@@ -113,15 +113,32 @@ describe('sensitive SPA document headers', () => {
     expect(isCareersInterviewPath('/careers')).toBe(false);
   });
 
-  test('marks the careers job-offer token page noindex, no-referrer and no-store, and only the full 64-hex path', () => {
+  // The client route /careers/offer/:token (react-router 6) decodes each segment and ignores case and extra trailing
+  // slashes, for any token. Every document path that opens the page must get the headers, not only the canonical one.
+  test.each([
+    `/careers/offer/${'a'.repeat(64)}`,
+    `/Careers/Offer/${'a'.repeat(64)}`,
+    `/CAREERS/OFFER/${'a'.repeat(64)}/`,
+    `/careers/%6Fffer/${'a'.repeat(64)}`, // %6F = o
+    `/careers/offer/%61${'a'.repeat(63)}`,
+    `/careers/offer/${'a'.repeat(64)}//`,
+  ])('marks the job-offer document %s noindex, no-referrer and no-store', (path) => {
     const res = mockResponse();
-    applySensitiveSpaHeaders(`/careers/offer/${'a'.repeat(64)}`, res);
+    applySensitiveSpaHeaders(path, res);
     expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
     expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
     expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
-    expect(isCareersOfferPath(`/careers/offer/${'a'.repeat(64)}/`)).toBe(true);
-    expect(isCareersOfferPath(`/careers/offer/${'A'.repeat(64)}`)).toBe(false);
-    expect(isCareersOfferPath('/careers/offer/not-a-token')).toBe(false);
+  });
+
+  test('matches every path the offer route opens, and no other', () => {
+    expect(isCareersOfferPath(`/careers/offer/${'A'.repeat(64)}`)).toBe(true);
+    expect(isCareersOfferPath('/careers/offer/not-a-token')).toBe(true); // the page opens and shows not-valid
+    expect(isCareersOfferPath('/careers/offer/a%2Fb')).toBe(true); // an encoded slash stays inside the token
+    expect(isCareersOfferPath('/careers/offer/%E0%A4%A')).toBe(true); // malformed: matched as written, as the router does
+    expect(isCareersOfferPath('/careers/offer/')).toBe(false);
+    expect(isCareersOfferPath('/careers/offer/a/b')).toBe(false);
+    expect(isCareersOfferPath('/careers/offers/a')).toBe(false);
+    expect(isCareersOfferPath('/careers')).toBe(false);
     expect(isCareersOfferPath(`/api/public/careers/offer/${'a'.repeat(64)}`)).toBe(false);
   });
 

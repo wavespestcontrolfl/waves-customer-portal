@@ -122,7 +122,12 @@ export function resolutionDate(estimate) {
 // viewed offer gone quiet past the going-cold window (7d+). Kept DISJOINT from
 // isGoingColdEstimate so the two "Needs attention" cards never double-count the
 // same offer — every open offer lands in at most one bucket.
+// None of the three follow-up buckets lists a self-serve quote nobody delivered
+// (undeliveredSelfServe, from the server: plan restart, plan start, report
+// card): the customer opened it from the portal, and it carries a
+// zero-follow-up contract.
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
+  if (estimate?.undeliveredSelfServe) return false;
   if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {
     const sentAt = new Date(estimate.sentAt).getTime();
     return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
@@ -134,12 +139,24 @@ export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
   return false;
 }
 
+// The Sent tile's rows, shared with its drilldown (the Estimates page's
+// sent_group filter) so the count and the list always agree: awaiting,
+// viewed (follow_up) and scheduled estimates, except a self-serve quote
+// nobody delivered that still waits on the customer. That is no send (codex
+// pre-push P1). One staff scheduled to send counts, as scheduled.
+const SENT_GROUP_CLASSES = new Set(["awaiting", "follow_up", "scheduled"]);
+export function isSentGroupEstimate(estimate) {
+  if (!SENT_GROUP_CLASSES.has(estimate?._class)) return false;
+  return !(estimate._class === "awaiting" && estimate.undeliveredSelfServe);
+}
+
 // Going cold = the early-warning window only: a VIEWED offer idle 48h–7d. A
 // never-opened send is follow-up-overdue (not "cold"), and past 7d a viewed
 // offer crosses into follow-up-overdue too — so this is the complement slice,
 // disjoint from isFollowUpOverdueEstimate.
 export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== "viewed") return false;
+  if (estimate?.status !== "viewed" || estimate.undeliveredSelfServe)
+    return false;
   const last = lastEngagementMs(estimate);
   if (last == null) return false;
   const age = nowMs - last;
@@ -555,9 +572,14 @@ export default function PipelineAnalytics({
     const readyToSend = classified.filter(
       (e) => e._class === "ready_to_send",
     ).length;
-    const awaiting = classified.filter((e) => e._class === "awaiting").length;
-    const followUp = classified.filter((e) => e._class === "follow_up").length;
-    const scheduled = classified.filter((e) => e._class === "scheduled").length;
+    // The Sent tile and its lines count isSentGroupEstimate rows, the rows
+    // its drilldown lists.
+    const sentGroup = classified.filter(isSentGroupEstimate);
+    const sentOfClass = (cls) =>
+      sentGroup.filter((e) => e._class === cls).length;
+    const awaiting = sentOfClass("awaiting");
+    const followUp = sentOfClass("follow_up");
+    const scheduled = sentOfClass("scheduled");
     // Won = won forever: archiving an accepted estimate (housekeeping)
     // must not shrink the funnel, so archived-accepted rows still count.
     const won = classified.filter(
@@ -623,7 +645,7 @@ export default function PipelineAnalytics({
         drafts: needsEstimate + readyToSend,
         needsEstimate,
         readyToSend,
-        sent: awaiting + followUp + scheduled,
+        sent: sentGroup.length,
         awaiting,
         viewed: followUp,
         scheduled,

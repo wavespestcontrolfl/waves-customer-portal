@@ -2275,13 +2275,10 @@ function initScheduledJobs() {
   // UPDATED ... FOR ALL COMUNNICATION LINES"). Moves a 'new' lead to
   // 'contacted' once a person reached it after its first contact: a delivered
   // staff text, a connected call, a staff email or a visit booked for its
-  // customer. Lead status and history only; sends nothing. Gate
-  // GATE_LEAD_STATUS_FOLLOWS_CONTACT (off / shadow / true) is read at call
-  // time and checked before the lock, so an off gate leaves no job_health row;
-  // kill = unset. runExclusive: an overlapping tick must not judge a stale read.
+  // customer. Lead status and history only; sends nothing.
+  // runExclusive: an overlapping tick must not judge a stale read.
   // =========================================================================
   cron.schedule('*/10 * * * *', async () => {
-    if (require('../config/feature-gates').leadStatusFollowsContactMode() === 'off') return;
     try {
       await runExclusive('lead-contact-sync', () =>
         require('./lead-contact-sync').runLeadContactSync());
@@ -5237,12 +5234,10 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 10 MIN (offset 6) — Admin alert quiet fall-off (owner 2026-11-04: "IF THE ALERT IS OVER 3 DAYS
   // OLD,, IT SHOULD FALL OFF"). Marks done, never deletes, an open admin bell row with no new activity for
-  // 72 hours (the quiet policy of admin-alert-retention.js). GATE_ALERT_QUIET_FALL_OFF: unset = no query, `shadow` = count and
-  // log, write nothing, `true` = close. runExclusive: a deploy overlap must not run two passes over the same page.
+  // 72 hours (the quiet policy of admin-alert-retention.js). runExclusive: a deploy overlap must not run two passes over the same page.
   // =========================================================================
   cron.schedule('6,16,26,36,46,56 * * * *', async () => {
     try {
-      if (require('../config/feature-gates').alertQuietFallOffMode() === 'off') return;
       await runExclusive('admin-alert-quiet-fall-off', () => require('./admin-alert-retention').runAdminAlertQuietPolicy());
     } catch (err) {
       logger.error(`[alert-quiet-fall-off] tick failed: ${err.message}`);
@@ -5717,25 +5712,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 15 MIN, 8AM-8PM — Caller callback late bell (GATE_CALLER_CALLBACK_BELL;
-  // returns before any read when off). Owner 2026-11-04 (option A): a new-lead
+  // EVERY 15 MIN, 8AM-8PM — Caller callback late bell. Owner 2026-11-04 (option A): a new-lead
   // caller who said they would call us back gets ONE Leads bell when that
   // callback is late: at the time they named, else 2 business hours after the
   // call. Each run closes the bells whose caller called or texted, whom a
-  // person reached, who got a visit, or whose lead closed. With
-  // GATE_CALLER_CALLBACK_PROMISE_CLOSE on it also closes the caller's own
-  // promise when they called, texted or a person followed up. Nothing goes to
-  // the caller.
+  // person reached, who got a visit, or whose lead closed. It also closes the
+  // caller's own promise when they called, texted or a person followed up.
+  // Nothing goes to the caller.
   // Minutes 5, 20, 35 and 50 as a LIST: node-cron 3 reads a stepped range such
   // as '5-59/15' as the range values divisible by the step (15, 30, 45), which
   // dropped one run an hour and moved the rest onto the pager's minutes.
   // =========================================================================
   cron.schedule('0 5,20,35,50 8-20 * * *', async () => {
-    if (!require('../config/feature-gates').callerCallbackBellLive()) return;
     try {
       await runExclusive('caller-callback-bell', async () => {
         const result = await require('./caller-callback-bell').runCallerCallbackBell();
-        // The promises part prints only when a promise was closed (GATE_CALLER_CALLBACK_PROMISE_CLOSE), so a gate-off line is unchanged.
+        // The promises part prints only when a promise was closed.
         const promises = result.promisesClosed ? `, ${result.promisesClosed} promises closed` : '';
         logger.info(`Caller callback bell: ${result.raised ?? 0} raised, ${result.closed ?? 0} closed${promises} (${result.outcome || result.skipped})`);
       });
@@ -5798,6 +5790,24 @@ function initScheduledJobs() {
       logger.error(`Monday review bell failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEDNESDAYS 7:00AM + 1:00PM — Pest Insider shadow planner. Issues go out on the 1st and 3rd
+  // Thursday of the month; the day before, this plans and builds the issue with the real builder
+  // and records the result in pest_insider_issues (status shadow, or skipped with the reason).
+  // Any other Wednesday it does nothing. The 1:00 PM run is the catch-up for a missed, failed or
+  // refused 7:00 AM tick: a built row is left alone, a skipped one is built again. It SENDS NOTHING:
+  // no email, no newsletter_sends row, no bell. The send path comes in the next PR and reads these rows.
+  // =========================================================================
+  for (const expression of ['0 7 * * 3', '0 13 * * 3']) {
+    cron.schedule(expression, async () => {
+      try {
+        await runExclusive('pest-insider-shadow-issue', () => require('./pest-insider/schedule').runShadowIssue());
+      } catch (err) {
+        logger.error(`Pest Insider shadow planner failed: ${err.message}`);
+      }
+    }, { timezone: 'America/New_York' });
+  }
 
   // =========================================================================
   // DAILY 8AM — Morning banner. Owner
@@ -7582,13 +7592,10 @@ function initScheduledJobs() {
       (isEnabled('promiseChaserBell') && isEnabled('callCommitments'))
         ? runExclusive('promise-chaser-bell', () => require('./promise-chaser-bell').sweepPromiseChasers())
         : Promise.resolve(0),
-      // GATE_MISSED_CALL_REPUSH: one more admin push for a missed-call bell
-      // still unread 30 minutes on, in office hours. Gate-checked here so
-      // dark means no module load; the sweep stamps repushed_at atomically,
-      // so overlapping instances cannot send twice.
-      isEnabled('missedCallRepush')
-        ? Promise.resolve().then(() => require('./missed-call-repush').sweepMissedCallRepush())
-        : Promise.resolve(0),
+      // One more admin push for a missed-call bell still unread 30 minutes on,
+      // in office hours. The sweep stamps repushed_at atomically, so
+      // overlapping instances cannot send twice.
+      Promise.resolve().then(() => require('./missed-call-repush').sweepMissedCallRepush()),
     ]);
     results.forEach((result, index) => {
       if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'missed-call-retire', 'repeat-caller', 'missed-call-text-back', 'promise-chaser', 'missed-call-repush'][index]} sweep failed: ${result.reason.message}`);
@@ -8353,16 +8360,22 @@ function initScheduledJobs() {
     logger.info('Running: weekly CSR recommendation');
     try {
       const CSRCoach = require('./csr/csr-coach');
-      const rec = await CSRCoach.generateWeeklyTeamRecommendation();
+      // One period for the whole tip: the seven completed ET days before today (completedWeekDates), so one Friday's
+      // tip starts where the last one ended. The scored-call recommendation and the call-outcomes line both read it.
+      const { loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates } = require('./csr/weekly-call-outcomes');
+      const now = new Date();
+      const rec = await CSRCoach.generateWeeklyTeamRecommendation({ between: completedWeekDates(now) });
       // Was an internal text to the owner's phone, silenced since 2026-09
       // (services/owner-alerts.js). One row per week.
       if (rec.recommendation) {
         const { recordOwnerAlert, whyFromFreeText } = require('./owner-alerts');
+        // The week's new-customer call outcomes lead the tip; a failed read drops the line, never the tip.
+        const outcomesLine = await loadWeeklyCallOutcomes({ now, completedDays: true }).then(formatWeeklyCallOutcomes).catch(() => '');
         await recordOwnerAlert('csr-weekly-tip', {
           action: 'read the weekly call coaching tip',
           why: whyFromFreeText(rec.recommendation),
           subject: { type: 'check', id: 'csr-weekly-tip' },
-          text: `Weekly CSR Tip:\n\n${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
+          text: `Weekly CSR Tip:\n\n${outcomesLine ? `${outcomesLine}\n\n` : ''}${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
           link: '/admin/communications',
           dedupeKey: `owner-alert:csr-weekly-tip:${etDateString()}`,
         });

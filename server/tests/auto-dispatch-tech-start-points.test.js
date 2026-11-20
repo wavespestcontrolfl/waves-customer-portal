@@ -32,10 +32,9 @@ const {
 
 const ENV_GATE = process.env.GATE_TECH_START_POINTS;
 const ENV_SHARED = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
-const ENV_DRIVE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 beforeEach(() => { delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; });
 afterEach(() => {
-  for (const [k, v] of [['GATE_TECH_START_POINTS', ENV_GATE], ['GATE_AUTO_DISPATCH_SHARED_MODEL', ENV_SHARED], ['GATE_DRIVE_TIME_CALIBRATION', ENV_DRIVE]]) {
+  for (const [k, v] of [['GATE_TECH_START_POINTS', ENV_GATE], ['GATE_AUTO_DISPATCH_SHARED_MODEL', ENV_SHARED]]) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
 });

@@ -1,7 +1,6 @@
-// The lead contact sync (services/lead-contact-sync.js, GATE_LEAD_STATUS_FOLLOWS_CONTACT):
-// the judging rules that run in JavaScript over rows the witness queries return, and the
-// gate. A scripted fake stands in for knex: every chain resolves to the rows scripted for
-// its table. The SQL predicates themselves (automated texts, voicemail calls, deleted leads)
+// The lead contact sync (services/lead-contact-sync.js):
+// the judging rules that run in JavaScript over rows the witness queries return. A scripted
+// fake stands in for knex: every chain resolves to the rows scripted for its table. The SQL predicates themselves (automated texts, voicemail calls, deleted leads)
 // are held by lead-contact-sync-postgres.test.js, which CI runs against PostgreSQL.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -49,43 +48,11 @@ const call = (fields = {}) => ({
 });
 const sharing = (fields = {}) => ({ id: 'lead-2', customer_id: null, email: null, peer: '9415550100', ...fields });
 
-const run = (script, mode = 'true') => runLeadContactSync({ dbi: fakeDb(script), mode, now: T(60) });
+const run = (script) => runLeadContactSync({ dbi: fakeDb(script), now: T(60) });
 
 beforeEach(() => {
   jest.clearAllMocks();
   _test.resetResume();
-});
-
-describe('lead contact sync: gate', () => {
-  test('off touches nothing', async () => {
-    const dbi = jest.fn(() => { throw new Error('db must not be read'); });
-    expect(await runLeadContactSync({ dbi, mode: 'off' })).toEqual({ skipped: 'gate_off' });
-    expect(dbi).not.toHaveBeenCalled();
-  });
-
-  test('shadow judges, counts by evidence type and writes nothing', async () => {
-    const result = await run({ leads: [[lead()], []], sms_log: [text()] }, 'shadow');
-    expect(result.mode).toBe('shadow');
-    expect(result.moved).toBe(1);
-    expect(result.byEvidence).toEqual({ staff_text: 1 });
-    expect(markLeadContactedFromEvidence).not.toHaveBeenCalled();
-  });
-
-  test('the gate reader maps unset and junk to off, shadow and true through', () => {
-    const { leadStatusFollowsContactMode } = jest.requireActual('../config/feature-gates');
-    const saved = process.env.GATE_LEAD_STATUS_FOLLOWS_CONTACT;
-    try {
-      const read = (value) => {
-        if (value === undefined) delete process.env.GATE_LEAD_STATUS_FOLLOWS_CONTACT;
-        else process.env.GATE_LEAD_STATUS_FOLLOWS_CONTACT = value;
-        return leadStatusFollowsContactMode();
-      };
-      expect([read(undefined), read(''), read('yes'), read('SHADOW'), read(' true ')]).toEqual(['off', 'off', 'off', 'shadow', 'true']);
-    } finally {
-      if (saved === undefined) delete process.env.GATE_LEAD_STATUS_FOLLOWS_CONTACT;
-      else process.env.GATE_LEAD_STATUS_FOLLOWS_CONTACT = saved;
-    }
-  });
 });
 
 describe('lead contact sync: moving a lead', () => {
@@ -204,7 +171,7 @@ describe('lead contact sync: what does not count', () => {
   test('the write cap bounds one run', async () => {
     const leads = ['a', 'b', 'c'].map((id, i) => lead({ id, phone: `(941) 555-010${i}` }));
     const sms = leads.map((l, i) => text({ id: `sms-${i}`, peer: `941555010${i}` }));
-    const result = await runLeadContactSync({ dbi: fakeDb({ leads: [leads, []], sms_log: sms }), mode: 'true', now: T(60), writeCap: 2 });
+    const result = await runLeadContactSync({ dbi: fakeDb({ leads: [leads, []], sms_log: sms }), now: T(60), writeCap: 2 });
     expect(result.moved).toBe(2);
     expect(result.skipped.write_cap).toBe(1);
   });
@@ -212,7 +179,7 @@ describe('lead contact sync: what does not count', () => {
 
 describe('lead contact sync: walking a backlog across runs', () => {
   const two = { pageSize: 2, maxPages: 1 };
-  const runPaged = (script) => runLeadContactSync({ dbi: fakeDb(script), mode: 'true', now: T(60), ...two });
+  const runPaged = (script) => runLeadContactSync({ dbi: fakeDb(script), now: T(60), ...two });
 
   test('a run that stops at its page cap resumes after that page; the walk restarts at the newest once it ends', async () => {
     const newest = [lead({ id: 'n1', phone: '(941) 555-0111' }), lead({ id: 'n2', phone: '(941) 555-0112', first_contact_at: T(-1), cursor_at: 'cur-n2' })];

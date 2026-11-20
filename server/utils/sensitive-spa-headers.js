@@ -136,11 +136,25 @@ function isCareersInterviewPath(reqPath = '') {
   return /^\/careers\/interview\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// The path as the browser router (react-router 6) matches it: each segment percent-decoded, an encoded slash kept
+// inside its segment, and a malformed path left as it is.
+function routerDecodedPath(reqPath) {
+  const value = String(reqPath || '');
+  try {
+    return value.split('/').map((segment) => decodeURIComponent(segment).replace(/\//g, '%2F')).join('/');
+  } catch {
+    return value;
+  }
+}
+
 // Public job-offer page — 64-hex bearer token (job_offers.token) that signs, declines or asks for another date on the
 // applicant's offer and renders their first name, pay and start date, so the shell gets the same headers as the interview
 // page (matches the /api/public/careers/offer headers in server/index.js; GATE_JOB_OFFERS).
+// The client route /careers/offer/:token matches the decoded path with no regard to case or extra trailing slashes, and
+// for any token, so this matches the same way: every document that opens the offer page carries the headers, and a bad
+// token only shows the not-valid page under them.
 function isCareersOfferPath(reqPath = '') {
-  return /^\/careers\/offer\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
+  return /^\/careers\/offer\/[^/]+\/*$/i.test(routerDecodedPath(reqPath));
 }
 
 // The portal home and login page are an app door, not a search result.

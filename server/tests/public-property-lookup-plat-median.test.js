@@ -143,3 +143,19 @@ describe('public payload never carries suite-sizing fields (Codex #4840 r6 P0)',
     expect(out.homeSqFt).toBe(1400);
   });
 });
+
+describe('publicEnrichedProfile — roof-style evidence stays staff-only (owner 2026-11-19)', () => {
+  test('county roof words and both tile-style reads never reach the public payload', () => {
+    const out = publicEnrichedProfile({
+      homeSqFt: 2100,
+      roofType: 'TILE',
+      countyRoofRaw: { material: 'CLAY BARREL TILE', structure: 'HIP', source: 'sarasota' },
+      roofStyleHint: 'barrel_tile',
+      roofTileStyle: 'BARREL',
+    });
+    expect(out.roofType).toBe('TILE');
+    expect(out).not.toHaveProperty('countyRoofRaw');
+    expect(out).not.toHaveProperty('roofStyleHint');
+    expect(out).not.toHaveProperty('roofTileStyle');
+  });
+});

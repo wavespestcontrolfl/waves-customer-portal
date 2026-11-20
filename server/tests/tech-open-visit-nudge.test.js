@@ -17,7 +17,6 @@ const { triggerNotification } = require('../services/notification-triggers');
 const { runTechOpenVisitNudge, _test } = require('../services/tech-open-visit-nudge');
 
 const GATE = 'GATE_TECH_OPEN_VISIT_NUDGE';
-const BANNER_GATE = 'GATE_OWNER_NUDGE_BANNER';
 
 function chain(overrides = {}) {
   const c = {
@@ -73,7 +72,6 @@ function visitRow({
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env[GATE];
-  delete process.env[BANNER_GATE];
   db.raw = jest.fn((sql) => ({ raw: sql }));
   TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'SM123', deliveryOutcome: 'accepted' });
   // Fixture techs are the owner (texted) unless a test says otherwise.
@@ -911,8 +909,8 @@ describe('re-service carry-over', () => {
   });
 });
 
-// Owner 2026-11-04 "banner": GATE_OWNER_NUDGE_BANNER sends the owner's nudge as a Waves Admin banner instead of the text.
-describe('owner banner (GATE_OWNER_NUDGE_BANNER)', () => {
+// Owner 2026-11-04 "banner": the owner's nudge goes as a Waves Admin banner instead of the text.
+describe('owner banner', () => {
   const NOW = new Date('2026-09-28T23:00:00Z');
   let notifChains;
 
@@ -933,8 +931,7 @@ describe('owner banner (GATE_OWNER_NUDGE_BANNER)', () => {
     triggerNotification.mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
   });
 
-  test('gate on, a phone takes it: the owner gets the banner and no text, and the slot stays claimed', async () => {
-    process.env[BANNER_GATE] = 'true';
+  test('a phone takes it: the owner gets the banner and no text, and the slot stays claimed', async () => {
     seed();
     const r = await runTechOpenVisitNudge({ now: NOW });
     expect(r).toMatchObject({ sent: 1, skipped: 0 });
@@ -952,8 +949,7 @@ describe('owner banner (GATE_OWNER_NUDGE_BANNER)', () => {
     expect(released()).toBe(false);
   });
 
-  test('gate on, no device accepts it (sent 0): the same text goes out, once, and the slot stays claimed', async () => {
-    process.env[BANNER_GATE] = 'true';
+  test('no device accepts it (sent 0): the same text goes out, once, and the slot stays claimed', async () => {
     triggerNotification.mockResolvedValue({ bellWritten: false, push: { sent: 0 } });
     seed();
     const r = await runTechOpenVisitNudge({ now: NOW });
@@ -973,16 +969,14 @@ describe('owner banner (GATE_OWNER_NUDGE_BANNER)', () => {
     ['a policy silence', { bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true }],
     ['a dispatch error', { bellWritten: false, push: null, error: 'boom' }],
     ['no result at all (unknown type)', undefined],
-  ])('gate on, %s: falls back to the text', async (_name, result) => {
-    process.env[BANNER_GATE] = 'true';
+  ])('%s: falls back to the text', async (_name, result) => {
     triggerNotification.mockResolvedValue(result);
     seed();
     await runTechOpenVisitNudge({ now: NOW });
     expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
   });
 
-  test('gate on, the banner throws: the text still goes out and the error text is never logged', async () => {
-    process.env[BANNER_GATE] = 'true';
+  test('the banner throws: the text still goes out and the error text is never logged', async () => {
     triggerNotification.mockRejectedValue(Object.assign(new Error('Ana Ruiz 941-555-0101'), { code: 'EBANNER' }));
     seed();
     const r = await runTechOpenVisitNudge({ now: NOW });
@@ -991,8 +985,7 @@ describe('owner banner (GATE_OWNER_NUDGE_BANNER)', () => {
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('Ana Ruiz');
   });
 
-  test('gate on, no banner and the text is refused: the slot goes back (released only when nothing went out)', async () => {
-    process.env[BANNER_GATE] = 'true';
+  test('no banner and the text is refused: the slot goes back (released only when nothing went out)', async () => {
     triggerNotification.mockResolvedValue({ push: { sent: 0 } });
     TwilioService.sendSMS.mockResolvedValue({ success: false, error: 'blocked' });
     seed();
@@ -1001,8 +994,7 @@ describe('owner banner (GATE_OWNER_NUDGE_BANNER)', () => {
     expect(released()).toBe(true);
   });
 
-  test('gate on, a second run the same day (claim taken): no banner and no text', async () => {
-    process.env[BANNER_GATE] = 'true';
+  test('a second run the same day (claim taken): no banner and no text', async () => {
     const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
     TwilioService.isKnownOwnerPhone.mockReturnValue(true);
     db.mockImplementation((table) => {
@@ -1016,20 +1008,7 @@ describe('owner banner (GATE_OWNER_NUDGE_BANNER)', () => {
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
 
-  test.each([[undefined], ['1'], ['TRUE'], ['false']])('gate %p: the owner gets the text exactly as today, with no banner call', async (value) => {
-    if (value !== undefined) process.env[BANNER_GATE] = value;
-    seed();
-    const r = await runTechOpenVisitNudge({ now: NOW });
-    expect(r).toMatchObject({ sent: 1, skipped: 0 });
-    expect(triggerNotification).not.toHaveBeenCalled();
-    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
-    expect(TwilioService.sendSMS.mock.calls[0][1]).toBe(
-      _test.buildMessage([{ id: 'v1', ids: ['v1'], status: 'on_site', windowStart: '09:00:00', serviceTypes: ['Pest Control'], customerFirst: 'Ana', customerLast: 'Ruiz' }]),
-    );
-  });
-
-  test('gate on, another technician (not the owner): still a tech-home card + push, never the banner', async () => {
-    process.env[BANNER_GATE] = 'true';
+  test('another technician (not the owner): still a tech-home card + push, never the banner', async () => {
     PushService.sendToAdminUser.mockResolvedValue({ sent: 1 });
     seed({ owner: false });
     const r = await runTechOpenVisitNudge({ now: NOW });

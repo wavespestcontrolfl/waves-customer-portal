@@ -787,9 +787,8 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards, { startMin = 8 * 6
   // Google's legs describe ITS order's sequence — they do not exist for a
   // different permutation, and fetching routed legs per candidate is the
   // fleet-API spend this lane scoped out. The model path is the calibrated
-  // two-term drive-time fit under GATE_DRIVE_TIME_CALIBRATION (live in
-  // prod, MAE 3.89 min — the underestimation note on the guard describes
-  // the LEGACY 30 mph constant), and the promises being protected are
+  // two-term drive-time fit (MAE 3.89 min — the underestimation note on the
+  // guard describes the old 30 mph constant), and the promises being protected are
   // 2-hour arrival windows, so the model's error is an order of magnitude
   // inside the slack. Any residual miss is also self-limiting: route_order
   // is a board ordering, the day re-evaluates every night, and dispatch
