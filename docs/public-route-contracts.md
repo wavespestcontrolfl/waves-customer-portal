@@ -7902,8 +7902,10 @@ number gate or the dry-run invariant is security-critical).
 `<Connect action="…/relay-sandbox/live-complete"><Stream url="wss://HOST/ws/voice-live/CALLSID/TOKEN"/></Connect>`
 (Twilio forbids a query string on a `<Stream>` url, so the CallSid and the per-call minted token are path segments).
 `live-complete` is a POST TwiML webhook, Twilio-signature validated at the mount, refused with a 403 `<Hangup/>` unless
-`To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`, and answers a bare `<Hangup/>`. The WebSocket upgrade runs the relay's
-door in the same order: the token must verify for that CallSid, the call_log row must be sandbox-sourced and carry the
+`To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`, and answers a bare `<Hangup/>`. The WebSocket upgrade first checks
+Twilio's handshake signature (`X-Twilio-Signature` over the exact wss URL, `liveStreamUrl` in relay-protocol.js, with
+`TWILIO_AUTH_TOKEN`; missing or invalid = refused before any database read), then runs the relay's door in the same
+order: the token must verify for that CallSid, the call_log row must be sandbox-sourced and carry the
 `metadata.gpt_live` stamp the cell route wrote, the token must be signed for this path (`LIVE_TOKEN_AUDIENCE`; the
 relay socket refuses such a token, and this path refuses a relay token) and be the one that stamp names by digest
 (`stream_token_sha256`; any other valid token for the call is refused), the gate must be on, and the token is then

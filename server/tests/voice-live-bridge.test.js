@@ -710,6 +710,16 @@ describe('reservation admission', () => {
     expect(t.admit.mock.invocationCallOrder[0]).toBeLessThan(t.openaiFactory.mock.invocationCallOrder[0]);
   });
 
+  test('a stalled admission ends the call at the start deadline; OpenAI never opens and the ledger is left alone', async () => {
+    const t = setup({ deps: { admit: () => new Promise(() => {}), startDeadlineMs: 20, closeWaitMs: 20 } });
+    await t.twilioStart();
+    await waitFor(() => t.update.mock.calls.length > 0);
+    expect(t.openaiFactory).not.toHaveBeenCalled();
+    expect(t.twilio.close).toHaveBeenCalled();
+    expect(t.ledgerUpdate).not.toHaveBeenCalled();
+    expect(summaryOf(t)).toMatchObject({ close_reason: 'start_timeout', openai_contacted: false });
+  });
+
   test('a reservation not admitted (released, settled, or a database error) opens no OpenAI session and leaves the ledger alone', async () => {
     for (const admit of [jest.fn(async () => false), jest.fn(async () => { throw new Error('db down'); })]) {
       const t = setup({ deps: { admit } });

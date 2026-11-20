@@ -2318,10 +2318,7 @@ function isSandboxCall(req) {
 // socket, whose database has no sandbox row for it (codex r14 P1). The
 // request's Host is Twilio-signature-covered, so it is trustworthy here.
 function sandboxRelayHost(req) {
-  return process.env.SERVER_DOMAIN
-    || process.env.RAILWAY_PUBLIC_DOMAIN
-    || (req && req.headers && String(req.headers.host || '').replace(/:\d+$/, ''))
-    || 'portal.wavespestcontrol.com';
+  return require('../services/voice-agent/relay-protocol').publicWsHost(req && req.headers && req.headers.host);
 }
 function sandboxRelayXml({ callSid, cell, req = null }) {
   const { buildRelayTwiML, RELAY_WS_PATH, spanishWelcomeGreeting } = require('../services/voice-agent/relay-protocol');
@@ -2694,7 +2691,7 @@ function gptLiveStreamXml(req, callSid, token) {
   const twiml = new VoiceResponse();
   twiml.play(wavesGreetingUrl());
   const connect = twiml.connect({ action: GPT_LIVE_COMPLETE_ACTION });
-  connect.stream({ url: `wss://${sandboxRelayHost(req)}/ws/voice-live/${encodeURIComponent(callSid)}/${token}` });
+  connect.stream({ url: require('../services/voice-agent/relay-protocol').liveStreamUrl(sandboxRelayHost(req), callSid, token) });
   return twiml.toString();
 }
 

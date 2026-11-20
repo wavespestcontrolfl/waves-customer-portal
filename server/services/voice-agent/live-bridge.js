@@ -123,6 +123,15 @@ async function admitReservation(callSid) {
   return n === 1;
 }
 
+function waitAtMost(promise, ms) {
+  let timer;
+  const bound = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, bound]).finally(() => clearTimeout(timer));
+}
+
 function median(sorted) {
   return sorted.length ? sorted[Math.ceil(sorted.length * 0.5) - 1] : null;
 }
@@ -240,6 +249,15 @@ class LiveBridge {
       return;
     }
     this.streamSid = streamSid;
+    // No session.started in time (admission included) = a stalled database, a
+    // refused or stuck start: end the call rather than leave the caller on a
+    // silent line. A late admission then finds the call finalizing.
+    this.startTimer = setTimeout(() => {
+      if (this.ready) return;
+      this.noteError('start_timeout');
+      void this.finalize('start_timeout');
+    }, this.deps.startDeadlineMs);
+    if (this.startTimer.unref) this.startTimer.unref();
     // OpenAI opens only on an admitted reservation.
     void this.admission.then((ok) => {
       if (this._finalizing) return;
@@ -284,14 +302,6 @@ class LiveBridge {
       void this.finalize('socket_open_failed');
       return;
     }
-    // No session.started in time = a refused or stuck start: end the call
-    // rather than leave the caller on a silent line.
-    this.startTimer = setTimeout(() => {
-      if (this.ready) return;
-      this.noteError('start_timeout');
-      void this.finalize('start_timeout');
-    }, this.deps.startDeadlineMs);
-    if (this.startTimer.unref) this.startTimer.unref();
     this.openai.on('open', () => { if (this.toOpenAi(startMsg)) this.startSent = true; });
     this.openai.on('message', (raw) => this.onOpenAiMessage(raw));
     this.openai.on('close', () => this.onOpenAiGone());
@@ -473,7 +483,10 @@ class LiveBridge {
     clearTimeout(this.startTimer);
     await this.closeOpenAi();
     try { this.twilio.close(); } catch { /* already closed */ }
-    await this.admission; // settled, never thrown: whether this bridge owns the ledger row
+    // Whether this bridge owns the ledger row. A database still stalled after
+    // closeWaitMs counts as not admitted: no ledger write, and if the claim
+    // lands later the row keeps its whole reservation (fail closed).
+    await waitAtMost(this.admission, this.deps.closeWaitMs);
     try {
       await this.writeSummary(reason);
     } catch (err) {

@@ -159,10 +159,11 @@ async function burnCallToken(token, callSid) {
 // as path segments. Same door as /ws/voice-agent, in the same order: verify
 // the token for THIS CallSid, read the call_log row, require the sandbox
 // source AND the gpt_live stamp the cell route wrote AND the gate, then burn
-// the token. The token must be signed for this path (LIVE_TOKEN_AUDIENCE). The
-// bridge admits the call's reservation after the handshake. The socket goes to its own WebSocketServer, created at the first
+// the token. Twilio's handshake signature is checked first, and the token must
+// be signed for this path (LIVE_TOKEN_AUDIENCE). The bridge admits the call's
+// reservation after the handshake. The socket goes to its own WebSocketServer, created at the first
 // live upgrade, and to live-bridge.js. Any failure destroys the socket.
-const LIVE_WS_PREFIX = '/ws/voice-live/';
+const { LIVE_WS_PREFIX } = require('./relay-protocol');
 let liveWss = null;
 
 function destroySocket(socket) {
@@ -193,6 +194,20 @@ async function readLiveStamp(callSid) {
   return { voice: String(live.voice || ''), cell: String(live.cell || ''), tokenDigest: String(live.stream_token_sha256 || '') };
 }
 
+// Twilio signs the Media Streams handshake: X-Twilio-Signature over the exact
+// wss URL the cell route rendered (a GET: no params). Checked before any
+// database read or token burn, so a forged request leaves the token usable for
+// Twilio's own connect. No auth token, no header or a bad one: refused.
+function liveSignatureValid(req, callSid, token) {
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const headers = (req && req.headers) || {};
+  const signature = headers['x-twilio-signature'];
+  if (!authToken || typeof signature !== 'string' || !signature) return false;
+  const { publicWsHost, liveStreamUrl } = require('./relay-protocol');
+  const url = liveStreamUrl(publicWsHost(headers.host), callSid, token);
+  return require('twilio').validateRequest(authToken, signature, url, {});
+}
+
 // Only the token the cell route issued (and stamped by digest) opens the paid
 // bridge: another valid token for this CallSid, such as the greeting's relay
 // token, must not open a second session on the same reservation.
@@ -204,7 +219,11 @@ function isStampedToken(stamp, token) {
 
 async function handleLiveUpgrade(req, socket, head, pathname) {
   const parsed = parseLivePath(pathname);
-  if (!parsed || !verifyCallToken(parsed.token, parsed.callSid, { audience: require('./relay-protocol').LIVE_TOKEN_AUDIENCE })) {
+  if (!parsed || !liveSignatureValid(req, parsed.callSid, parsed.token)) {
+    logger.warn('[voice-live] rejected ws upgrade: missing/invalid Twilio signature');
+    return destroySocket(socket);
+  }
+  if (!verifyCallToken(parsed.token, parsed.callSid, { audience: require('./relay-protocol').LIVE_TOKEN_AUDIENCE })) {
     logger.warn('[voice-live] rejected ws upgrade: missing/invalid per-call token');
     return destroySocket(socket);
   }

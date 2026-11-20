@@ -521,6 +521,8 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     const url = res.body.match(/<Stream url="([^"]+)"/)[1];
     expect(url).toMatch(/^wss:\/\/portal\.example\.com\/ws\/voice-live\/CA-sb-live\/[0-9a-z]+\.\d+\.[0-9a-f]{16}\.[0-9a-f]+$/);
     expect(url).not.toContain('?');
+    // the same builder the upgrade's Twilio signature check uses
+    expect(url).toBe(require('../services/voice-agent/relay-protocol').liveStreamUrl('portal.example.com', 'CA-sb-live', url.split('/').pop()));
     expect(res.body).not.toContain('<ConversationRelay');
     expect(res.body).not.toContain('shh-secret-123');
     // The ledger read, the ledger claim and the stamp run under one lock, in one transaction.

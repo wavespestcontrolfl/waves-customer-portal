@@ -114,6 +114,24 @@ const CALL_TOKEN_TTL_MS = 5 * 60 * 1000;
 // and a relay token never verifies at /ws/voice-live/. A payload with an
 // audience cannot equal one without: its last field is never a 16-hex nonce.
 const LIVE_TOKEN_AUDIENCE = 'voice-live';
+// The GPT-Live trial's Media Streams path. Twilio forbids a query string on a
+// <Stream> url, so the CallSid and the token ride as path segments.
+const LIVE_WS_PREFIX = '/ws/voice-live/';
+
+// The public host a WebSocket URL names: the configured domain, else the
+// request's own Host (port dropped).
+function publicWsHost(hostHeader) {
+  return process.env.SERVER_DOMAIN
+    || process.env.RAILWAY_PUBLIC_DOMAIN
+    || String(hostHeader || '').replace(/:\d+$/, '')
+    || 'portal.wavespestcontrol.com';
+}
+
+// The exact <Stream> url the cell route renders, and the URL Twilio signs on
+// the WebSocket handshake (X-Twilio-Signature), so both sides build it here.
+function liveStreamUrl(host, callSid, token) {
+  return `wss://${host}${LIVE_WS_PREFIX}${encodeURIComponent(callSid)}/${token}`;
+}
 
 function callTokenMac(callSid, expSec, nonce, secret, audience = '') {
   const payload = `${CALL_TOKEN_VERSION}.${String(callSid)}.${expSec}.${nonce}`;
@@ -555,6 +573,9 @@ module.exports = {
   mintCallToken,
   verifyCallToken,
   LIVE_TOKEN_AUDIENCE,
+  LIVE_WS_PREFIX,
+  publicWsHost,
+  liveStreamUrl,
   callTokenDigest,
   CALL_TOKEN_TTL_MS,
   parsePrompt,

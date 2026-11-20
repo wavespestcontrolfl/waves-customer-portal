@@ -94,9 +94,9 @@ function attach() {
 
 // The burn AND the source resolution are DB round trips (gh prb-r11), so
 // the upgrade resolves after several async hops — flush a few macrotasks.
-async function upgrade(httpServer, url) {
+async function upgrade(httpServer, url, headers = {}) {
   const socket = { destroy: jest.fn() };
-  httpServer.emit('upgrade', { url }, socket, Buffer.alloc(0));
+  httpServer.emit('upgrade', { url, headers }, socket, Buffer.alloc(0));
   for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r));
   return socket;
 }
@@ -575,6 +575,10 @@ describe('ws upgrade — GPT-Live path', () => {
   let httpServer;
 
   const liveUrl = (sid = LIVE_SID, token = LIVE_TOKEN) => `/ws/voice-live/${sid}/${token}`;
+  const AUTH = 'twilio-auth-test';
+  // Twilio signs the handshake over the public wss URL (no params).
+  const sign = (path) => require('twilio').getExpectedTwilioSignature(AUTH, `wss://portal.example.com${path}`, {});
+  const upgradeLive = (path, { signature = sign(path) } = {}) => upgrade(httpServer, path, signature === null ? {} : { 'x-twilio-signature': signature });
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -585,6 +589,8 @@ describe('ws upgrade — GPT-Live path', () => {
     process.env.ANTHROPIC_API_KEY = 'sk-test';
     process.env.VOICE_RELAY_WS_SECRET = SECRET;
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.TWILIO_AUTH_TOKEN = AUTH;
+    process.env.SERVER_DOMAIN = 'portal.example.com';
     LIVE_TOKEN = mintLive(LIVE_SID);
     STAMP = { gpt_live: { cell: '71', voice: 'marin', started_at: '2026-11-19T12:00:00.000Z', stream_token_sha256: callTokenDigest(LIVE_TOKEN) } };
     mockCallLogRow = { source: 'voice_relay_sandbox', metadata: STAMP };
@@ -598,28 +604,48 @@ describe('ws upgrade — GPT-Live path', () => {
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.VOICE_RELAY_WS_SECRET;
     delete process.env.GATE_VOICE_GPT_LIVE_TEST;
+    delete process.env.TWILIO_AUTH_TOKEN;
+    delete process.env.SERVER_DOMAIN;
   });
 
   test('a good token on a stamped sandbox row starts the bridge with the stamped voice and cell', async () => {
     const ws = { id: 'twilio-ws' };
     mockHandleUpgrade.mockImplementation((req, socket, head, cb) => cb(ws));
-    const socket = await upgrade(httpServer, liveUrl());
+    const socket = await upgradeLive(liveUrl());
     expect(socket.destroy).not.toHaveBeenCalled();
     expect(runLiveBridge).toHaveBeenCalledWith(ws, { callSid: LIVE_SID, voice: 'marin', cell: '71' });
   });
 
   test('a GPT-Live token never opens the relay socket, and a relay token never opens the live socket', async () => {
     const liveForRelay = mintCallToken('CA-cross-1', { audience: LIVE_TOKEN_AUDIENCE });
-    const relay = await upgrade(httpServer, `/ws/voice-agent?callSid=CA-cross-1&t=${liveForRelay}`);
+    const relay = await upgradeLive(`/ws/voice-agent?callSid=CA-cross-1&t=${liveForRelay}`);
     expect(relay.destroy).toHaveBeenCalled();
     // a relay token, even under a stamp naming its own digest
     const relayToken = mintCallToken(LIVE_SID);
     mockCallLogRow = { source: 'voice_relay_sandbox', metadata: { gpt_live: { ...STAMP.gpt_live, stream_token_sha256: callTokenDigest(relayToken) } } };
-    const live = await upgrade(httpServer, liveUrl(LIVE_SID, relayToken));
+    const live = await upgradeLive(liveUrl(LIVE_SID, relayToken));
     expect(live.destroy).toHaveBeenCalled();
     expect(mockBurned.size).toBe(0);
     expect(mockHandleUpgrade).not.toHaveBeenCalled();
     expect(runLiveBridge).not.toHaveBeenCalled();
+  });
+
+  test('an unsigned, wrongly signed or unverifiable handshake is refused before any database read, and the token stays usable', async () => {
+    const db = require('../models/db');
+    const otherPath = liveUrl(LIVE_SID, mintLive(LIVE_SID));
+    for (const signature of [null, '', 'bm90LWEtc2lnbmF0dXJl', sign(otherPath)]) {
+      const socket = await upgradeLive(liveUrl(), { signature });
+      expect(socket.destroy).toHaveBeenCalled();
+    }
+    delete process.env.TWILIO_AUTH_TOKEN; // nothing to check with: refused too
+    expect((await upgradeLive(liveUrl())).destroy).toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+    expect(mockBurned.size).toBe(0);
+    // Twilio's own signed connect still works with the same token
+    process.env.TWILIO_AUTH_TOKEN = AUTH;
+    mockHandleUpgrade.mockImplementation((req, socket, head, cb) => cb({}));
+    expect((await upgradeLive(liveUrl())).destroy).not.toHaveBeenCalled();
+    expect(runLiveBridge).toHaveBeenCalledTimes(1);
   });
 
   test('a bad, missing, wrong-call or malformed token destroys the socket', async () => {
@@ -633,7 +659,7 @@ describe('ws upgrade — GPT-Live path', () => {
       `/ws/voice-live/%E0%A4%A/${good}`,
       `/ws/voice-live/${LIVE_SID}/${SECRET}`,
     ]) {
-      const socket = await upgrade(httpServer, url);
+      const socket = await upgradeLive(url);
       expect(socket.destroy).toHaveBeenCalled();
     }
     expect(mockHandleUpgrade).not.toHaveBeenCalled();
@@ -649,7 +675,7 @@ describe('ws upgrade — GPT-Live path', () => {
       undefined,
     ]) {
       mockCallLogRow = row;
-      const socket = await upgrade(httpServer, liveUrl());
+      const socket = await upgradeLive(liveUrl());
       expect(socket.destroy).toHaveBeenCalled();
     }
     expect(mockBurned.size).toBe(0); // read-then-burn: a refusal leaves the token alone
@@ -659,7 +685,7 @@ describe('ws upgrade — GPT-Live path', () => {
   test('another valid live token for the same call cannot open a second paid session', async () => {
     const other = mintLive(LIVE_SID);
     expect(other).not.toBe(LIVE_TOKEN);
-    const socket = await upgrade(httpServer, liveUrl(LIVE_SID, other));
+    const socket = await upgradeLive(liveUrl(LIVE_SID, other));
     expect(socket.destroy).toHaveBeenCalled();
     expect(mockBurned.size).toBe(0);
     expect(runLiveBridge).not.toHaveBeenCalled();
@@ -667,14 +693,14 @@ describe('ws upgrade — GPT-Live path', () => {
 
   test('a stamp with no token digest opens nothing', async () => {
     mockCallLogRow = { source: 'voice_relay_sandbox', metadata: { gpt_live: { cell: '71', voice: 'marin' } } };
-    const socket = await upgrade(httpServer, liveUrl());
+    const socket = await upgradeLive(liveUrl());
     expect(socket.destroy).toHaveBeenCalled();
     expect(runLiveBridge).not.toHaveBeenCalled();
   });
 
   test('gate off destroys the socket', async () => {
     delete process.env.GATE_VOICE_GPT_LIVE_TEST;
-    const socket = await upgrade(httpServer, liveUrl());
+    const socket = await upgradeLive(liveUrl());
     expect(socket.destroy).toHaveBeenCalled();
     expect(mockHandleUpgrade).not.toHaveBeenCalled();
     expect(mockBurned.size).toBe(0);
@@ -682,11 +708,11 @@ describe('ws upgrade — GPT-Live path', () => {
 
   test('an unreadable row or a failed burn destroys the socket (fail closed)', async () => {
     mockCallLogFails = true;
-    let socket = await upgrade(httpServer, liveUrl());
+    let socket = await upgradeLive(liveUrl());
     expect(socket.destroy).toHaveBeenCalled();
     mockCallLogFails = false;
     mockBurnFails = true;
-    socket = await upgrade(httpServer, liveUrl());
+    socket = await upgradeLive(liveUrl());
     expect(socket.destroy).toHaveBeenCalled();
     expect(mockHandleUpgrade).not.toHaveBeenCalled();
   });
@@ -694,8 +720,8 @@ describe('ws upgrade — GPT-Live path', () => {
   test('the token opens one session only', async () => {
     mockHandleUpgrade.mockImplementation((req, socket, head, cb) => cb({}));
     const url = liveUrl();
-    const first = await upgrade(httpServer, url);
-    const second = await upgrade(httpServer, url);
+    const first = await upgradeLive(url);
+    const second = await upgradeLive(url);
     expect(first.destroy).not.toHaveBeenCalled();
     expect(second.destroy).toHaveBeenCalled();
     expect(runLiveBridge).toHaveBeenCalledTimes(1);
@@ -704,7 +730,7 @@ describe('ws upgrade — GPT-Live path', () => {
   test('an ordinary /ws/voice-agent upgrade still goes through and never reaches the live bridge', async () => {
     const t = mintCallToken('CA-relay-x');
     mockCallLogRow = undefined;
-    const relay = await upgrade(httpServer, `/ws/voice-agent?callSid=CA-relay-x&t=${t}`);
+    const relay = await upgradeLive(`/ws/voice-agent?callSid=CA-relay-x&t=${t}`);
     expect(relay.destroy).not.toHaveBeenCalled();
     expect(mockHandleUpgrade).toHaveBeenCalledTimes(1);
     expect(runLiveBridge).not.toHaveBeenCalled();
