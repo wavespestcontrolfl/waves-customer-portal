@@ -14,6 +14,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { dateOnlyString, dateOnlyAtNoonUtc } = require('../../utils/date-only');
+const { CUSTOMER_STAGES } = require('../customer-stages');
 
 const KINDS = ['pool', 'home'];
 const COMPANY_WORDS = new Set(['LLC', 'INC', 'CORP', 'CORPORATION', 'CO', 'COMPANY', 'LTD', 'INCORPORATED']);
@@ -189,13 +190,18 @@ async function readDataThrough(conn, source, today) {
 
 // The keys of every active payer and every live customer company. The caller gets booleans only. A failed read
 // fails the whole list (the office presses Try again): an empty set would show every customer as a fresh prospect.
+// A live customer is the shared rule (customer-stages.js whereLiveCustomer): active, not deleted, in a customer
+// stage. The customers table also holds CRM leads, and a lead's company is still a prospect.
 async function readCustomerKeys() {
   const result = await db.raw(
-    `SELECT company_name AS name FROM customers WHERE deleted_at IS NULL AND BTRIM(COALESCE(company_name, '')) <> ''
+    `SELECT company_name AS name FROM customers
+      WHERE active AND deleted_at IS NULL AND pipeline_stage IN (${CUSTOMER_STAGES.map(() => '?').join(', ')})
+        AND BTRIM(COALESCE(company_name, '')) <> ''
      UNION
      SELECT company_name AS name FROM payers WHERE active AND BTRIM(COALESCE(company_name, '')) <> ''
      UNION
      SELECT display_name AS name FROM payers WHERE active AND BTRIM(COALESCE(display_name, '')) <> ''`,
+    CUSTOMER_STAGES,
   );
   return new Set(result.rows.map((row) => builderKey(row.name)).filter(Boolean));
 }

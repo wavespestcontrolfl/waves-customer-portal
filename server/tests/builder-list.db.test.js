@@ -12,6 +12,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const knex = require('knex');
+const { randomUUID } = require('node:crypto');
 const { listBuilders, builderPermits } = require('../services/prospects/builder-list');
 
 const describeDb = SKIP ? describe.skip : describe;
@@ -110,7 +111,7 @@ describeDb('Builders list (PostgreSQL)', () => {
     expect(await builderPermits({ kind: 'pool', key: 'FUTURE POOLS', now: NOW })).toEqual([]);
   });
 
-  test('a builder that matches an active payer or a live customer company is flagged; an inactive payer is not', async () => {
+  test('a builder that matches an active payer or a live customer company is flagged; an inactive payer or a lead is not', async () => {
     await mockPg('pool_permit_records').insert([
       pool(), pool({ contractor_name: 'FRESH POOLS INC', contractor_license: 'CPC444' }), pool({ contractor_name: 'IDLE POOLS LLC', contractor_license: 'CPC666' }),
       // The county spells it with the accent; the payer was typed without it.
@@ -121,9 +122,25 @@ describeDb('Builders list (PostgreSQL)', () => {
       { display_name: 'Idle Pools', company_name: 'Idle Pools LLC', active: false },
       { display_name: 'Pena Sample Pools', active: true },
     ]);
+    // A live customer's company is a customer; a CRM lead row with the same kind of match is still a prospect.
+    const person = (company, stage, phone) => {
+      const id = randomUUID();
+      return { id, first_name: 'Sample', last_name: 'Owner', phone, email: `${id}@example.invalid`, company_name: company, pipeline_stage: stage, active: true };
+    };
+    await mockPg('pool_permit_records').insert([
+      pool({ contractor_name: 'LIVE SAMPLE POOLS INC', contractor_license: 'CPC901' }),
+      pool({ contractor_name: 'LEAD SAMPLE POOLS INC', contractor_license: 'CPC902' }),
+    ]);
+    await mockPg('customers').insert([
+      person('Live Sample Pools', 'active_customer', '+19415550161'),
+      person('Lead Sample Pools LLC', 'new_lead', '+19415550162'),
+    ]);
     const result = await listBuilders({ kind: 'pool', now: NOW });
     const flags = Object.fromEntries(result.builders.map((builder) => [builder.key, builder.isCustomer]));
-    expect(flags).toEqual({ 'SAMPLE POOLS': true, 'FRESH POOLS': false, 'IDLE POOLS': false, 'PENA SAMPLE POOLS': true });
+    expect(flags).toEqual({
+      'SAMPLE POOLS': true, 'FRESH POOLS': false, 'IDLE POOLS': false, 'PENA SAMPLE POOLS': true,
+      'LIVE SAMPLE POOLS': true, 'LEAD SAMPLE POOLS': false,
+    });
     const sites = await builderPermits({ kind: 'pool', key: 'PENA SAMPLE POOLS', now: NOW });
     expect(sites).toHaveLength(1);
   });

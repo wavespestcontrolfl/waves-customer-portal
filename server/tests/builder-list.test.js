@@ -184,6 +184,15 @@ describe('listBuilders', () => {
     expect(inSnapshot).toEqual([expect.stringMatching(/AS newest/), expect.stringMatching(/GROUP BY/)]);
   });
 
+  test('the customer lookup counts only live customers (the shared stages), never a CRM lead row', async () => {
+    answer({ newest: '2026-11-16' });
+    await listBuilders({ kind: 'pool', now: new Date('2026-11-19T15:00:00Z') });
+    const [sql, bindings] = mockRaw.mock.calls.find(([text]) => /FROM customers/.test(text));
+    expect(sql).toMatch(/WHERE active AND deleted_at IS NULL AND pipeline_stage IN \(\?, \?, \?\)/);
+    expect(bindings).toEqual(require('../services/customer-stages').CUSTOMER_STAGES);
+    expect(bindings).toEqual(['active_customer', 'won', 'at_risk']);
+  });
+
   test('a failed customer lookup fails the list, so no customer is shown as a fresh prospect', async () => {
     mockRaw.mockImplementation(async (sql) => {
       if (/FROM customers/.test(sql)) throw new Error('boom');
