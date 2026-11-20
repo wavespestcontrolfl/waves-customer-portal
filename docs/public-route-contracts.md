@@ -5228,7 +5228,10 @@ its `form_submission` type, its source and its `quiz` answers
 (`extracted_data` is merged: a key the price page does not send, `timeline`
 included, is kept), and the later `/api/public/quote/calculate` run prices
 that same lead. A wrong, expired or refused attach token is ignored: the
-lookup inserts its own `quote_wizard` lead as before. The webhook does not
+lookup inserts its own `quote_wizard` lead as before. The rule is decided
+once, in the attach UPDATE; the same request's later writes (the completion
+stage, the address verdict) follow that lead and merge `extracted_data`
+keys only. The webhook does not
 accept an attach token in the pair. Also accepts the OPTIONAL `timeline`
 described
 under `/api/webhooks/lead` above, with the same storage and urgency
@@ -5362,9 +5365,12 @@ id reaches a visitor only through the quiz hand-off) is written only while
 that lead passes the hand-off's rule: open, not deleted, not commercial
 (`exceptClosedWebFormLead`, `server/services/lead-statuses.js`, inside the
 ownership UPDATE). A refused lead matches zero rows, like a wrong id, and
-the run files its own `quote_wizard` lead; `/upsell` applies the same rule
-on its read and on its write and answers 404. A `leadId` of any other lead
-type is unchanged.
+the run files its own `quote_wizard` lead. The run's later customer link
+(`customer_id`) repeats the rule, so a web-form lead the office converted
+or closed mid-request keeps its customer. `/upsell` holds its read and its
+write to one predicate (the id, the typed email, not deleted, and this
+rule) and answers 404 when either matches no row. A `leadId` of any other
+lead type is held to its own route's conditions only.
 Optional `heard_about` / `heard_about_prompt` (owner-approved 2026-10-30,
 "count customers from AI"): the wizard's self-reported "How did you hear
 about us?" answer and its AI-only "What did you ask it?" follow-up, validated

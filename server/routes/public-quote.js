@@ -2938,7 +2938,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
 
       if (customerId) {
-        await db('leads').where({ id: lead.id }).update({ customer_id: customerId });
+        // The office's convert or close also writes this column. A web-form
+        // lead (the quiz hand-off) it acted on since this run's ownership
+        // write keeps the customer that action gave it (0 rows here).
+        await db('leads').where({ id: lead.id }).modify(exceptClosedWebFormLead).update({ customer_id: customerId });
       }
     } catch (e) {
       logger.error(`[public-quote] Customer upsert failed: ${e.message}`);
@@ -4520,14 +4523,15 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     // leadId + email match = good-enough public auth (customer just typed the
     // email in the same session). Avoids any-id-overwrite abuse. A web-form
     // lead (the quiz hand-off) must also still pass the hand-off's rule, as
-    // on /calculate; the write below repeats it, so a lead the office closes
-    // between this read and that write is left alone.
-    const lead = await db('leads')
+    // on /calculate. The write below repeats this whole predicate, so a lead
+    // the office closes, removes or re-addresses between this read and that
+    // write is left alone.
+    const ownLead = () => db('leads')
       .where({ id: leadId })
       .whereNull('deleted_at')
       .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
-      .modify(exceptClosedWebFormLead)
-      .first();
+      .modify(exceptClosedWebFormLead);
+    const lead = await ownLead().first();
     if (!lead) return res.status(404).json({ error: 'Lead not found.' });
 
     const addLabels = valid.map(id => UPSELL_LABELS[id]);
@@ -4548,7 +4552,7 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     const mergedUpsells = Array.from(new Set([...prevUpsells, ...valid]));
     const updatedData = { ...existingData, upsell_interests: mergedUpsells, upsell_added_at: new Date().toISOString() };
 
-    const written = await db('leads').where({ id: leadId }).modify(exceptClosedWebFormLead).update({
+    const written = await ownLead().update({
       service_interest: mergedInterest,
       extracted_data: JSON.stringify(updatedData),
       updated_at: new Date(),

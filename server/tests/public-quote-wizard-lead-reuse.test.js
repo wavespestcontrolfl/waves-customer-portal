@@ -197,6 +197,13 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // never the original. A web-form lead (the quiz hand-off) must also
     // still be open and not commercial, in the same predicate.
     expect(src).toMatch(/const ownRow = \(\) => db\('leads'\)\n\s+\.where\(\{ id: leadId \}\)\n\s+\.whereNull\('deleted_at'\)\n\s+\.whereRaw\('LOWER\(email\) = \?', \[String\(contactEmail\)\.toLowerCase\(\)\.trim\(\)\]\)\n\s+\.modify\(exceptClosedWebFormLead\);/);
+    // The two later public writes of a column an office action also writes
+    // keep the rule in their own statement: the customer link, and the
+    // add-on step's write, which reuses its read's whole predicate.
+    expect(src).toContain("await db('leads').where({ id: lead.id }).modify(exceptClosedWebFormLead).update({ customer_id: customerId });");
+    expect(src).toMatch(/const ownLead = \(\) => db\('leads'\)\n\s+\.where\(\{ id: leadId \}\)\n\s+\.whereNull\('deleted_at'\)\n\s+\.whereRaw\('LOWER\(email\) = \?', \[String\(email\)\.toLowerCase\(\)\.trim\(\)\]\)\n\s+\.modify\(exceptClosedWebFormLead\);/);
+    expect(src).toContain('const written = await ownLead().update({');
+    expect(src).not.toMatch(/db\('leads'\)\.where\(\{ id: leadId \}\)\.update\(/);
     expect(block).not.toMatch(/forUpdate/);
     // The stored additional-property list counts as well as the request's
     // (codex r12 P1).

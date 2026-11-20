@@ -612,6 +612,12 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         // abandoned row already carries the callback ask; /calculate
         // re-derives it (or recovers this one when its cache read misses).
       };
+      // The attach above decided whether this run continues an existing
+      // lead. This write and the verdict write below are the same request's:
+      // they merge keys into extracted_data and write no column an office
+      // action writes, so a lead the office closes while the lookup runs
+      // ends as it would had the lookup finished first. The price
+      // calculation re-checks the lead on its own write.
       await db('leads').where({ id: lead.id }).update({
         // Call-led token attaches never acquire browser evidence. A genuine
         // quote-wizard row keeps its first valid evidence, or fills it once
