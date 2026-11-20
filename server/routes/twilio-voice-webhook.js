@@ -2623,14 +2623,14 @@ function gptLiveCellFor(digits) {
   return { cell: digits, voice: GPT_LIVE_CELLS.get(digits) };
 }
 
-// The default applies only when the variable is unset. A set value that is not
-// a plain non-negative number ("$1", "-1", "five") is a mistake: null, and the
-// reservation refuses the call rather than guess a cap.
+// The default applies only when the variable is absent. A set value that is
+// not a plain non-negative number ("", "$1", "-1", "five") is a mistake: null,
+// and the reservation refuses the call rather than guess a cap.
 function gptLiveMaxUsd() {
-  const raw = String(process.env.VOICE_GPT_LIVE_TEST_MAX_USD ?? '').trim();
-  if (raw === '') return GPT_LIVE_DEFAULT_MAX_USD;
-  const usd = /^\d+(\.\d+)?$/.test(raw) ? Number(raw) : NaN;
-  return Number.isFinite(usd) ? usd : null;
+  const raw = process.env.VOICE_GPT_LIVE_TEST_MAX_USD;
+  if (raw === undefined) return GPT_LIVE_DEFAULT_MAX_USD;
+  const text = String(raw).trim();
+  return /^\d+(\.\d+)?$/.test(text) ? Number(text) : null;
 }
 
 // Reserve one call's worst-case OpenAI cost (live-bridge PER_CALL_RESERVE_USD:

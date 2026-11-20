@@ -252,38 +252,84 @@ describe('model audio, barge-in and latency', () => {
     expect(summaryOf(t).interruptions).toBe(1);
   });
 
+  // A reply as OpenAI streams it: `count` 200 ms audio chunks, 100 ms apart.
+  const streamReply = (t, count) => {
+    for (let i = 0; i < count; i++) {
+      if (i > 0) t.advance(100);
+      t.openai.receive({ type: 'session.output_audio.delta', delta: b64(1600) });
+    }
+  };
+
   test('after a barge-in, the cut-off reply\'s tail never reaches Twilio, and the delay measure waits for the real next reply', async () => {
     const t = setup();
     await t.ready();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
     t.advance(1000);
-    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) }); // reply starts at +1000, 1000 ms queued
-    t.advance(600);
+    streamReply(t, 6); // a reply streams +1000..+1500, plays to +2200
+    t.advance(100);
     t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 }); // barge-in at +1600
-    t.advance(100);
-    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(320) }); // the old reply's tail, inside the gap
-    t.advance(100);
+    t.advance(50);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(320) }); // the old reply's tail, no gap
+    t.advance(50);
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(320) }); // more tail
-    t.advance(800);
+    t.advance(900);
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // the real next reply at +2600
     t.twilioStop();
     await flush();
     const payloads = t.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
-    expect(payloads).toEqual([b64(8000), b64(160)]); // no restart mid-sentence
+    expect(payloads).not.toContain(b64(320)); // no restart mid-sentence
+    expect(payloads.filter((p) => p === b64(160))).toHaveLength(2); // the greeting and the next reply
     expect(summaryOf(t).turns).toEqual([1100]); // +2600 minus the speech end at +1500
+  });
+
+  test('a reply right after a barge-in (the old one already streamed) is played and timed, not dropped as tail', async () => {
+    const t = setup();
+    await t.ready();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
+    t.twilioMedia();
+    t.advance(1000);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) }); // whole reply at +1000, plays to +2000
+    t.advance(600);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 }); // clear at +1600
+    t.advance(200);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(240) }); // a new reply 200 ms after the clear
+    t.twilioStop();
+    await flush();
+    expect(t.twilio.sent.some((m) => m.event === 'media' && m.media.payload === b64(240))).toBe(true);
+    expect(summaryOf(t).turns).toEqual([300]); // +1800 minus +1500
+  });
+
+  test('a fast reply that starts right as the last one finishes playing is timed', async () => {
+    const t = setup();
+    await t.ready();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
+    t.twilioMedia();
+    t.advance(1000);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) }); // reply at +1000, plays to +2000
+    t.advance(960);
+    // the caller's short answer over the end of it: ends at +1950, too late to cut anything
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'yes', start_ms: 1700, end_ms: 1950 });
+    t.advance(140);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // next reply at +2100
+    t.twilioStop();
+    await flush();
+    expect(t.twilio.sent.filter((m) => m.event === 'clear')).toHaveLength(0);
+    expect(summaryOf(t).turns).toEqual([150]);
   });
 
   test('a cut-off reply that keeps streaming is dropped for TAIL_DROP_MAX_MS at the most', async () => {
     const t = setup();
     await t.ready();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
     t.advance(1000);
-    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) });
-    t.advance(600);
+    streamReply(t, 6); // +1000..+1500
+    t.advance(100);
     t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 }); // clear at +1600
     for (let i = 0; i < 20; i++) {
       t.advance(100);
-      t.openai.receive({ type: 'session.output_audio.delta', delta: b64(80) }); // a stream with no gap
+      t.openai.receive({ type: 'session.output_audio.delta', delta: b64(80) }); // the stream goes on with no gap
     }
     const sent = t.twilio.sent.filter((m) => m.event === 'media' && m.media.payload === b64(80));
     expect(sent.length).toBe(6); // dropped through +3000 (1500 ms), sent from +3100 on
@@ -558,6 +604,9 @@ describe('finish', () => {
     expect(s).not.toHaveProperty('cost_usd');
     expect(s.errors).toContain('usage_unconfirmed');
     expect(t.ledgerUpdate).not.toHaveBeenCalled(); // the reservation stands
+    // no acknowledgment by the deadline: terminated at once, never a 30 s graceful close
+    expect(t.openai.terminate).toHaveBeenCalled();
+    expect(t.openai.close).not.toHaveBeenCalled();
   });
 
   test('a session OpenAI ends itself (expired) ends the call even while its socket stays open', async () => {

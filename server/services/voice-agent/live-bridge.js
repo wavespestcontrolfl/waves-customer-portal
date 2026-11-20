@@ -37,7 +37,7 @@ const SESSION_CAP_MS = 10 * 60 * 1000;
 const CLOSE_WAIT_MS = 5000;
 const START_DEADLINE_MS = 10000; // session.started must arrive within this, or the call ends
 const BARGE_IN_MARGIN_MS = 200;
-const NEW_REPLY_GAP_MS = 250; // model silence before a delta that marks the start of a new reply
+const NEW_REPLY_GAP_MS = 250; // a model audio chunk this long after the one before starts a new reply
 const TAIL_DROP_MAX_MS = 1500; // after a barge-in, drop the cut-off reply's tail at most this long
 const MULAW_BYTES_PER_MS = 8; // 8000 samples a second, one byte each
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
@@ -334,30 +334,24 @@ class LiveBridge {
   onOutputAudio(msg) {
     if (typeof msg.delta !== 'string' || !msg.delta || !this.streamSid) return;
     const t = this.deps.now();
-    if (this.isOldTail(t)) return;
-    // A reply delay counts only where a reply starts (model audio after a
-    // silence). A caller transcript that lands while the model is already
-    // talking (transcription lag) must not log a false near-zero delay.
-    if (t >= this.playbackEndsAt + NEW_REPLY_GAP_MS) this.onReplyStart(t);
+    // OpenAI streams a reply faster than it plays, so its chunks arrive close
+    // together, and a new reply arrives after a gap in the stream. A gap marks
+    // a reply start whatever is still queued at Twilio, so a fast reply and a
+    // reply right after a barge-in are both timed. A chunk with no gap after a
+    // barge-in is the cut-off reply's tail: it is dropped, so the caller never
+    // hears it restart mid-sentence (for TAIL_DROP_MAX_MS at the most).
+    const newReply = this.lastAudioAt === null || t - this.lastAudioAt >= NEW_REPLY_GAP_MS;
+    this.lastAudioAt = t;
+    if (newReply) {
+      this.tailDropSince = null;
+      this.onReplyStart(t);
+    } else if (this.tailDropSince !== null) {
+      if (t - this.tailDropSince < TAIL_DROP_MAX_MS) return;
+      this.tailDropSince = null;
+    }
     const decodedBytes = Buffer.from(msg.delta, 'base64').length;
     this.playbackEndsAt = Math.max(t, this.playbackEndsAt) + decodedBytes / MULAW_BYTES_PER_MS;
     this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload: msg.delta } });
-  }
-
-  // After a barge-in cleared Twilio, chunks of the cut-off reply that keep
-  // streaming in are dropped, so the caller never hears it restart mid-
-  // sentence. The tail ends at a gap in the stream (a new reply), or after
-  // TAIL_DROP_MAX_MS at the most.
-  isOldTail(t) {
-    const prev = this.lastAudioAt;
-    this.lastAudioAt = t;
-    if (this.tailDropSince === null) return false;
-    // The gap counts from the later of the last chunk and the clear: the first
-    // chunk after a clear is a new reply only after a real silence.
-    const gap = t - Math.max(prev === null ? -Infinity : prev, this.tailDropSince);
-    if (gap < NEW_REPLY_GAP_MS && t - this.tailDropSince < TAIL_DROP_MAX_MS) return true;
-    this.tailDropSince = null;
-    return false;
   }
 
   // The pending measure is consumed only here, by a reply start. The first
@@ -490,7 +484,8 @@ class LiveBridge {
   }
 
   // session.close, then up to closeWaitMs for session.closed (it carries the
-  // final usage). A socket that is not open is just dropped.
+  // final usage). With no session.closed by then, the socket is terminated at
+  // once: a graceful close could hold it open 30 s more, past the reservation.
   async closeOpenAi() {
     const sock = this.openai;
     if (!sock) return;
@@ -506,7 +501,7 @@ class LiveBridge {
       this.wakeClose = null;
     }
     try {
-      if (sock.readyState === WS_OPEN) sock.close();
+      if (this.openaiGone && sock.readyState === WS_OPEN) sock.close();
       else if (typeof sock.terminate === 'function') sock.terminate();
       else sock.close();
     } catch { /* already closed */ }
