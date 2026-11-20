@@ -256,9 +256,10 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
   test('every build the route runs passes the address: the offered lists and the commit\'s one-day rebuilds', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/inspection-public.js'), 'utf8');
     const calls = [...src.matchAll(/await buildAvailabilityForLead\(([^;]*?)\);/gs)].map((m) => m[1]);
-    // GET, /availability, /find-slots, the email block's slots, the SLOT_TAKEN refresh, the commit's single-day
-    // anti-forgery build and revalidateSlotAt (per truck those two drop the same openings as the list).
-    expect(calls).toHaveLength(7);
+    // GET, /availability, /find-slots, the email block's slots, the SLOT_TAKEN refresh and its second build at the
+    // typed location (nextCommitRefresh), the commit's single-day anti-forgery build and revalidateSlotAt (per truck
+    // those two drop the same openings as the list).
+    expect(calls).toHaveLength(8);
     expect(calls.filter((c) => !/\baddress\b/.test(c))).toEqual([]);
     expect(calls.filter((c) => /rangeFrom: date, rangeTo: date/.test(c))).toHaveLength(2);
   });

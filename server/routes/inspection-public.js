@@ -2250,10 +2250,10 @@ function sendLocationFailure(res, failure, county, leadId) {
 async function sendSlotTaken(res, { location, address = null, alsoAt = null, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
   let refreshed = null;
   try {
-    const build = (at, zoneAddress) => buildAvailabilityForLead(at, { ...range, config, duration: catalog.durationMinutes, address: zoneAddress });
-    const here = await build(location, address);
+    const here = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address });
+    const there = alsoAt && await buildAvailabilityForLead(alsoAt.location, { ...range, config, duration: catalog.durationMinutes, address: alsoAt.address });
     // Set only once both builds succeed: a failed second build answers with no times, never the unfiltered ones.
-    refreshed = alsoAt ? keepStartsOpenAt(here, await build(alsoAt.location, alsoAt.address)) : here;
+    refreshed = alsoAt ? keepStartsOpenAt(here, there) : here;
   } catch (err) {
     logger.warn(`[inspection-public] refresh availability failed for lead ${leadId}: ${err.message}`);
   }
