@@ -436,12 +436,15 @@ function reserviceCandidateOutranks(candidate, existing) {
 // `serviceLines` (capability categories), or null (today's offers). A plain
 // function so the gate/empty/failure branches stay out of buildBookingAvailability.
 // Fail-open: an unreadable map is logged and offers what today's code offers.
+// `strict` (a caller that counts openings, availabilityForPin `verifiedOnly`) throws
+// instead, and so does an unreadable territory under it (lineOfferRanking `strict`).
 // `place` ({ lat, lng }: the address being booked) lets GATE_TERRITORY_ROUTING pick the territory's technician.
-async function loadLineOfferRanking(serviceLines, place = null) {
+async function loadLineOfferRanking(serviceLines, place = null, { strict = false } = {}) {
   if (!Array.isArray(serviceLines) || !serviceLines.length) return null;
   try {
-    return await require('../services/scheduling/line-technician').lineOfferRanking(db, { lines: serviceLines, place });
+    return await require('../services/scheduling/line-technician').lineOfferRanking(db, { lines: serviceLines, place, strict });
   } catch (err) {
+    if (strict) throw new Error(`line map unread: ${err.message}`);
     logger.warn(`[booking] line map offer ranking unavailable: ${err.message}`);
     return null;
   }
@@ -1736,7 +1739,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
-  const lineRanking = await loadLineOfferRanking(serviceLines, { lat, lng });
+  const lineRanking = await loadLineOfferRanking(serviceLines, { lat, lng }, { strict: verifiedOnly === true });
   // The signed-offer policy tag for this build (minted inside addCandidate
   // below; createSelfBooking verifies with the same mapping). An offer built
   // with mid-route insertion carries it, so a GATE_BOOK_CAPACITY_COMMIT /
@@ -1883,6 +1886,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // availabilityForPin's read-only caller passes it (the hourly route check's slot-rule
     // decision); unset for every other caller = the shared allowance, as before.
     providerTravel: paidLookups,
+    // An unreadable closed-day list (find-time's blackout read) throws for a caller that
+    // counts openings (availabilityForPin `verifiedOnly`), as for the nightly dispatch
+    // search; every other caller fails open (closed days offered), as before.
+    strictBlackout: verifiedOnly === true,
   });
 
   // Slot rules come from the shared bookingSlotWindow derivation so the
@@ -2342,10 +2349,16 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
 //   `surface` labels the ask for the customer route check (default 'book'):
 //     the route check's asks log as 'route_check', apart from customer
 //     searches, under the same rules;
-//   `verifiedOnly` takes no fallback list: a failed occupancy read, or a
-//     customer route check that failed, ran out of time, could not score a
-//     route or kept its whole week (the floor), throws instead of serving the
-//     unchecked list the customer keeps. Its check waits up to 15 seconds.
+//   `verifiedOnly` takes no fallback list: an unreadable closed-day list
+//     (blackout dates, weekly days off, holidays), service-line map or
+//     territory, a failed occupancy read, or a customer route check that
+//     failed, ran out of time, could not score a route or kept its whole week
+//     (the floor), throws instead of serving the unchecked list the customer
+//     keeps. Its check waits up to 15 seconds. Two cached reads keep their
+//     last good value on a failed refresh (the customer window config, the
+//     expected-minutes catalog). The zone route days change the offer only
+//     under capacity routing, as the capacity finder's own reads do (the
+//     decision marks that answer `travel: 'modeled'`).
 async function availabilityForPin({ lat, lng, serviceKey, internal = false, paidLookups, through, crew, now, surface, verifiedOnly }) {
   const funnelKey = normalizeBookingServiceKey(serviceKey);
   // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).

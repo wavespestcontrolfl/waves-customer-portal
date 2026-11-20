@@ -697,7 +697,7 @@ describe('runRouteCheck', () => {
     });
   });
 
-  test("slot rule (A3): with no crew slot, /book's own pool says whether the zero is an answer (its whole-week floor)", async () => {
+  test("slot rule (A3): with no crew slot, /book's own pool says whether the zero is an answer (its whole-week floor), and its crew starts count", async () => {
     // /book's own pool answers too: its check kept no whole week, so the crew's zero is the zone's answer.
     const zero = fakeConn();
     expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
@@ -715,6 +715,17 @@ describe('runRouteCheck', () => {
     expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
     expect(JSON.parse(kept.writes[0][1].ad_shadow).decision).toEqual({
       ...FLOOR, mode: 'unknown', zones: FLOOR.zones.map((z) => ({ ...z, error: 'route check: floor_kept' })),
+    });
+    // A crew start /book's own pool offers counts (it opened between the two reads); another technician's does not.
+    const OTHER = '00000000-0000-4000-8000-000000000002';
+    availabilityForPin.mockImplementation(async ({ crew, lat }) => (
+      crew || lat !== 27.5 ? { days: [] } : offerOn('2026-11-21', ['11:00'], ['09:00', OTHER])));
+    const opened = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
+    expect(JSON.parse(opened.writes[0][1].ad_shadow).decision).toEqual({
+      ...FLOOR,
+      mode: 'full',
+      zones: [{ ...FLOOR.zones[0], byDate: { ...FLOOR.zones[0].byDate, '2026-11-21': 1 }, first: '2026-11-21 11:00' }, FLOOR.zones[1]],
     });
   });
 

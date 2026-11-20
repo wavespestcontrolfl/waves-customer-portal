@@ -226,6 +226,15 @@ describe("availabilityForPin — the hourly route check's read-only ask", () => 
     expect(offeredAt9(await availabilityForPin(pin))).toEqual(['tech-1']);
   });
 
+  test('verifiedOnly: find-time reads the closed-day list strict (an unreadable list throws); every other caller fails open', async () => {
+    // find-time's own strictBlackout (blackout-strict-read.test.js), as the nightly dispatch search reads it.
+    const { availabilityForPin } = require('../routes/booking')._internals;
+    const pin = { lat: 27.4, lng: -82.4, serviceKey: 'pest_control', paidLookups: false };
+    await availabilityForPin({ ...pin, verifiedOnly: true });
+    await availabilityForPin(pin);
+    expect(findAvailableSlots.mock.calls.map(([opts]) => opts.strictBlackout)).toEqual([true, false]);
+  });
+
   test('verifiedOnly: a route check that kept a slot unchecked is no answer; a customer keeps its list as before', async () => {
     const { availabilityForPin } = require('../routes/booking')._internals;
     const routeCheck = require('../services/scheduling/customer-route-check');
