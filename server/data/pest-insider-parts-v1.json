@@ -10,7 +10,8 @@
     "puss-caterpillar-243839273.jpg": { "sha16": "9a5c5cf39eef93cd", "source": "https://www.inaturalist.org/observations/243839273", "license": "CC BY 4.0", "author": "Sue Carnahan", "subject": "puss caterpillar" },
     "bigheaded-ant-31175728.jpg": { "sha16": "535272538591bab8", "source": "https://www.inaturalist.org/observations/31175728", "license": "CC BY 4.0", "author": "Wilderness Safaris Botswana - Conservation Team", "subject": "bigheaded ant" },
     "house-centipede-19251730.jpg": { "sha16": "477c67099c055c44", "source": "https://www.inaturalist.org/observations/19251730", "license": "CC BY 4.0", "author": "Kyle Elshoff", "subject": "house centipede" },
-    "io-moth-28369492.jpg": { "sha16": "6574dab5949b9d8e", "source": "https://www.inaturalist.org/observations/28369492", "license": "CC BY 4.0", "author": "Trevor Edmonson", "subject": "io moth" }
+    "io-moth-28369492.jpg": { "sha16": "6574dab5949b9d8e", "source": "https://www.inaturalist.org/observations/28369492", "license": "CC BY 4.0", "author": "Trevor Edmonson", "subject": "io moth" },
+    "sri-lankan-weevil-134888437.jpg": { "sha16": "625ec0bdc0d8f021", "source": "https://www.inaturalist.org/observations/134888437", "license": "CC0", "author": "juniem", "subject": "weevil" }
   },
   "facts": {
     "T03": {
@@ -78,7 +79,11 @@
       "panels": [ { "photo": "termite-pellets-177672553.jpg", "crop": [0, 560, 768, 369], "marks": [ { "at": [[221, 66]], "r": 34, "label": "pellet piles", "pill": [330, 200] } ] } ]
     },
     "fire-ant": { "parts": [], "text16": "731aad619d596e69", "why": "Jaws here are how it stings, not a feature to look for." },
-    "sri-lankan-weevil": { "parts": [], "text16": "707ad3d4d21c43e8", "why": "The notched leaf is plant damage, not a part of the weevil." },
+    "sri-lankan-weevil": {
+      "parts": ["notched-leaf"], "text16": "707ad3d4d21c43e8",
+      "heading": "The notched-leaf signature is everywhere",
+      "panels": [ { "photo": "sri-lankan-weevil-134888437.jpg", "crop": [0, 200, 1024, 492], "marks": [ { "at": [[166, 199]], "r": 34, "label": "notched-leaf signature", "pill": [300, 226] } ] } ]
+    },
     "lovebug": { "parts": [], "text16": "2043267c56b3e3cb", "why": "Body fluids are not a part to show." },
     "fungus-gnat": { "parts": [], "text16": "1b4caa2058a26278", "why": "\"An overwatering alarm with wings\" is a figure of speech." },
     "millipede": { "parts": [], "text16": "994a0095918ea90a", "why": "Leaves and leaf litter are its food and home, not its parts." },
