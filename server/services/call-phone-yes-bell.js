@@ -6,7 +6,8 @@
  * on the card expires within 24 hours, or the soonest visit to come that keeps the card open starts within 48 hours. Only a
  * card with status open rings or is rewritten (the sweep keeps only those current). Each ring also sends a phone banner to
  * the admins (bell-banners.js kind call_phone_yes, 7:00 AM to 9:00 PM Eastern; a ring at night stays in the bell, and the
- * 8 AM banner counts it). Nothing here texts, emails or calls a customer.
+ * 8 AM banner counts it). The caller's words are redacted as every bell body is, and access codes and payment details
+ * are masked too, because the why can reach a phone's lock screen. Nothing here texts, emails or calls a customer.
  *
  * Contract: docs/admin-notifications.md. Category `estimate` with `bell: true` (as the other estimate bells), area
  * Estimates, severity needs-you, who person, subject the booking call (one card per call), link the Triage tab, where the
@@ -15,7 +16,8 @@
  * filed row closes (every pass retries that close), so a card keeps one open row. A card filed when time is already short
  * rings the time-short bell alone, and nothing rings for a card after its time-short bell. Between rings the open row is
  * rewritten quietly when the card's words change (a yes taken back, an estimate accepted, the visit moved): no ring, no
- * banner, and its read state kept.
+ * banner, and its read state kept. Each card rings in a transaction of its own that holds its call's triage lock and
+ * reads the card again, so a card closed or claimed while the pass runs rings nothing.
  *
  * Done-when `phone_yes_card_closed`: the sweep (call-phone-yes-accept.js, every 10 minutes while the gate is on) closes a
  * card's rows once the card is no longer open: the tap accepted it, a person resolved or dismissed it, or the sweep
@@ -87,8 +89,9 @@ const STATE_TEXT = {
     why: ({ visitDay, words }) => {
       const tail = visitDay ? ` on a call, and the visit is ${visitDay}.` : ' on a call.';
       const quote = compose.firstSentence(words).replace(/\.+$/, '');
-      const quoted = quote ? Names.whyWithQuote({ lead: 'The caller said ', quote, tail }) : '';
-      // Words that break the why's rules (a date, an exclamation mark, a bracket) give way to plain words.
+      // Words that break the why's rules (a date, an exclamation mark, a bracket such as a mask) give way to plain words,
+      // also when the cut to fit would drop the part that breaks them.
+      const quoted = quote && !compose.breaksAlertRules(quote) ? Names.whyWithQuote({ lead: 'The caller said ', quote, tail }) : '';
       return quoted && !compose.breaksAlertRules(quoted) ? quoted : `The caller said yes to pay per application${tail}`;
     },
   },
@@ -108,6 +111,15 @@ const DUE_WHY = {
   visit_soon: ({ visitDay }) => `The visit the call booked is ${visitDay}, and its card in Triage is still open.`,
 };
 
+// The caller's words in the bell: access codes and payment details masked (redactAccessCodes, as visit notes are), then
+// redacted as every bell body is (contact details, street addresses), because the why can reach a phone's lock screen.
+// Codes first: the phone mask would keep a card number's last four digits. A mask leaves a bracket, which the why's
+// rules refuse, so the why falls back to plain words rather than quote it.
+function bellWords(raw) {
+  const { redactAccessCodes } = require('./context-aggregator');
+  return Names.redactedWords(redactAccessCodes(raw));
+}
+
 // The bell's words: the headline's action, the one-sentence why and the detail. The card's payload and summary give
 // them, so the bell says what the card shows; the detail keeps the caller's whole words.
 function textFor({ name, card, expiresAt = null, several = false, visit = null, due = null }) {
@@ -115,7 +127,8 @@ function textFor({ name, card, expiresAt = null, several = false, visit = null, 
   const state = cardStateOf(payload);
   const start = visitStart(visit);
   const visitDay = start ? formatETDayDate(start) : null;
-  const words = state === 'yes' && payload.caller_words ? Names.redactedWords(payload.caller_words) : '';
+  // The words go with the yes in every state (a card whose estimate was accepted still carries them), not with the headline.
+  const words = payload.yes_heard === true && payload.caller_words ? bellWords(payload.caller_words) : '';
   const facts = { booked: visitDay ? ` for ${visitDay}` : '', words, expiresAt, several, visitDay };
   return {
     action: Names.fitAction('Estimates', name, [STATE_TEXT[state].action]),
@@ -140,13 +153,14 @@ function standingKey(cardId, written) {
 // has no open row. Returns { key, raised } (the key it raised and the raise's result), or null.
 // card: { id, call_log_id, related_customer_id, related_estimate_id, payload, summary }; expiresAt: the soonest an open
 // estimate on the card expires, after now; several: the card names more than one estimate; visit: the soonest visit to
-// come that keeps the card open ({ scheduled_date, window_start }) or null; written: as standingKey.
-async function ringCard({ card, expiresAt = null, several = false, visit = null, written, now = new Date() }) {
+// come that keeps the card open ({ scheduled_date, window_start }) or null; written: as standingKey; trx: the card's
+// transaction (runBellPass), which the write joins, so the banner goes only once it commits.
+async function ringCard({ card, expiresAt = null, several = false, visit = null, written, now = new Date(), trx }) {
   const due = dueReason({ expiresAt, visit, now });
   const ringKey = keyToRing({ cardId: card.id, due, rung: written });
   const key = ringKey || standingKey(card.id, written);
   if (!key) return null;
-  const name = (await Names.lookupCustomerName(db, card.related_customer_id)) || 'a customer';
+  const name = (await Names.lookupCustomerName(trx, card.related_customer_id)) || 'a customer';
   const text = textFor({ name, card, expiresAt, several, visit, due });
   const raised = await compose.raiseAdminAlert('estimate', {
     area: 'Estimates',
@@ -163,6 +177,7 @@ async function ringCard({ card, expiresAt = null, several = false, visit = null,
     bannerKind: 'call_phone_yes',
     dedupeKey: key,
     ...(ringKey ? {} : { refreshOnDedupe: true, ringOnRefresh: () => false }),
+    trx,
     detail: text.detail,
     metadata: {
       triageItemId: String(card.id),
@@ -188,28 +203,36 @@ async function writtenKeys(cardIds) {
 }
 
 /**
- * The bell pass, run by the sweep after its filing and its moot close. `timed`: the open cards to ring, each
- * { card, expiresAt, several, visit }; `openCardIds`: every open card, also one whose times could not be read, so its
- * rows stay. Then two closes, each retried by every pass: a card's filed row once its time-short row exists (one open
- * row per card), and the rows of cards no longer open. Returns the number of rows the second close closed.
+ * The bell pass, run by the sweep after its filing and its moot close. `listCards()`: every card still open or claimed,
+ * each { id, status, call_log_id }. `readCard(trx, listed)`: an open card read again under its call's triage lock (the
+ * lock every card writer takes first), with the times that make it urgent ({ card, expiresAt, several, visit }), or null
+ * once it is no longer open. Each open card rings in a transaction of its own that holds that lock, so a card the tap
+ * accepts or a person claims while the pass runs rings nothing. Then two closes, each retried by every pass: a card's
+ * filed row once its time-short row exists (one open row per card), and the rows of cards no longer open, listed again
+ * so a card closed during the pass loses its rows in this pass. A claimed card, or one that could not be read, keeps
+ * its rows. Returns the number of rows the second close closed.
  */
-async function runBellPass({ timed, openCardIds, now = new Date() }) {
-  const written = await writtenKeys(openCardIds);
-  for (const entry of timed) {
+async function runBellPass({ listCards, readCard, now = new Date() }) {
+  const listed = await listCards();
+  const written = await writtenKeys(listed.map((card) => card.id));
+  for (const entry of listed.filter((card) => card.status === 'open')) {
     try {
-      const out = await ringCard({ ...entry, written, now });
+      const out = await db.transaction(async (trx) => {
+        const fresh = await readCard(trx, entry);
+        return fresh ? ringCard({ ...fresh, written, now, trx }) : null;
+      });
       // A row now stands for this key; a raise that failed or was withheld returns no id, and the next run tries again.
       if (out?.raised?.id) written.set(out.key, true);
     } catch (e) {
       // Nothing rang for this key, so the next run tries again.
-      logger.warn(`[call-phone-yes] bell skipped for card ${entry.card.id}: ${e.code || e.name || 'error'}`);
+      logger.warn(`[call-phone-yes] bell skipped for card ${entry.id}: ${e.code || e.name || 'error'}`);
     }
   }
-  const replaced = openCardIds.filter((id) => written.has(dueKey(id)) && written.get(filedKey(id)) === true);
+  const replaced = listed.map((card) => card.id).filter((id) => written.has(dueKey(id)) && written.get(filedKey(id)) === true);
   await Episodes.closeAdminAlertKeys(db, replaced.map(filedKey), 'phone_yes_time_short', {
     now, resolution: 'Replaced by the alert that time runs short on this card',
   });
-  const open = new Set(openCardIds.map(String));
+  const open = new Set((await listCards()).map((card) => String(card.id)));
   const standing = [...await Episodes.openAdminAlertKeys(db, FILED_PREFIX), ...await Episodes.openAdminAlertKeys(db, DUE_PREFIX)];
   return Episodes.closeAdminAlertKeys(db, standing.filter((key) => !open.has(cardIdOfKey(key))), DONE_WHEN, {
     now, resolution: 'The card is closed',

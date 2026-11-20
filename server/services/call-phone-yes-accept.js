@@ -733,40 +733,46 @@ async function runCallPhoneYesSweep({ now = new Date(), pageSize = SCAN_LIMIT } 
 // The bell pass (call-phone-yes-bell.js), after the filing and the moot close: each open card rings what it owes (once
 // when filed, once more when time runs short), then the rows of cards no longer open close. Only a card with status
 // open rings or is rewritten: the sweep keeps only those current (applyCardState), so the bell never says more than the
-// card. A claimed card (in_progress) keeps its row until it closes, as does a card whose times cannot be read.
+// card. Each card is read again under its call's triage lock just before it rings, so a card the tap accepts or a
+// person claims while the pass runs rings nothing. A claimed card (in_progress) keeps its row until it closes, as does a
+// card whose times cannot be read.
 async function ringOpenCards(now) {
   const Bell = require('./call-phone-yes-bell');
-  const cards = await db('triage_items').where({ reason_code: REASON_CODE }).whereIn('status', Bell.OPEN_CARD_STATES)
-    .select('id', 'status', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload', 'summary');
-  const timed = [];
-  for (const card of cards.filter((c) => c.status === 'open')) {
-    try {
-      timed.push({ card, ...(await cardTimes(card, now)) });
-    } catch (e) {
-      logger.warn(`[call-phone-yes] bell times skipped for card ${card.id}: ${e.code || e.name || 'error'}`);
-    }
-  }
-  return Bell.runBellPass({ timed, openCardIds: cards.map((card) => card.id), now });
+  return Bell.runBellPass({
+    listCards: () => db('triage_items').where({ reason_code: REASON_CODE }).whereIn('status', Bell.OPEN_CARD_STATES)
+      .select('id', 'status', 'call_log_id'),
+    readCard: (trx, listed) => openCardNow(trx, listed, now),
+    now,
+  });
+}
+
+// An open card read again under its call's triage lock (the lock every card writer takes first), with the times that
+// make it urgent; null once it is no longer open (the tap accepted it, or a person claimed, resolved or dismissed it).
+async function openCardNow(trx, listed, now) {
+  await lockTriageCall(trx, listed.call_log_id);
+  const card = await trx('triage_items').where({ id: listed.id, reason_code: REASON_CODE, status: 'open' })
+    .first('id', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload', 'summary');
+  return card ? { card, ...(await cardTimes(trx, card, now)) } : null;
 }
 
 // The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and the
 // soonest visit to come among the ones that keep the card open (booked by the call, on the calendar, not linked to an
 // estimate, pest). Both are read under the card's customer, as its moot check reads them. A call that booked several
 // visits files its card with no visit of its own, so the call's visits are read, not the card's.
-async function cardTimes(card, now) {
+async function cardTimes(conn, card, now) {
   const { visitStart } = require('./call-phone-yes-bell');
   const ids = cardEstimateIds(card);
   const soonest = ids.length
-    ? await db('estimates').whereIn('id', ids).where({ customer_id: card.related_customer_id })
+    ? await conn('estimates').whereIn('id', ids).where({ customer_id: card.related_customer_id })
       .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').where('expires_at', '>', now)
       .orderBy('expires_at').first('expires_at')
     : null;
-  const upcoming = (await callVisitsOnCalendar(db, card.call_log_id, card.related_customer_id))
+  const upcoming = (await callVisitsOnCalendar(conn, card.call_log_id, card.related_customer_id))
     .filter((v) => !v.source_estimate_id && visitStart(v) > now)
     .sort((a, b) => visitStart(a) - visitStart(b));
   let visit = null;
   for (const candidate of upcoming) {
-    if (await isPestVisit(db, candidate)) { visit = candidate; break; }
+    if (await isPestVisit(conn, candidate)) { visit = candidate; break; }
   }
   return { expiresAt: soonest?.expires_at || null, several: ids.length > 1, visit };
 }

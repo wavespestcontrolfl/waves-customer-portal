@@ -128,6 +128,25 @@ describe('the words, by card state', () => {
     expect(passesRules(text).headline.length).toBeLessThanOrEqual(60);
   });
 
+  // The why can reach a phone's lock screen: a credential in the first sentence is never quoted, and the detail masks it.
+  test.each([
+    ['a gate code in digits', 'Yes, bill me each time, the gate code is 4545. Thanks.', /4545/],
+    ['a gate code in number words', 'Sure, put me on the plan, the gate code is four five four five.', /four five/],
+    ['a card number', 'Yes, and charge my card 4111 1111 1111 1111 each time.', /1111/],
+  ])('%s in the first sentence: plain words in the why, a mask in the detail', (_label, words, secret) => {
+    const text = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: words }), visit: VISIT });
+    expect(text.why).toBe('The caller said yes to pay per application on a call, and the visit is Tue, Nov 24.');
+    expect(text.detail).toContain('[redacted]');
+    expect(text.detail).not.toMatch(secret);
+    expect(() => passesRules(text)).not.toThrow();
+  });
+
+  test('a gate code after the first sentence: the yes is quoted, and the detail masks the code', () => {
+    const text = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: 'Yes, the plan is fine. Oh and 4545 is the gate code.' }), visit: VISIT });
+    expect(text.why).toBe('The caller said “Yes, the plan is fine” on a call, and the visit is Tue, Nov 24.');
+    expect(text.detail).toContain('“Yes, the plan is fine. Oh and [redacted] is the gate code.”');
+  });
+
   test("the detail keeps the caller's whole turn, also a long one with a condition at its end", () => {
     const long = `${'Yes, the quarterly plan is fine, and you can bill me each time you come out to the house. '.repeat(8)}But only if the price stays the same.`;
     const { detail } = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: long }), visit: VISIT });
@@ -138,6 +157,9 @@ describe('the words, by card state', () => {
   test("the detail is the card's summary, the caller's whole words and where the card is", () => {
     const { detail } = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: WORDS }), visit: VISIT });
     expect(detail).toBe(`The card says this. The caller's words: “${WORDS}”. Open Communications, then Triage, to see the card.`);
+    // A card whose estimate was accepted still carries the yes, so its words stay when the headline changes.
+    expect(textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: WORDS, estimate_accepted: true }), visit: VISIT }).detail)
+      .toBe(detail);
     expect(textFor({ name: 'Pat Sampleton', card: card({ yes_heard: false }), visit: VISIT }).detail)
       .toBe('The card says this. Open Communications, then Triage, to see the card.');
   });

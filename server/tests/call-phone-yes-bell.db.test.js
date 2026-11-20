@@ -27,6 +27,7 @@ const knex = require('knex');
 const { randomUUID } = require('crypto');
 const { bannerAfterWrite, __private: { skipReason } } = require('../services/bell-banners');
 const Compose = require('../services/admin-alert-compose');
+const Bell = require('../services/call-phone-yes-bell');
 const { etDateString, formatETDayDate, parseETDateTime } = require('../utils/datetime-et');
 const { _private: { ringOpenCardsForTest } } = require('../services/call-phone-yes-accept');
 
@@ -222,6 +223,42 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect((await bellsOf(working.id)).filed.done_at).toBeNull();
     // A closed card rings nothing more.
     expect(bannersFor(resolved.id) + bannersFor(working.id)).toBe(2);
+  });
+
+  test('a card the tap accepts or a person claims while the pass runs rings nothing; the accepted one closes in that pass', async () => {
+    const accepted = await phoneYesCard();
+    const claimed = await phoneYesCard();
+    await pass();
+    // Time runs short on both, and each changes after the pass lists it: the tap accepts one, a person claims the other.
+    await trx('scheduled_services').whereIn('id', [accepted.visitId, claimed.visitId]).update({ scheduled_date: etDay(1) });
+    const realPass = Bell.runBellPass;
+    let listedOnce = false;
+    const spy = jest.spyOn(Bell, 'runBellPass').mockImplementation(({ listCards, ...rest }) => realPass({
+      ...rest,
+      listCards: async () => {
+        const listed = await listCards();
+        if (!listedOnce) {
+          listedOnce = true;
+          await trx('triage_items').where({ id: accepted.id }).update({ status: 'resolved', resolved_at: new Date() });
+          await trx('triage_items').where({ id: claimed.id }).update({ status: 'in_progress' });
+        }
+        return listed;
+      },
+    }));
+    try {
+      await pass();
+    } finally {
+      spy.mockRestore();
+    }
+
+    const acceptedBells = await bellsOf(accepted.id);
+    expect(acceptedBells.due).toBeUndefined();
+    expect(acceptedBells.filed.metadata).toEqual(expect.objectContaining({ autoCleared: true, autoClearedReason: 'phone_yes_card_closed' }));
+    const claimedBells = await bellsOf(claimed.id);
+    expect(claimedBells.due).toBeUndefined();
+    expect(claimedBells.filed.done_at).toBeNull();
+    // The two rings at filing, nothing after.
+    expect(bannersFor(accepted.id) + bannersFor(claimed.id)).toBe(2);
   });
 
   test('a yes taken back: the open row is rewritten quietly, with no banner, and keeps its read state', async () => {

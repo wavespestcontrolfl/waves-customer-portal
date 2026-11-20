@@ -698,10 +698,16 @@ still holds its key, so each key rings at most once and no `RERING` entry is owe
 closes (every pass retries that close, and a raise that wrote no row closes nothing), so a card has one open row; a card filed when
 time is already short rings the time-short bell alone, and nothing rings for a card after its time-short bell. Between rings the
 open row is rewritten quietly when the card's words change (a yes taken back, an estimate accepted, the visit moved):
-`refreshOnDedupe` with `ringOnRefresh` false, so no ring, no banner, and the row keeps its read state. The why quotes the caller's first sentence when it passes the why rules, and uses plain words otherwise; `detail`
-holds the card's summary and the caller's whole words, redacted. Each ring sends a phone banner with the New lead sound
+`refreshOnDedupe` with `ringOnRefresh` false, so no ring, no banner, and the row keeps its read state. The caller's words have
+access codes and payment details masked (`redactAccessCodes`), then are redacted as every bell body is, because the why can reach a
+phone's lock screen. The why quotes the caller's first sentence when the whole sentence passes the why rules (a mask leaves a
+bracket, which they refuse), and uses plain words otherwise; `detail` holds the card's summary and the caller's whole words while
+the card carries a yes, also once an estimate is accepted. Each card rings in a transaction of its own that holds its call's
+triage lock (`lockTriageCall`, which every card writer takes first) and reads the card again there, so a card the tap accepts or
+a person claims while the pass runs rings nothing. Each ring sends a phone banner with the New lead sound
 (`bell-banners.js` kind `call_phone_yes`, 7:00 AM to 9:00 PM Eastern; the 8 AM banner counts a ring at night). The same pass closes
-the rows of every card that is no longer open: accepted by the tap, resolved or dismissed by a person, or closed as moot. With the
+the rows of every card that is no longer open, listed again after the rings: accepted by the tap, resolved or dismissed by a
+person, or closed as moot. With the
 gate off the sweep does not run, so open rows stay as they are until it runs again. A failed ring is logged with ids only and is
 tried again on the next run. It sends nothing to a customer.
 
