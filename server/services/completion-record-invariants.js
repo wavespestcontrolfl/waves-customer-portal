@@ -579,10 +579,27 @@ function foldSendRows(rows, out) {
     }
     const at = evidenceSendTime(row);
     if (!at) entry.confirmedWithoutTime = true;
-    else if (!entry.firstConfirmedSendAt || at < entry.firstConfirmedSendAt) entry.firstConfirmedSendAt = at;
+    if (at) {
+      entry.sendTimes.push(at);
+      if (!entry.firstConfirmedSendAt || at < entry.firstConfirmedSendAt) entry.firstConfirmedSendAt = at;
+    }
   }
   return sets;
 }
+
+// Report emails confirmed delivered whose own send time was never stored (the sender lost its response
+// before writing sent_at; the delivery webhook still landed). The send happened somewhere between the
+// moment the row was queued and the delivery: the two bounds, not one time.
+const EVIDENCE_DELIVERED_ONLY_SQL = `
+  WITH tgt AS (
+    SELECT r.id AS record_id, r.scheduled_service_id FROM service_records r WHERE r.id = ANY(string_to_array(?, ',')::uuid[])
+  )
+  SELECT t.record_id, COALESCE(m.queued_at, m.created_at) AS queued_at, m.delivered_at
+    FROM tgt t
+    JOIN service_records s ON s.id = t.record_id OR (t.scheduled_service_id IS NOT NULL AND s.scheduled_service_id = t.scheduled_service_id)
+    JOIN email_messages m ON m.idempotency_key LIKE 'service_report_ready:%'
+                         AND split_part(m.idempotency_key, ':', 2) = s.id::text
+   WHERE m.sent_at IS NULL AND m.delivered_at IS NOT NULL`;
 
 /**
  * Delivery evidence for completed service_records ids. Returns a Map of record id (lowercase) to
@@ -592,17 +609,24 @@ function foldSendRows(rows, out) {
  *                          on a visit whose report is waived too (a required report email is still owed)
  *   firstConfirmedSendAt   the earliest readable time of any confirmed send (Date) or null
  *   confirmedWithoutTime   some confirmed send has no readable time (stored time missing or malformed)
+ *   sendTimes              every readable confirmed send time (a delivered-only email contributes its delivery time)
+ *   deliveredIntervals     report emails delivered with no stored send time, as { from: queued, to: delivered }: the
+ *                          send fell somewhere in between, so the reader must use both bounds
  *   completedAt            when the visit last became complete (COMPLETED_MARKER_AT, the detectors' own anchor)
  * A record with no evidence at all is { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false }.
  */
 async function deliveryEvidenceForRecords(recordIds, knex = db) {
   const ids = [...new Set((recordIds || []).map((id) => String(id).toLowerCase()))];
-  const out = new Map(ids.map((id) => [id, { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false, completedAt: null }]));
+  const out = new Map(ids.map((id) => [id, { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false, completedAt: null, sendTimes: [], deliveredIntervals: [] }]));
   if (!ids.length) return out;
-  const [exempt, sends] = await Promise.all([
+  const [exempt, sends, deliveredOnly] = await Promise.all([
     knex.raw(EVIDENCE_EXEMPT_SQL, [ids.join(',')]),
     knex.raw(EVIDENCE_SENDS_SQL, [ids.join(',')]),
+    knex.raw(EVIDENCE_DELIVERED_ONLY_SQL, [ids.join(',')]),
   ]);
+  for (const row of deliveredOnly.rows) {
+    out.get(String(row.record_id).toLowerCase()).deliveredIntervals.push({ from: new Date(row.queued_at), to: new Date(row.delivered_at) });
+  }
   const reportWaived = new Set();
   for (const row of exempt.rows) {
     const id = String(row.record_id).toLowerCase();

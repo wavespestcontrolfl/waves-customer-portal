@@ -144,6 +144,9 @@ describe('tech rewards scores input checks', () => {
       t.string('status');
       t.string('idempotency_key');
       t.timestamp('sent_at', { useTz: true });
+      t.timestamp('delivered_at', { useTz: true });
+      t.timestamp('queued_at', { useTz: true });
+      t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
     });
     await db.schema.withSchema(mockSchema).createTable('service_recaps', (t) => {
       t.bigIncrements('id');
@@ -500,6 +503,36 @@ describe('tech rewards scores input checks', () => {
       expect(await scores.readOnTime(tech, WINDOW)).toBe(0);
     });
 
+    test('onTime: a delivered email with no send time is judged by its queued..delivered bounds', async () => {
+      const record = await visit(tech); // completed 2026-04-10T15:00Z: window 14:00 that day .. 15:00 next day
+      const key = `service_report_ready:${record.id}:primary`;
+      const email = (queued, delivered) => db('email_messages').del().then(() => db('email_messages').insert({
+        idempotency_key: key, status: 'delivered', sent_at: null, queued_at: ts(queued), delivered_at: ts(delivered) }));
+      await email('2026-04-10T15:01:00Z', '2026-04-10T15:05:00Z'); // wholly inside: sent in the window
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+      await email('2026-04-05T10:00:00Z', '2026-04-06T10:00:00Z'); // wholly before: an earlier closeout, ignored (late, not unknown)
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(0);
+      await email('2026-04-10T10:00:00Z', '2026-04-10T15:05:00Z'); // queued before the window, delivered in it: unknown
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull();
+      await email('2026-04-10T15:01:00Z', '2026-04-12T15:05:00Z'); // queued in the window, delivered after it: unknown
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull();
+      await email('2026-04-12T10:00:00Z', '2026-04-12T15:05:00Z'); // wholly after: a late send, known
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(0);
+      // an unknown interval is settled by another send that proves timeliness
+      await email('2026-04-10T10:00:00Z', '2026-04-10T15:05:00Z');
+      await db('service_report_deliveries').insert({ service_record_id: record.id, status: 'sent', sent_at: ts('2026-04-10T16:00:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+    });
+
+    test('onTime: a send long before completion belongs to an earlier closeout and does not credit', async () => {
+      // record reused by the recap rail: created 04-07, completed 04-10 15:00
+      const record = await visit(tech, { created_at: ts('2026-04-07T15:00:00Z'), recap_sms_sent_at: ts('2026-04-10T15:00:00Z') });
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'sent', sent_at: ts('2026-04-07T16:00:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(0); // the old closeout's email is stale
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'sent', sent_at: ts('2026-04-10T14:30:00Z') }); // 30 min before the stamp: same closeout
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+    });
+
     test('audit: match share of audited visits in the window months', async () => {
       expect(await scores.readAudit(tech, WINDOW)).toBeNull();
       const add = async (month, result, technicianId = tech) => db('tech_protocol_audits').insert({
@@ -633,6 +666,52 @@ describe('tech rewards scores input checks', () => {
       // goes to tech's April 1 visit: 1 callback in 2 visits -> 0
       expect(await scores.readCallbacks(tech, WINDOW)).toBe(0);
       expect(await scores.readCallbacks(other, WINDOW)).toBeNull();
+    });
+
+    test('callbacks: a flagged incomplete record beside a completed unflagged sibling is one callback visit, in both counts', async () => {
+      const customer_id = randomUUID();
+      await visit(tech, { customer_id, service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') });
+      await visit(tech, { customer_id: randomUUID(), service_date: '2026-04-02' });
+      const svc = await scheduled(other);
+      await visit(other, { customer_id, scheduled_service_id: svc.id, service_date: '2026-04-10', is_callback: true, status: 'incomplete', created_at: ts('2026-04-10T14:00:00Z') });
+      await visit(other, { customer_id, scheduled_service_id: svc.id, service_date: '2026-04-10', created_at: ts('2026-04-10T14:05:00Z') }); // completed, flag only on the sibling
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(0); // 1 callback in 2 visits
+      expect(await scores.readCallbacks(other, WINDOW)).toBeNull(); // and not a regular visit of its technician
+    });
+
+    test('callbacks: the canonical (newest performed) sibling decides the category, not the first by id', async () => {
+      const customer_id = randomUUID();
+      const lawnTech = await db('technicians').insert({ name: 'Fixture Three' }).returning('id').then((rows) => rows[0].id);
+      await visit(tech, { customer_id, service_type: 'Quarterly Pest Control', service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') });
+      await visit(lawnTech, { customer_id, service_type: 'Lawn Fertilization', service_date: '2026-04-02', created_at: ts('2026-04-02T14:00:00Z') });
+      const svc = await scheduled(other);
+      // the older sibling (a lawn re-service) has the SMALLER id, the newer (a pest re-service) the larger
+      await visit(other, { id: '00000000-0000-4000-8000-000000000001', customer_id, scheduled_service_id: svc.id, service_type: 'Lawn Fertilization', service_date: '2026-04-10', is_callback: true, created_at: ts('2026-04-10T14:00:00Z') });
+      await visit(other, { id: 'ffffffff-0000-4000-8000-000000000001', customer_id, scheduled_service_id: svc.id, service_type: 'Quarterly Pest Control', service_date: '2026-04-10', is_callback: true, created_at: ts('2026-04-10T14:05:00Z') });
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(0); // the pest callback corrects the pest visit
+      expect(await scores.readCallbacks(lawnTech, WINDOW)).toBe(100);
+    });
+
+    test('callbacks: candidates are visits with a record in the window; the canonical record\'s own date is rechecked', async () => {
+      const APRIL = { from: '2026-04-01', to: '2026-04-30' };
+      const c1 = randomUUID();
+      await visit(tech, { customer_id: c1, service_date: '2026-03-15', created_at: ts('2026-03-15T14:00:00Z') }); // the source
+      await visit(tech, { customer_id: randomUUID(), service_date: '2026-04-05', created_at: ts('2026-04-05T14:00:00Z') }); // 1 regular visit in April
+      // siblings span the boundary: the flagged one is March 31, the newest (canonical) one April 2: counted in April
+      const svc = await scheduled(other);
+      await visit(other, { customer_id: c1, scheduled_service_id: svc.id, service_date: '2026-03-31', is_callback: true, created_at: ts('2026-03-31T14:00:00Z') });
+      await visit(other, { customer_id: c1, scheduled_service_id: svc.id, service_date: '2026-04-02', created_at: ts('2026-04-02T14:00:00Z') });
+      expect(await scores.readCallbacks(tech, APRIL)).toBe(0); // 1 callback in 1 visit
+      await db('service_records').where({ technician_id: other }).del();
+      // the canonical (newest created) sibling is dated March 31: outside April, so the visit is not an April callback
+      const svc2 = await scheduled(other);
+      await visit(other, { customer_id: c1, scheduled_service_id: svc2.id, service_date: '2026-04-02', is_callback: true, created_at: ts('2026-04-02T14:00:00Z') });
+      await visit(other, { customer_id: c1, scheduled_service_id: svc2.id, service_date: '2026-03-31', created_at: ts('2026-04-03T10:00:00Z') });
+      expect(await scores.readCallbacks(tech, APRIL)).toBe(100);
+      // a callback visit with no record in the window at all is never a candidate
+      await db('service_records').where({ technician_id: other }).del();
+      await visit(other, { customer_id: c1, service_date: '2026-03-20', is_callback: true });
+      expect(await scores.readCallbacks(tech, APRIL)).toBe(100);
     });
 
     test('every read takes an uppercase technician id like the lowercase one', async () => {
