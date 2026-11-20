@@ -123,6 +123,20 @@ describe('POST /api/requests/restart-plan', () => {
     mockMint.mockRejectedValueOnce(new Error('snapshot did not freeze'));
     res = await post();
     expect(res.status).toBe(500);
+
+    // Knex puts an insert's bound values in its message (AGENTS.md "PII in logs"): the route
+    // logs and forwards the database code and the customer id only, as start-plan does.
+    const logged = jest.spyOn(require('../services/logger'), 'error').mockImplementation(() => {});
+    try {
+      mockMint.mockRejectedValueOnce(Object.assign(new Error(`insert into "estimates" ("address", "customer_phone") values ('1 Main St, Parrish, FL 34219', '+19415550101') - boom`), { code: '23505' }));
+      res = await post();
+      expect(res.status).toBe(500);
+      expect(JSON.stringify(res.body)).not.toMatch(/Main St|5550101/);
+      expect(JSON.stringify(logged.mock.calls)).not.toMatch(/Main St|5550101/);
+      expect(logged).toHaveBeenCalledWith(expect.stringMatching(/\[plan-restart\] mint failed for customer cust-1: 23505$/));
+    } finally {
+      logged.mockRestore();
+    }
   });
 });
 
