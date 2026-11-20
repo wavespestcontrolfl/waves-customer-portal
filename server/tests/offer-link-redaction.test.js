@@ -280,6 +280,29 @@ describe('a found token split anywhere is hidden in every piece', () => {
   });
 });
 
+describe('past the decoding budget the text fails closed', () => {
+  // Decoding stops after four passes. A unit that would still decode further may hide a route word, so that unit is
+  // hidden whole, and every run of 64 hex in the text counts as a found token. A text that reads fully is unchanged.
+  const token = createHash('sha256').update('decode budget').digest('hex');
+  const layered = (k) => `https://portal.wavespestcontrol.com/careers/%${'25'.repeat(k - 1)}6Fffer/${token}`;
+
+  test('a route word encoded four times is still read; five times hides the unit and every copy of the token', () => {
+    expect(redactOfferLinks(`Open ${layered(4)} today`)).toBe(`Open ${portalUrl('/careers/offer/[link hidden]')} today`);
+    expect(redactOfferLinks(`Open ${layered(5)} today`)).toBe('Open [link hidden] today');
+    const stored = redactOfferLinks(`Open ${layered(5)} or copy ${token} today`);
+    expect(stored).not.toContain(token.slice(0, 20));
+    expect(stored).not.toContain(token.slice(-20));
+    expect(redactOfferLinks(`<a href="${layered(6)}">Read your offer</a>`)).toBe('<a href="[link hidden]">Read your offer</a>');
+    expect(offerLinkTokens(`Open ${layered(5)} today`)).toEqual([]); // nothing to pin: a held text with it is not queued
+  });
+
+  test('a text that reads fully keeps its 64 hex and its encodings', () => {
+    for (const text of [`Build ${token} shipped`, 'Save 50% off &amp; more', 'Tracking: https://example.com/?u=https%253A%252F%252Fwaves.example']) {
+      expect(redactOfferLinks(text)).toBe(text);
+    }
+  });
+});
+
 describe('the deferred replay body', () => {
   const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
   const stored = `Hi Jordan, your job offer: portal.wavespestcontrol.com/careers/offer/${OFFER_LINK_HIDDEN} It stays open until Fri, Dec 18.`;

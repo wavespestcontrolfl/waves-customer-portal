@@ -61,16 +61,22 @@ function percentDecode(seq) {
   }
 }
 
-// The unit as a browser or a reader resolves it. Decoding repeats, so a double-encoded spelling resolves too.
-function readable(unit) {
+const decodeOnce = (text) => decodeHTML(text).replace(/(?:%[0-9a-f]{2})+/gi, percentDecode);
+const DECODE_PASSES = 4;
+
+// The unit as a browser or a reader resolves it. Decoding repeats, so a double-encoded spelling resolves too, up to
+// DECODE_PASSES. `undecided`: the reading would still decode further, so it may hide a route word (see scan).
+function reading(unit) {
   let out = unit;
-  for (let pass = 0; pass < 4; pass += 1) {
-    const next = decodeHTML(out).replace(/(?:%[0-9a-f]{2})+/gi, percentDecode);
+  for (let pass = 0; pass < DECODE_PASSES; pass += 1) {
+    const next = decodeOnce(out);
     if (next === out) break;
     out = next;
   }
-  return out.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/').toLowerCase();
+  const seen = out.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/').toLowerCase();
+  return { seen, undecided: decodeOnce(seen) !== seen };
 }
+const readable = (unit) => reading(unit).seen;
 
 // A reading as a reader sees it run together: every character with no mark of its own dropped (white space, raw or
 // decoded from a character reference, controls, format and other default-ignorable characters, the blank braille
@@ -135,14 +141,15 @@ function offerTokensOf(unit, seen = readable(unit)) {
   return [...found].sort((a, b) => at(a) - at(b));
 }
 
-// The units of `text` in order: each with where it starts, its reader's text, and whether it sits inside a tag.
+// The units of `text` in order: each with where it starts, its reader's text, whether that reading is undecided, and
+// whether it sits inside a tag.
 function unitsOf(text) {
   const tags = [...text.matchAll(TAG_RE)].map((m) => [m.index, m.index + m[0].length]);
   let t = 0;
   return [...text.matchAll(UNIT_RE)].map((m) => {
     while (t < tags.length && tags[t][1] <= m.index) t += 1;
-    const seen = readable(m[0]);
-    return { text: m[0], at: m.index, seen, flat: compact(seen), inTag: t < tags.length && tags[t][0] <= m.index };
+    const { seen, undecided } = reading(m[0]);
+    return { text: m[0], at: m.index, seen, flat: compact(seen), undecided, inTag: t < tags.length && tags[t][0] <= m.index };
   });
 }
 
@@ -199,12 +206,12 @@ function splitMarks(views, linked) {
   return marks;
 }
 
-// One unit as stored. Unmarked: the link as sent keeps its host with the token hidden, and a unit with no other offer
-// link and no copy of a found token stays. Otherwise the unit is replaced as a whole: by the standard hidden link for
-// each offer-path token it holds (pinned in order), else by the bare marker, or by nothing for the later parts of a
-// split token.
+// One unit as stored. Unmarked and decided: the link as sent keeps its host with the token hidden, and a unit with no
+// other offer link and no copy of a found token stays. Otherwise the unit is replaced as a whole: by the standard
+// hidden link for each offer-path token it holds (pinned in order), else by the bare marker, or by nothing for the
+// later parts of a split token.
 function storedUnit(u, mark, linked, tokens) {
-  if (!mark) {
+  if (!mark && !u.undecided) {
     const sent = [];
     const kept = u.text.replace(SENT_LINK_RE, (m, path, token) => {
       sent.push(token.toLowerCase());
@@ -236,7 +243,11 @@ function scan(text) {
     for (const token of offerTokensOf(u.text, u.seen)) linked.add(token);
   }
   for (const view of views) for (const token of joinedTokens(view)) linked.add(token);
-  if (!linked.size) return { redacted: text, tokens: [] };
+  // A unit still encoded past the decoding budget may hide a route word, so such a text fails closed: that unit is
+  // hidden whole, and every run of 64 hex in the text counts as a found token, so each unit holding one is hidden too.
+  const undecided = units.some((u) => u.undecided);
+  if (undecided) for (const view of views) for (const m of view.text.matchAll(/[0-9a-f]{64}/g)) linked.add(m[0]);
+  if (!linked.size && !undecided) return { redacted: text, tokens: [] };
   const marks = splitMarks(views, linked);
   const tokens = [];
   let redacted = '';

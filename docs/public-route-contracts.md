@@ -8652,14 +8652,18 @@ history, another offer's link in the offer text) is not queued, and the owner se
 units' reader text is also read run together (once with every unit, once with the units outside tags only) with
 every character a reader does not see dropped, so a link or a copy split by markup, white space (also `&nbsp;`), line
 breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is found and hidden in
-every piece: the marker in the first unit, nothing in the rest, the tags kept. The
+every piece: the marker in the first unit, nothing in the rest, the tags kept. Decoding stops after four passes; a unit
+that would still decode further may hide a route word, so it is hidden whole, and in such a text every run of 64 hex
+counts as a found token (each unit holding one is hidden). The
 service worker never handles an offer page, in any request mode (`client/public/sw.js` `isOfferLinkPath`: the path,
 percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the
 server routes `/API/` as `/api/`). It stores no URL that could carry the link, because a stored response or request
-keeps its URL: every entry is rebuilt without its URL (`withoutUrl`, `tagWithBuild`) and stored under a key with no
-query or fragment (the shell under `/`, any other same-origin GET under its own path; a shell whose asset reference is
-not a plain same-origin `/assets/` path is not stored), and a redirected response is served but not stored (the shell
-and its assets included). A request with a query or fragment that is not a page load is left to the browser. Its cache
+keeps its URL: every entry is rebuilt without its URL (`withoutUrl`, `tagWithBuild`) and stored under a plain key: the
+shell under `/`, and a static file under its own path (`isStorablePath`: segments of letters, digits, dot, dash and
+underscore that do not start with a dot, a static file type, no run of 32 hex), so no key has a query, a fragment, an
+encoding or a dot segment; a shell whose asset reference is not such an `/assets/` path is not stored. A redirected
+response is served but not stored (the shell and its assets included). Any other request that is not a page load is
+left to the browser. Its cache
 has a new name (`waves-customer-v13-private-links`), so activation drops the older worker's bucket whole, offer links
 included, before the worker claims a page, and each page load drops any older bucket found again
 (`sweepOlderCaches`). It never serves its offline shell in the page's place, so the browser always fetches the page

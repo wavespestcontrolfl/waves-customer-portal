@@ -46,14 +46,16 @@ const OFFLINE_FALLBACK_HTML = `<!doctype html>
   setTimeout(() => { if (navigator.onLine) location.reload(); }, 4000);
 </script></body></html>`;
 
-// A shell's asset reference becomes a cache key, so it must be a plain same-origin /assets/ path: no query or
-// fragment (either could hold an offer link), nothing the URL parser rewrites (dot segments, backslashes, encoded
-// characters) and never an offer path.
-function isPlainAssetPath(ref) {
-  const url = new URL(ref, self.location.origin);
-  return url.origin === self.location.origin && url.pathname === ref && ref.startsWith('/assets/')
-    && !ref.includes('%') && !isOfferLinkPath(ref);
+// What the worker may store: a static file, under its own path. The path is the cache key, so only a plain one is
+// kept: segments of letters, digits, dot, dash and underscore that do not start with a dot (no encoding, no dot
+// segment, no query or fragment), a static file type, and no run of 32 hex (an offer token is 64). Any other path,
+// which could carry an offer link or its token, is left to the browser.
+const STATIC_PATH_RE = /^(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+\.(?:js|mjs|css|map|json|webmanifest|png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|txt|pdf|mp4|webm|mp3|wav|wasm)$/i;
+function isStorablePath(pathname) {
+  return STATIC_PATH_RE.test(pathname) && !/[0-9a-f]{32}/i.test(pathname);
 }
+// A shell's asset reference becomes a cache key the same way, and it must sit under /assets/.
+const isPlainAssetPath = (ref) => ref.startsWith('/assets/') && isStorablePath(ref);
 
 function shellAssetUrls(html) {
   const urls = new Set();
@@ -666,12 +668,11 @@ function isOfferLinkPath(pathname) {
 // The storage rule. A stored response keeps the URL it came from, and a
 // stored request keeps its own, so either could hold a job-offer link: a
 // redirect's target, a query or a fragment. So every response this worker
-// stores is rebuilt without its URL, and it is stored only under a key with
-// no query or fragment: the shell under '/' (from any page), and any other
-// same-origin GET under its own path, when that response was not redirected
-// (its body is another URL's; the shell and its assets the same). A request
-// with a query or fragment that is not a page load is left to the browser.
-// tagWithBuild rebuilds assets too.
+// stores is rebuilt without its URL, and it is stored only under a plain key:
+// the shell under '/' (from any page), and a static file under its own path
+// (isStorablePath), when that response was not redirected (its body is
+// another URL's; the shell and its assets the same). Any other request that
+// is not a page load is left to the browser. tagWithBuild rebuilds assets too.
 function withoutUrl(response) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
@@ -734,7 +735,7 @@ self.addEventListener('fetch', event => {
   }
 
   // Any other request with a query or fragment: its key would keep them.
-  if (url.search || url.hash) return;
+  if (url.search || url.hash || !isStorablePath(url.pathname)) return;
 
   // Hashed assets (/assets/index-CRewFOq2.js) — immutable, so cache on first
   // use; pruneStaleAssets evicts them once the shell moves to a newer build.

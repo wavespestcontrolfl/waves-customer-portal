@@ -520,9 +520,19 @@ describe('service-worker private link pages', () => {
     }
     const offerUrl = `https://portal.test/careers/offer/${token}`;
     worker.setFetch(async () => new FakeResponse('body', { url: offerUrl, redirected: true }));
-    for (const path of ['/go/1', '/assets/chunk-1.js']) {
+    for (const path of ['/images/go-1.png', '/assets/chunk-1.js']) {
       const { response } = await worker.dispatchFetch(path, { mode: 'cors' });
       expect(response.url).toBe(offerUrl); // served, not stored
+    }
+    // Only a plain static file path is a key. Any other path is left to the browser, so an offer link encoded inside
+    // it (dotted or not) or a token used as a file name never becomes a key.
+    worker.setFetch(async () => fakeResponse('body'));
+    for (const path of [
+      `/go/careers%2Fx%2F..%2Foffer%2F${token}`, `/images/careers%2F..%2Fcareers%2Foffer%2F${token}.png`,
+      `/images/${token}.png`, `/assets/x%2Fcareers%2Foffer%2F${token}.js`, '/go/1',
+    ]) {
+      const { response } = await worker.dispatchFetch(path, { mode: 'cors' });
+      expect(response).toBeUndefined();
     }
     worker.setFetch(async () => new FakeResponse('{}', { url: 'https://portal.test/manifest.json' }));
     await worker.dispatchFetch('/manifest.json', { mode: 'cors' });
