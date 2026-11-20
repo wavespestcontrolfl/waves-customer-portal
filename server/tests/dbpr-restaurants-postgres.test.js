@@ -34,17 +34,21 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   });
   afterAll(async () => { if (db) await rows().del(); });
 
-  test('lastReadKeys: the keys the newest read refreshed, from the fiscal year\'s first day on', async () => {
-    // Its own kind (kind has no fixed list), so the newest read is this test's rows alone.
-    const kind = `t${RUN}`;
-    await db('restaurant_prospects').insert([
-      { kind, source_key: key(20), event_date: '2026-11-10', last_seen_at: '2026-11-16T15:40:00Z' }, // the newest read
-      { kind, source_key: key(21), event_date: '2026-07-01', last_seen_at: '2026-11-16T14:41:00Z' }, // the same read, earlier
-      { kind, source_key: key(22), event_date: '2026-11-02', last_seen_at: '2026-11-09T15:40:00Z' }, // a read before
-      { kind, source_key: key(23), event_date: '2026-06-30', last_seen_at: '2026-11-16T15:40:00Z' }, // the year before
-    ]);
-    expect((await svc.lastReadKeys(kind, '2026-07-01')).sort()).toEqual([key(20), key(21)]);
-    expect(await svc.lastReadKeys(`u${RUN}`, '2026-07-01')).toEqual([]);
+  test('lastRead and saveRead keep the newest complete read of a file in system_settings', async () => {
+    const kind = `t${RUN}`; // its own setting key, removed below
+    const settings = () => db('system_settings').where({ key: `restaurant_prospects_read_${kind}` });
+    try {
+      expect(await svc.lastRead(kind)).toBeNull();
+      await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 6700 });
+      await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 6712 });
+      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2026-07-01', rows: 6712 });
+      expect(await settings()).toHaveLength(1);
+      // A value that is not a read is no measure.
+      await settings().update({ value: 'not json' });
+      expect(await svc.lastRead(kind)).toBeNull();
+    } finally {
+      await settings().del();
+    }
   });
 
   test('the same (kind, source_key) is one row; a different kind with the same key is another', async () => {
