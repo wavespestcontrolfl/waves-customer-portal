@@ -31,7 +31,9 @@ const { whereHasRealReply } = require('./draft-prefix');
 // reply-v2 (2026-09-24, #4713): the safe-copy template rung is gone, so a
 // reply-v1 draft stored on a failed publish may be that canned text — the
 // runner's publish-retry reuse only takes drafts of the CURRENT version.
-const REPLY_VERSION = 'reply-v2';
+// reply-v3 (2026-11-19): the app is always "the Waves app" (owner), so a
+// stored v2 draft that says "the app" is never reused on a publish retry.
+const REPLY_VERSION = 'reply-v3';
 const DRAFT_TIMEOUT_MS = 45 * 1000;
 const RECENT_REPLIES_LIMIT = 10;
 
@@ -553,6 +555,11 @@ function classifyReplyMode(grounding) {
   if (t.has('loyalty')) return 'loyalty';
   return 'service_quality';
 }
+
+// Owner 2026-11-19: the app is always "the Waves app". A rewrite, not a
+// verifier rejection: a rejection would park the review for a person.
+const BARE_APP_RE = /\b(?:the|our|your)(?:\s+mobile)?\s+app\b(?!-|\s+store)/gi;
+const wavesApp = (text) => String(text || '').replace(BARE_APP_RE, (m) => (/^[A-Z]/.test(m) ? 'The Waves app' : 'the Waves app'));
 
 /**
  * Split a candidate into { body, signOff } and normalize whitespace.
@@ -1175,6 +1182,7 @@ HARD RULES (a reply breaking any of these is discarded):
 - No incentives of any kind (discount, free, credit, gift, reward). Never ask for stars or for the review to be changed.
 - No safety claims ("safe", "non-toxic", "EPA"), no re-entry or drying times, no guarantees or warranties, no "best"/"#1" claims, no competitor names.
 - No emoji in the body. No em dashes. No stock phrases: "means the world", "thrilled", "delighted to hear", "made our day", "taking the time to", "pest and lawn team", "down here", "here in the neighborhood".
+- If the reply mentions the app, call it "the Waves app" ("The Waves app" at the start of a sentence). Never "the app", "our app", "your app" or "the Waves Pest Control app".
 - Do not repeat the openings or phrasing of the recent replies you are shown.
 - Do not summarize the review back to the reviewer.
 
@@ -1333,7 +1341,7 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
       // supersedes the 2026-09-03 "never parks for want of copy" directive.
       return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: res.reason, error: res.error };
     }
-    const normalized = splitReply(res.text, grounding.locationName).full;
+    const normalized = splitReply(wavesApp(res.text), grounding.locationName).full;
     const verdict = verifyReplyDetailed(normalized, grounding, { recentReplies, mode });
     if (!verdict) {
       return { ok: true, text: normalized, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reviewOnly: step.reviewOnly };
@@ -1369,6 +1377,7 @@ module.exports = {
   draftReviewReply,
   // tests
   splitReply,
+  wavesApp,
   greetingName,
   reviewEchoBans,
   relationshipAllowedTerms,

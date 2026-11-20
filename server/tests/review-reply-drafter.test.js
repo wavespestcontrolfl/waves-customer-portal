@@ -886,6 +886,36 @@ describe('2026-09-24 round-6 P1 fixes: outcome idioms, negated membership, reply
   });
 });
 
+describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
+  const appReview = 'The Waves app and notifications are excellent! Marcus was great.';
+  test('the system prompt carries the rule and the version moved to reply-v3', () => {
+    const sys = Drafter.buildSystemPrompt(grounding(), 'service_quality');
+    expect(sys).toContain('call it "the Waves app"');
+    expect(sys).toContain('Never "the app", "our app", "your app"');
+    expect(Drafter.REPLY_VERSION).toBe('reply-v3');
+  });
+  test('the rewrite fixes the bare phrases and leaves look-alike words alone', () => {
+    const w = Drafter.wavesApp;
+    expect(w('We love that you like our app.')).toBe('We love that you like the Waves app.');
+    expect(w('The app is a big part of it. Our mobile app helps.')).toBe('The Waves app is a big part of it. The Waves app helps.');
+    expect(w('Glad the app\u2019s alerts help, and the app\'s notes too.')).toBe('Glad the Waves app\u2019s alerts help, and the Waves app\'s notes too.');
+    expect(w('Thanks for using YOUR APP.')).toBe('Thanks for using The Waves app.');
+    expect(w('Glad the Waves app helps.')).toBe('Glad the Waves app helps.');
+    const same = 'Happy to apply the apps and our application, the App Store and the app-based tools.';
+    expect(w(same)).toBe(same);
+  });
+  test('a draft that says "the app" is stored as "the Waves app" and passes verification', async () => {
+    const g = grounding({ text: appReview });
+    mockDispatch.mockResolvedValueOnce({ ok: true, text: good('Hi Dana,\n\nThank you for the kind words about the app and Marcus.') });
+    const r = await Drafter.draftReviewReply({ grounding: g, recentReplies: [] });
+    expect(r.ok).toBe(true);
+    expect(r.attempts).toBe(1);
+    expect(r.text).toContain('words about the Waves app and Marcus');
+    expect(r.version).toBe('reply-v3');
+    expect(Drafter.verifyReplyText(r.text, g)).toBeNull();
+  });
+});
+
 describe('2026-09-24 P1 fix: worked/handled negation restored, compliment adjectives restored, outcome fallback widened', () => {
   test('a negated outcome the review stated is still caught: "did not work" blocks "Glad the treatment worked."', () => {
     const g = grounding({ text: 'The treatment did not work.', mentionedTechNames: [], topics: [] });
