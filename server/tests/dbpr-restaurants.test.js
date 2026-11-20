@@ -27,9 +27,9 @@ const INSP_HEAD = [
   ...Array.from({ length: 58 }, (_, i) => `Violation ${String(i + 1).padStart(2, '0')}`),
   'License ID', 'Inspection Visit ID',
 ];
-function inspRow({ county = 'Manatee', date = '10/20/2026', v35 = 1, visit = '9001', licenseId = '5001', name = 'SAMPLE DINER' } = {}) {
+function inspRow({ county = 'Manatee', date = '10/20/2026', v35 = 1, visit = '9001', licenseId = '5001', name = 'SAMPLE DINER', city = 'BRADENTON', zip = '34208' } = {}) {
   const v = Array.from({ length: 58 }, (_, i) => (i === 34 ? String(v35) : '0'));
-  return csvLine(['D7', '41', county, '2010', 'SEA0000001', name, '200 SAMPLE TRL', 'BRADENTON', '34208', '1', '1', 'Food',
+  return csvLine(['D7', '41', county, '2010', 'SEA0000001', name, '200 SAMPLE TRL', city, zip, '1', '1', 'Food',
     'Routine - Food', 'Warning Issued', date, '2', ...v, licenseId, visit]);
 }
 const inspCsv = (rows) => `${csvLine(INSP_HEAD)}\n${rows.join('\n')}\n`;
@@ -42,9 +42,9 @@ const LIC_HEAD = ['Application Number', 'Application Type', 'Application Approva
   'Location Zip Code', 'Location County Code', 'Location County', 'Secondary Phone Number', 'District', 'Region', 'License Number',
   'Primary Status Code', 'Secondary Status Code', 'License Expiry Date', 'Last Inspection Date', 'Number of Seats',
   'Base Risk Level', 'Secondary Risk Level'];
-function licRow({ app = '7001', county = 'Sarasota', primary = '555-010-0000', mailCounty = '51', secondary = '941-555-0101', seats = '40', date = '08/21/2026' } = {}) {
+function licRow({ app = '7001', county = 'Sarasota', primary = '555-010-0000', mailCounty = '51', secondary = '941-555-0101', seats = '40', date = '08/21/2026', city = 'SARASOTA', zip = '34231-1234' } = {}) {
   return csvLine([app, 'Plan Review and Initial (COMBO SEAT)', date, '200', '2010', 'SAMPLE DINER LLC', 'SEAT', '', 'SAMPLE DINER LLC', '', '1 MAIL ST', ' ',
-    'TAMPA', 'FL', '33601', primary, mailCounty, 'SAMPLE DINER', ' ', '200 SAMPLE TRL', 'UNIT 3', '', 'SARASOTA', 'FL', '34231-1234', '68', county,
+    'TAMPA', 'FL', '33601', primary, mailCounty, 'SAMPLE DINER', ' ', '200 SAMPLE TRL', 'UNIT 3', '', city, 'FL', zip, '68', county,
     secondary, 'D7', '07', 'SEA0000002', '20', '20', '12/01/2026', '10/29/2026', seats]);
 }
 const licCsv = (rows) => `${csvLine(LIC_HEAD)}\n${rows.join('\n')}\n`;
@@ -62,14 +62,17 @@ describe('parseUsDate', () => {
 describe('parseInspectionRows', () => {
   const { parseDbprCsv } = require('../services/commercial-suite-size/dbpr-food-license');
 
-  test('keeps only code-35 visits in the three counties, with trimmed headers and a plain date', () => {
+  test('keeps only code-35 visits in the three counties outside Punta Gorda, with trimmed headers and a plain date', () => {
     const rows = parseDbprCsv(inspCsv([
       inspRow({ visit: '9001' }),
       inspRow({ visit: '9002', county: 'Sarasota' }),
-      inspRow({ visit: '9003', county: 'Charlotte' }),
+      inspRow({ visit: '9003', county: 'Charlotte', city: 'PORT CHARLOTTE', zip: '33952' }),
       inspRow({ visit: '9004', county: 'Hillsborough' }),
       inspRow({ visit: '9005', v35: 0 }),
       inspRow({ visit: '9006', date: 'not a date' }),
+      // Punta Gorda is not served (owner ruling 2026-10-22): by city name, or by a ZIP only Punta Gorda uses.
+      inspRow({ visit: '9007', county: 'Charlotte', city: 'PUNTA GORDA', zip: '33983' }),
+      inspRow({ visit: '9008', county: 'Charlotte', city: '', zip: '33950' }),
     ]));
     const out = svc.parseInspectionRows(rows);
     expect(out.map((r) => r.source_key)).toEqual(['9001', '9002', '9003']);
@@ -84,8 +87,11 @@ describe('parseInspectionRows', () => {
 describe('parseLicenseRows and the phone rule', () => {
   const { parseDbprCsv } = require('../services/commercial-suite-size/dbpr-food-license');
 
-  test('parses a relaxed-width file into records for the three counties', () => {
-    const rows = parseDbprCsv(licCsv([licRow(), licRow({ app: '7002', county: 'Polk' }), licRow({ app: '7003', county: 'Charlotte', seats: '' })]));
+  test('parses a relaxed-width file into records for the three counties, outside Punta Gorda', () => {
+    const rows = parseDbprCsv(licCsv([
+      licRow(), licRow({ app: '7002', county: 'Polk' }), licRow({ app: '7003', county: 'Charlotte', seats: '' }),
+      licRow({ app: '7004', county: 'Charlotte', city: 'Punta Gorda', zip: '33982-0001' }),
+    ]));
     const out = svc.parseLicenseRows(rows, 'new_license');
     expect(out.map((r) => r.source_key)).toEqual(['7001', '7003']);
     expect(out[0]).toMatchObject({

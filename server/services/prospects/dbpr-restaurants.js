@@ -3,9 +3,9 @@
  * 2026-11-19). Backend only: it fills `restaurant_prospects` and sends nothing to anyone, calls no AI.
  *
  *   7fdinspi.csv      district 7 inspections, current fiscal year. Kept: visits that cited violation 35 in
- *                     Manatee, Sarasota or Charlotte.
- *   newfood.csv       new licenses statewide. Kept: the three counties.
- *   chgownr_food.csv  ownership changes statewide. Kept: the three counties. In this file the values under
+ *                     Manatee, Sarasota or Charlotte, outside Punta Gorda (not served; excluded-localities.js).
+ *   newfood.csv       new licenses statewide. Kept: the three counties, outside Punta Gorda.
+ *   chgownr_food.csv  ownership changes statewide. Kept: the same places. In this file the values under
  *                     "Primary Phone Number" and "Mailing County Code" arrive swapped, so a phone is picked by shape.
  *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
@@ -20,6 +20,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { SERVICE_AREA_COUNTIES } = require('../call-triage-flags');
+const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
 const { parseDbprCsv, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
@@ -68,8 +69,11 @@ function parseUsDate(value) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
-function inServiceCounty(name) {
-  return COUNTIES.has(String(name || '').trim().toUpperCase());
+// The three served counties, less the places inside them Waves does not serve (Punta Gorda, owner ruling 2026-10-22).
+// services/excluded-localities.js is the one list of those places; it decides by city name or by a Punta Gorda-only ZIP.
+function inServiceArea(county, city, zip) {
+  if (!COUNTIES.has(String(county || '').trim().toUpperCase())) return false;
+  return !isExcludedLocality(city) && !isExcludedZip(zip);
 }
 
 // A phone is picked by shape (10 or more digits), never by column name: chgownr_food.csv swaps the Primary Phone
@@ -89,7 +93,7 @@ const wholeNumber = (v) => (/^\d+$/.test(String(v || '').trim()) ? Number(String
 function parseInspectionRows(rows) {
   const out = [];
   for (const row of rows) {
-    if (!inServiceCounty(row['County Name'])) continue;
+    if (!inServiceArea(row['County Name'], row['Location City'], row['Location Zip Code'])) continue;
     if (!(Number(row['Violation 35']) > 0)) continue;
     const sourceKey = clean(row['Inspection Visit ID']);
     const eventDate = parseUsDate(row['Inspection Date']);
@@ -122,7 +126,7 @@ function parseInspectionRows(rows) {
 function parseLicenseRows(rows, kind) {
   const out = [];
   for (const row of rows) {
-    if (!inServiceCounty(row['Location County'])) continue;
+    if (!inServiceArea(row['Location County'], row['Location City'], row['Location Zip Code'])) continue;
     const sourceKey = clean(row['Application Number']);
     if (!sourceKey) continue;
     out.push({

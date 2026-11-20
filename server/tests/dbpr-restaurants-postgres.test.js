@@ -14,7 +14,8 @@ afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
 maybeDescribe('restaurant_prospects (live Postgres)', () => {
   let db;
   let svc;
-  const RUN = randomUUID();
+  // source_key is varchar(40), like the real keys (short numeric ids): a full UUID marker would not fit.
+  const RUN = randomUUID().replace(/-/g, '').slice(0, 16);
   const key = (n) => `t-${RUN}-${n}`;
   const rec = (n, over = {}) => ({
     kind: 'inspection', source_key: key(n), license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010',
