@@ -7135,9 +7135,13 @@ function priceTrenching(property = {}, options = {}, replay) {
   // a custom dilution (pre-push audit 12). Any other dilution is off the chart, whatever the configured rates (a standard and high
   // pair moved together keeps their ratio, not the label's dilution): it keeps the full volume, as on main, and a custom one stays
   // a manual override sent to review (pre-push audits 20 and 21). The code field outlives a config rename, so the configured product
-  // must still name a bottle whose label was read (Crosscheck Plus or Talak 7.9 F; pre-push audit 22).
+  // must still name a bottle whose label was read (Crosscheck Plus or Talak 7.9 F; pre-push audit 22). The chart halves the label's
+  // own volume (labelFinishedGallonsPer10LFPerFtDepth, 4.0 gal per 10 LF per foot of depth): a configured volume off the chart keeps
+  // it too, since half of it is not the label's reduced volume (pre-push audit at the fourth push).
+  const gallonsPer10LFPerFtDepth = cfg.finishedGallonsPer10LFPerFtDepth || 4;
   const labelHalfVolume = product.labelHalfVolumeOzPerFinishedGallon > 0 && namesHalfVolumeLabel(product)
-    && Math.abs(productOzPerFinishedGallon - product.labelHalfVolumeOzPerFinishedGallon) < 1e-9;
+    && Math.abs(productOzPerFinishedGallon - product.labelHalfVolumeOzPerFinishedGallon) < 1e-9
+    && Math.abs(gallonsPer10LFPerFtDepth - product.labelFinishedGallonsPer10LFPerFtDepth) < 1e-9;
   const volumeFactor = labelHalfVolume ? 0.5 : 1;
   const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);
   const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
@@ -7313,7 +7317,7 @@ function priceTrenching(property = {}, options = {}, replay) {
     };
   }
 
-  const finishedGallonsPerLFPerFtDepth = (cfg.finishedGallonsPer10LFPerFtDepth || 4) / 10;
+  const finishedGallonsPerLFPerFtDepth = gallonsPer10LFPerFtDepth / 10;
   const labeledDirtGallons = measurements.dirtLF * finishedGallonsPerLFPerFtDepth * trenchDepthFt;
   const labeledConcreteGallons = measurements.concreteLF *
     finishedGallonsPerLFPerFtDepth *

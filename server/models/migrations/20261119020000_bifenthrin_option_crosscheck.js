@@ -34,12 +34,14 @@
  * routes/admin-inventory, as migrations 20260907000020 and 20260928060000 do; it takes the same product lock, held here already).
  * The recalculation picks the winner from current prices and writes the catalog best price, its flags and its status, a stale or
  * needs-pricing mark included: the pre-slab and mosquito links read only an unmarked row, and job costing reads best_price
- * directly (calculateInventoryCost), so the catalog must not keep a stale price or a mark. Step P acts only while the SiteOne row
- * still looks exactly as one of the two entries wrote it: that entry's price, price_amount (what costing reads first) included, its
- * own pack (1 gal, priced per oz: the handler derives the unit cost from it), an open quote (no expires_at passed: the inventory
- * price rules skip an expired row), and its landed and per-oz figures (that price's own, or none: the import clears the landed ones;
- * the price sync can store freight in landed_unit_price); a row that differs (an edit, shipping or tax: its landed cost would need
- * them) is left alone with a warning.
+ * directly (calculateInventoryCost), so the catalog must not keep a stale price or a mark. Step P acts on the product's one current
+ * SiteOne quote: one the shared eligibility predicate admits (vendor-pricing-eligibility: active, approved or auto-approved,
+ * unexpired, positive), as every recalculation and auto-order reads it. An archived row (inactive, unapproved or expired) steers no
+ * price, so it is left alone and does not count (pre-push audit at the fourth push). Step P acts only while that quote still looks
+ * exactly as one of the two entries wrote it: approved, that entry's price, price_amount (what costing reads first) included, its
+ * own pack (1 gal, priced per oz: the handler derives the unit cost from it), and its landed and per-oz figures (that price's own,
+ * or none: the import clears the landed ones; the price sync can store freight in landed_unit_price); a row that differs (an edit,
+ * shipping or tax: its landed cost would need them) is left alone with a warning.
  * server/data/pricing.csv, the sheet the admin pricing import reads first, lists the same gallon at $30.90, so a re-import keeps it.
  *
  * Stale quotes (pre-push audits 24 and 25), when Step P must leave the price: each stale price sits inside the links' [0.5x, 2x]
@@ -265,19 +267,15 @@ const STALE_LIST = STALE_PRICES.map(money).join(' or ');
 // A per-oz price as a gallon price, to the cent.
 const gallonPrice = (perOz) => Math.round(perOz * STALE_SIZE_OZ * 100) / 100;
 
-// The SiteOne row Step P may correct: active, approved, unexpired (vendor-pricing-eligibility: expires_at null or later than now),
+// The current SiteOne quote Step P may correct (active and unexpired already, as the eligibility predicate admitted it): approved,
 // at a stale price (price_amount too, when set: costing reads it first), the 1 gal pack priced per oz (the handler derives the
 // unit cost from the row's own quantity), with no shipping or tax and that entry's own landed and per-oz figures. Returns null
 // when it is, else the reason it is not.
-function vendorRowBlocker(row, now) {
+function vendorRowBlocker(row) {
   const stale = STALE_PRICES.find((price) => same(row.price, price));
-  if (row.is_active !== true || row.approval_status !== 'approved' || stale === undefined
-    || (filled(row.price_amount) && !same(row.price_amount, stale))) {
-    return `the vendor row is not an active, approved row at a stale price, ${STALE_LIST} (price ${row.price}, price_amount `
+  if (row.approval_status !== 'approved' || stale === undefined || (filled(row.price_amount) && !same(row.price_amount, stale))) {
+    return `the vendor row is not an approved row at a stale price, ${STALE_LIST} (price ${row.price}, price_amount `
       + `${row.price_amount}) - an admin changed it`;
-  }
-  if (filled(row.expires_at) && !(new Date(row.expires_at).getTime() > now.getTime())) {
-    return `the vendor row's quote expired (expires_at ${row.expires_at}) - enter the price in the app`;
   }
   if (String(row.quantity ?? '').trim().toLowerCase() !== STALE_QUANTITY || ('unit_normalized' in row && row.unit_normalized !== 'oz')) {
     return `the vendor row is not the ${STALE_QUANTITY} pack priced per oz (quantity ${row.quantity}, unit ${row.unit_normalized})`;
@@ -364,10 +362,11 @@ async function fixProductPrice(knex, productId) {
   if (!product) return null;
   const rows = await knex('vendor_pricing').where({ product_id: productId }).forUpdate();
   const now = new Date();
-  const siteOne = [];
-  for (const quote of rows) if (await isSiteOneRow(knex, quote)) siteOne.push(quote);
-  const row = correctableRow(productId, siteOne, now);
-  const stale = await staleQuotes(knex, productId, siteOne.filter((quote) => quote !== row), now);
+  const current = await currentSiteOneQuotes(knex, productId, rows, now);
+  const row = correctableRow(productId, current);
+  // The stale entries Step P had to leave (see the header): each current SiteOne quote it did not correct that the recalculation
+  // would read at a stale gallon price.
+  const stale = current.filter((quote) => quote !== row && staleGallonOf(quote) !== undefined);
   const held = stalePriceHeld(product);
   if (!row && !stale.length && held === undefined) return null;
 
@@ -412,20 +411,25 @@ async function fixProductPrice(knex, productId) {
 
 // The SiteOne row Step P corrects, or null with the reason logged. A SiteOne row already at $30.90 (a re-run, or the price entered
 // before this deploy) is the correction itself: no warning.
-function correctableRow(productId, siteOne, now) {
-  const blocker = siteOne.length === 1 ? vendorRowBlocker(siteOne[0], now) : `it does not have exactly one SiteOne vendor row (item ${STALE_SKU} or none)`;
-  if (!blocker) return siteOne[0];
-  if (!(siteOne.length === 1 && readsNewPrice(siteOne[0]))) console.warn(`${LOG} ${CATALOG_NAME} (${productId}) price left alone: ${blocker}`);
+function correctableRow(productId, current) {
+  const blocker = current.length === 1 ? vendorRowBlocker(current[0])
+    : `it does not have exactly one current SiteOne quote (item ${STALE_SKU} or none; an archived row does not count)`;
+  if (!blocker) return current[0];
+  if (!(current.length === 1 && readsNewPrice(current[0]))) console.warn(`${LOG} ${CATALOG_NAME} (${productId}) price left alone: ${blocker}`);
   return null;
 }
 
-// The stale entries Step P had to leave (see the header): each eligible SiteOne quote it did not correct that the inventory
-// recalculation would read at a stale gallon price. Eligible by the shared predicate itself.
-async function staleQuotes(knex, productId, siteOne, now) {
+// The product's current SiteOne quotes: those the shared eligibility predicate admits (vendor-pricing-eligibility, the one every
+// recalculation and auto-order reads: active, approved or auto-approved, unexpired, positive). An archived row (inactive,
+// unapproved or expired) steers no price, so it is left alone and never keeps Step P from the one current quote (pre-push audit
+// at the fourth push).
+async function currentSiteOneQuotes(knex, productId, rows, now) {
+  const siteOne = [];
+  for (const quote of rows) if (await isSiteOneRow(knex, quote)) siteOne.push(quote);
   if (!siteOne.length) return [];
   const { eligibleVendorPricing } = require('../../services/vendor-pricing-eligibility');
   const eligible = new Set((await eligibleVendorPricing(knex('vendor_pricing').where({ product_id: productId }), now)).map((quote) => quote.id));
-  return siteOne.filter((quote) => eligible.has(quote.id) && staleGallonOf(quote) !== undefined);
+  return siteOne.filter((quote) => eligible.has(quote.id));
 }
 
 // The stale gallon price a quote offers as the recalculation reads it (its own per-oz price for a quote, vendorRowPricePerOz), else

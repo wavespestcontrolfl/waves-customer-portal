@@ -334,6 +334,31 @@ describe('termite measurement overrides and safeguards', () => {
       .toMatchObject({ finishedGallons: 80, productOz: 40, requiresManualReview: true });
   });
 
+  // The chart halves the label's own volume, 4.0 gal per 10 LF per foot of depth (production's setting, read 2026-11-20). A configured
+  // volume off the chart keeps it at the high rate: half of it is not the label's reduced volume, and would price too little product
+  // (pre-push audit at the fourth push).
+  test('a configured trench volume off the label chart keeps that volume at the bifenthrin high rate', () => {
+    const trenching = require('../services/pricing-engine/constants').SPECIALTY.trenching;
+    const saved = trenching.finishedGallonsPer10LFPerFtDepth;
+    const measurements = { perimeterLF: 400, dirtLF: 400, concreteLF: 0 };
+    const trench = () => priceTrenching({}, {
+      measurements, productKey: 'talstar_p', applicationRate: 'high', labelConfirmed: true, labelBottle: 'lesco_crosscheck_plus',
+    });
+    try {
+      trenching.finishedGallonsPer10LFPerFtDepth = 3; // 400 LF x 0.3 x 0.5 ft = 60 labeled gallons
+      const offChart = trench();
+      expect(offChart).toMatchObject({ finishedGallons: 60, productOz: 120, labelConfirmed: true });
+      expect(offChart.warnings.join(' ')).not.toMatch(/reduced finished volume/);
+      expect(offChart.manualReviewReasons).not.toContain('reduced_volume_confirmation_required');
+      trenching.finishedGallonsPer10LFPerFtDepth = 4; // the chart's: 80 labeled gallons, halved
+      const onChart = trench();
+      expect(onChart).toMatchObject({ finishedGallons: 40, productOz: 80 });
+      expect(onChart.manualReviewReasons).toContain('reduced_volume_confirmation_required');
+    } finally {
+      trenching.finishedGallonsPer10LFPerFtDepth = saved;
+    }
+  });
+
   test('trenching high rate and warranty restrictions surface review and quote gates', () => {
     const highRate = priceTrenching({}, {
       measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 },

@@ -630,6 +630,46 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.pricing_config_audit).toEqual([]);
     });
 
+    // Pre-push audit at the fourth push: an archived SiteOne row (inactive, unapproved or expired) steers no price, so it does not
+    // count. The one current quote beside it is corrected, not expired, and the archived row stays as it was through down().
+    test.each([
+      ['inactive', { is_active: false }],
+      ['unapproved', { approval_status: 'pending' }],
+      ['expired', { expires_at: new Date('2026-11-01T00:00:00.000Z') }],
+    ])('an archived (%s) SiteOne row beside the current $58.42 quote: the current quote is corrected; the archived row stays', async (_name, archived) => {
+      const old = vendorRow({ id: 'v0', is_best_price: false, ...archived });
+      const db = world({ vendors: [vendorRow(), old] });
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(db.vendor_pricing[0]).toMatchObject({ price: 30.9, price_amount: 30.9, previous_price: 58.42 });
+      expect(db.vendor_pricing[1]).toEqual(old);
+      const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
+      expect(warnings).not.toMatch(/price left alone/);
+      expect(warnings).not.toMatch(STALE_WARNING);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
+      expect(auditKeys(db)).toEqual(['inventory:lesco_crosscheck_plus_price', 'onetime_preslab', 'onetime_trenching']);
+      await migration.down(knex);
+      expect(db.vendor_pricing[0]).toMatchObject({ price: '58.42', price_amount: '58.4200', is_best_price: true });
+      expect(db.vendor_pricing[1]).toEqual(old);
+      expect(db.products_catalog[0]).toMatchObject({ best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
+      expect(Number(db.products_catalog[0].best_price)).toBe(58.42);
+      expect(db.price_history).toEqual([]);
+      expect(db.pricing_config_audit).toEqual([]);
+    });
+
+    // Two current SiteOne quotes: Step P cannot tell which one the office buys from, so it corrects neither. Both still offer the
+    // stale gallon, so both expire, and the catalog waits for the price in the app.
+    test('two current SiteOne quotes at the stale price: neither is corrected, and both expire', async () => {
+      const db = world({ vendors: [vendorRow(), vendorRow({ id: 'v4', vendor_sku: null, is_best_price: false })] });
+      await migration.up(fakeKnex(db));
+      expect(db.vendor_pricing.map((v) => v.price)).toEqual(['58.42', '58.42']);
+      const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
+      expect(warnings).toMatch(/\(p1\) price left alone: it does not have exactly one current SiteOne quote/);
+      expect(warnings).toMatch(STALE_WARNING);
+      db.vendor_pricing.forEach(expectExpired);
+      expectUnpriced(db.products_catalog[0]);
+    });
+
     // Pre-push audit 25: another vendor's $58.42 for 2.5 gal is $23.37 a gallon, a real offer below the corrected $30.90. It stays
     // current, and the recalculation picks it by its own per-oz price.
     test('another vendor\'s $58.42 for 2.5 gal ($23.37 a gallon) is its own offer: it stays, and the catalog takes it', async () => {
@@ -652,7 +692,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.vendor_pricing[0].price).toBe(30.9);
       expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, needs_pricing: false, best_price_status: 'current' });
       const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
-      expect(warnings).toMatch(/\(p2\) price left alone: it does not have exactly one SiteOne vendor row \(item D00001542 or none\)/);
+      expect(warnings).toMatch(/\(p2\) price left alone: it does not have exactly one current SiteOne quote \(item D00001542 or none; an archived row does not count\)/);
       expect(warnings).not.toMatch(STALE_WARNING);
       expectUnpriced(db.products_catalog[1]);
       expect(auditKeys(db)).toEqual(['inventory:lesco_crosscheck_plus_price', 'inventory:lesco_crosscheck_plus_stale', 'onetime_preslab', 'onetime_trenching']);

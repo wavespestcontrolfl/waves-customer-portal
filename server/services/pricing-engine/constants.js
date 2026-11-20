@@ -2003,8 +2003,10 @@ const SPECIALTY = {
         // termite dilution only at a reduced volume, so the active ingredient per foot stays the 0.06% amount (Volume
         // Adjustment Chart: 4.0 gal per 10 LF at 0.06%, 2.0 gal at 0.12%). The 0.12% dilution of this 7.9% bottle is 2 fl oz
         // a finished gallon. Code only (the label is the bottle's, not a config value): priceTrenching halves the volume at
-        // exactly this dilution, whatever the configured rates.
+        // exactly this dilution, whatever the configured rates, and only over the chart's own 4.0 gal per 10 LF per foot of
+        // depth (a configured volume off the chart keeps it, pre-push audit at the fourth push).
         labelHalfVolumeOzPerFinishedGallon: 2.0,
+        labelFinishedGallonsPer10LFPerFtDepth: 4.0,
         standardConcentrationLabel: '0.06%',
         highConcentrationLabel: 'high_rate',
         defaultWarrantyPositioning: 'limited',
@@ -2027,6 +2029,7 @@ const SPECIALTY = {
         productOzPerFinishedGallonAtStandardRate: 1.0,
         productOzPerFinishedGallonAtHighRate: 2.0,
         labelHalfVolumeOzPerFinishedGallon: 2.0, // the same bottle and label rule as bifen_it
+        labelFinishedGallonsPer10LFPerFtDepth: 4.0,
         standardConcentrationLabel: '0.06%',
         highConcentrationLabel: 'high_rate',
         defaultWarrantyPositioning: 'limited',
