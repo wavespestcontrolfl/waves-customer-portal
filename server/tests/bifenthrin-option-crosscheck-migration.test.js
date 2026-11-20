@@ -432,7 +432,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       product: db.products_catalog[0], deductedAmount: 4, inventoryUnit: 'fl_oz', amount: 4, amountUnit: 'fl_oz',
     }).costUsed;
 
-    test('pending approvals that would put the stale price back are rejected as superseded; others stay; down() reopens them', async () => {
+    test('pending approvals that would put the stale price back are rejected as superseded; others stay; down() leaves them closed', async () => {
       const events = [
         pendingEvent('e58', 's58'),
         pendingEvent('e31', 's31'), // another price: an admin's call
@@ -457,16 +457,15 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.price_approvals[0]).toMatchObject({ reviewed_by: migration.TAG, notes: expect.stringMatching(/^Superseded/) });
       expect(warn).toHaveBeenCalledWith(expect.stringMatching(/pending price approvals e58, e58b, a58 would put a stale price/));
 
-      db.price_approvals[0].notes = 'Checked by hand'; // an admin's edit since up()
+      // down() leaves each one closed: the quote is back at the stale price they offer, so reopening them could only offer it again
+      // (pre-push audit at the seventh push: a newer report may have queued since).
+      const closed = snapshot({ events: db.price_approval_events, legacy: db.price_approvals });
       await migration.down(knex);
       expect(db.vendor_pricing[0]).toMatchObject({ price: '58.42' });
-      expect(db.price_approval_events).toEqual(events);
-      expect(db.price_approvals.slice(1)).toEqual(legacy.slice(1));
-      expect(db.price_approvals[0]).toMatchObject({ status: 'rejected', reviewed_by: migration.TAG, notes: 'Checked by hand' });
-      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/price approval a58 changed since this migration - leaving it alone/));
+      expect(snapshot({ events: db.price_approval_events, legacy: db.price_approvals })).toBe(closed);
     });
 
-    test('a pending approval at the stale price beside a SiteOne row already at $30.90 is superseded alone; down() reopens it', async () => {
+    test('a pending approval at the stale price beside a SiteOne row already at $30.90 is superseded alone; down() leaves it closed', async () => {
       const event = pendingEvent('e58', 's58');
       // A catalog the recalculation leaves at the same price: only the superseded approval makes the audit row.
       const reconciled = catalogRow({ best_price: '30.90', best_price_amount_cached: '30.9000', best_price_vendor_id_cached: 'ven1' });
@@ -479,7 +478,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v1', best_price_status: 'current' });
       expect(auditKeys(db)).toEqual(['inventory:lesco_crosscheck_plus_stale', 'onetime_preslab', 'onetime_trenching']);
       await migration.down(knex);
-      expect(db.price_approval_events).toEqual([event]);
+      expect(db.price_approval_events[0]).toMatchObject({ approval_status: 'rejected', rejected_by: migration.TAG });
       const { best_price_updated_at: seenAt, ...seen } = reconciled;
       expect(db.products_catalog[0]).toMatchObject(seen); // as up() saw it (the audit row's JSON keeps its timestamp as a string)
       expect(new Date(db.products_catalog[0].best_price_updated_at)).toEqual(seenAt);
@@ -498,6 +497,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
 
     test.each([
       ['per fl oz', '0.4564', 'fl_oz'],
+      ['per oz, which costing reads as a fluid ounce', '0.4564', 'oz'],
       ['per gallon', '58.4200', 'gal'],
       ['per quart, at the imported $57.17', '14.2925', 'qt'],
       ['with no unit, per fl oz', '0.4564', null],
@@ -514,11 +514,14 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: cost, cost_unit: unit });
     });
 
-    test.each([['0.2414', 'fl_oz'], ['0.4600', 'fl_oz'], ['0.5000', null]])('a unit cost of an admin\'s own (%s per %s) stays', async (cost, unit) => {
+    // A weight unit holds no gallon price: $7.3025 a pound is the stale gallon's figure per 16 oz, and stays (pre-push audit at the
+    // seventh push).
+    test.each([['0.2414', 'fl_oz'], ['0.4600', 'fl_oz'], ['0.5000', null], ['7.3025', 'lb']])('a unit cost of an admin\'s own (%s per %s) stays', async (cost, unit) => {
       const db = world({ catalog: [catalogRow({ cost_per_unit: cost, cost_unit: unit })] });
       await migration.up(fakeKnex(db));
       expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: cost, cost_unit: unit, best_price: 30.9 });
-      expect(JSON.parse(db.pricing_config_audit.find((r) => r.config_key === migration.CATALOG_AUDIT_KEY).old_value).unit_cost).toBeNull();
+      const audit = db.pricing_config_audit.find((r) => r.config_key === migration.CATALOG_AUDIT_KEY);
+      expect(JSON.parse(audit.new_value).catalog_recalculated).toMatchObject({ cost_per_unit: cost, cost_unit: unit });
       expect(warn).not.toHaveBeenCalled();
     });
 
@@ -536,6 +539,19 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(snapshot(db)).toBe(after);
       await migration.down(knex);
       expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: '0.4564', cost_unit: 'fl_oz', best_price: '30.90' });
+    });
+
+    // The recalculation itself clears a cost whose unit contradicts the catalog's size (cogsResetFor); down() puts it back with the
+    // quote, as up() found it (pre-push audit at the seventh push).
+    test('a unit cost the recalculation clears (a count cost on the gallon catalog) comes back with down()', async () => {
+      const db = world({ catalog: [catalogRow({ cost_per_unit: '1.5000', cost_unit: 'each' })] });
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: null, cost_unit: null, best_price: 30.9 });
+      expect(warn).not.toHaveBeenCalled(); // the recalculation's own reset, not a stale price
+      await migration.down(knex);
+      expect(db.vendor_pricing[0]).toMatchObject({ price: '58.42' });
+      expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: '1.5000', cost_unit: 'each' });
     });
 
     test('a unit cost entered after up() is kept by down()', async () => {

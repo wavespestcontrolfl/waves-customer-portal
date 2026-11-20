@@ -83,10 +83,12 @@
  * queue's price_approval_events, or the legacy price_approvals) that, approved, would put a stale gallon price back on one of the
  * product's SiteOne quotes (each approve handler's own writes over the quote it writes to, read as the recalculation reads it) is
  * rejected as superseded, as the price worker supersedes its own stale reports; one at another price, or for another vendor, is an
- * admin's call, and stays. A catalog unit cost (cost_per_unit, which job costing reads before the catalog price) that is a stale
- * gallon price in its own unit, at the column's precision (with no unit, in each volume unit costing converts), is cleared, so job
- * costing reads the catalog price; any other unit cost is an admin's own, and stays. Either alone is enough for Step P to run: a
- * price entered before this deploy can leave one behind.
+ * admin's call, and stays. down() leaves a superseded approval closed: after a rollback its quote holds the stale price it offers or
+ * a price entered since, so reopening it could only put an obsolete price back (pre-push audit at the seventh push). A catalog unit
+ * cost (cost_per_unit, which job costing reads before the catalog price) that is a stale gallon price in its own liquid unit (a
+ * volume unit, or an ounce; a weight or count unit holds no gallon price), at the column's precision (with no unit, in each volume
+ * unit), is cleared, so job costing reads the catalog price; any other unit cost is an admin's own, and stays. Either alone is
+ * enough for Step P to run: a price entered before this deploy can leave one behind.
  *
  * pest_service_costs (the admin Pricing Logic panel's Pest Service Cost Breakdown; display only, pestVisitCostModel prices the
  * visit): its Talak line, 4 fl oz a visit at 41.57 / 128, becomes Crosscheck Plus at the engine's 0.97 (4 fl oz at 30.90 / 128) in
@@ -104,9 +106,9 @@
  * row still holds exactly what up() wrote, and it restores a stale quote's expiry only while the quote still holds exactly what
  * up() wrote; after either it runs the recalculation again, so the catalog follows the restored rows (a mark up()'s recalculation
  * cleared comes back when the winner up() saw returns); with neither, it puts back a catalog price up() replaced or recalculated,
- * and the winner flags up()'s recalculation moved, only while the catalog still holds exactly what up() wrote; it puts back each
- * approval up() superseded, and a unit cost it cleared, only while that still holds what up() wrote (one decided or entered since
- * is kept); it restores the pest breakdown only when its audit row exists AND the row still
+ * and the winner flags up()'s recalculation moved, only while the catalog still holds exactly what up() wrote; it puts back a unit
+ * cost up() changed (its own clear, or its recalculation's) only while the catalog still holds what up() left, and leaves an
+ * approval up() superseded closed (see above); it restores the pest breakdown only when its audit row exists AND the row still
  * deep-equals what up() wrote; then it deletes this migration's price_history and price_snapshots rows (a restored vendor row
  * links its earlier snapshot again), audit rows and changelog row.
  *
@@ -393,17 +395,16 @@ async function fixProductPrice(knex, productId) {
   const expired = await expireQuotes(knex, stale, now);
   before.stale_quotes = expired.before;
   const superseded = await supersedeApprovals(knex, approvals, now);
-  before.approvals = superseded.before;
   await recalcBestPrice(knex, productId);
   const repricedFrom = await repriceKeptStalePrice(knex, productId, now);
-  before.unit_cost = await clearStaleUnitCost(knex, productId);
+  const unitCost = await clearStaleUnitCost(knex, productId);
 
   const catalogRecalculated = pickColumns(await knex('products_catalog').where({ id: productId }).first(), catalogColumns);
   // What down() compares and puts back. With no vendor row or quote to restore (catalog_only), down() restores the catalog itself
   // and the winner flags this recalculation left, while the catalog still holds what up() wrote (pre-push audit at the first push).
   const written = {
     catalog_recalculated: catalogRecalculated, stale_quotes: expired.written, catalog_repriced: repricedFrom !== undefined,
-    catalog_only: !row && !stale.length, approvals: superseded.written,
+    catalog_only: !row && !stale.length, superseded_approvals: superseded,
     is_best_price_ids: (await knex('vendor_pricing').where({ product_id: productId })).filter((quote) => quote.is_best_price === true).map((quote) => quote.id),
   };
   // A catalog-only recalculation that left the catalog and its winner flags as they were found them already reconciled (an
@@ -421,7 +422,7 @@ async function fixProductPrice(knex, productId) {
     config_key: configKey, old_value: JSON.stringify(before), new_value: JSON.stringify(written), changed_by: TAG, reason,
   });
   warnPrice(productId, {
-    row, stale, repricedFrom, held, approvals, unitCost: before.unit_cost, best: catalogRecalculated.best_price ?? 'none (needs pricing)',
+    row, stale, repricedFrom, held, approvals, unitCost, best: catalogRecalculated.best_price ?? 'none (needs pricing)',
   });
   return row ? 'priced' : stale.length ? 'expired' : written.catalog_repriced ? 'repriced' : 'recalculated';
 }
@@ -609,34 +610,35 @@ async function staleApprovals(knex, productId, rows) {
   return found;
 }
 
-// Each one rejected as superseded, as the price worker supersedes its own stale reports. Returns each one's decision columns
-// before and after, for down().
+// Each one rejected as superseded, as the price worker supersedes its own stale reports. down() leaves it closed: after a rollback
+// the quote holds the stale price it offers (approving it changes nothing) or a price entered since (approving it would put an
+// obsolete price back), and a new price report queues a fresh one (pre-push audit at the seventh push). Returns what it closed.
 async function supersedeApprovals(knex, approvals, now) {
-  const superseded = { before: [], written: [] };
   for (const { table, approval } of approvals) {
     const queue = QUEUES[table];
     await knex(table).where({ id: approval.id }).update({ [queue.status]: 'rejected', [queue.by]: TAG, [queue.at]: now, [queue.note]: SUPERSEDED_NOTE });
-    superseded.before.push({ table, id: approval.id, columns: pickColumns(approval, decided(queue)) });
-    superseded.written.push({ table, id: approval.id, columns: pickColumns(await knex(table).where({ id: approval.id }).first(), decided(queue)) });
   }
-  return superseded;
+  return approvals.map(({ table, approval }) => ({ table, id: approval.id }));
 }
 
 // A catalog unit cost (cost_per_unit: job costing reads it before the catalog price, calculateInventoryCost and costLineFromUsage)
-// that is a stale gallon price in its own unit, at the column's precision (decimal 10,4). With no unit, costing reads it in the
-// amount's own unit, so it is matched in each volume unit costing converts. Returns that stale gallon price, else undefined: any
-// other unit cost is an admin's own, and stays.
+// that is a stale gallon price in its own liquid unit, at the column's precision (decimal 10,4). Liquid means a volume unit, or an
+// ounce, which costing reads as a fluid ounce for a liquid (inventory-units); a weight or count unit holds no gallon price (pre-push
+// audit at the seventh push). With no unit, costing reads it in the amount's own unit, so it is matched in each volume unit.
+// Returns that stale gallon price, else undefined: any other unit cost is an admin's own, and stays.
 const UNIT_COST_COLUMNS = ['cost_per_unit', 'cost_unit'];
 const VOLUME_UNITS = ['fl_oz', 'pt', 'qt', 'gal', 'ml', 'l'];
+const LIQUID = ['volume', 'ambiguous'];
 function staleUnitCostOf(product) {
   if (!carries(product.cost_per_unit)) return undefined;
-  const { convertToOz } = require('../../services/product-costing');
-  const ozPerUnit = (filled(product.cost_unit) ? [product.cost_unit] : VOLUME_UNITS).map((unit) => convertToOz(1, unit));
-  return STALE_PRICES.find((price) => ozPerUnit.some((oz) => oz > 0
-    && same(product.cost_per_unit, Math.round((price / STALE_SIZE_OZ) * oz * 10000) / 10000)));
+  const { INVENTORY_UNITS, normalizeInventoryUnit } = require('../../services/inventory-units');
+  const ozPerUnit = (filled(product.cost_unit) ? [product.cost_unit] : VOLUME_UNITS)
+    .map((unit) => INVENTORY_UNITS[normalizeInventoryUnit(unit)]).filter((unit) => LIQUID.includes(unit?.dimension)).map((unit) => unit.factor);
+  return STALE_PRICES.find((price) => ozPerUnit.some((oz) => same(product.cost_per_unit, Math.round((price / STALE_SIZE_OZ) * oz * 10000) / 10000)));
 }
 
-// A stale unit cost is cleared, so job costing reads the catalog price. Returns the unit cost it cleared, for down(), else null.
+// A stale unit cost is cleared, so job costing reads the catalog price. Returns the unit cost it cleared, for the deploy log, else
+// null.
 async function clearStaleUnitCost(knex, productId) {
   const catalog = await knex('products_catalog').where({ id: productId }).first();
   if (!catalog || staleUnitCostOf(catalog) === undefined) return null;
@@ -659,7 +661,6 @@ async function restoreCatalogPrice(knex) {
 async function restoreProductPrice(knex, before, written) {
   if (!before || !written) return;
   await lockProduct(knex, before.product_id);
-  await restoreApprovals(knex, before.approvals, written.approvals);
   let restored = await restoreQuoteExpiries(knex, before.stale_quotes, written.stale_quotes);
   if (before.vendor_pricing && written.vendor_pricing) {
     const row = await knex('vendor_pricing').where({ id: before.vendor_pricing_id }).forUpdate().first();
@@ -678,33 +679,23 @@ async function restoreProductPrice(knex, before, written) {
   }
   if (restored) await recalcRestoringMark(knex, before.product_id, before.catalog_seen);
   else if (written.catalog_repriced || written.catalog_only) await restoreCatalogSeen(knex, before, written);
-  await restoreUnitCost(knex, before);
+  await restoreUnitCost(knex, before, written);
 }
 
-// Each approval up() superseded goes back as it was, only while it still holds what up() wrote (one decided since is kept).
-async function restoreApprovals(knex, before, written) {
-  for (const { table, id, columns } of Array.isArray(before) ? before : []) {
-    const wrote = (Array.isArray(written) ? written : []).find((entry) => entry.table === table && entry.id === id);
-    const row = Object.hasOwn(QUEUES, table) && await knex.schema.hasTable(table) ? await knex(table).where({ id }).forUpdate().first() : null;
-    if (!wrote || !row || !sameColumns(row, wrote.columns)) {
-      console.warn(`${LOG} down: the ${CATALOG_NAME} price approval ${id} changed since this migration - leaving it alone`);
-      continue;
-    }
-    await knex(table).where({ id }).update(columns);
-  }
-}
-
-// The unit cost up() cleared comes back while the catalog still has none (one entered since is kept). A catalog restored as up()
-// saw it already holds it.
-async function restoreUnitCost(knex, before) {
-  if (!before.unit_cost) return;
+// The unit cost as up() saw it, when up() changed it (its own clear, or its recalculation's: a cost whose unit contradicts the
+// catalog's size), only while the catalog still holds what up() left (one entered since is kept; pre-push audit at the seventh
+// push). A catalog restored as up() saw it already holds it.
+async function restoreUnitCost(knex, before, written) {
+  const seen = pickColumns(before.catalog_seen || {}, UNIT_COST_COLUMNS);
+  const left = pickColumns(written.catalog_recalculated || {}, UNIT_COST_COLUMNS);
+  if (sameColumns(seen, left)) return;
   const catalog = await knex('products_catalog').where({ id: before.product_id }).forUpdate().first();
-  if (!catalog || sameColumns(catalog, before.unit_cost)) return;
-  if (filled(catalog.cost_per_unit) || filled(catalog.cost_unit)) {
+  if (!catalog || sameColumns(catalog, seen)) return;
+  if (!sameColumns(catalog, left)) {
     console.warn(`${LOG} down: the ${CATALOG_NAME} unit cost changed since this migration - leaving it alone`);
     return;
   }
-  await knex('products_catalog').where({ id: before.product_id }).update(before.unit_cost);
+  await knex('products_catalog').where({ id: before.product_id }).update(seen);
 }
 
 // A catalog price up() replaced or recalculated, with no vendor row restored to recalculate from: the catalog as up() saw it, and
