@@ -254,6 +254,27 @@ describe('the report payload', () => {
     expect(legacy.findings.map((f) => f.title)).toEqual(['Safe for pets once dry', 'Light ant activity', 'Safe for pets after it dries']);
   });
 
+  test('beside a note, a finding detail or recommendation the screen refuses never prints, nor does the stored "no activity" row', async () => {
+    const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
+    const row = (id, title, extra) => ({
+      id, service_record_id: SERVICE.id, category: 'observation', severity: 'low', title, detail: null, recommendation: null, ...extra,
+    });
+    const findings = [
+      row('f-gate', 'Ant trail by the lanai', { detail: 'A trail along the lanai door.', recommendation: 'Gate code 4417 for the next visit' }),
+      row('f-toxic', 'Seal the slider', { detail: 'Toxic residue on the sill', recommendation: 'Replace the weatherstrip.' }),
+      { id: 'f-none', service_record_id: SERVICE.id, ...buildNoActivityFinding('pest') },
+    ];
+    const data = await build({ structured_notes: JSON.stringify(stored()) }, { service_findings: findings });
+    expect(data.findings.map((f) => f.title)).toEqual(['Ant trail by the lanai', 'Seal the slider']);
+    expect(JSON.stringify(data.findings)).toContain('A trail along the lanai door.');
+    expect(JSON.stringify(data.findings)).toContain('Replace the weatherstrip.');
+    expect(JSON.stringify(data.findings)).not.toMatch(/were clear/);
+    expect(JSON.stringify(data)).not.toMatch(/4417|Toxic/);
+    // A record with no note keeps every row, as today.
+    const legacy = await build({ structured_notes: '{}' }, { service_findings: findings });
+    expect(legacy.findings.map((f) => f.title).sort()).toEqual(['Ant trail by the lanai', 'No activity observed this visit', 'Seal the slider']);
+  });
+
   test('the PDF key hashes the summary the report prints', async () => {
     const data = await build();
     expect(summaryCopySignature(SERVICE)).toBe(`${keyOf(data.summary)}-rn`);

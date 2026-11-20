@@ -29,6 +29,11 @@ const express = require('express');
 const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const documentsRouter = require('../routes/documents');
+// Production loads the web report's module at boot (server/index.js mounts
+// reports-public.js, which requires it), so the PDF's lazy require of
+// buildProtocolPayload finds it loaded. Load it here too, outside each
+// test's time limit: on a busy machine it takes seconds.
+require('../services/service-report/report-data');
 
 const SHARE_TOKEN = 'a'.repeat(64);
 const NOTE_TEXT = 'I treated the perimeter and knocked down the webs by the lanai.';

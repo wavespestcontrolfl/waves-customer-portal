@@ -53,10 +53,14 @@ function assertPdfBuffer(buf, provider) {
 // report-copy reportDependsOnWriterRules) waits for its root showing the
 // state this render's key is computed under (renderWriterRulesState; /data
 // names it in PDF mode). Every other record renders the same in both states,
-// so it waits for the root alone, also in a restart overlap.
-function reportPdfReadySelector(dependsOnWriterRules = true) {
-  if (!dependsOnWriterRules) return '.service-report-v1';
-  return `.service-report-v1[data-writer-rules="${require('./technician-report-copy').renderWriterRulesState()}"]`;
+// so it waits for the root alone, also in a restart overlap. A record that
+// carries the technician's own note also waits for the root showing the note
+// state of the caller's build (technician-report-copy reportNoteRenderState).
+function reportPdfReadySelector(dependsOnWriterRules = true, reportNoteState = null) {
+  const root = dependsOnWriterRules
+    ? `.service-report-v1[data-writer-rules="${require('./technician-report-copy').renderWriterRulesState()}"]`
+    : '.service-report-v1';
+  return reportNoteState ? `${root}[data-report-note="${reportNoteState}"]` : root;
 }
 
 async function renderReportPdfWithCloudflare(url, { serviceRecordId, readySelector = '.service-report-v1' } = {}) {
@@ -174,6 +178,9 @@ async function renderServiceReportV1Pdf(data, {
   // reportDependsOnWriterRules(service), from the row the caller keys the
   // render on. Unknown = true: the strict wait.
   dependsOnWriterRules = true,
+  // reportNoteRenderState(service, data), from the same row and the caller's
+  // own build: null on a record without the technician's own note.
+  reportNoteState = null,
 } = {}) {
   const reportToken = token || data.token;
   const recordId = serviceRecordId || data.serviceRecordId || data.id || null;
@@ -184,7 +191,7 @@ async function renderServiceReportV1Pdf(data, {
   const started = Date.now();
 
   try {
-    const rendered = await renderReportPdf(url, { serviceRecordId: recordId, readySelector: reportPdfReadySelector(dependsOnWriterRules) });
+    const rendered = await renderReportPdf(url, { serviceRecordId: recordId, readySelector: reportPdfReadySelector(dependsOnWriterRules, reportNoteState) });
     const pdf = assertPdfBuffer(rendered.pdf, provider);
     const elapsedMs = Date.now() - started;
     emitPdfRenderSuccess({

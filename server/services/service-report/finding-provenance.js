@@ -15,12 +15,15 @@
  * record that carries the technician's own note (carriesReportNote), a label
  * proves a row only when it passes the complete customer-copy screen
  * (customerCopyViolations), as that record's report lists do (report-data
- * buildProtocolPayload). There a row whose only text is the stock detail is
- * the picked label alone, so it stands only as a screened label does, and
- * every row's title passes the same screen, whatever else the row carries:
- * the title is the technician's words (a picked label, or a free-text
- * observation), while completion writes only the stock detail or the fixed
- * "no activity" copy beside it and no recommendation.
+ * buildProtocolPayload). There every text field a customer reads passes the
+ * same screen before it proves anything: a row whose title fails it is left
+ * out, and a detail or a recommendation that fails it is left out of its row
+ * (screenedFinding). A row whose only text is then the stock detail is the
+ * picked label alone, so it stands only as a screened label does. The stored
+ * "no activity" row of the pest, mosquito, termite and rodent lines is one of
+ * those: its fixed detail ("were clear") fails the screen, so the row has no
+ * text left and is not shown beside a note, as the render adds no such row
+ * there (report-data).
  */
 const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
 
@@ -38,6 +41,16 @@ function stockDetailOnly(row) {
     && !String(row?.recommendation || '').trim();
 }
 
+// On a record that carries the technician's own note: the row with each
+// text field a customer reads screened, or null when its title fails.
+function screenedFinding(row, customerCopyViolations) {
+  if (customerCopyViolations(String(row?.title || '').trim()).length) return null;
+  const keep = (value) => (String(value || '').trim() && customerCopyViolations(String(value)).length ? null : value);
+  return { ...row, detail: keep(row?.detail), recommendation: keep(row?.recommendation) };
+}
+
+const titleKey = (row) => String(row?.title || '').trim().toLowerCase();
+
 function provenFindingRows(rows, structuredNotes) {
   let notes = structuredNotes;
   if (typeof notes === 'string') {
@@ -52,12 +65,12 @@ function provenFindingRows(rows, structuredNotes) {
     .map((label) => label.trim())
     .filter((label) => !screened || !customerCopyViolations(label).length)
     .map((label) => label.toLowerCase()));
-  return (Array.isArray(rows) ? rows : []).filter((row) => {
-    const title = String(row?.title || '').trim();
-    if (screened && customerCopyViolations(title).length) return false;
-    const label = title.toLowerCase();
-    if (screened && stockDetailOnly(row)) return formTitles.has(label);
-    return findingHasOwnText(row) || formTitles.has(label);
+  const list = Array.isArray(rows) ? rows : [];
+  if (!screened) return list.filter((row) => findingHasOwnText(row) || formTitles.has(titleKey(row)));
+  return list.map((row) => screenedFinding(row, customerCopyViolations)).filter((row) => {
+    if (!row) return false;
+    if (stockDetailOnly(row)) return formTitles.has(titleKey(row));
+    return findingHasOwnText(row) || formTitles.has(titleKey(row));
   });
 }
 

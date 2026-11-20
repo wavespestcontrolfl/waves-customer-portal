@@ -95,8 +95,8 @@ const STAFF_JWT = jwt.sign({
   tokenVersion: 4,
 }, 'test-jwt-secret');
 
-function mockDb({ deliveryMode }) {
-  const structuredNotes = JSON.stringify({ typedReportDelivery: deliveryMode });
+function mockDb({ deliveryMode, notes = {} }) {
+  const structuredNotes = JSON.stringify({ typedReportDelivery: deliveryMode, ...notes });
   const fullRecord = {
     id: 'service-1',
     customer_id: 'customer-1',
@@ -268,6 +268,35 @@ describe('GET /reports/:token/data: the writer-rules state of a PDF payload', ()
       const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
       expect(res.status).toBe(200);
       expect((await res.json()).writerRules).toBeUndefined();
+    });
+  });
+
+  // The note state, the same way (technician-report-copy reportNoteRenderState).
+  test("a PDF payload of a record that carries the technician's own note names its note state; any other payload names none", async () => {
+    const notes = { reportNote: { v: 1, text: 'I treated the perimeter.', source: 'cleaned' } };
+    const payload = { typedReport: null, pestPressure: null, pdfUrl: `/api/reports/${VALID_TOKEN}` };
+    for (const [built, state] of [[{ summaryIsOwnNote: true }, 'shown'], [{}, 'withheld']]) {
+      buildReportV1Data.mockResolvedValue({ ...payload, ...built });
+      mockDb({ deliveryMode: 'auto_send', notes });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=pdf`);
+        expect(res.status).toBe(200);
+        expect((await res.json()).reportNote).toBe(state);
+      });
+    }
+    buildReportV1Data.mockResolvedValue({ ...payload, summaryIsOwnNote: true });
+    mockDb({ deliveryMode: 'auto_send', notes });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).reportNote).toBeUndefined();
+    });
+    buildReportV1Data.mockResolvedValue(payload);
+    mockDb({ deliveryMode: 'auto_send' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=pdf`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).reportNote).toBeUndefined();
     });
   });
 });

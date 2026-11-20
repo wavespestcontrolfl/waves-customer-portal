@@ -121,6 +121,22 @@ describe('provenFindingRows', () => {
     expect(provenFindingRows([recommended, detailed, passing, DETAILED], {}).map((r) => r.id))
       .toEqual(['f-rec-refused', 'f-detail-refused', 'f-rec-ok', 'f-detail']);
   });
+
+  test("on a note record, a detail or a recommendation the screen refuses is left out of its row, and a row with no text left is not shown", () => {
+    const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
+    const gateCode = row('f-gate', 'Ant trail by the lanai', { detail: 'A trail along the lanai door.', recommendation: 'Gate code 4417 for the next visit' });
+    const safeOnly = row('f-safe', 'Ant trail', { recommendation: 'Keep pets off it, it is safe once dry' });
+    const toxic = row('f-toxic', 'Seal the slider', { detail: 'Toxic residue on the sill', recommendation: 'Replace the weatherstrip.' });
+    // The stored "no activity" row: its fixed pest detail ("were clear") fails the screen.
+    const noActivity = { ...row('f-none', ''), ...buildNoActivityFinding('pest') };
+    const rows = [gateCode, safeOnly, toxic, noActivity];
+    expect(provenFindingRows(rows, NOTE_RECORD).map((r) => [r.id, r.detail, r.recommendation])).toEqual([
+      ['f-gate', 'A trail along the lanai door.', null],
+      ['f-toxic', null, 'Replace the weatherstrip.'],
+    ]);
+    // A record with no note keeps every row whole, as today.
+    expect(provenFindingRows(rows, {})).toEqual(rows);
+  });
 });
 
 describe('customer readers of a visit\'s findings', () => {

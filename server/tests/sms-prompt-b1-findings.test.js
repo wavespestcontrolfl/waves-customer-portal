@@ -103,3 +103,17 @@ test("on a note record, a refused title or an unlisted stock row is never texted
   const legacy = await loadLatestVisitFindings(record({ structured_notes: { formObservations: ['Yellowjacket'] } }));
   expect(legacy.map((f) => f.title)).toEqual(['Safe for pets once dry', 'Fire ant mounds', 'Yellowjacket', 'Ant trail 1', 'Ant trail 2']);
 });
+
+test("on a note record, a finding's refused recommendation is never texted, and the row keeps its passing detail", async () => {
+  on();
+  const notes = { reportNote: { v: 1, text: 'I treated the perimeter and swept the webs.', source: 'cleaned' } };
+  const noteRecord = record({ service_line: 'pest', service_type: 'Quarterly Pest Control', structured_notes: notes });
+  mockRows.value = [{
+    title: 'Ant trail by the lanai', detail: 'A trail along the lanai door.', recommendation: 'Keep pets off it, it is safe once dry', severity: 'low', category: 'activity',
+  }];
+  const out = await loadLatestVisitFindings(noteRecord);
+  expect(out).toEqual([expect.objectContaining({ title: 'Ant trail by the lanai', detail: 'A trail along the lanai door.', recommendation: null })]);
+  // A record with no note texts the row whole, as today.
+  const legacy = await loadLatestVisitFindings(record({ structured_notes: {} }));
+  expect(legacy[0].recommendation).toBe('Keep pets off it, it is safe once dry');
+});

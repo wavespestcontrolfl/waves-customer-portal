@@ -531,6 +531,22 @@ function renderWriterRulesState() {
   return reportWriterRulesLive() ? 'on' : 'off';
 }
 
+// The note state, in the same way. A record that carries the technician's own
+// note (carriesReportNote, stored notes that cannot be read included) keys
+// its PDF with `-rn` (summaryCopySignature), and the page it prints must be
+// built by the note reader in the same state: /data in PDF mode names it
+// (`reportNote`), the PDF document shows it on its root element
+// (data-report-note), and the renderer prints only once the page shows the
+// state of its own build (pdf.js reportPdfReadySelector). 'shown' when the
+// summary is the note (summaryIsOwnNote), 'withheld' when it is not (a
+// refused note, a typed visit, another line). A page bundle or server from
+// before the note reader never shows it, so the render times out and nothing
+// is stored. null on every other record, which renders the same either way.
+function reportNoteRenderState(service, payload) {
+  if (!carriesReportNote(service?.structured_notes)) return null;
+  return payload?.summaryIsOwnNote === true ? 'shown' : 'withheld';
+}
+
 function summaryCopySignature(service = {}) {
   const serviceData = recordServiceData(service);
   const parsed = visitReportCustomerCopy(service);
@@ -596,6 +612,7 @@ module.exports = {
   customerCopyViolations,
   summaryCopySignature,
   renderWriterRulesState,
+  reportNoteRenderState,
   reportDependsOnWriterRules,
   MAX_REPORT_CHARS,
 };

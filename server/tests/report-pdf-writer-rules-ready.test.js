@@ -29,6 +29,7 @@ jest.mock('../services/service-report/pdf-events', () => ({
 const fs = require('fs');
 const path = require('path');
 const { renderReportPdf, renderServiceReportV1Pdf, reportPdfReadySelector } = require('../services/service-report/pdf');
+const { reportNoteRenderState } = require('../services/service-report/technician-report-copy');
 
 const ENV_KEYS = ['GATE_REPORT_WRITER_RULES', 'PDF_RENDERER', 'CF_ACCOUNT_ID', 'CF_BROWSER_RENDERING_TOKEN'];
 const savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -103,6 +104,7 @@ describe('a service report PDF prints only a page built in its own writer-rules 
       const calls = source.split('renderServiceReportV1Pdf(data, {').slice(1).map((rest) => rest.slice(0, rest.indexOf('});')));
       expect(calls).toHaveLength(1);
       expect(calls[0]).toContain('dependsOnWriterRules: reportDependsOnWriterRules(service),');
+      expect(calls[0]).toContain('reportNoteState: reportNoteRenderState(service, data),');
     });
   });
 
@@ -114,4 +116,40 @@ describe('a service report PDF prints only a page built in its own writer-rules 
 
   // The page side (the PDF document's root carries the state, in both
   // states) is a DOM test: client/src/pages/ServiceReportDocument.test.jsx.
+});
+
+// A record that carries the technician's own note keys its PDF with `-rn`
+// (summaryCopySignature). A page bundle or server from before the note reader
+// would print it with the legacy recap and merged note lines, so the render
+// also waits for the root showing the note state of its own build: such a
+// page never shows it, the render times out and nothing is stored (pre-push
+// P1 on 0bc664ed4d and 5b51753cd0).
+describe("a note record's PDF prints only a page built in its own note state", () => {
+  test('the ready selector adds the note state, with or without the writer-rules state', () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    expect(reportPdfReadySelector(true, 'shown')).toBe('.service-report-v1[data-writer-rules="on"][data-report-note="shown"]');
+    expect(reportPdfReadySelector(false, 'withheld')).toBe('.service-report-v1[data-report-note="withheld"]');
+    expect(reportPdfReadySelector(false, null)).toBe('.service-report-v1');
+  });
+
+  test('a note record render waits for that selector, with either provider', async () => {
+    process.env.PDF_RENDERER = 'playwright';
+    await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1', dependsOnWriterRules: false, reportNoteState: 'withheld' });
+    expect(mockPage.waitForSelector).toHaveBeenCalledWith('.service-report-v1[data-report-note="withheld"]', { timeout: 10000 });
+
+    const calls = cloudflareFetch();
+    await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1', dependsOnWriterRules: false, reportNoteState: 'shown' });
+    expect(calls[0].waitForSelector).toEqual({ selector: '.service-report-v1[data-report-note="shown"]', visible: true, timeout: 10000 });
+  });
+
+  test("the note state follows the record and the caller's own build", () => {
+    const note = JSON.stringify({ reportNote: { v: 1, text: 'I treated the perimeter.', source: 'cleaned' } });
+    expect(reportNoteRenderState({ structured_notes: note }, { summaryIsOwnNote: true })).toBe('shown');
+    expect(reportNoteRenderState({ structured_notes: note }, { summary: 'Your routine service is complete.' })).toBe('withheld');
+    // Stored notes that cannot be read count as a note, and no note prints.
+    expect(reportNoteRenderState({ structured_notes: ['[Found] raw line'] }, {})).toBe('withheld');
+    // Every other record names no state.
+    expect(reportNoteRenderState({ structured_notes: JSON.stringify({ observations: [] }) }, { summaryIsOwnNote: true })).toBeNull();
+    expect(reportNoteRenderState({}, {})).toBeNull();
+  });
 });

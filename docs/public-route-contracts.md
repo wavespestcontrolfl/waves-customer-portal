@@ -510,8 +510,12 @@ the voice relay. On a record that carries the technician's own note
 `customerCopyViolations`, as that record's report lists do. There a row whose
 only text is the stock detail completion writes for a picked label
 (`STRUCTURED_OBSERVATION_FINDING_DETAIL`) is that label alone, so it stands
-only when the label passes the same screen, and every row's title passes it,
-whatever else the row carries. The texting prompt (`loadLatestVisitFindings`)
+only when the label passes the same screen. There every text field a customer
+reads passes the screen first: a row whose title fails it is dropped, and a
+detail or a recommendation that fails it is left out of its row. A row with no
+text left is then dropped too, the stored "no activity" row of the pest,
+mosquito, termite and rodent lines among them (its fixed detail, "were clear",
+fails the screen). The texting prompt (`loadLatestVisitFindings`)
 and the voice relay (`get_service_report`) run `provenFindingRows` too, after
 their own rule that a row needs a detail or a recommendation, and cut to their
 limits (5 and 6) after the filters.
@@ -3055,7 +3059,13 @@ that root shows the state the render's key was computed under
 built in the other state (a rolling restart's overlap), or by a page bundle or
 server from before this key, never matches: the render times out and nothing
 is stored. Every other record renders the same in both states and waits for
-the report root alone.
+the report root alone. A record that carries the technician's own note
+(`carriesReportNote`; its PDF key has `-rn`) waits the same way for its note
+state: in `mode=pdf` its payload also carries `reportNote: 'shown' | 'withheld'`
+(`reportNoteRenderState`: `shown` when the summary is the note,
+`summaryIsOwnNote`), the PDF document shows it on its root (`data-report-note`),
+and both providers print only once that root shows the state of the caller's
+own build. No other record, and no other mode, carries the key.
 
 The technician's own note (owner 2026-11-19, the report speed plan; reader
 `visitReportCustomerCopy`, `technician-report-copy.js`): a completed visit may
@@ -3092,10 +3102,12 @@ and each value passes `customerCopyViolations` as it renders. Completion writes
 merged `protocolActionsCompleted` on every visit. `findings` drops a row with a
 bare title (no detail, no recommendation; text of only spaces counts as none),
 a stored row whose only text is the stock detail unless its label passes
-`customerCopyViolations`, and any row whose title fails that screen
-(`provenFindingRows`, as in the readers above),
-and the render adds no "no activity" row: the completion writes that row from
-the merged lists. The lawn write gate's report build reads stored notes that
+`customerCopyViolations`, and any row whose title fails that screen; a detail
+or a recommendation that fails it is left out of its row, so a row with no text
+left drops, the stored "no activity" row of the pest, mosquito, termite and
+rodent lines among them (`provenFindingRows`, as in the readers above).
+The render adds no "no activity" row of its own either: the form's lists
+being empty proves nothing beside a note. The lawn write gate's report build reads stored notes that
 cannot be read as stored, never an object it rebuilt around its frozen facts,
 so it reads them as the live report does. The PDF
 key hashes the summary as it prints, and on such a record it always carries
