@@ -443,6 +443,7 @@ module.exports = {
   seatsToSqft,
   resolveViaDbprLicense,
   loadDistrictRows,
+  defaultFetchText,
   isEligibleDineInLicense,
   peekDistrictRows,
   warmDistrictRowsInBackground,
