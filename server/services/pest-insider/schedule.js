@@ -7,72 +7,56 @@
  * nothing: no email, no newsletter_sends row, no admin notification. The send path comes
  * in the next PR and reads these rows.
  *
- * Calendar dates here are 'YYYY-MM-DD' strings. They are computed with UTC date math on
- * the year, month and day numbers alone, so the machine's time zone and daylight saving
- * can never move a date. Only todayET() looks at a clock, and it asks the ET helper.
- *
- * Issue Thursdays have a day of month of 1-7 (the 1st Thursday) or 15-21 (the 3rd), which
- * is the same rule the table's CHECK enforces.
+ * Calendar dates here are 'YYYY-MM-DD' strings. The date math is the shared ET helpers in
+ * utils/datetime-et.js (validCalendarDate, etNthWeekdayOfMonth, addETDays, etDateString);
+ * this module keeps only the 1st-and-3rd-Thursday rule, which the table's CHECK also enforces.
  */
 'use strict';
 
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, addETDays, etNthWeekdayOfMonth, validCalendarDate } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
 
 /** The last six issues' picks keep a fact or species from repeating (plan.js RECENT_WINDOW). */
 const HISTORY_SIZE = 6;
 /** Rows that count as "an issue was built or sent" when looking back. */
 const USED_STATUSES = Object.freeze(['shadow', 'drafted', 'scheduled', 'sent']);
+/** etParts().dayOfWeek numbering: Sunday = 0. */
 const THURSDAY = 4;
+/** At most this many failed post probes are kept in a row's diagnostics. */
+const MAX_PROBE_FAILURES = 10;
 
-const pad = (n) => String(n).padStart(2, '0');
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+// Noon UTC on a calendar date is that same date in ET, clear of DST seams (the datetime-et convention).
+const atNoonUTC = (dateET) => new Date(`${dateET}T12:00:00Z`);
 
-function partsOf(dateET) {
-  if (typeof dateET !== 'string' || !DATE_ONLY.test(dateET)) throw new Error(`pest-insider: "${dateET}" is not a YYYY-MM-DD date`);
-  const [year, month, day] = dateET.split('-').map(Number);
-  const d = new Date(Date.UTC(year, month - 1, day));
-  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) {
-    throw new Error(`pest-insider: ${dateET} is not a real calendar date`);
-  }
-  return { year, month, day, weekday: d.getUTCDay() };
+function calendarDate(value) {
+  const date = validCalendarDate(value);
+  if (!date) throw new Error(`pest-insider: "${value}" is not a real calendar date (YYYY-MM-DD)`);
+  return date;
 }
 
-const format = (year, month, day) => `${year}-${pad(month)}-${pad(day)}`;
-
-/** The two issue dates of a month: its 1st and 3rd Thursday. */
+/** The two issue dates of a month (1-based; 13 is next January): its 1st and 3rd Thursday. */
 function issueDatesInMonth(year, month) {
-  const firstWeekday = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
-  const firstThursday = 1 + ((THURSDAY - firstWeekday + 7) % 7);
-  return [format(year, month, firstThursday), format(year, month, firstThursday + 14)];
+  return [1, 3].map((nth) => etDateString(etNthWeekdayOfMonth(year, month, nth, THURSDAY)));
 }
 
 function isIssueDate(dateET) {
-  const { year, month, day, weekday } = partsOf(dateET);
-  return weekday === THURSDAY && issueDatesInMonth(year, month).includes(format(year, month, day));
+  const date = calendarDate(dateET);
+  const [year, month] = date.split('-').map(Number);
+  return issueDatesInMonth(year, month).includes(date);
 }
 
-/** The first issue date on or after `fromDateET`. */
+/** The first issue date on or after `fromDateET`: this month's, or next month's 1st Thursday. */
 function nextIssueDate(fromDateET) {
-  const { year, month } = partsOf(fromDateET);
-  for (let offset = 0; offset < 3; offset += 1) {
-    const monthIndex = month - 1 + offset;
-    const dates = issueDatesInMonth(year + Math.floor(monthIndex / 12), (monthIndex % 12) + 1);
-    const next = dates.find((d) => d >= fromDateET);
-    if (next) return next;
-  }
-  throw new Error('pest-insider: no issue date found'); // unreachable: every month has two
+  const from = calendarDate(fromDateET);
+  const [year, month] = from.split('-').map(Number);
+  return [...issueDatesInMonth(year, month), ...issueDatesInMonth(year, month + 1)].find((d) => d >= from);
 }
 
 /** The calendar date today in America/New_York. */
 const todayET = (now = new Date()) => etDateString(now);
 
 /** The calendar date after `dateET`. */
-function nextDay(dateET) {
-  const { year, month, day } = partsOf(dateET);
-  const d = new Date(Date.UTC(year, month - 1, day + 1));
-  return format(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
-}
+const nextDay = (dateET) => etDateString(addETDays(atNoonUTC(calendarDate(dateET)), 1));
 
 /**
  * What the last six issues before `issueDate` used, oldest first, as the planner expects.
@@ -96,9 +80,32 @@ async function recentHistory(issueDate, { database } = {}) {
   };
 }
 
+/**
+ * The fetch the post check uses, wrapped to note each probe the website did not answer (a network
+ * error, a timeout, a 5xx or a 429). The post check reads all of those as "not live"; the note lets
+ * a skipped row tell "the website did not answer" apart from "the post is gone".
+ */
+function recordingFetch(fetchImpl = globalThis.fetch) {
+  const failures = [];
+  const probe = async (url, options) => {
+    try {
+      const res = await fetchImpl(url, options);
+      if (res.status >= 500 || res.status === 429) failures.push(`${url} ${res.status}`);
+      return res;
+    } catch (err) {
+      failures.push(`${url} ${(err && err.name) || 'Error'}`);
+      throw err;
+    }
+  };
+  return { probe, failures };
+}
+
 // The row for one planned issue. Bodies are never stored here: the send path rebuilds the issue.
-function rowFor(issueDate, built, now) {
+function rowFor(issueDate, built, now, probeFailures) {
   const { ok, reason, issue, diagnostics = {} } = built;
+  const recorded = probeFailures.length
+    ? { ...diagnostics, postCheckFailures: probeFailures.slice(0, MAX_PROBE_FAILURES), postCheckFailureCount: probeFailures.length }
+    : diagnostics;
   return {
     issue_date: issueDate,
     status: ok ? 'shadow' : 'skipped',
@@ -108,39 +115,57 @@ function rowFor(issueDate, built, now) {
     subject: ok ? issue.subject : null,
     preview: ok ? issue.preview : null,
     reason: reason || null,
-    diagnostics: JSON.stringify(diagnostics),
+    diagnostics: JSON.stringify(recorded),
     built_at: now,
   };
 }
 
+// Writes this tick's row. A first build inserts (a racing tick's row wins). A retry replaces the
+// earlier row only while it is still 'skipped', so a row the send path has moved on is never touched.
+async function writeRow(db, existing, row, now) {
+  if (existing) {
+    const updated = await db('pest_insider_issues').where({ id: existing.id, status: 'skipped' }).update({ ...row, updated_at: now });
+    return Number(updated) > 0;
+  }
+  const inserted = await db('pest_insider_issues').insert(row).onConflict('issue_date').ignore().returning('id');
+  return Array.isArray(inserted) ? inserted.length > 0 : true;
+}
+
 /**
- * Plan and build tomorrow's issue (when tomorrow is an issue date) and record it. Safe to
- * call again the same day: a date that already has a row is left alone.
- * @returns {Promise<{ skipped: true, reason: string } | { skipped: false, issueDate: string, status: string, reason: string|null, inserted: boolean }>}
+ * Plan and build tomorrow's issue (when tomorrow is an issue date) and record it. Safe to call
+ * again the same day: a built row is left alone, and a skipped one is built again (the 1:00 PM
+ * catch-up retries an issue the 7:00 AM tick refused, for example during a website outage).
+ * @returns {Promise<{ skipped: true, reason: string } | { skipped: false, issueDate: string, status: string, reason: string|null, written: boolean, retried: boolean }>}
  */
 async function runShadowIssue({ now = new Date(), fetchImpl, database } = {}) {
   const issueDate = nextDay(todayET(now));
   if (!isIssueDate(issueDate)) return { skipped: true, reason: 'not_build_day' };
 
   const db = database || require('../../models/db');
-  if (await db('pest_insider_issues').where({ issue_date: issueDate }).first('id')) {
-    return { skipped: true, reason: 'already_built' };
-  }
+  const existing = await db('pest_insider_issues').where({ issue_date: issueDate }).first('id', 'status');
+  if (existing && existing.status !== 'skipped') return { skipped: true, reason: 'already_built' };
 
   // Lazy: the builder pulls the fact bank, renderer and validator; the scheduler should not load them at boot.
   const { buildIssue } = require('./index');
   const { checkLivePosts } = require('./posts');
   const logger = require('../logger');
 
-  const livePostFactIds = await checkLivePosts(fetchImpl ? { fetchImpl } : {});
+  const { probe, failures } = recordingFetch(fetchImpl);
+  const livePostFactIds = await checkLivePosts({ fetchImpl: probe });
   const recent = await recentHistory(issueDate, { database: db });
   const built = buildIssue({ sendDate: issueDate, recent, recheckedFactIds: [], livePostFactIds, liveToolUrls: [] });
-  const row = rowFor(issueDate, built, now);
+  const row = rowFor(issueDate, built, now, failures);
+  const written = await writeRow(db, existing, row, now);
 
-  const inserted = await db('pest_insider_issues').insert(row).onConflict('issue_date').ignore().returning('id');
-  const wasInserted = Array.isArray(inserted) ? inserted.length > 0 : true;
-  logger.info(`[pest-insider] shadow issue ${issueDate}: ${row.status}${row.reason ? ` (${row.reason})` : ''} fact=${row.fact_id || '-'} species=${row.species_slug || '-'}${wasInserted ? '' : ' (row already existed)'}`);
-  return { skipped: false, issueDate, status: row.status, reason: row.reason, inserted: wasInserted };
+  const notes = [
+    row.reason ? `(${row.reason})` : null,
+    `fact=${row.fact_id || '-'} species=${row.species_slug || '-'}`,
+    failures.length ? `post probes failed=${failures.length}` : null,
+    existing ? 'retry of a skipped row' : null,
+    written ? null : '(row not written: another tick got there first)',
+  ].filter(Boolean).join(' ');
+  logger.info(`[pest-insider] shadow issue ${issueDate}: ${row.status} ${notes}`);
+  return { skipped: false, issueDate, status: row.status, reason: row.reason, written, retried: Boolean(existing) };
 }
 
 module.exports = {

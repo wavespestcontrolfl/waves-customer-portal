@@ -5803,9 +5803,9 @@ function initScheduledJobs() {
   // WEDNESDAYS 7:00AM + 1:00PM — Pest Insider shadow planner. Issues go out on the 1st and 3rd
   // Thursday of the month; the day before, this plans and builds the issue with the real builder
   // and records the result in pest_insider_issues (status shadow, or skipped with the reason).
-  // Any other Wednesday it does nothing. The 1:00 PM run is the catch-up for a missed or failed
-  // 7:00 AM tick: a date that already has a row is left alone. It SENDS NOTHING: no email, no
-  // newsletter_sends row, no bell. The send path comes in the next PR and reads these rows.
+  // Any other Wednesday it does nothing. The 1:00 PM run is the catch-up for a missed, failed or
+  // refused 7:00 AM tick: a built row is left alone, a skipped one is built again. It SENDS NOTHING:
+  // no email, no newsletter_sends row, no bell. The send path comes in the next PR and reads these rows.
   // =========================================================================
   for (const expression of ['0 7 * * 3', '0 13 * * 3']) {
     cron.schedule(expression, async () => {
