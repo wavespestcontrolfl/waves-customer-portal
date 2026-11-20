@@ -46,7 +46,7 @@ function makeQuery(rows = []) {
 }
 
 describe('findConflictingVisits — travel option (GATE_SLOT_TRAVEL_GAP)', () => {
-  const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
+  const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES'];
   const saved = {};
   beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
   beforeEach(() => {
@@ -123,7 +123,7 @@ describe('findConflictingVisits — travel option (GATE_SLOT_TRAVEL_GAP)', () =>
 
   test('gate on + travel → a live hold in front of a far committed stop does not shadow it', async () => {
     process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-    const FAR_SOUTH = { lat: 27.20, lng: -82.545 }; // ~67 modeled minutes from Palmetto
+    const FAR_SOUTH = { lat: 27.155, lng: -82.545 }; // ~67 modeled minutes from Palmetto
     const q = makeQuery([
       { id: 'far', customer_id: 'c9', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60, ...FAR_SOUTH },
       { id: 'hold', customer_id: null, reservation_expires_at: '2099-01-01T00:00:00Z', window_start: '10:15:00', window_end: '11:00:00', estimated_duration_minutes: 45, ...PALMETTO },

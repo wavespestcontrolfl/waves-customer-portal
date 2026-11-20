@@ -184,7 +184,9 @@
       "h1": "Hello {first}, your rodent exclusion quote is ready!",
       "sub": "Every entry point sealed with the right material, priced from your home’s roofline and access points — approve online and pick a day. Licensed & insured."
     },
-    "screeningBullet": "Vent screening on dryer, attic, gable, and soffit vents"
+    "screeningBullet": "Vent screening on dryer, attic, gable, and soffit vents",
+    "reentryBullet": "Includes a 1-year re-entry guarantee: if a rodent gets back in through the work we sealed, Waves reseals and traps at no extra charge.",
+    "termsReentry": "Pay on service day. Renew the guarantee yearly for ${renewal}."
   },
   "rodent_trapping": {
     "outcome": "The fastest way to drop an active interior population — we set the traps, come back to check and reset them, then hand off to exclusion.",

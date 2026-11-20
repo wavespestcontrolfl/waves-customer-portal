@@ -100,9 +100,10 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
   if (!copy.ok) return { ok: false, reason: copyFailReason(copy), issue: null, diagnostics };
 
   const issue = renderIssue({
+    sendDate: dateET,
     subject: copy.subject,
     preview: copy.preview,
-    lead: { headline: copy.headline, sentences: copy.lead.map((text) => ({ text })), postUrl: post },
+    lead: { headline: copy.headline, sentences: copy.lead.map((text) => ({ text })), postUrl: post, factId: leadFact.id },
     idItem: { text: copy.idText, species: idItem },
   });
 

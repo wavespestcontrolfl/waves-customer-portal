@@ -4,7 +4,7 @@
  *
  * Read-only: only SELECTs. It runs the policy in shadow mode with no cursor and no audit record, and prints how many
  * open bell alerts have had no new activity for 72 hours and would be marked done, by category. Counts only; no alert
- * text. Ignores GATE_ALERT_QUIET_FALL_OFF (it is a preview).
+ * text.
  *
  * Run: node server/scripts/quiet-fall-off-dry-run.js
  */

@@ -159,7 +159,7 @@ describe('opts.repairOnly excludes canonicalization entirely, even with the gate
   // day the nightly band hasn't reached yet. Canonicalization only ever
   // runs from the nightly band pass or the cleanup script's own
   // canonicalizeStale run — neither sets opts.repairOnly.
-  const repairGateEnv = ['GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION', 'GATE_ROUTE_REORDER'];
+  const repairGateEnv = ['GATE_ROUTE_REORDER_REPAIR', 'GATE_ROUTE_REORDER'];
   beforeEach(() => {
     for (const g of repairGateEnv) process.env[g] = 'true';
     process.env.GATE_ROUTE_REORDER_STALE_ORDER = 'true';
@@ -732,7 +732,7 @@ describe('the baseline is certified with Google\'s real legs when it IS Google\'
     totalDurationSeconds: 600,
     source: 'google_routes_api',
   });
-  const FIT_GATES = ['GATE_ROUTE_REORDER_WINDOW_FIT', 'GATE_DRIVE_TIME_CALIBRATION'];
+  const FIT_GATES = ['GATE_ROUTE_REORDER_WINDOW_FIT'];
   afterEach(() => { for (const g of FIT_GATES) delete process.env[g]; });
 
   test('window-fit fallback OFF: Google\'s legs rejected the identical order — the baseline is never written on legless travel', async () => {

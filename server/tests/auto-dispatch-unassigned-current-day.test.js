@@ -24,13 +24,12 @@ jest.mock('../services/rebooker', () => ({
 
 const { computeCurrentPlacement } = require('../services/auto-dispatch/candidate-slots');
 
-const ENV = Object.fromEntries(['GATE_AUTO_DISPATCH_SHARED_MODEL', 'GATE_TECH_WORK_DAYS', 'GATE_TECH_START_POINTS', 'GATE_DRIVE_TIME_CALIBRATION']
+const ENV = Object.fromEntries(['GATE_AUTO_DISPATCH_SHARED_MODEL', 'GATE_TECH_WORK_DAYS', 'GATE_TECH_START_POINTS']
   .map((k) => [k, process.env[k]]));
 beforeEach(() => {
   process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
   delete process.env.GATE_TECH_WORK_DAYS;
   delete process.env.GATE_TECH_START_POINTS;
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
 });
 afterAll(() => {
   for (const [k, v] of Object.entries(ENV)) {

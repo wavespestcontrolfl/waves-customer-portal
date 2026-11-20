@@ -1,9 +1,19 @@
 // Local editor recovery only. Gmail drafts and the server's SMS approval queue
 // have different owners and send semantics; neither stores unsent portal edits.
+import { registerReloadHold } from "./reloadHolds";
+
 const STORAGE_KEY = "waves_admin_email_drafts_v1";
 const emptyDrafts = () => ({ compose: { to: "", subject: "", body: "" }, replies: {} });
 let activeSession = null;
 const warnBeforeDraftUnload = (event) => { event.preventDefault(); event.returnValue = ""; };
+// While the warning is on, an automatic reload of an out-of-date tab waits too.
+let unloadWarningOn = false;
+registerReloadHold("email-draft", () => unloadWarningOn);
+function setUnloadWarning(on) {
+  unloadWarningOn = on;
+  if (on) window.addEventListener("beforeunload", warnBeforeDraftUnload);
+  else window.removeEventListener("beforeunload", warnBeforeDraftUnload);
+}
 
 const UNRESOLVED_SEND_STATUSES = new Set(["running", "outcome_unknown", "provider_accepted"]);
 
@@ -15,13 +25,12 @@ function syncUnloadWarning(session) {
   // the attempt is reconciled, not just while the request is in flight.
   const unresolvedSend = Object.values(session.sending).some(Boolean)
     || Object.values(session.attempts).some((attempt) => UNRESOLVED_SEND_STATUSES.has(attempt?.status));
-  if (unsavedText || unresolvedSend) window.addEventListener("beforeunload", warnBeforeDraftUnload);
-  else window.removeEventListener("beforeunload", warnBeforeDraftUnload);
+  setUnloadWarning(unsavedText || unresolvedSend);
 }
 
 export function loadEmailDrafts(userId) {
   if (activeSession?.userId === userId) return activeSession;
-  window.removeEventListener("beforeunload", warnBeforeDraftUnload);
+  setUnloadWarning(false);
   let drafts = emptyDrafts();
   let attempts = {};
   try {
@@ -111,7 +120,7 @@ const SCHEDULE_STATE_PREFIXES = ["waves_email_schedule_uncertain:"];
 
 export function clearEmailDrafts() {
   activeSession = null;
-  window.removeEventListener("beforeunload", warnBeforeDraftUnload);
+  setUnloadWarning(false);
   try {
     sessionStorage.removeItem(STORAGE_KEY);
     for (const key of Object.keys(sessionStorage)) {

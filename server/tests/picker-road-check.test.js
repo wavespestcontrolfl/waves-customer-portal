@@ -135,7 +135,7 @@ describe('createPickerTravel', () => {
     ]);
     expect(asked.traffic).toEqual([`${DATE}@660`, `${plus(1)}@540`, `${plus(1)}@720`, `${plus(1)}@960`]);
     expect(asked.plain).toEqual([]);
-    expect(travel.lookup(leg(plus(1), 18 * 60 + 30))).toEqual({ minutes: 17, source: 'google_traffic', reason: null });
+    expect(travel.lookup(leg(plus(1), 18 * 60 + 30))).toEqual({ minutes: 21, source: 'google_traffic', reason: null });
     expect(reserveRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 4, plain: 0 });
   });
 
@@ -146,8 +146,8 @@ describe('createPickerTravel', () => {
     await travel.preload([leg(DATE, 10 * 60), leg(DATE, 9 * 60 + 30)]);
     expect(asked.traffic).toEqual([`${DATE}@660`]);
     expect(reserveRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 1, plain: 0 });
-    expect(travel.lookup(leg(DATE, 10 * 60))).toEqual({ minutes: 17, source: 'google_traffic', reason: null });
-    expect(travel.lookup(leg(DATE, 9 * 60 + 30))).toEqual({ minutes: 17, source: 'google_traffic', reason: null });
+    expect(travel.lookup(leg(DATE, 10 * 60))).toEqual({ minutes: 21, source: 'google_traffic', reason: null });
+    expect(travel.lookup(leg(DATE, 9 * 60 + 30))).toEqual({ minutes: 21, source: 'google_traffic', reason: null });
   });
 
   test('the next days: one road time without traffic per pair of places, whatever the hour', async () => {
@@ -156,7 +156,7 @@ describe('createPickerTravel', () => {
     expect(asked.plain).toHaveLength(1);
     expect(asked.traffic).toEqual([]);
     expect(reserveRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 0, plain: 1 });
-    expect(travel.lookup(leg(plus(4), 17 * 60))).toEqual({ minutes: 14, source: 'google_road', reason: null });
+    expect(travel.lookup(leg(plus(4), 17 * 60))).toEqual({ minutes: 18, source: 'google_road', reason: null });
   });
 
   test('later days are never asked: the model', async () => {
@@ -259,7 +259,7 @@ describe('createPickerTravel', () => {
     await save.travel.preload([leg(plus(1), 9 * 60), leg(plus(3), 9 * 60)]);
     expect(reserveRoadSpend).not.toHaveBeenCalled();
     expect(save.asked).toEqual({ traffic: [], plain: [] });
-    expect(save.travel.lookup(leg(plus(1), 9 * 60))).toMatchObject({ minutes: 17, source: 'google_traffic' });
+    expect(save.travel.lookup(leg(plus(1), 9 * 60))).toMatchObject({ minutes: 21, source: 'google_traffic' });
     // A drive no picker looked up keeps the model.
     expect(save.travel.lookup(leg(plus(3), 9 * 60))).toMatchObject({ source: 'conservative_model' });
   });
@@ -300,8 +300,8 @@ describe('createPickerTravel', () => {
     const today = [leg(DATE, 10 * 60 + 30)];
     await Promise.all([a.travel.preload(today), b.travel.preload(today)]);
     expect(a.asked.traffic.length + b.asked.traffic.length).toBe(1);
-    expect(b.travel.lookup(today[0])).toEqual({ minutes: 17, source: 'google_traffic', reason: null });
-    expect(a.travel.lookup(today[0])).toEqual({ minutes: 17, source: 'google_traffic', reason: null });
+    expect(b.travel.lookup(today[0])).toEqual({ minutes: 21, source: 'google_traffic', reason: null });
+    expect(a.travel.lookup(today[0])).toEqual({ minutes: 21, source: 'google_traffic', reason: null });
   });
 
   test('concurrent checks cannot oversubscribe the request budget', async () => {
@@ -322,17 +322,14 @@ describe('createPickerTravel', () => {
     const again = make();
     await again.travel.preload(legs);
     expect(again.asked).toEqual({ traffic: [], plain: [] });
-    expect(again.travel.lookup(legs[0])).toMatchObject({ minutes: 17, source: 'google_traffic' });
-    expect(again.travel.lookup(legs[2])).toMatchObject({ minutes: 14, source: 'google_road' });
+    expect(again.travel.lookup(legs[0])).toMatchObject({ minutes: 21, source: 'google_traffic' });
+    expect(again.travel.lookup(legs[2])).toMatchObject({ minutes: 18, source: 'google_road' });
   });
 });
 
-// Drive clock (owner 2026-10-28; on whenever GATE_DRIVE_TIME_CALIBRATION is
-// on): a Google leg carries the park minutes when it is READ, once, on every
+// Drive clock (owner 2026-10-28): a Google leg carries the park minutes when it is READ, once, on every
 // path; the caches keep Google's own minutes.
 describe('drive clock park minutes on Google legs', () => {
-  // The drive clock's one switch: the calibrated drive model.
-  const CLOCK = 'GATE_DRIVE_TIME_CALIBRATION';
   const FROM = { lat: '27.5000', lng: '-82.4000' };
   const TO = { lat: 27.52, lng: -82.41 };
   const plus = (n) => {
@@ -370,16 +367,10 @@ describe('drive clock park minutes on Google legs', () => {
     };
   };
 
-  // Each test starts with the calibrated model (and so the drive clock) off
-  // and turns it on itself.
-  const savedCalibration = process.env[CLOCK];
   beforeEach(() => {
     process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';
-    delete process.env[CLOCK];
   });
   afterEach(() => {
-    if (savedCalibration === undefined) delete process.env[CLOCK];
-    else process.env[CLOCK] = savedCalibration;
     _test.roadCache.clear();
     _test.plainCache.clear();
     delete process.env.GOOGLE_MAPS_API_KEY;
@@ -388,24 +379,18 @@ describe('drive clock park minutes on Google legs', () => {
     delete process.env.PICKER_ROAD_PLAIN_DAYS;
   });
 
-  test('both modes: raw off, +4 on, exactly once however often it is read, caches stay raw', async () => {
+  test('both modes: +4, exactly once however often it is read, caches stay raw', async () => {
     const travel = createPickerTravel({ spender: 'staff-1', factories: fakeAnswering(), now: () => NOW.getTime() });
     await travel.preload([leg(plus(1)), leg(plus(3))]);
-    expect(travel.lookup(leg(plus(1)))).toMatchObject({ minutes: 17, source: 'google_traffic' });
-    process.env[CLOCK] = 'true';
     for (let i = 0; i < 3; i += 1) {
       expect(travel.lookup(leg(plus(1)))).toMatchObject({ minutes: 21, source: 'google_traffic' });
       expect(travel.lookup(leg(plus(3)))).toMatchObject({ minutes: 18, source: 'google_road' });
     }
     expect([..._test.roadCache.values()].map((v) => v.minutes)).toEqual([17]);
     expect([..._test.plainCache.values()].map((v) => v.minutes)).toEqual([14]);
-    delete process.env[CLOCK];
-    expect(travel.lookup(leg(plus(1))).minutes).toBe(17);
-    expect(travel.lookup(leg(plus(3))).minutes).toBe(14);
   });
 
   test('through the real travel source: Google 11 reads 15 once, and the cache holds 11', async () => {
-    process.env[CLOCK] = 'true';
     const travel = createPickerTravel({ spender: 'staff-1', factories: realSources(matrix('601s')), now: () => NOW.getTime() });
     await travel.preload([leg(plus(1)), leg(plus(3))]);
     expect(travel.lookup(leg(plus(1)))).toMatchObject({ minutes: 15, source: 'google_traffic' });
@@ -418,21 +403,17 @@ describe('drive clock park minutes on Google legs', () => {
     expect(again.lookup(leg(plus(1))).minutes).toBe(15);
     process.env.DRIVE_CLOCK_PARK_MINUTES = '2';
     expect(again.lookup(leg(plus(1))).minutes).toBe(13);
-    delete process.env[CLOCK];
-    expect(again.lookup(leg(plus(1))).minutes).toBe(11);
   });
 
   test('a cache-only read adds it once', async () => {
     await createPickerTravel({ spender: 'staff-1', factories: realSources(matrix('601s')), now: () => NOW.getTime() })
       .preload([leg(plus(1))]);
-    process.env[CLOCK] = 'true';
     const save = createPickerTravel({ spender: 'staff-1', factories: realSources(matrix('601s')), now: () => NOW.getTime(), cacheOnly: true });
     await save.preload([leg(plus(1))]);
     expect(save.lookup(leg(plus(1)))).toMatchObject({ minutes: 15, source: 'google_traffic' });
   });
 
   test('a model leg (later day, or unbought) never gets the park minutes', () => {
-    process.env[CLOCK] = 'true';
     const travel = createPickerTravel({ spender: 'staff-1', factories: fakeAnswering(), now: () => NOW.getTime() });
     // Later than the road days, and a road day nobody bought.
     expect(travel.lookup(leg(plus(20)))).toMatchObject({ minutes: 99, source: 'conservative_model' });
@@ -440,7 +421,6 @@ describe('drive clock park minutes on Google legs', () => {
   });
 
   test('a same-place Google leg stays 0', async () => {
-    process.env[CLOCK] = 'true';
     const here = { date: plus(1), from: TO, to: TO, departureMin: 9 * 60 };
     const travel = createPickerTravel({ spender: 'staff-1', factories: realSources(matrix('0s')), now: () => NOW.getTime() });
     await travel.preload([here]);
@@ -464,13 +444,7 @@ describe('drive clock park minutes on Google legs', () => {
     beforeEach(() => { process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true'; });
     afterEach(() => { delete process.env.GATE_BEST_TIMES_ROAD_TIMES; });
 
-    test('off: Google minutes as they came', async () => {
-      const [priced] = await price();
-      expect(priced).toMatchObject({ drive_in_minutes: 20, detour_minutes: 18, drive_source: 'google' });
-    });
-
-    test('on: +4 on each leg once, on a fresh lookup and again on the cached read', async () => {
-      process.env[CLOCK] = 'true';
+    test('+4 on each leg once, on a fresh lookup and again on the cached read', async () => {
       const [fresh] = await price();
       expect(fresh).toMatchObject({ drive_in_minutes: 24, detour_minutes: 18 + 4, drive_source: 'google' });
       expect([..._test.roadCache.values()].map((v) => v.minutes).sort()).toEqual([10, 12, 20]);

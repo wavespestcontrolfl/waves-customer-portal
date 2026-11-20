@@ -5,6 +5,7 @@ import { Badge, Button, Card, CardBody, Textarea } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { uuid } from "../../utils/ibSession";
 import { formatETDateTime } from "../../lib/timezone";
+import { MessageMediaV2 } from "../../components/admin/MessageMediaV2";
 
 // Communications -> Portal tab. Lists what customers asked
 // for inside the customer portal and nobody answered: portal chat hand-offs and
@@ -191,6 +192,7 @@ function WholeThread({ threadId }) {
         <div key={m.id}>
           <div className="text-14 text-ink-tertiary">{m.direction === "outbound" ? (m.ai ? "Waves AI" : "Waves") : "Customer"} · {formatWhen(m.createdAt)}</div>
           <div className="text-14 text-zinc-900 whitespace-pre-wrap break-words">{m.body}</div>
+          <MessageMediaV2 media={m.photos} />
         </div>
       ))}
       {error && <div role="alert" className="text-14 text-alert-fg">{error}</div>}

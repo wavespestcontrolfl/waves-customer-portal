@@ -17,7 +17,7 @@
  *
  * A second policy, the quiet one (runAdminAlertQuietPolicy, below the undo section), shares this module's
  * candidates, stamps, registry, writer and cursors: an open bell alert with no new activity for 72 hours is
- * marked done every 10 minutes (own gate GATE_ALERT_QUIET_FALL_OFF, own cron, own cursor key).
+ * marked done every 10 minutes (own cron, own cursor key).
  *
  * Each run expires the rows it judges due and records one audit_log row
  * (admin_alert_retention.expire).
@@ -74,7 +74,6 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { alertQuietFallOffMode } = require('../config/feature-gates');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const AGE_DAYS = 30;
@@ -558,8 +557,7 @@ async function undoRetentionRun({ run, execute = false, conn = db, now = new Dat
 // A second policy of this module, not a second sweep: it reads the same candidates (pageQuery), judges with the same
 // lastActivityMs and ringRiskFor, writes through the same expireBatch (version fence, lock and statement timeouts),
 // keeps its place with the same cursor helpers, and records and undoes like a retention run. What differs is the
-// cadence (its own cron, every 10 minutes, its own runExclusive key and gate GATE_ALERT_QUIET_FALL_OFF:
-// off / shadow / true) and the rules below.
+// cadence (its own cron, every 10 minutes, its own runExclusive key) and the rules below.
 //   - Bell rows only (NOT_ACTIVITY_SQL), never Claude's queue (metadata.claudeQueue / sentToClaude), never a
 //     KEEP_UNTIL_SETTLED_CATEGORIES row.
 //   - Idle more than 72 hours by lastActivityMs: created_at, rungAt, observedAt, lastFailureAt and a Reopen's
@@ -569,7 +567,7 @@ async function undoRetentionRun({ run, execute = false, conn = db, now = new Dat
 //     ring, or text) the minute it closed. The nightly policy caps those; this one cannot, it runs 144 times a day.
 //   - done_by 'quiet-72h' (reopenable and takeable: notification-service REOPENABLE_DONE_BY_SQL), resolution "No
 //     new activity for 3 days", read state untouched like every retention close. At most QUIET_TICK_CAP closes a
-//     tick. shadow counts and logs, writes nothing.
+//     tick. A shadow pass (the dry-run script) counts and logs, writes nothing.
 //   - A run is recorded (audit_log admin_alert_quiet_fall_off.close, and the metadata.retention stamp on each row)
 //     only when it closed at least one row, so undo works by run or by time (reopenQuietFallOff) and the log does
 //     not fill with 144 empty runs a day.
@@ -621,15 +619,14 @@ const QUIET_MODES = {
 };
 
 /**
- * One pass of the quiet policy. Returns { skipped: true, reason: 'gate_off' } or the summary.
- * `io` swaps the database edges (tests and the dry-run script).
+ * One pass of the quiet policy. Returns the summary. `mode` is 'true' (closes) or 'shadow' (the dry-run script's
+ * preview). `io` swaps the database edges (tests and the dry-run script).
  */
 async function runAdminAlertQuietPolicy({
-  now = new Date(), mode = alertQuietFallOffMode(), conn = db, scope = null, io = defaultQuietIo(conn, scope),
+  now = new Date(), mode = 'true', conn = db, scope = null, io = defaultQuietIo(conn, scope),
   batchSize = BATCH_SIZE, maxBatches = MAX_BATCHES, cap = QUIET_TICK_CAP,
 } = {}) {
   const handler = QUIET_MODES[mode];
-  if (!handler) return { skipped: true, reason: 'gate_off' };
   const runId = now.toISOString();
   const budget = handler.budget(cap);
   const summary = {

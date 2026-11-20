@@ -1,4 +1,4 @@
-// The lead call-back reminder banner (GATE_LEAD_CALL_REMINDER, owner 2026-11-05 "remind"): a "Missed call request" or
+// The lead call-back reminder banner (owner 2026-11-05 "remind"): a "Missed call request" or
 // night call-back bell still open one business hour after its latest event sends ONE banner, only while nobody has
 // reached the lead, only 8 AM to 8 PM ET. The database is a stub here: the rows, the fenced stamp's result and the
 // open check are set per test.
@@ -90,25 +90,9 @@ const run = async (now = NOW) => {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  process.env.GATE_LEAD_CALL_REMINDER = 'true';
   Object.assign(mockState, { rows: [row('n-1')], leads: [{ id: LEAD, customer_id: CUST, phone: '+19415550100', status: 'new', deleted_at: null }], stampResult: 1, open: {}, estimate: null, calls: [], failLeads: false, failOpen: false });
   Object.assign(mockBundles, { byId: {}, fail: false });
 });
-afterEach(() => { delete process.env.GATE_LEAD_CALL_REMINDER; });
-
-describe('the gate', () => {
-  test.each([[undefined], [''], ['1'], ['on'], ['TRUE'], ['shadow'], [' true']])('GATE_LEAD_CALL_REMINDER = %j reads and sends nothing', async (value) => {
-    if (value === undefined) delete process.env.GATE_LEAD_CALL_REMINDER; else process.env.GATE_LEAD_CALL_REMINDER = value;
-    expect(require('../config/feature-gates').leadCallReminderLive()).toBe(false);
-    expect(await runLeadCallReminder({ now: NOW })).toEqual({ skipped: true, reason: 'gate_off' });
-    expect(mockState.calls).toEqual([]);
-    expect(triggerNotification).not.toHaveBeenCalled();
-  });
-  test('exactly "true" is live', () => {
-    expect(require('../config/feature-gates').leadCallReminderLive()).toBe(true);
-  });
-});
-
 describe('the clock', () => {
   test.each([
     ['a ring missed at 10:09 AM -> 11:09 AM', est('04', '10:09'), est('04', '11:09')],
@@ -282,7 +266,7 @@ describe('the alert-relevance sweep runs the pass after its closes', () => {
   const { runAdminAlertRelevanceSweep } = require('../services/admin-alert-relevance');
   beforeEach(() => { mockState.rows = []; });
 
-  test('gate on: the pass runs with the sweep\'s time and its count is reported', async () => {
+  test('the pass runs with the sweep\'s time and its count is reported', async () => {
     const spy = jest.spyOn(reminder, 'runLeadCallReminder').mockResolvedValueOnce({ skipped: false, due: 2, reminded: 2, sends: [] });
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(spy).toHaveBeenCalledWith({ now: NOW });
@@ -290,11 +274,9 @@ describe('the alert-relevance sweep runs the pass after its closes', () => {
     spy.mockRestore();
   });
 
-  test('gate off: the pass is never called', async () => {
-    delete process.env.GATE_LEAD_CALL_REMINDER;
-    const spy = jest.spyOn(reminder, 'runLeadCallReminder');
+  test('a pass that reminds nobody adds nothing to the sweep result', async () => {
+    const spy = jest.spyOn(reminder, 'runLeadCallReminder').mockResolvedValueOnce({ skipped: false, due: 0, reminded: 0, sends: [] });
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
-    expect(spy).not.toHaveBeenCalled();
     expect(result).not.toHaveProperty('leadCallReminders');
     spy.mockRestore();
   });
