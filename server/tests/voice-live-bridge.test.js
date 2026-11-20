@@ -68,7 +68,7 @@ function setup({ executeTool, closeReply = true, deps = {} } = {}) {
     now: () => clock,
     executeTool: exec,
     buildInstructions: () => 'INSTRUCTIONS',
-    buildTools: () => [{ type: 'function', name: 'find_slots', description: 'd', parameters: { type: 'object' } }],
+    buildTools: () => [{ type: 'function', name: 'get_availability', description: 'd', parameters: { type: 'object' } }],
     greeting: () => 'Waves, this is Sandy.',
     scrubTurns: (turns) => turns.map((turn) => ({ ...turn })), // the real scrubber has its own test
     db: () => db,
@@ -296,10 +296,11 @@ describe('model audio, barge-in and latency', () => {
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting: no turn yet
     t.advance(5000);
-    t.twilioMedia(); // inputStartWall = now
+    t.twilioMedia();
     t.advance(1500);
-    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'when can you come', start_ms: 0, end_ms: 1200 });
-    t.advance(900); // speech ended at +1200, now is +1500 + 900 = +2400: 1200 ms
+    // session time counts from session.started (t0): speech ended at t0 + 6200
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'when can you come', start_ms: 5000, end_ms: 6200 });
+    t.advance(900); // now t0 + 7400: 1200 ms
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) });
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // only the first counts
     t.twilioStop();
@@ -308,6 +309,20 @@ describe('model audio, barge-in and latency', () => {
     expect(s.turns).toEqual([1200]);
     expect(s.latency_p50_ms).toBe(1200);
     expect(s.latency_max_ms).toBe(1200);
+  });
+
+  test('a late first caller packet does not shift speech timing: it counts from session.started', async () => {
+    const t = setup();
+    await t.ready(); // session time 0 = t0
+    t.advance(3000);
+    t.twilioMedia(); // the first packet arrives 3 s late
+    t.advance(1000);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hi', start_ms: 3500, end_ms: 3900 });
+    t.advance(500); // now t0 + 4500; speech ended at t0 + 3900
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) });
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toEqual([600]);
   });
 
   test('a caller transcript that lands while the model is already talking records no reply delay', async () => {
@@ -337,18 +352,19 @@ describe('tools', () => {
   test('an allowlisted call runs executeTool with a sandbox ctx, then answers with the output and one response.create', async () => {
     const t = setup();
     await t.ready();
-    t.openai.receive(call('c1', 'find_slots', JSON.stringify({ when: 'next Tuesday', zip: '34202' })));
+    t.openai.receive(call('c1', 'get_availability', JSON.stringify({ city: ' Bradenton ', zip: '34202', address_line1: '1 Main St' })));
     await flush();
     expect(t.exec).toHaveBeenCalledTimes(1);
     const [name, input, ctx] = t.exec.mock.calls[0];
-    expect(name).toBe('find_slots');
-    expect(input).toEqual({ when: 'next Tuesday', zip: '34202' });
+    expect(name).toBe('get_availability');
+    // the city alone: a street or ZIP would reach Google's paid geocoder
+    expect(input).toEqual({ city: 'Bradenton' });
     expect(ctx).toMatchObject({ sandbox: true, callSid: CALL_SID, customerId: null, callerVerified: false });
     const tail = t.openai.sent.slice(-2);
     expect(tail[0]).toEqual({ type: 'response.item.create', item: { type: 'function_call_output', call_id: 'c1', output: 'Open times: Tuesday at 9 AM.' } });
     expect(tail[1]).toEqual({ type: 'response.create' });
     // a replayed done event for the same call_id answers nothing twice
-    t.openai.receive(call('c1', 'find_slots', '{}'));
+    t.openai.receive(call('c1', 'get_availability', '{"city":"Bradenton"}'));
     await flush();
     expect(t.exec).toHaveBeenCalledTimes(1);
     expect(t.openai.sent.filter((m) => m.type === 'response.create')).toHaveLength(1);
@@ -357,9 +373,9 @@ describe('tools', () => {
   test('only a completed function_call item is acted on', async () => {
     const t = setup();
     await t.ready();
-    t.openai.receive(call('c2', 'find_slots', '{}', { status: 'in_progress' }));
+    t.openai.receive(call('c2', 'get_availability', '{"city":"Venice"}', { status: 'in_progress' }));
     t.openai.receive({ type: 'response.event', event: { type: 'response.output_item.done', item: { type: 'message', call_id: 'c3', status: 'completed' } } });
-    t.openai.receive({ type: 'response.event', event: { type: 'response.output_item.added', item: { type: 'function_call', call_id: 'c4', name: 'find_slots', arguments: '{}', status: 'completed' } } });
+    t.openai.receive({ type: 'response.event', event: { type: 'response.output_item.added', item: { type: 'function_call', call_id: 'c4', name: 'get_availability', arguments: '{"city":"Venice"}', status: 'completed' } } });
     await flush();
     expect(t.exec).not.toHaveBeenCalled();
     expect(t.openai.types()).not.toContain('response.create');
@@ -368,8 +384,9 @@ describe('tools', () => {
   test.each([
     ['a name outside the allowlist', 'capture_lead', '{"call_summary":"x"}'],
     ['a write tool', 'request_booking', '{}'],
-    ['bad JSON arguments', 'find_slots', '{not json'],
-    ['arguments that are not an object', 'find_slots', '[1,2]'],
+    ['find_slots (its date words go to a paid model)', 'find_slots', '{"when":"tomorrow"}'],
+    ['bad JSON arguments', 'get_availability', '{not json'],
+    ['arguments that are not an object', 'get_availability', '[1,2]'],
   ])('%s gets the refusal text and executeTool is never called', async (_label, name, args) => {
     const t = setup();
     await t.ready();
@@ -393,7 +410,7 @@ describe('tools', () => {
   test('a tool that outlives its bound answers with the refusal', async () => {
     const t = setup({ executeTool: jest.fn(() => new Promise(() => {})), deps: { toolTimeoutMs: 20 } });
     await t.ready();
-    t.openai.receive(call('c6', 'find_slots', '{"when":"tomorrow"}'));
+    t.openai.receive(call('c6', 'get_availability', '{"city":"Venice"}'));
     await waitFor(() => t.openai.sent.some((m) => m.type === 'response.item.create'));
     expect(t.openai.sent.slice(-2)[0].item.output).toBe(TOOL_REFUSAL);
     t.twilioStop();
@@ -401,14 +418,36 @@ describe('tools', () => {
     expect(summaryOf(t).errors).toContain('tool_timeout');
   });
 
-  test('the allowlist is the three read-only tools, converted to the OpenAI function shape', () => {
-    expect(BACKEND_TOOL_NAMES).toEqual(['get_availability', 'find_slots', 'get_services_catalog']);
+  test('the allowlist is two read-only tools in the OpenAI function shape; open times take a city only', () => {
+    expect(BACKEND_TOOL_NAMES).toEqual(['get_availability', 'get_services_catalog']);
     const tools = bridgeMod.buildBackendTools();
     expect(tools.map((x) => x.name)).toEqual(BACKEND_TOOL_NAMES);
     for (const tool of tools) {
       expect(tool).toEqual({ type: 'function', name: tool.name, description: expect.any(String), parameters: expect.objectContaining({ type: 'object' }) });
       expect(tool.input_schema).toBeUndefined();
     }
+    expect(Object.keys(tools[0].parameters.properties)).toEqual(['city']);
+    expect(tools[0].parameters.additionalProperties).toBe(false);
+  });
+
+  test('open times with no city ask for one and run nothing', async () => {
+    const t = setup();
+    await t.ready();
+    t.openai.receive(call('c7', 'get_availability', '{"zip":"34202"}'));
+    await flush();
+    expect(t.exec).not.toHaveBeenCalled();
+    expect(t.openai.sent.slice(-2)[0].item.output).toMatch(/which city/);
+  });
+
+  test('a city outside the service zones gets the trial\'s own text, never an ask for a street or ZIP', async () => {
+    const exec = jest.fn(async () => 'Could not determine the service location. Ask the caller for their street address or ZIP code, then call this tool again.');
+    const t = setup({ executeTool: exec });
+    await t.ready();
+    t.openai.receive(call('c8', 'get_availability', '{"city":"Atlanta"}'));
+    await flush();
+    const out = t.openai.sent.slice(-2)[0].item.output;
+    expect(out).toMatch(/not one this test line can check/);
+    expect(out).not.toMatch(/ZIP/);
   });
 });
 
@@ -466,6 +505,18 @@ describe('finish', () => {
     expect(s.usage_confirmed).toBe(false);
     expect(s).not.toHaveProperty('cost_usd');
     expect(s.errors).toContain('usage_unconfirmed');
+  });
+
+  test('a session OpenAI ends itself (expired) ends the call even while its socket stays open', async () => {
+    const t = setup();
+    await t.ready();
+    t.openai.receive({ type: 'session.closed', reason: 'expired', session: {}, usage: { seconds: 300 } });
+    await waitFor(() => t.update.mock.calls.length > 0);
+    expect(t.twilio.close).toHaveBeenCalled();
+    expect(t.openai.sent.some((m) => m.type === 'session.close')).toBe(false); // already closed: nothing to ask
+    const s = summaryOf(t);
+    expect(s).toMatchObject({ close_reason: 'provider_closed', provider_close_reason: 'expired', usage_seconds: 300, usage_confirmed: true });
+    expect(s.cost_usd).toBe(bridgeMod.callCostUsd(300, 0));
   });
 
   test('an OpenAI socket close or error closes the Twilio socket', async () => {
@@ -627,18 +678,18 @@ describe('spend cap', () => {
     expect(summaryOf(t).errors).toContain('backend_cap');
   });
 
-  test('at the cap a tool call is refused without running, and no response.create is sent', async () => {
+  test('at the cap the response.create that would cross it is never sent, and the call ends', async () => {
     const t = setup();
     await t.ready();
     for (let i = 1; i < bridgeMod.MAX_BACKEND_UNITS; i++) t.openai.receive(delegation(`d${i}`));
-    // the last unit under the cap: this delegation; its tool run would cross it
+    // the last unit under the cap: this delegation; the follow-up response.create would cross it
     t.openai.receive({
       type: 'response.event',
       delegation_id: 'd-last',
-      event: { type: 'response.output_item.done', item: { type: 'function_call', call_id: 'c9', name: 'find_slots', arguments: '{}', status: 'completed' } },
+      event: { type: 'response.output_item.done', item: { type: 'function_call', call_id: 'c9', name: 'get_availability', arguments: '{"city":"Venice"}', status: 'completed' } },
     });
-    await flush();
-    expect(t.exec).not.toHaveBeenCalled();
+    await waitFor(() => t.update.mock.calls.length > 0);
+    expect(t.exec).toHaveBeenCalledTimes(1); // a local read, free
     expect(t.openai.sent.some((m) => m.type === 'response.create')).toBe(false);
     expect(summaryOf(t).errors).toContain('backend_cap');
   });
@@ -653,7 +704,7 @@ describe('instructions', () => {
     // Sandy's own prompt builder output is the unchanged prefix.
     expect(text.startsWith(buildBasePrompt(isContextEnabled(), null, { officeOpen: null }))).toBe(true);
     expect(text.endsWith(bridgeMod.TRIAL_LIMITS)).toBe(true);
-    expect(bridgeMod.TRIAL_LIMITS).toMatch(/cannot book, take a lead, send a text, transfer/);
+    expect(bridgeMod.TRIAL_LIMITS.replace(/\s+/g, ' ')).toMatch(/You cannot search a specific day, book, take a lead, send a text, transfer the call/);
     expect(bridgeMod.TRIAL_LIMITS).toMatch(/call or text the Waves office/);
     expect(bridgeMod.TRIAL_LIMITS).not.toMatch(/will call (them|you) back/);
   });

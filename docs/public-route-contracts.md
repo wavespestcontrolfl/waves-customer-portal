@@ -7907,7 +7907,8 @@ door in the same order: the token must verify for that CallSid, the call_log row
 `metadata.gpt_live` stamp the cell route wrote, the token must be the one that stamp names by digest
 (`stream_token_sha256`; any other valid token for the call is refused), the gate must be on, and the token is then
 burned (one session per token, one token per reservation); any failure destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`. Its tools are a
-read-only allowlist (open appointment times, services list): no booking, lead, text or transfer. The cell route
+read-only allowlist (the soonest open times for a city, by a local service-zone read; the services list): no
+booking, lead, text or transfer, no geocoder and no date-parsing model. The cell route
 reserves one call's worst-case OpenAI cost under an advisory lock before it issues the token (one reservation per
 CallSid), and refuses the call
 when that reservation does not fit under `VOICE_GPT_LIVE_TEST_MAX_USD` (default 5), and on any database error there.

@@ -25,7 +25,26 @@ const logger = require('../logger');
 const OPENAI_LIVE_URL = 'wss://api.openai.com/v1/live/sessions';
 const LIVE_VOICES = Object.freeze(['marin', 'delta']);
 const DEFAULT_VOICE = 'marin';
-const BACKEND_TOOL_NAMES = Object.freeze(['get_availability', 'find_slots', 'get_services_catalog']);
+const BACKEND_TOOL_NAMES = Object.freeze(['get_availability', 'get_services_catalog']);
+// The trial's open-times lookup takes a CITY only. resolveAvailability then
+// places the visit at that service zone's centre (a local service_zones read).
+// A street or ZIP would go to Google's paid geocoder, and find_slots' date
+// words to a paid model: both outside the owner's OpenAI-only spend yes. So
+// the trial offers the soonest open times for a city, and no date search.
+const TRIAL_AVAILABILITY_TOOL = Object.freeze({
+  type: 'function',
+  name: 'get_availability',
+  description: 'Look up the soonest open appointment times for a home in a city in the Waves service area. '
+    + 'Ask the caller which city the home is in first.',
+  parameters: {
+    type: 'object',
+    properties: { city: { type: 'string', description: 'The city the home is in, for example Bradenton, Sarasota or Venice.' } },
+    required: ['city'],
+    additionalProperties: false,
+  },
+});
+const ASK_CITY = 'Ask the caller which city the home is in, then call get_availability again with that city.';
+const CITY_NOT_FOUND = 'That city is not one this test line can check. Ask the caller for the nearest city in the Waves service area.';
 const TOOL_REFUSAL = 'That is not available on this test line.';
 
 const WS_OPEN = 1;
@@ -49,8 +68,8 @@ const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,
 // give no backend input cap and no documented token-usage event, so a backend
 // unit is charged at its worst case: a full 128,000-token GPT-Live context in
 // ($0.0256) plus max_output_tokens 1,024 out ($0.0012), rounded up to $0.03.
-// One unit = one delegation OpenAI starts, one response.create this bridge
-// sends, or one tool run (find_slots can call a model to read the date words).
+// One unit = one delegation OpenAI starts, or one response.create this bridge
+// sends. Tool runs are local reads (see TRIAL_AVAILABILITY_TOOL) and cost nothing.
 const LIVE_USD_PER_MINUTE = 0.05;
 const BACKEND_USD_PER_UNIT = 0.03;
 const BACKEND_USD_PER_INPUT_TOKEN = 0.20 / 1e6;
@@ -78,13 +97,15 @@ function callCostUsd(usageSeconds, backendUnits, tokenUsd = 0) {
 
 const TRIAL_LIMITS = [
   'TRIAL LIMITS (this overrides everything above):',
-  'You are on a test line. You can look up open appointment times and the list of services,',
-  'and nothing else. You cannot book, take a lead, send a text, transfer the call, or look up',
+  'You are on a test line. You can look up the soonest open appointment times for a city in the',
+  'service area, and the list of services, and nothing else. You cannot search a specific day,',
+  'book, take a lead, send a text, transfer the call, or look up',
   'prices or accounts, and nobody will call back from this line. If the caller wants any of those,',
   'say this test line cannot do that, and they can call or text the Waves office.',
 ].join('\n');
 
-const BACKEND_INSTRUCTIONS = 'Use the tools to answer questions about open appointment times and about the services Waves offers. '
+const BACKEND_INSTRUCTIONS = 'Use the tools to answer questions about the soonest open appointment times (ask for the city first) '
+  + 'and about the services Waves offers. '
   + 'Reply in one or two plain sentences, ready to be spoken aloud. Nothing can be booked, saved or sent on this line, '
   + 'and nobody will call back, so ignore any tool text that says to capture a lead, place a booking or promise a call; '
   + 'say the caller can call or text the Waves office.';
@@ -108,13 +129,22 @@ function buildLiveInstructions() {
 // shape. The three allowlisted tools live in TOOLS (the availability pair) and
 // CONTEXT_TOOLS (the services list).
 function buildBackendTools() {
-  const { TOOLS, CONTEXT_TOOLS } = require('./relay-tools');
-  const all = [...TOOLS, ...CONTEXT_TOOLS];
-  return BACKEND_TOOL_NAMES.map((name) => {
-    const tool = all.find((t) => t && t.name === name);
-    if (!tool) throw new Error(`relay tool ${name} not found`);
-    return { type: 'function', name: tool.name, description: tool.description, parameters: tool.input_schema };
-  });
+  const { CONTEXT_TOOLS } = require('./relay-tools');
+  const services = (CONTEXT_TOOLS || []).find((t) => t && t.name === 'get_services_catalog');
+  if (!services) throw new Error('relay tool get_services_catalog not found');
+  return [
+    { ...TRIAL_AVAILABILITY_TOOL, parameters: { ...TRIAL_AVAILABILITY_TOOL.parameters } },
+    { type: 'function', name: services.name, description: services.description, parameters: services.input_schema },
+  ];
+}
+
+// The input the trial passes on: the city alone for open times (never a
+// street or ZIP, see TRIAL_AVAILABILITY_TOOL), nothing for the services list.
+// { reply } answers the model without running anything.
+function trialToolInput(name, input) {
+  if (name !== 'get_availability') return { input: {} };
+  const city = typeof input.city === 'string' ? input.city.trim().slice(0, 60) : '';
+  return city ? { input: { city } } : { reply: ASK_CITY };
 }
 
 function buildSessionStart({ instructions, tools, voice }) {
@@ -213,7 +243,7 @@ class LiveBridge {
     this.startSeen = false; // the Twilio start frame is handled once, whatever it holds
 
     this.startedAt = this.deps.now();
-    this.inputStartWall = null;
+    this.sessionStartWall = null; // when session.started arrived: transcript ms count from here
     this.speechEndWall = null;
     this.awaitingReply = false;
     this.playbackEndsAt = 0;
@@ -299,7 +329,6 @@ class LiveBridge {
   onTwilioMedia(media) {
     // Caller audio is dropped until the model session is confirmed.
     if (!this.ready || typeof media.payload !== 'string' || (media.track && media.track !== 'inbound')) return;
-    if (this.inputStartWall === null) this.inputStartWall = this.deps.now();
     this.toOpenAi({ type: 'session.input_audio.append', audio: media.payload });
   }
 
@@ -373,6 +402,7 @@ class LiveBridge {
 
   onSessionStarted() {
     this.ready = true;
+    this.sessionStartWall = this.deps.now();
     clearTimeout(this.startTimer);
     this.toOpenAi({ type: 'session.commentary.append', delegation_id: null, content: this.deps.greeting() });
   }
@@ -397,7 +427,9 @@ class LiveBridge {
   onInputTranscript(msg) {
     const text = typeof msg.delta === 'string' ? msg.delta : '';
     const t = this.deps.now();
-    const speechEnd = Number.isFinite(msg.end_ms) && this.inputStartWall !== null ? this.inputStartWall + msg.end_ms : null;
+    // start_ms / end_ms count from the start of the Live session, so they map
+    // to wall time from session.started, not from the first caller packet.
+    const speechEnd = Number.isFinite(msg.end_ms) && this.sessionStartWall !== null ? this.sessionStartWall + msg.end_ms : null;
     if (speechEnd !== null) {
       this.speechEndWall = speechEnd;
       this.awaitingReply = true;
@@ -439,6 +471,10 @@ class LiveBridge {
     this.closeReason = typeof msg.reason === 'string' ? msg.reason : this.closeReason;
     this.openaiGone = true;
     if (this.wakeClose) this.wakeClose();
+    // A session OpenAI ended itself (expired, content, connection_lost) is
+    // over even if its socket stays open: end the call and write the record.
+    // During our own close this is the awaited reply and changes nothing.
+    void this.finalize('provider_closed');
   }
 
   onOpenAiError(msg) {
@@ -493,13 +529,16 @@ class LiveBridge {
       this.noteError('tool_bad_json');
       return TOOL_REFUSAL;
     }
-    if (!this.addBackendUnit()) return TOOL_REFUSAL;
+    const prepared = trialToolInput(name, input);
+    if (prepared.reply) return prepared.reply;
     this.toolCalls.push(name);
     const ctx = buildToolCtx(this.callSid);
     try {
-      const out = await withTimeout(Promise.resolve().then(() => this.deps.executeTool(name, input, ctx)), this.deps.toolTimeoutMs);
+      const out = await withTimeout(Promise.resolve().then(() => this.deps.executeTool(name, prepared.input, ctx)), this.deps.toolTimeoutMs);
       if (ctx.toolFailed) this.noteError('tool_failed');
-      return typeof out === 'string' && out ? out : TOOL_REFUSAL;
+      if (typeof out !== 'string' || !out) return TOOL_REFUSAL;
+      // The stock text asks for a street or ZIP, which this trial never looks up.
+      return out.startsWith('Could not determine the service location') ? CITY_NOT_FOUND : out;
     } catch (err) {
       this.noteError(err && err.message === 'tool_timeout' ? 'tool_timeout' : 'tool_error');
       return TOOL_REFUSAL;
