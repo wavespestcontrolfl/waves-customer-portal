@@ -194,6 +194,7 @@ jest.setTimeout(20000);
     });
     const [originalPayment] = await mockDatabase('payments').insert({
       customer_id: customerId, stripe_payment_intent_id: intent.id, amount: captured,
+      base_amount_cents: 7500, surcharge_amount_cents: Math.round(surcharge * 100),
       status: 'paid', processor: 'stripe', payment_date: '2026-09-30', metadata: { invoice_id: invoiceId },
     }).returning('*');
 
@@ -236,6 +237,28 @@ jest.setTimeout(20000);
     });
     expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id }).first())
       .toMatchObject({ amount: '75.00', resolved: false });
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
+  });
+
+  test.each([
+    ['two ledger entries', {}, {}, true],
+    ['a different recorded principal', { base_amount_cents: 7501 }, {}, false],
+    ['a different recorded surcharge', { surcharge_amount_cents: 1 }, {}, false],
+    ['different principal in ledger metadata', {}, { base_amount: '74.99' }, false],
+    ['different surcharge in ledger metadata', {}, { card_surcharge: '0.01' }, false],
+  ])('a paid challenge with %s keeps its reserved credit', async (_case, amounts, metadata, duplicate) => {
+    await mockDatabase('invoices').where({ id: invoiceId }).update({
+      status: 'paid', stripe_payment_intent_id: intent.id,
+    });
+    const row = { customer_id: customerId, stripe_payment_intent_id: intent.id, amount: 75,
+      payment_date: '2026-09-30', processor: 'stripe', status: 'paid', ...amounts, metadata: { invoice_id: invoiceId, ...metadata } };
+    await mockDatabase('payments').insert(duplicate ? [row, row] : [row]);
+    await settle(intent);
+    expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ status: 'failed', decline_code: 'authentication_required' });
+    expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id }).first())
+      .toMatchObject({ invoice_id: invoiceId, amount: '75.00', resolved: false });
+    expect(await mockDatabase('customers').where({ id: customerId }).first()).toMatchObject({ account_credits: '40.00' });
     expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
   });
 

@@ -393,11 +393,14 @@ describe('saved-card worker identity is rechecked before existing-payment settle
     mockState.processingPaymentsUpdated = 1;
     mockState.preLockAttempt = attempt();
     mockState.lockedAttempts = [attempt('pi_worker_returned')];
+    mockState.settleReadInvoice = { ...mockState.preLockInvoice, customer_id: LOSER };
 
     await handlePaymentIntentSucceeded(savedCardPi());
 
     expect(mockState.updates.filter((u) => u.table === 'payments')).toHaveLength(0);
-    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toMatchObject({ inTrx: true });
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toMatchObject({
+      inTrx: true, payload: { invoice_id: 'inv-1', customer_id: LOSER },
+    });
     expect(mockState.updates.find((u) => u.table === 'invoices' && u.payload?.status === 'paid')).toBeFalsy();
   });
 

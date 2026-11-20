@@ -1943,7 +1943,7 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
       : null;
     if (lockedAttempt === CONFLICTING_WORKER_INTENT) {
       await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal ?? centsToDollars(paymentIntent.amount),
-        'Succeeded PaymentIntent differs from the locked saved-card worker response', { database: trx });
+        'Succeeded PaymentIntent differs from the locked saved-card worker response', { database: trx, invoice: settledInvoice });
       return QUARANTINED;
     }
     if (settledInvoice) await assertNoConflictingAuthenticationSettlement(paymentIntent, settledInvoice, null, trx);
@@ -1991,10 +1991,10 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
           'Succeeded PaymentIntent differs from the locked saved-card worker response', { database: trx, invoice: lockedInvoice });
         return QUARANTINED;
       }
-      const existingPayment = await trx('payments')
-        .where({ stripe_payment_intent_id: piId })
-        .forUpdate()
-        .first();
+      const paymentRows = trx('payments').where({ stripe_payment_intent_id: piId }).forUpdate();
+      const [existingPayment, duplicatePayment] = authenticatingAttempt
+        ? await paymentRows.orderBy('id').limit(2)
+        : [await paymentRows.first()];
       if (existingPayment && !authenticatingAttempt) {
         if (lockedInvoice) await assertNoConflictingAuthenticationSettlement(paymentIntent, lockedInvoice, null, trx);
         // 'disputed' is terminal here: a delayed/reclaimed succeeded
@@ -2045,6 +2045,7 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
       };
       let exactPaidAuthentication = false;
       if (authenticatingAttempt && existingPayment) {
+        if (duplicatePayment) return quarantineAuthentication('more than one payment is recorded for the captured intent');
         const ledgerInvoiceId = existingPayment.metadata?.invoice_id;
         if (existingPayment.customer_id !== lockedInvoice.customer_id
           || (ledgerInvoiceId ? ledgerInvoiceId !== lockedInvoice.id : activePi !== piId)) {
@@ -2132,7 +2133,7 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
           if (exactPaidAuthentication) expectedInvoice.amount_paid = (await handPartsPaidCents(trx, lockedInvoice.id)) / 100;
           const paidSurcharge = exactPaidAuthentication ? Number(paymentIntent.metadata?.card_surcharge || 0) : 0;
           const amountDue = invoiceAmountDue(expectedInvoice) - paidSurcharge;
-          if (!authenticatedSavedCardAmountMatches(paymentIntent, creditAttempt, amountDue)) {
+          if (!authenticatedSavedCardAmountMatches(paymentIntent, creditAttempt, amountDue, exactPaidAuthentication ? existingPayment : null)) {
             return quarantineAuthentication('the locked invoice, submitted base and surcharge, or captured cents disagree');
           }
           try {
@@ -7264,6 +7265,7 @@ async function resolveMetadataCanceledSavedCardAttempt(paymentIntent, database =
     originalCustomerId: metadataCustomerId,
     stripePaymentIntentId: paymentIntent.id,
     failureMessage: 'PaymentIntent canceled before settling',
+    preserveReplacementCheckout: true,
     database,
   });
 }

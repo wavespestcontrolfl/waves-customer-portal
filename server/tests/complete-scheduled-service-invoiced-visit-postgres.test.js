@@ -429,11 +429,58 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     } finally { await cleanup(f); }
   });
 
+  test('a busy visit cash lock releases the completion for an immediate payment retry', async () => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
+    let holder;
+    try {
+      const StripeService = require('../services/stripe');
+      const idempotencyKey = randomUUID();
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({
+        prepaid_amount: 40,
+        prepaid_method: 'cash',
+        prepaid_at: new Date(),
+      });
+      StripeService.assertNoInvoiceChargeReconciliationPending.mockImplementationOnce(async () => {
+        holder = await mockPg.transaction();
+        await holder('scheduled_services').where({ id: f.serviceId }).forUpdate().first();
+      });
+
+      const busy = await complete(f, { invoiceAlreadySent: true }, { idempotencyKey });
+      expect(busy).toMatchObject({
+        status: 503,
+        body: { code: 'prepaid_visit_busy', serviceRecordId: expect.any(String) },
+      });
+      expect(await mockPg('invoices').where({ id: f.invoiceId }).first('status', 'total'))
+        .toMatchObject({ status: 'sent', total: '80.00' });
+      expect(await mockPg('payments').where({ customer_id: f.customerId })).toHaveLength(0);
+      expect(await mockPg('service_completion_attempts').where({ service_id: f.serviceId }).first('status'))
+        .toMatchObject({ status: 'side_effects_pending' });
+      expect(completionTexts()).toEqual([]);
+
+      await holder.rollback();
+      holder = null;
+      const retried = await complete(f, { invoiceAlreadySent: true }, { idempotencyKey });
+      expect(retried.status).toBe(200);
+      expect(await mockPg('invoices').where({ id: f.invoiceId }).first('status', 'total'))
+        .toMatchObject({ status: 'sent', total: '40.00' });
+      expect((await mockPg('payments').where({ customer_id: f.customerId })).map((row) => Number(row.amount)))
+        .toEqual([40]);
+      expect(await mockPg('service_completion_attempts').where({ service_id: f.serviceId }).first('status'))
+        .toMatchObject({ status: 'succeeded' });
+      expect(completionTexts()).toHaveLength(1);
+    } finally {
+      if (holder && !holder.isCompleted()) await holder.rollback();
+      await cleanup(f);
+    }
+  });
+
   test('completion preserves a shared checkout when the locked invoice becomes processing', async () => {
     const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
     try {
       const StripeService = require('../services/stripe');
       const PayCombined = require('../services/pay-combined');
+      const alert = jest.spyOn(require('../services/admin-alert-compose'), 'raiseAdminAlert')
+        .mockResolvedValue({ id: 'fixture-processing-alert' });
       const siblingId = randomUUID();
       StripeService.retrievePaymentIntent.mockClear();
       StripeService.cancelPaymentIntent.mockClear();
@@ -481,6 +528,18 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
       expect(await mockPg('payments').where({ customer_id: f.customerId })).toHaveLength(0);
       expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
       expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+      expect(alert).toHaveBeenCalledWith('billing', expect.objectContaining({
+        severity: 'needs-you',
+        subject: { type: 'invoice', id: f.invoiceId },
+        doneWhen: 'payment_reconciled',
+      }), expect.objectContaining({
+        dedupeKey: `completion-prepaid-reconciliation:${f.invoiceId}:pi_processing_completion`,
+        metadata: expect.objectContaining({
+          reason: 'payment_in_flight',
+          piStatus: 'processing',
+          prepaidCents: 8000,
+        }),
+      }));
     } finally { await cleanup(f); }
   });
 

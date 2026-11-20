@@ -391,6 +391,59 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       .toMatchObject({ status: 'failed', stripe_payment_intent_id: intent.id });
   });
 
+  test('metadata cancellation transfers reserved credit to a replacement live checkout', async () => {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const attemptId = randomUUID();
+    const intent = {
+      id: `pi_${attemptId.replaceAll('-', '')}`,
+      status: 'canceled',
+      payment_method: 'pm_worker_bound_credit',
+      metadata: {
+        source: 'admin_card_on_file', saved_card_attempt_id: attemptId,
+        waves_invoice_id: invoiceId, waves_customer_id: customerId,
+      },
+    };
+    await app('customers').insert({ id: customerId, account_credits: 0 });
+    await app('invoices').insert({
+      id: invoiceId, customer_id: customerId, status: 'sent', invoice_number: invoiceId,
+      total: 100, credit_applied: 25, due_date: '2099-01-01',
+      stripe_payment_intent_id: 'pi_live_checkout_after_credit',
+    });
+    await app('stripe_invoice_charge_attempts').insert({
+      id: attemptId, invoice_id: invoiceId, status: 'ambiguous',
+      stripe_payment_method_id: intent.payment_method,
+      stripe_payment_intent_id: intent.id,
+      worker_payment_intent_id: intent.id,
+      amount: 75,
+      credit_applied_delta: 25,
+      credit_applied_total: 25,
+      created_at: new Date(),
+    });
+
+    await expect(resolveMetadataCanceledSavedCardAttempt(intent, app)).resolves.toBe(true);
+    expect(await app('invoices').where({ id: invoiceId }).first())
+      .toMatchObject({
+        status: 'sent',
+        credit_applied: '25.00',
+        stripe_payment_intent_id: 'pi_live_checkout_after_credit',
+      });
+    expect(await app('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ status: 'failed', resolved_at: expect.any(Date), stripe_payment_intent_id: intent.id });
+    expect(await app('customers').where({ id: customerId }).first())
+      .toMatchObject({ account_credits: '0.00' });
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
+
+    // The webhook event is processed once. A redelivery is a no-op, and the
+    // replacement remains correctly priced from the retained invoice credit.
+    await expect(resolveMetadataCanceledSavedCardAttempt(intent, app)).resolves.toBe(false);
+    expect(await app('invoices').where({ id: invoiceId }).first())
+      .toMatchObject({
+        credit_applied: '25.00',
+        stripe_payment_intent_id: 'pi_live_checkout_after_credit',
+      });
+  });
+
   test.each(['waves_invoice_id', 'saved_card_attempt_id', 'waves_customer_id'])(
     'metadata cancellation rejects malformed %s before a PostgreSQL UUID comparison', async (field) => {
       const intent = {

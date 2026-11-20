@@ -108,12 +108,25 @@ function savedCardCreditAdjustment({ attempt, invoice }) {
 
 // The replacement charge was submitted with a fixed base and surcharge.
 // Compare both in cents before the webhook changes the invoice's total.
-function authenticatedSavedCardAmountMatches(paymentIntent, attempt, amountDue) {
+function authenticatedSavedCardAmountMatches(paymentIntent, attempt, amountDue, paidReceipt = null) {
   const metadata = paymentIntent.metadata || {};
   if (metadata.base_amount == null || metadata.base_amount === '') return false;
   const submittedBase = Math.round(Number(metadata.base_amount) * 100);
   const submittedSurcharge = Math.round(Number(metadata.card_surcharge ?? 0) * 100);
   const captured = paymentIntent.amount_received;
+  if (paidReceipt) {
+    // Older paid rows may lack a breakdown. Every component they do carry
+    // must agree with the signed capture before replay can debit credit.
+    for (const [field, column, cents] of [
+      ['base_amount', 'base_amount_cents', submittedBase],
+      ['card_surcharge', 'surcharge_amount_cents', submittedSurcharge],
+    ]) {
+      if (paidReceipt[column] != null && Number(paidReceipt[column]) !== cents) return false;
+      const dollars = paidReceipt.metadata?.[field];
+      if (dollars != null && (!/^\d+(?:\.\d{1,2})?$/.test(String(dollars))
+        || Math.round(Number(dollars) * 100) !== cents)) return false;
+    }
+  }
   return Number.isSafeInteger(captured) && captured > 0 && paymentIntent.amount === captured
     && Number.isSafeInteger(submittedSurcharge) && submittedSurcharge >= 0
     && submittedBase === Math.round(amountDue * 100)

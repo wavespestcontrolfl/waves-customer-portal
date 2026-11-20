@@ -12292,6 +12292,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     }
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
+    let prepaidResumeResponse = null;
     const applyPrepaidCreditToInvoice = async (invoiceRow) => {
       // Applying annual-prepay coverage to a PRE-EXISTING invoice is deferred to a
       // dedicated follow-up — it needs non-cash accounting (the money was already
@@ -12356,23 +12357,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }
           if (lockedInvoice.payer_id || lockedInvoice.payer_statement_id
             || invoiceWithdrawnFromCustomer(lockedInvoice)) return lockedInvoice;
-          if (!isInvoiceCollectibleStatus(lockedInvoice.status)) return lockedInvoice;
-
-          // Checkout-mode saved-card fence under the invoice lock. An earlier
-          // off-session card attempt can still be awaiting authentication even
-          // when the invoice has no PI pointer; never post the visit cash beside
-          // money that may still settle. Expected holds return without writes so
-          // a stale claim promoted to ambiguous on this transaction can commit.
-          try {
-            await StripeService.assertNoInvoiceChargeReconciliationPending(
-              lockedInvoice.id,
-              trx,
-              { checkout: true },
-            );
-          } catch (err) {
-            if (!isCollectionPendingFenceError(err)) throw err;
-            logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: saved-card payment is in progress or awaiting reconciliation`);
-            return lockedInvoice;
+          const processing = String(lockedInvoice.status).toLowerCase() === 'processing';
+          if (!isInvoiceCollectibleStatus(lockedInvoice.status) && !processing) return lockedInvoice;
+          if (!processing) {
+            // A saved-card challenge can still settle without a PI pointer.
+            // A processing invoice already has money in flight and instead
+            // needs an office task if the visit also carries unallocated cash.
+            try {
+              await StripeService.assertNoInvoiceChargeReconciliationPending(
+                lockedInvoice.id,
+                trx,
+                { checkout: true },
+              );
+            } catch (err) {
+              if (!isCollectionPendingFenceError(err)) throw err;
+              logger.warn(`[dispatch] Prepaid credit deferred for invoice ${lockedInvoice.invoice_number}: saved-card payment is in progress or awaiting reconciliation`);
+              return lockedInvoice;
+            }
           }
 
           // The visit marker is mutable after completion starts. Lock and reread
@@ -12393,11 +12394,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
           const invoiceTotalCents = toCents(lockedInvoice.total);
           const dueCents = Math.round(invoiceAmountDue(lockedInvoice) * 100);
-          if (!(invoiceTotalCents > 0) || !(dueCents > 0)) return lockedInvoice;
-          // A part payment is already on this invoice: this application reduces total and would paid-flip it with the part still in
-          // amount_paid. The office settles it from the Invoices page.
-          if (toCents(lockedInvoice.amount_paid) > 0) {
-            logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: a part payment is on it — the office records the rest`);
+          if (!processing && (!(invoiceTotalCents > 0) || !(dueCents > 0))) return lockedInvoice;
+          // The office settles an invoice with a hand-recorded part payment.
+          if (!processing && toCents(lockedInvoice.amount_paid) > 0) {
+            logger.warn(`[dispatch] Prepaid credit deferred for invoice ${lockedInvoice.invoice_number}: the office records the remaining part payment`);
             return lockedInvoice;
           }
           // The visit marker is cumulative. Charge Now may already have
@@ -12414,7 +12414,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // applies to a PARTIAL cash payment: leaving the old full-balance
           // checkout confirmable beside received cash would overcollect it.
           const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
-          const piGuard = await guardOpenPaymentIntentForPrepaid(lockedInvoice, { database: trx });
+          const piGuard = processing
+            ? { ok: false, reason: 'payment_in_flight', piStatus: 'processing' }
+            : await guardOpenPaymentIntentForPrepaid(lockedInvoice, { database: trx });
           if (!piGuard.ok) {
             prepaidReconciliation = {
               invoiceId: lockedInvoice.id,
@@ -12481,7 +12483,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
         });
       } catch (err) {
         if (err?.code !== 'visit_busy') throw err;
-        logger.info(`[dispatch] Prepaid credit deferred for service ${svc.id}: ${err.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, err);
+        if (!released) {
+          logger.error(`[dispatch] prepaid visit lock busy for ${svc.id}, but attempt ${completionAttempt?.id} could not be released for immediate resume`);
+        } else {
+          logger.info(`[dispatch] Prepaid credit deferred for service ${svc.id}: ${err.message}`);
+        }
+        prepaidResumeResponse = {
+          status: 503,
+          body: {
+            error: released
+              ? 'The closeout is saved. Retry it to apply the recorded payment once the visit update finishes.'
+              : `The closeout is saved. Retry it in about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes.`,
+            code: 'prepaid_visit_busy',
+            serviceRecordId: record.id,
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          },
+        };
         return invoiceRow;
       }
       // Stripe says money is moving (or the checkout cannot safely be
@@ -13102,6 +13120,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           } catch (e) { logger.warn(`[dispatch] backfill accrual-skip review log failed: ${e.message}`); }
         }
         invoice = await applyPrepaidCreditToInvoice(invoice);
+        if (prepaidResumeResponse) return prepaidResumeResponse;
         // An adopted concurrent invoice may already be settled — mirror the
         // pre-minted suppressor's SMS branch instead of promising a fresh
         // invoice.
@@ -13478,6 +13497,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         });
       } catch (e) { logger.warn(`[dispatch] Could not back-link invoice to service_record: ${e.message}`); }
       preMintedInvoice = await applyPrepaidCreditToInvoice(preMintedInvoice);
+      if (prepaidResumeResponse) return prepaidResumeResponse;
       invoice = preMintedInvoice;
       payUrl = await shortenOrPassthrough(`${portalUrl}/pay/${invoice.token}`, {
         kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,

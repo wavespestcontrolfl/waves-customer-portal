@@ -837,13 +837,15 @@ credit deductions and automated debits also preserve the reservation.
 Amount edits to the held invoice wait for the challenge to resolve.
 A cancellation clears the hold only when the original charge worker recorded
 that exact PaymentIntent independently of the webhook. A disagreement between
-the two IDs keeps checkout held. A legacy ID without worker provenance
+the two IDs keeps checkout held. If another checkout already uses credit posted
+to the invoice, canceling the original card attempt keeps that credit applied
+so the replacement checkout still quotes the amount due. A legacy ID without worker provenance
 keeps checkout on HTTP 409 even if the supplied intent was canceled. After webhook history expires, an operator can
 verify the PaymentIntent directly using the saved-card cancellation command
 in `ops/agents/README.md`. A successful challenge settles the matching card
 payment and any missing portion of its submitted account credit in one invoice
 transaction. If the invoice was already paid, a replay can post the missing
-credit once when the signed capture, Stripe ledger entry, submitted credit,
+credit once when the signed capture, a single matching Stripe ledger entry, submitted credit,
 and paid total agree after accounting for surcharge and prior cash. The
 original receipt and paid date stand. A funding shortfall or amount mismatch
 keeps the hold in place for reconciliation. A later dispute can
@@ -873,7 +875,9 @@ Schedule issues a paid receipt only when the unallocated visit cash covers
 the amount due. At visit completion, a partial cash posting retires a
 cancelable checkout so the next checkout quotes the remaining balance. If
 the processor is already collecting the payment, staff reconcile the cash
-against the processor outcome.
+against the processor outcome. If another administrator holds the visit lock,
+completion returns HTTP 503 with `prepaid_visit_busy`. Retrying the same
+completion posts the available cash once before the customer receives a payment link.
 
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
 ruling, Venmo and PayPal retired over their fees): the GET payload carries

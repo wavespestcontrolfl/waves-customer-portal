@@ -241,7 +241,10 @@ async function recordAuthenticationSettlement(intent, trx, { returnedPaymentId =
     .select('customer_id')
     .where({ id: intent.metadata.waves_invoice_id });
   const ledger = trx('payments').select('id').whereIn('customer_id', currentInvoiceOwner)
-    .where({ stripe_payment_intent_id: intent.id, processor: 'stripe', amount });
+    .where({ stripe_payment_intent_id: intent.id, processor: 'stripe', amount })
+    .whereNotExists(trx('payments as other_payment').select('id')
+      .where('other_payment.stripe_payment_intent_id', intent.id)
+      .whereColumn('other_payment.id', '<>', 'payments.id'));
   if (returnedPaymentId) {
     // A prior refund/dispute owns the invoice and ledger. Prove the original
     // capture and close only its challenge, leaving both terminal states alone.

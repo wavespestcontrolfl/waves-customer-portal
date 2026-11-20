@@ -317,9 +317,15 @@ test('every production caller of postCreditMovement that locks an invoice first 
     },
     {
       file: 'services/stripe.js', label: 'resolveFailedInvoiceSavedCardChargeAttempt',
-      anchor: "await trx('customers').where({ id: customerId }).forUpdate().first('id');\n    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
+      anchor: 'async function resolveFailedInvoiceSavedCardChargeAttempt(',
       customerLock: "await trx('customers').where({ id: customerId }).forUpdate().first('id');",
-      invoiceLock: "const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
+      invoiceLock: "invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
+    },
+    {
+      file: 'services/stripe.js', label: 'saved-card cancellation with a replacement checkout',
+      anchor: 'async function resolveFailedInvoiceSavedCardChargeAttempt(',
+      customerLock: "await trx('customers').where({ id: customerId }).forUpdate().first('id');",
+      invoiceLock: 'invoice = await lockInvoicePaymentIntentAllocation(trx, {',
     },
     {
       file: 'services/stripe.js', label: 'persistSavedCardChargeCreditDelta',
@@ -344,7 +350,7 @@ test('every production caller of postCreditMovement that locks an invoice first 
   for (const { file, label, anchor, customerLock, invoiceLock } of cases) {
     const source = read(file);
     expect(source.includes(anchor)).toBe(true);
-    const customerAt = source.indexOf(customerLock);
+    const customerAt = source.indexOf(customerLock, source.indexOf(anchor));
     const invoiceAt = source.indexOf(invoiceLock, customerAt);
     if (customerAt === -1) throw new Error(`${file} (${label}): customer lock string not found`);
     if (!(invoiceAt > customerAt)) throw new Error(`${file} (${label}): invoice lock not found after customer lock`);
