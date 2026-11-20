@@ -123,7 +123,7 @@ async function isRobodialerWave(row) {
     .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
     // A member whose caller later got through is a real caller (Codex #6379 r6):
     // the bell's own answered-proof called-back check, per historical row.
-    .whereRaw(calledBackSql({ retire: true }))
+    .whereRaw(CALLED_BACK_ANSWERED_SQL)
     .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
     .select(db.raw(`COUNT(DISTINCT ${LAST10_SQL('from_phone')}) AS n`), db.raw('COALESCE(bool_or(call_log.id = ?), false) AS self', [row.id]))
     .first();
@@ -178,7 +178,7 @@ async function isRobodialerBurst(row) {
     .whereNull('recording_sid').whereNull('recording_url')
     .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
     .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
-    .whereRaw(calledBackSql({ retire: true }))
+    .whereRaw(CALLED_BACK_ANSWERED_SQL)
     .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
     // First call ever from that number (full-country key; any earlier row counts).
     .whereRaw(`NOT EXISTS (SELECT 1 FROM call_log prior WHERE prior.id <> call_log.id AND prior.created_at < call_log.created_at AND ${phoneKeySql('prior.from_phone')} = ${CALLER_KEY})`)
@@ -251,7 +251,7 @@ async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
         .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(at.getTime() - VOICEMAIL_GRACE_MS)]))
       .orWhere('recording_duration_seconds', '<=', MAX_SILENT_RECORDING_SECONDS)
       .orWhere((screened) => screened.whereRaw(FAILED_SCREEN_SQL).where('recording_duration_seconds', '<=', FAILED_SCREEN_SILENT_SECONDS)))
-    .whereRaw(calledBackSql({ retire: true }))
+    .whereRaw(CALLED_BACK_ANSWERED_SQL)
     .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
     .whereRaw(NOT_ON_LIVE_LEAD_SQL)
     .select(db.raw(`COUNT(DISTINCT ${LAST10_SQL('from_phone')}) AS n`))
@@ -292,16 +292,15 @@ function isEmptyVoicemailRecording(row) {
   return false;
 }
 
-// Missed-call bell gaps (owner 2026-10-20). Both are admitted only through the
-// opts the bell passes under its own gates, so the text-back lane, which shares
-// missedCallShapeEligible, never sees them.
-//   customerEmptyVoicemail (GATE_MISSED_CALL_EMPTY_VM_CUSTOMER): a customer on
-//     file whose recording held no speech counts as "no message left".
-//   noOutcomeCustomer (GATE_MISSED_CALL_NO_OUTCOME_CUSTOMER): a customer's
-//     `completed` call with no answered_by and no recording counts as unanswered.
+// Missed-call bell gaps (owner 2026-10-20), both for a customer on file. The
+// text-back lane, which shares missedCallShapeEligible, only ever offers calls
+// with no customer, so it never sees them.
+//   An empty voicemail (a recording that held no speech) counts as "no message left".
+//   outcomeUnansweredFor: a customer's `completed` call with no answered_by and
+//     no recording counts as unanswered.
 function emptyRecordingAdmitted(row, opts) {
   if (!isEmptyVoicemailRecording(row)) return false;
-  return Boolean(opts?.emptyVoicemail || (opts?.customerEmptyVoicemail && row.customer_id));
+  return Boolean(opts?.emptyVoicemail || row.customer_id);
 }
 
 const AI_OUTCOMES = new Set(['ai_handled', 'ai_transferred']);
@@ -310,34 +309,22 @@ function noOutcomeCustomerCall(row) {
     && !(row.recording_sid || row.recording_url) && !AI_OUTCOMES.has(row.call_outcome);
 }
 // outcomeUnanswered stays one-argument: repeat-caller-bell passes it to Array.filter.
-function outcomeUnansweredFor(row, opts) {
-  return outcomeUnanswered(row) || Boolean(opts?.noOutcomeCustomer && noOutcomeCustomerCall(row));
-}
-
-// The gap options, read per call so a flip needs no restart.
-function gapOptions() {
-  const { isEnabled } = require('../config/feature-gates');
-  return {
-    customerEmptyVoicemail: isEnabled('missedCallEmptyVmCustomer'),
-    noOutcomeCustomer: isEnabled('missedCallNoOutcomeCustomer'),
-  };
+function outcomeUnansweredFor(row) {
+  return outcomeUnanswered(row) || noOutcomeCustomerCall(row);
 }
 
 // The SQL twin of outcomeUnansweredFor, shared by the claim and the sweep.
-// Gate off (or B off) it is the original clause, byte for byte.
-const UNANSWERED_SQL_HEAD = '(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?))';
-function unansweredClause(gaps) {
-  const sql = gaps?.noOutcomeCustomer
-    ? `${UNANSWERED_SQL_HEAD} OR (answered_by IS NULL AND status = 'completed' AND customer_id IS NOT NULL AND recording_sid IS NULL AND recording_url IS NULL))`
-    : `${UNANSWERED_SQL_HEAD})`;
-  return [sql, [...UNANSWERED, ...UNANSWERED_STATUSES]];
-}
+const UNANSWERED_CLAUSE = [
+  '(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?))'
+  + " OR (answered_by IS NULL AND status = 'completed' AND customer_id IS NOT NULL AND recording_sid IS NULL AND recording_url IS NULL))",
+  [...UNANSWERED, ...UNANSWERED_STATUSES],
+];
 
-// "No voicemail yet" in SQL. Gate A on and the call is a customer's empty
-// voicemail: the claim pins the very recording and transcription state that
-// was read as empty, so a newer recording or a re-transcription loses the race.
-function emptyVmCustomerAdmitted(row, gaps) {
-  return Boolean(gaps?.customerEmptyVoicemail && row?.customer_id && isEmptyVoicemailRecording(row));
+// "No voicemail yet" in SQL. When the call is a customer's empty voicemail the
+// claim pins the very recording and transcription state that was read as
+// empty, so a newer recording or a re-transcription loses the race.
+function emptyVmCustomerAdmitted(row) {
+  return Boolean(row?.customer_id && isEmptyVoicemailRecording(row));
 }
 function recordingFilter(row, admitted) {
   return (qb) => {
@@ -351,18 +338,15 @@ function recordingFilter(row, admitted) {
       .whereRaw('transcription IS NOT DISTINCT FROM ?::text', [row.transcription]);
   };
 }
-// The sweep cannot know a row yet: with gate A on it also lists a customer's
-// recording the processor finished with as rejected or as markers only; the
-// JS shape check decides. Gate off it is the original two whereNull calls.
-function sweepRecordingFilter(gaps) {
-  return (qb) => {
-    if (!gaps?.customerEmptyVoicemail) return qb.whereNull('recording_sid').whereNull('recording_url');
-    return qb.where((g) => g
-      .where((none) => none.whereNull('recording_sid').whereNull('recording_url'))
-      .orWhere((vm) => vm.whereNotNull('customer_id')
-        .where((t) => t.where('transcription_status', 'rejected')
-          .orWhere((c) => c.where('transcription_status', 'completed').whereRaw("transcription LIKE '%[%'")))));
-  };
+// The sweep cannot know a row yet: it also lists a customer's recording the
+// processor finished with as rejected or as markers only; the JS shape check
+// decides.
+function sweepRecordingFilter(qb) {
+  return qb.where((g) => g
+    .where((none) => none.whereNull('recording_sid').whereNull('recording_url'))
+    .orWhere((vm) => vm.whereNotNull('customer_id')
+      .where((t) => t.where('transcription_status', 'rejected')
+        .orWhere((c) => c.where('transcription_status', 'completed').whereRaw("transcription LIKE '%[%'")))));
 }
 
 /**
@@ -372,8 +356,9 @@ function sweepRecordingFilter(gaps) {
  * without the bell's settled alert hiding the call from it.
  *
  * `opts.emptyVoicemail` (text-back lane only, behind its own gate): a
- * recording that held no speech counts as "no message left". The bell never
- * passes it, so the bell's behavior is unchanged.
+ * recording that held no speech counts as "no message left" for a caller with
+ * no customer. The bell never passes it; a customer's empty voicemail is
+ * admitted by emptyRecordingAdmitted.
  */
 function missedCallShapeEligible(row, opts = {}) {
   if (!row || row.direction !== 'inbound') return false;
@@ -409,11 +394,9 @@ const buildCalledBackSql = (outboundProof) => 'NOT EXISTS (SELECT 1 FROM call_lo
   + ` OR (later.direction = 'inbound' AND ${LATER_KEY} = ${CALLER_KEY}`
   + " AND (later.answered_by IN ('human', 'ai_agent') OR later.call_outcome IN ('ai_handled', 'ai_transferred')"
   + ' OR later.voicemail_callback_alerted_at IS NOT NULL))))';
-const CALLED_BACK_SQL = buildCalledBackSql('');
-
-// GATE_CALLBACK_NEEDS_ANSWER (owner 2026-10-20): bridged_at is stamped when the
+// Callback needs an answer (owner 2026-10-20): bridged_at is stamped when the
 // STAFF leg presses 1, before the customer leg is dialed, so a callback that
-// rang out counted as "called back". With the gate on an outbound call counts
+// rang out used to count as "called back". An outbound call counts
 // only with proof the customer answered:
 //  - the customer leg the <Dial action> recorded completed with seconds > 0
 //    (metadata.customer_leg; call-commitments.js reads the same shape); or
@@ -440,21 +423,13 @@ const CALLED_BACK_DEFER_SQL = buildCalledBackSql(
   " AND ((later.metadata->'customer_leg'->>'status' = 'completed' AND " + CUSTOMER_LEG_SECONDS_SQL + ')'
   + " OR (later.metadata->'customer_leg' IS NULL AND later.recording_duration_seconds > 0 AND (later.recording_sid IS NOT NULL OR later.recording_url IS NOT NULL))"
   + " OR (later.metadata->'customer_leg' IS NULL AND later.status = 'bridged' AND later.bridged_at > now() - interval '15 minutes'))");
-// Read at call time, so the claim, the sweep, the re-read before the push and
-// the retire pass all follow one gate. `retire` asks for proof of an answered leg.
-function calledBackSql({ retire = false } = {}) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('callbackNeedsAnswer')) return CALLED_BACK_SQL;
-  return retire ? CALLED_BACK_ANSWERED_SQL : CALLED_BACK_DEFER_SQL;
-}
-
-// GATE_MISSED_CALL_VISIT_UNDERWAY (owner 2026-10-21): a customer on file called
+// Visit underway (owner 2026-10-21): a customer on file called
 // at 1:05 PM and nobody answered; the tech went en route 1:46, arrived 1:59 and
 // the invoice was paid 2:32. That bell should not have rung. The call's customer
 // has a visit that moved (en route, arrived or completed) or an invoice that was
 // paid AFTER the call, on the same ET day. True = the visit is underway, so the
 // bell is retired / never rings / is never re-pushed. Written against the
-// unaliased `call_log` row, like calledBackSql. No literal question mark here
+// unaliased `call_log` row, like the called-back SQL above. No literal question mark here
 // (knex reads one as a binding). "Paid" is the codebase's own: invoices.paid_at.
 const ET_DAY = (col) => `(${col} AT TIME ZONE 'America/New_York')::date`;
 const VISIT_UNDERWAY_SQL = '(call_log.customer_id IS NOT NULL AND ('
@@ -464,15 +439,9 @@ const VISIT_UNDERWAY_SQL = '(call_log.customer_id IS NOT NULL AND ('
   + ` OR (vss.completed_at > call_log.created_at AND ${ET_DAY('vss.completed_at')} = ${ET_DAY('call_log.created_at')})))`
   + ' OR EXISTS (SELECT 1 FROM invoices vinv WHERE vinv.customer_id = call_log.customer_id'
   + ` AND vinv.paid_at > call_log.created_at AND ${ET_DAY('vinv.paid_at')} = ${ET_DAY('call_log.created_at')})))`;
-const visitUnderwayOn = () => require('../config/feature-gates').isEnabled('missedCallVisitUnderway');
-// Gate off = null: callers add nothing, so the SQL is byte-identical to before.
-function visitUnderwaySql() {
-  return visitUnderwayOn() ? VISIT_UNDERWAY_SQL : null;
-}
 // knex .modify() helper: keep only calls whose customer's visit has not moved.
 function whereNoVisitUnderway(qb) {
-  const sql = visitUnderwaySql();
-  if (sql) qb.whereRaw(`NOT ${sql}`);
+  qb.whereRaw(`NOT ${VISIT_UNDERWAY_SQL}`);
 }
 
 function parseMeta(meta) {
@@ -490,19 +459,20 @@ function leaseStale(token, now = Date.now()) {
 // caller can prime a number block or a line and length with fresh numbers so a
 // genuine first-time prospect matches, and real people who hang up at the beep
 // cluster on one length). Returns true when the push must be skipped.
-//  - Block wave with GATE_MISSED_CALL_SPAM_WAVE on: stamped missed_call_spam_wave: 'block_quiet'.
-//  - Burst with GATE_MISSED_CALL_SPAM_BURST on: stamped 'burst_quiet'.
+//  - Block wave: stamped missed_call_spam_wave: 'block_quiet'.
+//  - Burst: stamped 'burst_quiet'.
 //  - An unknown caller who failed the press-1 screen (no key; owner 2026-11-16
 //    "build") with GATE_CALL_SCREEN_EXCHANGE_HISTORY on: stamped 'screen_quiet'.
 //    Since October 12 of 16 such calls pushed; the screen kept them off the
 //    staff phones but not off the admin app.
-//  - A flagged call whose gate is off rings as before, stamped with the rule's
-//    shadow key below.
+//  - A flagged screen call whose gate is off rings as before, stamped with the
+//    rule's shadow key below.
 // The row settles normally after delivery. `fenced` is the caller's lease-fenced update.
-// One row per rule, in precedence order: the flag, its gate, the quiet stamp, the shadow stamp.
+// One row per rule, in precedence order: the flag, its gate (none for a wave or a
+// burst), the quiet stamp, the shadow stamp (only for a rule with a gate).
 const QUIET_RULES = [
-  { flag: 'block', gate: 'missedCallSpamWave', quiet: 'block_quiet', shadow: 'missed_call_spam_wave_shadow' },
-  { flag: 'burst', gate: 'missedCallSpamBurst', quiet: 'burst_quiet', shadow: 'missed_call_spam_burst_shadow' },
+  { flag: 'block', quiet: 'block_quiet' },
+  { flag: 'burst', quiet: 'burst_quiet' },
   { flag: 'screen', gate: 'callScreenExchangeHistory', quiet: 'screen_quiet', shadow: 'missed_call_screen_quiet_shadow' },
 ];
 
@@ -514,7 +484,7 @@ async function quietRobodialerPush(row, fenced) {
   const stamps = {};
   let quietAs = null;
   for (const rule of QUIET_RULES.filter((r) => flags[r.flag])) {
-    if (!spamGateOn(rule.gate)) stamps[rule.shadow] = true;
+    if (rule.gate && !spamGateOn(rule.gate)) stamps[rule.shadow] = true;
     else quietAs = quietAs || rule.quiet;
   }
   if (quietAs) stamps.missed_call_spam_wave = quietAs;
@@ -531,53 +501,7 @@ async function quietRobodialerPush(row, fenced) {
 // durable row the push is the only channel, so it goes (fail open). `false` stops the push.
 const pushGuard = (quiet, stillMissed, bellWritten) => (quiet ? async (arg) => (bellWritten() ? false : stillMissed(arg)) : stillMissed);
 
-// Shadow for gates A and B while they are off: stamp
-// metadata.missed_call_gap_shadow on a call the gate WOULD have rung, once, so
-// the owner can read how many a flip changes before making it. No bell, no
-// settle, no updated_at change (the sweep's voicemail grace reads updated_at).
-const SHADOW_KEY = 'missed_call_gap_shadow';
-const SHADOW_LIMIT = 50;
-async function stampGapShadows(gaps, now) {
-  try {
-    if (!gaps.customerEmptyVoicemail) {
-      await stampShadow('empty_vm_customer', { customerEmptyVoicemail: true }, now, (q) => q
-        .where((r) => r.whereNotNull('recording_sid').orWhereNotNull('recording_url'))
-        .whereIn('transcription_status', ['rejected', 'completed']));
-    }
-    if (!gaps.noOutcomeCustomer) {
-      await stampShadow('no_outcome_customer', { noOutcomeCustomer: true }, now, (q) => q
-        .whereNull('answered_by').where('status', 'completed').whereNull('recording_sid').whereNull('recording_url'));
-    }
-  } catch (err) {
-    logger.warn(`[missed-call-bell] gap shadow failed: ${err.message}`);
-  }
-}
-
-async function stampShadow(kind, shapeOpts, now, narrow) {
-  const rows = await db('call_log')
-    .modify((q) => whereNotSandboxCall(q))
-    .modify(whereNotBlockedCall)
-    .where({ direction: 'inbound' })
-    .whereNotNull('customer_id')
-    .whereIn('status', TERMINAL_STATUSES)
-    .whereNull('voicemail_callback_alerted_at')
-    .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
-    .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
-    .whereRaw(`COALESCE(metadata->>'${SHADOW_KEY}','') = ''`)
-    .whereRaw(calledBackSql())
-    .where('created_at', '>', new Date(now - 24 * 60 * 60 * 1000))
-    .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(now - VOICEMAIL_GRACE_MS)])
-    .modify(narrow)
-    .orderBy('created_at', 'desc')
-    .limit(SHADOW_LIMIT);
-  const ids = rows.filter((r) => missedCallEligible(r, now, shapeOpts)).map((r) => r.id);
-  if (!ids.length) return 0;
-  return db('call_log').whereIn('id', ids).modify((q) => whereNotSandboxCall(q))
-    .whereRaw(`COALESCE(metadata->>'${SHADOW_KEY}','') = ''`)
-    .update({ metadata: db.raw(`COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('${SHADOW_KEY}', ?::text)`, [kind]) });
-}
-
-// GATE_MISSED_CALL_PUSH_CHECK (owner 2026-10-20): the bell used to settle as
+// Push check (owner 2026-10-20): the bell used to settle as
 // soon as its row was written, even when the push reached no phone. Pass 1
 // that finds the push dead (a subscription existed, none was sent, none was
 // merely skipped) releases the lease and records missed_call_push_retries, so
@@ -627,21 +551,19 @@ async function holdForPushRetry({ row, stats, fenced, pushRetry, firstPassSubs }
     if (pushReachedNoPhone(stats, firstPassSubs)) await raisePushDeadAlert(row).catch((err) => logger.warn(`[missed-call-bell] push alert failed: ${err.message}`));
     return false;
   }
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('missedCallPushCheck') || !stats?.bellWritten || !pushReachedNoPhone(stats)) return false;
+  if (!stats?.bellWritten || !pushReachedNoPhone(stats)) return false;
   await fenced().update({ metadata: db.raw("(metadata - 'missed_call_notified_at') || jsonb_build_object('missed_call_push_retries', 1, 'missed_call_push_first_subs', ?::int)", [Number(stats.push.subscriptions)]) });
   return true;
 }
 
 // True when the bell write was suppressed only because a callback is in flight
-// (GATE_CALLBACK_NEEDS_ANSWER defer arm): the call is still missed by the
-// answered-proof test. If that callback rings out, nothing rang, so the call
-// must not settle; the sweep retries after the callback ends. Gate off, both
-// tests are the same SQL and this is always false.
+// (the in-flight callback arm of CALLED_BACK_DEFER_SQL): the call is still
+// missed by the answered-proof test. If that callback rings out, nothing rang,
+// so the call must not settle; the sweep retries after the callback ends.
 const deferredOnlyCheck = (stillMissed, stillMissedFinal) => async () => !(await stillMissed()) && Boolean(await stillMissedFinal());
 
 // The end of one delivery pass: settle it, release the lease for the next
-// sweep, or (gate D) hold the call for the push retry.
+// sweep, or hold the call for the push retry.
 async function finishDelivery({ row, stats, fenced, settle, pushRetry, firstPassSubs, deferredOnly }) {
   const deferred = !pushRetry && Boolean(stats?.suppressed) && !stats.bellWritten
     && await deferredOnly().catch(() => false);
@@ -659,12 +581,12 @@ async function finishDelivery({ row, stats, fenced, settle, pushRetry, firstPass
 const VISIT_UNDERWAY_RESOLUTION = "The customer's visit went ahead after the call";
 
 // Post-check after a bell was delivered: close it when the call stopped being
-// the missed-call lane's. With GATE_MISSED_CALL_VISIT_UNDERWAY on, a call that
+// the missed-call lane's. A call that
 // stays missed on every other test and was closed only by the visit gets the
 // visit wording; every other close keeps the default wording.
 async function retireAfterDelivery(callLogId, stillMissedFinal, stillMissedIgnoringVisit) {
   if (await stillMissedFinal().catch(() => true)) return;
-  const visitOnly = visitUnderwaySql() ? await stillMissedIgnoringVisit().catch(() => false) : false;
+  const visitOnly = await stillMissedIgnoringVisit().catch(() => false);
   const NotificationService = require('./notification-service');
   await NotificationService.supersedeMissedCallAdmin({
     callLogId,
@@ -677,10 +599,8 @@ async function ringMissedCallIfUnanswered(callSid) {
   try {
     const row = await db('call_log').where('twilio_call_sid', callSid).modify(whereNotBlockedCall).first();
     const { isEnabled } = require('../config/feature-gates');
-    const gaps = gapOptions();
-    if (!missedCallEligible(row, Date.now(), { unknownCallers: isEnabled('missedCallUnknownCallers'), ...gaps })) return false;
-    const recording = recordingFilter(row, emptyVmCustomerAdmitted(row, gaps));
-    const calledBack = calledBackSql();
+    if (!missedCallEligible(row, Date.now(), { unknownCallers: isEnabled('missedCallUnknownCallers') })) return false;
+    const recording = recordingFilter(row, emptyVmCustomerAdmitted(row));
     // Atomic claim: first writer wins across retries / pods. The mutable
     // eligibility predicates are re-checked IN the claim so a voicemail
     // recording or an answered outcome that landed between the read above
@@ -695,8 +615,8 @@ async function ringMissedCallIfUnanswered(callSid) {
       .modify(recording)
       .whereNull('voicemail_callback_alerted_at')
       .whereRaw("COALESCE(call_outcome,'') NOT IN ('ai_handled', 'ai_transferred')")
-      .whereRaw(...unansweredClause(gaps))
-      .whereRaw(calledBack)
+      .whereRaw(...UNANSWERED_CLAUSE)
+      .whereRaw(CALLED_BACK_DEFER_SQL)
       .modify(whereNoVisitUnderway)
       // RETURNING: the push-retry state below is read from the row this very
       // claim won, never from the snapshot read before it (a concurrent pass
@@ -712,9 +632,8 @@ async function ringMissedCallIfUnanswered(callSid) {
     // push-only delivery leaves no row; a re-send is coalesced by the
     // per-call push tag (browser replaces same-tag notifications), whereas
     // settling before dispatch would make the crash a permanent loss.
-    // A push-only retry (GATE_MISSED_CALL_PUSH_CHECK, pass 2): the bell row from
-    // pass 1 stands. Keyed on the stored counter, not the gate, so a gate flipped
-    // off between the passes can never write a second bell.
+    // A push-only retry (pass 2): the bell row from pass 1 stands, so pass 2
+    // never writes a second bell.
     const { pushRetry, firstPassSubs } = pushRetryState(claimed.metadata);
     // A pending push retry skips the shortcut: its bell row is expected, and a
     // pass 2 that crashed before dispatch must still send the push.
@@ -732,18 +651,18 @@ async function ringMissedCallIfUnanswered(callSid) {
     const { triggerNotification } = require('./notification-triggers');
     // Is this call still the missed-call lane's? False once a recording
     // persisted or the voicemail lane claimed it.
-    // False too once a later call got through (calledBackSql).
+    // False too once a later call got through (the called-back SQL).
     const stillMissedWith = (calledBackClause, visitCheck = whereNoVisitUnderway) => async () => Boolean(await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall)
       .modify(recording).whereNull('voicemail_callback_alerted_at')
       .whereRaw(calledBackClause)
       .modify(visitCheck)
       .first('id'));
-    const stillMissed = stillMissedWith(calledBack);
+    const stillMissed = stillMissedWith(CALLED_BACK_DEFER_SQL);
     // The post-check below retires the bell for good, so it needs proof of an
     // answered callback, not a callback that may still be ringing.
-    const stillMissedFinal = stillMissedWith(calledBackSql({ retire: true }));
+    const stillMissedFinal = stillMissedWith(CALLED_BACK_ANSWERED_SQL);
     // The same check without the visit clause: tells the post-check below whether the visit is the only reason.
-    const stillMissedIgnoringVisit = stillMissedWith(calledBackSql({ retire: true }), () => {});
+    const stillMissedIgnoringVisit = stillMissedWith(CALLED_BACK_ANSWERED_SQL, () => {});
     const deferredOnly = deferredOnlyCheck(stillMissed, stillMissedFinal);
     let stats = null;
     let rowWritten = false; // set by the trigger before the push
@@ -756,7 +675,7 @@ async function ringMissedCallIfUnanswered(callSid) {
         phone: row.from_phone,
         callLogId: row.id,
         at: row.created_at,
-        // GATE_MISSED_CALL_ALERT_DETAIL: line, call length, next visit; {} with the gate off.
+        // Line, call length, next visit.
         ...(await require('./missed-call-alert-detail').detailPayload(row)),
       }, {
         // Re-read right before the push (same supersession pattern as the
@@ -796,10 +715,7 @@ const TERMINAL_STATUSES = ['completed', 'no-answer', 'busy', 'canceled', 'failed
 async function sweepMissedCalls({ limit = 50 } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   const unknownCallers = isEnabled('missedCallUnknownCallers');
-  const gaps = gapOptions();
-  const calledBack = calledBackSql();
   const now = Date.now();
-  await stampGapShadows(gaps, now);
   let rung = 0;
   let offered = 0;
   let cursor = null;
@@ -822,12 +738,12 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
         }
       })
       .whereIn('status', TERMINAL_STATUSES)
-      .modify(sweepRecordingFilter(gaps))
+      .modify(sweepRecordingFilter)
       .whereNull('voicemail_callback_alerted_at')
       .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
-      .whereRaw(...unansweredClause(gaps))
+      .whereRaw(...UNANSWERED_CLAUSE)
       .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
-      .whereRaw(calledBack)
+      .whereRaw(CALLED_BACK_DEFER_SQL)
       .modify(whereNoVisitUnderway)
       // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
       .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
@@ -845,7 +761,7 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
       // A text cursor preserves PostgreSQL microseconds across tied dates.
       .select('*', db.raw('created_at::text AS sweep_created_at'));
     for (const r of rows) {
-      if (!r.twilio_call_sid || !missedCallEligible(r, now, { unknownCallers, ...gaps })) continue;
+      if (!r.twilio_call_sid || !missedCallEligible(r, now, { unknownCallers })) continue;
       offered += 1;
       if (await ringMissedCallIfUnanswered(r.twilio_call_sid)) rung += 1;
       if (offered === limit) return rung;
@@ -863,7 +779,7 @@ const RETIRE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * Retire open missed-call bells whose caller got through AFTER the bell rang
  * (owner 2026-10-05): a later answered call, an alerted voicemail, or our
- * dialed callback — the same called-back SQL (calledBackSql) that keeps a bell from ringing.
+ * dialed callback — the same called-back SQL (CALLED_BACK_ANSWERED_SQL) that keeps a bell from ringing.
  * Runs on the 2-minute call-alert cron; idempotent (a done bell is not
  * selected again). Never re-opens: a retired bell stays done.
  * This module is the ONE owner of missed-call bells (the relevance sweep has no
@@ -871,20 +787,16 @@ const RETIRE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  */
 async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
   let retired = await retireOpenMissedCalls({
-    clause: `NOT ${calledBackSql({ retire: true })}`,
+    clause: `NOT ${CALLED_BACK_ANSWERED_SQL}`,
     resolution: 'The caller got through on a later call',
     limit,
   });
-  // Visit underway (GATE_MISSED_CALL_VISIT_UNDERWAY): a separate reason, so the
-  // office can see why the bell closed. Off: this block does nothing.
-  const underway = visitUnderwaySql();
-  if (underway) {
-    retired += await retireOpenMissedCalls({
-      clause: underway,
-      resolution: VISIT_UNDERWAY_RESOLUTION,
-      limit,
-    });
-  }
+  // Visit underway: a separate reason, so the office can see why the bell closed.
+  retired += await retireOpenMissedCalls({
+    clause: VISIT_UNDERWAY_SQL,
+    resolution: VISIT_UNDERWAY_RESOLUTION,
+    limit,
+  });
   return retired + await closeContactedMissedCalls();
 }
 
@@ -921,7 +833,7 @@ async function supersedeCalls(callLogIds, resolution) {
 
 // Contact clauses (owner 2026-10-24: customer-contact bells "should close
 // automatically"; approved 2026-10-26). Beside the called-back proof above
-// (calledBackSql, kept as it is), a missed-call bell closes once, AFTER the call
+// (the called-back SQL, kept as it is), a missed-call bell closes once, AFTER the call
 // began (callStartedAtSql, the SQL form of call-timeline.js callStartedAt: a row
 // inserted after the call was over is backed out to its real start):
 //  - a person's text reached the caller (operatorReplySql + smsDeliveredSql,
@@ -1036,10 +948,9 @@ module.exports = {
   exchangeHangupScreenHit,
   sweepMissedCalls,
   outcomeUnanswered,
-  calledBackSql,
-  visitUnderwaySql,
+  CALLED_BACK_ANSWERED_SQL,
+  VISIT_UNDERWAY_SQL,
   VISIT_UNDERWAY_RESOLUTION,
-  CALLED_BACK_SQL,
   UNKNOWN_CALLER_MIN_SECONDS,
   // Exported so missed-call-text-back.js shares the exact same "what counts
   // as a missed call" shape in its SQL pre-filter instead of re-deriving it.

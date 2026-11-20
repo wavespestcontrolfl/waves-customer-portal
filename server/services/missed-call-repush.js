@@ -1,5 +1,5 @@
 /**
- * Missed-call re-push (GATE_MISSED_CALL_REPUSH, owner "ALL" 2026-10-20).
+ * Missed-call re-push (owner "ALL" 2026-10-20).
  * Admin push only: nothing here reaches a customer.
  *
  * A customer_missed_call bell that is still unread and not done 30 minutes
@@ -18,8 +18,6 @@
  * consumes the one re-push. Only the writer that stamped it sends. A crash
  * after the stamp loses the re-push rather than repeating it; that is the
  * deliberate trade.
- *
- * Off (gate unset) the sweep returns before any query.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -29,8 +27,7 @@ const TRIGGER_KEY = 'customer_missed_call';
 // call_log.metadata.missed_call_spam_wave values the bell stamps on a call whose push it quieted.
 const QUIET_SPAM_WAVE = ['block_quiet', 'burst_quiet', 'screen_quiet'];
 const REPUSH_AFTER_MS = 30 * 60 * 1000;
-// A bell older than this is the office's to close by hand; the window also
-// bounds the first sweep after the gate is turned on.
+// A bell older than this is the office's to close by hand.
 const WINDOW_MS = 48 * 60 * 60 * 1000;
 
 /**
@@ -104,14 +101,12 @@ async function repushOne(row, { triggers, trigger, to, PushService, hours, clock
   // after this tick's retire never buzzes again (Codex #6383 r3).
   const callStillMissed = async () => {
     if (!payload.callLogId) return true;
-    const { calledBackSql, visitUnderwaySql } = require('./missed-call-bell');
+    const { CALLED_BACK_ANSWERED_SQL, VISIT_UNDERWAY_SQL } = require('./missed-call-bell');
     const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-    // GATE_MISSED_CALL_VISIT_UNDERWAY: the customer's visit moved after the call, so no re-push.
-    // Gate off: visitUnderwaySql() is null and the select is exactly as before.
-    const underway = visitUnderwaySql();
+    // The customer's visit moved after the call: no re-push.
     const call = await db('call_log').where('id', payload.callLogId)
       .modify((qb) => whereNotSandboxCall(qb))
-      .first('id', db.raw(`(${calledBackSql({ retire: true })}${underway ? ` AND NOT ${underway}` : ''}) AS still_missed`), db.raw("metadata->>'missed_call_spam_wave' AS spam_wave"));
+      .first('id', db.raw(`(${CALLED_BACK_ANSWERED_SQL} AND NOT ${VISIT_UNDERWAY_SQL}) AS still_missed`), db.raw("metadata->>'missed_call_spam_wave' AS spam_wave"));
     // A call whose push the bell deliberately quieted (a robodialer wave or burst) is never buzzed later.
     if (QUIET_SPAM_WAVE.includes(call?.spam_wave)) return false;
     // No call row proves nothing either way: the bell stays eligible.
@@ -166,8 +161,6 @@ async function repushOne(row, { triggers, trigger, to, PushService, hours, clock
 }
 
 async function sweepMissedCallRepush({ now = new Date(), limit = 20, hours = undefined, clock = () => new Date() } = {}) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('missedCallRepush')) return 0;
   try {
     const nowMs = now.getTime();
     const officeHours = hours !== undefined ? hours : await require('./voice-agent/relay-context').loadOfficeHours();

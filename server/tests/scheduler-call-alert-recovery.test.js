@@ -21,6 +21,7 @@ jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() })
 jest.mock('../services/missed-call-bell', () => ({ sweepMissedCalls: jest.fn() }));
 jest.mock('../services/repeat-caller-bell', () => ({ sweepRepeatCallers: jest.fn() }));
 jest.mock('../services/promise-chaser-bell', () => ({ sweepPromiseChasers: jest.fn() }));
+jest.mock('../services/missed-call-repush', () => ({ sweepMissedCallRepush: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');

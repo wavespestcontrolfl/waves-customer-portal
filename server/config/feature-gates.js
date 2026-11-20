@@ -194,7 +194,6 @@
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
  *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 15s+, no answer, no voicemail — texts them back from the line they called)
  *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 15s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
- *   GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN=true (text-back lane only: no text to a caller who failed the press-1 pre-connect screen, call_log.metadata.preconnect_screen 'failed'; settles skipped:screen_failed; the missed-call bell is unchanged; dark by default)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
  *   GATE_SMS_UNANSWERED_REPLY=true (a suggested house-voice reply nobody acted on goes out on its own after 2 open hours, ordinary questions only; strict opt-in, read at call time via smsUnansweredReplyLive(), dark by default; customer-facing)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
@@ -445,8 +444,6 @@
  *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
  *   GATE_CALL_COMMERCIAL_DICTATED_BOOKING=true (owner ruling 2026-09-30: a commercial job staff dictate on the call and the caller accepts, with a price agreed, auto-books on INBOUND calls (outbound waits for staff identity independent of the speaker labels) instead of always going to the office. The staff commitment quote AND the caller's acceptance quote must each appear word for word in a turn of their own speaker (call-reschedule-agreement.js groundRescheduleAgreement, reused unchanged); a missing/unlabeled transcript or a quote only in the other speaker's turn fails closed. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears commercial_requires_quote — capacity, address validation, unit checks and the on-the-hour rule still apply, and no price agreed still goes to the office. Strict opt-in, read at call time via callCommercialDictatedBookingLive(). Off = byte-identical. hasAgentCommittedEvidence is untouched. See services/call-commercial-dictated-booking.js.)
  *   GATE_CALLBACK_SPAM_CLOSES_PARENT=true (an OUTBOUND call with metadata.relatedCallId (the admin Call back action on a voicemail) that lands a spam verdict also settles the parent inbound call: its open/in_progress triage_items whose reason a return call would have answered (the CALLBACK_SPAM_MOOT_CODES allowlist in call-triage-flags.js; other reasons stay open) resolve (resolution_source auto, resolution_rule callback_spam), its open Waves callback commitments are dismissed, review_status syncs to resolved when no card is left, metadata.callback_verdict is stamped. Nothing is sent. Strict opt-in, read via isEnabled. Off = today's behavior. Rollback: unset.)
- *   GATE_MISSED_CALL_ALERT_DETAIL=true (the missed-call bell and push body also name the line the caller dialed, the call length in seconds and, for a customer on file, the date of their next scheduled visit; admin copy only, nothing is sent to a customer. Strict opt-in, read via isEnabled. Off = today's sentence, byte-identical. Rollback: unset.)
- *   GATE_MISSED_CALL_REPUSH=true (a customer_missed_call bell still unread and not done 30 minutes after it rang gets ONE more admin push, same tag, renotify, during office hours Mon-Sat 8:00-18:00 ET; no new bell row, stamped metadata.repushed_at so it never repeats. Admin push only. Strict opt-in, read via isEnabled. Off = no sweep work. Rollback: unset.)
  *   GATE_CALL_EXTRACTION_SYSTEM_PROMPT=true (call extraction V2 sends its rules and output contract as a static system part and only the call's own facts and transcript as the user message, so the provider can cache the rules across calls. Same rules, different order and channel: its calls are their own prompt-version cohort (`s`, or `b` with the agent-proposed-slot block). Strict opt-in, read once per call via callExtractionSystemPromptLive(). Off = the one-message prompt, byte-identical. Rollback: unset.)
  *   GATE_CALL_EXTRACTION_V1_FALLBACK=true (call extraction V1 (extractCallData, the legacy extractor that still feeds the routing legs) runs on Gemini alone. When Gemini fails for a PROVIDER reason (a non-2xx answer such as 402 credits depleted, 429 or 5xx; a network error or timeout; GEMINI_API_KEY missing; or invalid JSON after the existing two parse attempts), this gate retries the SAME prompt through the house dispatcher: Claude first (MODELS.CALL_EXTRACTION_ANTHROPIC, pinned like the V2 Claude leg), then OpenAI (the pinned CALL_EXTRACTION_MODEL leg) if Claude also fails. Output goes through the same normalizeCallExtraction tail, so its shape is identical; the provider that served it is stamped as extraction_v1_provider in metadata.processing_timings and a warn line names the fallback. A bad answer that is not a provider failure keeps today's behavior, and when every backup leg fails the call takes the same path as before (extraction_failed with the attempt counter, or the invalid-JSON stub). Strict opt-in, read at call time via callExtractionV1FallbackLive(). Off = Gemini only, byte-identical. Rollback: unset. Sends nothing to a customer.)
  *   GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING=true (owner ruling 2026-10-06: a commercial Waves Assessment that Waves staff book on the call with NO price discussed auto-books, on OUTBOUND callback calls (lead_auto_bridge) as well as inbound, instead of always going to the office. Only the Waves Assessment catalog row (every service view of the call must resolve to it) and only when no price came up at all; any price mentioned goes to the priced path (GATE_CALL_COMMERCIAL_DICTATED_BOOKING), unchanged. The staff commitment and the caller acceptance are grounded word for word in the right speaker's turns (call-reschedule-agreement.js), including the shape where STAFF proposes the day and time, the caller says yes and staff then commits ("How does noon on Thursday sound?" / "Perfect." / "I'll book you for that"), which has its own extraction instruction while this gate is on. On an OUTBOUND recording the speaker labels are LLM-inferred and have swapped, so staff identity is proven independent of the labels: an Agent-labeled turn says "this is <name> with|from|at Waves" and no Caller-labeled turn does; otherwise it holds. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. OUTBOUND calls qualify only as lead callback bridges (call metadata.type lead_auto_bridge) AND only when outbound booking creation itself is on: GATE_CALL_OUTBOUND_BOOKING plus V2 routing in enforce mode (CALL_EXTRACTION_V2_ENABLED=true and CALL_EXTRACTION_V2_DRIVES_ROUTING=true or CALL_TRIAGE_ENFORCE_V2_GATES=true); this gate never authorizes outbound creation by itself, and the routing lane and the creation path read one predicate (outboundAutoBookingEnabled). Only clears commercial_requires_quote and the advisory card still files; the on-the-hour rule, capacity, address validation and unit checks still apply. Strict opt-in, read at call time via callCommercialAssessmentBookingLive(). Off = byte-identical, outbound stays excluded. See services/call-commercial-dictated-booking.js.)
@@ -2220,19 +2217,6 @@ const gates = {
   // hung up at the voicemail greeting). Bell only — no customer comms. Ships
   // dark; the bell stays customers-only until the owner flips it.
   missedCallUnknownCallers: process.env.GATE_MISSED_CALL_UNKNOWN_CALLERS === 'true',
-  // Quiet the push (not the bell row, never a text) for a robodialer wave (owner
-  // 2026-10-20 "yes", narrowed after Codex #6392 r2): a Google Business Profile
-  // line, under 30 s, no voicemail, and 3+ unknown numbers from the same 6-digit
-  // block in 14 days. On = bell row written, no push, stamped block_quiet. Off =
-  // shadow: the call still rings and is stamped missed_call_spam_wave_shadow.
-  missedCallSpamWave: process.env.GATE_MISSED_CALL_SPAM_WAVE === 'true',
-  // Quiet the push (not the bell row) for a robodialer burst (owner 2026-10-20
-  // "ALL", narrowed after Codex #6392 r1): 3+ different first-time unknown
-  // numbers on one line inside 24 h, each 15 s or more, within 1 s of each
-  // other, none got through. Any line type. On = bell row written, no push,
-  // stamped burst_quiet. Off = shadow: missed_call_spam_burst_shadow. The
-  // text-back still sends, stamped missed_call_text_spam_shadow 'burst'.
-  missedCallSpamBurst: process.env.GATE_MISSED_CALL_SPAM_BURST === 'true',
   // Admin bell when one number places 3+ inbound calls inside 3 hours
   // (repeat-caller-bell.js). Bell only — no customer comms. Ships dark.
   repeatCallerBell: process.env.GATE_REPEAT_CALLER_BELL === 'true',
@@ -2408,19 +2392,6 @@ const gates = {
   // Strict opt-in, read at call time via callbackSpokenNumberLinkLive(). Off =
   // today's behavior. Rollback: unset.
   callbackSpokenNumberLink: process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK === 'true',
-  // Missed-call bell and push say more (owner "ALL" 2026-10-20): the line the
-  // caller dialed, how many seconds they stayed on, and a customer's next
-  // visit date. Admin copy only; nothing reaches a customer. Off = today's
-  // sentence, byte for byte.
-  missedCallAlertDetail: process.env.GATE_MISSED_CALL_ALERT_DETAIL === 'true',
-  // One more push for a missed-call bell nobody has opened (owner "ALL"
-  // 2026-10-20): 30 minutes after it rang, in office hours, once. No new
-  // bell row. Admin push only.
-  missedCallRepush: process.env.GATE_MISSED_CALL_REPUSH === 'true',
-  // A missed-call bell for a customer on file whose visit moved after the call
-  // (en route, arrived or completed, or an invoice paid, same ET day) is retired,
-  // never rung and never re-pushed (owner 2026-10-21). Admin bell only.
-  missedCallVisitUnderway: process.env.GATE_MISSED_CALL_VISIT_UNDERWAY === 'true',
   // Call commitments: every processed call records what Waves promised and
   // what the caller agreed to as evidence-linked rows (call_commitments),
   // seeded from the V2 extraction plus one bounded model pass over the
@@ -2714,31 +2685,6 @@ const gates = {
   // awaiting transcription never does). Needs GATE_MISSED_CALL_TEXT_BACK.
   // Off → byte-identical to before.
   missedCallTextBackEmptyVoicemail: process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true',
-  // Narrows the text-back lane ONLY (not the bell), owner ruling 2026-10-24
-  // ("this should be fixed": no text-back to robocalls): a caller who failed
-  // the press-1 pre-connect screen (GATE_CALL_PRECONNECT_SCREEN stamps
-  // call_log.metadata.preconnect_screen 'failed' when an unknown caller on
-  // STIR attestation B pressed no key) gets no text; the call settles
-  // skipped:screen_failed. 'passed', 'gated', 'would_gate' and no stamp text
-  // as before. Off → byte-identical to before.
-  missedCallTextSkipFailedScreen: process.env.GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN === 'true',
-  // Missed-call bell gaps (owner 2026-10-20, "ALL", after the call audit). Admin
-  // bell only: none of the four sends a customer text, email or call. Each ships
-  // dark; off = byte-identical to before, except gates A and B stamp
-  // metadata.missed_call_gap_shadow on the calls they would have rung.
-  // A: a customer on file who reached voicemail and left an empty recording
-  // (no speech) rings the bell.
-  missedCallEmptyVmCustomer: process.env.GATE_MISSED_CALL_EMPTY_VM_CUSTOMER === 'true',
-  // B: a customer's inbound call that ended `completed` with no answered_by and
-  // no recording (the status-callback fallback insert, the ingest watchdog)
-  // counts as unanswered for the bell.
-  missedCallNoOutcomeCustomer: process.env.GATE_MISSED_CALL_NO_OUTCOME_CUSTOMER === 'true',
-  // C: our dialed callback counts as "the caller got through" only when the
-  // customer leg was answered, not when the staff leg pressed 1 (bridged_at).
-  callbackNeedsAnswer: process.env.GATE_CALLBACK_NEEDS_ANSWER === 'true',
-  // D: a missed-call bell whose push reached no phone is retried once by the
-  // 2-minute sweep, then settled; one admin alert per ET day names the failure.
-  missedCallPushCheck: process.env.GATE_MISSED_CALL_PUSH_CHECK === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
