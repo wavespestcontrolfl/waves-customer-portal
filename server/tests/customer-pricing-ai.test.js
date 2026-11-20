@@ -2481,17 +2481,33 @@ describe('strictPriceSettings: the refresh of the price settings before the engi
       }), { schema: { hasTable: async () => false } });
       const NO_MEMBERSHIP = { waveguard_tier: null, monthly_rate: null };
       const MEMBER = { waveguard_tier: 'Bronze', monthly_rate: 55 };
-      // Counts the reads of one table, and fails every one after `allowed`.
-      const counting = (table, allowed = Infinity) => {
+      // Counts the reads of one table, and fails the ones `fails` names by their number.
+      const counting = (table, fails = () => false) => {
         const base = withVisits(NO_MEMBERSHIP, []);
         const state = { reads: 0 };
         return Object.assign((name) => {
           if (name === table) {
             state.reads += 1;
-            if (state.reads > allowed) throw new Error(`${table} read down`);
+            if (fails(state.reads)) throw new Error(`${table} read down`);
           }
           return base(name);
         }, { schema: base.schema, state });
+      };
+      // An account that changes between two reads: only the rows query number `seenAt` of the visits finds them.
+      const seenOnlyAt = (serviceTypes, seenAt) => {
+        const seen = withVisits(NO_MEMBERSHIP, serviceTypes);
+        const gone = withVisits(NO_MEMBERSHIP, []);
+        let queries = 0;
+        return Object.assign((table) => {
+          const q = gone(table);
+          if (table === 'scheduled_services') {
+            q.select = () => {
+              queries += 1;
+              return (queries === seenAt ? seen : gone)(table).select();
+            };
+          }
+          return q;
+        }, { schema: gone.schema });
       };
 
       test.each([
@@ -2629,26 +2645,47 @@ describe('strictPriceSettings: the refresh of the price settings before the engi
         await expect(price({ strictPriceSettings: true, db: stamped(MEMBER), customer: atPrimary })).rejects.toMatchObject(OTHER_SERVICE);
       });
 
-      // Strict reads the live rows and the membership once more than the default. When one of those reads
-      // fails there is no proof that the customer has nothing else: pricing is withheld.
+      // The owned services and the live rows are two reads of the visits. Each reading alone refuses: when the
+      // account changes between the two, the one that saw the service is enough.
       test.each([
-        ['the live recurring rows', 'scheduled_services'],
-        ['the membership', 'customers'],
-      ])('strict: a failed read of %s withholds pricing', async (_label, table) => {
+        ['the read of the owned services', 1],
+        ['the read of the live rows', 2],
+      ])('strict: a lawn service that only %s saw is refused', async (_label, seenAt) => {
+        sync.mockResolvedValue(true);
+        await expect(price({ strictPriceSettings: true, db: seenOnlyAt(['Lawn Care'], seenAt) })).rejects.toMatchObject(OTHER_SERVICE);
+      });
+
+      test('strict: an account with no membership reads the visits twice, and a service neither read saw is priced', async () => {
+        sync.mockResolvedValue(true);
+        const result = await price({ strictPriceSettings: true, db: seenOnlyAt(['Lawn Care'], 3) });
+        expect(result.options.length).toBeGreaterThan(0);
+      });
+
+      // Strict makes two more reads of each table than the default. When any one of them fails there is no proof
+      // that the customer has nothing else: pricing is withheld.
+      test.each([
+        ['scheduled_services', 'the columns, then the rows, of the live rows read'],
+        ['customers', 'the customer row of the live rows read, then the membership'],
+      ])('strict: a failed read of the %s table withholds pricing, at each read strict adds (%s)', async (table) => {
         sync.mockResolvedValue(true);
         const defaultDb = counting(table);
         expect((await price({ db: defaultDb })).options.length).toBeGreaterThan(0);
         const strictDb = counting(table);
         expect((await price({ strictPriceSettings: true, db: strictDb })).options.length).toBeGreaterThan(0);
-        expect(strictDb.state.reads).toBeGreaterThan(defaultDb.state.reads);
+        // The reads strict adds come after the ones it shares with the default.
+        const first = defaultDb.state.reads + 1;
+        const last = strictDb.state.reads;
+        expect(last - first + 1).toBe(2);
 
-        // The default makes none of the extra reads, so it still prices on this handle.
-        const failing = () => counting(table, defaultDb.state.reads);
-        expect((await price({ db: failing() })).options.length).toBeGreaterThan(0);
-        sync.mockClear();
-        const strict = await price({ strictPriceSettings: true, db: failing() });
-        expect(strict).toMatchObject({ ok: false, code: 'PRICING_UNAVAILABLE', options: [] });
-        expect(sync).not.toHaveBeenCalled();
+        // The default makes none of them, so it still prices on a handle where they all fail.
+        expect((await price({ db: counting(table, (read) => read >= first) })).options.length).toBeGreaterThan(0);
+        // Strict: each of them alone.
+        for (let failed = first; failed <= last; failed += 1) {
+          sync.mockClear();
+          const strict = await price({ strictPriceSettings: true, db: counting(table, (read) => read === failed) });
+          expect(strict).toMatchObject({ ok: false, code: 'PRICING_UNAVAILABLE', options: [] });
+          expect(sync).not.toHaveBeenCalled();
+        }
       });
 
       // The services reader's default reads a failed customer read as "not a member": no current services.
