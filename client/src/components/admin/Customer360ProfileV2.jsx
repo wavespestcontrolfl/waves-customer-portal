@@ -49,7 +49,8 @@
 import useCustomerHistory from "../../hooks/useCustomerHistory";
 import { OfficeLikeButton, SmsLikeBadges } from "./SmsLikeControls";
 import { smsLikeThread } from "../../lib/smsLikes";
-import { Fragment, useState, useEffect, useRef, useId, useCallback, lazy, Suspense } from "react";
+import { Fragment, useState, useEffect, useRef, useId, useCallback, Suspense } from "react";
+import { lazyPanel } from "../LazyPanel";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { createPortal } from "react-dom";
 import "./customer360-workspace.css";
@@ -164,8 +165,8 @@ import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS } from "@waves/irrigation-runtime";
 
 // Reuse the Communications composer without loading the whole Messages page
 // until a profile opens Comms. Its send, attachment, and AI guards stay shared.
-const CustomerMessageMedia = lazy(() => import("./MessageMediaV2").then((module) => ({ default: module.MessageMediaV2 })));
-const CustomerSmsComposer = lazy(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.SmsTab })));
+const CustomerMessageMedia = lazyPanel(() => import("./MessageMediaV2").then((module) => ({ default: module.MessageMediaV2 })));
+const CustomerSmsComposer = lazyPanel(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.SmsTab })));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 

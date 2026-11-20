@@ -101,6 +101,12 @@ export function reloadBlocker() {
   return reloadBlockers()[0] ?? null;
 }
 
+// The stale-chunk reload asks too (staleChunkReload.js): on a staff page,
+// anything above keeps the tab. Customer pages are unchanged.
+export function staffReloadBlocker(pathname = window.location.pathname) {
+  return isAdminPath(pathname) ? reloadBlocker() : null;
+}
+
 const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 // Work that outlasted a full wait, such as a device write that never settles,
@@ -143,4 +149,12 @@ export async function reloadForNewBuild({
   try { sessionStorage.setItem(RELOADED_FOR, JSON.stringify({ build, tries: tries + 1 })); } catch { return 'storage'; }
   reload();
   return null;
+}
+
+// Waits up to 10 s for open requests and device writes to settle, as a page
+// move does, then names what still holds a staff tab, or null.
+export async function staffBlockerAfterWork({ now = () => Date.now() } = {}) {
+  const until = now() + WRITE_WAIT_MS;
+  while (workInFlight() > 0 && now() < until) await pause(200);
+  return staffReloadBlocker();
 }

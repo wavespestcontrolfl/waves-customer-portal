@@ -1,11 +1,12 @@
 import React, { Suspense } from "react";
+import { lazyPanel } from "../../components/LazyPanel";
 import { useSearchParams } from "react-router-dom";
 import { BookOpen, Brain, Library } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { UiSurface } from "../../components/ui";
 
-const KnowledgePage = React.lazy(() => import("./KnowledgePage"));
-const KnowledgeBasePage = React.lazy(() => import("./KnowledgeBasePage"));
+const KnowledgePage = lazyPanel(() => import("./KnowledgePage"));
+const KnowledgeBasePage = lazyPanel(() => import("./KnowledgeBasePage"));
 
 const AREAS = [
   { key: "wiki", label: "Wiki", Icon: BookOpen },

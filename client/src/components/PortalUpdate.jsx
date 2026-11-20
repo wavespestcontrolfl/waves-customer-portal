@@ -15,9 +15,9 @@ import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/porta
 // (the Ask Waves prompt included). Work that outlives a move is in a module,
 // in storage or in a send still running, and holds the reload
 // (reloadHolds.js). A held move opens the next page in the old code. If the
-// deploy removed that page's code, the stale-chunk reload
-// (staleChunkReload.js, App.jsx's lazyWithRetry) still runs as it does
-// without this gate, held work or not; a follow-up PR makes it obey the holds.
+// deploy removed that page's code, the stale-chunk reload obeys the same
+// holds (staleChunkReload.js): the page waits for open work, then reloads
+// once or shows its retry screen.
 export function PortalUpdateGate({ fallback, children }) {
   const { pathname } = useLocation();
   const navigationType = useNavigationType();
@@ -71,7 +71,9 @@ const HOLD_TEXT = {
   offline: 'This device is offline. A reload may show an error page.',
 };
 
-// The Reload bar's button. It obeys the same holds as the automatic reload:
+// The reload button of the Reload bar, of PortalReloadPrompt (below) and of
+// the staff retry screen (App.jsx). It obeys the same holds as the automatic
+// reload:
 // when work holds it, a click names every held work instead of reloading, and
 // the button becomes "Reload anyway". Each click asks again, so "Reload
 // anyway" reloads only when nothing holds that the button has not named. A
@@ -79,8 +81,8 @@ const HOLD_TEXT = {
 // the naming (clearNamed): that use can start new work under a name already
 // shown, such as more typing after "Anything not saved on this page will be
 // lost.", so the next Reload asks again. `pageUsed`: a use of the page in view
-// since it opened (below).
-function useHoldAwareReload(resetKey) {
+// since it opened (below). `beforeReload` runs right before the reload.
+export function useHoldAwareReload(resetKey, beforeReload) {
   const [held, setHeld] = useState([]);
   useEffect(() => { setHeld((named) => (named.length ? [] : named)); }, [resetKey]);
   const clearNamed = useCallback(() => setHeld((named) => (named.length ? [] : named)), []);
@@ -90,6 +92,7 @@ function useHoldAwareReload(resetKey) {
       setHeld(blockers);
       return;
     }
+    beforeReload?.();
     window.location.reload();
   };
   const heldText = [...new Set(held.map((name) => HOLD_TEXT[name] || 'Something in this tab is still open.'))].join(' ');
@@ -108,7 +111,8 @@ function usePageUsed(pathname, onUse) {
   useEffect(() => { used.current = false; }, [pathname]);
   useEffect(() => {
     const noteUse = (event) => {
-      if (!(event.target instanceof Element) || event.target.closest('[data-portal-update-bar]')) return;
+      // A Reload control itself (this bar, PortalReloadPrompt) is no use of the page.
+      if (!(event.target instanceof Element) || event.target.closest('[data-portal-update-bar], [data-portal-reload-prompt]')) return;
       used.current = true;
       onUse();
     };
@@ -133,6 +137,25 @@ export function PortalUpdateBar() {
       className="fixed left-1/2 z-[10990] box-border flex w-max max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-sm border-hairline border-zinc-300 bg-white px-4 py-2 font-sans text-sm text-zinc-900 shadow-lg">
       <span>{named ? heldText : 'A new version of the portal is ready.'}</span>
       <Button className="min-h-11 shrink-0 text-sm" onClick={() => tryReload(pageUsed())}>
+        {named ? 'Reload anyway' : 'Reload'}
+      </Button>
+    </div>
+  );
+}
+
+// Shown in place of a part of a staff page whose code the live build no
+// longer serves (components/LazyPanel.jsx): a Reload like the bar's. The part
+// failed as it was opened, so the page was in use, and the first Reload asks
+// once about the page, with what holds the tab, as the bar does after a use.
+// A later use of the page clears what it named.
+export function PortalReloadPrompt({ message, className }) {
+  const { pathname } = useLocation();
+  const { named, heldText, tryReload, clearNamed } = useHoldAwareReload(pathname);
+  usePageUsed(pathname, clearNamed);
+  return (
+    <div role="status" data-portal-reload-prompt="" className={className}>
+      <span>{named ? heldText : message}</span>
+      <Button className="min-h-11 shrink-0 text-sm" onClick={() => tryReload(true)}>
         {named ? 'Reload anyway' : 'Reload'}
       </Button>
     </div>

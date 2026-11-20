@@ -21,14 +21,15 @@
  * Tier 1 V2 styling.
  */
 import React, { Suspense, useState } from "react";
+import { lazyPanel } from "../../components/LazyPanel";
 import { useSearchParams } from "react-router-dom";
 import { FileClock, FileText } from "lucide-react";
 import { UiSurface } from "../../components/ui";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
-const DocumentTemplatesPage = React.lazy(() => import("./DocumentTemplatesPage"));
-const DocumentRequestsPage = React.lazy(() => import("./DocumentRequestsPage"));
+const DocumentTemplatesPage = lazyPanel(() => import("./DocumentTemplatesPage"));
+const DocumentRequestsPage = lazyPanel(() => import("./DocumentRequestsPage"));
 
 const TABS = [
   { key: "templates", label: "Templates", Icon: FileText },

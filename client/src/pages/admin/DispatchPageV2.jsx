@@ -39,9 +39,9 @@ import {
   useRef,
   useCallback,
   useMemo,
-  lazy,
   Suspense,
 } from "react";
+import { lazyPanel } from "../../components/LazyPanel";
 import { createPortal } from "react-dom";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import { Plus } from "lucide-react";
@@ -113,7 +113,7 @@ import { serviceWindowLabel } from "../tech/routeStops";
 import { lawnSheetService } from "../tech/lawnSheetService";
 import { requestDispatchSync } from "../../lib/dispatchSync";
 
-const RevenuePanel = lazy(
+const RevenuePanel = lazyPanel(
   () => import("../../components/dispatch/RevenuePanelV2"),
 );
 

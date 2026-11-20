@@ -17,6 +17,7 @@
  * for the same subject — one canonical section removes the split.
  */
 import React, { Suspense, useState } from "react";
+import { lazyPanel } from "../../components/LazyPanel";
 import { useSearchParams } from "react-router-dom";
 import { Camera, Leaf } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -25,7 +26,7 @@ import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { UiSurface } from "../../components/ui";
 import { getAdminUser } from "../../lib/adminAuth";
 
-const LawnAssessmentPanel = React.lazy(() => import("./LawnAssessmentPanel"));
+const LawnAssessmentPanel = lazyPanel(() => import("./LawnAssessmentPanel"));
 
 const TAB_KEY = "tab";
 const TABS = { FUNNEL: "funnel", FIELD: "field" };

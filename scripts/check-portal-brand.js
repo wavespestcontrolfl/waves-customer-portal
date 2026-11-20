@@ -100,7 +100,7 @@ const EXCLUDED_DIR_HINTS = [
 //   itself is no longer listed: its one "violation" was the word-emoji inside
 //   the comment describing that sweep, which the comment skip above retires.)
 const LEGACY_BASELINE = {
-  'client/src/App.jsx': { 'banned-font-size': 2 },
+  'client/src/App.jsx': { 'banned-font-size': 1 },
   'client/src/components/BrandFooter.jsx': { 'banned-font-size': 2 },
   'client/src/components/NewsletterSignup.jsx': { 'banned-font-size': 2 },
   'client/src/components/NotificationBell.jsx': { 'banned-font-size': 9 },

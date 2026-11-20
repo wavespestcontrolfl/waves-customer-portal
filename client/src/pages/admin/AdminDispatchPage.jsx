@@ -27,6 +27,7 @@ import React, {
   useEffect,
   useCallback,
 } from "react";
+import { lazyPanel } from "../../components/LazyPanel";
 import { useSearchParams } from "react-router-dom";
 import {
   CalendarDays,
@@ -44,7 +45,7 @@ import AdminTabRedirect from "../../components/admin/AdminTabRedirect";
 import DispatchBoardPage from "./DispatchBoardPage";
 import DayScorecardPanel from "../../components/dispatch/DayScorecardPanel";
 
-const DispatchPageV2 = React.lazy(() => import("./DispatchPageV2"));
+const DispatchPageV2 = lazyPanel(() => import("./DispatchPageV2"));
 
 const TAB_KEY = "tab";
 const TABS = {

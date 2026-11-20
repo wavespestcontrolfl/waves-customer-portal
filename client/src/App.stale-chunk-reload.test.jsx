@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import React, { Suspense, lazy } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const reported = vi.hoisted(() => ({ calls: [] }));
 vi.mock('./lib/reportError', () => ({ reportError: (...args) => { reported.calls.push(args); } }));
@@ -15,10 +15,23 @@ import { PageErrorBoundary, lazyWithRetry } from './App';
 import {
   CHUNK_RELOAD_FLAG,
   handleVitePreloadError,
+  isChunkError,
   isStaleChunkReloadPending,
   markPageNavigating,
+  reloadForMissingCode,
   resetStaleChunkReloadForTests,
 } from './lib/staleChunkReload';
+import { registerReloadHold } from './lib/reloadHolds';
+import { installPortalVersionWatch, resetPortalVersionForTests } from './lib/portalVersion';
+
+// Held work on a staff tab (lib/reloadHolds.js), as a manual card charge
+// waiting on the card check registers it.
+let holding = false;
+registerReloadHold('card-payment', () => holding);
+
+function missingChunk() {
+  return Promise.reject(new TypeError('Failed to fetch dynamically imported module: /assets/Page-old.js'));
+}
 
 function preloadErrorEvent() {
   return new Event('vite:preloadError', { cancelable: true });
@@ -41,8 +54,10 @@ function renderInBoundary(Page) {
 }
 
 beforeEach(() => {
+  holding = false;
   sessionStorage.clear();
   resetStaleChunkReloadForTests();
+  resetPortalVersionForTests();
   reported.calls = [];
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -153,4 +168,138 @@ test('with no reload pending, a lazy page that loads normally clears the one-sho
   renderInBoundary(Page);
   expect(await screen.findByText('Loaded page')).toBeInTheDocument();
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+});
+
+test('the missing-code check knows the error of each browser and of a Vite stylesheet, and nothing else', () => {
+  for (const message of [
+    'Failed to fetch dynamically imported module: /assets/Page-old.js',
+    'Importing a module script failed.',
+    'error loading dynamically imported module: /assets/Page-old.js',
+    'Unable to preload CSS for /assets/Page-old.css',
+    'Loading chunk 7 failed. (ChunkLoadError)',
+  ]) expect(isChunkError(new Error(message))).toBe(true);
+  expect(isChunkError(new TypeError('real render bug'))).toBe(false);
+  expect(isChunkError(null)).toBe(false);
+});
+
+test('a customer page keeps its stale-chunk reload while a staff tab hold is open', () => {
+  holding = true;
+  const reload = vi.fn();
+  const stale = preloadErrorEvent();
+  handleVitePreloadError(stale, reload);
+  expect(stale.defaultPrevented).toBe(true);
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+// A staff page obeys the holds of an out-of-date tab (lib/portalReload.js).
+describe('on a staff page', () => {
+  let reload;
+  beforeEach(() => {
+    reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/dashboard', reload });
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  test('with nothing open, a stale-chunk preload error reloads at once, as on every page', () => {
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test('held work keeps the tab: the preload error neither reloads nor swallows the import, and leaves the one-shot flag', () => {
+    holding = true;
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+    expect(isStaleChunkReloadPending()).toBe(false);
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  });
+
+  test('a request still open keeps the tab too; the page whose code is missing waits for it, then reloads once', async () => {
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const read = target.fetch('/api/admin/auth/me');
+      const stale = preloadErrorEvent();
+      handleVitePreloadError(stale, reload);
+      expect(stale.defaultPrevented).toBe(false);
+      renderInBoundary(lazyWithRetry(missingChunk));
+      expect(await screen.findByText('Loading the new version...')).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+      pending[0]({ headers: new Headers() });
+      await read;
+      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+      expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
+      expect(isStaleChunkReloadPending()).toBe(true);
+    } finally {
+      uninstall();
+    }
+  });
+
+  test('a page whose code is missing while held work keeps the tab says the portal has a new version; Reload names the work, then Reload anyway reloads', async () => {
+    holding = true;
+    renderInBoundary(lazyWithRetry(missingChunk));
+    expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
+    expect(screen.getByText('Couldn’t load this page')).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(screen.getByText('A card payment is still going through.')).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  });
+
+  test('after the one reload for a missing chunk already ran, the page shows the retry screen, not another reload', async () => {
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    renderInBoundary(lazyWithRetry(missingChunk));
+    expect(await screen.findByText('Couldn’t load this page')).toBeInTheDocument();
+    expect(screen.getByText('Check your connection and try again.')).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  });
+
+  test('offline, a page whose code is missing asks to check the connection, and its Retry names the offline device', async () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    renderInBoundary(lazyWithRetry(missingChunk));
+    expect(await screen.findByText('Check your connection and try again.')).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(screen.getByText('This device is offline. A reload may show an error page.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reload anyway' })).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a plain React.lazy whose code is missing gets the same recovery, not the crash screen, and is not reported', async () => {
+    holding = true;
+    renderInBoundary(lazy(missingChunk));
+    expect(await screen.findByText('Couldn’t load this page')).toBeInTheDocument();
+    expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
+    expect(reported.calls).toHaveLength(0);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a real crash on a staff page still shows the crash screen and is reported', async () => {
+    function Broken() { throw new TypeError('real render bug'); }
+    renderInBoundary(Broken);
+    expect(await screen.findByText('Something went wrong')).toBeInTheDocument();
+    expect(reported.calls).toHaveLength(1);
+  });
+
+  test('a page that closed during the wait does not reload', async () => {
+    await expect(reloadForMissingCode({ current: () => false, reload })).resolves.toBe('moved');
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('without session storage there is no one-shot guard, so the tab never reloads by itself', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage blocked'); });
+    await expect(reloadForMissingCode({ reload })).resolves.toBe('storage');
+    expect(reload).not.toHaveBeenCalled();
+  });
 });

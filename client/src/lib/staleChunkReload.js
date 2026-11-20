@@ -20,8 +20,26 @@
 // handler holds such a chunk instead. Once one is held, the boundary and
 // lazyWithRetry hold later failures too; if this page is still here when the
 // window ends, the navigation never committed and the page reloads.
+//
+// On a staff page, the reload obeys the holds of an out-of-date tab
+// (lib/portalReload.js): open requests and device writes, held work, and a
+// browser offline. While any of them holds the tab, the handler leaves the
+// import to fail. A page whose code is missing then waits for open work, as
+// a page move does, and reloads once or shows its retry screen
+// (reloadForMissingCode, App.jsx). A part of a page shows a Reload prompt in
+// its place (components/LazyPanel.jsx).
+
+import { staffBlockerAfterWork, staffReloadBlocker } from './portalReload';
 
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
+
+// The error for a chunk the live build no longer serves: the browser's own
+// for a module script (Chrome, Safari, Firefox), webpack's name, and Vite's
+// for a page stylesheet gone the same way.
+export function isChunkError(err) {
+  return /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|ChunkLoadError|Unable to preload CSS/i
+    .test(String(err?.message || ''));
+}
 
 // Long enough for a slow navigation to commit. It bounds how long a page whose
 // navigation never committed keeps placeholders before it reloads.
@@ -79,6 +97,9 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
     event.preventDefault();
     return;
   }
+  // A staff tab with open or held work: the import fails as it would with
+  // no handler (see the top of this file).
+  if (staffReloadBlocker()) return;
   try {
     if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return;
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
@@ -88,6 +109,31 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
   markStaleChunkReloadPending();
   event.preventDefault();
   reload();
+}
+
+// A staff page whose code is missing (App.jsx): waits for open work, as a
+// page move does, then reloads once, as for a stale chunk, when nothing holds
+// the tab. Resolves why it did not reload: what holds the tab, 'reloaded'
+// when this tab already reloaded once for a missing chunk (a real outage then
+// gets the retry screen, not a reload loop), 'storage' when session storage
+// is blocked (no one-shot guard), or 'moved' when the page closed meanwhile.
+export async function reloadForMissingCode({
+  current = () => true,
+  reload = () => window.location.reload(),
+  now,
+} = {}) {
+  const blocker = await staffBlockerAfterWork({ now });
+  if (!current()) return 'moved';
+  if (blocker) return blocker;
+  try {
+    if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return 'reloaded';
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+  } catch {
+    return 'storage';
+  }
+  markStaleChunkReloadPending();
+  reload();
+  return null;
 }
 
 // Test-only reset; module state otherwise lives for the page's lifetime.

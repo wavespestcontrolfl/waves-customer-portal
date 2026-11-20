@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, useRef, Suspense } from "react";
+import { lazyPanel } from "../../components/LazyPanel";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Activity,
@@ -34,7 +35,7 @@ import {
   UiSurface,
   cn,
 } from "../../components/ui";
-const ContentCalendar = lazy(() => import("./ContentCalendar"));
+const ContentCalendar = lazyPanel(() => import("./ContentCalendar"));
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // Defense-in-depth: the server already rejects non-http(s) competitor URLs at
 // the storage boundary, but never render a stored URL as an href without
