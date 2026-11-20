@@ -32,6 +32,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
+const { decodeHTML } = require('entities');
 const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
 const { etDateString, etCalendarDaysUntil } = require('../../utils/datetime-et');
@@ -192,8 +193,9 @@ function parseInspectionRows(rows, counts = {}, today = null) {
         highPriority: wholeNumber(row['Number of High Priority Violations']),
         // The violation-35 citations the file counted: a report page that lists fewer cannot answer.
         violation35: cited,
-        // Which visit of the inspection this is: only the first visit's report page answers.
-        visitNumber: wholeNumber(row['Visit Number']),
+        // Which visit of the inspection this is: only the first visit's report page answers. A 0 or a blank is not
+        // known: null, so a re-read of a later file fills it.
+        visitNumber: wholeNumber(row['Visit Number']) || null,
       },
     });
   }
@@ -251,7 +253,6 @@ function parseLicenseRows(rows, kind, counts = {}, today = null) {
 
 // ── Report page (pure) ──────────────────────────────────────────
 
-const ENTITIES = { '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
 // The state office's street address closes every whole page.
 const PAGE_FOOTER_RE = /2601 Blair Stone Road/;
 const VIOLATION_CODE_RE = /^\d\d[A-Z]?-\d\d-\d$/;
@@ -267,11 +268,10 @@ function violationsColumn(cells) {
   return cells.findIndex((cell) => /^violation$/i.test(cell));
 }
 
-// Tags out, the six entities the pages use decoded, NUL characters and runs of white space made one space.
+// Tags out, every character reference decoded (named or numeric: "&nbsp;", "&#45;", "&#x2D;"), NUL characters and
+// runs of white space made one space.
 function htmlText(html) {
-  return String(html || '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&(?:nbsp|amp|lt|gt|quot|#39);/g, (entity) => ENTITIES[entity])
+  return decodeHTML(String(html || '').replace(/<[^>]+>/g, ' '))
     .replaceAll('\0', ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -280,8 +280,9 @@ function htmlText(html) {
 // A follow-up report lists each violation of the inspection with every visit's note, labelled, oldest first:
 // "High Priority - - From initial inspection : ... - From follow-up inspection 2026-09-03: ...".
 const VISIT_NOTE_RE = /(?:-\s*)?From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
-// Any mention of a visit label, read by VISIT_NOTE_RE or not.
-const VISIT_LABEL_RE = /\bfrom\s+(?:initial|follow[\s-]?up|call[\s-]?back|re-?)\s*inspection/gi;
+// Any mention of a visit label, read by VISIT_NOTE_RE or not: any case, and any separator inside "follow-up",
+// "call back" or "re-inspection" (a dash of another kind, a space). A row where the two counts differ cannot be read.
+const VISIT_LABEL_RE = /\bfrom\s+(?:initial|follow\W{0,3}up|call\W{0,3}back|re\W{0,3})\s*inspection/gi;
 
 // How a row's text names its visits: { routine: true } without labels (all of it the read visit's own), { label,
 // notes } with labels (a note's date is null for the initial visit), or { unreadable: true } when a label does not

@@ -135,6 +135,14 @@ describe('parseInspectionRows', () => {
       detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2, violation35: 1, visitNumber: 1 },
     });
   });
+
+  test('a visit number of 0, or blank, is not known: stored as null, so a re-read of a later file fills it', () => {
+    const row = (number) => inspRow({ visit: '9012' }).replace('"34208","1","1","Food"', `"34208","1","${number}","Food"`);
+    expect(row('0')).toContain('"34208","1","0","Food"');
+    const visitNumber = (number) => svc.parseInspectionRows(parseDbprCsv(inspCsv([row(number)])))[0].detail.visitNumber;
+    for (const number of ['0', '00', '', ' ']) expect(visitNumber(number)).toBeNull();
+    expect(visitNumber('2')).toBe(2);
+  });
 });
 
 describe('parseLicenseRows and the phone rule', () => {
@@ -422,6 +430,25 @@ describe('parseInspectionReport', () => {
       const empty = reportPage(`<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - ${notes}</td></tr>`, '08/28/2026');
       expect(parse(empty, { violation35: 1, visitDate: '2026-08-28' })).toBeNull();
     }
+  });
+
+  test('character references are decoded before visit labels are read, so a callback-only 35A row is never the first visit\'s', () => {
+    const door = '<tr><td>35B-01-4</td><td>&nbsp;</td><td>Basic - From initial inspection : Gap under the back door.</td></tr>';
+    const flies = (label) => `<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - ${label} Live flies at the bar.</td></tr>`;
+    const read = (rows) => parse(reportPage(rows, '10/20/2026'), { violation35: 1, visitDate: '2026-10-20' });
+    for (const label of ['From follow&#45;up inspection 2026-10-22:', 'From follow&#x2D;up inspection 2026-10-22:']) {
+      // The 35A row was first cited at the callback: the first visit cited the door only.
+      expect(read(`${flies(label)}${door}`)).toEqual({ pestEvidence: false, findings: [] });
+      // Alone, the callback-only row leaves the first visit nothing of its own: no answer.
+      expect(read(flies(label))).toBeNull();
+    }
+    // A dash of another kind, or a space, in the label: no answer, never a routine row.
+    for (const label of ['From follow&hyphen;up inspection 2026-10-22:', 'From follow\u2011up inspection 2026-10-22:', 'From follow up inspection 2026-10-22:']) {
+      expect(read(flies(label))).toBeNull();
+    }
+    // A finding's text is decoded too.
+    const roaches = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>Roaches &#8212; under the sink &amp; bar.</td></tr>';
+    expect(parse(reportPage(roaches)).findings[0].text).toBe('Roaches \u2014 under the sink & bar.');
   });
 
   test('a page answers only for the visit whose date its inspection table gives', () => {
