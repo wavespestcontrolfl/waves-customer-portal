@@ -526,13 +526,16 @@ router.post('/:id/reply', async (req, res, next) => {
     // The row the editor posts over: an unchanged resubmission of a draft or
     // an attempt keeps the account facts and the origin recorded for it.
     const current = await db('google_reviews').where({ id: req.params.id }).first('auto_reply_draft', 'auto_reply_grounding', 'review_reply', 'auto_reply_version', 'auto_reply_status', 'auto_reply_reason');
-    // An Intelligence Bar attempt whose PUT timed out, submitted again
-    // unchanged before the sync restores it (its text is still in
-    // auto_reply_draft and the slot is empty): agent text, held to the
-    // account facts its attempt recorded, as Post now does.
-    const parkedAgentAttempt = !!current && !current.review_reply && !!current.auto_reply_draft
-      && current.auto_reply_version === 'agent_ops' && current.auto_reply_status === AutoReply.STATUS.PARKED
-      && AutoReply.RECONCILE_REASONS.has(current.auto_reply_reason) && String(current.auto_reply_draft).trim() === submitted;
+    // Agent text submitted unchanged, whatever button sent it (Use Draft, or
+    // text pasted into the editor): a restored agent draft in the slot
+    // (version agent_ops), or an Intelligence Bar attempt still parked after
+    // a timeout (its text in auto_reply_draft, the slot empty until the sync
+    // restores it). It keeps its agent origin and the account facts its
+    // attempt recorded, as Post now does.
+    const slotDraft = current && isDraftReply(current.review_reply) ? stripDraftPrefix(current.review_reply).trim() : null;
+    const unchangedAgentText = !!current && current.auto_reply_version === 'agent_ops' && (slotDraft === submitted
+      || (!current.review_reply && !!current.auto_reply_draft && current.auto_reply_status === AutoReply.STATUS.PARKED
+        && AutoReply.RECONCILE_REASONS.has(current.auto_reply_reason) && String(current.auto_reply_draft).trim() === submitted));
     const result = await ReplyPublisher.publishReviewReply({
       reviewId: req.params.id,
       text: replyText,
@@ -541,7 +544,7 @@ router.post('/:id/reply', async (req, res, next) => {
       // A draft or grounding token, or a restored agent draft, marks text
       // that started from an AI or Agent Ops draft (Use Draft, AI Reply),
       // edited or not: the publisher checks the app name strictly.
-      fromDraft: Boolean(useDraft || (typeof groundingToken === 'string' && groundingToken) || fromAgentDraft === true || parkedAgentAttempt),
+      fromDraft: Boolean(useDraft || (typeof groundingToken === 'string' && groundingToken) || fromAgentDraft === true || unchangedAgentText),
       // A human posting closes out a pending/posted auto-reply state on the
       // row; a never-queued row keeps NULL.
       autoFields: AutoReply.manualReplyCloseFields(db),
@@ -566,16 +569,10 @@ router.post('/:id/reply', async (req, res, next) => {
         if (!current) return undefined;
         // "Use Draft" (draftToken only): the stored pipeline draft's snapshot
         // carries the account fingerprint it was grounded on (codex r50).
-        // "Use Draft" on a restored agent draft (fromAgentDraft), posted
-        // unchanged, and a still-parked one: the account facts its attempt
+        // Unchanged agent text (above): the account facts its attempt
         // recorded, as Post now.
-        let snapshotFits = parkedAgentAttempt;
-        if (!snapshotFits && (useDraft || fromAgentDraft === true) && isDraftReply(current.review_reply)) {
-          const slotText = stripDraftPrefix(current.review_reply).trim();
-          snapshotFits = useDraft
-            ? !!current.auto_reply_draft && slotText === String(current.auto_reply_draft).trim()
-            : current.auto_reply_version === 'agent_ops' && slotText === submitted;
-        }
+        const snapshotFits = unchangedAgentText
+          || (useDraft && slotDraft != null && !!current.auto_reply_draft && slotDraft === String(current.auto_reply_draft).trim());
         if (!snapshotFits) return undefined;
         const g = current.auto_reply_grounding;
         const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);

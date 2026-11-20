@@ -2001,6 +2001,10 @@ describe('admin actions', () => {
     expect(await Runner.pipelineDraftGuard(text)(ib)).toBeNull();
     mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
     expect(await Runner.pipelineDraftGuard(text)(ib)).toMatch(/customer facts changed/);
+    // An attempt parked with no recorded review (or a malformed record) is never sent again unchanged, as for Post now; edited text is the person's own.
+    expect(await Runner.pipelineDraftGuard(text)({ ...base, auto_reply_grounding: null })).toMatch(/no record of the review/);
+    expect(await Runner.pipelineDraftGuard(text)({ ...base, auto_reply_grounding: '{not json' })).toMatch(/no record of the review/);
+    expect(await Runner.pipelineDraftGuard(text + ' Thanks again.')({ ...base, auto_reply_grounding: null })).toBeNull();
   });
 
   test('a malformed grounding token is never an unguarded submission (codex r47)', async () => {

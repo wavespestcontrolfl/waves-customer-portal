@@ -653,8 +653,11 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           this.orWhere('review_reply', asDraft(replyText));
         });
     }
+    // The write binds the attempted text (and the slot the claim read), so a
+    // database error message can quote it and the reviewer's name: only its
+    // code goes into the log (AGENTS.md, PII in logs).
     await q.update(uncertain)
-      .catch((e2) => logger.error(`[review-reply] google_uncertain park failed for ${reviewId}: ${e2.message}`));
+      .catch((e2) => logger.error(`[review-reply] google_uncertain park failed for ${reviewId}: ${require('../notification-service').safeErrorSummary(e2)}`));
     logger.error(`[review-reply] Google PUT timed out for ${reviewId} — outcome unknown, claim abandoned, parked for reconciliation`);
     throw new ReviewReplyError(CODES.GOOGLE_UNCERTAIN, `${e.message} — the reply may be live on Google; reconcile after the next sync.`, { status: 502, cause: e });
   }

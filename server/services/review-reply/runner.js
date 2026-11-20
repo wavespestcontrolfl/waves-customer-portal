@@ -1625,15 +1625,15 @@ function dismissCancelFields(conn = db) {
  * such a draft is never marked stale for one. Null when it may be
  * published: no grounding recorded, or both fingerprints still match. Pass
  * accountFpNow when the caller already read the account facts.
- * requireReview (Post now's re-attempt of a still-parked attempt): an
- * attempt with no recorded review (parked before the publisher recorded
- * one) is never re-attempted as written; the park stays for the sync's
- * restore or a person's reply from the editor.
+ * requireReview (a still-parked attempt sent again unchanged, by Post now
+ * or from the editor): an attempt with no recorded review (parked before
+ * the publisher recorded one, or a malformed record) is never sent again as
+ * written; the park stays for the sync's restore or an edited reply.
  */
 async function manualAttemptMoved(row, accountFpNow, { requireReview = false } = {}) {
   const g = row.auto_reply_grounding;
   const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);
-  if (requireReview && !snap?.fingerprint) return 'this earlier attempt has no record of the review it was written for — wait for the next review sync, or reply from the editor';
+  if (requireReview && !snap?.fingerprint) return 'this earlier attempt has no record of the review it was written for — read the current review and edit the reply first';
   if (snap?.fingerprint && snap.fingerprint !== reviewFingerprint(row)) return 'the review or its customer link changed since this draft was written — read the current review and edit the draft first';
   if (!snap?.accountFingerprint) return null;
   let current = accountFpNow;
@@ -1701,7 +1701,7 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
     if (!gReview && !token && !human && fresh.auto_reply_draft && submitted === String(fresh.auto_reply_draft).trim()
       && fresh.auto_reply_status === STATUS.PARKED && RECONCILE_REASONS.has(fresh.auto_reply_reason)
       && MANUAL_VERSIONS.has(fresh.auto_reply_version || '')) {
-      return manualAttemptMoved(fresh);
+      return manualAttemptMoved(fresh, undefined, { requireReview: true });
     }
     if (gReview) {
       if (gReview !== reviewFingerprint(fresh)) return 'the review or its customer link changed since this draft was generated — reload and draft again';

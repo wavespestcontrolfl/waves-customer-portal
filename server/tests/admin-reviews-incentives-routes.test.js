@@ -140,6 +140,11 @@ describe('POST /admin/reviews/:id/reply — the account facts for the post-PUT c
     expect(await expectedAccountFor({ replyText: text, fromAgentDraft: true })).toBe('acct-recorded');
   });
 
+  test('a restored agent draft pasted into the editor unchanged (no Use Draft) keeps its account facts and its agent origin', async () => {
+    expect(await expectedAccountFor({ replyText: text })).toBe('acct-recorded');
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(true);
+  });
+
   test('edited text, or a restored draft a person wrote, carries none; Use Draft of a stored draft keeps its snapshot (codex r50)', async () => {
     expect(await expectedAccountFor({ replyText: `${text} We fixed the garage too.`, fromAgentDraft: true })).toBeUndefined();
     Publisher.publishReviewReply.mockClear();

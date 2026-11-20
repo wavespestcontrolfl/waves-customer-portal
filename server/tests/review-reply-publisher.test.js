@@ -764,6 +764,16 @@ describe('publishReviewReply', () => {
     expect(logged).not.toMatch(/Dana|update/);
   });
 
+  test('a failed park write after an Intelligence Bar timeout logs only the database error code', async () => {
+    const logger = require('../services/logger');
+    state.rows[0].auto_reply_status = null;
+    // The park write fails; the mock's error quotes the bound text and the reviewer's name.
+    await ibTimeout({ duringPut: () => { state.failNextUpdate = true; } });
+    const logged = logger.error.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toMatch(/google_uncertain park failed for rev-1: ECONNRESET/);
+    expect(logged).not.toMatch(/Dana|update/);
+  });
+
   test('an Intelligence Bar timeout records nothing when the row changed during the PUT (the change wins)', async () => {
     state.rows[0].auto_reply_status = null;
     await ibTimeout({ duringPut: () => Object.assign(state.rows[0], { auto_reply_status: 'skipped', auto_reply_reason: 'dismissed' }) });
