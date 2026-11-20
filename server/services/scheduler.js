@@ -1770,11 +1770,11 @@ function initScheduledJobs() {
   // =========================================================================
   // MONDAY 10:36 AM ET — Weekly restaurant prospect list (owner 2026-11-19):
   // new food licenses, ownership changes and violation-35 inspections in
-  // Manatee / Sarasota / Charlotte from Florida's public restaurant files,
-  // then the public report page of each recent code-35 inspection to split
-  // 35A (pest evidence) from 35B (outer openings). Fills restaurant_prospects
-  // only: sends nothing, calls no AI, no gate. Kill = env
-  // DBPR_PROSPECT_SYNC_DISABLED. Minute 36, not :25: the hourly :25 check
+  // Manatee / Sarasota / Charlotte, less Punta Gorda (not served), from
+  // Florida's public restaurant files, then the public report page of each
+  // recent code-35 inspection to split 35A (pest evidence) from 35B (outer
+  // openings). Fills restaurant_prospects only: sends nothing, calls no AI,
+  // no gate. Kill = env DBPR_PROSPECT_SYNC_DISABLED. Minute 36, not :25: the hourly :25 check
   // runs then. It is clear of the Monday 6:40-7:15 and the 8:40-9:40 deploy
   // windows. Every step upserts by (kind, source_key) and a read report is
   // never read again, so a re-run after a deploy kill is harmless.
