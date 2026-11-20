@@ -3,15 +3,20 @@
  * first visit fits a listed block, by the schedule gap tool's own check (the real analyzeGapCandidate and arrival
  * search), least added drive first. The reads are faked; synthetic ids and names only.
  */
-jest.mock('../models/db', () => ({}));
+// The module database: the fill list is built on it only. Each test's fake knex answers through it (fakeConn).
+jest.mock('../models/db', () => {
+  const db = (...args) => db.current(...args);
+  return db;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/estimate-slot-availability', () => {
   const actual = jest.requireActual('../services/estimate-slot-availability');
   return {
     resolveEstimateCoords: jest.fn(), resolveCatalogSlotProfile: jest.fn(), appointmentServicesFor: jest.fn((profile) => profile.services),
     estimateMoveInDate: jest.fn(async () => null),
-    // The booking page's own season rule.
+    // The booking page's own season rule and its name for a set of services.
     seasonalSelectionProfile: actual.seasonalSelectionProfile, inMosquitoSeason: actual.inMosquitoSeason,
+    formatServiceProfileLabel: actual.formatServiceProfileLabel,
   };
 });
 jest.mock('../services/auto-dispatch/preferences', () => {
@@ -25,12 +30,10 @@ jest.mock('../services/scheduling/tech-start-point', () => ({
 }));
 jest.mock('../services/scheduling/departure-time', () => ({ dayDepartureMinutes: jest.fn(async () => 480) }));
 jest.mock('../services/day-replan/route-check', () => ({ DISPATCH_DAY_END: 18 * 60 }));
-// The estimate page's own reads: a guarantee-only renewal, and an upcoming visit its page would adopt.
-jest.mock('../routes/estimate-public', () => ({
-  parseEstimateDataSafe: jest.fn((row) => (typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data || {})),
-  isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
-  findLinkedUpcomingAppointment: jest.fn(async () => null),
-  adoptionServiceModesForContract: jest.fn(() => ['recurring']),
+// The estimate page's own answer (estimate-slots-public.js): whether it offers times, and its slot picker.
+const PICKER = { serviceMode: 'recurring', selection: {} };
+jest.mock('../routes/estimate-slots-public', () => ({
+  _internals: { slotBrowseRefusal: jest.fn(async () => null), pageSlotPicker: jest.fn(async () => ({ serviceMode: 'recurring', selection: {} })) },
 }));
 // The real check, watched: the list must yield to the event loop between checks.
 jest.mock('../services/scheduling/gap-candidates', () => {
@@ -39,7 +42,7 @@ jest.mock('../services/scheduling/gap-candidates', () => {
 });
 
 const logger = require('../services/logger');
-const page = require('../routes/estimate-public');
+const page = require('../routes/estimate-slots-public')._internals;
 const slots = require('../services/estimate-slot-availability');
 const { getCustomerSchedulingPreferences, normalizePreferences } = require('../services/auto-dispatch/preferences');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
@@ -80,7 +83,9 @@ function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = 
     q.pluck = async () => (table === 'scheduled_services' ? taken : q.categories.flatMap((category) => inactive[category] || []));
     return q;
   };
-  return { conn, calls };
+  const db = require('../models/db');
+  db.current = conn;
+  return { conn: db, calls };
 }
 
 // Every listed day's stops (the gap tool's read): by date, numbered in route order as dispatch saves them.
@@ -111,7 +116,7 @@ describe('open estimates', () => {
         estimate('e4', { customer_id: '3274944a-f509-413c-9dee-a8b0cdb16493' })],
       taken: ['e3'],
     });
-    expect((await _internals.openEstimates(conn, NOW)).estimates.map((e) => e.id)).toEqual(['e1']);
+    expect((await _internals.openEstimates(conn, NOW)).estimates.map((e) => e.estimate.id)).toEqual(['e1']);
     expect(calls).toEqual(expect.arrayContaining([
       ['estimates', 'whereIn', ['status', ['sent', 'viewed']]], ['estimates', 'whereNull', ['archived_at']],
       ['estimates', 'whereNotNull', ['customer_id']], ['estimates', 'whereNull', ['expires_at']], ['estimates', 'orWhere', ['expires_at', '>', NOW]],
@@ -127,46 +132,52 @@ describe('open estimates', () => {
     const { conn, calls } = fakeConn({ estimates: [...tests, ...older], taken: ['o0'] });
     const { estimates: open } = await _internals.openEstimates(conn, NOW);
     expect(open).toHaveLength(_internals.MAX_ESTIMATES);
-    expect(open[0].id).toBe('o1');
+    expect(open[0].estimate.id).toBe('o1');
     expect(calls.some(([table, m]) => table === 'estimates' && m === 'limit')).toBe(false);
     // The page's lookup runs for the estimates it keeps, and stops at the cap.
-    expect(page.findLinkedUpcomingAppointment).toHaveBeenCalledTimes(_internals.MAX_ESTIMATES);
+    expect(page.pageSlotPicker).toHaveBeenCalledTimes(_internals.MAX_ESTIMATES);
   });
 
-  test('an estimate with no visit to book, or whose page already shows an appointment, is left out', async () => {
-    page.isRodentGuaranteeOnlyEstimate.mockImplementation((row) => row.id === 'renewal');
-    page.findLinkedUpcomingAppointment.mockImplementation(async (row) => (row.id === 'booked' ? { id: 'visit-1' } : null));
+  test('an estimate whose page offers no times, or shows no slot picker, is left out; the rest carry the page\'s picker', async () => {
+    // A guarantee-only renewal: the page answers with no times. An appointment already scheduled: no picker.
+    page.slotBrowseRefusal.mockImplementation(async (row) => (row.id === 'renewal' ? { status: 200, body: { invoiceOnlyAcceptance: true } } : null));
+    page.pageSlotPicker.mockImplementation(async (id) => (id === 'booked' ? null : { serviceMode: 'one_time', selection: {} }));
     try {
-      // estimate_data as a JSON string: the page's helpers get it parsed, as the page's view passes it.
-      const stored = { estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control' }] } } }) };
-      const parsed = JSON.parse(stored.estimate_data);
-      const { conn } = fakeConn({ estimates: [estimate('renewal', stored), estimate('booked', stored), estimate('open', stored)] });
-      expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [expect.objectContaining({ id: 'open' })], unread: 0 });
-      expect(page.isRodentGuaranteeOnlyEstimate).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }), parsed);
-      // As the page's view asks it: the estimate's own service modes, on this connection.
-      expect(page.adoptionServiceModesForContract).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }), parsed);
-      expect(page.findLinkedUpcomingAppointment).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }), parsed,
-        { database: conn, serviceModes: ['recurring'] });
-      expect(page.findLinkedUpcomingAppointment).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'renewal' }), expect.anything(), expect.anything());
+      const { conn } = fakeConn({ estimates: [estimate('renewal'), estimate('booked'), estimate('open')] });
+      page.pageSlotPicker.mockClear();
+      const result = await _internals.openEstimates(conn, NOW);
+      expect(result).toEqual({
+        estimates: [{ estimate: expect.objectContaining({ id: 'open' }), picker: { serviceMode: 'one_time', selection: {} } }], unread: 0 });
+      // The page's two checks, in its order: a refused estimate never reaches the picker.
+      expect(page.slotBrowseRefusal).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }));
+      expect(page.pageSlotPicker.mock.calls.map(([id]) => id)).toEqual(['booked', 'open']);
+      // One revision: the picker reads the row the refusal read and the visit is sized from, never its own.
+      expect(page.pageSlotPicker.mock.calls[1][1].row).toBe(result.estimates[0].estimate);
     } finally {
-      page.isRodentGuaranteeOnlyEstimate.mockImplementation(() => false);
-      page.findLinkedUpcomingAppointment.mockImplementation(async () => null);
+      page.slotBrowseRefusal.mockImplementation(async () => null);
+      page.pageSlotPicker.mockImplementation(async () => PICKER);
     }
   });
 
   test('an estimate whose page lookup fails is left off, counted as unread and logged; the rest are still checked', async () => {
-    page.findLinkedUpcomingAppointment.mockImplementation(async (row) => {
-      if (row.id === 'down') throw new Error('lookup timeout');
+    page.slotBrowseRefusal.mockImplementation(async (row) => {
+      if (row.id === 'refusal-down') throw new Error('park lookup failed');
       return null;
     });
+    page.pageSlotPicker.mockImplementation(async (id) => {
+      if (id === 'down') throw new Error('lookup timeout');
+      return PICKER;
+    });
     try {
-      const { conn } = fakeConn({ estimates: [estimate('down'), estimate('ok')] });
-      expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [expect.objectContaining({ id: 'ok' })], unread: 1 });
+      const { conn } = fakeConn({ estimates: [estimate('down'), estimate('refusal-down'), estimate('ok')] });
+      expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [{ estimate: expect.objectContaining({ id: 'ok' }), picker: PICKER }], unread: 2 });
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate down unread (lookup timeout)'));
-      // The notice's count: the estimate was checked, and could not be read.
-      expect(await fillList(conn, [], NOW)).toEqual({ checked: 2, fitted: 0, noLocation: 0, unread: 1, byBlock: [] });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate refusal-down unread (park lookup failed)'));
+      // The notice's count: the estimates were checked, and could not be read.
+      expect(await fillList(conn, [], NOW)).toEqual({ checked: 3, fitted: 0, noLocation: 0, unread: 2, byBlock: [] });
     } finally {
-      page.findLinkedUpcomingAppointment.mockImplementation(async () => null);
+      page.slotBrowseRefusal.mockImplementation(async () => null);
+      page.pageSlotPicker.mockImplementation(async () => PICKER);
     }
   });
 
@@ -187,9 +198,14 @@ describe('a fit inside the block', () => {
     const late = { windowStart: '09:00', windowEnd: '10:00', estimatedArrival: '09:40', addedDriveMinutes: 3 };
     const early = { windowStart: '09:00', windowEnd: '10:00', estimatedArrival: '08:50', addedDriveMinutes: 5.5 };
     // Arriving at 9:40, the visit ends at 10:40, past the block: the next fit is taken.
-    expect(_internals.fitInside(block, [late, early])).toEqual({ windowStart: '09:00', startMin: 540, endMin: 600, length: 60, addedDriveMin: 6 });
+    expect(_internals.fitInside(block, [late, early])).toEqual({ windowStart: '09:00', startMin: 540, endMin: 600, length: 60, onSiteMin: 60, addedDriveMin: 6 });
     // The offered window stays 9:00 when the van comes at 9:40.
-    expect(_internals.fitInside({ start: 9 * 60, min: 100 }, [late])).toEqual({ windowStart: '09:00', startMin: 580, endMin: 640, length: 60, addedDriveMin: 3 });
+    expect(_internals.fitInside({ start: 9 * 60, min: 100 }, [late])).toEqual({ windowStart: '09:00', startMin: 580, endMin: 640, length: 60, onSiteMin: 60, addedDriveMin: 3 });
+    // The modeled end: 45 minutes on site in a 60-minute visit (owner planning minutes) fits a 50-minute block. The visit
+    // as booked stays 60 minutes.
+    const planned = { ...early, estimatedArrival: '09:00', estimatedDeparture: '09:45', addedDriveMinutes: 2 };
+    expect(_internals.fitInside({ start: 9 * 60, min: 50 }, [planned])).toEqual({ windowStart: '09:00', startMin: 540, endMin: 585, length: 60, onSiteMin: 45, addedDriveMin: 2 });
+    expect(_internals.fitInside({ start: 9 * 60, min: 44 }, [planned])).toBeNull();
     expect(_internals.fitInside({ start: 9 * 60 + 1, min: 120 }, [early])).toBeNull();
     expect(_internals.fitInside(block, [{ ...early, addedDriveMinutes: -0.4 }]).addedDriveMin).toBe(0);
   });
@@ -211,18 +227,69 @@ describe('fillList', () => {
     expect(lines[0].addedDriveMin).toBeLessThan(lines[1].addedDriveMin);
     expect(lines[1].addedDriveMin).toBeLessThan(lines[2].addedDriveMin);
     for (const line of lines) {
-      expect(line).toMatchObject({ name: `Pat ${line.estimateId}`, label: 'Pest Control', length: 60, endMin: line.startMin + 60 });
+      expect(line).toMatchObject({ name: `Pat ${line.estimateId}`, label: 'Pest Control', length: 60, onSiteMin: 60, endMin: line.startMin + 60 });
       expect(line.startMin).toBeGreaterThanOrEqual(9 * 60);
       expect(line.endMin).toBeLessThanOrEqual(13 * 60);
     }
     // Never geocoded: each location is the stored one or none.
     expect(slots.resolveEstimateCoords).toHaveBeenCalledTimes(4);
     for (const [, opts] of slots.resolveEstimateCoords.mock.calls) expect(opts).toEqual({ paidCalls: false, strictReads: true });
-    expect(slots.resolveCatalogSlotProfile).toHaveBeenCalledWith(expect.objectContaining({ id: 'near' }), {}, conn);
+    // Sized as the page sizes it: the page picker's service mode and default selection.
+    expect(slots.resolveCatalogSlotProfile).toHaveBeenCalledWith(expect.objectContaining({ id: 'near' }), { serviceMode: 'recurring' }, conn);
     expect(getCustomerSchedulingPreferences).toHaveBeenCalledWith('c-near', 'Pest Control', conn, { serviceKey: 'pest_control' });
     // The gap tool's read of the day, with its statuses and columns.
     expect(dayStopsQuery).toHaveBeenCalledWith(conn, { dateStr: DAY, excludeStatuses: ['cancelled', 'completed'], select: ['stop columns'] });
     expect(loadTechStartPoints).toHaveBeenCalledWith(conn, [TECH]);
+  });
+
+  test('built on the main database only: the page\'s checks read it, so another connection is refused', async () => {
+    const other = (table) => { throw new Error(`read ${table}`); };
+    await expect(fillList(other, [morning], NOW)).rejects.toThrow('the fill list reads the main database only');
+  });
+
+  test('a combined visit keeps its full length on the modeled route: the planned minutes of one service never shrink it', async () => {
+    const before = process.env.GATE_SCHEDULING_CAPACITY;
+    const fake = slots.appointmentServicesFor.getMockImplementation();
+    // Plan-only mode: the route plans the owner's minutes on site, and nothing else changes. The page's own rule for
+    // the services this visit performs.
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    slots.appointmentServicesFor.mockImplementation(jest.requireActual('../services/estimate-slot-availability').appointmentServicesFor);
+    try {
+      dayStops({ [DAY]: [stop('first', '08:00')] });
+      locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+      const { conn } = fakeConn({ estimates: [estimate('near')] });
+      // One service: a one-time pest visit plans 45 minutes on site.
+      slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, serviceLabel: 'One-Time Pest Control',
+        services: [{ service: 'pest_control', label: 'One-Time Pest Control' }] });
+      expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ length: 60, onSiteMin: 45 });
+      // The same pest service with lawn care on one visit: the whole 60 minutes.
+      slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, reservationServiceMix: true, serviceLabel: 'Pest Control + Lawn Care',
+        services: [{ service: 'pest_control', label: 'One-Time Pest Control' }, { service: 'lawn_care', label: 'Lawn Care' }] });
+      expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ label: 'One-Time Pest Control + Lawn Care', length: 60, onSiteMin: 60 });
+      // A recurring estimate whose lawn program books its own visits: plan-only mode keeps lawn care in the profile,
+      // but this visit performs pest control alone, so it plans the recurring pest row.
+      slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, serviceMode: 'recurring', serviceLabel: 'Quarterly Pest Control + Lawn Care',
+        services: [{ service: 'pest_control', label: 'Quarterly Pest Control' }, { service: 'lawn_care', label: 'Lawn Care (Every 6 weeks)' }] });
+      // The line names that visit's own service.
+      expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ label: 'Quarterly Pest Control', length: 60, onSiteMin: 35 });
+    } finally {
+      slots.appointmentServicesFor.mockImplementation(fake);
+      if (before === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = before;
+    }
+  });
+
+  test('the visit is sized as the page sizes it: the picker\'s service mode and default selection', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00')] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const { conn } = fakeConn({ estimates: [estimate('near')] });
+    const selection = { selectedFrequency: 'monthly', serviceCadences: { mosquito: 'seasonal9' } };
+    page.pageSlotPicker.mockResolvedValueOnce({ serviceMode: 'recurring', selection });
+    await fillList(conn, [morning], NOW);
+    expect(slots.resolveCatalogSlotProfile).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'near' }), { serviceMode: 'recurring', ...selection }, conn);
+    page.pageSlotPicker.mockResolvedValueOnce({ serviceMode: 'one_time', selection: {} });
+    await fillList(conn, [morning], NOW);
+    expect(slots.resolveCatalogSlotProfile).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'near' }), { serviceMode: 'one_time' }, conn);
   });
 
   test('least added drive comes first, even when it starts later (a customer who asked for late morning)', async () => {

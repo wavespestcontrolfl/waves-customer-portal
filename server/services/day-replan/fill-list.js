@@ -9,17 +9,20 @@
  * on the technician's day as booked, with the day's schedule blocks (lunch, time off), the customer's day and time
  * rules, the technician's capability for every service the visit performs, and the van home by the route check's day
  * end (route-check.js DISPATCH_DAY_END). The estimate stands in as a new stop (estimateGapCandidate): the customer's
- * stored location, never geocoded, with the service and length its booking page offers, tried at every place in the
- * route as the staff finder tries a new customer, and only on a day the visit's own rules allow (the booking page's
- * first-visit dates, the mowing day for every service it performs). A visit fits a block when it runs inside it: from
- * the van's arrival (or the window's start, when the van is early) to the visit's end. A line keeps the offered window
- * start too (`windowStart`), the hour staff would book.
+ * stored location, never geocoded, with the service and length its booking page offers (the page picker's service mode
+ * and default selection), tried at every place in the route as the staff finder tries a new customer, and only on a day
+ * the visit's own rules allow (the booking page's first-visit dates, the mowing day for every service it performs). A
+ * visit fits a block when it runs inside it: from the van's arrival (or the window's start, when the van is early) to
+ * the visit's end on the modeled route (its planned minutes on site). A line keeps the offered window start too
+ * (`windowStart`), the hour staff would book.
  *
- * Open estimate: sent or viewed, not archived or expired, with a customer who is not an internal test contact, a visit
- * to book (not a rodent guarantee-only renewal), no visit or live hold made from it, and no upcoming visit its page would
- * adopt ("Appointment already scheduled": routes/estimate-public.js findLinkedUpcomingAppointment). Nothing here is paid:
- * no geocoding and no road times.
+ * Open estimate: sent or viewed, not archived or expired, with a customer who is not an internal test contact, no visit
+ * or live hold made from it, and a booking page that offers times and shows its slot picker
+ * (routes/estimate-slots-public.js slotBrowseRefusal and pageSlotPicker, the two checks the texting AI and the daily
+ * no-time-soon check ask). That leaves out guarantee-only renewals, commercial, parked, quote-required and invoice-only
+ * estimates, and the ones whose page already shows an appointment. Nothing here is paid: no geocoding and no road times.
  */
+const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { isInternalTestContact } = require('../internal-test-customers');
@@ -41,10 +44,10 @@ const toMin = (hhmm) => {
 };
 
 /**
- * The newest MAX_ESTIMATES open estimates ({ estimates, unread }): internal test contacts, guarantee-only renewals, the
- * ones a visit or live hold was made from, and the ones whose page shows an appointment already scheduled are left out
- * first, so they never take a place in the count. An estimate whose page lookup fails is left off, counted as unread
- * and logged. A failed read of the estimates or their visits throws.
+ * The newest MAX_ESTIMATES open estimates, each with its page picker ({ estimates: [{ estimate, picker }], unread }):
+ * internal test contacts, the ones a visit or live hold was made from, and the ones whose page offers no times or shows
+ * no picker are left out first, so they never take a place in the count. An estimate whose page lookup fails is left
+ * off, counted as unread and logged. A failed read of the estimates or their visits throws.
  */
 async function openEstimates(conn, now) {
   const rows = await conn('estimates').whereIn('status', ['sent', 'viewed']).whereNull('archived_at').whereNotNull('customer_id')
@@ -59,19 +62,19 @@ async function openEstimates(conn, now) {
     .where((q) => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', now))
     .pluck('source_estimate_id');
   const takenIds = new Set(taken.map(String));
-  const page = require('../../routes/estimate-public');
+  const page = require('../../routes/estimate-slots-public')._internals;
   const out = [];
   let unread = 0;
   for (const row of open) {
     if (out.length + unread >= MAX_ESTIMATES) break;
     if (takenIds.has(String(row.id))) continue;
     try {
-      // The page's own reads, as its view makes them: the parsed estimate data, its service modes, a visit it would adopt.
-      const data = page.parseEstimateDataSafe(row);
-      if (page.isRodentGuaranteeOnlyEstimate(row, data)) continue;
-      const scheduled = await page.findLinkedUpcomingAppointment(row, data,
-        { database: conn, serviceModes: page.adoptionServiceModesForContract(row, data) });
-      if (!scheduled) out.push(row);
+      // The page's own answer: no times to offer (a refusal), or no picker (an appointment already scheduled, a quote
+      // to give, invoice only); else its picker's service mode and default selection, which size the visit. Both
+      // checks and the visit read this one row, so they judge one revision of the estimate.
+      if (await page.slotBrowseRefusal(row)) continue;
+      const picker = await page.pageSlotPicker(row.id, { row });
+      if (picker) out.push({ estimate: row, picker });
     } catch (err) {
       unread += 1;
       logger.warn(`[fill-list] estimate ${row.id} unread (${err.message}); left off the list`);
@@ -82,14 +85,18 @@ async function openEstimates(conn, now) {
 
 /**
  * The block's best fit, or null (routeFits come least added drive first): the visit runs inside the block, from the
- * van's arrival (or the window's start, when the van is early) to its end.
+ * van's arrival (or the window's start, when the van is early) to its end on the modeled route (the window's length
+ * when the route gave no end). `length` is the visit as booked (its window: the catalog length); `onSiteMin` is the
+ * route plan's minutes on site, which can be shorter (owner 2026-11-19: the visit row is 1 hour, the plan keeps its
+ * own minutes).
  */
 function fitInside(block, routeFits) {
   for (const fit of routeFits) {
     const length = toMin(fit.windowEnd) - toMin(fit.windowStart);
     const startMin = Math.max(toMin(fit.windowStart), toMin(fit.estimatedArrival));
-    if (startMin >= block.start && startMin + length <= block.start + block.min) {
-      return { windowStart: String(fit.windowStart).slice(0, 5), startMin, endMin: startMin + length, length,
+    const endMin = fit.estimatedDeparture ? toMin(fit.estimatedDeparture) : startMin + length;
+    if (startMin >= block.start && endMin <= block.start + block.min) {
+      return { windowStart: String(fit.windowStart).slice(0, 5), startMin, endMin, length, onSiteMin: endMin - startMin,
         addedDriveMin: Math.max(0, Math.round(fit.addedDriveMinutes)) };
     }
   }
@@ -122,15 +129,18 @@ async function readDays(conn, blocks) {
 /**
  * The fill list for the listed blocks ({ day, techId, start, min }): byBlock[i] is block i's lines, best first, and
  * the counts the notice states. Throws when the estimates, a day's stops, the start points or the departure time cannot
- * be read. An estimate whose own reads fail is left off and counted as unread.
+ * be read. An estimate whose own reads fail is left off and counted as unread. Built on the module database only: the
+ * page's checks read it (estimate-slots-public.js), and the 07:05 job passes it (scheduler.js runOpenBlocksAlert()),
+ * so every read sees the same rows; another connection (a transaction) throws.
  */
 async function fillList(conn, blocks, now) {
+  if (conn !== db) throw new Error('the fill list reads the main database only');
   const { estimates, unread } = await openEstimates(conn, now);
   const result = { checked: estimates.length + unread, fitted: 0, noLocation: 0, unread, byBlock: blocks.map(() => []) };
   const candidates = [];
-  for (const estimate of blocks.length ? estimates : []) {
+  for (const { estimate, picker } of blocks.length ? estimates : []) {
     try {
-      const candidate = await estimateGapCandidate(estimate, conn);
+      const candidate = await estimateGapCandidate(estimate, conn, picker);
       if (candidate.unavailable) result.noLocation += 1;
       else candidates.push({ estimate, candidate });
     } catch (err) {
