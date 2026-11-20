@@ -39,7 +39,7 @@ describe('Tech scoreboard tab', () => {
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(adminFetch.mock.calls.map(c => c[0])).toEqual(['/tech/rewards-scoreboard']);
     render(<Scoreboard board={result.current} />);
-    expect(screen.getByText(/2026 season.*over\. These are its final figures; the bonus is paid Sep 25, 2026/)).toBeInTheDocument();
+    expect(screen.getByText(/2026 season.*over\. Bonus pay is scheduled for Sep 25, 2026\. Figures stay estimates until the office finalizes the pay\./)).toBeInTheDocument();
     expect(screen.getByText('91.5%')).toBeInTheDocument();
     const parts = screen.getByRole('table', { name: 'Score parts' });
     expect(within(parts).getByText('Reports on time')).toBeInTheDocument();

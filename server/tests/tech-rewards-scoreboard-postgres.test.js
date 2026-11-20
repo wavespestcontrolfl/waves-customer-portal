@@ -58,6 +58,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.text('kind').notNullable();
       t.text('status').notNullable();
       t.date('earned_week_start').notNullable();
+      t.date('covers_to');
       t.integer('amount_cents').notNullable();
     });
     await s.createTable('review_incentive_payouts', (t) => {
@@ -75,7 +76,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.text('template_key');
     });
     [{ id: alpha }, { id: beta }] = await db('technicians').insert([
-      { name: 'Sample Alpha', hire_date: '2025-04-01' }, { name: 'Sample Beta', hire_date: '2024-01-15' },
+      { name: 'Sample Alpha', hire_date: '2025-12-01' }, { name: 'Sample Beta', hire_date: '2024-01-15' },
     ]).returning('id');
   });
 
@@ -107,7 +108,9 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       { technician_id: alpha, kind: 'commission', status: 'paid', earned_week_start: '2026-04-06', amount_cents: 20000 },
       { technician_id: alpha, kind: 'commission', status: 'open', earned_week_start: '2026-11-09', amount_cents: 10000 },
       { technician_id: alpha, kind: 'commission', status: 'voided', earned_week_start: '2026-05-04', amount_cents: 5000 },
-      { technician_id: alpha, kind: 'commission', status: 'paid', earned_week_start: '2025-12-29', amount_cents: 4000 }, // last year
+      { technician_id: alpha, kind: 'commission', status: 'paid', earned_week_start: '2025-12-29', amount_cents: 4000 }, // a hand-made line of last year's week
+      { technician_id: alpha, kind: 'commission', status: 'paid', earned_week_start: '2025-12-29', covers_to: '2026-01-01', amount_cents: 2500 }, // paid Jan 1: this year, in the week of Dec 29
+      { technician_id: alpha, kind: 'commission', status: 'open', earned_week_start: '2026-12-14', covers_to: '2026-12-15', amount_cents: 7000 }, // dated after today
       { technician_id: alpha, kind: 'review_bonus', status: 'paid', earned_week_start: '2026-04-06', amount_cents: 1500 }, // not commission
       { technician_id: beta, kind: 'commission', status: 'paid', earned_week_start: '2026-04-06', amount_cents: 33333 },
     ]);
@@ -124,6 +127,9 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       { technician_id: alpha, service_date: '2026-05-10', sent_at: '2026-05-10T16:00:00Z' },
       { technician_id: alpha, service_date: '2026-06-10' }, // never sent
       { technician_id: alpha, service_date: '2026-09-10', sms_sent_at: '2026-09-10T16:00:00Z' }, // after the season
+      { technician_id: alpha, service_date: '2026-08-31', sms_sent_at: '2026-09-01T15:00:00Z' }, // visit in the season, ask sent after it
+      { technician_id: alpha, service_date: '2026-08-30', sms_sent_at: '2026-09-01T03:30:00Z' }, // sent Aug 31 11:30 PM ET: inside
+      { technician_id: alpha, service_date: '2026-07-01', sms_sent_at: '2026-07-01T16:00:00Z', template_key: 'resolution_check' }, // a no-link check-in is not an ask
       { technician_id: beta, service_date: '2026-04-10', sms_sent_at: '2026-04-10T16:00:00Z' },
     ]);
   }
@@ -135,10 +141,21 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.season).toMatchObject({ year: 2026, status: 'final' });
     expect(scores.buildSeasonScore).toHaveBeenCalledWith(alpha, 2026, { start: '2026-03-01', end: '2026-08-31' }, expect.anything());
     expect(board.seasonBonus.grossCents).toBe(150000); // Mar 2 + Aug 31 weeks only
-    expect(board.reviews).toMatchObject({ count: 3, asks: 2, rateBps: 10000 });
-    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 30000, paidCents: 20000, pendingCents: 10000 });
-    // hired 2025-04-01: next stay bonus is the 3-year one; prior 12 months of pay (2025-11-20 .. 2026-11-20): 100000+50000+70000+10000
-    expect(board.stayBonus).toMatchObject({ dueDate: '2028-04-01', years: 3, estimateCents: Math.round(230000 * 0.04) });
+    expect(board.reviews).toMatchObject({ count: 3, asks: 3, rateBps: 10000 });
+    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 32500, paidCents: 22500, pendingCents: 10000 });
+    // hired 2025-12-01: the 1-year bonus is due 2026-12-01 from the pay of 2025-12-01 .. today: 100000+50000+70000+10000
+    expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1, estimateCents: Math.round(230000 * 0.02) });
+  });
+
+  test('a running season is cut at today: the score window, the settings lookup and the counts', async () => {
+    await seed();
+    scores.buildSeasonScore.mockResolvedValue({ complete: false, year: 2026, parts: { ...PARTS, audit: null }, missing: ['audit'] });
+    const board = await service.getScoreboard(alpha, { now: new Date('2026-06-15T15:00:00Z') });
+    expect(board.season).toMatchObject({ year: 2026, status: 'running' });
+    expect(scores.buildSeasonScore).toHaveBeenCalledWith(alpha, 2026, { start: '2026-03-01', end: '2026-06-15' }, expect.anything());
+    expect(scores.getSettings).toHaveBeenCalledWith('2026-06-15', expect.anything());
+    expect(board.seasonBonus.grossCents).toBe(100000); // the Aug 31 week has not happened yet
+    expect(board.reviews).toMatchObject({ count: 1, asks: 2 }); // the Apr 10 review; asks of Apr 10 and May 10
   });
 
   test('another technician is never mixed in', async () => {

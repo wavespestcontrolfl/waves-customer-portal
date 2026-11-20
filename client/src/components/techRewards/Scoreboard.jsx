@@ -34,7 +34,7 @@ function seasonWords(season) {
   const range = `${dayLabel(season.start)} to ${dayLabel(season.end)}`;
   return season.status === 'running'
     ? `${season.year} season, ${range}: running, the numbers so far.`
-    : `${season.year} season, ${range}: over. These are its final figures; the bonus is paid ${dayLabel(season.payDate)}.`;
+    : `${season.year} season, ${range}: over. Bonus pay is scheduled for ${dayLabel(season.payDate)}. Figures stay estimates until the office finalizes the pay.`;
 }
 
 function Stat({ label, value, note }) {

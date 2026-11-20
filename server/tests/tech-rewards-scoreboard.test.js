@@ -1,7 +1,6 @@
 // Tech Rewards Plan D5-4: the pure parts of the scoreboard service (which season, review rate, the compose step),
 // with synthetic fixtures. The reads run against Postgres in tech-rewards-scoreboard-postgres.test.js.
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../services/bi-tech-scorecard', () => ({ reviewAsksByTechnician: jest.fn() }));
 
 const { composeScoreboard, pickSeason, reviewRateBps } = require('../services/tech-rewards-scoreboard');
 
