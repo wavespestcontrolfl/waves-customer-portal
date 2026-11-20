@@ -79,6 +79,7 @@ import { hasPurchasedTrenchingWarranty, hasIncludedReentryGuarantee, includedRee
 const glassAppearanceActive = () => document.documentElement.hasAttribute('data-glass-theme');
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import MistingLayoutCard from '../components/estimate/MistingLayoutCard';
+import RoofPointsCard from '../components/estimate/RoofPointsCard';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
@@ -968,13 +969,18 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   );
 }
 
-function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null }) {
+function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null, roofPoints = null }) {
   const phone = useIsMobile(560);
   // GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn misting layout (/data `mistingLayout`) takes the satellite photo's
   // place. A picture that fails to load puts the satellite photo back, so there is never a hole.
   const [mistingFailed, setMistingFailed] = useState(false);
+  // The roof points the Waves technician confirmed (/data `roofPoints`, frozen when the estimate was sent) take the
+  // satellite photo's place too, unless a misting layout is showing (misting wins). A photo that fails to load puts the
+  // satellite photo back.
+  const [roofPointsFailed, setRoofPointsFailed] = useState(false);
   if (!intelligence) return null;
   const showMisting = Boolean(mistingLayout?.imageUrl) && !mistingFailed;
+  const showRoofPoints = !showMisting && Boolean(roofPoints?.imageUrl) && Array.isArray(roofPoints?.pins) && roofPoints.pins.length > 0 && !roofPointsFailed;
   const metrics = Array.isArray(intelligence.metrics) ? intelligence.metrics : [];
   const signals = Array.isArray(intelligence.signals) ? intelligence.signals : [];
   // "Show your work" (estimateShowYourWork gate): the parcel-outline
@@ -1002,7 +1008,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       </div>
 
       <p className="gc-lead" style={{
-        margin: satelliteUrl || showMisting || metrics.length ? '0 0 14px' : '0',
+        margin: satelliteUrl || showMisting || showRoofPoints || metrics.length ? '0 0 14px' : '0',
         color: '#3F4A65',
         fontSize: 14,
         lineHeight: 1.5,
@@ -1012,6 +1018,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
 
       {showMisting ? (
         <MistingLayoutCard layout={mistingLayout} address={address} onImageError={() => setMistingFailed(true)} />
+      ) : showRoofPoints ? (
+        <RoofPointsCard points={roofPoints} address={address} onImageError={() => setRoofPointsFailed(true)} />
       ) : satelliteUrl ? (
         <img
           src={resolveApiAssetUrl(satelliteUrl)}
@@ -1029,7 +1037,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         />
       ) : null}
 
-      {showYourWork?.overlaySatelliteUrl && !showMisting ? (
+      {showYourWork?.overlaySatelliteUrl && !showMisting && !showRoofPoints ? (
         <div style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
           Red outline: your property boundary from county records.
         </div>
@@ -10154,7 +10162,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             not for an authored commercial proposal — the PDF document drops
             `intelligence` for it the same way. */}
         {authoredProposalOnPage ? null : (
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} />
         )}
         {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
@@ -10244,7 +10252,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <>
       {!isRegulatedCertificateSurface ? (
         <>
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} />
           <EstimateAskBar
             preview={readOnlyPreview}
             token={token}
@@ -10963,6 +10971,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 copy={copy}
                 showYourWork={data.showYourWork || null}
                 mistingLayout={data.mistingLayout || null}
+                roofPoints={data.roofPoints || null}
                 lockInCta={canShowSlotPicker
                   ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={promptPickTime} style={{ justifyContent: 'center' }} />
                   : null}

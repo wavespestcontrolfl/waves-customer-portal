@@ -31,6 +31,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { clearRouteCacheForRequest } = require('../utils/route-cache');
 const { nanpNationalDigits, isValidNanpNumber, nanpPhoneProblem } = require('../utils/phone');
 const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
+const { freezeRoofPointsForSend } = require('../services/estimate-roof-points');
 const { soldByLive, setEstimateSoldBy, listSellerCandidates, loadSoldByForList, soldByRowFields } = require('../services/estimate-sold-by');
 const {
   buildEstimatePricingAudit,
@@ -3471,6 +3472,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       failedChannels,
     };
   }
+  // Roof points (owner ruling 2026-11-20, choice 4A): the customer page shows only the points the technician confirmed, as
+  // they stand NOW. This is the one place every delivered send passes (immediate, scheduled, lead auto-send, tech send and
+  // re-sends all end in sendEstimateNow), so the copy is taken here for the anchor and each sibling this send publishes.
+  // A re-send replaces the copy; no confirmed points now deletes it. Never throws: a failure here cannot fail the send.
+  try { await freezeRoofPointsForSend([estimate, ...claimedGroupSiblings]); } catch { /* the send stands */ }
   // Rollout telemetry from the FINAL delivered row — after the provider
   // handoff, after the send-time park recompute and every pre-delivery
   // check (GH codex P2 on #3750: counting earlier labelled aborted or
