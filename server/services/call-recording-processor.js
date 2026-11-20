@@ -11556,6 +11556,17 @@ const CallRecordingProcessor = {
           // refuse (reason recording_changed below) instead of processing
           // audio the operator never chose (Codex #3736 r6 P1).
           .where(function expectedRecording() { if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid); })
+          // A sweep pass re-checks the sweep's length rule in this atomic
+          // claim (pre-push Codex P1). The sweep selects up to 20 rows, then
+          // runs them one at a time, so a webhook timer can finish a selected
+          // short call (voicemail, spam) before its turn, and this claim
+          // accepts those states. With GATE_SHORT_CALL_RECORDING_SWEEP on, a
+          // short row passes only on its first pass, so the finished one is
+          // refused here instead of running the paid pipeline again. A
+          // PAN-quarantined row has no length floor, as in the sweep.
+          .where(function sweepLengthStillHolds() {
+            if (opts.sweep) this.whereRaw(`(${sweepLengthSql()} OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')`);
+          })
           .update({
             processing_status: 'processing',
             processing_token: procToken,
@@ -25717,7 +25728,9 @@ const CallRecordingProcessor = {
     const results = [];
     for (const call of pending) {
       try {
-        const result = await this.processRecording(call.twilio_call_sid);
+        // `sweep`: the claim re-checks the length rule this row was selected
+        // on, since a timer may have finished it while it waited its turn.
+        const result = await this.processRecording(call.twilio_call_sid, { sweep: true });
         results.push({ callSid: call.twilio_call_sid, ...result });
       } catch (err) {
         results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });

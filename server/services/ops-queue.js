@@ -19,7 +19,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
 const { computeStalledCalls } = require('./call-processing-stall-watchdog');
-const { sweepLengthSql } = require('../config/call-extraction-retry');
+const { sweepLengthSql, failureReportLengthSql, sweepLengthOk, SWEEP_MIN_SECONDS } = require('../config/call-extraction-retry');
 const { EXECUTING_RECOVERY_MINUTES } = require('./content/email-approvals');
 const { STALE_CLAIM_MS: DELIVERY_STALE_CLAIM_MS } = require('./service-report/delivery-queue');
 const { STALE_CLAIM_MS: PDF_STALE_CLAIM_MS } = require('./service-report/pdf-queue');
@@ -111,13 +111,25 @@ async function laneScheduledJobs() {
   return finish(items);
 }
 
+// The sweep's length clause for a retry state: over 10 s, gate on or off, or
+// PAN-quarantined (no length floor), as pendingCandidatesQuery applies it.
+function sweepLengthHolds(r) {
+  if (sweepLengthOk(r)) return true;
+  try {
+    const meta = typeof r.transcription_metadata === 'string' ? JSON.parse(r.transcription_metadata) : r.transcription_metadata;
+    return String(meta?.pan_detected) === 'true';
+  } catch {
+    return false;
+  }
+}
+
 // A no_transcription / extraction_failed row is a scheduled retry only while
 // it is under the processor's attempt cap, inside extraction_failed's
-// creation fence (no_transcription has none), and with audio for a
+// creation fence (no_transcription has none), with audio for a
 // no_transcription retry (the sweep's PAN transcript-only branch never takes
-// that state). The scans already hold every listed row to the sweep's length
-// rule, which a retry state meets only over 10 s (or PAN-quarantined), gate
-// on or off. Anything else is a failure, with the reason.
+// that state), and over the sweep's length floor. A short call's failure
+// (listed with GATE_SHORT_CALL_RECORDING_SWEEP on) is never retried. Anything
+// else is a failure, with the reason.
 function callFailureState(r) {
   const max = CALL_EXTRACTION_MAX_ATTEMPTS;
   const attempts = Number(r.extraction_attempts) || 0;
@@ -137,6 +149,9 @@ function callFailureState(r) {
     // Outside the sweep's creation fence: nothing will retry it automatically
     // (a force-reprocess that failed again lands here).
     return { status: 'failed', detail: `extraction failed (${attempts}/${max}) — call older than the ${RECENT_DAYS}-day retry window, no automatic retry` };
+  }
+  if (!sweepLengthHolds(r)) {
+    return { status: 'failed', detail: `${noTranscript ? 'no transcript' : 'extraction failed'} (${attempts}/${max}) — a recording of ${SWEEP_MIN_SECONDS} seconds or less, no automatic retry` };
   }
   return {
     status: 'pending',
@@ -159,10 +174,13 @@ async function laneCallProcessing() {
   // Eligibility applies to every retryable state — null / pending /
   // processing AND no_transcription (the processor cannot reclaim an
   // ineligible no_transcription row either; it would sit "pending" forever).
-  const eligible = (b) => b
+  // `lengthSql`: the sweep's own rule (the default) for a row it may still
+  // take; the failure-report rule for a failure being REPORTED, so a short
+  // call that failed on the pass the gate gave it is listed, not hidden.
+  const eligible = (b, lengthSql = sweepLengthSql()) => b
           .whereNotNull('twilio_call_sid')
           .where(function longEnoughToProcess() {
-            this.whereRaw(sweepLengthSql())
+            this.whereRaw(lengthSql)
               .orWhere(function panQuarantined() {
                 this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
               });
@@ -190,16 +208,17 @@ async function laneCallProcessing() {
   // SEPARATELY: a backlog of old retry rows must never fill the live page
   // ahead of the stalled calls it monitors. Under the processor's attempt cap
   // it is a scheduled retry; at the cap it is terminal (no sweep revisits it),
-  // windowed by the failure event like extraction_failed.
+  // windowed by the failure event like extraction_failed and judged by the
+  // failure-report length rule.
   // A retry needs a recording: the sweep's PAN transcript-only branch never
   // takes this state, so a quarantined row with only its masked transcript is
   // listed as a failure (recent branch), never as a scheduled retry.
-  const retryRows = await eligible(db('call_log').where('processing_status', 'no_transcription')
+  const retryRows = await db('call_log').where('processing_status', 'no_transcription')
     .where(function retryOrRecentFailure() {
-      this.where((q) => q.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
-        .whereRaw("NULLIF(btrim(recording_url), '') IS NOT NULL"))
-        .orWhere('updated_at', '>', since(RECENT_DAYS));
-    }))
+      this.where((q) => eligible(q.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+        .whereRaw("NULLIF(btrim(recording_url), '') IS NOT NULL")))
+        .orWhere((q) => eligible(q.where('updated_at', '>', since(RECENT_DAYS)), failureReportLengthSql()));
+    })
     .orderBy('updated_at', 'desc')
     .limit(SCAN_LIMIT)
     .select(columns);
@@ -211,12 +230,13 @@ async function laneCallProcessing() {
   // windowed by the FAILURE event (updated_at), not creation: an admin
   // force-reprocess of an old call that fails again is a fresh failure that
   // needs attention, and a creation window would hide it.
-  // Same eligibility as the live set: an under-cap retry the processor could
-  // never pick up is not "retry scheduled", and at-cap rows are terminal
-  // either way.
+  // Same eligibility as the live set, by the failure-report length rule; the
+  // display below decides "retry scheduled" by the sweep's own rule, so an
+  // under-cap row the processor will never pick up again is a failure, and
+  // at-cap rows are terminal either way.
   const failedRows = await eligible(db('call_log')
     .where('processing_status', 'extraction_failed')
-    .where('updated_at', '>', since(RECENT_DAYS)))
+    .where('updated_at', '>', since(RECENT_DAYS)), failureReportLengthSql())
     .orderBy('updated_at', 'desc')
     .limit(SCAN_LIMIT)
     .select(columns);

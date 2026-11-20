@@ -18,7 +18,7 @@ const EXTRACTION_RETRY_WINDOW_DAYS = 7;
 // that ended in no_transcription or extraction_failed is not retried, and a
 // finished one is not run again. So the gate adds no retries, and a reader
 // that judges a retry by the attempt cap alone (callback reconciliation, the
-// estimate guard, the call panel) meets no new state.
+// estimate guard) meets no new state.
 // Every reader that mirrors the sweep's eligibility (getStats, the stall
 // watchdog, the ops queue, the agent-control run list) uses this rule, so
 // none of them can disagree with the sweep. Callers keep their own
@@ -41,6 +41,15 @@ function sweepLengthSql() {
   return `(${floor} OR (${RECORDING_SECONDS_SQL} > 0 AND created_at > NOW() - INTERVAL '${SHORT_RECORDING_SWEEP_HOURS} hours' AND ${FIRST_PASS_SQL}))`;
 }
 
+// The length rule for REPORTING a failure the sweep will not retry: over
+// 10 s, or, gate on, any recording over 0 s, so a short call that failed on
+// the pass the gate gave it stays visible (the ops queue's failure scans).
+// Never for "will the sweep take it" (that is sweepLengthSql). Gate off = the
+// old floor, byte for byte.
+function failureReportLengthSql() {
+  return `${RECORDING_SECONDS_SQL} > ${shortRecordingSweepLive() ? 0 : SWEEP_MIN_SECONDS}`;
+}
+
 // The same rule for one call_log row: it reads processing_status (NULL or
 // absent = a first pass). COALESCE semantics: a recorded 0 is authoritative
 // and never borrows the longer call duration.
@@ -59,5 +68,6 @@ module.exports = {
   SWEEP_MIN_SECONDS,
   SHORT_RECORDING_SWEEP_HOURS,
   sweepLengthSql,
+  failureReportLengthSql,
   sweepLengthOk,
 };

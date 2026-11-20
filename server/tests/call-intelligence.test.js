@@ -153,7 +153,8 @@ describe('buildCallIntelligence', () => {
 });
 
 describe('describeProcessing — honest phases', () => {
-  const base = { recording_url: 'https://api.twilio.com/x.mp3', extraction_attempts: 0 };
+  const base = { recording_url: 'https://api.twilio.com/x.mp3', recording_duration_seconds: 45, extraction_attempts: 0 };
+  const PAN_ONLY = { recording_url: null, recording_duration_seconds: 4, transcription: '[masked]', transcription_metadata: JSON.stringify({ pan_detected: true }) };
   test.each([
     [{ processing_status: null }, 'queued', false],
     [{ processing_status: null, recording_url: null }, 'waiting_for_recording', false],
@@ -161,6 +162,12 @@ describe('describeProcessing — honest phases', () => {
     [{ processing_status: 'processed' }, 'complete', false],
     [{ processing_status: 'no_transcription' }, 'failed_retrying', true],
     [{ processing_status: 'extraction_failed', extraction_attempts: 1 }, 'failed_retrying', true],
+    // The sweep's media and length gates: a retry state keeps the 10-second floor (gate on or off), a
+    // no_transcription retry needs a recording, and a PAN-quarantined masked transcript has no floor.
+    [{ processing_status: 'no_transcription', recording_duration_seconds: 8 }, 'failed', false],
+    [{ processing_status: 'extraction_failed', extraction_attempts: 1, recording_duration_seconds: 8 }, 'failed', false],
+    [{ processing_status: 'no_transcription', ...PAN_ONLY }, 'failed', false],
+    [{ processing_status: 'extraction_failed', extraction_attempts: 1, ...PAN_ONLY }, 'failed_retrying', true],
     [{ processing_status: 'extraction_failed', extraction_attempts: 3 }, 'failed', false],
     // Older than the sweep's retry window: no automatic retry is coming (codex gh-r9 P2).
     [{ processing_status: 'extraction_failed', extraction_attempts: 1, created_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString() }, 'failed', false],
@@ -171,6 +178,24 @@ describe('describeProcessing — honest phases', () => {
     const out = describeProcessing({ ...base, ...row });
     expect(out.phase).toBe(phase);
     expect(out.retryable).toBe(retryable);
+  });
+
+  test('a failure the sweep will not retry says why and points to Reprocess, gate on or off', async () => {
+    for (const gate of [undefined, 'true']) {
+      const before = process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
+      if (gate === undefined) delete process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
+      else process.env.GATE_SHORT_CALL_RECORDING_SWEEP = gate;
+      try {
+        const short = describeProcessing({ ...base, processing_status: 'no_transcription', extraction_attempts: 1, recording_duration_seconds: 8, created_at: new Date().toISOString() });
+        expect(short).toMatchObject({ phase: 'failed', retryable: false });
+        expect(short.detail).toBe('Transcription produced nothing (attempt 1); the recording is 10 seconds or less, so the sweep does not retry it — Reprocess to try again.');
+        const noAudio = describeProcessing({ ...base, processing_status: 'no_transcription', extraction_attempts: 1, recording_url: null });
+        expect(noAudio.detail).toBe('Transcription produced nothing (attempt 1); there is no recording to retry, so the sweep does not retry it — Reprocess to try again.');
+      } finally {
+        if (before === undefined) delete process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
+        else process.env.GATE_SHORT_CALL_RECORDING_SWEEP = before;
+      }
+    }
   });
 
   test('a claim whose heartbeat went quiet says so instead of "processing"', () => {

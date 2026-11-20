@@ -90,6 +90,17 @@ describe('the sweep length rule', () => {
       }
     });
   });
+
+  test('the failure-report rule: the old floor gate off; gate on, any recording, so a short failure stays visible', async () => {
+    const { failureReportLengthSql } = require('../config/call-extraction-retry');
+    for (const value of [undefined, 'false', '1', 'TRUE']) {
+      await withGate(value, () => expect(failureReportLengthSql()).toBe(OLD_FLOOR_SQL));
+    }
+    await withGate('true', () => {
+      expect(failureReportLengthSql()).toBe('COALESCE(recording_duration_seconds, duration_seconds, 0) > 0');
+      expect(failureReportLengthSql()).not.toContain('INTERVAL');
+    });
+  });
 });
 
 describe('the sweep query text', () => {
@@ -115,6 +126,25 @@ describe('the sweep query text', () => {
     expect(on).toContain(`((${OLD_FLOOR_SQL} OR (${WINDOW_SQL})) ${PAN}`);
     // The in-memory timers keep the first 10 minutes: the fresh branch still waits for the CDN settle.
     expect(on).toContain(`"updated_at" < NOW() - INTERVAL '10 minutes'`);
+  });
+
+  test('every sweep pass asks the claim to re-check the length rule (a timer may finish a row while it waits)', async () => {
+    const select = jest.spyOn(processor, 'pendingCandidatesQuery').mockResolvedValue([{ twilio_call_sid: 'CAfixture01' }, { twilio_call_sid: 'CAfixture02' }]);
+    const run = jest.spyOn(processor, 'processRecording').mockResolvedValue({ success: true });
+    try {
+      await processor.processAllPending();
+      expect(run.mock.calls).toEqual([['CAfixture01', { sweep: true }], ['CAfixture02', { sweep: true }]]);
+    } finally {
+      select.mockRestore();
+      run.mockRestore();
+    }
+  });
+
+  test('the claim carries that re-check for a sweep pass only (the live-PG block below runs it)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const clause = "if (opts.sweep) this.whereRaw(`(${sweepLengthSql()} OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')`);";
+    // Once: in the ordinary claim, the one a sweep pass takes (it never sends force).
+    expect(src.split(clause)).toHaveLength(2);
   });
 
   test('the stuck-transcript fallback leaves the retry states to their own capped branches', async () => {
@@ -207,6 +237,16 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
   test('gate on: a stranded short first pass is swept too; a day-old one, one still settling, and a short retry or finished row are not', async () => {
     await withGate('true', async () => {
       expect(await candidates()).toEqual([SID_SHORT, SID_LONG, SID_SHORT_DIED].sort());
+    });
+  });
+
+  test('gate on: a sweep pass refuses a short call a timer finished while it waited, and changes nothing', async () => {
+    // The claim accepts a voicemail row; the re-check of the length rule is what refuses it.
+    await withGate('true', async () => {
+      const out = await processor.processRecording(SID_SHORT_VOICEMAIL, { sweep: true });
+      expect(out).toMatchObject({ success: false, skipped: true });
+      const row = await db('call_log').where({ twilio_call_sid: SID_SHORT_VOICEMAIL }).first('processing_status', 'processing_token');
+      expect(row).toEqual({ processing_status: 'voicemail', processing_token: null });
     });
   });
 

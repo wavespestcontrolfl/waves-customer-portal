@@ -12,7 +12,7 @@
 const { listForCall, refreshFulfillment, buildCallOutcomes, anchorEvidence } = require('./call-commitments');
 // The processor's own retry predicate (attempt cap + age window), so the
 // phase below never promises a retry the sweep will not make (Codex r9 P2).
-const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../config/call-extraction-retry');
+const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, SWEEP_MIN_SECONDS, sweepLengthOk } = require('../config/call-extraction-retry');
 
 function parseJson(value, fallback = null) {
   if (value == null) return fallback;
@@ -28,22 +28,33 @@ function addressText(addr) {
 
 // The two retry lanes' state, in one place (the sweep's eligibility, read
 // back): under the attempt cap (and, for extraction_failed, inside the 7-day
-// creation window) the sweep retries; past either, the row is terminal and
-// only Reprocess tries again.
+// creation window), with something to process (a recording; for
+// extraction_failed also a PAN-quarantined masked transcript, which the
+// sweep's transcript-only branch takes) and over the sweep's 10-second floor
+// (a retry state keeps it, gate on or off; a PAN-quarantined row has none),
+// the sweep retries. Otherwise the row is terminal and only Reprocess tries
+// again, so the panel agrees with the ops queue and the agent-control runs.
 function retryLaneState(status, call) {
   const attempts = Number(call.extraction_attempts || 0);
-  const createdAt = call.created_at ? new Date(call.created_at) : null;
-  const tooOld = status === 'extraction_failed' && !!createdAt && !Number.isNaN(createdAt.getTime())
-    && (Date.now() - createdAt.getTime()) > EXTRACTION_RETRY_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-  const exhausted = attempts >= CALL_EXTRACTION_MAX_ATTEMPTS;
-  const retrying = !exhausted && !tooOld;
   const what = status === 'no_transcription' ? 'Transcription produced nothing' : 'Extraction failed';
-  const detail = exhausted
-    ? `${what} ${attempts} times; automatic retries are exhausted — Reprocess to try again.`
-    : tooOld
-      ? `${what} (attempt ${attempts || 1}); the call is older than ${EXTRACTION_RETRY_WINDOW_DAYS} days, so the sweep no longer retries it — Reprocess to try again.`
-      : `${what} (attempt ${attempts || 1}); the sweep retries automatically.`;
-  return { phase: retrying ? 'failed_retrying' : 'failed', retryable: retrying, detail };
+  if (attempts >= CALL_EXTRACTION_MAX_ATTEMPTS) {
+    return { phase: 'failed', retryable: false, detail: `${what} ${attempts} times; automatic retries are exhausted — Reprocess to try again.` };
+  }
+  const pan = String(parseJson(call.transcription_metadata, {})?.pan_detected) === 'true';
+  const recording = !!String(call.recording_url || '').trim();
+  // The first reason that applies, in the sweep's order; none = it retries.
+  // Date.parse: no creation time is never "too old" (NaN compares false).
+  const stop = [
+    [status === 'extraction_failed' && Date.now() - Date.parse(call.created_at) > EXTRACTION_RETRY_WINDOW_DAYS * 864e5,
+      `the call is older than ${EXTRACTION_RETRY_WINDOW_DAYS} days, so the sweep no longer retries it`],
+    [!recording && !(status === 'extraction_failed' && pan && call.transcription != null),
+      'there is no recording to retry, so the sweep does not retry it'],
+    [!pan && !sweepLengthOk(call), `the recording is ${SWEEP_MIN_SECONDS} seconds or less, so the sweep does not retry it`],
+  ].find(([applies]) => applies);
+  const tried = `${what} (attempt ${attempts || 1})`;
+  return stop
+    ? { phase: 'failed', retryable: false, detail: `${tried}; ${stop[1]} — Reprocess to try again.` }
+    : { phase: 'failed_retrying', retryable: true, detail: `${tried}; the sweep retries automatically.` };
 }
 
 // Fixed-text phases: the status alone decides. The others (queued, a held
