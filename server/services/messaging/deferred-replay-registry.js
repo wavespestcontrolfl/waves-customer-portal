@@ -381,8 +381,11 @@ const REGISTRY = {
     },
   },
   estimate_follow_up_deferred: {
+    // The follow-up always queues its estimate id (estimate-follow-up.js). A row
+    // without one has nothing to check acceptance, expiry or checkout against,
+    // so it never sends: a final no in both hooks.
     async recheck(meta) {
-      if (!meta.estimate_id) return { eligible: true };
+      if (!meta.estimate_id) return { eligible: false, reason: 'estimate-missing' };
       const { deferredFollowupStillEligible } = require('../estimate-follow-up');
       return deferredFollowupStillEligible(meta.estimate_id, { stage: meta.followup_stage, quotedExpiresAt: meta.quoted_expires_at });
     },
@@ -394,7 +397,7 @@ const REGISTRY = {
     // opened-unopened-reminder estimate is a terminal refusal.
     providerPreSendCheck(meta) {
       return async () => {
-        if (!meta.estimate_id) return { ok: true };
+        if (!meta.estimate_id) return { ok: false, code: 'ESTIMATE_NOT_SENDABLE', reason: 'estimate-missing' };
         const { followupTextProviderCheck } = require('../estimate-follow-up');
         return followupTextProviderCheck(meta.estimate_id, { stage: meta.followup_stage, quotedExpiresAt: meta.quoted_expires_at });
       };

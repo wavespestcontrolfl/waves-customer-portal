@@ -217,7 +217,7 @@ describe('deferredFollowupStillEligible (quiet-hours text replay)', () => {
     // Reopened the estimate and started checkout: the gate answers recently-opened first.
     arrangeReplay({ hold: { id: 'hold-1' }, est: { last_viewed_at: viewedAt } });
 
-    const verdict = await deferredFollowupStillEligible('est-1');
+    const verdict = await deferredFollowupStillEligible('est-1', { stage: 'viewed' });
 
     expect(verdict).toMatchObject({ eligible: false, reason: 'recently-opened', retryable: true });
     // Retries when the 2-hour view window ends.
@@ -240,10 +240,20 @@ describe('deferredFollowupStillEligible (quiet-hours text replay)', () => {
 
     await expect(deferredFollowupStillEligible('est-1', { stage: 'unviewed' }))
       .resolves.toEqual({ eligible: false, reason: 'estimate-viewed' });
-    for (const stage of ['viewed', 'final', 'expiring', null]) {
+    for (const stage of ['viewed', 'final', 'expiring']) {
       const verdict = await deferredFollowupStillEligible('est-1', { stage });
       expect(verdict).toMatchObject({ reason: 'recently-opened', retryable: true });
     }
+  });
+
+  test('a row queued before the stage was recorded may be an unopened reminder: a recent view stays a final no', async () => {
+    const viewedAt = new Date(NOW.getTime() - 10 * 60000);
+    arrangeReplay({ est: { viewed_at: viewedAt, last_viewed_at: viewedAt } });
+    // Waiting out the view would send it two hours later, when no unopened veto can apply (the stage is unknown).
+    await expect(deferredFollowupStillEligible('est-1', { stage: null })).resolves.toEqual({ eligible: false, reason: 'recently-opened' });
+    // Checkout in progress is still a wait for it: no view decides that one.
+    arrangeReplay({ hold: { id: 'hold-1' } });
+    await expect(deferredFollowupStillEligible('est-1', { stage: null })).resolves.toMatchObject({ reason: 'customer-mid-checkout', retryable: true });
   });
 
   test('an expiring text whose quoted deadline changed while it waited is final, even mid-checkout or after a view', async () => {

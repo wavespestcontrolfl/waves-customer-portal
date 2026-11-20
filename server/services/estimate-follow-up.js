@@ -422,7 +422,11 @@ async function deferredFollowupStillEligible(estimateId, { stage = null, quotedE
     // here (codex r27) instead of the cron path's fail-open false, so an
     // unverifiable reply state lands in the catch below and holds the row.
     const gate = await safetyGate(est, new Date(), { replay: true });
-    const hold = gate.skip ? replayHoldVerdict(gate.reason, est, Date.now()) : null;
+    // A row queued before the stage was recorded (no followup_stage) may be an
+    // unopened reminder, which a view ends for good: a recent view stays a
+    // final no for it, as before this check existed.
+    const waits = gate.skip && (stage || gate.reason !== "recently-opened");
+    const hold = waits ? replayHoldVerdict(gate.reason, est, Date.now()) : null;
     if (hold) return hold;
     if (gate.skip) return { eligible: false, reason: gate.reason };
     return { eligible: true };
