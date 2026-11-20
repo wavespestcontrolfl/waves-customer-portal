@@ -17,15 +17,19 @@
 const OWN_APP_RE = /\b(?:the|our|your)\s+(?:waves\s+(?:pest\s+control\s+)?)?(?:mobile\s+)?app\b/gi;
 // offAppName allows one name and rejects the rest, instead of listing wrong
 // phrasings (audit rounds found a new wrong phrasing each time). It blanks
-// each exact "the Waves app" ("The Waves app" at the start of a sentence or
-// a line; "app's" is the name too), then any word "app" or "apps" left is off
+// each "the Waves app" or "The Waves app" ("app's" is the name too), then
+// any word "app" or "apps" left is off
 // the name: "a new Waves app", "our apps", "an app", "the Waves app-based
 // reminders", "the Waves app store". In a reply to a Waves review an app is
 // the Waves app. Other words ("apply", "application") pass. The span is that
 // one word, so no other reply text is stored with a rejection.
 const WAVES_APP_RE = /\b[Tt]he Waves app\b/g;
 const APP_WORD_RE = /\bapps?\b/i;
-const SENTENCE_START_RE = /(?:^|[.!?]["')\]’”]*\s+|\n\s*)$/;
+// wavesApp writes "The" where a sentence or a line starts: at the start of
+// the text, after ".", "!" or "?" (closing quotes may follow) and a space, or
+// after a line break. An opening quote or bracket may come between:
+// '. “The Waves app helps.”'.
+const SENTENCE_START_RE = /(?:^|[.!?]["')\]’”]*\s+|\n\s*)["'(\[‘“]*$/;
 // The name ends only at the end of the text, a space or closing punctuation
 // ("app's" passes). Any other next character (a hyphen of any kind, a
 // letter, a digit, a slash) makes a longer word: "app-based", "app‑based"
@@ -38,10 +42,13 @@ function wavesApp(text) {
   return String(text || '').replace(OWN_APP_RE, (m, at, s) => (NAME_GOES_ON_RE.test(s.slice(at + m.length)) ? m : nameAt(s, at)));
 }
 
-// Exact, case and spacing included: a reply reaches Google as written.
+// "Waves", the spacing and the word "app" are exact: a reply reaches Google
+// as written. The article's case is grammar, not the name, so "The" passes
+// anywhere: no sentence test can refuse a correct reply (an opening quote, a
+// bracket or an abbreviation such as "e.g." would fool one).
 function offAppName(text) {
   const s = String(text || '');
-  const rest = s.replace(WAVES_APP_RE, (m, at) => (m === nameAt(s, at) && !NAME_GOES_ON_RE.test(s.slice(at + m.length)) ? ' '.repeat(m.length) : m));
+  const rest = s.replace(WAVES_APP_RE, (m, at) => (NAME_GOES_ON_RE.test(s.slice(at + m.length)) ? m : ' '.repeat(m.length)));
   const hit = rest.match(APP_WORD_RE);
   return hit ? hit[0] : null;
 }

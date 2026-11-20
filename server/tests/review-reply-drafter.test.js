@@ -914,6 +914,25 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(w(unsure)).toBe(unsure);
     const same = 'Happy to apply the apps and our application, the App Store, the app-to-app transfer, our app\u2011based reminders and the app-based tools.';
     expect(w(same)).toBe(same);
+    // An opening quote or bracket after a sentence start keeps the capital.
+    expect(w('You said it best. \u201cOur app makes scheduling easy.\u201d')).toBe('You said it best. \u201cThe Waves app makes scheduling easy.\u201d');
+    expect(w('\u201cThe app is great,\u201d you said. Thanks! (our app is free.)')).toBe('\u201cThe Waves app is great,\u201d you said. Thanks! (The Waves app is free.)');
+    expect(w('You said "the app works" and we agree.')).toBe('You said "the Waves app works" and we agree.');
+  });
+  test('the article may be "The" or "the" anywhere: only the name is checked, so no sentence test can refuse a correct reply', () => {
+    const off = AppName.offAppName;
+    for (const ok of [
+      'You said it best. \u201cThe Waves app makes scheduling easy.\u201d',
+      'You said it best. \u201cthe Waves app makes scheduling easy.\u201d',
+      '\u201cThe Waves app is great,\u201d you said.',
+      'Thanks. (The Waves app is free.) Glad it helps.',
+      'Thanks.\n\n\u2018The Waves app\u2019 is the name.',
+      'Thanks for using The Waves app, e.g. the Waves app reminders.',
+      'Glad it helps. the Waves app is new.',
+    ]) expect(off(ok)).toBeNull();
+    // The name itself stays exact.
+    expect(off('Thanks for using the waves app.')).toBe('app');
+    expect(off('Thanks for using THE WAVES APP.')).toBe('APP');
   });
   test('the verifier rejects every "app" that is not part of exactly "the Waves app"', () => {
     const g = grounding({ text: appReview });
@@ -923,12 +942,10 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
       expect(verdict(said)).toMatchObject({ code: 'app_name' });
     }
     expect(verdict('the Waves app')).toBeNull();
-    // Exact, case and spacing included: an Agent Ops draft reaches Google as written.
+    // "Waves" and the spacing are exact: an Agent Ops draft reaches Google as written.
     expect(verdict('the waves app')).toEqual({ code: 'app_name', span: 'app' });
     expect(verdict('the  Waves app')).toEqual({ code: 'app_name', span: 'app' });
     expect(AppName.offAppName('Glad it helps. The Waves app is new, and the Waves app is free.')).toBeNull();
-    expect(AppName.offAppName('Thanks for using The Waves app.')).toBe('app');
-    expect(AppName.offAppName('Glad it helps. the Waves app is new.')).toBe('app');
     // "apply" and "application" are other words; "the app stores" and the possessive are the app.
     expect(AppName.offAppName('Happy to apply our application.')).toBeNull();
     expect(AppName.offAppName('Glad the Waves app’s alerts help.')).toBeNull();
