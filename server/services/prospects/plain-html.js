@@ -22,16 +22,19 @@
  *   or a function such as var(); a direction other than ltr; a unicode-bidi other than normal); a style sheet with
  *   such a declaration in a rule whose selector can match an element of the page (canMatch); or a link to a style
  *   sheet. A CSS escape or an import, which can spell or load any style, counts as such a declaration. Other ways a
- *   style can hide or change text (a size, a colour, a position, an opacity, a transform, a font, generated content)
- *   are not read, and neither is what a script does when it runs: the source's own styles and scripts must not hide
- *   or add what its reader needs;
+ *   style can hide or change text (a size, a colour, a position, an opacity, a transform, a font, letter case,
+ *   generated content such as a list's numbers or a q's quotation marks, a display other than none) are not read,
+ *   and neither is what a script does when it runs: the source's own styles and scripts must not hide or add what
+ *   its reader needs;
  * - a run of text that holds a right-to-left letter (Hebrew, Arabic and the like) or a direction control other than
  *   the left-to-right mark (RIGHT_TO_LEFT_RE). Without them, and without the dir, direction, unicode-bidi and bdo
  *   above, a browser shows text in the order it is written;
  * - a script that holds "<script": after "<!--" in a script, that makes the script run past its first end tag;
  * - a page that ends inside a tag, a comment, a doctype, a script, a style or the title.
  *
- * htmlText(html) is the text a browser shows for a part of a page plainPage rebuilt.
+ * htmlText(html) is the text a browser shows for a part of a page plainPage rebuilt, when no style changes a tag's
+ * display (a span shown as a block, a div shown inline). Such a style can make a browser part or join words
+ * elsewhere, so a reader that must not depend on where words part compares text with its spaces taken out.
  */
 
 const { decodeHTML } = require('entities');
@@ -245,10 +248,12 @@ function plainPage(html, tags) {
   return rest === null ? null : out + rest;
 }
 
-// Inline formatting tags: a browser shows the text on both sides of one as one run, so "35A-<b>02</b>-8" reads
-// "35A-02-8". Any other tag (a cell, a row, a paragraph, a line break, an image) parts the text around it.
-const INLINE_TAGS = new Set(['a', 'abbr', 'b', 'big', 'cite', 'code', 'data', 'dfn', 'em', 'font', 'i', 'kbd', 'mark',
-  's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time', 'tt', 'u', 'var', 'wbr']);
+// The elements a browser shows inline by default with nothing of their own between the text on both sides (HTML's
+// rendering rules): it shows that text as one run, so "35A-<b>02</b>-8" reads "35A-02-8". Any other tag (a cell, a
+// row, a paragraph, a line break, an image, a q with its quotation marks) parts the text around it.
+const INLINE_TAGS = new Set(['a', 'abbr', 'acronym', 'b', 'big', 'blink', 'cite', 'code', 'data', 'del', 'dfn', 'em',
+  'font', 'i', 'ins', 'kbd', 'label', 'map', 'mark', 'nobr', 'output', 's', 'samp', 'slot', 'small', 'span', 'strike',
+  'strong', 'sub', 'sup', 'time', 'tt', 'u', 'var', 'wbr']);
 
 // Characters a browser draws as nothing that join or shape no glyph: the soft hyphen, the zero-width space, the
 // left-to-right mark (plainPage refuses the other direction controls), the word joiner and the invisible operators,
@@ -257,12 +262,12 @@ const INLINE_TAGS = new Set(['a', 'abbr', 'b', 'big', 'cite', 'code', 'data', 'd
 const INVISIBLE_RE = /[\u00ad\u200b\u200e\u2060-\u2064\ufeff]/g;
 
 // The text a browser shows for a part of a page plainPage rebuilt: an inline tag out with nothing in its place, any
-// other tag a space, the references decoded, the INVISIBLE_RE characters taken out (so "Callba&shy;ck" reads
-// "Callback"), and NUL characters and runs of white space made one space.
+// other tag a space, the references decoded, the INVISIBLE_RE characters and NUL characters taken out (so
+// "Callba&shy;ck" reads "Callback"; a browser drops a NUL in text), and runs of white space made one space.
 function htmlText(html) {
   return decodeHTML(String(html || '').replace(/<\/?([a-z][a-z0-9]*)>/g, (tag, name) => (INLINE_TAGS.has(name) ? '' : ' ')))
     .replace(INVISIBLE_RE, '')
-    .replaceAll('\0', ' ')
+    .replaceAll('\0', '')
     .replace(/\s+/g, ' ')
     .trim();
 }

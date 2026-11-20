@@ -165,11 +165,16 @@ describe('htmlText', () => {
   test('joins the text around an inline tag, as a browser shows it, and parts it at any other tag', () => {
     expect(text('<td>35A-<B class=x>02</B>-8<br>Live ro<wbr>aches<td>Callba<u>ck</u></td>')).toBe('35A-02-8 Live roaches Callback');
     expect(text('&l<b></b>t; &<!-- -->lt; <<!-- -->td>')).toBe('&lt; &lt; <td>');
+    // An insertion, a deletion and a label are inline too; a q adds quotation marks, so it parts the text.
+    const inline = new Set([...TAGS, 'ins', 'del', 'label', 'q']);
+    expect(htmlText(plainPage('<td>Call<ins>ba</ins><del>c</del>k <label>Fol</label>low-up <q>x</q>y', inline)))
+      .toBe('Callback Follow-up x y');
   });
 
-  test('decodes references, takes out invisible characters, and makes NUL characters and white space one space', () => {
+  test('decodes references, takes out invisible characters and NUL characters, and makes white space one space', () => {
     expect(text(' Live&nbsp;ro&shy;aches &amp; flies,\n &lt;5 seen a < b ')).toBe('Live roaches & flies, <5 seen a < b');
-    expect(text('a\0b\u200bc &amp;lt; d&lrm;e&#8288;f&#xFEFF;')).toBe('a bc &lt; def');
+    // A browser drops a NUL in text: "Call\0back" shows as "Callback".
+    expect(text('a\0b\u200bc &amp;lt; d&lrm;e&#8288;f&#xFEFF; Call\0back')).toBe('abc &lt; def Callback');
     // A joiner shapes what a browser shows: the chef emoji stays one emoji.
     expect(text('Chef: \u{1F469}&zwj;\u{1F373}')).toBe('Chef: \u{1F469}\u200d\u{1F373}');
   });
