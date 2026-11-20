@@ -9,6 +9,10 @@
 const {
   isMembershipCustomerRow,
   isActivePlanCustomer,
+  isLiveObligationRow,
+  loadActiveRecurringServiceRows,
+  loadLiveRecurringObligationRows,
+  loadOwnedRecurringServiceKeys,
   loadExistingRecurringQualifyingRows,
   loadExistingQualifyingServiceKeys,
   toQualifyingKeys,
@@ -41,6 +45,94 @@ describe('isMembershipCustomerRow', () => {
   test('falls back to a positive recurring monthly_rate when no tier is set', () => {
     expect(isMembershipCustomerRow({ waveguard_tier: null, monthly_rate: 95 })).toBe(true);
     expect(isMembershipCustomerRow({ waveguard_tier: null, monthly_rate: 0 })).toBe(false);
+  });
+});
+
+// The row rule of loadLiveRecurringObligationRows, exported for a reader of another row shape (the legacy plan
+// visit in service-report/cross-sell.js). `today` is an ET calendar day.
+describe('isLiveObligationRow', () => {
+  const TODAY = '2026-11-20';
+  const row = (change = {}) => ({ status: 'confirmed', scheduled_date: '2026-11-25', source: 'admin', is_callback: false, ...change });
+
+  test('an upcoming visit is live: today counts, a date as a string or as a pg DATE value', () => {
+    expect(isLiveObligationRow(row(), TODAY)).toBe(true);
+    expect(isLiveObligationRow(row({ scheduled_date: TODAY }), TODAY)).toBe(true);
+    expect(isLiveObligationRow(row({ scheduled_date: new Date('2026-11-25T05:00:00Z') }), TODAY)).toBe(true);
+  });
+
+  test.each([
+    ['a date before today', { scheduled_date: '2026-11-19' }],
+    ['no date', { scheduled_date: null }],
+    ['a free re-service callback', { is_callback: true }],
+    ['a one-time booking source', { source: 'estimate-accept' }],
+    ['a one-time booking source in another case', { source: 'Quote-Wizard-Onetime' }],
+  ])('%s is not live', (_label, change) => {
+    expect(isLiveObligationRow(row(change), TODAY)).toBe(false);
+  });
+
+  test.each([['en_route'], ['on_site'], ['in_progress'], ['ON_SITE']])('a visit %s is live whatever its date', (status) => {
+    expect(isLiveObligationRow(row({ status, scheduled_date: '2026-11-19' }), TODAY)).toBe(true);
+    expect(isLiveObligationRow(row({ status, scheduled_date: null }), TODAY)).toBe(true);
+  });
+
+  test('a visit in progress is still not live as a callback or a one-time booking', () => {
+    expect(isLiveObligationRow(row({ status: 'on_site', is_callback: true }), TODAY)).toBe(false);
+    expect(isLiveObligationRow(row({ status: 'en_route', source: 'admin-manual-booking-resend' }), TODAY)).toBe(false);
+  });
+
+  // The $0 visit a one-time job's price already paid for rides the job, never a plan.
+  test('an included follow-up is not live, upcoming or in progress; a visit that is not one stays live', () => {
+    expect(isLiveObligationRow(row({ followup_included: true }), TODAY)).toBe(false);
+    expect(isLiveObligationRow(row({ followup_included: true, status: 'on_site', scheduled_date: '2026-11-19' }), TODAY)).toBe(false);
+    expect(isLiveObligationRow(row({ followup_included: false }), TODAY)).toBe(true);
+    expect(isLiveObligationRow(row({ followup_included: null }), TODAY)).toBe(true);
+  });
+});
+
+// The ownership readers ask the calendar for the rows that carry the recurring flag. No writer saves an included
+// follow-up with that flag, so this is a guard for a row shape: such a row is not an owned recurring service.
+describe('an included follow-up that carries the recurring flag (ownership readers)', () => {
+  const PEST = { id: 's1', service_type: 'Quarterly Pest Control', scheduled_date: '2099-09-12', status: 'scheduled' };
+  // Records each select's column list. The catalog join reads the same rows (it keys them by id).
+  function world({ rows, columns = { is_recurring: {}, followup_included: {} }, tier = null }) {
+    const selects = [];
+    const db = (table) => {
+      const q = {
+        where: () => q,
+        whereNotIn: () => q,
+        leftJoin: () => q,
+        columnInfo: async () => columns,
+        first: async () => (table === 'customers' ? { id: 'c1', waveguard_tier: tier } : null),
+        select: async (...cols) => { selects.push([table, cols.flat()]); return rows; },
+      };
+      return q;
+    };
+    return { db, selects };
+  }
+  const selectedFrom = (selects, table) => selects.filter(([name]) => name === table).map(([, cols]) => cols);
+
+  test('the calendar read carries followup_included where the table has the column, and not where it does not', async () => {
+    const withColumn = world({ rows: [] });
+    await loadActiveRecurringServiceRows(withColumn.db, 'c1');
+    expect(selectedFrom(withColumn.selects, 'scheduled_services')).toEqual([expect.arrayContaining(['followup_included'])]);
+    const without = world({ rows: [], columns: { is_recurring: {} } });
+    await loadActiveRecurringServiceRows(without.db, 'c1');
+    expect(selectedFrom(without.selects, 'scheduled_services')).toEqual([expect.not.arrayContaining(['followup_included'])]);
+  });
+
+  test('it is not a live obligation and owns no family; the same visit without the mark is and does', async () => {
+    const included = world({ rows: [{ ...PEST, followup_included: true }] }).db;
+    expect(await loadLiveRecurringObligationRows(included, 'c1')).toEqual([]);
+    expect(await loadOwnedRecurringServiceKeys(included, 'c1')).toEqual([]);
+    const plain = world({ rows: [{ ...PEST, followup_included: false }] }).db;
+    expect(await loadLiveRecurringObligationRows(plain, 'c1')).toHaveLength(1);
+    expect(await loadOwnedRecurringServiceKeys(plain, 'c1')).toEqual(['pest_control']);
+  });
+
+  // The gated TIER evidence (rowPassesGatedPricingEvidence) is a different rule and is not changed here.
+  test('the qualifying loader reads the row as it did before', async () => {
+    const member = world({ rows: [{ ...PEST, followup_included: true }], tier: 'Bronze' }).db;
+    expect(await loadExistingRecurringQualifyingRows(member, 'c1')).toHaveLength(1);
   });
 });
 
