@@ -125,9 +125,15 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
     return phone;
   };
 
+  const send = (path, body) => fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const post = async (path, body) => {
-    const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const res = await send(path, body);
     return { status: res.status, json: await res.json() };
+  };
+  // The same, with the reply's Cache-Control header (the webhook's hand-off).
+  const postSeeingCache = async (path, body) => {
+    const res = await send(path, body);
+    return { status: res.status, json: await res.json(), cacheControl: res.headers.get('cache-control') };
   };
   const parsed = (value) => (typeof value === 'string' ? JSON.parse(value) : value);
   const leadsOnPhone = (phone) => db('leads').whereRaw(`${LAST_TEN('phone')} = ?`, [phone]).orderBy('created_at');
@@ -183,13 +189,15 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
   describe('the lead webhook\'s hand-off', () => {
     test('asked, with answers that end on a price page: a hand-off for the new lead, its activity line, and no draft', async () => {
       const body = priceAsk();
-      const filed = await post('/api/leads', body);
+      const filed = await postSeeingCache('/api/leads', body);
       expect(filed.status).toBe(200);
       const leads = await leadsOnPhone(body.phone);
       expect(leads.map((row) => [row.lead_type, row.status, row.customer_id])).toEqual([['form_submission', 'new', filed.json.customerId]]);
       expect(parsed(leads[0].extracted_data)).toMatchObject({ stage: INTAKE_STAGE, quiz: QUIZ, timeline: 'this_week' });
       expect(filed.json.handoff).toEqual({ lead_id: leads[0].id, token: expect.any(String), expires_in: 7200 });
       expect(verifyLeadAttachToken(leads[0].id, filed.json.handoff.token)).toBe(true);
+      // The reply carries a credential for the lead: it is never cached.
+      expect(filed.cacheControl).toContain('no-store');
       expect(await estimatesOnPhone(body.phone)).toEqual([]);
       expect(await handoffNotes(leads[0].id)).toEqual([expect.stringContaining('this lead starts with no draft')]);
     }, 60000);
@@ -197,15 +205,29 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
     test('not asked (every other form, a saved replay): the draft as before and no hand-off', async () => {
       for (const flag of [undefined, false, 'true', 1]) {
         const body = priceAsk({ price_handoff: flag });
-        const filed = await post('/api/leads', body);
+        const filed = await postSeeingCache('/api/leads', body);
         expect(filed.status).toBe(200);
         expect(filed.json.handoff).toBeUndefined();
+        expect(filed.cacheControl || '').not.toContain('no-store');
         const leads = await leadsOnPhone(body.phone);
         expect(leads).toHaveLength(1);
         expect(await estimatesOnPhone(body.phone)).toEqual(FORM_DRAFT);
         expect(await handoffNotes(leads[0].id)).toEqual([]);
       }
     }, 120000);
+
+    test('asked, but the submission names a service key: no hand-off, and the draft step parks a key the catalog cannot confirm', async () => {
+      const body = priceAsk({ service_key: 'no_such_service_key' });
+      const filed = await post('/api/leads', body);
+      expect(filed.status).toBe(200);
+      expect(filed.json.handoff).toBeUndefined();
+      const leads = await leadsOnPhone(body.phone);
+      expect(leads.map((row) => row.service_key)).toEqual([null]);
+      expect(await handoffNotes(leads[0].id)).toEqual([]);
+      const drafts = await db('estimates').whereRaw(`${LAST_TEN('customer_phone')} = ?`, [body.phone]);
+      expect(drafts.map((row) => [row.source, row.status])).toEqual(FORM_DRAFT);
+      expect(JSON.stringify(parsed(drafts[0].estimate_data))).toContain('Submitted service key could not be verified against the catalog');
+    }, 60000);
 
     test('asked, but the answers end on a call, a business call-back or an office review: the draft and no hand-off', async () => {
       const elsewhere = [

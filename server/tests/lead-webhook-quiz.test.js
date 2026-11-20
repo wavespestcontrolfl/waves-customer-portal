@@ -188,10 +188,6 @@ describe('quizHandoffFor: the price page hand-off in the response', () => {
     expect(handoff({ lead: { id: LEAD, is_commercial: true, is_residential: false } })).toBeNull();
   });
 
-  test('none for a keyed lead: the price page would rewrite its label beside the old catalog key', () => {
-    expect(handoff({ lead: { ...homeLead, service_key: 'pest_quarterly' } })).toBeNull();
-    expect(handoff({ lead: { ...homeLead, service_key: null } })).not.toBeNull();
-  });
 
   test('none for an attached lead or a missing lead row', () => {
     expect(handoff({ insertedLead: false })).toBeNull();

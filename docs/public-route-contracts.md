@@ -4464,12 +4464,17 @@ no-op; no other form sends it, and a page must leave it out of a request it
 saves to replay later (nobody is there to use the hand-off, and the lead
 would get no draft). The server's own rule must agree (`quizContinuesToPrice`,
 `server/services/lead-quiz.js`: a named problem, `property` `house` |
-`townhome` | `condo`, `timeline` `this_week` | `this_month` | `browsing`).
-When all hold AND this request INSERTS the `leads` row (never an attach to
-a call lead, never the existing-customer or unverified-hold reply, never a
-row the readiness gate marked commercial, never a keyed lead), the response
+`townhome` | `condo`, `timeline` `this_week` | `this_month` | `browsing`),
+and the submission must name no service key (`serviceKey` / `service_key`,
+confirmed or not: a keyed lead keeps its catalog label, and a key the
+catalog cannot confirm must reach the draft step, which parks it for
+review). When all hold AND this request INSERTS the `leads` row (never an
+attach to a call lead, never the existing-customer or unverified-hold
+reply, never a row the readiness gate marked commercial), the response
 gains `handoff: { lead_id, token, expires_in }`: an ATTACH token for that
-one lead (see `/api/public/estimator/property-lookup` below), 2 hours. That
+one lead (see `/api/public/estimator/property-lookup` below), 2 hours. A
+response that carries a `handoff` is sent `Cache-Control: no-store` (the
+shared token-response headers, `server/middleware/no-store.js`). That
 request creates NO `lead_webhook` draft estimate: the price page makes the
 visitor's one estimate, and `/api/public/quote/calculate` refuses its own
 draft while another open estimate sits on the phone. A lead that is handed

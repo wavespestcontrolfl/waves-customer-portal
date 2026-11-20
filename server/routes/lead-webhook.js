@@ -28,6 +28,7 @@ const { normalizeLeadAddress, formatAddress } = require('../utils/address-normal
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken, mintLeadAttachToken, ATTACH_TTL_SECONDS } = require('../utils/lead-prefill-token');
+const { noStore } = require('../middleware/no-store');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
@@ -759,9 +760,13 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // A quiz page sends `price_handoff: true` when its answers end on a price
     // page and its browser can carry the hand-off there. The server's own
     // rule must agree (quizContinuesToPrice: a named problem, at a home,
-    // that can wait). No other form sends it, and a saved replay never does,
+    // that can wait). Never for a submission that names a catalog key,
+    // confirmed or not: a keyed lead's label is its catalog identity (the
+    // price page would rewrite the label beside the key), and a key the
+    // catalog cannot confirm must reach the draft step, which parks it for
+    // review. No other form sends the flag, and a saved replay never does,
     // so nothing below changes for them.
-    const quizPriceAsk = body.price_handoff === true && quizContinuesToPrice(quiz, timeline);
+    const quizPriceAsk = body.price_handoff === true && !serviceKey && quizContinuesToPrice(quiz, timeline);
 
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     let createdEstimateId = null;
@@ -962,8 +967,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
 
     // The price page hand-off for this lead, or null (quizHandoffFor). A quiz
     // page that asked and gets none (the submission joined a call lead, the
-    // row is commercial or keyed, the insert failed) gets the usual draft,
-    // made now. A lead that is handed off says so in its activity list.
+    // row is commercial, the insert failed) gets the usual draft, made now.
+    // A lead that is handed off says so in its activity list.
     const handoff = quizHandoffFor({ priceAsk: quizPriceAsk, insertedLead, lead: leadRecord });
     if (handoff) await notePriceHandoff(leadRecord.id);
     else if (quizPriceAsk) await createLeadDraftEstimate();
@@ -1347,6 +1352,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     }
 
     logger.info(`Lead webhook: new customer ${firstName} ${lastName} from ${leadSource.source}`);
+    // A hand-off is a bearer credential for one lead: the reply that carries
+    // it is never cached (the shared token-response headers).
+    if (handoff) noStore(req, res, () => {});
     res.json({ success: true, customerId: customer.id, ...(handoff ? { handoff } : {}) });
   } catch (err) {
     logger.error(`Lead webhook error: ${err.message}`);
@@ -1369,15 +1377,14 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
 // exist together for one submission.
 // Never for "Today", "Business" or "Unsure": those end on a call or an office
 // review, and a business must not reach a home price. Never for a row the
-// readiness gate marked commercial on any other signal. Never for a keyed
-// lead: its label is its catalog identity, and the price page would rewrite
-// the label beside the old key. Never for an attached call lead or an
-// existing customer: those rows hold someone's earlier data, and the caller
-// has not proved it is theirs. The token is attach-only and lives 2 hours
-// (utils/lead-prefill-token.js): it cannot be exchanged for the lead's
-// contact fields. null = no hand-off.
+// readiness gate marked commercial on any other signal. Never for an
+// attached call lead or an existing customer: those rows hold someone's
+// earlier data, and the caller has not proved it is theirs. (A submission
+// that names a catalog key never asks: quizPriceAsk.) The token is
+// attach-only and lives 2 hours (utils/lead-prefill-token.js): it cannot be
+// exchanged for the lead's contact fields. null = no hand-off.
 function quizHandoffFor({ priceAsk, insertedLead, lead } = {}) {
-  if (priceAsk !== true || insertedLead !== true || !lead?.id || lead.is_commercial === true || lead.service_key) return null;
+  if (priceAsk !== true || insertedLead !== true || !lead?.id || lead.is_commercial === true) return null;
   const token = mintLeadAttachToken(lead.id);
   return token ? { lead_id: lead.id, token, expires_in: ATTACH_TTL_SECONDS } : null;
 }
