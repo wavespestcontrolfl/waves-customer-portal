@@ -93,8 +93,9 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
   const through = etDateString(now);
   const from = shiftDay(through, -(days - 1));
   const newSince = new Date(now.getTime() - NEW_DAYS * 24 * 60 * 60 * 1000);
-  const [rows, health, answered] = await db.transaction((trx) => Promise.all([
-    trx('restaurant_prospects')
+  // One read at a time: a transaction is one connection, and the pg driver deprecates a query sent while another runs.
+  const [rows, health, answered] = await db.transaction(async (trx) => [
+    await trx('restaurant_prospects')
       .whereBetween('event_date', [from, through])
       .whereRaw("COALESCE(license_type_code, '') <> ?", [FOOD_TRUCK])
       .where((q) => q.whereIn('kind', ['new_license', 'owner_change']).orWhere((p) => p.where({ kind: 'inspection', pest_evidence: true })))
@@ -107,10 +108,10 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
         trx.raw("count(*) FILTER (WHERE kind = 'new_license') OVER () AS total_new_restaurant"),
         trx.raw("count(*) FILTER (WHERE kind = 'owner_change') OVER () AS total_new_owner"),
         trx.raw("count(*) FILTER (WHERE kind = 'inspection') OVER () AS total_pest_finding")),
-    trx('job_health').where({ job_name: SYNC_JOB }).first('last_success_at', 'last_finished_at', 'last_started_at'),
+    await trx('job_health').where({ job_name: SYNC_JOB }).first('last_success_at', 'last_finished_at', 'last_started_at'),
     // Whether any inspection report has been read (answered either way): until one has, no pest finding can show.
-    trx('restaurant_prospects').where({ kind: 'inspection' }).whereNotNull('pest_evidence').first('id'),
-  ]), { isolationLevel: 'repeatable read', readOnly: true });
+    await trx('restaurant_prospects').where({ kind: 'inspection' }).whereNotNull('pest_evidence').first('id'),
+  ], { isolationLevel: 'repeatable read', readOnly: true });
   const list = rows.map((row) => toRow(row, newSince));
   // No row means the period holds none. count() is a bigint: the driver gives a string.
   const totals = rows[0] || {};

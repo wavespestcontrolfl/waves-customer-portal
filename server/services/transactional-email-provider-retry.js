@@ -54,8 +54,8 @@ function isTransactionalRetryEligible(message) {
   if (group.startsWith('marketing_')) return false;
   const categories = asArray(message.categories).map((v) => String(v).toLowerCase());
   if (categories.includes('bounce_recovery') || categories.includes(REPLACED_RECIPIENT_CATEGORY)) return false;
-  // A follow-up carrying the monthly average, or a reschedule or cancellation notice, is
-  // never re-sent from its stored copy: the price or the visit may have changed since
+  // An estimate follow-up, or a reschedule or cancellation notice, is never re-sent from its
+  // stored copy: the estimate, its price or the visit may have changed since
   // (constants/email-replay-exclusions.js).
   if (staleStoredCopyReason(categories)) return false;
   return !!message.recipient_email_snapshot && !!message.subject_snapshot;

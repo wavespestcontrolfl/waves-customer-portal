@@ -241,6 +241,26 @@ describeDb('Restaurants list (PostgreSQL)', () => {
     expect(mockTransactionSettings).toEqual([expect.objectContaining({ isolationLevel: 'repeatable read', readOnly: true })]);
   });
 
+  test('the reads run one at a time on the snapshot\'s connection: the pg driver deprecates overlapping queries', async () => {
+    const isRead = (query) => /^\s*select\b/i.test((query && query.sql) || '');
+    let inFlight = 0;
+    let most = 0;
+    let reads = 0;
+    const start = (query) => { if (isRead(query)) { reads += 1; inFlight += 1; most = Math.max(most, inFlight); } };
+    const end = (_answer, query) => { if (isRead(query)) inFlight -= 1; };
+    database.on('query', start);
+    database.on('query-response', end);
+    database.on('query-error', end);
+    try {
+      await listRestaurants({ days: 30, now: NOW });
+    } finally {
+      database.removeListener('query', start);
+      database.removeListener('query-response', end);
+      database.removeListener('query-error', end);
+    }
+    expect([reads, most]).toEqual([3, 1]);
+  });
+
   test('a period that is not offered is refused before any read', async () => {
     await expect(listRestaurants({ days: 7, now: NOW })).rejects.toThrow('unknown period');
   });

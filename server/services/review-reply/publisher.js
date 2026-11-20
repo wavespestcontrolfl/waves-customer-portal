@@ -53,6 +53,9 @@ const CODES = {
   // DB error): retryable, and it must NOT be read as a definitive
   // "someone else replied" (codex r74).
   RECONCILE_FAILED: 'reconcile_failed',
+  // A local write before the PUT failed (transient database error): nothing
+  // reached Google, and the caller may try again.
+  LOCAL_WRITE_FAILED: 'local_write_failed',
   // The reply names the app another way than "the Waves app" (owner 2026-11-19).
   APP_NAME: 'app_name',
 };
@@ -292,6 +295,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   // live claim, so this write is the only place that can notice).
   let prePutFingerprint = null;
   let prePutContent = null;
+  // The pipeline status and reply slot the claim read before the PUT: an
+  // Intelligence Bar attempt that times out is recorded only on that
+  // unchanged row (a change made meanwhile wins).
+  let prePutState = null;
   // Predicate: the row's review CONTENT still equals the pre-check snapshot
   // (rating / text / reviewer / attribution). Used to make the persist a
   // compare-and-set on the review the reply was written for.
@@ -312,6 +319,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     if (fresh.dismissed) throw new ReviewReplyError(CODES.STALE, 'This review was dismissed since the page was loaded — reload it.', { status: 409 });
     prePutFingerprint = reviewFingerprint(fresh);
     prePutContent = { star_rating: fresh.star_rating, review_text: fresh.review_text, reviewer_name: fresh.reviewer_name, customer_id: fresh.customer_id };
+    prePutState = { status: fresh.auto_reply_status ?? null, slot: fresh.review_reply ?? null };
     // The review CONTENT the browser displayed (codex r33): manually
     // written text carries no draft token, so the editor sends the review
     // token from the list API; a reviewer rewrite the sync recorded since
@@ -521,6 +529,34 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           }
         }
       }
+      if (allowOverwrite || actor.type === 'ib') {
+        // A person's attempt (editor or Intelligence Bar) takes the row from
+        // the automatic runner BEFORE the PUT, as a compare-and-set on the
+        // status and reply slot the claim read: a runner that claimed it
+        // mid-draft can no longer store over the row while Google's PUT is
+        // in flight, and no new runner claim, queue expiry or catch-up
+        // enqueue lands under the live publish claim (runner.js
+        // claimDueRows), so a timed-out attempt's record still finds the row
+        // it read. A row that changed since the checks refuses here, before
+        // anything reaches Google.
+        const fence = db('google_reviews').where({ id: reviewId });
+        if (prePutState.status == null) fence.whereNull('auto_reply_status'); else fence.where('auto_reply_status', prePutState.status);
+        if (prePutState.slot == null) fence.whereNull('review_reply'); else fence.where('review_reply', prePutState.slot);
+        let fenced;
+        try {
+          fenced = await fence.update({ auto_reply_claimed_until: null });
+        } catch (dbErr) {
+          // The WHERE binds the earlier reply text, so a database error
+          // message can quote it (and the reviewer's name): only its code
+          // goes into the log and the answer (AGENTS.md, PII in logs).
+          const summary = require('../notification-service').safeErrorSummary(dbErr);
+          logger.warn(`[review-reply] pre-post fence failed for ${reviewId}: ${summary}`);
+          throw new ReviewReplyError(CODES.LOCAL_WRITE_FAILED, `Could not prepare this review for posting (${summary}) — nothing was sent to Google; try again.`, { status: 503 });
+        }
+        if (!(Array.isArray(fenced) ? fenced.length : fenced)) {
+          throw new ReviewReplyError(CODES.STALE, 'This review changed while the reply was being checked — reload it and try again.', { status: 409 });
+        }
+      }
       try {
         await withDeadline((signal) => gbp.replyToReview(resourceName, replyText, review.location_id, { signal }), 'GBP replyToReview');
       } catch (e) {
@@ -557,7 +593,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     const e = outcome.result.error;
     outcome.abandonClaim();
     const uncertain = { auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_error: String(e.message).slice(0, 1000) };
-    if (allowOverwrite) {
+    // An Intelligence Bar submission is a person's confirmed action, not the
+    // automatic lane, though it posts without overwrite.
+    const ibAttempt = actor.type === 'ib';
+    if (allowOverwrite || ibAttempt) {
       // A manual attempt (admin editor / IB): keep the exact text and mark
       // the version manual, so the sync that later clears the park hands
       // that text back to a person instead of the automatic lane (codex r75).
@@ -565,17 +604,49 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // Agent Ops draft: the restored [DRAFT] keeps that origin, so Use Draft
       // and Post now send it with the strict app-name rule.
       Object.assign(uncertain, { auto_reply_draft: replyText, auto_reply_version: auditMeta?.version || (agentText ? 'agent_ops' : 'human'), auto_reply_mode: null });
+      // The grounding of THIS text: the review as the claim read it before
+      // the PUT, and the account facts its draft was written from (an AI
+      // draft's grounding token, a stored or restored draft's snapshot; none
+      // for a person's own words). The sync checks it before it marks a
+      // landed reply posted (syncReplyFields, validatePromotionAccountFacts),
+      // and Post now and Use Draft before they publish the text again (in
+      // this park, or as the [DRAFT] the sync restores). Never an earlier
+      // draft's snapshot.
+      uncertain.auto_reply_grounding = JSON.stringify({ fingerprint: prePutFingerprint, accountFingerprint: expectedAccountFingerprint || null });
+      // This text is not known to be published: an earlier reply's time (a
+      // retracted one, an overwritten one) never dates it. The sync stamps
+      // Google's time when it finds the reply landed.
+      uncertain.auto_reply_published_at = null;
+      // A person's attempt takes the row from the automatic runner, as a
+      // posted manual reply does (manualReplyCloseFields): a runner that
+      // claimed it mid-draft can no longer store or release over this park.
+      uncertain.auto_reply_claimed_until = null;
+      // The attempted text replaces a [DRAFT] in the slot this write compares
+      // against (the pipeline's, an Agent Ops draft, a restored one), as a
+      // landed reply and the sync's restore both do. Until that sync the card
+      // shows this attempt, and the older draft never reads as a person's own
+      // words that Post now publishes as written.
+      if (isDraftReply(prePutState.slot)) Object.assign(uncertain, { review_reply: null, reply_updated_at: null });
     }
     const q = db('google_reviews').where({ id: reviewId });
     if (allowOverwrite) {
       // Human / IB-edit publishers: the row may be never-queued (NULL) or
       // skipped/manual_reply with a real prior reply — CAS on the reply
-      // slot exactly as this attempt observed it, so a sync that already
-      // reconciled a newer reply is left alone.
-      if (review.review_reply == null) q.whereNull('review_reply'); else q.where('review_reply', review.review_reply);
+      // slot exactly as this attempt observed it inside its claim (the slot
+      // the pre-PUT fence compared), so a sync that already reconciled a
+      // newer reply is left alone, and a runner draft stored before the
+      // claim gives way to the attempt.
+      if (prePutState.slot == null) q.whereNull('review_reply'); else q.where('review_reply', prePutState.slot);
+    } else if (ibAttempt) {
+      // An Intelligence Bar submission may answer any unanswered review,
+      // whatever its pipeline status (never queued, skipped, retracted, a
+      // pipeline draft): CAS on the status and the reply slot the claim read
+      // before the PUT, so an unchanged row records the attempt and a change
+      // made meanwhile wins.
+      if (prePutState.status == null) q.whereNull('auto_reply_status'); else q.where('auto_reply_status', prePutState.status);
+      if (prePutState.slot == null) q.whereNull('review_reply'); else q.where('review_reply', prePutState.slot);
     } else {
-      // NULL (never queued — e.g. an IB submission) must match too: SQL
-      // NOT IN never matches NULL.
+      // NULL (never queued) must match too: SQL NOT IN never matches NULL.
       q.where(function stateOwned() { this.whereNull('auto_reply_status').orWhereNotIn('auto_reply_status', ['posted', 'skipped', 'retracted']); })
         .where(function ownSlot() {
           this.whereNull('review_reply');
@@ -584,8 +655,11 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           this.orWhere('review_reply', asDraft(replyText));
         });
     }
+    // The write binds the attempted text (and the slot the claim read), so a
+    // database error message can quote it and the reviewer's name: only its
+    // code goes into the log (AGENTS.md, PII in logs).
     await q.update(uncertain)
-      .catch((e2) => logger.error(`[review-reply] google_uncertain park failed for ${reviewId}: ${e2.message}`));
+      .catch((e2) => logger.error(`[review-reply] google_uncertain park failed for ${reviewId}: ${require('../notification-service').safeErrorSummary(e2)}`));
     logger.error(`[review-reply] Google PUT timed out for ${reviewId} — outcome unknown, claim abandoned, parked for reconciliation`);
     throw new ReviewReplyError(CODES.GOOGLE_UNCERTAIN, `${e.message} — the reply may be live on Google; reconcile after the next sync.`, { status: 502, cause: e });
   }

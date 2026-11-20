@@ -238,9 +238,23 @@ async function hasVerifiedOverrides(address) {
   return Object.keys(row?.verified_overrides || {}).length > 0;
 }
 
+// `strict` reads (getCachedLookup, getVerifiedOverrides): a failed read THROWS
+// instead of answering null. For a caller that prices with nobody watching
+// (the plan start offer): to it, "the read failed" must never look like "no
+// row" or "no corrections". The error carries a code only, by the same rule
+// as the warnings below: a PG error can quote the failing row, and a cache
+// row holds a customer street address.
+function strictReadFailure(what, err) {
+  return Object.assign(new Error(`property lookup ${what} read failed`), {
+    code: 'LOOKUP_CACHE_READ_FAILED',
+    causeCode: err?.code || null,
+  });
+}
+
 // Cached lookup data — null when the cache is disabled, the row is missing,
 // the data slot is empty (override-only stub row), or the row expired.
-async function getCachedLookup(address) {
+// A failed read is also null, unless the caller asked for `strict`.
+async function getCachedLookup(address, { strict = false } = {}) {
   if (isCacheDisabled()) return null;
   try {
     const { hash } = addressKey(address);
@@ -257,6 +271,7 @@ async function getCachedLookup(address) {
     // quote the failing row, and cache rows carry normalized_address — a
     // customer street address in the logs (AGENTS.md PII-in-logs rule).
     logger.warn('[lookup-cache] read failed', { code: err?.code || 'none' });
+    if (strict) throw strictReadFailure('cache', err);
     return null;
   }
 }
@@ -313,19 +328,28 @@ function shortTtlState(record, aiAnalysis) {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Verified overrides are corrections, not cache: read them even when the
-// cache is disabled or the row's data slot has expired.
-async function getVerifiedOverrides(address) {
+// cache is disabled or the row's data slot has expired. A failed read answers
+// null (no corrections applied), unless the caller asked for `strict`: a
+// cached home served without its corrections prices on sizes staff fixed.
+async function getVerifiedOverrides(address, { strict = false } = {}) {
   try {
     const { hash } = addressKey(address);
     const row = await db('property_lookups')
       .where({ address_hash: hash })
       .first('verified_overrides');
-    const overrides = row?.verified_overrides || {};
-    return Object.keys(overrides).length ? overrides : null;
+    return verifiedOverridesOfRow(row);
   } catch (err) {
     logger.warn('[lookup-cache] override read failed', { code: err?.code || 'none' });
+    if (strict) throw strictReadFailure('verified override', err);
     return null;
   }
+}
+
+// The corrections stored on one row, in the shape getVerifiedOverrides
+// answers: the object, or null when the row has none (or there is no row).
+function verifiedOverridesOfRow(row) {
+  const overrides = row?.verified_overrides || {};
+  return Object.keys(overrides).length ? overrides : null;
 }
 
 // Backfill patch for rows cached BEFORE the FEMA NFHL provider shipped:
@@ -715,6 +739,7 @@ module.exports = {
   getCachedLookup,
   hasVerifiedOverrides,
   getVerifiedOverrides,
+  verifiedOverridesOfRow,
   isCacheDisabled,
   attachFloodZoneToCachedLookup,
   attachPoolPermitsToCachedLookup,

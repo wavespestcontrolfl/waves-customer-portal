@@ -11,6 +11,7 @@ const { appPlanEnabled, loadCustomerWateringPlan } = require('../services/irriga
 const AwayWatch = require('../services/away-watch');
 const { yardPets } = require('../services/pet-name-line');
 const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
+const { hasCustomerLawnCare } = require('../services/lawn-health-shared');
 const { movingPortalLive } = require('../config/feature-gates');
 
 // GATE_AWAY_WATCH: the Property tab shows its Away Watch section only when the server says so: the gate is live and
@@ -65,7 +66,7 @@ const {
   prefsRenderStamp,
   renderedAgainstCurrentHome,
 } = require('../services/property-preferences-schema');
-const { settleControllerTimer } = require('../services/controller-timer');
+const { controllerTimerSeen, settleControllerTimer } = require('../services/controller-timer');
 // The locked write found nothing left to save (the only fields were a rejected sprinkler timer).
 const NOTHING_SAVED = Symbol('nothing saved');
 
@@ -158,10 +159,16 @@ router.get('/pet-name-ask', async (req, res) => {
 
 router.get('/preferences', async (req, res, next) => {
   try {
-    const [prefs, hasLawnCare] = await Promise.all([
+    const [prefs, hasLawnCare, hasLawnService] = await Promise.all([
       db('property_preferences').where({ customer_id: req.customerId }).first(),
       customerQualifiesForLawnInches(req.customer).catch((err) => {
         logger.warn(`[property] lawn evidence lookup failed for ${req.customerId}: ${err.message}`);
+        return false;
+      }),
+      // The sprinkler timer card is a lawn surface, so it follows the Lawn Health card's rule (owner ruling 2026-08-28:
+      // on lawn care itself; a tier or a turf type on file is not), not the wider Weekly Inches one above.
+      hasCustomerLawnCare(req.customerId).catch((err) => {
+        logger.warn(`[property] lawn care lookup failed for ${req.customerId}: ${err.message}`);
         return false;
       }),
     ]);
@@ -189,6 +196,7 @@ router.get('/preferences', async (req, res, next) => {
           updatedAt: null,
         },
         hasLawnCare,
+        hasLawnService,
         irrigationSuppressed: false,
         ...awayWatchPayload(req),
       });
@@ -219,7 +227,7 @@ router.get('/preferences', async (req, res, next) => {
     const irrigationSuppressed = fields.irrigation_system === false;
     camelFields.irrigationSystem = true;
 
-    res.json({ preferences: camelFields, hasLawnCare, irrigationSuppressed, ...awayWatchPayload(req) });
+    res.json({ preferences: camelFields, hasLawnCare, hasLawnService, irrigationSuppressed, ...awayWatchPayload(req) });
   } catch (err) {
     next(err);
   }
@@ -315,9 +323,10 @@ router.put('/preferences', async (req, res, next) => {
       // after a move the request must carry the matching stamp (an absent
       // token — an old bundle — fails closed, gh-r43).
       const requestFresh = renderedAgainstCurrentHome(current, renderStamp);
-      // The sprinkler timer on file is one record about one home: it saves whole, and only from a page rendered
-      // against the current home (a move clears it under this lock). A rejected timer leaves `updates` without it.
-      rejected.push(...settleControllerTimer(updates, { fresh: requestFresh }));
+      // The sprinkler timer on file is one record about one home: it saves whole, only from a page rendered against
+      // the current home (a move clears it under this lock), and only over the timer that page showed. A rejected
+      // timer leaves `updates` without it.
+      rejected.push(...settleControllerTimer(updates, { fresh: requestFresh, stored: current, seen: controllerTimerSeen(req.body) }));
       if (Object.keys(updates).length === 0) return NOTHING_SAVED;
       // The confirmation union is ONE atomic statement over the row's
       // CURRENT value — an unlocked pre-move read could write a full pre-move

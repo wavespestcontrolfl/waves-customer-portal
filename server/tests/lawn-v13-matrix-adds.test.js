@@ -111,7 +111,7 @@ describe('1b. no customer-report override for Talak on mole crickets (the code a
 describe('2. take-all: the second pass of each Artavia pair is Headway', () => {
   test('spring pair Mar (Artavia) then Apr (Headway); fall pair Sep (Artavia) then Oct (Headway)', () => {
     expect(lineFor(3, N.ART)[0]).toMatch(/take-all areas, first spring application/);
-    expect(lineFor(4, matrix.HEAD)[0]).toMatch(/take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 2 to 4 gal of water, 30 days after the first/);
+    expect(lineFor(4, matrix.HEAD)[0]).toMatch(/take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 5 gal of water, 30 days after the first/);
     expect(lineFor(4, N.ART)).toEqual([]);
     expect(lineFor(9, N.ART)[0]).toMatch(/take-all areas, first fall application/);
     expect(lineFor(10, matrix.HEAD)[0]).toMatch(/take-all areas, second fall application, 3 fl oz per 1,000 sq ft/);

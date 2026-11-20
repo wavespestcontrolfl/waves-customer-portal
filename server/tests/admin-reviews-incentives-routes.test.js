@@ -106,3 +106,75 @@ describe('POST /admin/reviews/send-request — review hold response', () => {
     expect(res.json).toHaveBeenCalledWith({ error: reason });
   });
 });
+
+describe('POST /admin/reviews/:id/reply — the account facts for the post-PUT check', () => {
+  const router = require('../routes/admin-reviews');
+  const db = require('../models/db');
+  const Publisher = require('../services/review-reply/publisher');
+  const AutoReply = require('../services/review-reply/runner');
+  const handler = router.stack.find(layer => layer.route?.path === '/:id/reply' && layer.route.methods.post).route.stack.at(-1).handle;
+  const text = 'Thanks Dana. Glad the Waves app helps.';
+  const restored = { review_reply: `[DRAFT] ${text}`, auto_reply_draft: null, auto_reply_version: 'agent_ops', auto_reply_grounding: { fingerprint: 'f'.repeat(40), accountFingerprint: 'acct-recorded' } };
+  let row;
+
+  beforeEach(() => {
+    row = restored;
+    db.mockImplementation(() => ({ where: () => ({ first: async () => row }) }));
+    Publisher.publishReviewReply = jest.fn(async () => ({ googlePosted: true }));
+    AutoReply.manualReplyCloseFields = jest.fn(() => ({}));
+    AutoReply.pipelineDraftGuard = jest.fn(() => async () => null);
+    AutoReply.parseGroundingToken = jest.fn(() => null);
+    AutoReply.STATUS = { PARKED: 'parked' };
+    AutoReply.RECONCILE_REASONS = new Set(['google_uncertain', 'persist_failed']);
+  });
+  afterEach(() => db.mockReset());
+
+  async function expectedAccountFor(body) {
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    await handler({ params: { id: 'rev-1' }, body, technicianId: 'admin-1' }, res, jest.fn());
+    expect(res.json).toHaveBeenCalledWith({ success: true, googlePosted: true });
+    return Publisher.publishReviewReply.mock.calls[0][0].expectedAccountFingerprint;
+  }
+
+  test('Use Draft on a restored agent draft, posted unchanged, carries the account facts its attempt recorded', async () => {
+    expect(await expectedAccountFor({ replyText: text, fromAgentDraft: true })).toBe('acct-recorded');
+  });
+
+  test('a stored pipeline draft pasted into the editor unchanged (no Use Draft) keeps its snapshot and its machine origin; edited text does not', async () => {
+    row = { review_reply: '[DRAFT] Hi Dana, pipeline words.', auto_reply_draft: 'Hi Dana, pipeline words.', auto_reply_version: 'reply-v3', auto_reply_status: 'drafted', auto_reply_grounding: { fingerprint: 'f'.repeat(40), accountFingerprint: 'acct-stored' } };
+    expect(await expectedAccountFor({ replyText: 'Hi Dana, pipeline words.' })).toBe('acct-stored');
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(true);
+    Publisher.publishReviewReply.mockClear();
+    expect(await expectedAccountFor({ replyText: 'Hi Dana, pipeline words, and thanks.' })).toBeUndefined();
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(false);
+  });
+
+  test('a restored agent draft pasted into the editor unchanged (no Use Draft) keeps its account facts and its agent origin', async () => {
+    expect(await expectedAccountFor({ replyText: text })).toBe('acct-recorded');
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(true);
+  });
+
+  test('edited text, or a restored draft a person wrote, carries none; Use Draft of a stored draft keeps its snapshot (codex r50)', async () => {
+    expect(await expectedAccountFor({ replyText: `${text} We fixed the garage too.`, fromAgentDraft: true })).toBeUndefined();
+    Publisher.publishReviewReply.mockClear();
+    row = { ...restored, auto_reply_version: 'human' };
+    expect(await expectedAccountFor({ replyText: text, fromAgentDraft: true })).toBeUndefined();
+    Publisher.publishReviewReply.mockClear();
+    row = { review_reply: '[DRAFT] Hi Dana, pipeline words.', auto_reply_draft: 'Hi Dana, pipeline words.', auto_reply_version: 'reply-v3', auto_reply_grounding: { accountFingerprint: 'acct-stored' } };
+    expect(await expectedAccountFor({ replyText: 'Hi Dana, pipeline words.', draftToken: 'f'.repeat(40) })).toBe('acct-stored');
+  });
+
+  test('an Intelligence Bar attempt still parked after a timeout, submitted unchanged, keeps its account facts and its agent origin; edited text or a person\'s attempt does not', async () => {
+    const parked = { review_reply: null, auto_reply_draft: text, auto_reply_version: 'agent_ops', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_grounding: { fingerprint: 'f'.repeat(40), accountFingerprint: 'acct-parked' } };
+    row = parked;
+    expect(await expectedAccountFor({ replyText: text })).toBe('acct-parked');
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(true);
+    Publisher.publishReviewReply.mockClear();
+    expect(await expectedAccountFor({ replyText: `${text} Thanks again.` })).toBeUndefined();
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(false);
+    Publisher.publishReviewReply.mockClear();
+    row = { ...parked, auto_reply_version: 'human', auto_reply_grounding: { fingerprint: 'f'.repeat(40), accountFingerprint: null } };
+    expect(await expectedAccountFor({ replyText: text })).toBeUndefined();
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(false);
+  });
+});

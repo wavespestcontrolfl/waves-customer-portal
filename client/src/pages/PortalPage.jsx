@@ -28,6 +28,7 @@ import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/Station
 import CancelFlow from '../components/portal/CancelFlow';
 import MovingEntry, { useMovingEntry } from '../components/portal/MovingEntry';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
+import SprinklerTimerCard from '../components/portal/SprinklerTimerCard';
 import MistingSystemCard from '../components/portal/MistingSystemCard';
 import YardWrappedCard from '../components/portal/YardWrappedCard';
 import PetNameAskCard from '../components/portal/PetNameAskCard';
@@ -8663,6 +8664,12 @@ const IRRIGATION_EDIT_FIELDS = new Set([
   'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationWaterSource', 'irrigationIssues',
 ]);
 
+// The sprinkler timer, and the same as one comparable value (a save response puts the server's timer on screen only
+// when it differs).
+const SPRINKLER_TIMER_FIELDS = ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'];
+const sprinklerTimerOf = (p) => Object.fromEntries(SPRINKLER_TIMER_FIELDS.map((field) => [field, p?.[field] ?? null]));
+const sprinklerTimerKey = (p) => SPRINKLER_TIMER_FIELDS.map((field) => p?.[field] ?? '').join('|');
+
 // Away Watch dates. The pair saves whole or not at all, so nothing is sent until both days are chosen (one autosave
 // carries both); clearing both, or Remove, sends two nulls. A draft that loses a day before its autosave leaves
 // withdraws the queued pair (withdrawPair), so a pair the screen no longer shows never saves.
@@ -8769,11 +8776,20 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // Every save sends it as `confirmed_as_of`, through flushes and retries: never a newer stamp a later save response
   // reported, because the customer has not seen that home's settings (pre-push audit on #8107).
   const screenStampRef = useRef(null);
+  // The customer's own timer pick that the server refused: it stays on screen beside the reason, and no save response
+  // replaces it, until a later pick is sent and taken.
+  const timerRefusedRef = useRef(false);
+  // The timers the row may hold as far as the queued timer changes know (sprinklerTimerKey values): the one this screen
+  // showed before the first of them, and the timer of a failed save that went back in the queue (it may have landed). The save
+  // sends them as controller_timer_seen, and the server sets the timer only over one of them: a page left open never
+  // puts back a timer someone else replaced, and an app answer never lands on another box.
+  const timerSeenRef = useRef(null);
   const saveQueueRef = useRef(Promise.resolve());
   // Identity these edits belong to. The whole portal tree remounts on any
   // property/customer change, so capturing once at mount is sufficient.
   const editsCustomerIdRef = useRef(customer?.id);
   const [serverHasLawnCare, setServerHasLawnCare] = useState(null);
+  const [serverHasLawnService, setServerHasLawnService] = useState(null);
   // A legacy row stored "off" by the retired toggle: the report and Monday
   // email suppress derivation until the customer's next irrigation edit
   // stamps it on, so the card must not claim a figure they aren't counting.
@@ -8799,6 +8815,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // service evidence) — the same test the PUT applies to Weekly
         // Inches, so the field never renders and then drops on save.
         if (typeof d.hasLawnCare === 'boolean') setServerHasLawnCare(d.hasLawnCare);
+        if (typeof d.hasLawnService === 'boolean') setServerHasLawnService(d.hasLawnService);
         setIrrigationSuppressed(d.irrigationSuppressed === true);
         setAwayWatchEnabled(d.awayWatchEnabled === true);
         setLoading(false);
@@ -8854,11 +8871,31 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // (screenStampRef), not the newest a save returned: a save that
         // reports a move does not show the customer the new home's settings.
         toSave.confirmed_as_of = screenStampRef.current;
+        const savingTimerSeen = timerSeenRef.current;
+        if (SPRINKLER_TIMER_FIELDS.some((field) => field in toSave)) {
+          toSave.controller_timer_seen = savingTimerSeen;
+          timerSeenRef.current = null;
+        }
         const savingIrrigationRevision = irrigationEditRevision.current;
         const savingAwayWatchRevision = awayWatchPairRevision.current;
         try {
           const result = await api.updatePropertyPreferences(toSave);
-          if (result && result.preferences) lastSavedRef.current = result.preferences;
+          const rejectedFields = Array.isArray(result?.rejected) ? result.rejected : [];
+          if (SPRINKLER_TIMER_FIELDS.some((field) => field in toSave)) {
+            timerRefusedRef.current = rejectedFields.some((r) => SPRINKLER_TIMER_FIELDS.includes(r.field));
+          }
+          if (result && result.preferences) {
+            lastSavedRef.current = result.preferences;
+            // After every save the card shows the timer the server holds: the customer's pick it took, or a timer
+            // staff saved in Customer 360 (it comes back in this row, even one saved just after this pick). Not while
+            // a pick of the customer's own waits in the queue (a batch leaves pendingRef only when its save starts, so
+            // every newer edit is still there) or was refused. Left stale, an app answer here would send the old
+            // timer back over the server's.
+            if (!timerRefusedRef.current && !SPRINKLER_TIMER_FIELDS.some((field) => field in pendingRef.current)) {
+              const timerNow = sprinklerTimerKey(result.preferences);
+              setPrefs((prev) => (sprinklerTimerKey(prev) === timerNow ? prev : { ...prev, ...sprinklerTimerOf(result.preferences) }));
+            }
+          }
           // A pair the member withdrew while this save was in flight saved anyway: show the window the server now
           // holds, so the summary (and the inputs, when the section reopens) never hide an active Away Watch. A newer
           // Away Watch edit still queued (Remove, a new pair) wins: saves run one after another, so it is still in
@@ -8872,7 +8909,6 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
               awayWatchUntil: result.preferences.awayWatchUntil ?? null,
             }));
           }
-          const rejectedFields = Array.isArray(result?.rejected) ? result.rejected : [];
           // A field the server validated and saved THIS round clears any
           // stale message from an earlier rejection of the same field; a
           // field the server names here gets (or keeps) its message.
@@ -8927,13 +8963,26 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           // still re-queues the whole batch, unchanged.
           const rejectedFields = Array.isArray(err?.rejected) ? err.rejected : [];
           // What a failure may re-queue: never an Away Watch pair the member withdrew after this save left, and never
-          // `confirmed_as_of` (every flush synthesizes it fresh), so a batch left with no real field queues nothing.
+          // `confirmed_as_of` or `controller_timer_seen` (every flush synthesizes them), so a batch left with no real
+          // field queues nothing.
           const requeueable = (fields) => {
             const kept = awayWatchPairRevision.current === savingAwayWatchRevision ? { ...fields } : withoutAwayWatchPair(fields);
             delete kept.confirmed_as_of;
+            delete kept.controller_timer_seen;
             return kept;
           };
+          // Re-queue UNDER newer edits (a field re-edited since this PUT left wins). A timer change goes back naming the
+          // timers its save named and the timer it sent: a save with no answer may have landed, and any timer change
+          // queued since was made over it.
+          const requeue = (fields) => {
+            if (!Object.keys(fields).length) return;
+            pendingRef.current = { ...fields, ...pendingRef.current };
+            if (SPRINKLER_TIMER_FIELDS.some((field) => field in fields)) {
+              timerSeenRef.current = [...new Set([...(savingTimerSeen || []), sprinklerTimerKey(toSave)])];
+            }
+          };
           if (rejectedFields.length) {
+            if (rejectedFields.some((r) => SPRINKLER_TIMER_FIELDS.includes(r.field))) timerRefusedRef.current = true;
             setFieldErrors(prev => {
               const next = { ...prev };
               for (const r of rejectedFields) next[r.field] = r.message;
@@ -8946,19 +8995,13 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
             // metadata-only request that the server 400s with no `rejected`
             // list — which re-queues it again, forever, and every
             // property-switch flush keeps failing on it.
-            const retryable = requeueable(Object.fromEntries(
+            requeue(requeueable(Object.fromEntries(
               Object.entries(toSave).filter(([k]) => k !== 'confirmed_as_of' && !rejectedSet.has(k)),
-            ));
-            if (Object.keys(retryable).length) {
-              pendingRef.current = { ...retryable, ...pendingRef.current };
-            }
+            )));
           } else {
-            // Re-queue UNDER newer edits (a field re-edited since this PUT
-            // left wins) so the next flush retries these without clobbering
-            // fresher input. The UI is not reverted, so queue and screen
-            // agree.
-            const retry = requeueable(toSave);
-            if (Object.keys(retry).length) pendingRef.current = { ...retry, ...pendingRef.current };
+            // The next flush retries these without clobbering fresher input.
+            // The UI is not reverted, so queue and screen agree.
+            requeue(requeueable(toSave));
           }
           throw err;
         }
@@ -9294,6 +9337,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // standalone lawn-plan customer with no turf type on file used to get no
   // Weekly Inches field at all (found on a customer's phone 2026-08-27).
   const hasLawnCare = tierHasLawnCare || !!String(customer.property?.lawnType || '').trim() || serverHasLawnCare === true;
+  // The sprinkler timer card is a lawn surface: the server's answer only, by the Lawn Health card's rule (owner ruling
+  // 2026-08-28). A tier counts any two services and a pest-only home can have a turf type on file, so neither counts.
+  const hasLawnService = serverHasLawnService === true;
   // Schema semantics (initial_schema.js): property_sqft IS the treated lawn
   // area and bed_sqft is the separate ornamental-bed measurement — never
   // subtract one from the other, that understates the service area.
@@ -9488,6 +9534,20 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         onOpenProperty={onOpenWateringProperty}
         pending={wateringPlanRevision !== savedWateringRevision}
         refreshKey={savedWateringRevision}
+      />}
+
+      {/* The timer on file for THIS home (step 1 of sprinkler timer connect). Lawn-service customers only; it saves
+          through this tab's autosave. Not in IRRIGATION_EDIT_FIELDS: a timer is not a watering input, so the plan does
+          not reload. */}
+      {hasLawnService && <SprinklerTimerCard
+        brand={prefs.irrigationControllerBrand}
+        model={prefs.irrigationControllerModel}
+        app={prefs.irrigationControllerApp}
+        error={fieldErrors.irrigationControllerBrand || fieldErrors.irrigationControllerModel || fieldErrors.irrigationControllerApp}
+        onChange={(fields) => {
+          if (!SPRINKLER_TIMER_FIELDS.some((field) => field in pendingRef.current)) timerSeenRef.current = [sprinklerTimerKey(prefs)];
+          Object.entries(fields).forEach(([field, value]) => updateField(field, value));
+        }}
       />}
 
       <ServicePrefsSection />

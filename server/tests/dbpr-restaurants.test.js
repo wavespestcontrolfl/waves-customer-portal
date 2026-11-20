@@ -121,8 +121,53 @@ describe('parseInspectionRows', () => {
     expect(out[0]).toMatchObject({
       kind: 'inspection', license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010', business_name: 'SAMPLE DINER',
       address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-11-16',
-      detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2 },
+      detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2, violation35: 1, visitNumber: 1 },
     });
+  });
+
+  test('a visit number of 0, or blank, is not known (null); one that does not read is a malformed row', () => {
+    const row = (number) => inspRow({ visit: '9012' }).replace('"34208","1","1","Food"', `"34208","1","${number}","Food"`);
+    expect(row('0')).toContain('"34208","1","0","Food"');
+    const visitNumber = (number) => svc.parseInspectionRows(parseDbprCsv(inspCsv([row(number)])))[0].detail.visitNumber;
+    for (const number of ['0', '00', '', ' ']) expect(visitNumber(number)).toBeNull();
+    expect(visitNumber('2')).toBe(2);
+    for (const number of ['Visit 1', '-1', '1.5', 'one']) {
+      const counts = { malformed: 0, valid: 0 };
+      expect(svc.parseInspectionRows(parseDbprCsv(inspCsv([row(number), inspRow({ visit: '9013' })])), counts).map((r) => r.source_key)).toEqual(['9013']);
+      expect(counts).toEqual({ malformed: 1, valid: 1 });
+    }
+  });
+
+  test('every copy of a visit, cited or not, raises its visit number: a callback listed twice is never a first visit', () => {
+    const withVisit = (line, number) => line.replace('"34208","1","1","Food"', `"34208","1","${number}","Food"`);
+    // The cited record's visit number (an uncited callback copy is kept too, as its own record: below).
+    const visits = (lines) => svc.parseInspectionRows(parseDbprCsv(inspCsv(lines)))
+      .filter((r) => r.detail.violation35 > 0).map((r) => [r.source_key, r.detail.visitNumber]);
+    const cited = inspRow({ visit: '9020' });
+    const uncited = (number, options = {}) => withVisit(inspRow({ visit: '9020', v35: 0, ...options }), number);
+    expect(uncited('2')).toContain('"34208","1","2","Food"');
+    // Cited as visit 1, listed again as visit 2 with no citation: visit 2, in either order.
+    expect(visits([cited, uncited('2')])).toEqual([['9020', 2]]);
+    expect(visits([uncited('2'), cited])).toEqual([['9020', 2]]);
+    // A copy that is malformed (a bad date) still names the later visit.
+    expect(visits([cited, uncited('2', { date: '13/45/2026' })])).toEqual([['9020', 2]]);
+    // A blank copy changes nothing; another visit's copy changes nothing.
+    expect(visits([cited, uncited('')])).toEqual([['9020', 1]]);
+    expect(visits([withVisit(cited, ''), uncited('')])).toEqual([['9020', null]]);
+    // No other copy makes a visit a first visit: a blank visit number stays blank (never read) beside a copy that
+    // says visit 1, valid or rejected (a bad date), in either order.
+    const rejected = withVisit(inspRow({ visit: '9020', date: '13/45/2026' }), '1');
+    expect(rejected).toContain('13/45/2026');
+    expect(visits([withVisit(cited, ''), uncited('1')])).toEqual([['9020', null]]);
+    expect(visits([uncited('1'), withVisit(cited, '')])).toEqual([['9020', null]]);
+    expect(visits([withVisit(cited, ''), rejected])).toEqual([['9020', null]]);
+    expect(visits([rejected, withVisit(cited, '')])).toEqual([['9020', null]]);
+    expect(visits([cited, withVisit(inspRow({ visit: '9021', v35: 0 }), '2')])).toEqual([['9020', 1]]);
+    // An uncited later visit is kept as its own record, so its visit number holds in the store; an uncited first
+    // visit is not kept.
+    const kept = (lines) => svc.parseInspectionRows(parseDbprCsv(inspCsv(lines)))
+      .map((r) => [r.source_key, r.detail.violation35, r.detail.visitNumber]);
+    expect(kept([uncited('2'), uncited('1'), withVisit(inspRow({ visit: '9022', v35: 0 }), '1')])).toEqual([['9020', 0, 2]]);
   });
 });
 
@@ -212,17 +257,30 @@ describe('parseLicenseRows and the phone rule', () => {
   });
 });
 
+describe('namesFirstVisit', () => {
+  test('a page names a first visit only by a given type that names no callback, follow-up or re-inspection', () => {
+    expect(['Routine - Food', 'Complaint - Food', 'Licensing - Food'].map((type) => svc.namesFirstVisit(type))).toEqual([true, true, true]);
+    const later = ['Callback - Food', 'Call Back - Food', 'call-back', 'Follow-up', 'Follow Up - Food', 'Re-inspection', 'Reinspection'];
+    expect(later.map((type) => svc.namesFirstVisit(type))).toEqual(later.map(() => false));
+    const none = ['', '   ', null, undefined, 7];
+    expect(none.map((type) => svc.namesFirstVisit(type))).toEqual(none.map(() => false));
+  });
+});
+
 describe('syncRestaurantProspects', () => {
   let store;
   let upserts;
+  let raised;
   let reads;
   let fetchText;
 
   function makeStore() {
     upserts = [];
+    raised = [];
     reads = {};
     return {
       upsertRecords: jest.fn(async (records) => { upserts.push(...records); return records.length; }),
+      raiseVisits: jest.fn(async (later) => { raised.push(...later); return later.length; }),
       // As the real store, without the lock: the read is judged against the stored one and kept when it passes and
       // is fuller (judgeRead).
       settleRead: jest.fn(async (kind, read, now) => {
@@ -260,6 +318,43 @@ describe('syncRestaurantProspects', () => {
   });
   afterAll(() => { delete process.env.DBPR_PROSPECT_SYNC_DISABLED; });
 
+  test('a visit any copy in the file names as a later visit is stored as that visit, in either row order', async () => {
+    // The import reads a row at a time: the uncited visit-2 copy may come after the cited visit-1 copy, or before it.
+    const callback = (line) => line.replace('"34208","1","1","Food"', '"34208","1","2","Food"');
+    expect(callback(inspRow({ visit: '9001', v35: 0 }))).toContain('"34208","1","2","Food"');
+    const stored = () => upserts.filter((r) => r.kind === 'inspection').map((r) => [r.source_key, r.detail.visitNumber])
+      .sort((a, b) => a[0].localeCompare(b[0]));
+    for (const lines of [
+      [inspRow({ visit: '9001' }), inspRow({ visit: '9003' }), callback(inspRow({ visit: '9001', v35: 0 }))],
+      [callback(inspRow({ visit: '9001', v35: 0 })), inspRow({ visit: '9003' }), inspRow({ visit: '9001' })],
+    ]) {
+      store = makeStore();
+      const result = await sync({ fetchText: makeFetch({ '7fdinspi.csv': () => inspCsv(lines) }), store });
+      expect(result.failures).toBe(0);
+      expect(stored()).toEqual([['9001', 2], ['9003', 1]]);
+      expect(raised).toEqual([['9001', 2]]);
+    }
+  });
+
+  test('an uncited callback is kept as a row; a later visit outside the area still goes to the store to raise', async () => {
+    // An uncited callback copy is kept (visit 2, no citation); one outside the area (a visit id names one visit
+    // statewide) has no record and is raised.
+    const callback = (line) => line.replace('"34208","1","1","Food"', '"34208","1","2","Food"');
+    const away = callback(inspRow({ visit: '9004', v35: 0, county: 'Hillsborough' }));
+    expect(away).toContain('"34208","1","2","Food"');
+    store = makeStore();
+    const lines = [callback(inspRow({ visit: '9001', v35: 0 })), away, inspRow({ visit: '9003' })];
+    const result = await sync({ fetchText: makeFetch({ '7fdinspi.csv': () => inspCsv(lines) }), store });
+    expect(result.failures).toBe(0);
+    expect(upserts.filter((r) => r.kind === 'inspection').map((r) => [r.source_key, r.detail.violation35, r.detail.visitNumber]))
+      .toEqual([['9001', 0, 2], ['9003', 1, 1]]);
+    expect(raised).toEqual([['9001', 2], ['9004', 2]]);
+    // A file with no later visit makes no raise call.
+    store = makeStore();
+    await sync({ fetchText: makeFetch(), store });
+    expect(store.raiseVisits).not.toHaveBeenCalled();
+  });
+
   test('upserts every kind under its own key, once per (kind, source_key)', async () => {
     store = makeStore();
     fetchText = makeFetch();
@@ -294,6 +389,7 @@ describe('syncRestaurantProspects', () => {
   test.each([
     ['Business (DBA-Does Business As) Name', '7fdinspi.csv', 'inspection'],
     ['Location Address', '7fdinspi.csv', 'inspection'],
+    ['Visit Number', '7fdinspi.csv', 'inspection'],
     ['Business Name', 'newfood.csv', 'new_license'],
     ['Location Street Address', 'newfood.csv', 'new_license'],
     ['Primary Phone Number', 'chgownr_food.csv', 'owner_change'],
