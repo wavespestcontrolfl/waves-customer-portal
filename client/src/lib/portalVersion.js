@@ -4,8 +4,8 @@
 // server/middleware/portal-build-header.js. This module compares that build
 // with the build this page loaded (<meta name="portal-build">, written by the
 // production build in vite.config.js), so an out-of-date staff tab can load
-// the live code. It also counts API writes still on their way, so a reload
-// can wait for them.
+// the live code. It also counts API requests still on their way, and the API
+// writes among them, so a reload can wait for them.
 //
 // The newest server wins while it is still answering: an answer from a
 // server that started earlier (the old one, draining for 30 s during a
@@ -23,6 +23,7 @@ const NEWEST_QUIET_MS = 60 * 1000;
 let pageBuild; // undefined until first read
 let live = { build: null, boot: 0, heardAt: 0 };
 let writes = 0;
+let requests = 0;
 const listeners = new Set();
 
 function loadedBuild() {
@@ -59,6 +60,42 @@ export function writesInFlight() {
   return writes;
 }
 
+// Every API request on its way, reads included, and every read of an API
+// answer's body still running. A read can be the first step of a send (the
+// mobile checkout reads the discount setting, then posts the invoice), and
+// the next step starts once its body is read. Each count ends in a promise
+// step right before the next step starts, so a timer never sees zero between
+// two steps of one chain.
+export function requestsInFlight() {
+  return requests;
+}
+
+const BODY_READS = ['json', 'text', 'blob', 'arrayBuffer', 'formData'];
+
+// The answer stays the same object. Each read of its body, or of a copy of
+// it, counts until it settles.
+function countBodyReads(response) {
+  if (!response || typeof response !== 'object') return;
+  for (const name of BODY_READS) {
+    const read = response[name];
+    if (typeof read !== 'function') continue;
+    response[name] = function countedBodyRead(...args) {
+      const result = read.apply(this, args);
+      if (typeof result?.then !== 'function') return result;
+      requests += 1;
+      return Promise.resolve(result).finally(() => { requests -= 1; });
+    };
+  }
+  const clone = response.clone;
+  if (typeof clone === 'function') {
+    response.clone = function countedClone(...args) {
+      const copy = clone.apply(this, args);
+      try { countBodyReads(copy); } catch { /* never breaks the caller's request */ }
+      return copy;
+    };
+  }
+}
+
 export function subscribePortalVersion(listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -79,14 +116,17 @@ export function installPortalVersionWatch({ target = globalThis } = {}) {
     let request = { api: false, write: false };
     try { request = apiRequest(input, init); } catch { /* never breaks the caller's request */ }
     if (request.write) writes += 1;
+    if (request.api) requests += 1;
     try {
       const response = await original.call(this, input, init);
       if (request.api) {
-        try { noteServerAnswer(response?.headers); } catch { /* the response is never altered */ }
+        try { noteServerAnswer(response?.headers); } catch { /* the stamps are only read */ }
+        try { countBodyReads(response); } catch { /* never breaks the caller's request */ }
       }
       return response;
     } finally {
       if (request.write) writes -= 1;
+      if (request.api) requests -= 1;
     }
   };
   target.fetch = watched;
@@ -99,5 +139,6 @@ export function resetPortalVersionForTests() {
   pageBuild = undefined;
   live = { build: null, boot: 0, heardAt: 0 };
   writes = 0;
+  requests = 0;
   listeners.clear();
 }

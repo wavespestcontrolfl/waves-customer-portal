@@ -10,6 +10,7 @@ import {
   installPortalVersionWatch,
   newerBuild,
   noteServerAnswer,
+  requestsInFlight,
   resetPortalVersionForTests,
   subscribePortalVersion,
   writesInFlight,
@@ -123,7 +124,57 @@ describe('installPortalVersionWatch', () => {
     await read;
   });
 
-  test('returns the answer untouched and removes itself only while it is outermost', async () => {
+  test('counts every API request until its answer arrives, and each read of its body until it settles, so a check before a send never shows zero to a timer', async () => {
+    const pending = [];
+    target = { fetch: vi.fn(() => new Promise((resolve) => pending.push(resolve))) };
+    uninstall = installPortalVersionWatch({ target });
+    const timerSees = () => new Promise((resolve) => { setTimeout(() => resolve(requestsInFlight()), 0); });
+    let finishBody;
+    // The mobile checkout: read the discount setting, then post the invoice.
+    const checkout = (async () => {
+      const res = await target.fetch('/api/admin/discounts/stacking');
+      const setting = await res.json();
+      return target.fetch('/api/admin/schedule/1/invoice', { method: 'POST', body: JSON.stringify(setting) });
+    })();
+    expect(requestsInFlight()).toBe(1);
+    expect(writesInFlight()).toBe(0);
+    pending[0]({ headers: new Headers(), json: () => new Promise((resolve) => { finishBody = resolve; }) });
+    expect(await timerSees()).toBe(1);
+    finishBody({ enabled: true });
+    expect(await timerSees()).toBe(1);
+    expect(writesInFlight()).toBe(1);
+    pending[1]({ headers: new Headers() });
+    await checkout;
+    expect(requestsInFlight()).toBe(0);
+  });
+
+  test('a body read that fails ends its count, a copy of an answer counts its own read, and other answers are not counted', async () => {
+    let failRead;
+    let finishCopy;
+    const copy = { json: () => new Promise((resolve) => { finishCopy = resolve; }) };
+    target = {
+      fetch: vi.fn(async (url) => (String(url).startsWith('/api/')
+        ? { headers: new Headers(), json: () => new Promise((_resolve, reject) => { failRead = reject; }), clone: () => copy }
+        : { headers: new Headers(), json: async () => ({}) })),
+    };
+    uninstall = installPortalVersionWatch({ target });
+    const res = await target.fetch('/api/admin/leads');
+    const read = res.json();
+    const copied = res.clone().json();
+    expect(requestsInFlight()).toBe(2);
+    failRead(new Error('not JSON'));
+    await expect(read).rejects.toThrow('not JSON');
+    expect(requestsInFlight()).toBe(1);
+    finishCopy({});
+    await copied;
+    expect(requestsInFlight()).toBe(0);
+    const asset = await target.fetch('/assets/manifest.json');
+    const assetRead = asset.json();
+    expect(requestsInFlight()).toBe(0);
+    await assetRead;
+  });
+
+  test('returns the same answer and removes itself only while it is outermost', async () => {
     const response = { ok: true, headers: new Headers() };
     const original = vi.fn(async () => response);
     target = { fetch: original };

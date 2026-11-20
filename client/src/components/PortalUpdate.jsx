@@ -52,6 +52,7 @@ const HOLD_TEXT = {
   'time-clock': 'A time-clock punch is still being sent.',
   'visual-note': 'A visual note is still being saved.',
   'bank-import': 'A bank statement is still being imported.',
+  'bank-link': 'A bank connection is still open.',
   'page-use': 'Anything not saved on this page will be lost.',
   offline: 'This device is offline. A reload may show an error page.',
 };

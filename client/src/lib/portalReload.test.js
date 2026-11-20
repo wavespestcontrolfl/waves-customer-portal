@@ -145,6 +145,34 @@ describe('reloadForNewBuild', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  test('waits for a read that leads to a write, as when the checkout reads the discount setting before it posts the invoice, then reloads', async () => {
+    vi.useFakeTimers();
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      liveBuild('bbb222bbb222', Date.now());
+      const checkout = (async () => {
+        const res = await target.fetch('/api/admin/discounts/stacking');
+        await res.json();
+        return target.fetch('/api/admin/schedule/1/invoice', { method: 'POST' });
+      })();
+      const reload = vi.fn();
+      const done = reloadForNewBuild({ reload });
+      pending[0]({ headers: new Headers(), json: async () => ({ enabled: true }) });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(pending).toHaveLength(2);
+      expect(reload).not.toHaveBeenCalled();
+      pending[1]({ headers: new Headers() });
+      await checkout;
+      await vi.advanceTimersByTimeAsync(400);
+      await expect(done).resolves.toBeNull();
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      uninstall();
+    }
+  });
+
   describe('with a save on its way', () => {
     let finishSave;
     let uninstall;
