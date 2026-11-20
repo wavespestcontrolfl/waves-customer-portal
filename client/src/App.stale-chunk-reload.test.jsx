@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import React, { Suspense, lazy } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const reported = vi.hoisted(() => ({ calls: [] }));
@@ -12,6 +13,7 @@ vi.mock('./components/InstallPrompt', () => ({ default: () => null }));
 vi.mock('./components/analytics/PublicFunnelTracking', () => ({ default: () => null }));
 vi.mock('./glass/glass-engine', () => ({ useGlassSurface: () => {} }));
 import { PageErrorBoundary, lazyWithRetry } from './App';
+import { PortalUpdateGate } from './components/PortalUpdate';
 import {
   CHUNK_RELOAD_FLAG,
   handleVitePreloadError,
@@ -58,6 +60,31 @@ function renderInBoundary(Page) {
       </Suspense>
     </PageErrorBoundary>,
   );
+}
+
+// #8121's gate around the routes, as App.jsx has it, with the /admin index's
+// redirect. Hands back a move: a path, or -1 for Back.
+function renderGate(entries) {
+  let navigate;
+  function Navigator() {
+    navigate = useNavigate();
+    return null;
+  }
+  function Where() {
+    return <div>{useLocation().pathname}</div>;
+  }
+  render(
+    <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
+      <PortalUpdateGate fallback={<div>Gate placeholder</div>}>
+        <Navigator />
+        <Routes>
+          <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
+          <Route path="*" element={<Where />} />
+        </Routes>
+      </PortalUpdateGate>
+    </MemoryRouter>,
+  );
+  return (to) => act(() => { navigate(to); });
 }
 
 beforeEach(() => {
@@ -204,6 +231,23 @@ test('on a customer page too, after the one reload a page still missing under a 
   expect(await screen.findByText('Couldn’t load this page')).toBeInTheDocument();
   expect(document.getElementById('chunk-reload-toast')).toBeNull();
   expect(isStaleChunkReloadPending()).toBe(false);
+});
+
+// A page whose stylesheet is missing: the preload error starts the reload,
+// and Vite still imports the page's script, which can load before the reload
+// lands.
+test('a chunk that loads while the reload for a missing chunk is under way keeps the one-shot flag', async () => {
+  const reload = vi.fn();
+  handleVitePreloadError(preloadErrorEvent(), reload);
+  expect(reload).toHaveBeenCalledTimes(1);
+  renderInBoundary(lazyWithRetry(() => Promise.resolve({ default: () => <div>Loaded page</div> })));
+  expect(await screen.findByText('Loaded page')).toBeInTheDocument();
+  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
+  resetStaleChunkReloadForTests(); // the page load the one reload opened
+  const again = preloadErrorEvent();
+  handleVitePreloadError(again, reload);
+  expect(again.defaultPrevented).toBe(false);
+  expect(reload).toHaveBeenCalledTimes(1);
 });
 
 test('with session storage blocked, a page whose code loaded still renders', async () => {
@@ -403,19 +447,36 @@ describe('on a staff page', () => {
     }
   });
 
-  test('a tab last used on a field page keeps itself at a move away: a missing chunk there never reloads by itself', () => {
-    vi.stubGlobal('location', { ...window.location, pathname: '/admin/today', reload });
-    const stop = watchPageUse(document);
-    try {
-      tap(document.body);
-      vi.stubGlobal('location', { ...window.location, pathname: '/admin/customers', reload });
-      const stale = preloadErrorEvent();
-      handleVitePreloadError(stale, reload);
-      expect(stale.defaultPrevented).toBe(false);
-      expect(reload).not.toHaveBeenCalled();
-    } finally {
-      stop();
-    }
+  // The gate notes the page each move leaves (notePageMove). Each move below
+  // ends on /admin/dashboard, the location this describe stubs.
+  test('Back from a field page, with no use of it, opens a page that never reloads by itself', () => {
+    const move = renderGate(['/admin/dashboard', '/admin/today']);
+    move(-1);
+    expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a redirect continues the move away from a field page: Today, then /admin, then the dashboard', () => {
+    const move = renderGate(['/admin/today']);
+    move('/admin');
+    expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a move between other staff pages, with nothing open, still reloads at once', () => {
+    const move = renderGate(['/admin/schedule']);
+    move('/admin/dashboard');
+    expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 
   test('in Waves Admin a missing chunk never reloads by itself', () => {

@@ -38,9 +38,10 @@
 //
 // Waves Admin and the field pages never reload by themselves, as at a page
 // move (selfReloadBarred, lib/portalReload.js): a reload with no signal opens
-// an offline screen. Nor does a move away from a field page, which the tab's
-// last use there marks: field work can still be on its way. There a missing
-// chunk always leaves the import to fail, so the page or the part asks.
+// an offline screen. Nor does the page a move from a field page opens, as
+// PortalUpdateGate judges that move (notePageMove): field work can still be
+// on its way. There a missing chunk always leaves the import to fail, so the
+// page or the part asks.
 //
 // The one reload for a missing chunk counts until the tab leaves the path it
 // reopened (chunkReloadAttempted): a route can load in parts, and the part
@@ -69,7 +70,16 @@ let reloadPending = false;
 let navigatingUntil = 0;
 let chunkHeld = false;
 let usedPath = null;
+let moveFrom = null;
 let reloadedPath = pathOpenedByChunkReload();
+
+// PortalUpdateGate (components/PortalUpdate.jsx) notes the page each page
+// move leaves, as #8121's rule judges it: a redirect continues the move it
+// ends, so Today -> /admin -> the dashboard still leaves Today. It notes it
+// as it renders, before the new page's code starts to load.
+export function notePageMove(from) {
+  moveFrom = from;
+}
 
 // Notes the path of each use of a page, as the Reload bar counts a use
 // (isPageUse, lib/portalReload.js). Installed once, by main.jsx.
@@ -85,11 +95,10 @@ export function usedOnThisStaffPage() {
   return isAdminPath(pathname) && usedPath === pathname;
 }
 
-// A staff page that never reloads by itself (see the top of this file). The
-// page of the tab's last use stands for the page a move left.
+// A staff page that never reloads by itself (see the top of this file).
 function staffSelfReloadBarred() {
   const { pathname } = window.location;
-  return isAdminPath(pathname) && selfReloadBarred(pathname, usedPath);
+  return isAdminPath(pathname) && selfReloadBarred(pathname, moveFrom);
 }
 
 // The path this page load opened on, when the one reload for a missing chunk
@@ -128,8 +137,12 @@ export function takeChunkReload() {
 // A page loaded (App.jsx lazyWithRetry): the live build serves its code, so a
 // later deploy may reload the tab again. The path the one reload reopened
 // counts until a page loads on another path. Best effort: blocked storage
-// must not fail a page whose code loaded.
+// must not fail a page whose code loaded. While a reload for a missing chunk
+// is under way, a load does not count: the flag must reach the page load
+// that reload opens. Vite still imports a page whose stylesheet is missing,
+// and that script can load before the reload lands.
 export function noteChunkLoaded() {
+  if (reloadPending) return;
   if (window.location.pathname !== reloadedPath) reloadedPath = null;
   try { sessionStorage.removeItem(CHUNK_RELOAD_FLAG); } catch { /* storage blocked */ }
 }
@@ -230,5 +243,6 @@ export function resetStaleChunkReloadForTests() {
   navigatingUntil = 0;
   chunkHeld = false;
   usedPath = null;
+  moveFrom = null;
   reloadedPath = pathOpenedByChunkReload();
 }

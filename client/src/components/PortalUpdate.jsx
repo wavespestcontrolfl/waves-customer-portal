@@ -4,6 +4,7 @@ import { Button } from './ui';
 import { isAdminPath, isFieldPath } from '../lib/adminBookmarkMeta';
 import { newerBuild, subscribePortalVersion } from '../lib/portalVersion';
 import { isPageUse, PAGE_USE_EVENTS, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
+import { notePageMove } from '../lib/staleChunkReload';
 
 // Wraps the route tree (App.jsx). At a page move that is due a reload
 // (lib/portalReload.js) it shows `fallback` in place of the routes, so the old
@@ -30,6 +31,8 @@ export function PortalUpdateGate({ fallback, children }) {
   if (gate.pathname !== pathname) {
     const origin = navigationType === 'REPLACE' ? gate.origin : gate.pathname;
     const from = isFieldPath(origin) ? origin : gate.pathname;
+    // The stale-chunk reload follows the same rule (lib/staleChunkReload.js).
+    notePageMove(from);
     setGate({ pathname, origin, reloading: reloadDueAtMove(pathname, Date.now(), from) });
   }
 
