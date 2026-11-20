@@ -4626,25 +4626,28 @@ function whereSweepCandidate(qb) {
 //   finish a selected row as voicemail or spam, or quarantine a card number,
 //   before the sweep reaches it, and the rest of this claim accepts those.
 // - `scheduledGeneration` (the recording webhook's timers): the
-//   processing_generation the webhook's own write left on the row. A pass
-//   that claimed the row since (a higher generation) overtook the timer, so
-//   the timer then runs only on a first-pass state (NULL or pending, which a
-//   deferral restores), on a claim (the heartbeat rule decides), or on a row
-//   the sweep would take now (whereSweepCandidate). So a retry state needs
-//   the sweep's cap, backoff and length rule: an overtaken timer never
-//   retries a short call's failure, which the sweep leaves alone. A finished
-//   verdict, a creation failure the office reviews, or any other state
-//   refuses it, so a call the sweep finished before the timer fired is not
-//   run again (pre-push Codex P1, rounds 8, 9 and 11).
-const OVERTAKEN_TIMER_STATES = ['pending', 'processing'];
+//   processing_generation the webhook's write left on the row (a duplicate
+//   delivery: the row as read). A timer runs on a first-pass state (NULL or
+//   pending, which a deferral restores) or a claim (the heartbeat rule
+//   decides). It takes a retry state only where the sweep would retry it now
+//   (whereSweepCandidate: the cap, the backoff, the length rule), so no
+//   timer, overtaken or a late duplicate's, retries a short call's failure,
+//   which the sweep leaves alone (pre-push Codex P1, rounds 11 and 12). Any
+//   other state it takes only if no pass claimed the row since its write (a
+//   higher generation overtook it): a finished verdict or a creation failure
+//   the office reviews refuses an overtaken timer, so a call the sweep
+//   finished before the timer fired is not run again (rounds 8 and 9).
 function whereUnattendedClaim(qb, opts = {}) {
   if (opts.sweep) qb.where(function sweepStillSelects() { whereSweepCandidate(this); });
   if (opts.scheduledGeneration != null) {
-    qb.where(function noVerdictSinceScheduled() {
-      this.where('processing_generation', '<=', Number(opts.scheduledGeneration))
-        .orWhereNull('processing_status')
-        .orWhereIn('processing_status', OVERTAKEN_TIMER_STATES)
-        .orWhere(function sweepWouldTakeNow() { whereSweepCandidate(this); });
+    qb.where(function timerStillOwedPass() {
+      this.whereNull('processing_status')
+        .orWhereIn('processing_status', ['pending', 'processing'])
+        .orWhere(function sweepWouldTakeNow() { whereSweepCandidate(this); })
+        .orWhere(function notOvertaken() {
+          this.where('processing_generation', '<=', Number(opts.scheduledGeneration))
+            .whereNotIn('processing_status', ['no_transcription', 'extraction_failed']);
+        });
     });
   }
   return qb;
@@ -11699,7 +11702,7 @@ const CallRecordingProcessor = {
           .where(function expectedRecording() { if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid); })
           // The fences for an unattended pass (whereUnattendedClaim): a sweep
           // pass re-checks the sweep's candidate rule, and a webhook timer
-          // that a newer pass overtook runs only on a row still owed a pass.
+          // runs only on a row still owed a pass.
           // Each refusal leaves the row untouched instead of running the paid
           // pipeline again.
           .where(function unattendedClaim() { whereUnattendedClaim(this, opts); })
