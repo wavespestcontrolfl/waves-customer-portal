@@ -190,13 +190,13 @@ function offerIdsOf(data) {
 // replaced the offer, or the applicant answered, while the result is open) or older (a read that started during the
 // send and landed after its answer). A read of the same version is the same row read later: it can add only the
 // server's expiry, which closes a sent offer by the clock without a write. The page's clock applies the same expiry to
-// a result left open (shownOffer). Without both versions, the send's answer. onCard: the read holds the version shown,
-// so the offer card shows the same; when it does not (the read after the send failed), the send's answer is all the
-// page knows, and an expiry by the page's clock is worded as only that (describeSend).
+// a result left open (shownOffer). Without both versions, the send's answer. byClock: the page's clock, not the server,
+// closed it (the row still says sent), so the result words only the expiry (describeSend).
 function sentView(result, data) {
   const now = offerIn(data, result.offer.id);
-  const onCard = Boolean(now) && Date.parse(now.updatedAt) >= Date.parse(result.offer.updatedAt);
-  return { offer: shownOffer(onCard ? now : result.offer), onCard };
+  const row = now && Date.parse(now.updatedAt) >= Date.parse(result.offer.updatedAt) ? now : result.offer;
+  const offer = shownOffer(row);
+  return { offer, byClock: offer.status !== row.status };
 }
 
 function initialDraftId(draft, data) {
@@ -617,7 +617,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, cl
 
   if (result) {
     const view = sentView(result, data);
-    const sent = describeSend(result.comms, firstName, view.offer.status, view.onCard);
+    const sent = describeSend(result.comms, firstName, view.offer.status, view.byClock);
     return (
       <>
         <DialogBody>
