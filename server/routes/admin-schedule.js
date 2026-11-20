@@ -24133,7 +24133,6 @@ function optimizeRefusalMessage(reason) {
   if (reason === 'WINDOW_FIT_GATE_OFF') return 'Google\'s route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
   if (reason === 'LIVE_STOP_IN_PROGRESS') return 'A stop on this route is already in progress — reorder it once that visit is complete.';
   if (reason === 'COORDLESS_STOPS') return 'A stop on this route has no map location, so its arrival window cannot be verified — nothing was changed.';
-  if (reason === 'MODEL_UNCALIBRATED') return 'Drive-time calibration is off, so this route\'s arrival windows cannot be verified without live traffic data — nothing was changed.';
   if (reason === 'PROGRESS_ORIGIN_UNKNOWN') return 'This route is already under way and the last completed stop has no map location, so the remaining drive cannot be verified — nothing was changed.';
   return 'No legal stop order keeps every promised arrival window — nothing was changed.';
 }
@@ -24460,9 +24459,6 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       RouteOptimizer, googleOrder: result.orderedStops, sourceStops: services, googleSource: result.source, legs: result.legs, startMin,
       origin: techDayOrigins.origins.get(techKey) || null,
       home: homeFromMap(techHomes, techKey),
-      // This button WRITES; it may not certify a promise on the uncalibrated
-      // model when Google's legs were discarded.
-      requireCalibratedModel: true,
     });
     if (!outcome.orderedStops) {
       return res.status(409).json({

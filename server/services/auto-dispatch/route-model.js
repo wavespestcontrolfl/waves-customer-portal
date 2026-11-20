@@ -4,9 +4,8 @@
  * GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
  * backlog item 3): the CURRENT placement and every CANDIDATE placement score
  * on ONE model — the calibrated drive-time estimator auto-dispatch/geo.js's
- * driveMin wraps (route-optimizer's model; GATE_DRIVE_TIME_CALIBRATION
- * governs which estimator that resolves to — no Google/Distance Matrix calls
- * either way) plus the owner planning-minutes table
+ * driveMin wraps (route-optimizer's model — no Google/Distance Matrix calls)
+ * plus the owner planning-minutes table
  * (scheduling/planning-minutes.js), applied to EVERY stop in the day's chain
  * — including the moving visit itself.
  *
@@ -30,10 +29,8 @@ const { driveMin, haversine, HQ } = require('./geo');
 const DEFAULT_DURATION_MINUTES = 60;
 
 // "Same area" for the day-clustering term (owner directive 2026-09-26): a
-// short local hop, not a cross-town drive — roughly 6-7 minutes of drive at
-// the ~30 mph model auto-dispatch/geo.js's estimator assumes off-calibration.
-// Kept as a plain mile radius (not minutes) so the term never depends on
-// which drive-time calibration is live.
+// short local hop, not a cross-town drive. Kept as a plain mile radius (not
+// minutes) so the term never depends on the drive-time model.
 const CLUSTER_RADIUS_MILES = 3;
 
 /**
