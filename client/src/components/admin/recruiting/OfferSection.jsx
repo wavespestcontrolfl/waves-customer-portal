@@ -15,6 +15,7 @@ export default function OfferSection({ detail, offerFlow, onChanged, detailStale
   const { enabled, data, openForm, error: readError, refreshError, ownerActions, retry } = offerFlow;
   const [signed, setSigned] = useState(null);
   const [error, setError] = useState(null);
+  const [reading, setReading] = useState(false); // a signed copy is loading: one read at a time (History)
   if (detail.role !== "technician") return null;
   if (readError) {
     return (
@@ -61,11 +62,14 @@ export default function OfferSection({ detail, offerFlow, onChanged, detailStale
     );
   }
   const viewSigned = async (offer) => {
+    setReading(true);
     try {
       setError(null);
       setSigned(await fetchSignedCopy(detail.id, offer.id));
     } catch (err) {
       setError(offerErrorMessage(err));
+    } finally {
+      setReading(false);
     }
   }
   return (
@@ -77,7 +81,7 @@ export default function OfferSection({ detail, offerFlow, onChanged, detailStale
         </Button>
       )}
       {error && <ActionFeedback error>{error}</ActionFeedback>}
-      <History history={history} onViewSigned={viewSigned} />
+      <History history={history} busy={reading} onViewSigned={viewSigned} />
       <SignedCopyView copy={signed} onClose={() => setSigned(null)} />
     </div>
   );

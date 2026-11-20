@@ -4,7 +4,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import OfferTimeline from "./OfferTimeline";
-import { reviseOffer, withdrawOffer } from "./offerApi";
+import { fetchSignedCopy, reviseOffer, withdrawOffer } from "./offerApi";
 
 vi.mock("./offerApi", () => ({ fetchSignedCopy: vi.fn(), reviseOffer: vi.fn(), withdrawOffer: vi.fn() }));
 
@@ -43,6 +43,7 @@ function card(props = {}) {
 beforeEach(() => {
   withdrawOffer.mockReset();
   reviseOffer.mockReset();
+  fetchSignedCopy.mockReset();
 });
 
 afterEach(() => {
@@ -91,6 +92,41 @@ describe("OfferTimeline", () => {
     render(card({ onOpenDraft, onChanged: async () => ({ current: record(), draft: revision }) }));
     fireEvent.click(screen.getByRole("button", { name: "Revise" }));
     await waitFor(() => expect(onOpenDraft).toHaveBeenCalledWith(revision));
+  });
+
+  // Two signed copies in the history: while one loads, every signed-copy button waits, so a slower read can never
+  // replace the copy the owner chose last.
+  it("keeps every signed-copy button off while one signed copy loads", async () => {
+    fetchSignedCopy.mockReturnValue(new Promise(() => {}));
+    const history = [
+      record({ id: "offer-7", status: "accepted", signedAt: "2026-06-01T15:00:00Z", signedName: "Jordan Rivera" }),
+      record({ id: "offer-8", status: "accepted", signedAt: "2026-08-01T15:00:00Z", signedName: "Jordan Rivera" }),
+    ];
+    render(card({ history }));
+    fireEvent.click(screen.getByText("Earlier offers (2)"));
+    const [first, second] = screen.getAllByRole("button", { name: "View signed copy" });
+    fireEvent.click(first);
+    await waitFor(() => expect(second).toBeDisabled());
+    expect(first).toBeDisabled();
+    expect(fetchSignedCopy).toHaveBeenCalledTimes(1);
+  });
+
+  // A date request whose day has come (Eastern): the server would pick another start date, so the card keeps the
+  // request as history and offers only Revise.
+  it("offers the update for the asked date only while that day is still ahead in Eastern time", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-19T15:00:00Z")); // 10 AM ET, Thursday Nov 19
+    try {
+      const asked = (day) => record({ status: "date_requested", requestedStartDate: day });
+      const { rerender } = render(card({ offer: asked("2026-11-19") }));
+      expect(screen.getByText(/Asked to start/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Make an updated offer for/ })).toBeNull();
+      expect(screen.getByRole("button", { name: "Revise" })).toBeInTheDocument();
+      rerender(card({ offer: asked("2026-11-23") }));
+      expect(screen.getByRole("button", { name: /Make an updated offer for/ })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("withdraws what the owner saw while the question is still valid", async () => {

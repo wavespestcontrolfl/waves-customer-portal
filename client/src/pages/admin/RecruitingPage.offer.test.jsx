@@ -1072,6 +1072,72 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(await screen.findByRole('heading', { name: /Casey Morgan — / })).toBeInTheDocument();
   });
 
+  // An action on one applicant can finish after the owner opened another. Its re-read is for an applicant no longer
+  // on screen, so it must not cancel the open applicant's own re-read, which would leave that applicant's stage stale.
+  it("a late offer action on one applicant does not cancel the open applicant's re-read", async () => {
+    let releaseA;
+    let releaseBRead;
+    let bWithdrawn = false;
+    let bReads = 0;
+    const aGate = new Promise((resolve) => { releaseA = resolve; });
+    const sentA = offerRecord({ status: 'sent', timeline: [] });
+    const sentB = offerRecord({ id: 'offer-9', applicationId: 'app-2', status: 'sent', timeline: [] });
+    const calls = [];
+    const fetchMock = vi.fn((url, options = {}) => {
+      const method = options.method || 'GET';
+      const path = String(url).replace(/^.*\/api/, '');
+      calls.push(`${method} ${path}`);
+      if (path.startsWith('/admin/careers?status=')) {
+        return Promise.resolve(res(200, { applications: [{ id: 'app-1', role: 'technician', status: 'offer', contact_snapshot: { name: 'Jordan Rivera' }, created_at: '2026-09-10T12:00:00Z' }], counts: {} }));
+      }
+      if (method === 'POST' && path === '/admin/careers/app-1/offer/offer-1/withdraw') return aGate.then(() => res(200, { offer: { ...sentA, status: 'withdrawn' } }));
+      if (method === 'POST' && path === '/admin/careers/app-2/offer/offer-9/withdraw') {
+        bWithdrawn = true;
+        return Promise.resolve(res(200, { offer: { ...sentB, status: 'withdrawn' } }));
+      }
+      if (path === '/admin/careers/app-1/offer') return Promise.resolve(res(200, offerPayload({ current: sentA })));
+      if (path === '/admin/careers/app-2/offer') return Promise.resolve(res(200, offerPayload({ current: bWithdrawn ? { ...sentB, status: 'withdrawn' } : sentB })));
+      if (path === '/admin/careers/app-1') return Promise.resolve(res(200, { application: detailFixture({ status: 'offer' }) }));
+      if (path === '/admin/careers/app-2') {
+        bReads += 1;
+        const application = detailFixture({ id: 'app-2', status: bWithdrawn ? 'interview' : 'offer', contact_snapshot: { name: 'Casey Morgan', phone: '9415550199' } });
+        if (bReads === 1) return Promise.resolve(res(200, { application }));
+        // B's re-read after its own withdraw: held until A's late action has finished.
+        return new Promise((resolve) => { releaseBRead = () => resolve(res(200, { application })); });
+      }
+      return Promise.resolve(res(200, {}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    function Nav() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/?application=app-2')}>go-b</button>;
+    }
+    render(<MemoryRouter><Nav /><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Rivera'));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    // A's withdraw is sent, and its answer waits.
+    fireEvent.click(within(await screen.findByTestId('offer-card')).getByRole('button', { name: 'Withdraw offer' }));
+    fireEvent.click(within((await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]')).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(calls).toContain('POST /admin/careers/app-1/offer/offer-1/withdraw'));
+    // The owner opens B and withdraws B's offer; B's re-read is out.
+    fireEvent.click(screen.getByText('go-b'));
+    const bHeading = await screen.findByRole('heading', { name: /Casey Morgan — / });
+    fireEvent.click(within(await screen.findByTestId('offer-card')).getByRole('button', { name: 'Withdraw offer' }));
+    fireEvent.click(within((await screen.findByText(/Withdraw this offer for Casey/)).closest('[role="dialog"]')).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(releaseBRead).toBeDefined());
+    // A's answer lands now. Its follow-up (the re-read, then the list reload) runs to the end before B's re-read
+    // answers: B's own list reload waits behind that re-read, so a new list read is A's.
+    const lists = () => calls.filter((c) => c.startsWith('GET /admin/careers?status=')).length;
+    const listsBefore = lists();
+    releaseA();
+    await waitFor(() => expect(lists()).toBeGreaterThan(listsBefore));
+    releaseBRead();
+    // B's detail follows its own re-read: the stage is Interview, so Interview is no longer a move.
+    const bDialog = bHeading.closest('[role="dialog"]');
+    await waitFor(() => expect(within(bDialog).queryByRole('button', { name: 'Interview' })).toBeNull());
+    expect(within(bDialog).getByRole('button', { name: 'Offer' })).toBeInTheDocument();
+  });
+
   it('Discard sends the draft status and hash, Withdraw the sent status', async () => {
     const sentOffer = offerRecord({ status: 'sent', timeline: [] });
     const theDraft = offerRecord({ id: 'offer-2', draftHash: 'hash-draft', supersedesId: 'offer-1' });

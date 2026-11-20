@@ -1037,6 +1037,10 @@ export default function RecruitingPage() {
   // applies only while that applicant is still the one on screen and nothing
   // newer has reached it (a later re-read, or a stage move's answer: refreshSeq).
   const openDetail = useCallback(async (id, { refresh = false } = {}) => {
+    // An action that finished after the owner opened another applicant: its
+    // re-read is for one no longer on screen, and it must not cancel the open
+    // applicant's own re-read (refreshSeq).
+    if (refresh && detailIdRef.current !== id) return;
     const seq = refresh ? detailSeq.current : ++detailSeq.current;
     const fresh = refresh ? ++refreshSeq.current : 0;
     try {

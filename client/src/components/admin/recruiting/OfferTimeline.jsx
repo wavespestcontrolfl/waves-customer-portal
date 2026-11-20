@@ -25,6 +25,7 @@ import {
   LOST_ANSWER_TEXT,
   money,
   offerErrorMessage,
+  todayET,
 } from "./offerLogic";
 
 const STATUS_LABEL = {
@@ -148,15 +149,19 @@ function closeCopy(target, firstName, liveOffer) {
   };
 }
 
+// The dated update is offered only while the asked day is still ahead in Eastern
+// time: for a day that has come, the server picks another start date, so the
+// note stays as history and the card's Revise is the action.
 function DateRequestNote({ offer, busy, canAct, onUpdate }) {
   if (offer.status !== "date_requested" || !offer.requestedStartDate) return null;
+  const ahead = offer.requestedStartDate > todayET();
   return (
     <div className="border-hairline border border-zinc-200 rounded p-3 mb-3">
       <div className="text-14 text-zinc-800 mb-1">
         Asked to start {formatDay(offer.requestedStartDate)}.
         {offer.dateRequestNote ? ` Note: ${offer.dateRequestNote}` : ""}
       </div>
-      {canAct && (
+      {canAct && ahead && (
         <Button size="sm" onClick={() => onUpdate(offer.requestedStartDate)} disabled={busy}>
           Make an updated offer for {formatDay(offer.requestedStartDate)}
         </Button>
@@ -165,7 +170,9 @@ function DateRequestNote({ offer, busy, canAct, onUpdate }) {
   );
 }
 
-export function History({ history, onViewSigned }) {
+// busy: a signed copy (or a write) is loading. Every signed-copy button waits for it,
+// so a slower read can never replace the copy the owner chose last.
+export function History({ history, busy = false, onViewSigned }) {
   if (!history?.length) return null;
   return (
     <details className="mt-3">
@@ -182,7 +189,7 @@ export function History({ history, onViewSigned }) {
             <Terms offer={h} />
             <Timeline entries={h.timeline} />
             {h.signedAt && (
-              <Button size="sm" variant="secondary" onClick={() => onViewSigned(h)}>
+              <Button size="sm" variant="secondary" onClick={() => onViewSigned(h)} disabled={busy}>
                 View signed copy
               </Button>
             )}
@@ -353,7 +360,7 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
         onRevise={() => revise()}
         onClose={() => setClosing(offer)}
       />
-      <History history={history} onViewSigned={viewSigned} />
+      <History history={history} busy={busy} onViewSigned={viewSigned} />
       <SignedCopyView copy={signed} onClose={() => setSigned(null)} />
       {closing && (
         <CloseOfferDialog
