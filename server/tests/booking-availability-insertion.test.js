@@ -97,10 +97,11 @@ describe('buildBookingAvailability — capacityPlacement pass-through', () => {
 });
 
 // The hourly route check's slot-rule decision (day-replan/route-check.js) reads /book's offer at a
-// zone center through availabilityForPin with paidLookups: false, so it buys nothing: no road
-// lookup (find-time travelAllowance) and no forecast (whose backup is the paid Open-Meteo key).
-// Every other caller sends none: today's lookups, as before.
-describe('availabilityForPin — paidLookups: false buys nothing', () => {
+// zone center through availabilityForPin with three options no other caller sends:
+// paidLookups: false buys nothing (no road lookup, find-time travelAllowance; no forecast, whose
+// backup is the paid Open-Meteo key); crew offers each date only from the technicians who work it;
+// through searches to the last date it decides on. Every other caller sends none: as before.
+describe("availabilityForPin — the hourly route check's read-only ask", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     wireDayCapCounts([]).first = jest.fn(async () => CONFIG); // loadBookingConfig's row
@@ -108,7 +109,7 @@ describe('availabilityForPin — paidLookups: false buys nothing', () => {
     findAvailableSlots.mockResolvedValue({ slots: [], total_feasible: 0 });
   });
 
-  test('no road lookup and no forecast read; an omitted value keeps both', async () => {
+  test('paidLookups: false: no road lookup and no forecast read; an omitted value keeps both', async () => {
     const { availabilityForPin } = require('../routes/booking')._internals;
     const { startCustomerRainRank } = require('../services/scheduling/customer-rain-rank');
     const gates = require('../config/feature-gates');
@@ -131,6 +132,45 @@ describe('availabilityForPin — paidLookups: false buys nothing', () => {
       chips.mockRestore();
       outlook.mockRestore();
     }
+  });
+
+  // Two technicians share a start; /book keeps one claim per date and start (the better rank).
+  const sharedStart = (techId, rank) => ({
+    date: D, start_time: '09:00', end_time: null, technician: { id: techId }, detour_minutes: 3,
+    stops_that_day: 2, rank, score: 100 - rank, insertion: { after_stop_id: 'stop-1' },
+  });
+  const offeredAt9 = (result) => result.days.flatMap((d) => d.slots).filter((s) => s.start_time === '09:00').map((s) => s.technician_id);
+
+  test('crew: a technician outside the date\'s crew is dropped before the one-per-start pick', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [sharedStart('tech-1', 1), sharedStart('tech-2', 2)], total_feasible: 2 });
+    // No crew: the better-ranked technician keeps the start, as before.
+    expect(offeredAt9(await build())).toEqual(['tech-1']);
+    // tech-1 does not work D: the start is tech-2's, not lost.
+    expect(offeredAt9(await build('', { crew: new Map([[D, new Set(['tech-2'])]]) }))).toEqual(['tech-2']);
+    // Nobody works D: nothing is offered there.
+    expect(offeredAt9(await build('', { crew: new Map([[D, new Set()]]) }))).toEqual([]);
+    // An unknown crew (null) or a date the map leaves out keeps every technician.
+    expect(offeredAt9(await build('', { crew: new Map([[D, null]]) }))).toEqual(['tech-1']);
+    expect(offeredAt9(await build('', { crew: new Map([[dayOffset(11), new Set(['tech-2'])]]) }))).toEqual(['tech-1']);
+    // The pin finder (the route check's ask) hands its crew to the same pick.
+    const { availabilityForPin } = require('../routes/booking')._internals;
+    const pin = { lat: 27.4, lng: -82.4, serviceKey: 'pest_control', paidLookups: false };
+    expect(offeredAt9(await availabilityForPin(pin))).toEqual(['tech-1']);
+    expect(offeredAt9(await availabilityForPin({ ...pin, crew: new Map([[D, new Set(['tech-2'])]]) }))).toEqual(['tech-2']);
+  });
+
+  test('through: the search reaches that date when it is past the default window, never past the 90-day horizon', async () => {
+    const { availabilityForPin } = require('../routes/booking')._internals;
+    const pin = { lat: 27.4, lng: -82.4, serviceKey: 'pest_control', paidLookups: false };
+    const searchedTo = async (extra) => {
+      findAvailableSlots.mockClear();
+      await availabilityForPin({ ...pin, ...extra });
+      return findAvailableSlots.mock.calls[0][0].dateTo;
+    };
+    expect(await searchedTo({})).toBe(dayOffset(14)); // advance_days_max
+    expect(await searchedTo({ through: dayOffset(3) })).toBe(dayOffset(14)); // never narrower than /book's own
+    expect(await searchedTo({ through: dayOffset(20) })).toBe(dayOffset(20));
+    expect(await searchedTo({ through: dayOffset(120) })).toBe(dayOffset(90));
   });
 });
 

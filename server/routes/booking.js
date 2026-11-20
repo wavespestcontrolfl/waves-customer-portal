@@ -1668,6 +1668,20 @@ function detachVoiceRouteCheck(plan, candidates) {
     .catch((err) => logger.warn(`[customer-route-check] voice shadow check failed: ${err.message}`));
 }
 
+// `crew` (availabilityForPin's read-only caller, the hourly route check): date ->
+// the ids of the technicians who work that date (a Set), or null when that is
+// unknown. A slot of a technician outside a date's known crew is dropped before
+// any candidate is built, so the one-technician-per-start pick below chooses only
+// among the technicians who work the day. A date the map leaves out or marks null
+// keeps every technician; no map keeps every slot, as before.
+function crewSlots(slots, crew) {
+  if (!crew) return slots;
+  return slots.filter((slot) => {
+    const works = crew.get(slot.date);
+    return !works || works.has(String(slot.technician?.id));
+  });
+}
+
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
 // rangeTo], applies the whole-hour rules, then returns the
 // curated best-4 (best-3 under the re-service profile — see rankProfile
@@ -1700,7 +1714,7 @@ function detachVoiceRouteCheck(plan, candidates) {
 // that already has a technician keeps that technician.
 // `zoneFunnelAddress`: opt-in address text. With GATE_SOUTH_ZONE_DAY_FUNNEL live and an address in a
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, paidLookups }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, paidLookups, crew }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -2047,7 +2061,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // A graced build never offers a slot whose simulated arrival delay is past
   // its grace (bookSlotGrace's -1): verifyArrivalCapacity would refuse it at
   // confirm. Ungraced builds pass every slot through untouched.
-  const offerSlots = orderByLineRank(graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []), lineRanking);
+  const offerSlots = orderByLineRank(crewSlots(graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []), crew), lineRanking);
   for (const slot of offerSlots) {
     if (capacityEnabled()) {
       // Capacity evaluates each start against the whole route and live blocks.
@@ -2293,12 +2307,15 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
 // (services/scheduling/text-offer-times.js, GATE_MULTI_TECH_TEXT_TIMES) share,
 // so a text-offered time and the website's come from one finder. Null when
 // /book is off, the service is no funnel service or the pin is missing.
-// `paidLookups: false` buys nothing: no road lookup (find-time travelAllowance)
-// and no forecast (the rain chips and the rain rank; both only stamp or order
-// the offers, never add or drop one). The hourly route check's slot-rule
-// decision (day-replan/route-check.js) passes it: it only reads the offer.
-// Unset = today's lookups, as before.
-async function availabilityForPin({ lat, lng, serviceKey, internal = false, paidLookups }) {
+// Three options only the hourly route check's slot-rule decision passes
+// (day-replan/route-check.js, which only reads the offer); unset = as before:
+//   `paidLookups: false` buys nothing: no road lookup (find-time
+//     travelAllowance) and no forecast (the rain chips and the rain rank; both
+//     only stamp or order the offers, never add or drop one);
+//   `through` (YYYY-MM-DD) searches at least to that date, as /book's own
+//     "Find more dates" request can, never past the 90-day horizon;
+//   `crew` offers each date only from the technicians who work it (crewSlots).
+async function availabilityForPin({ lat, lng, serviceKey, internal = false, paidLookups, through, crew }) {
   const funnelKey = normalizeBookingServiceKey(serviceKey);
   // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).
   const pin = [lat, lng].map((v) => (v == null || String(v).trim() === '' ? NaN : Number(v)));
@@ -2308,12 +2325,13 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false, paid
   if (!internal && !require('../config/feature-gates').isEnabled('selfBooking')) return null;
   const config = await loadBookingConfig();
   const today = new Date();
-  const { minDate, defaultTo } = bookingOfferWindow(config, today);
+  const { minDate, maxDate, defaultTo } = bookingOfferWindow(config, today);
+  const rangeTo = through && through > defaultTo ? [through, maxDate].sort()[0] : defaultTo;
   return buildFunnelAvailability({
     // Customer-facing text offers only; a staff-side pick (`internal`) is never filtered.
     ...(internal ? {} : { surface: 'book' }),
     lat: pin[0], lng: pin[1], duration: resolveBookingDuration(null, config, funnelKey),
-    rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
+    rangeFrom: minDate, rangeTo, config, today, serviceKey: funnelKey,
     // The /book page's own first request always sends expand=open
     // (PublicBookingPage.jsx), so an open route day offers its full block of
     // hourly windows there — and here.
@@ -2323,6 +2341,7 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false, paid
     // exactly what /book would show this customer, graced slots included.
     bookArrivalGrace: true,
     paidLookups,
+    crew,
   });
 }
 

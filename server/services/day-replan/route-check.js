@@ -49,7 +49,7 @@ const { _internals: { groupRouteStops, storedOrderStale, clockOrder } } = requir
 const {
   promisedWindowOrder, currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
 } = require('../route-reorder-window-fit');
-const { SHIFT } = require('../scheduling/policy');
+const { SHIFT, capacityEnabled } = require('../scheduling/policy');
 const { allocationKey } = require('../scheduling/visit-capacity');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
@@ -471,11 +471,15 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
  * next-available check and the text drafter's OPEN TIMES share (scheduling/text-offer-times.js), with the stated job
  * (STANDARD_SERVICE_KEY) at each service zone's center. So every rule a /book offer keeps is in the answer: the
  * customer window, the notice window, the zone route days, the occupancy mirror, the customer route check.
- * A slot counts on one of the next staffed days the totals count, and only for a technician the run counts that day
- * (`crew`, from `staffed`: a Sunday only with a stop booked). A Sunday whose stops read failed has no known crew: its
- * slots are not counted (byDate null). The finder reads the live tables itself, just after the snapshot.
+ * A slot counts on one of the next staffed days the totals count, searched through the last of them (`through`), and
+ * only from a technician the run counts that day: the finder gets the run's `crew` (from `staffed`: a Sunday only with
+ * a stop booked) and offers each date only from it, before it picks one technician per start. A Sunday whose stops
+ * read failed has no known crew: its slots are not counted (byDate null). The finder reads the live tables itself,
+ * just after the snapshot.
  * Shadow only: nothing reads the decision, no budget changes, nothing is held, and nothing is paid for (paidLookups
- * false buys no road lookup and reads no forecast; a zone center is a pin, so nothing is geocoded).
+ * false buys no road lookup and reads no forecast; a zone center is a pin, so nothing is geocoded). Under capacity
+ * routing /book itself buys road times, so there the answer is the free drive model's (`travel: 'modeled'`): a
+ * borderline slot can differ from /book's.
  *   mode 'full': some zone has a slot. 'floor': every zone answered for every date and none has a slot, or no staffed
  *   day is ahead. 'unknown': no slot, and the zones, a zone's answer or a date's crew could not be read (`reason`, a
  *   zone's `error`, or a null in byDate). A zone with no pin, or /book off, gets no answer (`no_offer`): an error,
@@ -494,16 +498,15 @@ async function decideSlotRule(conn, dates, crew) {
     try {
       const offer = await availabilityForPin({
         lat: zone.center_lat, lng: zone.center_lng, serviceKey: STANDARD_SERVICE_KEY, paidLookups: false,
+        through: dates[dates.length - 1], crew,
       });
       if (!offer) throw new Error('no_offer');
       for (const day of dates) {
-        const works = crew.get(day);
-        if (!works) {
+        if (!crew.get(day)) {
           byDate[day] = null;
           continue;
         }
-        const starts = (offer.days.find((d) => d.date === day)?.slots || [])
-          .filter((s) => works.has(String(s.technician_id))).map((s) => s.start_time).sort();
+        const starts = (offer.days.find((d) => d.date === day)?.slots || []).map((s) => s.start_time).sort();
         byDate[day] = starts.length;
         first ||= starts.length ? `${day} ${starts[0]}` : null;
       }
@@ -515,7 +518,7 @@ async function decideSlotRule(conn, dates, crew) {
   const anySlot = asked.some((z) => Object.values(z.byDate).some((n) => n > 0));
   const unread = asked.some((z) => z.error || Object.values(z.byDate).includes(null));
   const mode = anySlot ? 'full' : (unread ? 'unknown' : 'floor');
-  return { mode, service: STANDARD_SERVICE_KEY, dates, zones: asked };
+  return { mode, service: STANDARD_SERVICE_KEY, ...(capacityEnabled() ? { travel: 'modeled' } : {}), dates, zones: asked };
 }
 
 /**
