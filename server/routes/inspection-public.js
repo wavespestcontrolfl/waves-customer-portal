@@ -575,7 +575,8 @@ async function resolveServiceAddress(lead, custRow, suppliedAddress) {
 
 // Whether a geocode review quarantines this typed address for this profile: the profile is blocked, has an address on
 // file, and the typed address is not proven another property (profileAffirmativelyDiffers). resolveServiceAddress
-// then answers `unresolved`; nextCommitRefresh builds no times for it (pre-push P1 on 23dfae53de).
+// then answers `unresolved`, and a refused booking answers that refusal (nextCommitRefresh; pre-push P1s on 23dfae53de
+// and 172712852a).
 function quarantineRefusesSupplied(custRow, supplied) {
   return Boolean(custRow?.geocode_review_blocked && custRow.address_line1 && !profileAffirmativelyDiffers(custRow, supplied));
 }
@@ -636,9 +637,11 @@ function storedAddressCandidates(lead, custRow) {
 // that pin: then the fresh times are built here, with that address and the
 // trusted customer read again, as the next commit's first build reads them
 // (phase 1's copy can be stale by now: pre-push P1 on c08db66cc0); a failed
-// read carries none, nor does an address a geocode review now quarantines for
-// that customer, which the next commit answers `address_unresolved`
-// (quarantineRefusesSupplied; pre-push P1 on 23dfae53de). Any other refusal carries no times (`location` null), and
+// read carries none. An address a geocode review now quarantines for that
+// customer answers the next commit's own refusal (`failure`
+// 'address_unresolved', which sendSlotTaken sends in place of SLOT_TAKEN), so
+// the page shows its address message, not the times it holds
+// (quarantineRefusesSupplied; pre-push P1s on 23dfae53de and 172712852a). Any other refusal carries no times (`location` null), and
 // the page reloads its own list (GET, or POST /:token/availability with a
 // typed address), which reads the same resolver and trusted customer as the
 // next commit. A booking moved to a matched profile's other stored location
@@ -660,8 +663,8 @@ async function nextCommitRefresh({ lead, verified, resolved, custRow, bookingAdd
       return null;
     });
   if (!locationMoved) {
-    return nextCust && !quarantineRefusesSupplied(nextCust, resolved.address)
-      ? { location: bookingLocation, address: bookingAddress, customer: nextCust } : { location: null };
+    if (quarantineRefusesSupplied(nextCust, resolved.address)) return { location: null, failure: 'address_unresolved' };
+    return nextCust ? { location: bookingLocation, address: bookingAddress, customer: nextCust } : { location: null };
   }
   return { location: null, addressChanged: nextCust != null && String(nextCust.id) === String(custRow.id) };
 }
@@ -2263,8 +2266,10 @@ function sendLocationFailure(res, failure, county, leadId) {
 // `location` null (nextCommitRefresh): no times, so the page reloads its own
 // list; a refused booking moved to a matched profile's other stored location
 // may pass `addressChanged` with it. `customer`: as the page's own list
-// passes it (buildAvailabilityForLead).
-async function sendSlotTaken(res, { location, address = null, customer, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
+// passes it (buildAvailabilityForLead). `failure` (nextCommitRefresh): the
+// next commit would refuse the address, so that refusal is the answer.
+async function sendSlotTaken(res, { location, address = null, customer, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false, failure = null }) {
+  if (failure) return sendLocationFailure(res, failure, null, leadId);
   let refreshed = null;
   try {
     if (location) refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address, customer });

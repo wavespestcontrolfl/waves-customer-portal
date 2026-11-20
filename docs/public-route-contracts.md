@@ -1425,7 +1425,9 @@ unstamped hold is stamped with the funneled zone its check read, so the next
 booking sees it. An accept whose hold has no funneled zone of its own is also
 checked in the funneled zone its written row's city places it in (the service
 address's, else the accepting customer's), as the stop read reads such a row by
-that city. The answer is the existing `SLOT_UNAVAILABLE`; a refused re-tap or
+that city. A written row with no service address takes its estimate's linked
+property's address after the accept commits, so that property's city decides,
+and the accept stamps its zone on the row under the date lock. The answer is the existing `SLOT_UNAVAILABLE`; a refused re-tap or
 extend also deletes its hold, as one that now clashes does, so the day keeps
 one truck south. The stop read counts a hold by the real clock, so a hold that ran out while its writer waited
 on the date lock no longer holds the day, and it counts an unstamped stop by the
@@ -7705,10 +7707,11 @@ itself), with the funnel on, carries fresh times only when the page's next
 commit reads this one's inputs: an address typed (the page sends it again) at
 the same pin. They are built there with that address and the trusted customer
 read again (phase one's copy can be stale by then), as the next commit's first
-build reads them. A failed read, a typed address a geocode review now
-quarantines for that customer (the next commit answers `address_unresolved`),
-and any other refusal after phase one answer `availability: null`, and the
-page reloads its own list (GET, or
+build reads them. A typed address a geocode review now quarantines for that
+customer answers the next commit's own `422 address_unresolved` in place of
+`SLOT_TAKEN`, and the page shows its address message. A failed read, and any
+other refusal after phase one, answer `availability: null`, and the page
+reloads its own list (GET, or
 `POST /:token/availability` with the address it holds), which reads the same
 resolver and trusted customer as its next commit. A booking moved to a matched
 profile's other stored location also answers `address_changed: true` when that

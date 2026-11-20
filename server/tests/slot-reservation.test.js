@@ -572,6 +572,50 @@ describe('slot reservation helpers', () => {
       expect(customerRead).toHaveBeenCalledWith('city');
     });
 
+    // Pre-push P1 on 172712852a: an accepted visit with no service address of its own takes its estimate's linked
+    // property's address after the commit (estimate-property-linkage linkAcceptedEstimateProperty). The accept checks
+    // the funneled zone that property's city places the row in and stamps it under its date lock: until the linkage
+    // writes the address, the stop read would read the row by its customer's city. A property that is not the accepting
+    // customer's, or not active, is not linked; a row with its own service address does not read it; a stamp the stop
+    // read trusts still decides. An estimate with no address of its own, a Sarasota customer.
+    const LINKED_VENICE = { id: 'prop-1', customer_id: 'customer-1', city: 'Venice' };
+    test.each([
+      ['an unstamped hold, a Venice property', null, null, LINKED_VENICE, VENICE, { zone: 'venice' }, 2],
+      ['the fallthrough stamp, a Venice property', 'lakewood_ranch', null, LINKED_VENICE, VENICE, { zone: 'venice' }, 2],
+      ['another customer\'s property', null, null, { ...LINKED_VENICE, customer_id: 'customer-2' }, null, {}, 1],
+      ['an inactive property', null, null, { ...LINKED_VENICE, active: false }, null, {}, 1],
+      ['a row with its own Sarasota service address', null, 'Sarasota', LINKED_VENICE, null, {}, 0],
+      ['a Sarasota stamp: the stamp decides', 'sarasota', null, LINKED_VENICE, SARASOTA, {}, 2],
+    ])('accept, a linked property: %s', async (_label, stamp, serviceCity, property, checked, stamped, propertyReads) => {
+      const mayTake = jest.fn().mockResolvedValue(true);
+      spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const propertyRead = jest.fn().mockResolvedValue(property);
+      const trx = jest.fn((table) => {
+        if (table === 'service_zones') return { select: jest.fn().mockResolvedValue([SARASOTA, VENICE]) };
+        if (table === 'customers') return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue({ city: 'Sarasota' }) }) };
+        if (table === 'customer_properties') return { where: jest.fn().mockReturnValue({ first: propertyRead }) };
+        throw new Error(`unexpected table ${table}`);
+      });
+      const args = { ...ARGS, stamp, estimate: { ...ESTIMATE, address: '', property_id: 'prop-1' }, graduate: { customerId: 'customer-1', serviceCity } };
+      await expect(refuseOtherTruckSouthDay(trx, args)).resolves.toEqual(stamped);
+      expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: checked, date: '2027-05-20', technicianId: 'tech-1' });
+      expect(propertyRead).toHaveBeenCalledTimes(propertyReads);
+    });
+
+    test('accept, a linked Venice property on another truck\'s Venice day: slot-taken', async () => {
+      const mayTake = jest.fn().mockResolvedValue(false);
+      spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const trx = jest.fn((table) => {
+        if (table === 'service_zones') return { select: jest.fn().mockResolvedValue([SARASOTA, VENICE]) };
+        if (table === 'customers') return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue({ city: 'Sarasota' }) }) };
+        if (table === 'customer_properties') return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(LINKED_VENICE) }) };
+        throw new Error(`unexpected table ${table}`);
+      });
+      const args = { ...ARGS, estimate: { ...ESTIMATE, address: '', property_id: 'prop-1' }, graduate: { customerId: 'customer-1', serviceCity: null } };
+      await expect(refuseOtherTruckSouthDay(trx, args)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: VENICE, date: '2027-05-20', technicianId: 'tech-1' });
+    });
+
     // Placement: every hold, lapsed or live (at the function body's own level, not inside the lapsed-only rival
     // branch), after the date lock and the rival-hold check, before the technician check, with the hold's stamp.
     test.each([

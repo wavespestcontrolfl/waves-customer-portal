@@ -865,8 +865,9 @@ function slotTaken(slotId) {
 // refused, so its delete commits before the 409 and the hold no longer blocks its truck's hour (pre-push P1 on
 // c08db66cc0); a new hold and an accept are slot-taken (refuseOtherTruckSouthDay). An accept passes `graduate` (the
 // customer the hold graduates to, and the row's service address city): a hold whose own zone is not a funneled one is
-// then checked in the funneled zone its written row's city places it in (graduatedFunnelZone). Either gate off
-// (GATE_MULTI_TECH_CONFIRM, GATE_SOUTH_ZONE_DAY_FUNNEL) or no technician: nothing is read.
+// then checked in the funneled zone its written row's city places it in (graduatedFunnelZone), and takes that zone as
+// its stamp when the city is its estimate's linked property's, which the row does not carry until after the commit.
+// Either gate off (GATE_MULTI_TECH_CONFIRM, GATE_SOUTH_ZONE_DAY_FUNNEL) or no technician: nothing is read.
 async function truckSouthDayStamp(conn, { date, techId, zone = null, stamp = null, estimate = null, graduate = null }) {
   const funnel = require('./scheduling/zone-day-funnel');
   if (techId == null || !funnel.perTruckLive() || !funnel.funnelOn()) return {};
@@ -874,8 +875,10 @@ async function truckSouthDayStamp(conn, { date, techId, zone = null, stamp = nul
   const estimateZone = zone
     || (stamp ? await stampedZone(conn, stamp) : null)
     || (estimate ? await resolveEstimateZone(conn, estimate).catch(() => null) : null);
-  const checkZone = funnel.isFunnelZone(estimateZone) ? estimateZone : (await graduatedFunnelZone(conn, stamp, graduate)) || estimateZone;
+  const graduated = funnel.isFunnelZone(estimateZone) ? null : await graduatedFunnelZone(conn, stamp, graduate, estimate);
+  const checkZone = graduated?.zone || estimateZone;
   if (!(await funnel.truckMayTakeDate(conn, { estimateZone: checkZone, date, technicianId: techId }))) return null;
+  if (graduated?.linked) return { zone: zoneSlugOf(graduated.zone) };
   return !stamp && funnel.isFunnelZone(estimateZone) ? { zone: zoneSlugOf(estimateZone) } : {};
 }
 
@@ -890,14 +893,22 @@ async function refuseOtherTruckSouthDay(conn, args) {
 // trusts (none, or the fallthrough one) by its city: its service address's, else its customer's. So a hold whose
 // estimate resolves to no funneled zone, accepted by a customer in a far-south city, is checked there; the stop read's
 // own matcher (rowInFunnelZones) decides, and a stamp it trusts decides as it will on the written row. The row takes
-// no stamp from that city: it stays read by it (pre-push P1 on 69974e9e5d).
-async function graduatedFunnelZone(conn, stamp, graduate) {
+// no stamp from its own city: it stays read by it (pre-push P1 on 69974e9e5d). A row with no service address of its
+// own takes its estimate's linked property's address after the commit (estimate-property-linkage
+// linkAcceptedEstimateProperty, linkedAcceptPropertyId), so its city is that property's (`linked`): until the linkage
+// writes it, the stop read would read the row by its customer's city, so the accept stamps that zone under its date
+// lock (pre-push P1 on 172712852a). Returns { zone, linked } or null.
+async function graduatedFunnelZone(conn, stamp, graduate, estimate) {
   if (!graduate?.customerId) return null;
   const funnel = require('./scheduling/zone-day-funnel');
   const customer = await conn('customers').where({ id: graduate.customerId }).first('city');
-  const row = { zone: stamp, service_city: graduate.serviceCity || null, customer_city: customer?.city || null };
+  const { linkedAcceptPropertyId } = require('./estimate-property-linkage');
+  const linkedId = graduate.serviceCity ? null : await linkedAcceptPropertyId(conn, estimate, graduate.customerId);
+  const linkedCity = linkedId ? (await conn('customer_properties').where({ id: linkedId }).first('city'))?.city : null;
+  const row = { zone: stamp, service_city: graduate.serviceCity || linkedCity || null, customer_city: customer?.city || null };
   const zones = await funnel.funnelZoneRows(conn);
-  return zones.find((z) => funnel.rowInFunnelZones(row, [z])) || null;
+  const zone = zones.find((z) => funnel.rowInFunnelZones(row, [z]));
+  return zone ? { zone, linked: Boolean(linkedCity) } : null;
 }
 
 // A hold's zone stamp (zoneSlugOf of the zone reserveSlot resolved) back to its service_zones row, whose cities the

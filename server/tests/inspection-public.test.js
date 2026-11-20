@@ -2033,6 +2033,40 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'West Bradenton' })).toEqual({ address: typed.zoneFunnelAddress, city: 'Bradenton' });
     });
 
+    // Pre-push P1s on 23dfae53de and 172712852a: staff sent the profile's pin to a geocode review while this booking ran.
+    // The next commit's resolver answers `address_unresolved` for the same typed address, so the refusal answers that,
+    // not SLOT_TAKEN: the page shows its address message instead of the times it holds, and builds no fresh times.
+    test('a same-pin booking refused after staff blocked the address: the answer is address_unresolved', async () => {
+      Object.assign(mockFarSouthGates, { funnel: true });
+      gateState.reviewLive = true;
+      let blocked = false;
+      firstResults.customer_geocode_reviews = () => (blocked ? {
+        customer_id: 'cust-9', status: 'needs_pin', address_snapshot: ['123 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+        latitude: null, longitude: null, updated_at: new Date(),
+      } : null);
+      firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: '123 Palm Ave', address_line2: null,
+        city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      });
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockResolvedValueOnce({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+      mockCreateSelfBooking.mockImplementationOnce(async () => {
+        blocked = true;
+        return { ok: false, status: 409, error: 'That time is no longer open.' };
+      });
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
+
+      expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+      expect(res.statusCode).toBe(422);
+      expect(res.body).toEqual({ error: 'address_unresolved' });
+      expect(mockBuildAvailability).toHaveBeenCalledTimes(1);
+    });
+
     // Owner rule B per truck (pre-push P1 on 46fd83d04f): the typed city is in no zone while the matched profile's city
     // on file is (slot-zone.js leadBookingZone). createSelfBooking checks and stamps the profile city's zone, so the
     // re-check (per truck only: a one-day build funnels to itself with one truck) and a 409's fresh times build from
@@ -2465,9 +2499,9 @@ describe('POST /:token commit', () => {
       ['carries no times when that read fails', () => {
         firstResults.leads = () => { throw new Error('leads unreadable'); };
       }, { location: null }],
-      // Pre-push P1 on 23dfae53de: staff sent the profile's pin to review since phase one. The next commit's resolver
-      // answers `address_unresolved` for a typed copy of that address, so no times are built for it.
-      ['carries no times when a geocode review now quarantines that address', () => {
+      // Pre-push P1s on 23dfae53de and 172712852a: staff sent the profile's pin to review since phase one. The next
+      // commit's resolver answers `address_unresolved` for a typed copy of that address, so the refusal answers that.
+      ['answers the next commit\'s address refusal when a geocode review now quarantines that address', () => {
         gateState.reviewLive = true;
         firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
         firstResults.call_log = { from_phone: '+19415550101' };
@@ -2479,7 +2513,7 @@ describe('POST /:token commit', () => {
           customer_id: 'cust-9', status: 'needs_pin', address_snapshot: ['123 Palm Ave', null, 'Venice', 'FL', '34209'],
           latitude: null, longitude: null, updated_at: new Date(),
         };
-      }, { location: null }],
+      }, { location: null, failure: 'address_unresolved' }],
     ])('a typed address refused at the same pin %s', async (_label, seed, expected) => {
       mockFarSouthGates.funnel = true;
       seed();
@@ -2493,7 +2527,7 @@ describe('POST /:token commit', () => {
       });
 
       expect(refresh).toMatchObject(expected);
-      if (!expected.customer) expect(refresh).toEqual({ location: null });
+      if (!expected.customer) expect(refresh).toEqual(expected);
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its
