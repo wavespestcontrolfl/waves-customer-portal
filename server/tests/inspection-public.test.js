@@ -2274,17 +2274,19 @@ describe('POST /:token commit', () => {
     // the funnel off too, so it could undo a validated correction. A profile that wrongly says Punta Gorda (a place the
     // area check refuses) kept that city after a served town typed in its shared ZIP passed the check, and the profile
     // failed the check on its next read. The city is kept only when the funnel's zone comes from it, never for a
-    // refused place. Pre-push P1 on f344681474: a zone with no truck rule (Sarasota) does not keep it either.
+    // refused place. Pre-push P1 on f344681474: a zone with no truck rule (Sarasota) does not keep it either. With the
+    // funnel off, nothing reads a zone, phase 1 included.
     test.each([
       ['with the funnel off', false, 'Nokomis', 'Laurel', '34209', 'Sarasota'],
       ['and a profile city the area check refuses', true, 'Punta Gorda', 'Charlotte Harbor', '33980', 'Charlotte'],
       ['and a profile city in a zone with no truck rule', true, 'Sarasota', 'Bee Ridge', '34233', 'Sarasota'],
     ])('a typed city in no zone at the profile\'s address, %s: phase 1 writes the typed city', async (_label, funnel, storedCity, typedCity, zip, county) => {
       Object.assign(mockFarSouthGates, { perTruck: true, funnel });
-      listResults.service_zones = [
+      const zoneReads = jest.fn(() => [
         { id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] },
         { id: 'zone-s', zone_name: 'Sarasota / Lakewood Ranch', cities: ['Sarasota', 'Lakewood Ranch'] },
-      ];
+      ]);
+      listResults.service_zones = zoneReads;
       mockCounty.mockImplementation(async () => county);
       mockLocality.mockImplementation(async () => ({ city: typedCity, zip }));
       firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
@@ -2302,6 +2304,7 @@ describe('POST /:token commit', () => {
       expect(booked.statusCode).toBe(200);
       expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual([typedCity]);
       expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({ id: 'cust-9', city: typedCity });
+      expect(zoneReads.mock.calls.length > 0).toBe(funnel);
     });
 
     // Pre-push P1 on 7a682696f6: phase 1's write stays when the booking is then refused (owner ruling 2026-09-24), so a
