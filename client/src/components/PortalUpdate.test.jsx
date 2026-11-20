@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { Link, MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 vi.mock('../native/platform', () => ({ isWavesAdminApp: () => false }));
 
@@ -28,25 +28,15 @@ const goLive = (build) => act(() => {
   noteServerAnswer(new Headers({ 'X-Portal-Build': build, 'X-Portal-Boot': '2000' }));
 });
 
-// Like the photo assessment dialog: Send resizes the photos first, so no
-// save is open until the upload starts.
 function Page({ name }) {
   const navigate = useNavigate();
   return (
     <div>
       <h1>{name}</h1>
-      <Link to="/admin/pipeline">Open Pipeline</Link>
+      <button type="button" onClick={() => navigate('/admin/pipeline')}>Open Pipeline</button>
       <button type="button" onClick={() => navigate('?tab=leads')}>Leads tab</button>
-      <button type="button">Send photos</button>
     </div>
   );
-}
-
-// Moves the way the browser's Back button does: with no event on the page.
-let browserMove;
-function BrowserMoves() {
-  browserMove = useNavigate();
-  return null;
 }
 
 // Like the completion panel: saves its draft to the device's own storage as
@@ -81,7 +71,6 @@ function TruckCheck() {
 function renderAt(path) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <BrowserMoves />
       <PortalUpdateBar />
       <PortalUpdateGate fallback={<p>Loading the new version...</p>}>
         <Routes>
@@ -126,12 +115,9 @@ describe('PortalUpdateGate', () => {
     await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
   });
 
-  test('a page move in an out-of-date tab loads the live code once; a link only moves, and a touch that scrolls is no action', async () => {
+  test('a page move in an out-of-date tab loads the live code once', async () => {
     renderAt('/admin/dashboard');
     goLive('bbb222bbb222');
-    const heading = screen.getByRole('heading', { name: 'Dashboard' });
-    fireEvent.pointerDown(heading);
-    fireEvent.pointerCancel(heading);
     fireEvent.click(screen.getByText('Open Pipeline'));
     expect(screen.getByText('Loading the new version...')).toBeTruthy();
     expect(screen.queryByText('Pipeline')).toBeNull();
@@ -145,26 +131,6 @@ describe('PortalUpdateGate', () => {
     expect(screen.getByText('Dashboard')).toBeTruthy();
     await act(async () => {});
     expect(reload).not.toHaveBeenCalled();
-  });
-
-  test('a move within 10 s of an action on the page keeps the tab, as the work it started may have no save open yet; a later move reloads', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      renderAt('/admin/dashboard');
-      goLive('bbb222bbb222');
-      fireEvent.click(screen.getByRole('button', { name: 'Send photos' }));
-      vi.setSystemTime(Date.now() + 9_999);
-      act(() => browserMove('/admin/pipeline'));
-      expect(screen.getByText('Pipeline')).toBeTruthy();
-      await act(async () => {});
-      expect(reload).not.toHaveBeenCalled();
-      vi.setSystemTime(Date.now() + 1);
-      act(() => browserMove(-1));
-      expect(screen.getByText('Loading the new version...')).toBeTruthy();
-      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   test('held work keeps the tab: the move opens the page and the bar stays', async () => {
@@ -252,10 +218,7 @@ describe('PortalUpdateBar', () => {
     ['a toggle button', () => fireEvent.click(screen.getByRole('button', { name: 'Missing' }))],
     ['a switch', () => fireEvent.click(screen.getByRole('switch', { name: 'Damaged' }))],
     ['a typed note', () => fireEvent.input(screen.getByLabelText('Note'), { target: { value: 'Cracked hose' } })],
-    ['a signature drawn on a canvas', () => {
-      fireEvent.pointerDown(screen.getByLabelText('Signature'));
-      fireEvent.pointerUp(screen.getByLabelText('Signature'));
-    }],
+    ['a signature drawn on a canvas', () => fireEvent.pointerDown(screen.getByLabelText('Signature'))],
   ])('a use of the page in view (%s) is named before Reload drops its work', (_kind, change) => {
     renderAt('/admin/today/truck-check');
     goLive('bbb222bbb222');

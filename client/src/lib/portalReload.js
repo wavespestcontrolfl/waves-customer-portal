@@ -4,8 +4,7 @@
 // old page has closed: the move already dropped that page's state, so the
 // reload loses nothing more. Work that outlives a move holds it
 // (reloadHolds.js), and so does a save still open after 10 s: an API write,
-// or a write to the device's own storage (deviceWrites.js). A move soon
-// after an action on the page it leaves waits for a later move.
+// or a write to the device's own storage (deviceWrites.js).
 // Waves Admin never reloads by itself (a reload with no signal opens the
 // app's offline screen), nor do the field pages (/admin/today must work with
 // no signal); both, like every staff page, get the Reload bar. No tab reloads
@@ -18,11 +17,6 @@ import { isWavesAdminApp } from '../native/platform';
 
 export const RECENT_ANSWER_MS = 5 * 60 * 1000;
 export const WRITE_WAIT_MS = 10 * 1000;
-// A move within 10 s of an action on the page it leaves does not reload; a
-// later move does. The action can have started work that no save shows yet:
-// photos resizing before their upload, a read before a write, a save on a
-// timer. A plain move lets that work run on; a reload would cut it off.
-export const ACTION_QUIET_MS = 10 * 1000;
 const RELOADED_FOR = 'portal-reloaded-for';
 
 // One automatic reload per live build. Without session storage the tab could
@@ -40,14 +34,11 @@ function hasSignal(now) {
   return !browserOffline() && heardFromServerWithin(RECENT_ANSWER_MS, now);
 }
 
-// `lastActionAt`: when the user last acted on the page being left
-// (PortalUpdate.jsx's useLastPageAction).
-export function reloadDueAtMove(pathname, now = Date.now(), lastActionAt = -Infinity) {
+export function reloadDueAtMove(pathname, now = Date.now()) {
   const build = newerBuild();
   return Boolean(build)
     && isAdminPath(pathname) && !isFieldPath(pathname) && !isWavesAdminApp()
     && hasSignal(now)
-    && now - lastActionAt >= ACTION_QUIET_MS
     && !reloadedFor(build)
     && !reloadHoldName();
 }
