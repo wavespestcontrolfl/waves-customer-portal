@@ -18,6 +18,11 @@
  * that: when the issue still cannot go out and nobody was told why, it raises one admin
  * notification.
  *
+ * Spam-report stop: when the issue before this one went out and its readers marked more than 0.3%
+ * of the copies it delivered as spam, this issue waits. It is skipped with that reason, and the
+ * 1:00 PM run tells the owner once. The issue after it looks back at the skipped issue, which
+ * mailed no one, so it goes out as usual.
+ *
  * Calendar dates here are 'YYYY-MM-DD' strings. The date math is the shared ET helpers in
  * utils/datetime-et.js (validCalendarDate, etNthWeekdayOfMonth, addETDays, etDateString);
  * this module keeps only the 1st-and-3rd-Thursday rule, which the table's CHECK also enforces.
@@ -42,6 +47,13 @@ const USED_STATUSES = Object.freeze(['shadow', 'drafted', 'scheduled', 'sent', '
 const THURSDAY = 4;
 /** At most this many failed post probes are kept in a row's diagnostics. */
 const MAX_PROBE_FAILURES = 10;
+/**
+ * Spam reports above this share of the copies an issue delivered make the next issue wait (the
+ * plan the owner approved 2026-11-19: Gmail asks bulk senders to stay under 0.3%).
+ */
+const SPAM_REPORT_LIMIT = 0.003;
+/** Rows whose issue went out: a failed send may have reached some readers before it stopped. */
+const WENT_OUT_STATUSES = Object.freeze(['sent', 'failed']);
 
 // Noon UTC on a calendar date is that same date in ET, clear of DST seams (the datetime-et convention).
 const atNoonUTC = (dateET) => new Date(`${dateET}T12:00:00Z`);
@@ -140,6 +152,23 @@ async function recentHistory(issueDate, { database } = {}) {
     speciesSlugs: oldestFirst.map((r) => r.species_slug).filter(Boolean),
     toolIds: oldestFirst.map((r) => r.tool_id || null),
   };
+}
+
+/**
+ * The spam-report stop's reason for the issue on `issueDate`, or null: the issue before it went out
+ * and its readers marked more than SPAM_REPORT_LIMIT of the copies it delivered as spam
+ * (newsletter-sender spamReportCounts). The reason names that issue and its counts.
+ */
+async function spamStopReason(db, issueDate) {
+  const previous = await db('pest_insider_issues')
+    .where('issue_date', '<', issueDate)
+    .orderBy('issue_date', 'desc')
+    .first('issue_date', 'status', 'send_id');
+  if (!previous || !previous.send_id || !WENT_OUT_STATUSES.includes(previous.status)) return null;
+  const { spamReportCounts } = require('../newsletter-sender');
+  const { reports, delivered } = await spamReportCounts(db, previous.send_id);
+  if (!(delivered > 0) || reports / delivered <= SPAM_REPORT_LIMIT) return null;
+  return `spam_reports_over_limit:${dateOnlyString(previous.issue_date)}:${reports}/${delivered}`;
 }
 
 /**
@@ -290,10 +319,21 @@ const REASON_COPY = [
   [/^not_queued$/, 'its FYI copy went out, but the issue could not be queued'],
   [/^proof_claimed_elsewhere$/, 'its draft changed while its FYI copy was being prepared'],
   [/^draft_missing$/, 'its draft was deleted'],
+  [/^spam_reports_over_limit:/, spamStopCopy],
 ];
 function reasonCopy(reason) {
   const hit = REASON_COPY.find(([pattern]) => pattern.test(String(reason || '')));
-  return hit ? `${hit[1]} (${reason})` : String(reason || 'unknown reason');
+  if (!hit) return String(reason || 'unknown reason');
+  return `${typeof hit[1] === 'function' ? hit[1](reason) : hit[1]} (${reason})`;
+}
+
+// The spam-report stop's reason (spamStopReason) in words, with the earlier issue and its counts.
+function spamStopCopy(reason) {
+  const [, issueDate, counts] = reason.split(':');
+  const [reports, delivered] = counts.split('/').map(Number);
+  const percent = ((reports / delivered) * 100).toFixed(2);
+  return `readers marked ${reports} of the ${delivered} delivered copies of the ${issueDayLabel(issueDate)} issue as spam `
+    + `(${percent}%), above the 0.3% limit; the issue after this one sends as usual`;
 }
 
 // "Thursday, December 3": an issue date for people.
@@ -381,8 +421,8 @@ async function runIssuePlanner({ now = new Date(), fetchImpl, database, finalTic
   }
 }
 
-// One build: post check, history, builder, then the row (and, with the switch on, the draft and
-// the proof step). Returns the run's result plus the proof step's raw answer.
+// One build: the spam-report stop, post check, history, builder, then the row (and, with the switch
+// on, the draft and the proof step). Returns the run's result plus the proof step's raw answer.
 async function buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImpl, proofStep }) {
   // Lazy: the builder pulls the fact bank, renderer and validator; the scheduler should not load them at boot.
   const { buildIssue } = require('./index');
@@ -391,9 +431,14 @@ async function buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImp
   const replaceable = rebuildable(autoSend);
 
   const { probe, failures } = recordingFetch(fetchImpl);
-  const livePostFactIds = await checkLivePosts({ fetchImpl: probe });
-  const recent = await recentHistory(issueDate, { database: db });
-  const built = buildIssue({ sendDate: issueDate, recent, recheckedFactIds: [], livePostFactIds, liveToolUrls: [] });
+  // A stopped issue is not built: it waits whatever the posts and the builder would say.
+  const spamStop = await spamStopReason(db, issueDate);
+  let built = { ok: false, reason: spamStop };
+  if (!spamStop) {
+    const livePostFactIds = await checkLivePosts({ fetchImpl: probe });
+    const recent = await recentHistory(issueDate, { database: db });
+    built = buildIssue({ sendDate: issueDate, recent, recheckedFactIds: [], livePostFactIds, liveToolUrls: [] });
+  }
   let row = rowFor(issueDate, built, now, failures);
 
   let written;

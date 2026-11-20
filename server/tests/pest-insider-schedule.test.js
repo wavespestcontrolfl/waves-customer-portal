@@ -3,8 +3,8 @@
  * dates (1st and 3rd Thursday), build-day detection at ET edges, runIssuePlanner's recording
  * of a built or refused issue, and, with GATE_PEST_INSIDER_AUTO_SEND on, the draft for its
  * readers, the proof step and the last tick's notice. The database, the builder, the
- * live-post check, the audience query, the proof step and the notification are mocked: no
- * network, nothing sent. The table's CHECKs are in pest-insider-issues-migration-postgres.test.js (CI).
+ * live-post check, the audience query, the spam-report counts, the proof step and the notification
+ * are mocked: no network, nothing sent. The table's CHECKs are in pest-insider-issues-migration-postgres.test.js (CI).
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/pest-insider/index', () => ({ buildIssue: jest.fn() }));
@@ -14,11 +14,13 @@ jest.mock('../services/pest-insider/audience', () => ({
   selectIssueAudience: jest.fn(),
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true })) }));
+jest.mock('../services/newsletter-sender', () => ({ spamReportCounts: jest.fn() }));
 
 const { buildIssue } = require('../services/pest-insider/index');
 const { checkLivePosts } = require('../services/pest-insider/posts');
 const { selectIssueAudience } = require('../services/pest-insider/audience');
 const { triggerNotification } = require('../services/notification-triggers');
+const { spamReportCounts } = require('../services/newsletter-sender');
 const logger = require('../services/logger');
 const {
   issueDatesInMonth, isIssueDate, nextIssueDate, todayET, nextDay, recentHistory, runIssuePlanner, USED_STATUSES,
@@ -95,9 +97,10 @@ describe('build day detection', () => {
 });
 
 // A small fake knex: records inserts and updates, answers the "already built" lookup (and, as
-// `after`, the last tick's re-read) and the history query. A transaction runs on the same fake and
+// `after`, the last tick's re-read), the spam-report stop's look at the issue before (`previous`)
+// and the history query. A transaction runs on the same fake and
 // records a rollback; newsletter_sends takes the draft insert.
-function fakeDb({ existing = null, after, history = [], inserted = true, updated = 1, sendId = 'send-1' } = {}) {
+function fakeDb({ existing = null, after, history = [], inserted = true, updated = 1, sendId = 'send-1', previous = null } = {}) {
   const calls = { inserts: [], updates: [], sends: [], history: null, onConflict: null, rolledBack: false, reads: 0 };
   const table = (name) => {
     if (name === 'newsletter_sends') {
@@ -105,12 +108,17 @@ function fakeDb({ existing = null, after, history = [], inserted = true, updated
     }
     expect(name).toBe('pest_insider_issues');
     const q = {
-      where: jest.fn((cond) => { q.cond = cond; return q; }),
+      // where('issue_date', '<', date): a look back at earlier issues (the history, the issue before).
+      where: jest.fn((cond, op) => { if (op === '<') q.before = true; else q.cond = cond; return q; }),
       whereIn: jest.fn((col, vals) => { q.in = { col, vals }; return q; }),
       orderBy: jest.fn(() => q),
       limit: jest.fn((n) => { calls.limit = n; return q; }),
       select: jest.fn(async () => { calls.history = q.in; return history; }),
-      first: jest.fn(async () => { calls.reads += 1; return calls.reads > 1 && after !== undefined ? after : existing; }),
+      first: jest.fn(async () => {
+        if (q.before) return previous;
+        calls.reads += 1;
+        return calls.reads > 1 && after !== undefined ? after : existing;
+      }),
       update: jest.fn(async (row) => { calls.updates.push({ where: q.cond, statusIn: q.in && q.in.vals, row }); return updated; }),
       insert: jest.fn((row) => {
         calls.inserts.push(row);
@@ -439,6 +447,67 @@ describe('runIssuePlanner with GATE_PEST_INSIDER_AUTO_SEND on', () => {
     const sendProof = jest.fn();
     expect(await runIssuePlanner({ now: CATCH_UP, database, sendProof })).toEqual({ skipped: true, reason: 'already_built' });
     expect(sendProof).not.toHaveBeenCalled();
+  });
+
+  describe('the spam-report stop', () => {
+    // The issue before Dec 3, as pg returns it (a DATE is a JS Date).
+    const BEFORE = { issue_date: new Date('2026-11-19T00:00:00Z'), status: 'sent', send_id: 'send-prev' };
+    const STOP = 'spam_reports_over_limit:2026-11-19:2/322';
+
+    test.each([
+      ['2 reports in 322 delivered copies', BEFORE, { reports: 2, delivered: 322 }, STOP],
+      ['a failed send that reached 120 readers, 1 report', { ...BEFORE, status: 'failed' }, { reports: 1, delivered: 120 }, 'spam_reports_over_limit:2026-11-19:1/120'],
+    ])('the issue after one marked as spam above the limit waits (%s): skipped unbuilt, no draft, no proof', async (_label, previous, counts, reason) => {
+      spamReportCounts.mockResolvedValue(counts);
+      const database = fakeDb({ previous });
+      const sendProof = jest.fn();
+      const result = await runIssuePlanner({ now: WED_BUILD_DAY, database, sendProof });
+
+      expect(result).toMatchObject({ status: 'skipped', reason, sendId: null });
+      expect(spamReportCounts).toHaveBeenCalledWith(database, 'send-prev');
+      expect(checkLivePosts).not.toHaveBeenCalled();
+      expect(buildIssue).not.toHaveBeenCalled();
+      expect(selectIssueAudience).not.toHaveBeenCalled();
+      expect(database.calls.sends).toHaveLength(0);
+      expect(sendProof).not.toHaveBeenCalled();
+      expect(database.calls.inserts[0]).toMatchObject({ issue_date: '2026-12-03', status: 'skipped', reason, subject: null, preview: null, fact_id: null });
+    });
+
+    test.each([
+      ['its reports are exactly at the limit (3 in 1,000)', BEFORE, { reports: 3, delivered: 1000 }],
+      ['its reports are under the limit (1 in 400)', BEFORE, { reports: 1, delivered: 400 }],
+      ['it delivered no copy yet', BEFORE, { reports: 0, delivered: 0 }],
+      ['it waited itself (skipped: it mailed no one)', { ...BEFORE, status: 'skipped', send_id: null }, null],
+      ['it was held', { ...BEFORE, status: 'held' }, null],
+      ['there is none', null, null],
+    ])('the issue goes out as usual when the issue before it: %s', async (_label, previous, counts) => {
+      spamReportCounts.mockResolvedValue(counts);
+      const database = fakeDb({ previous });
+      const result = await runIssuePlanner({ now: WED_BUILD_DAY, database, sendProof: jest.fn(async () => QUEUED) });
+
+      expect(result).toMatchObject({ status: 'drafted', reason: null, proof: 'queued' });
+      expect(buildIssue).toHaveBeenCalledTimes(1);
+      expect(spamReportCounts.mock.calls).toEqual(counts ? [[database, 'send-prev']] : []);
+    });
+
+    test('the last tick checks again and tells the owner once, naming the earlier issue and its counts', async () => {
+      spamReportCounts.mockResolvedValue({ reports: 2, delivered: 322 });
+      // The 7:00 AM run skipped it; the 1:00 PM run rebuilds a skipped row, stops it again, then tells the owner.
+      const database = fakeDb({ existing: { id: 'row-1', status: 'skipped', send_id: null }, after: { status: 'skipped', reason: STOP }, previous: BEFORE });
+      const result = await runIssuePlanner({ now: CATCH_UP, database, finalTick: true, sendProof: jest.fn() });
+
+      expect(result).toMatchObject({ status: 'skipped', reason: STOP, retried: true, noticeRaised: true });
+      expect(database.calls.updates[0].row).toMatchObject({ status: 'skipped', reason: STOP });
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      expect(triggerNotification).toHaveBeenCalledWith('newsletter_proof_blocked', {
+        sendId: null,
+        subject: 'Waves Pest Insider for Thursday, December 3',
+        errors: [
+          'It will not send this time: readers marked 2 of the 322 delivered copies of the Thursday, November 19 issue as spam '
+          + `(0.62%), above the 0.3% limit; the issue after this one sends as usual (${STOP})`,
+        ],
+      });
+    });
   });
 
   describe('the last tick (1:00 PM)', () => {

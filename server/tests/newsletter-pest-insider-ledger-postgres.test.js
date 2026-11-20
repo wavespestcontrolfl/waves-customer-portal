@@ -1,7 +1,8 @@
 /**
  * A planned Waves Pest Insider issue's delivery ledger (newsletter-sender ledgerProgress) on real
- * PostgreSQL: which readers got the issue and which refused it, read from rows that the SendGrid
- * webhook's own event mapping (computeNewsletterEventUpdates) wrote. The fake query builder in
+ * PostgreSQL: which readers got the issue and which refused it, and its spam reports against the
+ * copies it delivered (spamReportCounts, the planner's spam-report stop), read from rows that the
+ * SendGrid webhook's own event mapping (computeNewsletterEventUpdates) wrote. The fake query builder in
  * newsletter-pest-insider-settle.test.js checks the query's shape only; PostgreSQL shows how a NULL
  * column reads (a comparison with NULL is unknown, and NOT unknown drops the row from a count).
  * Self-skips unless DATABASE_URL is set (CI's DB-gated suites run it). The fixtures are synthetic
@@ -21,12 +22,13 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 (SKIP ? describe.skip : describe)('a planned issue delivery ledger on PostgreSQL', () => {
   let db;
   let ledgerProgress;
+  let spamReportCounts;
   let computeNewsletterEventUpdates;
   const sendIds = [];
 
   beforeAll(() => {
     db = require('../models/db');
-    ({ ledgerProgress } = require('../services/newsletter-sender'));
+    ({ ledgerProgress, spamReportCounts } = require('../services/newsletter-sender'));
     ({ computeNewsletterEventUpdates } = require('../routes/webhooks-sendgrid'));
   });
   afterAll(async () => {
@@ -79,5 +81,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     // Reached: accepted, delivered, the reader's spam report, the reader's unsubscribe after delivery.
     // Refused: the bounce and the two drops. Nobody is left: no row is retryable.
     expect(await ledgerProgress(db, send)).toEqual({ got: 4, left: 0, refused: 3 });
+    // The spam-report stop counts the reader's own report against the 3 copies with a delivery signal
+    // (delivered, the spam report, the unsubscribe after delivery). The spam-report drop also has
+    // complained_at, but it is refused: neither a report nor a delivered copy. The accepted copy has
+    // no delivery event yet.
+    expect(await spamReportCounts(db, send.id)).toEqual({ reports: 1, delivered: 3 });
   });
 });
