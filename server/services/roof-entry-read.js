@@ -11,7 +11,9 @@
  *   - the model gets ONE provider call: the estimateVision policy is cut to its primary route, so a billed answer
  *     that fails to parse or validate is never retried on the second provider. It is stored with tier 'unknown' and
  *     no pins, and is never reused;
- *   - a property is read under a database advisory lock, so two server instances cannot both pay for it.
+ *   - a crop is CLAIMED with a pending row (one per crop, a partial unique index) before the image fetch and the model
+ *     call, so two requests, on one server or two, cannot both pay for it, and no connection or lock is held while the
+ *     slow, paid steps run. The paid result is written to the claimed row by id.
  * The model gives yes / no / unsure per entry type and up to 6 pins as 0-1 image fractions. It is never asked to
  * count: vision models count poorly, and the technician's own count (saveTechCount) is the ground truth.
  */
@@ -76,6 +78,10 @@ const ENTRY_TYPES = Object.freeze([
 ]);
 const LIKELY = Object.freeze(['yes', 'no', 'unsure']);
 const TIER_UNKNOWN = 'unknown';
+const STATUS_DONE = 'done';
+const STATUS_PENDING = 'pending';
+const STATUS_FAILED = 'failed';
+const CLAIM_STALE_MINUTES = 5;
 const TIERS = Object.freeze(['low', 'med', 'high', TIER_UNKNOWN]);
 
 const PIN_SCHEMA = {
@@ -257,12 +263,13 @@ const timeOf = (row) => new Date(row.created_at).getTime();
 /**
  * The reusable reads of one crop, or null. The window is counted from the original PAID read: the anchor is the
  * newest row with cost_estimate_cents > 0 (a paid call books at least 1 cent; a copy for another estimate books 0)
- * that is not tier 'unknown' and is under 90 days old. Rows created at or after the anchor are its copies for other
- * contexts, so a copy never carries a read past 90 days from the paid call and never starts a new window.
+ * that is a finished ('done') read, not tier 'unknown', and under 90 days old. Rows created at or after the anchor
+ * are its copies for other contexts, so a copy never carries a read past 90 days from the paid call and never starts
+ * a new window. Pending and failed rows are never reused.
  */
-async function reuseCandidates(key, conn = db) {
-  const rows = await conn(TABLE)
-    .where({ lookup_key: key })
+async function reuseCandidates(key) {
+  const rows = await db(TABLE)
+    .where({ lookup_key: key, status: STATUS_DONE })
     .whereNot({ ai_tier: TIER_UNKNOWN })
     .whereRaw("created_at > now() - (? * interval '1 day')", [REUSE_DAYS])
     .select('*');
@@ -276,9 +283,9 @@ async function reuseCandidates(key, conn = db) {
  * NEW row for this context that copies the paid AI result with cost 0 and empty technician fields. One row per
  * context keeps the technician's count for estimate B from overwriting estimate A's.
  */
-async function answerFor(source, ctx, trx) {
+async function answerFor(source, ctx) {
   if (sameContext(source, ctx)) return publicRead(source);
-  const [row] = await trx(TABLE).insert({
+  const [row] = await db(TABLE).insert({
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
     lookup_key: source.lookup_key,
@@ -288,6 +295,7 @@ async function answerFor(source, ctx, trx) {
     model: source.model,
     ai_flags: JSON.stringify(parseJson(source.ai_flags) || {}),
     ai_tier: source.ai_tier,
+    status: STATUS_DONE,
     cost_estimate_cents: 0,
   }).returning('*');
   return publicRead(row);
@@ -329,74 +337,130 @@ function settleOutcome(outcome) {
   return leg ? { model: leg.model, checked: null, billed: leg } : null;
 }
 
-// The paid part, run under the property's advisory lock and one transaction: look again, then image, model call and
-// insert. A second server instance waits on the lock and then finds this row instead of paying again. `seenIds` are
-// the rows of this crop that existed when the request began: a row that appeared after that (even a billed tier
-// 'unknown') was written by the holder we waited on, and is this request's answer. A LATER request, which did not wait
-// on that attempt, may retry an unknown.
-async function readUnderLock({ key, lat, lng, county, ctx, seenIds, prices }) {
-  return db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
-    const hit = await reuseCandidates(key, trx);
-    if (hit) {
-      const source = hit.candidates.find((r) => sameContext(r, ctx)) || hit.anchor;
-      return { status: 'ok', cached: true, read: await answerFor(source, ctx, trx) };
-    }
-    const appeared = (await trx(TABLE).where({ lookup_key: key }).select('*'))
-      .filter((r) => !seenIds.has(r.id))
-      .sort((a, b) => timeOf(b) - timeOf(a))[0];
-    if (appeared) return { status: 'ok', cached: true, read: await answerFor(appeared, ctx, trx) };
+// One short statement takes the crop's claim: a pending row with this request's context and the policy's model id. The
+// partial unique index admits one pending row per crop, so a conflict returns nothing. Autocommit: the claim is visible
+// to every other request before the image fetch starts, and no connection stays open afterwards.
+async function insertClaim(key, county, ctx) {
+  const src = IMAGE_SOURCES[county];
+  const rows = await db(TABLE).insert({
+    estimate_id: ctx.estimateId,
+    customer_id: ctx.customerId,
+    lookup_key: key,
+    county,
+    image_source: src.source,
+    image_year: src.year,
+    model: ONE_CALL_POLICY.primary.model,
+    ai_flags: '{}',
+    ai_tier: STATUS_PENDING,
+    cost_estimate_cents: 0,
+    status: STATUS_PENDING,
+    claimed_at: db.fn.now(),
+  }).onConflict().ignore().returning('*');
+  return rows[0] || null;
+}
 
+// A claim whose holder died is stale after 5 minutes (an image fetch and a model call are capped well under that):
+// mark it failed so the crop can be claimed again. The conditional UPDATE lets only one taker win.
+async function expireStaleClaim(key) {
+  const rows = await db(TABLE)
+    .where({ lookup_key: key, status: STATUS_PENDING })
+    .whereRaw("claimed_at < now() - (? * interval '1 minute')", [CLAIM_STALE_MINUTES])
+    .update({ status: STATUS_FAILED, ai_tier: TIER_UNKNOWN })
+    .returning('id');
+  return rows.length > 0;
+}
+
+async function claimCrop(key, county, ctx) {
+  const claimed = await insertClaim(key, county, ctx);
+  if (claimed) return claimed;
+  return (await expireStaleClaim(key)) ? insertClaim(key, county, ctx) : null;
+}
+
+// What the paid call produced, written to the claimed row by id. A finished read is 'done'. A call that was billed but
+// gave nothing usable (unparseable or schema-breaking answer) is 'failed' with its cost and tier 'unknown'. A claim
+// with nothing to keep (no image, or a call that failed before billing) is deleted, so the crop can be claimed again.
+async function finishClaim(claim, settled, prices) {
+  const patch = {
+    model: settled.model,
+    ai_flags: JSON.stringify(settled.checked ? settled.checked.flags : {}),
+    ai_tier: settled.checked ? settled.checked.tier : TIER_UNKNOWN,
+    status: settled.checked ? STATUS_DONE : STATUS_FAILED,
+    cost_estimate_cents: estimateCostCents(settled.billed, prices),
+  };
+  const [row] = await db(TABLE).where({ id: claim.id }).update(patch).returning('*');
+  return publicRead(row || { ...claim, ...patch });
+}
+
+const releaseClaim = (claim) => db(TABLE).where({ id: claim.id }).del();
+
+// The paid part, with NO connection held: image fetch, then one model call, then the write to the claimed row.
+async function payForRead({ claim, lat, lng, county, prices }) {
+  try {
     const image = await fetchAerial(lat, lng, county);
-    if (!image) return { status: 'no_image', cached: false, read: null };
+    if (!image) {
+      await releaseClaim(claim);
+      return { status: 'no_image', cached: false, read: null };
+    }
     const outcome = await callModel(image);
     const settled = settleOutcome(outcome);
     if (!settled) {
       logger.warn(`[roof-entry-read] model call failed: ${outcome.reason || 'unknown'}`);
+      await releaseClaim(claim);
       return { status: 'model_failed', cached: false, read: null };
     }
-    const [row] = await trx(TABLE).insert({
-      estimate_id: ctx.estimateId,
-      customer_id: ctx.customerId,
-      lookup_key: key,
-      county: countyKey(county),
-      image_source: image.source,
-      image_year: image.year,
-      model: settled.model,
-      ai_flags: JSON.stringify(settled.checked ? settled.checked.flags : {}),
-      ai_tier: settled.checked ? settled.checked.tier : TIER_UNKNOWN,
-      cost_estimate_cents: estimateCostCents(settled.billed, prices),
-    }).returning('*');
-    return { status: 'ok', cached: false, read: publicRead(row) };
-  });
+    return { status: 'ok', cached: false, read: await finishClaim(claim, settled, prices) };
+  } catch (err) {
+    // Never leave the crop pending for 5 minutes behind an unexpected error.
+    await db(TABLE).where({ id: claim.id }).update({ status: STATUS_FAILED, ai_tier: TIER_UNKNOWN }).catch(() => {});
+    throw err;
+  }
 }
 
-// Fast path only: one in-flight read per crop and context in this process. The advisory lock is what holds across instances.
+// The answer for a reusable read, for this request's context (a copy row when the context differs).
+async function reuseAnswer(hit, ctx) {
+  const source = hit.candidates.find((r) => sameContext(r, ctx)) || hit.anchor;
+  return { status: 'ok', cached: true, read: await answerFor(source, ctx) };
+}
+
+async function readCrop({ input, county, key, ctx, hit }) {
+  // Prices are read before the claim, only when a paid call is possible; the claim and the write are single statements.
+  const prices = hit ? null : await loadPriceMap();
+  const claim = await claimCrop(key, county, ctx);
+  if (!claim) {
+    // Another request holds the crop. It may have just finished: look once more, otherwise tell the caller to retry.
+    const again = await reuseCandidates(key);
+    if (again) return reuseAnswer(again, ctx);
+    return { status: 'in_progress', cached: false, read: null };
+  }
+  return payForRead({ claim, lat: input.lat, lng: input.lng, county, prices });
+}
+
+// Fast path only: one in-flight read per crop and context in this process. The claim row is what holds across instances.
 const inFlight = new Map();
 
+const lowerId = (v) => (v ? String(v).toLowerCase() : null);
+
 /**
- * Run or reuse a roof read. Returns { status: 'ok' | 'no_image' | 'model_failed', cached, read }.
+ * Run or reuse a roof read. Returns { status: 'ok' | 'in_progress' | 'no_image' | 'model_failed', cached, read }.
  * input: { lat, lng, county, estimateId?, customerId? }. Throws code 'unknown_reference' for a missing estimate or
- * customer. An unsupported county answers no_image before any database read. A reuse for a different estimate or
+ * customer. An unsupported county answers no_image before any database read. 'in_progress' means another request holds
+ * this crop's claim: no image fetch or model call was made, ask again shortly. A reuse for a different estimate or
  * customer gets its own row (a copy of the paid result, cost 0), so each context keeps its own technician feedback.
  */
 async function runRoofEntryRead(input) {
   const county = countyKey(input.county);
   if (!county) return { status: 'no_image', cached: false, read: null };
-  await assertReferencesExist(input);
-  const ctx = { estimateId: input.estimateId || null, customerId: input.customerId || null };
+  // Ids are compared and stored lower-case: an upper-case UUID is the same context as its lower-case spelling.
+  const ctx = { estimateId: lowerId(input.estimateId), customerId: lowerId(input.customerId) };
+  await assertReferencesExist(ctx);
   const key = lookupKey({ source: IMAGE_SOURCES[county].source, lat: input.lat, lng: input.lng });
-  // The rows of this crop as of now: what "already there" means for this request once it queues on the lock.
-  const seenIds = new Set((await db(TABLE).where({ lookup_key: key }).select('id')).map((r) => r.id));
   const hit = await reuseCandidates(key);
   const same = hit && hit.candidates.find((r) => sameContext(r, ctx));
   if (same) return { status: 'ok', cached: true, read: publicRead(same) };
+  if (hit) return reuseAnswer(hit, ctx);
   const flightKey = `${key}|${ctx.estimateId}|${ctx.customerId}`;
   if (inFlight.has(flightKey)) return inFlight.get(flightKey);
-  const pending = (async () => {
-    const prices = hit ? null : await loadPriceMap();
-    return readUnderLock({ ...input, key, ctx, seenIds, prices });
-  })().finally(() => inFlight.delete(flightKey));
+  const pending = readCrop({ input, county, key, ctx, hit }).finally(() => inFlight.delete(flightKey));
   inFlight.set(flightKey, pending);
   return pending;
 }

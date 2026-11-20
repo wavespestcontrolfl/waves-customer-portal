@@ -9,22 +9,24 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 let mockRows;
 jest.mock('../models/db', () => {
   const table = () => {
+    const run = (fn) => { const p = async () => fn(); return { returning: p, then: (ok, bad) => p().then(ok, bad), catch: (bad) => p().catch(bad) }; };
     const b = {
       where() { return b; },
       whereNot() { return b; },
       whereRaw() { return b; },
-      orderBy() { return b; },
       async first() { return undefined; },
       async select() { return []; },
       insert(record) {
-        return { async returning() { const row = { id: 'read-1', created_at: 'T', ...record }; mockRows.push(row); return [row]; } };
+        const make = async () => { const row = { id: 'read-1', created_at: 'T', ...record }; mockRows.push(row); return [row]; };
+        return { returning: make, onConflict: () => ({ ignore: () => ({ returning: make }) }) };
       },
+      update(patch) { return run(() => { Object.assign(mockRows[0], patch); return [mockRows[0]]; }); },
+      del() { return run(() => { mockRows.length = 0; return 1; }); },
     };
     return b;
   };
-  const makeDb = () => { const c = jest.fn(() => table()); c.raw = jest.fn(async () => {}); return c; };
-  const db = makeDb();
-  db.transaction = async (fn) => fn(makeDb());
+  const db = jest.fn(() => table());
+  db.fn = { now: () => 'NOW' };
   return db;
 });
 
@@ -71,7 +73,7 @@ function fakeNetwork(geminiText) {
   });
 }
 
-it('a billed, unparseable Gemini answer makes exactly one provider call, stores tier unknown and books that call\'s cost', async () => {
+it('a billed, unparseable Gemini answer makes exactly one provider call, stores a failed unknown row and books that call\'s cost', async () => {
   fakeNetwork('this is not json {');
   const out = await svc.runRoofEntryRead({ lat: 27.46, lng: -82.57, county: 'Manatee' });
   expect(providerCalls).toEqual({ gemini: 1, openai: 0, image: 1 });
@@ -79,6 +81,7 @@ it('a billed, unparseable Gemini answer makes exactly one provider call, stores 
   expect(out.read).toEqual(expect.objectContaining({ tier: 'unknown', flags: {} }));
   expect(mockRows).toHaveLength(1);
   expect(mockRows[0].ai_tier).toBe('unknown');
+  expect(mockRows[0].status).toBe('failed');
   // 1200 in x $0.30/M + 50 out x $2.50/M is a fraction of a cent: rounded up to the 1 cent floor, from real usage.
   expect(mockRows[0].cost_estimate_cents).toBe(1);
 });
@@ -88,4 +91,5 @@ it('a billed answer that parses but breaks the schema also makes one provider ca
   const out = await svc.runRoofEntryRead({ lat: 27.46, lng: -82.57, county: 'Manatee' });
   expect(providerCalls).toEqual({ gemini: 1, openai: 0, image: 1 });
   expect(out.read.tier).toBe('unknown');
+  expect(mockRows[0].status).toBe('failed');
 });

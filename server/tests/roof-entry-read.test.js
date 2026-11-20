@@ -12,66 +12,88 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const logger = require('../services/logger');
 
 // In-memory roof_entry_reads (plus the estimates / customers the references are checked against): just the chains
-// the service uses. A transaction runs against the same rows; `mockEvents` records the order of lock, image, model, insert.
+// the service uses. Every statement is its own autocommit call and `mockEvents` records their order with the image fetch
+// and the model call, so a test can prove nothing (no transaction, no lock) is held across the slow steps. The partial
+// unique index (one pending row per crop) is emulated on insert; `mockOnConflict` runs when it fires.
 let mockRows;
 let mockRefs;
 let mockDbCalls;
 let mockEvents;
-let mockOnLock;
-let mockLockKeys;
+let mockOnConflict;
 jest.mock('../models/db', () => {
   const table = (name) => {
     let where = {};
     let notWhere = {};
-    let cutoff = null;
+    let createdAfter = null;
+    let claimedBefore = null;
     const source = () => (name === 'roof_entry_reads' ? mockRows : mockRefs[name] || []);
     const match = () => source()
       .filter((r) => Object.entries(where).every(([k, v]) => r[k] === v))
       .filter((r) => Object.entries(notWhere).every(([k, v]) => r[k] !== v))
-      .filter((r) => cutoff == null || new Date(r.created_at).getTime() > cutoff)
+      .filter((r) => createdAfter == null || new Date(r.created_at).getTime() > createdAfter)
+      .filter((r) => claimedBefore == null || new Date(r.claimed_at).getTime() < claimedBefore)
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const settled = (fn) => {
+      const run = async () => fn();
+      return { returning: run, then: (ok, bad) => run().then(ok, bad), catch: (bad) => run().catch(bad) };
+    };
     const b = {
       where(w) { where = { ...where, ...w }; return b; },
       whereNot(w) { notWhere = w; return b; },
-      whereRaw(_sql, [days]) { cutoff = Date.now() - days * 86400000; return b; },
+      whereRaw(sql, [n]) {
+        if (sql.includes('claimed_at')) claimedBefore = Date.now() - n * 60000;
+        else createdAfter = Date.now() - n * 86400000;
+        return b;
+      },
       orderBy() { return b; },
       async first() { return match()[0]; },
       async select() { return match(); },
       insert(record) {
+        const run = (ignoreConflict) => async () => {
+          if (ignoreConflict && record.status === 'pending' && mockRows.some((r) => r.lookup_key === record.lookup_key && r.status === 'pending')) {
+            if (mockOnConflict) mockOnConflict();
+            return [];
+          }
+          mockEvents.push(record.status === 'pending' ? 'claim' : 'insert');
+          const row = {
+            id: `${String(mockRows.length + 1).padStart(8, '0')}-0000-4000-8000-000000000000`,
+            tech_final_count: null,
+            tech_final_flags: null,
+            status: 'done',
+            created_at: new Date().toISOString(),
+            ...record,
+            claimed_at: record.claimed_at === 'NOW' ? new Date().toISOString() : record.claimed_at,
+          };
+          mockRows.push(row);
+          return [row];
+        };
         return {
-          async returning() {
-            mockEvents.push('insert');
-            const row = { id: `${String(mockRows.length + 1).padStart(8, '0')}-0000-4000-8000-000000000000`, tech_final_count: null, tech_final_flags: null, created_at: new Date().toISOString(), ...record };
-            mockRows.push(row);
-            return [row];
-          },
+          returning: run(false),
+          onConflict: () => ({ ignore: () => ({ returning: run(true) }) }),
         };
       },
       update(patch) {
-        return {
-          async returning() {
-            const rows = match();
-            rows.forEach((r) => Object.assign(r, patch));
-            return rows;
-          },
-        };
+        return settled(() => {
+          mockEvents.push(`update:${patch.status || ''}`);
+          const rows = match();
+          rows.forEach((r) => Object.assign(r, patch));
+          return rows;
+        });
+      },
+      del() {
+        return settled(() => {
+          mockEvents.push('delete');
+          const rows = match();
+          mockRows = mockRows.filter((r) => !rows.includes(r));
+          return rows.length;
+        });
       },
     };
     return b;
   };
-  const makeDb = () => {
-    const conn = jest.fn((name) => { mockDbCalls.push(name); return table(name); });
-    conn.raw = jest.fn(async (sql, bindings) => {
-      mockEvents.push(`raw:${sql.includes('pg_advisory_xact_lock') ? 'lock' : sql}`);
-      if (sql.includes('pg_advisory_xact_lock')) {
-        mockLockKeys.push(bindings[0]);
-        if (mockOnLock) mockOnLock();
-      }
-    });
-    return conn;
-  };
-  const db = makeDb();
-  db.transaction = jest.fn(async (fn) => { mockDbCalls.push('transaction'); mockEvents.push('tx'); return fn(makeDb()); });
+  const db = jest.fn((name) => { mockDbCalls.push(name); return table(name); });
+  db.fn = { now: () => 'NOW' };
+  db.transaction = jest.fn();
   return db;
 });
 
@@ -95,6 +117,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const express = require('express');
 const router = require('../routes/admin-roof-entry-read');
 const svc = require('../services/roof-entry-read');
+const MODELS_PRIMARY_MODEL = require('../config/models').TEXT_POLICIES.estimateVision.primary.model;
 
 const entry = (likely = 'unsure', pins = []) => ({ likely, pins });
 const goodJson = (over = {}) => ({
@@ -135,8 +158,7 @@ beforeEach(() => {
   mockRefs = { estimates: [{ id: EST }, { id: EST2 }], customers: [{ id: CUST }] };
   mockDbCalls = [];
   mockEvents = [];
-  mockOnLock = null;
-  mockLockKeys = [];
+  mockOnConflict = null;
   mockAuth.mockClear();
   logger.info.mockClear();
   logger.warn.mockClear();
@@ -381,7 +403,7 @@ describe('references and county text', () => {
     }
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
-    expect(mockEvents).not.toContain('insert');
+    expect(mockEvents).not.toContain('claim');
   });
 
   it('accepts existing references and stores them', async () => {
@@ -399,56 +421,151 @@ describe('references and county text', () => {
   });
 });
 
-describe('advisory lock', () => {
-  it('takes the property lock first, then fetches, calls the model and inserts in that one transaction', async () => {
+const CROP_KEY = () => svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 });
+const crop = (over = {}) => ({
+  id: 'row-x', lookup_key: CROP_KEY(), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
+  ai_flags: '{}', ai_tier: 'pending', status: 'pending', cost_estimate_cents: 0, estimate_id: null, customer_id: null,
+  tech_final_count: null, tech_final_flags: null, created_at: new Date().toISOString(), claimed_at: new Date().toISOString(), ...over,
+});
+const minutesAgo = (m) => new Date(Date.now() - m * 60000).toISOString();
+
+describe('claim row', () => {
+  it('commits the claim before the image fetch and writes the result after the model call, holding no transaction in between', async () => {
     await post(home());
-    expect(mockLockKeys).toEqual([mockRows[0].lookup_key]);
-    // Prices are read BEFORE the transaction opens, so the pricing query never needs a second pool connection.
-    expect(mockEvents).toEqual(['prices', 'tx', 'raw:lock', 'image', 'model', 'insert']);
-    expect(mockDbCalls).toContain('transaction');
+    // Prices are read before the claim; the claim, the fetch, the model call and the write happen in this order, each
+    // database step its own statement, so no connection is held across the slow, paid steps.
+    expect(mockEvents).toEqual(['prices', 'claim', 'image', 'model', 'update:done']);
+    expect(require('../models/db').transaction).not.toHaveBeenCalled();
+    expect(mockRows).toHaveLength(1);
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'done', ai_tier: 'med', model: 'test-vision' }));
+    expect(mockRows[0].cost_estimate_cents).toBe(2);
   });
 
-  it('finds the row another server wrote while this one waited for the lock: no image fetch, no model call', async () => {
-    const key = svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 });
-    // The first reuse check (before the lock) misses; the other server's insert lands while we wait on the lock.
-    mockOnLock = () => {
-      mockRows.push({
-        id: 'read-other', lookup_key: key, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
-        ai_flags: JSON.stringify(goodJson().flags), ai_tier: 'high', cost_estimate_cents: 3, tech_final_count: null, tech_final_flags: null, created_at: new Date().toISOString(),
-      });
-    };
+  it('claims with this request\'s context and the policy model before the call', async () => {
+    let atCall;
+    mockDispatch.mockImplementation(async () => {
+      atCall = { ...mockRows[0] };
+      return { ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: {} };
+    });
+    await post(home({ estimate_id: EST, customer_id: CUST }));
+    expect(atCall).toEqual(expect.objectContaining({ status: 'pending', ai_tier: 'pending', estimate_id: EST, customer_id: CUST, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, cost_estimate_cents: 0 }));
+    expect(atCall.model).toBe(MODELS_PRIMARY_MODEL);
+    expect(atCall.claimed_at).toEqual(expect.any(String));
+  });
+
+  it('answers 202 in_progress with no image fetch and no model call while another request holds the crop', async () => {
+    mockRows.push(crop({ claimed_at: minutesAgo(1) }));
     const res = await post(home());
-    expect(res.json).toEqual(expect.objectContaining({ status: 'ok', cached: true }));
-    expect(res.json.read.id).toBe('read-other');
+    expect(res.status).toBe(202);
+    expect(res.json).toEqual({ status: 'in_progress', cached: false, read: null });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockRows).toHaveLength(1);
   });
-});
 
-describe('a billed unknown under the lock', () => {
-  const unknownRow = (key) => ({
-    id: 'read-unknown', lookup_key: key, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
-    ai_flags: '{}', ai_tier: 'unknown', cost_estimate_cents: 4, tech_final_count: null, tech_final_flags: null, created_at: new Date().toISOString(),
-  });
-
-  it('answers a request that waited on the lock with the holder\'s billed unknown: no second paid call', async () => {
-    const key = svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 });
-    mockOnLock = () => { mockRows.push(unknownRow(key)); };
+  it('looks once more after a conflict: a read the holder just finished is the answer', async () => {
+    mockRows.push(crop({ claimed_at: minutesAgo(1) }));
+    mockOnConflict = () => {
+      mockRows.length = 0;
+      mockRows.push(crop({ id: 'done-row', status: 'done', ai_tier: 'high', ai_flags: JSON.stringify(goodJson().flags), cost_estimate_cents: 3, claimed_at: null }));
+    };
     const res = await post(home());
+    expect(res.status).toBe(200);
     expect(res.json).toEqual(expect.objectContaining({ status: 'ok', cached: true }));
-    expect(res.json.read).toEqual(expect.objectContaining({ id: 'read-unknown', tier: 'unknown' }));
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(res.json.read.id).toBe('done-row');
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it('lets a LATER request, one that did not wait on that attempt, retry the unknown', async () => {
-    const key = svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 });
-    mockRows.push(unknownRow(key));
+  it('takes over a claim older than 5 minutes: marks it failed and pays once', async () => {
+    mockRows.push(crop({ id: 'stale', claimed_at: minutesAgo(6) }));
     const res = await post(home());
-    expect(res.json.cached).toBe(false);
-    expect(res.json.read.tier).toBe('med');
+    expect(res.json).toEqual(expect.objectContaining({ status: 'ok', cached: false }));
     expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockRows.find((r) => r.id === 'stale')).toEqual(expect.objectContaining({ status: 'failed', ai_tier: 'unknown' }));
+    expect(mockRows.filter((r) => r.status === 'done')).toHaveLength(1);
+    expect(mockRows.filter((r) => r.status === 'pending')).toHaveLength(0);
+  });
+
+  it('does not take over a claim that is under 5 minutes old', async () => {
+    mockRows.push(crop({ claimed_at: minutesAgo(4) }));
+    expect((await post(home())).status).toBe(202);
+    expect(mockRows[0].status).toBe('pending');
+  });
+
+  it('keeps the paid row when the estimate is deleted while the call runs (the reference is set to null)', async () => {
+    mockDispatch.mockImplementation(async () => {
+      // ON DELETE SET NULL, as the database does it.
+      mockRows.forEach((r) => { if (r.estimate_id === EST) r.estimate_id = null; });
+      mockRefs.estimates = [];
+      return { ok: true, provider: 'gemini', model: 'test-vision', json: goodWithPins(), usage: { input_tokens: 10, output_tokens: 10 } };
+    });
+    const res = await post(home({ estimate_id: EST }));
+    expect(res.json.status).toBe('ok');
+    expect(mockRows).toHaveLength(1);
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'done', estimate_id: null, ai_tier: 'med' }));
+    expect(mockRows[0].cost_estimate_cents).toBeGreaterThan(0);
+    expect(res.json.read.flags.plumbing_vent_stacks.likely).toBe('yes');
+  });
+
+  it('releases the claim when there is no image or the call fails before billing, so the crop can be claimed again', async () => {
+    fetchSpy.mockRejectedValue(new Error('down'));
+    expect((await post(home())).json.status).toBe('no_image');
+    expect(mockRows).toHaveLength(0);
+    fetchSpy.mockImplementation(async () => jpeg());
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [] });
+    expect((await post(home())).json.status).toBe('model_failed');
+    expect(mockRows).toHaveLength(0);
+  });
+
+  it('marks the claim failed on an unexpected error, never leaving the crop pending', async () => {
+    mockDispatch.mockRejectedValue(new Error('boom'));
+    expect((await post(home())).status).toBe(500);
+    expect(mockRows).toHaveLength(1);
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', ai_tier: 'unknown' }));
+    mockDispatch.mockResolvedValue({ ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: {} });
+    expect((await post(home())).json.read.tier).toBe('med');
+  });
+
+  it('shares one paid call between two different contexts asked together: the other gets in_progress or a copy', async () => {
+    const [a, b] = await Promise.all([post(home({ estimate_id: EST })), post(home({ estimate_id: EST2 }))]);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const paid = [a, b].filter((r) => r.json.status === 'ok' && r.json.cached === false);
+    expect(paid).toHaveLength(1);
+    expect(mockRows.filter((r) => r.status === 'pending')).toHaveLength(0);
+  });
+
+  it('treats an upper-case UUID as the same context as its lower-case spelling', async () => {
+    const first = await post(home({ estimate_id: EST.toUpperCase() }));
+    expect(first.json.read.estimate_id).toBe(EST);
+    expect(mockRows[0].estimate_id).toBe(EST);
+    const again = await post(home({ estimate_id: EST }));
+    const upper = await post(home({ estimate_id: EST.toUpperCase() }));
+    expect(again.json.read.id).toBe(first.json.read.id);
+    expect(upper.json.read.id).toBe(first.json.read.id);
+    expect(mockRows).toHaveLength(1);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    // The service is called directly the same way.
+    const direct = await svc.runRoofEntryRead({ lat: 27.46, lng: -82.57, county: 'Manatee', estimateId: EST.toUpperCase() });
+    expect(direct.read.id).toBe(first.json.read.id);
+  });
+});
+
+describe('a billed unusable answer', () => {
+  it('books it as a failed row with its cost, which a LATER request does not reuse and may retry', async () => {
+    mockDispatch.mockResolvedValue({
+      ok: false,
+      reason: 'all_providers_failed',
+      failures: [{ provider: 'gemini', model: 'test-vision', reason: 'empty_json', usage: { input_tokens: 100, output_tokens: 5 } }],
+    });
+    const first = await post(home());
+    expect(first.json.read.tier).toBe('unknown');
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', ai_tier: 'unknown' }));
+    expect(mockRows[0].cost_estimate_cents).toBeGreaterThan(0);
+    mockDispatch.mockResolvedValue({ ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: {} });
+    const second = await post(home());
+    expect(second.json.cached).toBe(false);
+    expect(second.json.read.tier).toBe('med');
+    expect(mockDispatch).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -490,7 +607,7 @@ describe('one row per estimate or customer context', () => {
   it('counts the reuse window from the paid read: a copy never extends it', async () => {
     const key = svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 });
     const day = 86400000;
-    const base = { lookup_key: key, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm', ai_flags: JSON.stringify(goodJson().flags), ai_tier: 'med', tech_final_count: null, tech_final_flags: null };
+    const base = { lookup_key: key, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm', ai_flags: JSON.stringify(goodJson().flags), ai_tier: 'med', status: 'done', tech_final_count: null, tech_final_flags: null };
     // Paid 91 days ago; a copy for estimate 2 was made at day 86 (5 days ago).
     mockRows.push({ ...base, id: 'paid', cost_estimate_cents: 2, estimate_id: null, customer_id: null, created_at: new Date(Date.now() - 91 * day).toISOString() });
     mockRows.push({ ...base, id: 'copy', cost_estimate_cents: 0, estimate_id: EST2, customer_id: null, created_at: new Date(Date.now() - 5 * day).toISOString() });

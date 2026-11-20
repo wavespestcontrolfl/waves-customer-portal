@@ -3,7 +3,9 @@
  *
  *   POST  /api/admin/roof-entry-read                run, or reuse (same property within 90 days), a read
  *         body { lat, lng, county, estimate_id?, customer_id? }; county is Manatee, Sarasota or Charlotte
- *         -> { status: 'ok' | 'no_image' | 'model_failed', cached, read }; read is null unless status is 'ok'
+ *         -> { status: 'ok' | 'in_progress' | 'no_image' | 'model_failed', cached, read }; read is null unless status is 'ok'.
+ *         200 for every status except 202 'in_progress': another request holds this roof's claim, no image fetch or
+ *         model call was made, ask again shortly. estimate_id / customer_id are stored and compared lower-case.
  *   PATCH /api/admin/roof-entry-read/:id/tech-count the technician's final count and flags, to compare with the AI later
  *         body { count?: int >= 0, flags?: { <entry type>: 'yes' | 'no' | 'unsure' } } -> { read }
  *
@@ -39,7 +41,8 @@ function readInput(body) {
   if (!ok) return null;
   return {
     lat: b.lat, lng: b.lng, county: b.county,
-    estimateId: b.estimate_id || null, customerId: b.customer_id || null,
+    estimateId: b.estimate_id ? b.estimate_id.toLowerCase() : null,
+    customerId: b.customer_id ? b.customer_id.toLowerCase() : null,
   };
 }
 
@@ -66,7 +69,7 @@ router.post('/', async (req, res, next) => {
     if (!input) return res.status(400).json({ error: 'lat, lng and county are required; estimate_id and customer_id are optional' });
     const result = await runRoofEntryRead(input);
     logger.info(`[admin-roof-entry-read] status=${result.status} cached=${result.cached} county=${countyKey(input.county) || 'unsupported'}`);
-    return res.json(result);
+    return res.status(result.status === 'in_progress' ? 202 : 200).json(result);
   } catch (err) {
     // A missing estimate or customer is refused before any spend; the foreign key still catches one deleted mid-read.
     if (err.code === 'unknown_reference' || err.code === '23503') return res.status(400).json({ error: 'Unknown estimate_id or customer_id' });
