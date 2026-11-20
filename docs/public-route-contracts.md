@@ -3061,11 +3061,14 @@ server from before this key, never matches: the render times out and nothing
 is stored. Every other record renders the same in both states and waits for
 the report root alone. A record that carries the technician's own note
 (`carriesReportNote`; its PDF key has `-rn`) waits the same way for its note
-state: in `mode=pdf` its payload also carries `reportNote: 'shown' | 'withheld'`
-(`reportNoteRenderState`: `shown` when the summary is the note,
-`summaryIsOwnNote`), the PDF document shows it on its root (`data-report-note`),
-and both providers print only once that root shows the state of the caller's
-own build. No other record, and no other mode, carries the key.
+state: in `mode=pdf` its payload also carries `reportNote`
+(`reportNoteRenderState`): `shown:` and the 8-hex digest of the signed note as
+it prints when the summary is the note (`summaryIsOwnNote`; the digest the
+key's `-tr` part names), else `withheld`. The PDF document shows it on its root
+(`data-report-note`), and both providers print only once that root shows the
+state of the caller's own build. A page built from another read of the record
+(the note or the signing name changed between the two reads) never matches. No
+other record, and no other mode, carries the key.
 
 The technician's own note (owner 2026-11-19, the report speed plan; reader
 `visitReportCustomerCopy`, `technician-report-copy.js`): a completed visit may
@@ -3105,14 +3108,17 @@ a stored row whose only text is the stock detail unless its label passes
 `customerCopyViolations`, and any row whose title fails that screen; a detail
 or a recommendation that fails it is left out of its row, so a row with no text
 left drops, the stored "no activity" row of the pest, mosquito, termite and
-rodent lines among them (`provenFindingRows`, as in the readers above).
-The render adds no "no activity" row of its own either: the form's lists
-being empty proves nothing beside a note. The lawn write gate's report build reads stored notes that
-cannot be read as stored, never an object it rebuilt around its frozen facts,
-so it reads them as the live report does. The PDF
-key hashes the summary as it prints, and on such a record it always carries
-`-rn` (just before any `-fson`/`-fsoff` part), summary or not. The visit notes on the
-other surfaces (`customerSafeVisitNotes`) run the same rule. The Documents API
+rodent lines among them (`provenFindingRows`, as in the readers above). The
+pest report's concern pass, which softens a stored "no activity" row when the
+customer flagged something, never runs on such a record, so the stored row
+reaches that screen as stored. The render adds no "no activity" row of its own
+either: the form's lists being empty proves nothing beside a note. The lawn
+write gate's report build reads stored notes that cannot be read as stored,
+never an object it rebuilt around its frozen facts, so it reads them as the
+live report does. The PDF key hashes the summary as it prints, and on such a
+record it always carries `-rn` (just before any `-fson`/`-fsoff` part), summary
+or not. The visit notes on the other surfaces (`customerSafeVisitNotes`) run
+the same rule. The Documents API
 PDF (`routes/documents.js` `generateServiceReportPDF`, at the signed-in
 `/api/documents/service-report/:serviceRecordId` and the shared
 `/api/documents/shared/:token`) prints such a record's observation and

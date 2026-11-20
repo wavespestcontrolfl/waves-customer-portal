@@ -4655,8 +4655,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // "all clear" right after they flagged something (John Kelleher audit
   // 2026-07-29). PEST ONLY — other lines have their own no-activity copy, and
   // the softened sentence must not claim treatment or a scheduled follow-up
-  // the record doesn't evidence (codex P2 #3043 ×2).
-  if (serviceLine === 'pest') {
+  // the record doesn't evidence (codex P2 #3043 ×2). Never on a record that
+  // carries the technician's own note: there the stored row reaches the
+  // provenance screen as completion stored it (below), as in every other
+  // findings reader, and its "were clear" detail drops it. The softened copy
+  // passes that screen, so it would print a no-activity claim beside the
+  // technician's own account (pre-push audit on c020cecb69).
+  if (serviceLine === 'pest' && !ownNote) {
     const renderConcern = structuredCustomerConcern(structured);
     if (renderConcern) {
       for (const finding of findings) {

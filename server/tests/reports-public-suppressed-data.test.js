@@ -275,7 +275,9 @@ describe('GET /reports/:token/data: the writer-rules state of a PDF payload', ()
   test("a PDF payload of a record that carries the technician's own note names its note state; any other payload names none", async () => {
     const notes = { reportNote: { v: 1, text: 'I treated the perimeter.', source: 'cleaned' } };
     const payload = { typedReport: null, pestPressure: null, pdfUrl: `/api/reports/${VALID_TOKEN}` };
-    for (const [built, state] of [[{ summaryIsOwnNote: true }, 'shown'], [{}, 'withheld']]) {
+    const signed = 'I treated the perimeter. — Jordan';
+    const digest = require('crypto').createHash('sha256').update(signed).digest('hex').slice(0, 8);
+    for (const [built, state] of [[{ summaryIsOwnNote: true, summary: signed }, `shown:${digest}`], [{}, 'withheld']]) {
       buildReportV1Data.mockResolvedValue({ ...payload, ...built });
       mockDb({ deliveryMode: 'auto_send', notes });
       await withServer(async (baseUrl) => {

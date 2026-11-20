@@ -123,11 +123,15 @@ describe('a service report PDF prints only a page built in its own writer-rules 
 // would print it with the legacy recap and merged note lines, so the render
 // also waits for the root showing the note state of its own build: such a
 // page never shows it, the render times out and nothing is stored (pre-push
-// P1 on 0bc664ed4d and 5b51753cd0).
+// P1 on 0bc664ed4d and 5b51753cd0). A shown note's state names the digest of
+// the signed note, so a page built from another read of the record never
+// matches either (pre-push P1 on c020cecb69).
 describe("a note record's PDF prints only a page built in its own note state", () => {
+  const digestOf = (text) => require('crypto').createHash('sha256').update(text).digest('hex').slice(0, 8);
+
   test('the ready selector adds the note state, with or without the writer-rules state', () => {
     process.env.GATE_REPORT_WRITER_RULES = 'true';
-    expect(reportPdfReadySelector(true, 'shown')).toBe('.service-report-v1[data-writer-rules="on"][data-report-note="shown"]');
+    expect(reportPdfReadySelector(true, 'shown:1a2b3c4d')).toBe('.service-report-v1[data-writer-rules="on"][data-report-note="shown:1a2b3c4d"]');
     expect(reportPdfReadySelector(false, 'withheld')).toBe('.service-report-v1[data-report-note="withheld"]');
     expect(reportPdfReadySelector(false, null)).toBe('.service-report-v1');
   });
@@ -138,18 +142,28 @@ describe("a note record's PDF prints only a page built in its own note state", (
     expect(mockPage.waitForSelector).toHaveBeenCalledWith('.service-report-v1[data-report-note="withheld"]', { timeout: 10000 });
 
     const calls = cloudflareFetch();
-    await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1', dependsOnWriterRules: false, reportNoteState: 'shown' });
-    expect(calls[0].waitForSelector).toEqual({ selector: '.service-report-v1[data-report-note="shown"]', visible: true, timeout: 10000 });
+    await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1', dependsOnWriterRules: false, reportNoteState: 'shown:1a2b3c4d' });
+    expect(calls[0].waitForSelector).toEqual({ selector: '.service-report-v1[data-report-note="shown:1a2b3c4d"]', visible: true, timeout: 10000 });
   });
 
   test("the note state follows the record and the caller's own build", () => {
     const note = JSON.stringify({ reportNote: { v: 1, text: 'I treated the perimeter.', source: 'cleaned' } });
-    expect(reportNoteRenderState({ structured_notes: note }, { summaryIsOwnNote: true })).toBe('shown');
+    const signed = 'I treated the perimeter. — Jordan';
+    expect(reportNoteRenderState({ structured_notes: note }, { summaryIsOwnNote: true, summary: signed })).toBe(`shown:${digestOf(signed)}`);
     expect(reportNoteRenderState({ structured_notes: note }, { summary: 'Your routine service is complete.' })).toBe('withheld');
     // Stored notes that cannot be read count as a note, and no note prints.
     expect(reportNoteRenderState({ structured_notes: ['[Found] raw line'] }, {})).toBe('withheld');
     // Every other record names no state.
     expect(reportNoteRenderState({ structured_notes: JSON.stringify({ observations: [] }) }, { summaryIsOwnNote: true })).toBeNull();
     expect(reportNoteRenderState({}, {})).toBeNull();
+  });
+
+  test('two different accepted notes, or one note signed by two names, never share a state', () => {
+    const note = JSON.stringify({ reportNote: { v: 1, text: 'I treated the perimeter.', source: 'cleaned' } });
+    const states = ['I treated the perimeter. — Jordan', 'I treated the lanai and the garage. — Jordan', 'I treated the perimeter. — Casey']
+      .map((summary) => reportNoteRenderState({ structured_notes: note }, { summaryIsOwnNote: true, summary }));
+    expect(new Set(states).size).toBe(3);
+    // So a page another read built never shows the selector the caller waits for.
+    expect(new Set(states.map((state) => reportPdfReadySelector(false, state))).size).toBe(3);
   });
 });

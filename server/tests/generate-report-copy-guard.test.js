@@ -604,6 +604,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // "dries" states the same fixed drying time as dry / drying / dried
+    // (pre-push audit on c020cecb69); a drying word with no figure stays legal
+    expect(reportCopyRejection('The spray dries in 30 minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('It dries within half an hour of the application.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Keep people and pets out until the spray dries.')).toBeNull();
     // dog/cat re-entry, awarded EPA approval, long alphabetic passwords (r78)
     expect(reportCopyRejection('Let your dog outside after thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The cats can go outside in 2 hours.')).toMatch(/^banned:/);

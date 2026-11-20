@@ -432,6 +432,13 @@ function printedReportSummary(parsed, service = {}) {
   return signer ? `${parsed.body} — ${signer}` : parsed.body;
 }
 
+// The 8-hex digest of a summary as it prints. The PDF key's `-tr` part
+// (summaryCopySignature) and a shown note's state (reportNoteRenderState)
+// name the same digest of the same string.
+function printedSummaryDigest(text) {
+  return crypto.createHash('sha256').update(String(text ?? '')).digest('hex').slice(0, 8);
+}
+
 // The service lines whose report may print the technician's own note. Phase 1
 // of the report speed plan (owner 2026-11-19) is the pest report alone: the
 // lawn and tree & shrub reports take the note in their own later step, with
@@ -537,14 +544,17 @@ function renderWriterRulesState() {
 // built by the note reader in the same state: /data in PDF mode names it
 // (`reportNote`), the PDF document shows it on its root element
 // (data-report-note), and the renderer prints only once the page shows the
-// state of its own build (pdf.js reportPdfReadySelector). 'shown' when the
-// summary is the note (summaryIsOwnNote), 'withheld' when it is not (a
-// refused note, a typed visit, another line). A page bundle or server from
-// before the note reader never shows it, so the render times out and nothing
-// is stored. null on every other record, which renders the same either way.
+// state of its own build (pdf.js reportPdfReadySelector). 'shown:<digest>'
+// when the summary is the note (summaryIsOwnNote): the digest of the signed
+// note as it prints, the one the key's `-tr` part names, so a page built from
+// another read of the record (the note or the signing name changed between
+// the two reads) never matches either. 'withheld' when it is not (a refused
+// note, a typed visit, another line). A page bundle or server from before
+// the note reader never shows it, so the render times out and nothing is
+// stored. null on every other record, which renders the same either way.
 function reportNoteRenderState(service, payload) {
   if (!carriesReportNote(service?.structured_notes)) return null;
-  return payload?.summaryIsOwnNote === true ? 'shown' : 'withheld';
+  return payload?.summaryIsOwnNote === true ? `shown:${printedSummaryDigest(payload.summary)}` : 'withheld';
 }
 
 function summaryCopySignature(service = {}) {
@@ -571,7 +581,7 @@ function summaryCopySignature(service = {}) {
   // The key hashes the summary as the report prints it (a note in the
   // technician's own words signed), so every other summary keeps its key:
   // its body.
-  return `-tr${crypto.createHash('sha256').update(printedReportSummary(parsed, service)).digest('hex').slice(0, 8)}${state}`;
+  return `-tr${printedSummaryDigest(printedReportSummary(parsed, service))}${state}`;
 }
 
 // The full customer-copy screen the notes parser applies — shared banned

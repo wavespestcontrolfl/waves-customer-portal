@@ -19,6 +19,7 @@
 const {
   visitReportCustomerCopy,
   summaryCopySignature,
+  reportNoteRenderState,
 } = require('../services/service-report/technician-report-copy');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
@@ -121,6 +122,14 @@ describe('the report payload', () => {
     expect(recap).not.toHaveProperty('summaryIsOwnNote');
     const refused = await build({ structured_notes: JSON.stringify({ ...stored({ text: UNSAFE }), customerRecap: UNSAFE }) });
     expect(refused).not.toHaveProperty('summaryIsOwnNote');
+  });
+
+  test('a cleaned note that names a fixed drying time is refused: no summary from it', async () => {
+    const text = 'I treated the perimeter. The spray dries in 30 minutes.';
+    expect(visitReportCustomerCopy({ ...SERVICE, structured_notes: JSON.stringify(stored({ text })) }).body).toBeNull();
+    const data = await build({ structured_notes: JSON.stringify(stored({ text })) });
+    expect(data).not.toHaveProperty('summaryIsOwnNote');
+    expect(JSON.stringify(data)).not.toContain('dries in 30');
   });
 
   test('a note with no technician name on the record is not signed', async () => {
@@ -275,9 +284,23 @@ describe('the report payload', () => {
     expect(legacy.findings.map((f) => f.title).sort()).toEqual(['Ant trail by the lanai', 'No activity observed this visit', 'Seal the slider']);
   });
 
+  test('beside a note, a customer concern never turns the stored "no activity" row into copy that prints', async () => {
+    const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
+    const findings = [{ id: 'f-none', service_record_id: SERVICE.id, ...buildNoActivityFinding('pest') }];
+    const concern = { customerConcernText: 'Ants keep coming in by the kitchen sink.' };
+    const data = await build({ structured_notes: notes(concern) }, { service_findings: findings });
+    expect(data.findings.filter((f) => f.category === 'no_activity')).toEqual([]);
+    expect(JSON.stringify(data.findings)).not.toMatch(/no (?:confirmed )?pest activity|were clear/i);
+    // A record with no note keeps the softened row, as today.
+    const legacy = await build({ structured_notes: JSON.stringify(concern) }, { service_findings: findings });
+    expect(legacy.findings.map((f) => f.title)).toContain('No pest activity confirmed this visit');
+  });
+
   test('the PDF key hashes the summary the report prints', async () => {
     const data = await build();
     expect(summaryCopySignature(SERVICE)).toBe(`${keyOf(data.summary)}-rn`);
+    // The PDF wait names the same digest (reportNoteRenderState).
+    expect(reportNoteRenderState(SERVICE, data)).toBe(`shown:${keyOf(data.summary).slice('-tr'.length)}`);
   });
 });
 
