@@ -138,12 +138,20 @@ describe('publishReviewReply', () => {
     // An Agent Ops draft the sync restored as a [DRAFT] after an uncertain post (auto_reply_draft cleared).
     Object.assign(state.rows[0], { auto_reply_draft: null, auto_reply_version: 'agent_ops', review_reply: asDraft(machine) });
     await expect(publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true })).rejects.toMatchObject(refused);
+    // …edited too: Use Draft sends no token for it, so any reply posted while it stands is agent text.
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks so much, Dana! Glad our customer app helps.', actor: { type: 'admin' }, allowOverwrite: true })).rejects.toMatchObject(refused);
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
     // A person's own [DRAFT] with the same words meets the never list only, and posts.
     Object.assign(state.rows[0], { auto_reply_version: 'human' });
     const r = await publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true });
     expect(r.googlePosted).toBe(true);
     expect(state.rows[0].review_reply).toBe(machine);
+    // A person's earlier attempt (an uncertain manual post stores its text with version 'human') retried unchanged is
+    // still their own words: the App Store passes.
+    const own = 'Thanks Dana. Get the Waves app on the App Store.';
+    Object.assign(state.rows[0], { review_reply: null, auto_reply_draft: own, auto_reply_version: 'human' });
+    const again = await publishReviewReply({ reviewId: 'rev-1', text: own, actor: { type: 'admin' }, allowOverwrite: true });
+    expect(again.googlePosted).toBe(true);
   });
 
   test('P0: a human reply that lands between the pre-check and the publish claim aborts inside the claim', async () => {

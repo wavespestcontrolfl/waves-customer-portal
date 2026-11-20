@@ -198,14 +198,16 @@ function updatedCount(updated) {
 }
 
 // Did the agent write this text? The runner and the Intelligence Bar post
-// agent text; a person's post is agent text when it came from an AI draft
-// (Use Draft, AI Reply: a token, edited or not), when it is the stored
-// pipeline draft unchanged, or when it is an Agent Ops draft the sync
-// restored as a [DRAFT] after an uncertain post (it keeps that version).
+// agent text. A person's post is agent text when it came from an AI draft
+// (Use Draft, AI Reply: a token, edited or not); while an Agent Ops draft
+// stands on the row as a [DRAFT] (Use Draft sends no token for it, so any
+// reply posted then counts, edited or not); or when it is the stored
+// pipeline draft unchanged. A stored draft with version 'human' is a
+// person's earlier attempt (an uncertain manual post), not agent text.
 function isAgentText(review, text, { actor, fromDraft }) {
   if (actor.type !== 'admin' || fromDraft) return true;
-  if (text === String(review.auto_reply_draft || '').trim()) return true;
-  return review.auto_reply_version === 'agent_ops' && isDraftReply(review.review_reply) && stripDraftPrefix(review.review_reply).trim() === text;
+  if (review.auto_reply_version === 'agent_ops' && isDraftReply(review.review_reply)) return true;
+  return review.auto_reply_version !== 'human' && text === String(review.auto_reply_draft || '').trim();
 }
 
 /**
