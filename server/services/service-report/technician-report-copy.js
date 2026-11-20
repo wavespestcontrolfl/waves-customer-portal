@@ -726,7 +726,8 @@ const NOTE_SENTENCE_CHAR_SRC = '[\\s\\S]';
 // stay with off, out, away, inside, indoors or clear ("keep an eye out" is
 // not one), off-limits, avoid, the people and pets a re-entry line names, or
 // a customer's permission to use the place again: "you can use", "you're
-// free to enjoy", "feel free to use", "it is safe to use".
+// free to enjoy", "feel free to use", "it is safe to use", "the treated
+// patio is fine to use".
 const NOTE_DRY_REENTRY_SRC = `(?<!\\p{L})(?:${[
   '(?:dry|dries|drying|dried|wet|damp)',
   're-?\\s?ent(?:er|ers|ered|ering|ry|ries|rance)',
@@ -735,7 +736,7 @@ const NOTE_DRY_REENTRY_SRC = `(?<!\\p{L})(?:${[
   'off[\\s-]?limits',
   '(?:avoid|avoids|avoiding|avoided)',
   '(?:pets?|dogs?|cats?|pupp(?:y|ies)|kittens?|kids?|child(?:ren)?|toddlers?|bab(?:y|ies)|people|family|anyone|everyone|guests?)',
-  `(?:you(?:\\s*['\u2019]ll|\\s+will|\\s+can|\\s+may|\\s+could|\\s+should|\\s+might)(?:\\s+(?:safely|then|now|also|soon|easily))?(?:\\s+be\\s+able\\s+to)?|you(?:\\s+are|['\u2019]re)\\s+(?:free|welcome|able|good|okay|ok|fine|clear|cleared|safe)\\s+to|feel\\s+free\\s+to|(?:it\\s+is|it['\u2019]s|it\\s+will\\s+be|it['\u2019]ll\\s+be)\\s+(?:safe|fine|ok|okay|alright|all\\s+right)\\s+to)\\s+(?:use|enjoy|resume|reopen)`,
+  `(?:you(?:\\s*['\u2019]ll|\\s+will|\\s+can|\\s+may|\\s+could|\\s+should|\\s+might)(?:\\s+(?:safely|then|now|also|soon|easily))?(?:\\s+be\\s+able\\s+to)?|you(?:\\s+are|['\u2019]re)\\s+(?:free|welcome|able|good|okay|ok|fine|clear|cleared|safe)\\s+to|feel\\s+free\\s+to|(?:\\p{L}+['\u2019](?:s|re|ll\\s+be)|is|are|will\\s+be|should\\s+be|would\\s+be|be)\\s+(?:safe|fine|ok|okay|alright|all\\s+right|good|ready|free|clear)\\s+to)\\s+(?:use|enjoy|resume|reopen)`,
 ].join('|')})(?!\\p{L})`;
 // A day word: a unit from a day up, a weekday (full or short: "Sat",
 // "Thurs"), today, a part of the day or a
@@ -782,10 +783,19 @@ const NOTE_MARKED_SENTENCE_RE = new RegExp([
   `${NOTE_DAY_WORD_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_REENTRY_VERB_SRC}`,
 ].join('|'), 'iu');
 
+// The visit-history reader's redactor (context-aggregator.js
+// redactAccessCodes: digits before an access word, a code word after a code
+// noun, a card number) masks forms neither access check here sees ("I used
+// 1234 to get through the gate."). A note-record value it would change is
+// withheld. Required at call time: context-aggregator loads this module.
+function visitHistoryRedacts(value) {
+  return require('../context-aggregator').redactAccessCodes(value) !== value;
+}
+
 function noteRecordCopyViolations(text) {
   const value = String(text || '');
   const violations = customerCopyViolations(value);
-  if (COMPLETION_ACCESS_CODE_RE.test(value)) violations.push('note_record_access_code');
+  if (COMPLETION_ACCESS_CODE_RE.test(value) || visitHistoryRedacts(value)) violations.push('note_record_access_code');
   if (NOTE_RECORD_TIME_RE.test(value)
     || value.split(NOTE_SENTENCE_END_RE).some((sentence) => NOTE_MARKED_SENTENCE_RE.test(sentence))) {
     violations.push('note_record_time');

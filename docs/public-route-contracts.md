@@ -3101,7 +3101,11 @@ note signed ` — <first name>` (the identity snapshot's name, never a generic
 label). The note, and every list value and finding field below on such a
 record, passes `noteRecordCopyViolations`: `customerCopyViolations`, the
 completion access-code check (`COMPLETION_ACCESS_CODE_RE`, which also names
-"Side access 4417 for the yard"), and any time a technician can give: any word that names hours, minutes or seconds, with
+"Side access 4417 for the yard"), the visit-history reader's redactor (a value
+`redactAccessCodes` would change is withheld: "I used 1234 to get through the
+gate"; production, 2026-11-20, read-only: it changes 24 of 401 raw pest
+technician notes, each naming a code noun, and no recap, form value or finding
+field), and any time a technician can give: any word that names hours, minutes or seconds, with
 or without a figure ("30+ minutes", "eighteen minutes", "½ hour", "a few
 minutes"); a figure with h or m; a clock time in any marked form ("3:30", any
 pm or a.m., "four am", "3 o'clock", "half past three", "four in the
@@ -3115,7 +3119,8 @@ Days stay legal (the next visit, when results show), except in a sentence
 that names drying or re-entry ("dry", "re-enter", "keep … off", "stay …
 inside", "off-limits", "avoid"), the people and pets a re-entry line is
 about, or a customer's permission to use the place again ("you can use it",
-"feel free to use", "it is fine to enjoy"): there any figure or number word withholds the copy ("11/22", "2d"),
+"feel free to use", "it is fine to enjoy", "the treated patio is fine to
+use"): there any figure or number word withholds the copy ("11/22", "2d"),
 and so does a day word (a unit from a day up, a weekday, full or short
 ("until Sat."), "today", a part of
 the day or a meal, a month other than "may", a season other than "fall"), so

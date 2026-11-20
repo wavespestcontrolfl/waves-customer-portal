@@ -84,6 +84,17 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
     const access = reportNoteCustomerCopy(stored({ text: 'I treated the yard. Side access 4417 for the yard.' }));
     expect(access.body).toBeNull();
     expect(access.violations).toEqual(['note_record_access_code']);
+    // A split code after a location word: only the completion check sees it
+    // (the redactor wants a run of 3 to 8 digits).
+    const split = reportNoteCustomerCopy(stored({ text: 'I treated the yard. Side gate 12-34 for the yard.' }));
+    expect(split.body).toBeNull();
+    expect(split.violations).toEqual(['note_record_access_code']);
+    // Digits before the access word: only the visit-history redactor
+    // (context-aggregator.js redactAccessCodes) sees this form.
+    const before = reportNoteCustomerCopy(stored({ text: 'I treated the yard. I used 1234 to get through the gate.' }));
+    expect(before.body).toBeNull();
+    expect(before.violations).toEqual(['note_record_access_code']);
+    expect(noteRecordCopyViolations('I treated the yard and the garage door frame.')).toEqual([]);
   });
 
   test('a time figure in any form withholds the note; the sanctioned wording and days stand', () => {
@@ -204,6 +215,8 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the patio. You can use it again in two days.',
       'I treated the lanai. Feel free to use the lanai after 2.',
       'I treated the yard. It is fine to enjoy the yard in two days.',
+      'I treated the patio. The treated patio is fine to use again on Monday.',
+      'I treated the lanai. The lanai\u2019s okay to use in two days.',
       'I treated the pool deck. You\u2019re free to use the pool deck on Monday.',
     ]) {
       const parsed = reportNoteCustomerCopy(stored({ text }));
