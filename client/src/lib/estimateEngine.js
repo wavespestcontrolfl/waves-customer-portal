@@ -1531,7 +1531,8 @@ export function normalizeTrenchingProductKey(value, { fallback = 'taurus_sc' } =
     cross_check_plus: 'talstar_p',
     lesco_cross_check_plus: 'talstar_p',
   };
-  return aliases[raw] || fallback;
+  // Own entries only: an inherited key such as "constructor" is no alias (pre-push audit at the thirteenth push).
+  return Object.hasOwn(aliases, raw) ? aliases[raw] : fallback;
 }
 
 // The server's rate aliases and token rules (normalizeTrenchingApplicationRate in service-pricing.js), so "0.125%" is the high rate
@@ -1545,7 +1546,8 @@ const TRENCHING_RATE_ALIASES = {
 export function normalizeTrenchingRate(value, { fallback = 'standard' } = {}) {
   const raw = String(value || 'standard').trim().toLowerCase().replace(/[\s-]+/g, '_')
     .replace(/%/g, '').replace(/\./g, '_').replace(/_+/g, '_');
-  return TRENCHING_RATE_ALIASES[raw] || fallback;
+  // Own entries only: an inherited key such as "constructor" is no alias (pre-push audit at the thirteenth push).
+  return Object.hasOwn(TRENCHING_RATE_ALIASES, raw) ? TRENCHING_RATE_ALIASES[raw] : fallback;
 }
 
 function normalizeTrenchingWarranty(value, product) {
@@ -1594,7 +1596,8 @@ export function normalizePreSlabProductKey(value, { fallback = 'termidor_sc' } =
     cross_check_plus: 'talstar_p',
     lesco_cross_check_plus: 'talstar_p',
   };
-  return aliases[raw] || fallback;
+  // Own entries only: an inherited key such as "constructor" is no alias (pre-push audit at the thirteenth push).
+  return Object.hasOwn(aliases, raw) ? aliases[raw] : fallback;
 }
 
 function normalizePreSlabVolume(value) {

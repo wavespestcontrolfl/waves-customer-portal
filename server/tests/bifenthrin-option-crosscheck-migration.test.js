@@ -431,6 +431,8 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
     const jobCost = (db) => calculateInventoryCost({
       product: db.products_catalog[0], deductedAmount: 4, inventoryUnit: 'fl_oz', amount: 4, amountUnit: 'fl_oz',
     }).costUsed;
+    // The other job-costing path, a service's product line (costLineFromUsage), at the same 4 fl oz.
+    const lineCost = (db) => costLineFromUsage({ ...db.products_catalog[0], product_name: 'Crosscheck', usage_amount: 4, usage_unit: 'fl_oz' }).cost;
 
     test('pending approvals that would put the stale price back are rejected as superseded; others stay; down() leaves them closed', async () => {
       const events = [
@@ -527,13 +529,19 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       ['per gallon', '58.4200', 'gal'],
       ['per quart, at the imported $57.17', '14.2925', 'qt'],
       ['with no unit, per fl oz', '0.4564', null],
+      // Units only costLineFromUsage knows (pre-push audit at the thirteenth push).
+      ['per cc', '0.0154', 'cc'],
+      ['per milliliter', '0.0154', 'milliliter'],
+      ['per litre', '15.4329', 'litre'],
     ])('a catalog unit cost at a stale price %s is cleared, so job costing reads the corrected price; down() puts it back', async (_, cost, unit) => {
       const db = world({ catalog: [catalogRow({ cost_per_unit: cost, cost_unit: unit })] });
       const knex = fakeKnex(db);
       expect(jobCost(db)).toBeGreaterThan(1.7); // 4 fl oz at a stale price
+      expect(lineCost(db)).toBeGreaterThan(1.7);
       await migration.up(knex);
       expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: null, cost_unit: null, best_price: 30.9 });
       expect(jobCost(db)).toBe(0.9656); // 4 fl oz of the $30.90 gallon
+      expect(lineCost(db)).toBeCloseTo(0.9656, 4);
       expect(warn).toHaveBeenCalledWith(expect.stringMatching(/catalog unit cost \(.+\) was a stale price/));
       await migration.down(knex);
       expect(db.vendor_pricing[0]).toMatchObject({ price: '58.42' });
@@ -541,8 +549,8 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
     });
 
     // A weight unit holds no gallon price: $7.3025 a pound is the stale gallon's figure per 16 oz, and stays (pre-push audit at the
-    // seventh push).
-    test.each([['0.2414', 'fl_oz'], ['0.4600', 'fl_oz'], ['0.5000', null], ['7.3025', 'lb']])('a unit cost of an admin\'s own (%s per %s) stays', async (cost, unit) => {
+    // seventh push), as does $0.0161 a gram in a unit only costLineFromUsage knows (pre-push audit at the thirteenth push).
+    test.each([['0.2414', 'fl_oz'], ['0.4600', 'fl_oz'], ['0.5000', null], ['7.3025', 'lb'], ['0.0161', 'gm']])('a unit cost of an admin\'s own (%s per %s) stays', async (cost, unit) => {
       const db = world({ catalog: [catalogRow({ cost_per_unit: cost, cost_unit: unit })] });
       await migration.up(fakeKnex(db));
       expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: cost, cost_unit: unit, best_price: 30.9 });

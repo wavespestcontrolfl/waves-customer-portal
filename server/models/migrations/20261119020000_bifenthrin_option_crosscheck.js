@@ -90,7 +90,8 @@
  * a price entered since, so reopening it could only put an obsolete price back (pre-push audit at the seventh push). A catalog unit
  * cost (cost_per_unit, which job costing reads before the catalog price) that is a stale gallon price in its own liquid unit (a
  * volume unit, or an ounce; a weight or count unit holds no gallon price), at the column's precision (with no unit, in each volume
- * unit), is cleared, so job costing reads the catalog price; any other unit cost is an admin's own, and stays. Either alone is
+ * unit), as either job-costing path reads the unit (pre-push audit at the thirteenth push: one knows cc, milliliter and litre), is
+ * cleared, so job costing reads the catalog price; any other unit cost is an admin's own, and stays. Either alone is
  * enough for Step P to run: a price entered before this deploy can leave one behind. Neither changes a quote, so with no quote and
  * no catalog price to move, Step P runs no recalculation: with no current quote, one would clear a catalog price that is right
  * (pre-push audit at the tenth push).
@@ -639,6 +640,9 @@ async function supersedeApprovals(knex, approvals, now) {
 // that is a stale gallon price in its own liquid unit, at the column's precision (decimal 10,4). Liquid means a volume unit, or an
 // ounce, which costing reads as a fluid ounce for a liquid (inventory-units); a weight or count unit holds no gallon price (pre-push
 // audit at the seventh push). With no unit, costing reads it in the amount's own unit, so it is matched in each volume unit.
+// Each path reads the unit by its own table, at its own size: calculateInventoryCost by inventory-units, and costLineFromUsage by
+// product-costing, which knows aliases the other does not (cc, milliliter, litre) and counts a unit only when it prices a usage in
+// fluid ounces, so a weight unit is left out there too (pre-push audit at the thirteenth push).
 // Returns that stale gallon price, else undefined: any other unit cost is an admin's own, and stays.
 const UNIT_COST_COLUMNS = ['cost_per_unit', 'cost_unit'];
 const VOLUME_UNITS = ['fl_oz', 'pt', 'qt', 'gal', 'ml', 'l'];
@@ -646,8 +650,12 @@ const LIQUID = ['volume', 'ambiguous'];
 function staleUnitCostOf(product) {
   if (!carries(product.cost_per_unit)) return undefined;
   const { INVENTORY_UNITS, normalizeInventoryUnit } = require('../../services/inventory-units');
-  const ozPerUnit = (filled(product.cost_unit) ? [product.cost_unit] : VOLUME_UNITS)
-    .map((unit) => INVENTORY_UNITS[normalizeInventoryUnit(unit)]).filter((unit) => LIQUID.includes(unit?.dimension)).map((unit) => unit.factor);
+  const { convertToOz, costLineFromUsage } = require('../../services/product-costing');
+  const ozPerUnit = (filled(product.cost_unit) ? [product.cost_unit] : VOLUME_UNITS).flatMap((unit) => {
+    const inventory = INVENTORY_UNITS[normalizeInventoryUnit(unit)];
+    const costed = costLineFromUsage({ usage_amount: 1, usage_unit: 'fl_oz', cost_per_unit: 1, cost_unit: unit }).source === 'cost_per_unit';
+    return [LIQUID.includes(inventory?.dimension) && inventory.factor, costed && convertToOz(1, unit)];
+  }).filter((oz) => oz > 0);
   return STALE_PRICES.find((price) => ozPerUnit.some((oz) => same(product.cost_per_unit, Math.round((price / STALE_SIZE_OZ) * oz * 10000) / 10000)));
 }
 

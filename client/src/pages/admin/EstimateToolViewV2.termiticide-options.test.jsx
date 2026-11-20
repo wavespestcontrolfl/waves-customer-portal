@@ -99,6 +99,10 @@ describe("label checks saved for the earlier bifenthrin bottle", () => {
     expect(canonicalTermiticideFields(keys)).toBe(keys);
     const unknown = { preslabProductKey: "mystery bottle", trenchingProductKey: "bifen_it" };
     expect(canonicalTermiticideFields(unknown)).toBe(unknown);
+    // An inherited key is no alias: a saved "constructor" stays a string, so Generate still sends it and the server holds it for
+    // review (pre-push audit at the thirteenth push).
+    const inherited = { preslabProductKey: "constructor", trenchingProductKey: "Constructor" };
+    expect(canonicalTermiticideFields(inherited)).toBe(inherited);
   });
 
   // The server reads a trenching rate alias as "standard" or "high" by its own token rules, so a reopen shows that rate in the picker
@@ -107,7 +111,7 @@ describe("label checks saved for the earlier bifenthrin bottle", () => {
     for (const [saved, rate] of [["high_rate", "high"], ["0.125%", "high"], ["Problem Soil", "high"], ["Regular", "standard"], ["0.06%", "standard"]]) {
       expect(canonicalTermiticideFields({ trenchingApplicationRate: saved, notes: "kept" })).toEqual({ trenchingApplicationRate: rate, notes: "kept" });
     }
-    for (const asSaved of [{ trenchingApplicationRate: "high" }, { trenchingApplicationRate: "extreme" }, { trenchingApplicationRate: "" }]) {
+    for (const asSaved of [{ trenchingApplicationRate: "high" }, { trenchingApplicationRate: "extreme" }, { trenchingApplicationRate: "constructor" }, { trenchingApplicationRate: "" }]) {
       expect(canonicalTermiticideFields(asSaved)).toBe(asSaved);
     }
   });
