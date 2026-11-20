@@ -2144,7 +2144,11 @@ either answer, so the accept retires that capture: the early refusal retires the
 verified capture for the existing retirement after the rollback. A `PLAN_START_RECHECK_RETRY` or
 `RESTART_RECHECK_RETRY` keeps the capture, since the page reuses it on the retry. When Stripe cannot confirm a
 retirement, the accept answers the existing 503 `RECURRING_CARD_RETIRE_FAILED` and the tab keeps its
-intent. The estimate page answers both state-changed codes with a banner that keeps the server's
+intent. Two accepts of one plan quote that overlap on its row lock are the exception: the later one's
+locked check reads the plan the earlier one created as a state change, so after the rollback the accept
+re-reads the estimate, and when it is now accepted it answers the same success replay as any accept of an
+accepted estimate and retires nothing (a failed read takes the error path, also with nothing retired).
+The estimate page answers both state-changed codes with a banner that keeps the server's
 message and links back to the portal, never "Refresh times". It turns off its one booking condition
 (the time picker, the pick-a-time prompts, the sticky booking bar and every book button) and its
 payment choices for that quote. Only the React page has that banner, so an accept-active

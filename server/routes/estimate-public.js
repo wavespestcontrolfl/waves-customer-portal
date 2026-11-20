@@ -10464,58 +10464,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
     // an ALREADY-accepted estimate stay untouched (that acceptance happened).
     // (The Bermuda gate itself now answers AFTER the blocking-state decision below - see "ORDER" after the inactive check.)
-    if (estimate.status === 'accepted') {
-      // An archived accepted estimate is no longer customer-viewable (the
-      // /:token/data gate rejects archived_at outright), so never rebuild
-      // invoice amounts or the bearer /pay link for it — return the same
-      // 409 the active gate below hands every other archived estimate.
-      // Pre-payload-rebuild this token got only the bare
-      // { success, alreadyAccepted } shape; blocking outright is strictly
-      // tighter and consistent with the rest of the route.
-      if (!isEstimateCustomerViewable(estimate)) {
-        const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
-      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
-      }
-      // Retry of an already-accepted estimate (e.g. the first response was
-      // lost in transit): rebuild the FULL success payload from persisted
-      // state so the customer still sees their real next step (pay link /
-      // booking link / site-confirmation copy) instead of generic confirmed
-      // copy that hides it. Read-only — no side effects re-run here (no
-      // conversion, no invoice mint, no sends). Best-effort: a rebuild
-      // failure degrades to the legacy bare payload rather than blocking
-      // the retry.
-      // Fast-redeem on the already-accepted RETRY too (Codex #3178 r38
-      // P2): the first accept can commit bookings + evidence + invoice and
-      // die before its own redemption block, and this retry still hands
-      // back the persisted pay link — so the credit must be in the balance
-      // before the customer can use it. Idempotent and best-effort; the
-      // payload rebuild stays read-only otherwise.
-      if (estimate.customer_id) {
-        try {
-          const acceptedVisits = await db('scheduled_services')
-            .where({ source_estimate_id: estimate.id })
-            .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
-            .whereRaw('COALESCE(is_callback, false) = false')
-            .limit(5)
-            .select('id');
-          for (const visit of acceptedVisits) {
-            await require('../services/inspection-credit').redeemInspectionCreditForBooking({
-              customerId: estimate.customer_id,
-              scheduledServiceId: visit.id,
-              createdBy: 'system:inspection_credit_estimate_accept_replay',
-            });
-          }
-        } catch (replayErr) {
-          logger.warn(`[estimate-accept] replay credit redemption deferred to sweep for estimate ${estimate.id}: ${replayErr.message}`);
-        }
-      }
-      try {
-        return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
-      } catch (e) {
-        logger.error(`[estimate-accept] already-accepted payload rebuild failed for estimate ${estimate.id}: ${e.message}`);
-        return res.json({ success: true, alreadyAccepted: true });
-      }
-    }
+    if (estimate.status === 'accepted') return respondAlreadyAccepted(res, estimate);
     // The documented re-price response first (codex r6 P0 on #3804): a
     // browser opened before the hold landed must see the contract's 409
     // copy, not the generic "no longer active" the accept-active preflight
@@ -17043,6 +16992,18 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // The transaction has rolled back: retire the capture an in-transaction
     // refusal dropped, now that no row lock is held (fail closed: when Stripe
     // cannot confirm, 503 and the tab keeps its intent).
+    // Two accepts of one plan quote overlapped on its row lock (codex pre-push P1): the later one's locked plan check
+    // read the plan the earlier one had just created as a state change, and refused. That accept succeeded, so this one
+    // answers with the same success replay as any accept of an accepted estimate, and never retires the card that
+    // accept bound. A read that fails answers the error path, again with nothing retired.
+    if (err && err.status === 409 && (err.code === 'RESTART_STATE_CHANGED' || err.code === 'PLAN_START_STATE_CHANGED')) {
+      try {
+        const current = await db('estimates').where({ token: req.params.token }).first();
+        if (current?.status === 'accepted') return await respondAlreadyAccepted(res, current);
+      } catch (replayErr) {
+        return next(replayErr);
+      }
+    }
     if (droppedCaptureToRetire && err && err.status === 409) {
       try {
         await retireOrDenyDroppedCapture(droppedCaptureToRetire.estimate, droppedCaptureToRetire.setupIntentId);
@@ -22810,6 +22771,61 @@ function buildAcceptSuccessPayload({
     prepayCoveredByCredit,
     ...(setupFeeAfterFirstVisit ? { setupFeeAfterFirstVisit: true } : {}),
   };
+}
+
+// The answer to an accept of an estimate that is already accepted: a retry the handler reads before its transaction,
+// and a plan quote's accept that overlapped another request's accept of it on the row lock (the accept's catch).
+async function respondAlreadyAccepted(res, estimate) {
+  // An archived accepted estimate is no longer customer-viewable (the
+  // /:token/data gate rejects archived_at outright), so never rebuild
+  // invoice amounts or the bearer /pay link for it — return the same
+  // 409 the accept's active gate hands every other archived estimate.
+  // Pre-payload-rebuild this token got only the bare
+  // { success, alreadyAccepted } shape; blocking outright is strictly
+  // tighter and consistent with the rest of the route.
+  if (!isEstimateCustomerViewable(estimate)) {
+    const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+    return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
+  }
+  // Retry of an already-accepted estimate (e.g. the first response was
+  // lost in transit): rebuild the FULL success payload from persisted
+  // state so the customer still sees their real next step (pay link /
+  // booking link / site-confirmation copy) instead of generic confirmed
+  // copy that hides it. Read-only — no side effects re-run here (no
+  // conversion, no invoice mint, no sends). Best-effort: a rebuild
+  // failure degrades to the legacy bare payload rather than blocking
+  // the retry.
+  // Fast-redeem on the already-accepted RETRY too (Codex #3178 r38
+  // P2): the first accept can commit bookings + evidence + invoice and
+  // die before its own redemption block, and this retry still hands
+  // back the persisted pay link — so the credit must be in the balance
+  // before the customer can use it. Idempotent and best-effort; the
+  // payload rebuild stays read-only otherwise.
+  if (estimate.customer_id) {
+    try {
+      const acceptedVisits = await db('scheduled_services')
+        .where({ source_estimate_id: estimate.id })
+        .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
+        .whereRaw('COALESCE(is_callback, false) = false')
+        .limit(5)
+        .select('id');
+      for (const visit of acceptedVisits) {
+        await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+          customerId: estimate.customer_id,
+          scheduledServiceId: visit.id,
+          createdBy: 'system:inspection_credit_estimate_accept_replay',
+        });
+      }
+    } catch (replayErr) {
+      logger.warn(`[estimate-accept] replay credit redemption deferred to sweep for estimate ${estimate.id}: ${replayErr.message}`);
+    }
+  }
+  try {
+    return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
+  } catch (e) {
+    logger.error(`[estimate-accept] already-accepted payload rebuild failed for estimate ${estimate.id}: ${e.message}`);
+    return res.json({ success: true, alreadyAccepted: true });
+  }
 }
 
 // Rebuilds the full accept success payload for a RETRY of an already-accepted
