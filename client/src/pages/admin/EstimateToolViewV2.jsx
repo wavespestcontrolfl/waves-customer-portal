@@ -30,6 +30,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
+import { hasIncludedReentryGuarantee } from "@estimate-purchased-warranty";
 import { buildLinePriceOverridesPayload, overridableLines } from "../../lib/linePriceOverrides";
 import "../../styles/estimate-workflow.css";
 import { addressAskNotice, filterAddressAsks } from "../../lib/addressAsks";
@@ -1260,7 +1261,7 @@ export function wholeHomeRegenerateBlock(form, available) {
 // The included re-entry guarantee a generated whole-home quote carries: its yearly renewal price.
 function wholeHomeGuaranteeRenewal(estimate) {
   const rows = [...(estimate?.oneTime?.items || []), ...(estimate?.oneTime?.specItems || [])];
-  const row = rows.find((r) => r?.includesReentryGuarantee === true);
+  const row = rows.find((r) => hasIncludedReentryGuarantee(r));
   return row ? { renewal: Number(row.guaranteeRenewalPrice) || null } : null;
 }
 

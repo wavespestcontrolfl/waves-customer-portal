@@ -414,6 +414,39 @@ describe('whole-home terms are frozen on a saved estimate (Settings changes neve
     });
   });
 
+  test('every supported saved shape restores the quote-time terms after a Settings change', () => {
+    gateOn(() => {
+      const quoted = generateEstimate(request());
+      const mapped = mapV1ToLegacyShape(quoted);
+      const rows = [...(mapped.oneTime.items || []), ...(mapped.oneTime.specItems || [])].filter((r) => r.service === 'rodent_exclusion');
+      const raw = rowsOf(quoted);
+      expect(rows.length).toBeGreaterThan(0);
+      const shapes = {
+        'result.oneTime.items': { result: { oneTime: { items: rows } } },
+        'result.oneTime.specItems': { result: { oneTime: { specItems: rows } } },
+        'result.results.oneTime.items': { result: { results: { oneTime: { items: rows } } } },
+        'result.results.oneTime.specItems': { result: { results: { oneTime: { specItems: rows } } } },
+        'result.specItems': { result: { specItems: rows } },
+        'engineResult.oneTime.items (only container)': { engineResult: { oneTime: { items: rows } } },
+        'engineResult.lineItems (raw rows)': { engineResult: { lineItems: raw } },
+        'bare mapped shape': { oneTime: { items: rows } },
+      };
+      for (const [name, saved] of Object.entries(shapes)) {
+        const signal = wholeHomeSealReplaySignal(saved);
+        expect([name, signal]).toEqual([name, { minimum: 595, renewal: 199 }]);
+        withSettingsChange(() => {
+          const replayed = generateEstimate({ ...request(), savedEstimateReplay: true, wholeHomeSealReplay: signal });
+          expect([name, total(replayed), rowsOf(replayed)[0].guaranteeRenewalPrice]).toEqual([name, 595, 199]);
+        });
+      }
+      // A stale engineResult never beats the current result: a current spot row yields no signal.
+      const spotRows = rows.map((r) => ({ service: r.service, label: r.label, price: r.price }));
+      expect(wholeHomeSealReplaySignal({ result: { oneTime: { items: spotRows } }, engineResult: { oneTime: { items: rows } } })).toBeNull();
+      // A flag on another service's row is nothing.
+      expect(wholeHomeSealReplaySignal({ result: { oneTime: { items: rows.map((r) => ({ ...r, service: 'bed_bug' })) } } })).toBeNull();
+    });
+  });
+
   test('a saved row without the stamp (older) replays the live table, field by field', () => {
     gateOn(() => {
       const mapped = mapV1ToLegacyShape(generateEstimate(request()));

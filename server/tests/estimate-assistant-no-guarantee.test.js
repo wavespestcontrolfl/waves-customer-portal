@@ -451,6 +451,42 @@ describe('estimate assistant no-guarantee context', () => {
     }
   });
 
+  test('a frozen pricing-bundle snapshot never beats the CURRENT saved exclusion row', () => {
+    const snapshot = { service: 'rodent_exclusion', label: 'Rodent Exclusion — Wire Mesh Points', amount: 150, price: 150,
+      includesReentryGuarantee: true, guaranteeRenewalPrice: 199 };
+    const currentSpot = { service: 'rodent_exclusion', label: snapshot.label, amount: 150, price: 150 };
+    const currentWhole = { ...currentSpot, includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
+    const build = (saved) => buildEstimateAssistantContext({
+      estimate: { onetime_total: 150 },
+      estData: { result: { oneTime: { items: saved } } },
+      pricingBundle: { anchorOneTimePrice: 150, oneTimeBreakdown: { items: [snapshot] } },
+      noGuaranteeClaims: true,
+    });
+    const terms = (context) => context.oneTime.items.flatMap((row) => row.purchasedTerms || []);
+    const answer = (context) => answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context);
+
+    // Current spot seal: the snapshot's guarantee and old renewal are not promised.
+    const spot = build([currentSpot]);
+    expect(terms(spot)).toEqual([]);
+    expect(answer(spot)).not.toContain('1-year re-entry guarantee');
+    expect(answer(spot)).not.toContain('$199');
+    // Current exclusion removed from the saved result: also nothing.
+    const removed = build([{ service: 'rodent_trapping', label: 'Rodent Trapping', amount: 350, price: 350 }]);
+    expect(terms(removed)).toEqual([]);
+    // Current whole-home row: its own renewal price replaces the snapshot's.
+    const whole = build([currentWhole]);
+    expect(terms(whole)).toContain('Renew the guarantee yearly for $249.');
+    expect(terms(whole)).not.toContain('Renew the guarantee yearly for $199.');
+    // No saved rows at all (inputs-only, replayed live): the priced row's own evidence stands.
+    const inputsOnly = buildEstimateAssistantContext({
+      estimate: { onetime_total: 150 },
+      estData: {},
+      pricingBundle: { anchorOneTimePrice: 150, oneTimeBreakdown: { items: [snapshot] } },
+      noGuaranteeClaims: true,
+    });
+    expect(terms(inputsOnly)).toContain('Renew the guarantee yearly for $199.');
+  });
+
   test('the flag on a non-exclusion row gives no Ask Waves terms', () => {
     const row = { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, price: 650, includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
     const context = buildEstimateAssistantContext({

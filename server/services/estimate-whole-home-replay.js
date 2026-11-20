@@ -9,27 +9,20 @@
  * and Tree & Shrub knob replays, shared by BOTH authoritative replay paths (estimate-public#savedFloorReplayOverrides and
  * admin-estimate-persistence#serverRecomputeFromEstimateData).
  *
- * Trusted source: the SAVED priced rows of the estimate (result one-time rows, else the raw engine result), which the pricer
- * stamped with wholeHomeMinimum and guaranteeRenewalPrice. Never client-posted input: the engine honors the signal only on
+ * Trusted source: the SAVED priced rows of the estimate, read through the repo's authoritative container
+ * (estimate-result-container storedRodentExclusionRows: mapped, nested and raw rows of the container that holds the
+ * CURRENT priced result), which the pricer stamped with wholeHomeMinimum and guaranteeRenewalPrice. Never client-posted
+ * input: the engine honors the signal only on
  * a savedEstimateReplay, and the key is stripped from posted bodies (estimate-client-identity-fields). A row saved before the
  * stamp carries a missing value: it replays the live table (per field).
  */
-function savedRows(estData) {
-  const oneTime = estData?.result?.oneTime || {};
-  return [
-    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
-    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
-    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
-  ];
-}
-
 const positive = (value) => (Number(value) > 0 ? Number(value) : null);
 
 // { minimum, renewal } from the first saved whole-home exclusion row that carries either, else null (replay live).
 function wholeHomeSealReplaySignal(estData) {
-  const { isRodentExclusionRow } = require('../../shared/estimate-purchased-warranty.cjs');
-  for (const row of savedRows(estData)) {
-    if (!isRodentExclusionRow(row) || row.includesReentryGuarantee !== true) continue;
+  const { hasIncludedReentryGuarantee } = require('../../shared/estimate-purchased-warranty.cjs');
+  for (const row of require('./estimate-result-container').storedRodentExclusionRows(estData)) {
+    if (!hasIncludedReentryGuarantee(row)) continue;
     const minimum = positive(row.wholeHomeMinimum);
     const renewal = positive(row.guaranteeRenewalPrice);
     if (minimum || renewal) return { minimum, renewal };

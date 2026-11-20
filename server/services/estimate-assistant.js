@@ -485,6 +485,16 @@ function includedReentryProjection(item) {
   return isRodentExclusionRow(item) ? { purchasedTerms } : {};
 }
 
+// The priced rows (the pricing bundle, possibly a frozen send snapshot) never state the included guarantee on their
+// own once the estimate has CURRENT saved rows: a current exclusion row without it (a spot seal) or no current
+// exclusion row at all (removed) clears it, and a current whole-home row's own terms (renewal price) replace the
+// snapshot's. An estimate with no saved rows (inputs-only, replayed live) keeps the priced rows' evidence.
+function reconcileIncludedGuarantee(pricedRows, currentSavedRows) {
+  if (!currentSavedRows.length) return pricedRows;
+  const currentTerms = currentSavedRows.find((row) => isRodentExclusionRow(row) && row.purchasedTerms?.length)?.purchasedTerms || [];
+  return pricedRows.map((row) => (isRodentExclusionRow(row) ? { ...row, purchasedTerms: currentTerms } : row));
+}
+
 function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
   const primaryLabelsByService = new Map();
   for (const row of primaryRows) {
@@ -917,7 +927,8 @@ function buildEstimateAssistantContext({
     { allowFallbackOnly: pricingRecurringRows.length === 0 },
   );
   const oneTimeEvidenceGroups = oneTimeEvidenceGroupsFromEstimateData(parsedData);
-  const pricedOneTimeRows = oneTimeRowsFromPricing(pricingBundle, oneTimeEvidenceGroups);
+  const currentSavedOneTimeRows = currentOneTimeRowsFromEstimateData(parsedData);
+  const pricedOneTimeRows = reconcileIncludedGuarantee(oneTimeRowsFromPricing(pricingBundle, oneTimeEvidenceGroups), currentSavedOneTimeRows);
   const oneTimeServices = mergeOneTimeServiceRows(
     pricedOneTimeRows,
     oneTimeRowsFromEstimateData(parsedData),
@@ -926,7 +937,7 @@ function buildEstimateAssistantContext({
   // result. oneTimeRowsFromEstimateData also keeps rows only an older
   // engineResult retains; those were removed and must never be advertised.
   const currentOneTimeKeys = new Set(
-    [...pricedOneTimeRows, ...currentOneTimeRowsFromEstimateData(parsedData)].map(oneTimeRowScopeKey),
+    [...pricedOneTimeRows, ...currentSavedOneTimeRows].map(oneTimeRowScopeKey),
   );
   const oneTimeTotal = Number(pricingBundle.anchorOneTimePrice || estimate.onetime_total || estimate.onetimeTotal);
   const hasOneTimeValue = (Number.isFinite(oneTimeTotal) && oneTimeTotal > 0) || oneTimeServices.length > 0;
