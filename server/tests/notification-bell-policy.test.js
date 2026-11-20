@@ -804,10 +804,14 @@ describe('missed-call bell eligibility (customer communication, owner ruling 202
     expect(missedCallEligible({ ...base, answered_by: 'voicemail', recording_sid: null })).toBe(true); // hung up at the prompt
     expect(missedCallEligible({ ...base, answered_by: 'unknown' })).toBe(true);
   });
-  test('no recorded outcome (Studio status_callback fallback rows): only an unanswered Twilio status counts as missed (codex r4)', () => {
+  test('no recorded outcome (Studio status_callback fallback rows): an unanswered Twilio status counts as missed (codex r4)', () => {
     expect(missedCallEligible({ ...base, answered_by: null, status: 'no-answer' })).toBe(true);
     expect(missedCallEligible({ ...base, answered_by: null, status: 'busy' })).toBe(true);
-    expect(missedCallEligible({ ...base, answered_by: null, status: 'completed' })).toBe(false); // may have been handled by the flow
+    // A customer's completed call with no outcome and no recording rings (owner 2026-10-20); a recording or an AI outcome keeps it out.
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'completed' })).toBe(true);
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'completed', recording_sid: 'RE1' })).toBe(false);
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'completed', call_outcome: 'ai_handled' })).toBe(false);
+    expect(missedCallEligible({ ...base, customer_id: null, answered_by: null, status: 'completed' })).toBe(false);
     expect(missedCallEligible({ ...base, answered_by: null, status: 'failed' })).toBe(false);
     expect(missedCallEligible({ ...base, answered_by: undefined, status: undefined })).toBe(false);
   });

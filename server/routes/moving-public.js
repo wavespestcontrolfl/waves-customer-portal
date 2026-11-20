@@ -1,8 +1,7 @@
 /**
  * Public moving page routes — /api/public/moving/:token.
  *
- * The link the office sends a customer who is moving (owner 2026-11-02, dark
- * behind GATE_MOVING_FLOW). No auth: the 48-hex token on customer_moves is the
+ * The link the office sends a customer who is moving (owner 2026-11-02). No auth: the 48-hex token on customer_moves is the
  * only gate, the same model as the price-change and re-service pages.
  *
  * Minimal PII (same contract as routes/price-change-public.js): first name,
@@ -16,7 +15,7 @@
  * POST /:token/submit  save the move; a checkId names the address check the
  *                      customer confirmed. Answers the fixed receipt sentences
  *
- * Gate off, a malformed token, an unknown token and a closed move all answer
+ * A malformed token, an unknown token and a closed move all answer
  * the same 404. This route sends no message and changes no visit, price or
  * property.
  */
@@ -24,7 +23,6 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const logger = require('../services/logger');
-const { movingFlowLive } = require('../config/feature-gates');
 const Moves = require('../services/customer-moves');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 // A knex error message carries the query's bindings (typed addresses, link
@@ -39,10 +37,8 @@ const PRIVACY_HEADERS = {
 
 const NOT_FOUND = { error: 'Not found' };
 
-// Dark = unobservable: no headers a probe could tell apart from any other 404.
 router.use((req, res, next) => {
   res.set(PRIVACY_HEADERS);
-  if (!movingFlowLive()) return res.status(404).json(NOT_FOUND);
   return next();
 });
 

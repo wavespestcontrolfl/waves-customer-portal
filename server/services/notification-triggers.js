@@ -680,9 +680,8 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => ({
       title: `Missed call — ${p.name || 'a customer'}`,
-      // GATE_MISSED_CALL_ALERT_DETAIL: the producer adds line / duration /
-      // next visit to the payload only with the gate on; without them this is
-      // the original sentence, character for character.
+      // The producer adds line / duration / next visit to the payload; without
+      // them this is the original sentence.
       body: require('./missed-call-alert-detail').formatMissedCallBody(p),
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).

@@ -860,7 +860,7 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
     applies: async () => true,
   },
   {
-    // A moving page (GATE_MOVING_FLOW) shows the customer's first name, plan
+    // A moving page shows the customer's first name, plan
     // services and move details, and its holder can change the move. Only /sms
     // binds it to the recipient (checkMovingLinks); a queued text keeps the old
     // phone and replays later, so it never carries one (GH Codex security
@@ -1591,26 +1591,20 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
 // The account-scoped kinds together: the appointment gate is re-read at the
 // send (every /appointment route 404s the moment it is off — r2 P1), then
 // each kind binds to the recipient's account.
-// A moving page link (GATE_MOVING_FLOW) shows the customer's first name, plan
+// A moving page link shows the customer's first name, plan
 // services and move details, and its holder can change the move: bound to
 // the recipient's account at the send like a report link (GH Codex security
 // review on #7486). A short link arrives expanded to its /moving/ target
-// (expandedView). The page must still open at the send: gate on, a move that
+// (expandedView). The page must still open at the send: a move that
 // is not closed (else its link is a 404). A look-alike host is not a Waves
-// link and is not judged. A gates module without the reader (a test mock)
-// reads as off: fail closed.
-function movingGateOn() {
-  const gates = require('../config/feature-gates');
-  return typeof gates.movingFlowLive === 'function' && gates.movingFlowLive();
-}
+// link and is not judged.
 // A live moving token ANYWHERE in the message other than the path token of a
 // canonical owned /moving/<token> link (GH Codex security reviews on #7486):
 // a foreign host that redirects to the real page, a query parameter (also on
 // a canonical link: /moving/<B>?shared=<A>), a percent-encoded or nested copy
 // would all skip the owner binding. Every run is fully decoded and every
 // 48-hex window is looked up against moves that still open, except each
-// canonical link's own path token, which the owner binding judges. Gate off:
-// every moving page is a 404, so nothing is looked up.
+// canonical link's own path token, which the owner binding judges.
 // The scan is bounded (GH Codex security review on #7486): an SMS body is at
 // most 1,600 characters (sms-guard validateOutbound), so a longer text can
 // never be sent. Short links expand, so the runs may total 4x that; past it,
@@ -1619,7 +1613,6 @@ function movingGateOn() {
 const MOVING_SCAN_MAX_CHARS = 6400;
 const MOVING_SCAN_MAX_WINDOWS = 2000;
 async function strayMovingTokenScan(runs, hosts, conn = db) {
-  if (!movingGateOn()) return null;
   if (runs.reduce((total, run) => total + run.length, 0) > MOVING_SCAN_MAX_CHARS) return 'too_long';
   const windows = new Set();
   const bound = new Set();
@@ -1652,9 +1645,6 @@ async function checkMovingLinks(ctx, moveIds) {
   for (const run of linkRuns(ctx.runs, /\/moving\//i)) {
     const token = canonicalPortalToken(run, ctx.hosts, MOVING_PATH_RE, ANY_SCHEME);
     if (!token) continue;
-    if (!movingGateOn()) {
-      return refuseSend('Moving links are switched off (GATE_MOVING_FLOW) — remove the moving link before sending.');
-    }
     const move = await db('customer_moves').where({ token: token.toLowerCase() }).first('id', 'customer_id', 'status');
     if (!move || move.status === 'closed') return refuseSend('This moving link no longer opens — remove it and insert a fresh one.');
     const bad = await onRecipientAccount(move.customer_id, 'moving link');
@@ -2135,7 +2125,7 @@ async function visitCardRequestLinked(runs, hosts, conn) {
  * itself verify: reschedule and track (scheduled_services tokens), re-service
  * (customers.reservice_token), pay (invoices.token), estimate
  * (estimates.token), referral (the public /r/ resolver's three paths) and the
- * moving page (customer_moves.token, GATE_MOVING_FLOW), owned-host
+ * moving page (customer_moves.token), owned-host
  * links only. Short codes are judged by their stored target as well as by the
  * in-place expansion (which leaves an unpaid invoice's /pay target wrapped —
  * Codex r5 on #6266 P1), and a code with no row is unresolved. The
