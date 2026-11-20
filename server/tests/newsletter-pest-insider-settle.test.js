@@ -121,6 +121,10 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
   return { writes, reads, events };
 }
 
+// A flip between 'sent' and 'failed' starts a new episode: the told marks before it go.
+const NEW_EPISODE_SQL = "(coalesce(diagnostics, '{}'::jsonb) - array['outcomeToldAt', 'blockedToldAt', 'recoveredToldAt', 'failureToldAt']) || ?::jsonb";
+const newEpisode = (fields) => ({ sql: NEW_EPISODE_SQL, bindings: [JSON.stringify(fields)] });
+
 // The told mark: written after the alert reached someone, while the row still holds that outcome.
 // A 'blocked' alert has its own (blockedToldAt).
 const toldMark = (id, status, at = IN_WINDOW, mark = 'outcomeToldAt') => ({
@@ -253,12 +257,13 @@ test.each([
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(writes).toEqual([
-    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: 'did not go out: its send ended, and no reader got it' }) },
+    // A flip: a new episode, whose alert has a key of its own.
+    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: 'did not go out: its send ended, and no reader got it', diagnostics: newEpisode({ episode: 1 }) }) },
     toldMark('issue-1', 'failed'),
   ]);
   expect(mockTrigger).toHaveBeenCalledTimes(1);
   expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Did not go out: its send ended, and no reader got it']);
-  expect(mockTrigger.mock.calls[0][2]).toEqual({ dedupeKey: 'pest-insider-outcome:issue-1' });
+  expect(mockTrigger.mock.calls[0][2]).toEqual({ dedupeKey: 'pest-insider-outcome:issue-1:1' });
 });
 
 test('a sent issue some of whose readers hard-bounced stays sent, with no alert', async () => {
@@ -318,10 +323,10 @@ test.each([
     [{ table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: expect.stringMatching(/^went out to 87 readers, but 1 readers'/) }) }], null],
   ['a Resume left nobody: its reason clears, quietly', TOLD_BLOCKED, { got: 88, left: 0 }, 1, CLEARED, null],
   ['its alert never reached anyone, and a Resume left nobody: its reason still clears, with no alert', UNTOLD_BLOCKED, { got: 88, left: 0 }, 1, CLEARED, null],
-  ['every reader it reached bounced later: no reader got it after all, so it fails, with its own alert', TOLD_BLOCKED, { got: 0, left: 3, refused: 85 }, 1, [
-    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: 'did not go out: its send ended, and no reader got it' }) },
+  ['every reader it reached bounced later: no reader got it after all, so it fails, with its own alert (a new episode: its block mark goes)', TOLD_BLOCKED, { got: 0, left: 3, refused: 85 }, 1, [
+    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: 'did not go out: its send ended, and no reader got it', diagnostics: newEpisode({ episode: 1 }) }) },
     toldMark('issue-1', 'failed'),
-  ], 'pest-insider-outcome:issue-1'],
+  ], 'pest-insider-outcome:issue-1:1'],
 ])('a sent issue whose readers were blocked is still read: %s', async (_label, issue, counts, settled, expected, alertKey) => {
   const { writes } = fakeDb({ issues: [issue], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts });
 
@@ -375,7 +380,7 @@ test('a failed issue whose send became sent (a Resume that finished, or delivery
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
     errors: [correction.charAt(0).toUpperCase() + correction.slice(1)], outcome: true,
-  }), { dedupeKey: 'pest-insider-recovered:issue-1:after-2026-12-03T12:30:00.000Z' });
+  }), { dedupeKey: 'pest-insider-recovered:issue-1:1' });
   expect(writes).toEqual([
     {
       table: 'pest_insider_issues',
@@ -383,9 +388,9 @@ test('a failed issue whose send became sent (a Resume that finished, or delivery
       patch: expect.objectContaining({
         status: 'sent',
         reason: correction,
-        // The failure stays on record as told; the correction is told next. A recovery starts over:
-        // the marks of the alerts before it are cleared.
-        diagnostics: { sql: RECOVERY_SQL, bindings: [JSON.stringify({ failureToldAt: '2026-12-03T12:30:00.000Z' })] },
+        // A flip: a new episode (the marks before it go), which records the told failure it recovered
+        // from; the correction is told next.
+        diagnostics: newEpisode({ episode: 1, failureToldAt: '2026-12-03T12:30:00.000Z' }),
       }),
     },
     // Its own mark: the issue stays on the lists, read as any sent issue is.
@@ -393,26 +398,25 @@ test('a failed issue whose send became sent (a Resume that finished, or delivery
   ]);
 });
 
-const RECOVERY_SQL = "(coalesce(diagnostics, '{}'::jsonb) - array['outcomeToldAt', 'blockedToldAt', 'recoveredToldAt']) || ?::jsonb";
 const RECOVERED_85 = 'went out after all: 85 readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume';
 // Recovered from a failure the owner was told at 12:30; the correction reached no one yet.
-const UNTOLD_CORRECTION = { ...ISSUE, status: 'sent', reason: RECOVERED_85, diagnostics: { failureToldAt: '2026-12-03T12:30:00.000Z' } };
-const CORRECTION_KEY = { dedupeKey: 'pest-insider-recovered:issue-1:after-2026-12-03T12:30:00.000Z' };
+const UNTOLD_CORRECTION = { ...ISSUE, status: 'sent', reason: RECOVERED_85, diagnostics: { episode: 1, failureToldAt: '2026-12-03T12:30:00.000Z' } };
+const CORRECTION_KEY = { dedupeKey: 'pest-insider-recovered:issue-1:1' };
 // Recovered from a failure the owner was told at 12:30, and told of the correction.
 const TOLD_RECOVERED = {
   ...ISSUE, status: 'sent', reason: 'went out after all: 85 readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume',
-  diagnostics: { failureToldAt: '2026-12-03T12:30:00.000Z', recoveredToldAt: '2026-12-03T12:45:00.000Z' },
+  diagnostics: { episode: 1, failureToldAt: '2026-12-03T12:30:00.000Z', recoveredToldAt: '2026-12-03T12:45:00.000Z' },
 };
 
 test.each([
-  ["a block after its Resume gets its own alert, keyed by the failure it recovered from (one keyed by the issue alone was told before it)", { got: 85, left: 3 }, [
+  ["a block after its Resume gets its own alert, keyed by its episode (one keyed by the issue alone was told before it)", { got: 85, left: 3 }, [
     { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: BLOCKED_REASON }) },
     toldMark('issue-1', 'sent', IN_WINDOW, 'blockedToldAt'),
-  ], 'pest-insider-blocked:issue-1:after-2026-12-03T12:30:00.000Z'],
-  ['no reader got it after all (every one it reached bounced later): it fails again, with a new alert', { got: 0, left: 0, refused: 85 }, [
-    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: 'did not go out: its send ended, and no reader got it' }) },
+  ], 'pest-insider-blocked:issue-1:1'],
+  ['no reader got it after all (every one it reached bounced later): it fails again, with a new alert (a new episode)', { got: 0, left: 0, refused: 85 }, [
+    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: 'did not go out: its send ended, and no reader got it', diagnostics: newEpisode({ episode: 2 }) }) },
     toldMark('issue-1', 'failed'),
-  ], 'pest-insider-outcome:issue-1:after-2026-12-03T12:30:00.000Z'],
+  ], 'pest-insider-outcome:issue-1:2'],
   ['nobody left to resume: its reason clears, quietly, as any sent issue\'s does', { got: 85, left: 0 }, CLEARED, null],
 ])('a recovered issue whose correction was told is still read: %s', async (_label, counts, expected, alertKey) => {
   const { writes } = fakeDb({ issues: [TOLD_RECOVERED], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts });
@@ -424,8 +428,8 @@ test.each([
 });
 
 test.each([
-  ['a sent issue', { ...ISSUE, status: 'sent' }, 'pest-insider-outcome:issue-1'],
-  ['a recovered one whose correction reached no one: never "went out after all" to no reader', UNTOLD_CORRECTION, 'pest-insider-outcome:issue-1:after-2026-12-03T12:30:00.000Z'],
+  ['a sent issue', { ...ISSUE, status: 'sent' }, 'pest-insider-outcome:issue-1:1'],
+  ['a recovered one whose correction reached no one: never "went out after all" to no reader', UNTOLD_CORRECTION, 'pest-insider-outcome:issue-1:2'],
 ])('no reader got it, and nobody is left to resume (the readers it was blocked for can no longer be mailed): %s fails, with its alert', async (_label, issue, alertKey) => {
   const { writes } = fakeDb({ issues: [issue], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 0, left: 0, refused: 0 } });
 
@@ -440,26 +444,28 @@ test.each([
 test('a second recovery starts over: it clears every earlier mark, records the failure it recovered from, and its correction has a new key', async () => {
   const failedAgain = {
     ...ISSUE, status: 'failed', reason: 'did not go out: its send ended, and no reader got it',
-    diagnostics: { ...TOLD_RECOVERED.diagnostics, blockedToldAt: '2026-12-03T13:00:00.000Z', outcomeToldAt: '2026-12-03T14:00:00.000Z' },
+    // Failed again in episode 2 (told at 14:00); stale marks from before it are cleared too.
+    diagnostics: { ...TOLD_RECOVERED.diagnostics, episode: 2, blockedToldAt: '2026-12-03T13:00:00.000Z', outcomeToldAt: '2026-12-03T14:00:00.000Z' },
   };
   const { writes } = fakeDb({ issues: [failedAgain], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 } });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
-  expect(writes[0].patch.diagnostics).toEqual({ sql: RECOVERY_SQL, bindings: [JSON.stringify({ failureToldAt: '2026-12-03T14:00:00.000Z' })] });
-  expect(mockTrigger.mock.calls.map((call) => call[2])).toEqual([{ dedupeKey: 'pest-insider-recovered:issue-1:after-2026-12-03T14:00:00.000Z' }]);
+  expect(writes[0].patch.diagnostics).toEqual(newEpisode({ episode: 3, failureToldAt: '2026-12-03T14:00:00.000Z' }));
+  expect(mockTrigger.mock.calls.map((call) => call[2])).toEqual([{ dedupeKey: 'pest-insider-recovered:issue-1:3' }]);
   expect(writes[1]).toEqual(toldMark('issue-1', 'sent', IN_WINDOW, 'recoveredToldAt'));
 });
 
 test('a failure after a recovery whose worker stopped before marking it told is found by its own key', async () => {
-  const failedAgain = { ...ISSUE, status: 'failed', reason: 'did not go out: its send ended, and no reader got it', diagnostics: { ...TOLD_RECOVERED.diagnostics } };
+  // Failed again in episode 2; its alert was delivered, but its worker stopped before the mark.
+  const failedAgain = { ...ISSUE, status: 'failed', reason: 'did not go out: its send ended, and no reader got it', diagnostics: { episode: 2 } };
   const bells = [
     { dedupeKey: 'pest-insider-outcome:issue-1', created_at: new Date('2026-12-03T12:30:00Z') },
-    { dedupeKey: 'pest-insider-outcome:issue-1:after-2026-12-03T12:30:00.000Z', created_at: new Date('2026-12-03T14:00:00Z') },
+    { dedupeKey: 'pest-insider-outcome:issue-1:2', created_at: new Date('2026-12-03T14:00:00Z') },
   ];
   const { writes } = fakeDb({ issues: [failedAgain], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 }, bells });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
-  expect(writes[0].patch.diagnostics.bindings).toEqual([JSON.stringify({ failureToldAt: '2026-12-03T14:00:00.000Z' })]);
+  expect(writes[0].patch.diagnostics).toEqual(newEpisode({ episode: 3, failureToldAt: '2026-12-03T14:00:00.000Z' }));
 });
 
 test('a send whose count says nobody, but whose ledger shows every planned reader got it, is sent, quietly', async () => {
@@ -476,8 +482,8 @@ test('a worker that delivered the failure alert but stopped before marking the r
   const { writes } = fakeDb({ issues: [failed], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 }, bells });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
-  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.anything(), { dedupeKey: 'pest-insider-recovered:issue-1:after-2026-12-03T12:30:00.000Z' });
-  expect(writes[0].patch.diagnostics.bindings).toEqual([JSON.stringify({ failureToldAt: '2026-12-03T12:30:00.000Z' })]);
+  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.anything(), { dedupeKey: 'pest-insider-recovered:issue-1:1' });
+  expect(writes[0].patch.diagnostics).toEqual(newEpisode({ episode: 1, failureToldAt: '2026-12-03T12:30:00.000Z' }));
 });
 
 test('a failed issue nobody was told about, whose send recovered to sent, becomes sent quietly', async () => {
@@ -485,8 +491,24 @@ test('a failed issue nobody was told about, whose send recovered to sent, become
   const { writes } = fakeDb({ issues: [failed], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 } });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
-  expect(writes).toEqual([{ table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: null }) }]);
+  // A flip all the same: a new episode, with no correction owed.
+  expect(writes).toEqual([{ table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: null, diagnostics: newEpisode({ episode: 1 }) }) }]);
   expect(mockTrigger).not.toHaveBeenCalled();
+});
+
+test('a quiet recovery starts a new episode: a block told before the failure it recovered from keeps no later block from being told', async () => {
+  // Told of a block in episode 0, then failed (episode 1: that mark went), and its failure alert reached no one.
+  const failed = { ...ISSUE, status: 'failed', reason: 'did not go out: its send ended, and no reader got it', diagnostics: { episode: 1 } };
+  let { writes } = fakeDb({ issues: [failed], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 } });
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(writes[0].patch.diagnostics).toEqual(newEpisode({ episode: 2 }));
+  expect(mockTrigger).not.toHaveBeenCalled();
+
+  // A new block in episode 2: told, under a key no earlier alert used.
+  ({ writes } = fakeDb({ issues: [{ ...ISSUE, status: 'sent', diagnostics: { episode: 2 } }], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 3 } }));
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(mockTrigger.mock.calls.map((call) => call[2])).toEqual([{ dedupeKey: 'pest-insider-blocked:issue-1:2' }]);
+  expect(writes.at(-1)).toEqual(toldMark('issue-1', 'sent', IN_WINDOW, 'blockedToldAt'));
 });
 
 
@@ -502,7 +524,7 @@ test.each([
   ['a block came before the next minute: the block is told (its own alert), never a stale "nothing to resume"', UNTOLD_CORRECTION, { got: 85, left: 3 }, [
     { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: BLOCKED_REASON }) },
     toldMark('issue-1', 'sent', IN_WINDOW, 'blockedToldAt'),
-  ], { dedupeKey: 'pest-insider-blocked:issue-1:after-2026-12-03T12:30:00.000Z' }, null],
+  ], { dedupeKey: 'pest-insider-blocked:issue-1:1' }, null],
   ['that block was told, and a Resume then left nobody: no correction (the block alert said it went out); its reason clears, quietly',
     { ...UNTOLD_CORRECTION, reason: BLOCKED_REASON, diagnostics: { ...UNTOLD_CORRECTION.diagnostics, blockedToldAt: '2026-12-03T13:00:00.000Z' } },
     { got: 88, left: 0 }, CLEARED, null, null],
@@ -523,7 +545,7 @@ test.each([
 
 test("a block alert a worker delivered but did not mark told: its keyed bell row counts, so a Resume that left nobody sends no correction", async () => {
   const issue = { ...UNTOLD_CORRECTION, reason: BLOCKED_REASON };
-  const bells = [{ dedupeKey: 'pest-insider-blocked:issue-1:after-2026-12-03T12:30:00.000Z', created_at: new Date('2026-12-03T13:00:00Z') }];
+  const bells = [{ dedupeKey: 'pest-insider-blocked:issue-1:1', created_at: new Date('2026-12-03T13:00:00Z') }];
   const { writes } = fakeDb({ issues: [issue], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 88, left: 0 }, bells });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });

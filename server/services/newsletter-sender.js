@@ -2253,19 +2253,24 @@ const TOLD_MARKS = Object.freeze({ outcome: 'outcomeToldAt', blocked: 'blockedTo
 async function alertToldAt(trx, issueId, diagnostics, alert) {
   if (diagnostics[TOLD_MARKS[alert]]) return diagnostics[TOLD_MARKS[alert]];
   const bell = await trx('notifications').where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [issueAlertKey(alert, issueId, diagnostics.failureToldAt)])
+    .whereRaw("metadata->>'dedupeKey' = ?", [issueAlertKey(alert, issueId, diagnostics.episode)])
     .first('created_at');
   return bell ? new Date(bell.created_at).toISOString() : null;
 }
 
 /**
  * A planned issue's alert key (one alert per key: a second one with the same key counts as told).
- * An issue that recovered from a told failure (failureToldAt) keys its later alerts by that failure,
- * so a block or a failure after a Resume is a new alert, never taken for one told before it.
+ * Each flip between 'sent' and 'failed' starts a new episode (diagnostics.episode, settlePlannedIssue),
+ * and an alert in a later episode carries its number, so a block or a failure after a Resume, or a
+ * recovery after a later failure, is a new alert, never taken for one told before it.
  */
-function issueAlertKey(alert, issueId, failureToldAt) {
-  return `pest-insider-${alert}:${issueId}${failureToldAt ? `:after-${failureToldAt}` : ''}`;
+function issueAlertKey(alert, issueId, episode) {
+  return `pest-insider-${alert}:${issueId}${episode ? `:${episode}` : ''}`;
 }
+
+// A new episode's diagnostics: the told marks of the one before it go (failureToldAt too: a correction
+// is owed only in the episode that recovered from a told failure).
+const NEW_EPISODE_SQL = "(coalesce(diagnostics, '{}'::jsonb) - array['outcomeToldAt', 'blockedToldAt', 'recoveredToldAt', 'failureToldAt']) || ?::jsonb";
 
 /**
  * A stale claim's release, as the resume path releases one: its worker's next heartbeat finds no
@@ -2297,8 +2302,10 @@ async function releaseStaleClaim(trx, send, status) {
  * reached someone, and only while it still holds the outcome that alert told; an untold row is
  * tried again each minute, within the lookback. A 'blocked' alert and a 'recovered' correction have
  * their own marks (blockedToldAt, recoveredToldAt), so their row stays untold: a later outcome (a
- * block after a Resume, or no reader got it after all) still gets its own alert. A recovery starts
- * over: it clears the marks of the alerts before it. Returns whether it changed the row.
+ * block after a Resume, or no reader got it after all) still gets its own alert. Each flip between
+ * 'sent' and 'failed' (a recovery, told or quiet, or a sent issue no reader got after all) starts a
+ * new episode: it clears the told marks before it, and its alerts get keys of their own; a told
+ * recovery records the failure it recovered from (failureToldAt). Returns whether it changed the row.
  */
 async function settlePlannedIssue({ id, send_id: sendId }, now) {
   const settled = await db.transaction(async (trx) => {
@@ -2317,28 +2324,25 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
     if (outcome.revokeClaim) await releaseStaleClaim(trx, send, outcome.status);
     // The row always records the outcome.
     const reason = 'reason' in outcome ? (outcome.reason && outcome.reason.slice(0, 500)) : issue.reason;
-    const changed = outcome.status !== issue.status || reason !== issue.reason || Boolean(outcome.failureToldAt);
+    const changed = outcome.status !== issue.status || reason !== issue.reason;
+    // Both outcomes are 'sent' or 'failed': a settled issue that changes status flips.
+    const flipped = issue.status !== 'scheduled' && outcome.status !== issue.status;
+    const episode = Number(issueDiagnostics(issue).episode || 0) + Number(flipped);
     if (changed) {
       await trx('pest_insider_issues').where({ id }).update({
         status: outcome.status,
         reason,
-        ...(outcome.failureToldAt ? {
-          diagnostics: trx.raw(
-            "(coalesce(diagnostics, '{}'::jsonb) - array['outcomeToldAt', 'blockedToldAt', 'recoveredToldAt']) || ?::jsonb",
-            [JSON.stringify({ failureToldAt: outcome.failureToldAt })],
-          ),
-        } : {}),
+        ...(flipped ? { diagnostics: trx.raw(NEW_EPISODE_SQL, [JSON.stringify({ episode, failureToldAt: outcome.failureToldAt })]) } : {}),
         updated_at: new Date(),
       });
     }
-    const failureToldAt = outcome.failureToldAt || issueDiagnostics(issue).failureToldAt;
-    return { changed, outcome, reason, failureToldAt, subject: send?.subject || issue.subject };
+    return { changed, outcome, reason, episode, subject: send?.subject || issue.subject };
   });
   if (!settled) return false;
   const { outcome, reason } = settled;
   if (!outcome.alert) return settled.changed;
   const told = await raiseSendAlert(sendId, settled.subject, reason.charAt(0).toUpperCase() + reason.slice(1), {
-    outcome: true, dedupeKey: issueAlertKey(outcome.alert, id, settled.failureToldAt),
+    outcome: true, dedupeKey: issueAlertKey(outcome.alert, id, settled.episode),
   });
   if (!told) {
     logger.error(`[newsletter-scheduler] Pest Insider issue ${id}: its alert reached no one; the next minute tries again`);
