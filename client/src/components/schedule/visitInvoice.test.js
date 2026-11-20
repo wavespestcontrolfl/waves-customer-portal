@@ -118,7 +118,7 @@ describe('visitInvoiceStatusNote', () => {
 
 describe('paidReportNotSent', () => {
   it('marks only an arrived visit whose attached invoice is paid or covered', () => {
-    const paidOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', checkoutInvoiceStatus: 'paid' };
+    const paidOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', checkoutInvoiceStatus: 'paid', reportAfterPayEnabled: true };
     expect(paidReportNotSent(paidOnSite)).toBe(true);
     expect(paidReportNotSent({ ...paidOnSite, checkoutInvoiceStatus: 'prepaid' })).toBe(true);
     // Money not in yet: the card keeps its usual state.
@@ -128,7 +128,15 @@ describe('paidReportNotSent', () => {
     expect(paidReportNotSent({ ...paidOnSite, status: 'en_route' })).toBe(false);
     expect(paidReportNotSent({ ...paidOnSite, status: 'completed' })).toBe(false);
     // No attached invoice.
-    expect(paidReportNotSent({ status: 'on_site' })).toBe(false);
+    expect(paidReportNotSent({ status: 'on_site', reportAfterPayEnabled: true })).toBe(false);
     expect(paidReportNotSent(null)).toBe(false);
+  });
+
+  it('stays off unless the row says the gate is on and this visit sends a report', () => {
+    const paidOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', checkoutInvoiceStatus: 'paid' };
+    // Gate off, or a completion that sends the customer no report (internal-only, delivery disabled): the server sends false.
+    expect(paidReportNotSent({ ...paidOnSite, reportAfterPayEnabled: false })).toBe(false);
+    // An older payload without the field.
+    expect(paidReportNotSent(paidOnSite)).toBe(false);
   });
 });

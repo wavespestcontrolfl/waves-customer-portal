@@ -60,8 +60,11 @@ export function attachedVisitInvoice(service) {
 // arrived at (on_site) whose attached invoice is settled. With
 // GATE_REPORT_AFTER_PAY on, a payment on the visit day no longer closes the
 // visit, so its report is still owed (owner 2026-11-19, *report after pay*).
+// The schedule row's reportAfterPayEnabled is true only while that gate is on
+// and the visit's completion sends the customer a report.
 export function paidReportNotSent(service) {
-  return String(service?.status || '').toLowerCase() === 'on_site'
+  return service?.reportAfterPayEnabled === true
+    && String(service.status || '').toLowerCase() === 'on_site'
     && Boolean(attachedVisitInvoice(service)?.settled);
 }
 

@@ -195,7 +195,15 @@ async function probeVisitRefusal(conn, svc) {
 // refusal carries it as `visit` so the caller can audit the refusal — and
 // resume its OWN partially committed closeout on a completed one (see
 // resumableIssuedCloseoutAttempt), never anyone else's.
-async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null } = {}) {
+// deferSameDay (issuedCloseoutTarget for the record_payment card only): with
+// GATE_REPORT_AFTER_PAY on, an arrived visit paid on its own day stays open
+// for its technician's report, and the retry sweep closes it once that day
+// has passed. The card discloses and pins that later close, so this judges
+// such a visit as the sweep will: neither the same-day rule nor a running
+// job timer (it ends before then, and the sweep checks it again) keeps it
+// open; every other refusal still does. The answer carries `deferred: true`:
+// that visit must not be closed today.
+async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null, deferSameDay = false } = {}) {
   if (!invoice) return { svc: null, reason: 'no_invoice' };
   const linked = await linkedVisitForInvoice(conn, invoice);
   if (!linked.svc) return { svc: null, reason: linked.reason, ...(linked.visit ? { visit: linked.visit } : {}) };
@@ -212,7 +220,9 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   } catch (err) {
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
   }
-  const refusedByState = issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger, issuedDay });
+  const deferred = deferSameDay && trigger === 'paid' && reportAfterPayLive()
+    && isArrivedVisitStatus(svc.status) && dateOnly(svc.scheduled_date) === today;
+  const refusedByState = deferred ? null : issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger, issuedDay });
   if (refusedByState) return leaveOpen(refusedByState);
   // Every read from here on is against a visit already in hand: a failed
   // one is an outage of THIS visit's closeout, rethrown carrying the visit
@@ -221,13 +231,13 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // nothing to be audited against and no sweep could ever retry it
   // (pre-push audit P1; probeVisitRefusal already did this for its two reads).
   try {
-    if (await visitJobTimerRunning(conn, svc.id)) return leaveOpen('visit_timer_running');
+    if (!deferred && await visitJobTimerRunning(conn, svc.id)) return leaveOpen('visit_timer_running');
     if (svc.visit_id) {
       const { openMembers } = require('./visit-groups');
       if ((await openMembers(conn, svc.visit_id)).length >= 2) return leaveOpen('grouped_visit');
     }
     const refusal = await probeVisitRefusal(conn, svc);
-    return refusal ? leaveOpen(refusal) : { svc, reason: null, visit: svc };
+    return refusal ? leaveOpen(refusal) : { svc, reason: null, visit: svc, ...(deferred ? { deferred: true } : {}) };
   } catch (err) {
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
   }
@@ -894,9 +904,14 @@ const issuedCloseoutIdempotencyKey = (invoiceId) => `invoice-issued:${invoiceId}
 // any refusal. The same resolver and resume probe the closeout runs, writing
 // no audit row, for the Intelligence Bar card to disclose the effect before it
 // happens. A probe that cannot read throws; the caller treats that as unknown.
-async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, today = etDateString() } = {}) {
+// includeDeferred (the record_payment card only): also name the visit a
+// payment on its day leaves open for the report under GATE_REPORT_AFTER_PAY,
+// which the retry sweep closes after that day, marked `deferred: true` (see
+// resolveVisitForIssuedInvoice deferSameDay). The other cards disclose only
+// what their own run closes now, so they keep the default.
+async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, today = etDateString(), includeDeferred = false } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return null;
-  const resolved = await resolveVisitForIssuedInvoice(conn, invoice, { today, trigger });
+  const resolved = await resolveVisitForIssuedInvoice(conn, invoice, { today, trigger, deferSameDay: includeDeferred });
   let visit = resolved.svc;
   let resuming = false;
   if (!visit && resolved.reason === 'visit_completed'
@@ -904,7 +919,7 @@ async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, toda
     visit = resolved.visit;
     resuming = true;
   }
-  return visit ? { visitId: visit.id, serviceType: visit.service_type || null, date: dateOnly(visit.scheduled_date), updatedAt: visit.updated_at || null, status: visit.status ?? null, resuming } : null;
+  return visit ? { visitId: visit.id, serviceType: visit.service_type || null, date: dateOnly(visit.scheduled_date), updatedAt: visit.updated_at || null, status: visit.status ?? null, resuming, ...(resolved.deferred ? { deferred: true } : {}) } : null;
 }
 
 async function loadCloseoutInvoice(run) {

@@ -136,7 +136,7 @@ const {
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
-const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
@@ -5871,6 +5871,18 @@ async function loadProjectCompletionContextByServiceId(services) {
       // service with its own typed findings (cockroach, German roach
       // knockdowns): /complete requires them and the report flow has none.
       fastCompleteReportEnabled: fastCompleteReportOffered(completionProfile),
+      // GATE_REPORT_AFTER_PAY (owner 2026-11-19, *report after pay*): a payment on the visit day leaves an arrived visit open for
+      // its technician's report. True only while the gate is on and this visit's completion sends the customer a report (the
+      // completion's own delivery posture, as complete-scheduled-service.js reads it), so Dispatch's "Paid, report not sent"
+      // badge never names a report that will not go out. No profile (a lookup outage) is false.
+      reportAfterPayEnabled: Boolean(completionProfile) && require('../config/feature-gates').reportAfterPayLive()
+        && !resolveCompletionDeliveryPosture({
+          typedFindingsType: completionProfile.findingsType || null,
+          completionMode: completionProfile.completionMode,
+          profileDeliveryMode: completionProfile.deliveryMode,
+          specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
+          profileCategory: completionProfile.category,
+        }).suppressCustomerComms,
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -7257,6 +7269,8 @@ router.get('/', async (req, res, next) => {
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_INVOICED_VISITS — see loadProjectCompletionContextByServiceId.
         invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
+        // GATE_REPORT_AFTER_PAY — see loadProjectCompletionContextByServiceId.
+        reportAfterPayEnabled: projectCompletionContext.reportAfterPayEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
@@ -7934,6 +7948,7 @@ router.get('/week', async (req, res, next) => {
           assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
+          reportAfterPayEnabled: projectCompletionContext.reportAfterPayEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,

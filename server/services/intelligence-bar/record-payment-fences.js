@@ -15,7 +15,8 @@
  *           settlement builds the invoice notes from the locked row and the paid UPDATE writes no other unpinned column;
  *         - the ET day is not the day the card showed (midnight passed), or the visit the card said the payment would complete has
  *           been edited since (edit time, scheduled date, service type) or is gone, or a technician started its job timer since (the
- *           closeout's own visitJobTimerRunning: a running timer leaves the visit open, so the promised closeout would not happen);
+ *           closeout's own visitJobTimerRunning: a running timer leaves the visit open, so the promised closeout would not happen;
+ *           not for a close deferred past the visit's day by GATE_REPORT_AFTER_PAY, which the retry sweep runs and checks then);
  *         - an annual-prepay term resolves to the invoice (its tag, its visit's term as the anchor, or a term whose
  *           prepay_invoice_id is this invoice): those settle a prepaid term and stay on the Invoices page.
  *       A lookup that throws aborts the settlement: nothing is recorded (fail closed).
@@ -84,14 +85,19 @@ function settlementFenceFor(pin) {
     if (pin.paymentDate !== etDateString()) throw drift(DATE_TEXT);
     if (pin.closeout && !(await closeoutVisitUnchanged(database, pin.closeout))) throw drift(VISIT_TEXT);
     // A job timer started after the card leaves no mark on the visit row, yet the closeout leaves a visit with a running timer open: the
-    // promised closeout would silently not happen. The closeout's own predicate, on the same handle.
-    if (pin.closeout && await require('../invoice-issued-closeout').visitJobTimerRunning(database, pin.closeout.visitId)) throw drift(TIMER_TEXT);
+    // promised closeout would silently not happen. The closeout's own predicate, on the same handle. Not for a deferred close
+    // (GATE_REPORT_AFTER_PAY): it runs after the visit's day, and the retry sweep checks the timer then.
+    if (pin.closeout && !pin.closeout.deferred && await require('../invoice-issued-closeout').visitJobTimerRunning(database, pin.closeout.visitId)) throw drift(TIMER_TEXT);
     if (await annualTermExists(database, row)) throw drift(ANNUAL_TEXT);
     return true;
   };
   fence.closeoutTarget = pin.closeoutTarget;
-  // The carded visit's facts, pinned with the target and re-asserted by the closeout under the visit's lock.
-  fence.closeoutVisit = pin.closeout ? { serviceType: pin.closeout.serviceType, date: pin.closeout.date, status: pin.closeout.status, updatedAtMs: pin.closeout.updatedAtMs } : null;
+  // The carded visit's facts, pinned with the target and re-asserted by the closeout under the visit's lock. A deferred close pins no
+  // edit time: the visit stays with its technician for the rest of its day, so an edit then is expected. A new date, service type or
+  // status still leaves it open.
+  fence.closeoutVisit = pin.closeout
+    ? { serviceType: pin.closeout.serviceType, date: pin.closeout.date, status: pin.closeout.status, ...(pin.closeout.deferred ? {} : { updatedAtMs: pin.closeout.updatedAtMs }) }
+    : null;
   return fence;
 }
 

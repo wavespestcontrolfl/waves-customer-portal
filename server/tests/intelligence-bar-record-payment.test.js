@@ -467,6 +467,67 @@ describe('confirm', () => {
       delete db.schema;
     });
 
+    // GATE_REPORT_AFTER_PAY (owner 2026-11-19, *report after pay*): a payment on the visit's own day leaves the arrived visit open
+    // for its technician's report, and the daily retry sweep closes it after that day. Pre-push audit P1: the card named no visit,
+    // so its 'none' pin stopped that sweep for good. The card now names the visit as deferred and pins it.
+    describe('a close deferred past the visit day (GATE_REPORT_AFTER_PAY)', () => {
+      const deferred = { ...closeout, status: 'on_site', deferred: true };
+
+      test('the probe asks for a deferred target, and the card says the visit stays open today for the report', async () => {
+        issuedCloseoutTarget.mockResolvedValue(deferred);
+        const card = await preview();
+        expect(issuedCloseoutTarget).toHaveBeenLastCalledWith(expect.anything(), { trigger: 'paid', includeDeferred: true });
+        const text = card.effects.map((e) => e.text).join('\n');
+        expect(text).toMatch(/The linked visit \(Pest Control on 2099-01-01\) stays open today so its technician can send the report\. If it is still open after today, the daily closeout check completes it quietly/);
+        expect(text).not.toMatch(/Also completes the linked visit/);
+        expect(card._version).toMatchObject({ closeout_visit: 'visit-77', closeout_deferred: true });
+        expect(card._approved.settlementFence.closeoutTarget).toBe('visit-77');
+      });
+
+      test('an immediate close keeps the card version it had (no deferred key)', async () => {
+        issuedCloseoutTarget.mockResolvedValue(closeout);
+        const card = await preview();
+        expect(card._version).not.toHaveProperty('closeout_deferred');
+      });
+
+      test('the pin keeps the visit, its type, date and status but no edit time; a running timer does not refuse the payment', async () => {
+        issuedCloseoutTarget.mockResolvedValue(deferred);
+        state.scheduled_services.push(visitRow({ status: 'on_site' }));
+        visitJobTimerRunning.mockImplementation(async () => true);
+        try {
+          const fence = await fenceOf();
+          expect(fence.closeoutTarget).toBe('visit-77');
+          expect(fence.closeoutVisit).toEqual({ serviceType: 'Pest Control', date: '2099-01-01', status: 'on_site' });
+          await expect(fence(db)).resolves.toBe(true);
+          expect(visitJobTimerRunning).not.toHaveBeenCalled();
+          // Between the card and Confirm the visit must still read as the card showed it.
+          state.scheduled_services[0].updated_at = new Date('2099-01-01T10:00:00Z');
+          await expect(fence(db)).rejects.toMatchObject({ statusCode: 409, drift: true });
+        } finally {
+          visitJobTimerRunning.mockImplementation(async () => false);
+          delete db.schema;
+        }
+      });
+
+      test('the closeout\'s same-day refusal is the promise kept: the result says the visit stays open for the report', async () => {
+        issuedCloseoutTarget.mockResolvedValue(deferred);
+        const card = await preview();
+        Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { status: 'paid' }, closeout: { closed: false, reason: 'visit_scheduled_today', visitId: 'visit-77' } } });
+        const res = await confirm(card);
+        expect(res).toMatchObject({ success: true, status: 'paid', visit_closeout: 'deferred' });
+        expect(res.note).toMatch(/The linked visit stays open today so its technician can send the report; if it is still open after today, the daily closeout check completes it\./);
+      });
+
+      test('an immediate card refused for the day still reports the visit as not closed', async () => {
+        issuedCloseoutTarget.mockResolvedValue(closeout);
+        const card = await preview();
+        Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { status: 'paid' }, closeout: { closed: false, reason: 'visit_scheduled_today', visitId: 'visit-77' } } });
+        const res = await confirm(card);
+        expect(res).toMatchObject({ visit_closeout: 'not_completed' });
+        expect(res.note).toMatch(/not closed \(visit_scheduled_today\)/);
+      });
+    });
+
     // Fake only the clock; the rest of the event loop stays real.
     const clockAt = (iso) => jest.useFakeTimers({ now: new Date(iso), doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'clearImmediate', 'queueMicrotask', 'performance'] });
 

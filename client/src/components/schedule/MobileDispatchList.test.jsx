@@ -113,17 +113,19 @@ describe('MobileDispatchList closeout-owed badge', () => {
 });
 
 describe('MobileDispatchList paid-report badge', () => {
-  it('flags an arrived stop whose attached invoice is paid, and no other stop', () => {
+  it('flags an arrived stop whose attached invoice is paid while its row allows it, and no other stop', () => {
     fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
-    const invoice = { checkoutInvoiceId: 'inv-1', checkoutInvoiceTotal: 115, checkoutInvoiceStatus: 'paid' };
+    const invoice = { checkoutInvoiceId: 'inv-1', checkoutInvoiceTotal: 115, checkoutInvoiceStatus: 'paid', reportAfterPayEnabled: true };
     const paidOnSite = { ...SERVICE, ...invoice, id: 'svc-paid', status: 'on_site', technicianId: 'tech-1' };
     const unpaidOnSite = { ...SERVICE, ...invoice, id: 'svc-unpaid', customerName: 'Unpaid Customer', status: 'on_site', checkoutInvoiceStatus: 'sent', technicianId: 'tech-1' };
     const paidDone = { ...SERVICE, ...invoice, id: 'svc-done', customerName: 'Done Customer', status: 'completed', technicianId: 'tech-1' };
+    // Gate off, or a visit whose completion sends the customer no report: the server sends the row flag false.
+    const paidNoReport = { ...SERVICE, ...invoice, id: 'svc-no-report', customerName: 'No Report Customer', status: 'on_site', reportAfterPayEnabled: false, technicianId: 'tech-1' };
     render(
       <MobileDispatchList
         mode="day"
         date="2026-07-15"
-        services={[paidOnSite, unpaidOnSite, paidDone]}
+        services={[paidOnSite, unpaidOnSite, paidDone, paidNoReport]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
