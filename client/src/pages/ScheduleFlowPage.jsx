@@ -1995,6 +1995,14 @@ export default function ScheduleFlowPage({ flow }) {
     return () => loadAbortRef.current?.abort();
   }, [load]);
 
+  // Drops every search still running (AI search, "Show all open times"):
+  // each reads loadAbortRef's signal when it starts and ignores a late
+  // answer. Requests made after this take the fresh controller.
+  const supersedeSearches = () => {
+    loadAbortRef.current?.abort();
+    loadAbortRef.current = new AbortController();
+  };
+
   // Keep the pick across an availability swap (AI search, "Show all open
   // times", address merge) when that exact time is still offered — re-stamped
   // from the fresh row — and drop it only when it's gone. A search used to
@@ -2257,6 +2265,10 @@ export default function ScheduleFlowPage({ flow }) {
         return;
       }
       if (body.code === 'SLOT_TAKEN') {
+        // A refusal supersedes any search still running: its times were
+        // built before this answer and could land over the reload below
+        // (pre-push P1 on 8f40c19990), as onChangeAddress does.
+        supersedeSearches();
         setSelectedSlot(null);
         // The taken time may be the emailed one: drop it here, not only via
         // a later availability update — the refresh is best-effort and can
@@ -2275,7 +2287,6 @@ export default function ScheduleFlowPage({ flow }) {
           setResolvedAddress('');
           if (body.lead) mergeData({ lead: body.lead });
         }
-        let staleTimes = false;
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
         } else if (inspectionLike) {
@@ -2283,22 +2294,21 @@ export default function ScheduleFlowPage({ flow }) {
           // to a client-side refresh through the SAME address-aware helper
           // showAllTimes uses, never the bare load()/GET below: an
           // addressless lead's held resolvedAddress must not be dropped
-          // here either (Codex pre-push P1, 2026-09-24). A failed refresh
-          // keeps the current calendar rather than blanking it, unless the
-          // address changed: the next confirm books the address on file,
-          // and those times were offered for the one just dropped
-          // (pre-push P1 on 979f0dbec9).
-          staleTimes = await refreshInspectionAvailability({ ignoreHeldAddress: Boolean(body.address_changed) })
-            .then(() => false, () => Boolean(body.address_changed));
+          // here either (Codex pre-push P1, 2026-09-24). When that refresh
+          // fails too, the page clears its times (the emailed pick follows
+          // the calendar) and asks for a reload: this answer carried no
+          // times, so nothing vouches for the old ones. The address behind
+          // them can have changed (`address_changed`, or phase one linked a
+          // profile at another address), and the next confirm books what
+          // the server resolves now (pre-push P1s on 979f0dbec9 and
+          // 8f40c19990).
+          if (!(await refreshInspectionAvailability({ ignoreHeldAddress: Boolean(body.address_changed) }).then(() => true, () => false))) {
+            mergeData({ availability: null });
+            setSubmitError('That time was just taken, and we couldn\'t load the latest open times. Please reload this page, or text us and we\'ll help.');
+            return;
+          }
         } else {
           await load();
-        }
-        // No stale time stays bookable (the emailed pick follows the
-        // calendar) until a reload shows the times for the address on file.
-        if (staleTimes) {
-          mergeData({ availability: null });
-          setSubmitError('That time was just taken, and we couldn\'t load the latest open times. Please reload this page, or text us and we\'ll help.');
-          return;
         }
         // SERIES_PROJECTION (reschedule): the chosen WINDOW conflicts with
         // this plan's upcoming visits (a shifted future occurrence at that
@@ -2393,8 +2403,7 @@ export default function ScheduleFlowPage({ flow }) {
           // An in-flight search for the OLD address must never land after
           // the new one resolves (Codex #4737 r15 P2): abort it and start a
           // fresh controller for the requests that follow.
-          loadAbortRef.current?.abort();
-          loadAbortRef.current = new AbortController();
+          supersedeSearches();
           setAiFiltered(false);
           setSelectedSlot(null);
           // The emailed time was offered for the old address.

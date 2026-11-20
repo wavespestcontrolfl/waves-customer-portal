@@ -657,7 +657,9 @@ function storedAddressCandidates(lead, custRow) {
 // it does not show). Any other refusal carries no times (`location` null), and
 // the page reloads its own list (GET, or POST /:token/availability with a
 // typed address), which reads the same resolver and trusted customer as the
-// next commit. A booking moved to a matched profile's other stored location
+// next commit. When that reload fails, the page clears its old times
+// (ScheduleFlowPage): phase one may have linked a profile at another address
+// (pre-push P1 on 8f40c19990). A booking moved to a matched profile's other stored location
 // says so (`address_changed`) when the next commit, with no address typed,
 // resolves to that very property: the same profile as the trusted customer it
 // loads, with the stored pin and address phase 1 adopted (storedCoordsResolution,

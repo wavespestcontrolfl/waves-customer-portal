@@ -55,6 +55,14 @@ function okPayload(overrides = {}) {
   };
 }
 
+// One open start on Monday, July 13 (a list for another address than okPayload's).
+function mondayAvailability(start, label) {
+  return {
+    ...okPayload().availability,
+    days: [{ date: '2026-07-13', fullDate: 'Monday, July 13', nearby: false, slots: [{ start_time: start, end_time: '09:30', start_label: label, end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+  };
+}
+
 function renderPage(path = '/inspection/deadbeef') {
   return render(
     <MemoryRouter initialEntries={[path]}>
@@ -725,9 +733,10 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(availabilityPosts).toHaveLength(1); // only the gate's own resolve, never a refresh with the stale address
   });
 
-  // Pre-push P1 on 979f0dbec9: the page dropped the typed address, so the next
-  // confirm books the address on file. When that reload fails, the calendar
-  // offered for the typed address must not stay bookable.
+  // Pre-push P1s on 979f0dbec9 and 8f40c19990: a refusal with no times leaves
+  // nothing that vouches for the old calendar. Here the page dropped the
+  // typed address, so the next confirm books the address on file. When the
+  // reload fails, no old time stays bookable, and the page asks for a reload.
   it('address_changed + a failed reload → the old times are cleared, with a reload message', async () => {
     let commitCalls = 0;
     let getCalls = 0;
@@ -759,16 +768,17 @@ describe('InspectionPage: an address race without availability refreshes at the 
     fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     await waitFor(() => expect(commitCalls).toBe(1));
-    await waitFor(() => expect(getCalls).toBe(2));
 
     expect(await screen.findByText(/couldn't load the latest open times\. Please reload this page/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Book /i })).not.toBeInTheDocument();
+    expect(getCalls).toBe(2);
   });
 
-  // Any other refusal keeps the current calendar when the reload fails, as
-  // before: the address it was offered for still stands.
-  it('a plain SLOT_TAKEN + a failed reload → the current calendar stays', async () => {
+  // Pre-push P1 on 8f40c19990: with no address typed, phase one can link a
+  // profile at another address, and that refusal carries no times either. A
+  // failed reload clears the old times, never shows them as the latest.
+  it('a refusal with no times and no address typed + a failed reload → the old times are cleared', async () => {
     let commitCalls = 0;
     let getCalls = 0;
     const fetchMock = vi.fn((url, opts = {}) => {
@@ -787,11 +797,48 @@ describe('InspectionPage: an address race without availability refreshes at the 
     fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     await waitFor(() => expect(commitCalls).toBe(1));
-    await waitFor(() => expect(getCalls).toBe(2));
 
-    expect(await screen.findByText(/That time was just taken — here are the latest open times\./i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).toBeInTheDocument();
-    expect(screen.queryByText(/couldn't load the latest open times/i)).not.toBeInTheDocument();
+    expect(await screen.findByText(/couldn't load the latest open times\. Please reload this page/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/here are the latest open times/i)).not.toBeInTheDocument();
+    expect(getCalls).toBe(2);
+  });
+
+  // Pre-push P1 on 8f40c19990: a search still running when the refusal lands
+  // must not put its times back over the reload's.
+  it('a search still running when the refusal lands → its late times never show', async () => {
+    let commitCalls = 0;
+    let getCalls = 0;
+    let finishSearch;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return new Promise((resolve) => { finishSearch = resolve; });
+      if (opts.method === 'POST') {
+        commitCalls += 1;
+        return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', address_changed: true, availability: null }, 409));
+      }
+      getCalls += 1;
+      return Promise.resolve(jsonResponse(getCalls === 1 ? okPayload() : okPayload({ availability: mondayAvailability('09:00', '9:00 AM') })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(finishSearch).toBeTypeOf('function'));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(commitCalls).toBe(1));
+    expect(await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
+
+    const stale = okPayload().availability;
+    stale.days[0].slots = [{ start_time: '15:00', end_time: '15:30', start_label: '3:00 PM', end_label: '3:30 PM', technician_id: 'tech-1' }];
+    finishSearch(jsonResponse({ availability: stale, summary: 'Open Sunday afternoon.' }));
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+
+    expect(screen.queryByRole('button', { name: /Choose 3:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
   });
 });
 

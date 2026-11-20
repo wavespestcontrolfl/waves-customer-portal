@@ -7736,10 +7736,12 @@ pin and address phase one adopted: the page drops the typed address, so its
 reload and its retry read that profile's stored location and address. When the
 next commit would load another profile, staff changed that profile's pin or
 address since phase one, or that read fails, the typed address stays. A failed build answers with no times too.
-When the page drops the typed address on `address_changed` (this answer or the
-account-change one) and its own reload then fails, it clears its times, the
-emailed time included, and asks the customer to reload the page: those times were
-offered for the address it dropped. With the
+When a `SLOT_TAKEN` answer carries no times and the page's own reload then fails,
+the page clears its times, the emailed time included, and asks the customer to
+reload the page: nothing vouches for the old ones, and the address behind them can
+have changed (`address_changed`, this answer's or the account-change one's, or
+phase one linked a profile at another address). Any refusal also drops a search
+still running, so its late times never land over the reload. With the
 funnel off, every refusal carries fresh times at the booking location, as
 before. No field,
 status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
