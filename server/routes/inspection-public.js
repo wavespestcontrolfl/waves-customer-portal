@@ -550,9 +550,7 @@ async function loadAssessmentCatalog() {
 async function resolveServiceAddress(lead, custRow, suppliedAddress) {
   const supplied = suppliedAddressFields(suppliedAddress);
   if (supplied) {
-    if (custRow?.geocode_review_blocked
-      && Boolean(custRow.address_line1)
-      && !profileAffirmativelyDiffers(custRow, supplied)) {
+    if (quarantineRefusesSupplied(custRow, supplied)) {
       return { location: null, address: null, source: null, unresolved: true };
     }
     const location = await geocodeServiceAddress(supplied);
@@ -573,6 +571,13 @@ async function resolveServiceAddress(lead, custRow, suppliedAddress) {
     if (location) return { location, address, source, unresolved: false };
   }
   return { location: null, address: null, source: null, unresolved: anyAddressText };
+}
+
+// Whether a geocode review quarantines this typed address for this profile: the profile is blocked, has an address on
+// file, and the typed address is not proven another property (profileAffirmativelyDiffers). resolveServiceAddress
+// then answers `unresolved`; nextCommitRefresh builds no times for it (pre-push P1 on 23dfae53de).
+function quarantineRefusesSupplied(custRow, supplied) {
+  return Boolean(custRow?.geocode_review_blocked && custRow.address_line1 && !profileAffirmativelyDiffers(custRow, supplied));
 }
 
 // The page's typed address as structured fields, or null when none.
@@ -631,7 +636,9 @@ function storedAddressCandidates(lead, custRow) {
 // that pin: then the fresh times are built here, with that address and the
 // trusted customer read again, as the next commit's first build reads them
 // (phase 1's copy can be stale by now: pre-push P1 on c08db66cc0); a failed
-// read carries none. Any other refusal carries no times (`location` null), and
+// read carries none, nor does an address a geocode review now quarantines for
+// that customer, which the next commit answers `address_unresolved`
+// (quarantineRefusesSupplied; pre-push P1 on 23dfae53de). Any other refusal carries no times (`location` null), and
 // the page reloads its own list (GET, or POST /:token/availability with a
 // typed address), which reads the same resolver and trusted customer as the
 // next commit. A booking moved to a matched profile's other stored location
@@ -652,7 +659,10 @@ async function nextCommitRefresh({ lead, verified, resolved, custRow, bookingAdd
       logger.warn(`[inspection-public] next-commit customer read failed for lead ${lead.id}: ${err.message}`);
       return null;
     });
-  if (!locationMoved) return nextCust ? { location: bookingLocation, address: bookingAddress, customer: nextCust } : { location: null };
+  if (!locationMoved) {
+    return nextCust && !quarantineRefusesSupplied(nextCust, resolved.address)
+      ? { location: bookingLocation, address: bookingAddress, customer: nextCust } : { location: null };
+  }
   return { location: null, addressChanged: nextCust != null && String(nextCust.id) === String(custRow.id) };
 }
 

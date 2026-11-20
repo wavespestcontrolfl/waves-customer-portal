@@ -2451,15 +2451,31 @@ describe('POST /:token commit', () => {
       ['carries no times when that read fails', () => {
         firstResults.leads = () => { throw new Error('leads unreadable'); };
       }, { location: null }],
+      // Pre-push P1 on 23dfae53de: staff sent the profile's pin to review since phase one. The next commit's resolver
+      // answers `address_unresolved` for a typed copy of that address, so no times are built for it.
+      ['carries no times when a geocode review now quarantines that address', () => {
+        gateState.reviewLive = true;
+        firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+        firstResults.call_log = { from_phone: '+19415550101' };
+        seedPhoneHousehold({
+          id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: '123 Palm Ave', address_line2: null,
+          city: 'Venice', state: 'FL', zip: '34209', phone: '9415550101',
+        });
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-9', status: 'needs_pin', address_snapshot: ['123 Palm Ave', null, 'Venice', 'FL', '34209'],
+          latitude: null, longitude: null, updated_at: new Date(),
+        };
+      }, { location: null }],
     ])('a typed address refused at the same pin %s', async (_label, seed, expected) => {
       mockFarSouthGates.funnel = true;
       seed();
       const { nextCommitRefresh } = inspectionPublicRouter._test;
       const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+      const typed = { line1: '123 Palm Ave', line2: null, city: 'Laurel', state: 'FL', zip: '34209' };
 
       const refresh = await nextCommitRefresh({
-        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied' }, custRow: { id: 'cust-9', city: 'Nokomis' },
-        bookingAddress: { line1: '123 Palm Ave', city: 'Laurel' }, bookingLocation: { lat: 27.4, lng: -82.5 }, locationMoved: false,
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied', address: typed }, custRow: { id: 'cust-9', city: 'Nokomis' },
+        bookingAddress: typed, bookingLocation: { lat: 27.4, lng: -82.5 }, locationMoved: false,
       });
 
       expect(refresh).toMatchObject(expected);

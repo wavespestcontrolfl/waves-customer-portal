@@ -7705,8 +7705,10 @@ itself), with the funnel on, carries fresh times only when the page's next
 commit reads this one's inputs: an address typed (the page sends it again) at
 the same pin. They are built there with that address and the trusted customer
 read again (phase one's copy can be stale by then), as the next commit's first
-build reads them. A failed read, and any other refusal after phase one,
-answers `availability: null`, and the page reloads its own list (GET, or
+build reads them. A failed read, a typed address a geocode review now
+quarantines for that customer (the next commit answers `address_unresolved`),
+and any other refusal after phase one answer `availability: null`, and the
+page reloads its own list (GET, or
 `POST /:token/availability` with the address it holds), which reads the same
 resolver and trusted customer as its next commit. A booking moved to a matched
 profile's other stored location also answers `address_changed: true` when that
