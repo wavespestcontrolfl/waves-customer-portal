@@ -278,6 +278,8 @@ describe('POST /', () => {
     expect(Object.keys(res.json.read.flags).sort()).toEqual([...svc.ENTRY_TYPES].sort());
     expect(res.json.read.flags.plumbing_vent_stacks).toEqual({ likely: 'yes', pins: [{ x: 0.4, y: 0.5 }, { x: 0.45, y: 0.52 }] });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // The staff screen draws the pins on the exact crop the service fetched.
+    expect(res.json.image_url).toBe(String(fetchSpy.mock.calls[0][0]));
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const payload = mockDispatch.mock.calls[0][1];
     expect(payload.images).toEqual([{ data: expect.any(String), mimeType: 'image/jpeg' }]);
@@ -300,6 +302,8 @@ describe('POST /', () => {
     expect(again.json.status).toBe('ok');
     expect(again.json.cached).toBe(true);
     expect(again.json.read.id).toBe(mockRows[0].id);
+    // A reused read names the same crop: the rounded centre gives the same export URL as the paid read's fetch.
+    expect(again.json.image_url).toBe(String(fetchSpy.mock.calls[0][0]));
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     expect(mockRows).toHaveLength(1);
@@ -335,6 +339,7 @@ describe('POST /', () => {
   it('answers no_image and makes no model call for a county without a service', async () => {
     const res = await post(home({ county: 'Hillsborough' }));
     expect(res.json).toEqual({ status: 'no_image', cached: false, read: null });
+    expect(res.json).not.toHaveProperty('image_url');
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockRows).toHaveLength(0);

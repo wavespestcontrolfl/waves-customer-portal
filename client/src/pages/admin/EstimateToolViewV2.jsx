@@ -66,6 +66,7 @@ import {
 import { formatCalendarDate, moveEstimateForm } from "../../lib/moveEstimateForm";
 import { MISTING_FORM_DEFAULTS, NO_MISTING, defaultMistingLabel, mistingOption, readMistingAvailability } from "../../lib/mosquitoMisting";
 import MistingLayoutDesigner from "../../components/admin/MistingLayoutDesigner";
+import RoofReadPanel, { roofSpotFrom } from "../../components/admin/RoofReadPanel";
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
@@ -3667,6 +3668,10 @@ export default function EstimateToolViewV2({
   // Whole-home rodent seal (GATE_EXCLUSION_WHOLE_HOME): explicit true from the rodent_waveguard row read below,
   // so a 404, a failed read or an older server hides the Seal scope choice and sends nothing new.
   const [exclusionWholeHomeAvailable, setExclusionWholeHomeAvailable] = useState(false);
+  // Staff roof read (GATE_ROOF_ENTRY_READ): explicit true from the same rodent_waveguard row, so a 404, a failed
+  // read or an older server hides the panel. The epoch restarts the panel on Next estimate.
+  const [roofReadAvailable, setRoofReadAvailable] = useState(false);
+  const [roofReadEpoch, setRoofReadEpoch] = useState(0);
   // Bahia as a NEW lawn plan (GATE_LAWN_V13 has no bahia program, so the server parks it for review).
   // Only an explicit false hides the option; an older server or a failed read keeps it, and a
   // reopened estimate that already carries bahia still shows it.
@@ -3775,7 +3780,7 @@ export default function EstimateToolViewV2({
         if (r.status === 404) return { ok: true, data: null };
         if (!r.ok) return { ok: false, data: null };
         const body = await r.json();
-        return { ok: true, data: body?.data ?? null, wholeHome: body?.exclusionWholeHome === true };
+        return { ok: true, data: body?.data ?? null, wholeHome: body?.exclusionWholeHome === true, roofRead: body?.roofEntryRead === true };
       } catch {
         return { ok: false, data: null };
       }
@@ -3788,6 +3793,7 @@ export default function EstimateToolViewV2({
       ]);
       if (!active) return;
       setExclusionWholeHomeAvailable(waveguardRow.wholeHome === true);
+      setRoofReadAvailable(waveguardRow.roofRead === true);
       // ALL THREE rows or nothing (codex #3591 r55 local P1): applying a
       // partial set leaves module defaults beside live values — the sidebar
       // could advertise a Silver/discounted posture the server's disabled
@@ -4099,6 +4105,8 @@ export default function EstimateToolViewV2({
         campusParcel: data.meta?.campusParcel || null,
         // This lookup's own cage era: a two-size lookup's size is never reclassified.
         poolCageTwoSizes: data.meta?.poolCageTwoSizes === true,
+        // The home's map point and county, for the staff roof read.
+        roofSpot: roofSpotFrom(data),
       });
       setCageTwoSizes(data.meta?.poolCageTwoSizes === true);
       setVerifySaveState({});
@@ -5301,6 +5309,8 @@ export default function EstimateToolViewV2({
     setGroupAnchorId(null);
     // The previous estimate's saved cage size no longer applies to the next estimate.
     setLoadedCageSize("");
+    // The last roof read belongs to the last estimate.
+    setRoofReadEpoch((n) => n + 1);
     setForm((f) => ({
       ...f,
       ...clearedPropertyFields(),
@@ -8482,6 +8492,14 @@ export default function EstimateToolViewV2({
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
                   {(exclusionWholeHomeAvailable || form.exclSealScope === "whole_home") && (
                     <ExclusionSealScope estimate={estimate} commercial={commercialDetected} blockedReason={wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable)} />
+                  )}
+                  {roofReadAvailable && (
+                    <RoofReadPanel
+                      key={`${roofReadEpoch}|${form.address}|${form.customerId || ""}|${form.leadId || ""}|${form.propertyId || ""}|${lookupMeta?.roofSpot?.lat ?? ""},${lookupMeta?.roofSpot?.lng ?? ""}`}
+                      spot={lookupMeta?.address === String(form.address || "").trim() ? lookupMeta?.roofSpot || null : null}
+                      estimateId={savedId || editMode?.id || null}
+                      customerId={form.customerId || null}
+                    />
                   )}
                   <p className="text-14 text-zinc-400 font-medium">Wire Mesh Points</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

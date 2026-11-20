@@ -605,12 +605,19 @@ const lowerId = (v) => (v ? String(v).toLowerCase() : null);
 
 /**
  * Run or reuse a roof read. Returns { status: 'ok' | 'in_progress' | 'no_image' | 'model_failed', cached, read }.
- * input: { lat, lng, county, estimateId?, customerId? }. Throws code 'unknown_reference' for a missing estimate or
+ * input: { lat, lng, county, estimateId?, customerId? }. An 'ok' answer also carries image_url, the county export URL of the crop. Throws code 'unknown_reference' for a missing estimate or
  * customer. An unsupported county answers no_image before any database read. 'in_progress' means another request holds
  * this crop's claim: no image fetch or model call was made, ask again shortly. A reuse for a different estimate or
  * customer gets its own row (a copy of the paid result, cost 0), so each context keeps its own technician feedback.
  */
 async function runRoofEntryRead(input) {
+  const result = await runRead(input);
+  // The staff screen draws the pins on the crop this key stands for: the exact export URL (same rounded centre) the fetch used.
+  if (result.status !== 'ok') return result;
+  return { ...result, image_url: exportRequestUrl(IMAGE_SOURCES[countyKey(input.county)], input.lat, input.lng) };
+}
+
+async function runRead(input) {
   const county = countyKey(input.county);
   if (!county) return { status: 'no_image', cached: false, read: null };
   // Ids are compared and stored lower-case: an upper-case UUID is the same context as its lower-case spelling.
