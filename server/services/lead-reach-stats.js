@@ -35,11 +35,12 @@
  *     .moveAutoSend result 'sent') is not a person and does not count; a delivery beyond the ones the
  *     automation's records prove may have been a person's. A group send records its automation on
  *     the one estimate it sent but publishes every sibling, so a sibling's deliveries may be that
- *     send's or a person's: possible, never certain. A staff send's receipt (manualSendAttempts,
- *     written only for a send a person started) that really handed off is a person's contact between
- *     its start and its completion. An estimate created before the stamp existed
- *     (FIRST_DELIVERY_STAMP_SINCE) may have been delivered with no stamp: possible from first contact
- *     on. The lead's 'estimate_sent' activity row is not used: it is written even when every channel
+ *     send's or a person's: possible, never certain. So is a delivery an automation attempt may have
+ *     made without recording how it ended (a claim with no result, a failed or stale attempt).
+ *     A staff send's receipt (manualSendAttempts, written only for a send a person started) that
+ *     really handed off is a person's contact between its start and its completion. An estimate
+ *     created before the stamp existed (FIRST_DELIVERY_STAMP_SINCE) may have been delivered with no
+ *     stamp: possible from first contact on. The lead's 'estimate_sent' activity row is not used: it is written even when every channel
  *     was suppressed.
  * Uncertainty is judged in one place, bucketReach: a lead is NOT JUDGED (left out of every count)
  * only when an uncertain item (a call with no known answer time, a possible person's resend) could
@@ -52,8 +53,9 @@
  * another customer's and no OTHER open lead shares that phone or email (lead-contact-sync.js
  * contactSkipReason, with the lead itself one of the sharers whatever its status), and no prospect
  * lead that first contacted us on that phone or email after this lead did, and before the contact,
- * takes it (a contact goes to the newest lead). Both read ALL leads, never the report's date range, so
- * a lead's bucket does not depend on the range it is shown in. A sent email's customer is the one
+ * takes it (a contact goes to the newest lead; a call whose answer window spans that lead's first contact
+ * is possible, never certain). Both read ALL leads, never the report's date range, with the overview's
+ * prospect scope (scopeToProspects), so a lead's bucket does not depend on the range it is shown in. A sent email's customer is the one
  * email-customer-link.js emailCustomerLink settles, read for the batch (emailOwners); a send it cannot
  * settle is no evidence. The originating call is the one exception: it is
  * matched by its twilio_call_sid, whatever callback number the lead gave. A call has one owner,
@@ -72,7 +74,7 @@ const { callEndedAtSql, callStartedAtSql } = require('./sms-pending-conversation
 const { personSentFilter, capturedRecipients, extractEmailAddresses } = require('./email/email-customer-link');
 const { openLeadIdentities, contactSkipReason, usablePhoneKey, leadEmail } = require('./lead-contact-sync');
 const { leadMatchesEstimateContact } = require('./lead-estimate-link');
-const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
+const { NON_ENGAGED_LEAD_STATUSES, scopeToProspects } = require('./lead-statuses');
 
 const REACH_WITHIN_MINUTES = 15;
 const MINUTE_MS = 60 * 1000;
@@ -274,13 +276,25 @@ async function personEmails(conn, addresses, since) {
 const FIRST_DELIVERED_SQL = "e.estimate_data #>> '{deliveryState,firstDeliveredAt}'";
 const automatedSql = (a) => `(COALESCE(${a}.estimate_data->'automation'->'autoSend'->>'result', '') = 'sent' OR COALESCE(${a}.estimate_data->'automation'->'moveAutoSend'->>'result', '') = 'sent')`;
 const AUTOMATED_SQL = automatedSql('e');
+// An automation attempt that never recorded how it ended. lead-estimate-auto-send.js and
+// moving-auto-send.js claim the row, send, and only then record result 'sent', so its delivery may be
+// the automation's: a claim with no result, 'failed' (the error may come after the delivery), or a stale
+// claim the worker gave up on ('stale', or recoveredReason 'stale_claim', which can also carry 'blocked').
+// 'not_sent' and a plain 'blocked' end with nothing sent by the automation.
+function unresolvedAttemptSql(a, job) {
+  const field = (key) => `${a}.estimate_data #>> '{automation,${job},${key}}'`;
+  return `((COALESCE(${field('result')}, '') NOT IN ('sent', 'not_sent', 'blocked')
+      AND (COALESCE(${field('claimedAt')}, ${field('claimed_at')}) IS NOT NULL OR COALESCE(${field('result')}, '') IN ('failed', 'stale')))
+    OR COALESCE(${field('recoveredReason')}, '') = 'stale_claim')`;
+}
+const autoUnresolvedSql = (a) => `(${unresolvedAttemptSql(a, 'autoSend')} OR ${unresolvedAttemptSql(a, 'moveAutoSend')})`;
 // A group send records its automation on the one estimate it sent (lead-estimate-auto-send.js), but
 // sendEstimateNow publishes and stamps the delivery of every sibling in the group. A sibling whose
-// group another member's automation sent may have been delivered by that send, or by a person on its
-// own (a sibling added later and sent by staff): `group_automated`, whose deliveries judgeReach takes as
-// possible, never certain.
+// group another member's automation sent (or may have sent) may have been delivered by that send, or by
+// a person on its own (a sibling added later and sent by staff): `group_automated`, whose deliveries
+// judgeReach takes as possible, never certain.
 const GROUP_AUTOMATED_SQL = `EXISTS (SELECT 1 FROM estimates g WHERE e.estimate_group_id IS NOT NULL
-  AND g.estimate_group_id = e.estimate_group_id AND g.id <> e.id AND ${automatedSql('g')})`;
+  AND g.estimate_group_id = e.estimate_group_id AND g.id <> e.id AND (${automatedSql('g')} OR ${autoUnresolvedSql('g')}))`;
 // Real deliveries the automation's own records prove: the lead auto-send's send, the moving job's
 // overnight email, and its recorded morning text (a second delivery of the same estimate).
 const AUTO_DELIVERIES_SQL = `(CASE WHEN COALESCE(e.estimate_data->'automation'->'autoSend'->>'result', '') = 'sent' THEN 1 ELSE 0 END
@@ -325,7 +339,8 @@ async function estimateSends(conn, cohort) {
       conn.raw("e.estimate_data->>'lead_id' as data_lead_id"), conn.raw(`${FIRST_DELIVERED_SQL} as at`),
       conn.raw("e.estimate_data #> '{deliveryState,deliveredAt}' as delivered_at"),
       conn.raw("e.estimate_data->'manualSendAttempts' as manual_attempts"),
-      conn.raw(`${AUTOMATED_SQL} as automated`), conn.raw(`${GROUP_AUTOMATED_SQL} as group_automated`),
+      conn.raw(`${AUTOMATED_SQL} as automated`), conn.raw(`${autoUnresolvedSql('e')} as auto_unresolved`),
+      conn.raw(`${GROUP_AUTOMATED_SQL} as group_automated`),
       conn.raw(`${AUTO_DELIVERIES_SQL} as auto_deliveries`), conn.raw(`${DELIVERIES_SQL} as deliveries`));
   return rows.flatMap((row) => {
     let leadId = null;
@@ -346,7 +361,7 @@ async function estimateSends(conn, cohort) {
     const created = asMs(row.created_at);
     const sends = [asMs(row.sent_at), first, times[times.length - 1]].filter((t) => t != null);
     return [{
-      leadId, at: first, automated: !!row.automated, groupAutomated: !!row.group_automated,
+      leadId, at: first, automated: !!row.automated, autoUnresolved: !!row.auto_unresolved, groupAutomated: !!row.group_automated,
       deliveries: Number(row.deliveries) || 0, autoDeliveries: Number(row.auto_deliveries) || 0,
       resendAt: complete ? (times[1] ?? null) : first,
       lastAt: times.length ? times[times.length - 1] : first,
@@ -367,7 +382,9 @@ async function identityOwners(conn, peers, addresses) {
   const [open, rows] = await Promise.all([
     openLeadIdentities(conn, { peers, emails: addresses, customerIds: [] }),
     peers.length || addresses.length
-      ? conn('leads').whereNull('deleted_at').whereNotIn('status', [...EXCLUDED_STATUSES]).whereNotNull('first_contact_at')
+      // The overview's own prospect scope (scopeToProspects: no second win, no won repeat of a won root), so a
+      // lead the report leaves out never takes a contact from one it counts.
+      ? conn('leads').whereNull('deleted_at').whereNotIn('status', [...EXCLUDED_STATUSES]).modify(scopeToProspects).whereNotNull('first_contact_at')
         .where((same) => same
           .orWhereRaw(`${peerSql} = ANY(?)`, [peers])
           .orWhereRaw('EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(LOWER(leads.email), a.addr) > 0)', [addresses]))
@@ -445,7 +462,10 @@ function reachItems(lead, index, owners) {
   // before first contact and ended after it may have reached the person after it.
   const mayFollow = (w) => (w.spanEnd ?? w.at) > firstAt;
   const sharers = { get: (key) => new Set([...(owners.open.get(key) || []), id]) };
-  const newerLeadTook = (w) => (owners.prospects.get(w.key) || []).some((m) => m.id !== id && m.firstAt > firstAt && m.firstAt <= w.at);
+  const newer = (w) => (owners.prospects.get(w.key) || []).filter((m) => m.id !== id && m.firstAt > firstAt);
+  const newerLeadTook = (w) => newer(w).some((m) => m.firstAt <= w.at);
+  // A newer lead's first contact inside a call's answer window: the answer may be that lead's.
+  const newerLeadMayHave = (w) => w.spanEnd != null && newer(w).some((m) => m.firstAt > w.at && m.firstAt <= w.spanEnd);
   const byIdentity = keys.flatMap((key) => index.byKey.get(key) || [])
     .filter((w) => mayFollow(w) && !contactSkipReason(w, customerId, sharers) && !newerLeadTook(w));
   // A call owned by this lead counts after first contact; the originating call is its first contact
@@ -453,32 +473,43 @@ function reachItems(lead, index, owners) {
   const isOrigin = (w) => !!sid && w.sid === sid;
   const owned = (index.owned.get(id) || []).filter((w) => mayFollow(w) || isOrigin(w));
   // That straddling call may also have reached the person before first contact, which never counts:
-  // possible from first contact on, never certain.
-  const items = [...byIdentity, ...owned].map((w) => (w.at > firstAt || isOrigin(w)
+  // possible from first contact on, never certain. So is a call another lead may have taken.
+  const timed = (w) => (w.at > firstAt || isOrigin(w)
     ? { earliest: w.at, latest: w.spanEnd ?? w.at }
-    : { earliest: firstAt, latest: null }));
+    : { earliest: firstAt, latest: null });
+  const items = [
+    ...byIdentity.map((w) => (newerLeadMayHave(w) ? { earliest: Math.max(firstAt, w.at), latest: null } : timed(w))),
+    ...owned.map(timed),
+  ];
   for (const e of index.estimates.get(id) || []) {
     items.push(...estimateItems(e, firstAt));
   }
   return items;
 }
 
+// What an estimate's own recorded deliveries say about a person reaching the lead after first contact
+// (firstAt), by who may have sent them; null when they say nothing. `last` is the newest delivery.
+function deliveryItem(e, firstAt) {
+  const last = e.lastAt ?? e.at ?? firstAt;
+  // Every delivery before first contact is no contact of this lead's.
+  if (last < firstAt) return null;
+  // After an automated first delivery, deliveries beyond the ones the automation's records prove may be
+  // a person's; the earliest such one is the second delivery in time.
+  if (e.automated) return e.deliveries > (e.autoDeliveries || 0) ? { earliest: Math.max(firstAt, e.resendAt ?? e.at ?? firstAt), latest: null } : null;
+  if (e.at == null) return null;
+  // The automation may have delivered it (another member's group send published it, or its own attempt
+  // never recorded how it ended), or a person sent it: possible, never certain.
+  if (e.groupAutomated || e.autoUnresolved) return { earliest: Math.max(firstAt, e.at), latest: null };
+  // A first delivery nothing automated is a person's.
+  return e.at >= firstAt ? { earliest: e.at, latest: e.at } : null;
+}
+
 // One estimate's possible person contacts after first contact (firstAt).
 function estimateItems(e, firstAt) {
-  const items = [];
-  if (e.automated) {
-    // After an automated first delivery, deliveries beyond the ones the automation's records prove may be
-    // a person's; the earliest such one is the second delivery in time.
-    if (e.deliveries > (e.autoDeliveries || 0)) items.push({ earliest: Math.max(firstAt, e.resendAt ?? e.at ?? firstAt), latest: null });
-  } else if (e.groupAutomated) {
-    // Another member's automation may have published it, or a person sent it: any delivery after first
-    // contact is possible, never certain.
-    if (e.at != null && (e.lastAt ?? e.at) >= firstAt) items.push({ earliest: Math.max(firstAt, e.at), latest: null });
-  } else if (e.at != null && e.at >= firstAt) {
-    // A first delivery nothing automated is a person's.
-    items.push({ earliest: e.at, latest: e.at });
-  }
-  // A staff send's receipt: a person reached the customer between its start and its completion.
+  const delivery = deliveryItem(e, firstAt);
+  const items = delivery ? [delivery] : [];
+  // A staff send's receipt (it proves a person's send whatever the automation did): a person reached the
+  // customer between its start and its completion.
   for (const send of e.personSends || []) {
     if (send.startedAt >= firstAt) items.push({ earliest: send.startedAt, latest: send.completedAt });
     else if (send.completedAt >= firstAt) items.push({ earliest: firstAt, latest: null });

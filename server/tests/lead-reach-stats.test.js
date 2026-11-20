@@ -138,6 +138,38 @@ describe('judgeReach', () => {
     expect(judgeReach([a], { ...none, estimates: [{ ...sibling, at: at(-5), lastAt: at(-5) }] }).get('1')).toBeNull();
   });
 
+  // Round 7, finding 1: the auto-send claims the row, sends, and only then records result 'sent'.
+  test('a delivery an automation attempt may have made without recording how it ended is possible, never certain', () => {
+    const a = lead(1);
+    const unresolved = { leadId: '1', at: at(5), lastAt: at(5), automated: false, autoUnresolved: true, deliveries: 1, autoDeliveries: 0 };
+    expect(judgeReach([a], { ...none, estimates: [{ ...unresolved, autoUnresolved: false }] }).get('1')).toBe(5);
+    expect(judgeReach([a], { ...none, estimates: [unresolved] }).get('1')).toBe(NOT_JUDGED);
+    // A staff receipt still proves a person's send.
+    expect(judgeReach([a], { ...none, estimates: [{ ...unresolved, personSends: [{ startedAt: at(4), completedAt: at(5) }] }] }).get('1')).toBe(5);
+  });
+
+  // Round 7, finding 5: a resend before first contact reached nobody for this lead.
+  test('an automated estimate delivered only before first contact gives no possible resend', () => {
+    const a = lead(1);
+    const old = { leadId: '1', at: at(-60), lastAt: at(-30), automated: true, deliveries: 2, autoDeliveries: 1, resendAt: at(-30) };
+    expect(judgeReach([a], { ...none, estimates: [old] }).get('1')).toBeNull();
+    // A resend after first contact may still be a person's.
+    expect(judgeReach([a], { ...none, estimates: [{ ...old, lastAt: at(5), resendAt: at(5) }] }).get('1')).toBe(NOT_JUDGED);
+  });
+
+  // Round 7, finding 4: a call with no known answer time while a newer lead first contacted us on its phone.
+  test('a call whose answer window spans a newer lead\'s first contact is possible for the older lead, never certain', () => {
+    const older = lead(1, { status: 'won' });
+    const key = phoneKey(older);
+    const call = { key, scope: 'phone', customerId: null, sid: null, stampedTo: null, at: at(3), spanEnd: at(8) };
+    const prospects = (...extra) => new Map([[key, [{ id: '1', firstAt: T0 }, ...extra]]]);
+    const run = (owners) => judgeReach([older], { ...none, owners: { open: new Map(), prospects: owners }, calls: [call] }).get('1');
+    expect(run(prospects())).toBe(8);
+    expect(run(prospects({ id: 'newer', firstAt: at(5) }))).toBe(NOT_JUDGED);
+    // A newer lead first contacted after the call ended takes nothing from it.
+    expect(run(prospects({ id: 'newer', firstAt: at(9) }))).toBe(8);
+  });
+
   // Round 6, finding 1: a staff send's receipt bounds when a person reached the customer.
   test('a staff send receipt that handed off is a person\'s contact between its start and its completion', () => {
     const [a, b, c] = [lead(1), lead(2), lead(3)];
@@ -342,6 +374,8 @@ function fakeConn(rowsByTable) {
         if (prop === 'whereRaw' || prop === 'orWhereRaw') return (sql) => { (conn.raws[name] = conn.raws[name] || []).push(String(sql)); return builder; };
         // A grouped condition (where/orWhere with a callback) runs on the same builder, so its SQL is recorded too.
         if (['where', 'orWhere', 'andWhere'].includes(prop)) return (...args) => { if (typeof args[0] === 'function') args[0](builder); return builder; };
+        // A modifier (knex .modify) runs on the same builder, so its SQL is recorded too.
+        if (prop === 'modify') return (fn, ...args) => { fn(builder, ...args); return builder; };
         return () => builder;
       },
     });
@@ -489,6 +523,15 @@ describe('loadLeadReachStats', () => {
     for (const sql of [automated, autoDeliveries]) expect(sql).not.toContain('estimate_group_id');
     expect(group).toContain('g.estimate_group_id = e.estimate_group_id AND g.id <> e.id');
     expect(group).toContain("g.estimate_data->'automation'->'autoSend'->>'result'");
+    // Round 7, finding 1: an unresolved attempt, on the estimate itself or on a group member.
+    const unresolved = raws.find((sql) => sql.endsWith(' as auto_unresolved'));
+    for (const job of ['autoSend', 'moveAutoSend']) {
+      expect(unresolved).toContain(`e.estimate_data #>> '{automation,${job},claimedAt}'`);
+      expect(group).toContain(`g.estimate_data #>> '{automation,${job},claimedAt}'`);
+    }
+    expect(unresolved).toContain("NOT IN ('sent', 'not_sent', 'blocked')");
+    expect(unresolved).toContain("IN ('failed', 'stale')");
+    expect(unresolved).toContain("= 'stale_claim'");
   });
 
   // Round 5, finding 5: deliveredAt keeps only the newest 25 deliveries.
@@ -585,6 +628,16 @@ describe('loadLeadReachStats', () => {
       leads: { queue: [[], [], [{ id: 'outside', twilio_call_sid: 'CA-theirs' }]] },
     });
     expect(await loadLeadReachStats([older], { conn })).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+  });
+
+  // Round 7, finding 3: the overview leaves out a won repeat of a won root (scopeToProspects).
+  test('the prospect owners read carries the overview\'s prospect scope', async () => {
+    const older = lead(1, { status: 'won' });
+    const conn = fakeConn({ sms_log: [{ peer: older.phone.replace('+1', ''), customer_id: null, at: new Date(at(30)) }] });
+    await loadLeadReachStats([older], { conn });
+    const leadRaws = conn.raws.leads || [];
+    expect(leadRaws.some((sql) => sql.includes("status IS DISTINCT FROM 'won'"))).toBe(true);
+    expect(leadRaws.some((sql) => sql.includes('duplicate_of_lead_id'))).toBe(true);
   });
 
   test('a newer prospect lead on the same phone, read from all leads, takes a later contact', async () => {
