@@ -61,6 +61,20 @@ describe('TechRecapCapture upload recovery', () => {
     await waitFor(() => expect(reloadHoldNames()).not.toContain('recap-upload'));
   });
 
+  it('a picked clip waiting for its tag holds the reload; cancelling the picker ends the hold', async () => {
+    const request = vi.fn(async (path, options) => {
+      if (isListRequest(path, options)) return { items: [] };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    pickPhoto('waiting.jpg');
+    const title = await screen.findByText('What were you doing?');
+    expect(reloadHoldNames()).toContain('recap-upload');
+    fireEvent.click(title.parentElement.parentElement);
+    await waitFor(() => expect(screen.queryByText('What were you doing?')).not.toBeInTheDocument());
+    expect(reloadHoldNames()).not.toContain('recap-upload');
+  });
+
   it('retries a lost confirm response against the same media row without uploading twice', async () => {
     let confirmAttempts = 0;
     let confirmed = false;

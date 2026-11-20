@@ -12299,6 +12299,9 @@ export function StationMarkingStep({
 function RecapCapture({ serviceId, onChange }) {
   const [items, setItems] = useState([]);
   const [pendingFile, setPendingFile] = useState(null);
+  // A picked clip waiting for its tag is only in this page: it holds the
+  // reload until it is tagged (the upload then holds) or closed.
+  useEffect(() => (pendingFile ? holdForRecapUpload() : undefined), [pendingFile]);
   const rolePickerRef = useModalFocus(!!pendingFile, () => setPendingFile(null));
   const [showMore, setShowMore] = useState(false);
   const [uploading, setUploading] = useState(0);

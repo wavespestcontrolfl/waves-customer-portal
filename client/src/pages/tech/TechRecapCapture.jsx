@@ -181,6 +181,9 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
   const serviceId = service?.id;
   const [itemState, setItemState] = useState({ serviceId: null, items: [] });
   const [pendingFile, setPendingFile] = useState(null);
+  // A picked clip waiting for its tag is only in this page: it holds the
+  // reload until it is tagged (the upload then holds) or cancelled.
+  useEffect(() => (pendingFile ? holdForRecapUpload() : undefined), [pendingFile]);
   const [failedUpload, setFailedUpload] = useState(null);
   const [showMore, setShowMore] = useState(false);
   const [uploading, setUploading] = useState(0);

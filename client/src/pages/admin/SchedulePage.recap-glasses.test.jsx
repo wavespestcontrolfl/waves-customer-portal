@@ -108,6 +108,21 @@ describe('PestRecapCard late clips (recap-glasses-v1)', () => {
     await waitFor(() => expect(reloadHoldNames()).not.toContain('recap-upload'));
   });
 
+  it('a picked clip waiting for its tag holds the reload; closing the picker ends the hold', async () => {
+    glassesFlag = true;
+    stubServer({ current: READY });
+    render(<PestRecapCard serviceId="visit-1" />);
+    await screen.findByRole('button', { name: 'From Photos' });
+
+    const library = Array.from(document.querySelectorAll('input[type="file"]')).find((input) => !input.hasAttribute('capture'));
+    fireEvent.change(library, { target: { files: [new File(['clip'], 'glasses.mp4', { type: 'video/mp4' })] } });
+    const picker = await screen.findByRole('dialog', { name: 'What were you doing?' });
+    expect(reloadHoldNames()).toContain('recap-upload');
+    fireEvent.click(picker.parentElement);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'What were you doing?' })).not.toBeInTheDocument());
+    expect(reloadHoldNames()).not.toContain('recap-upload');
+  });
+
   it('adds a library clip to an unapproved recap and shows the re-render', async () => {
     glassesFlag = true;
     const calls = stubServer({ current: READY });
