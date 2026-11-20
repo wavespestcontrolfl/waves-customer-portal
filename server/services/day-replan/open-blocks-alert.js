@@ -285,7 +285,9 @@ async function fillFor(conn, blocks, now, rulesRead) {
 /** The fill lines as the row keeps them, for the opening-to-booking count (page D2, step E). */
 function fillMetadata(fill, blocks) {
   if (fill.error) return { error: fill.error };
-  const lines = fill.byBlock.flatMap((list, i) => list.map((f) => ({ estimateId: f.estimateId, day: blocks[i].day, techId: blocks[i].techId, start: f.startMin, addedDriveMin: f.addedDriveMin })));
+  // window: the offered hour staff would book ('HH:MM'); start: when the visit would begin (the van may come later).
+  const lines = fill.byBlock.flatMap((list, i) => list.map((f) => ({ estimateId: f.estimateId, day: blocks[i].day, techId: blocks[i].techId,
+    window: f.windowStart, start: f.startMin, addedDriveMin: f.addedDriveMin })));
   return { checked: fill.checked, fitted: fill.fitted, lines };
 }
 

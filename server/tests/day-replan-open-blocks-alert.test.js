@@ -149,7 +149,10 @@ describe('the copy', () => {
 
 describe('the fill list (fill-list.js): open estimates that fit a listed block', () => {
   const sum = _internals.summarize([{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([wait(545, 75), tail(695, 325)]) }], new Map([[TECH, 'Pat']]));
-  const line = (estimateId, startMin, addedDriveMin, extra = {}) => ({ estimateId, name: `Pat ${estimateId}`, label: 'Pest Control', length: 60, startMin, endMin: startMin + 60, addedDriveMin, ...extra });
+  const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+  // The offered window is the hour the visit starts in: the van may come after it.
+  const line = (estimateId, startMin, addedDriveMin, extra = {}) => ({ estimateId, name: `Pat ${estimateId}`, label: 'Pest Control', length: 60,
+    windowStart: hhmm(Math.floor(startMin / 60) * 60), startMin, endMin: startMin + 60, addedDriveMin, ...extra });
   const fill = { checked: 4, fitted: 2, noLocation: 1, unread: 1, byBlock: [[line('e1', 560, 4)], [line('e2', 720, 9), line('e1', 780, 12, { name: null })]] };
 
   test('each block carries its technician id, planned or by the hour grid', () => {
@@ -198,9 +201,9 @@ describe('the fill list (fill-list.js): open estimates that fit a listed block',
 
   test('the row keeps each line with its block, or why the list was not built', () => {
     expect(_internals.fillMetadata(fill, sum.blocks)).toEqual({ checked: 4, fitted: 2, lines: [
-      { estimateId: 'e1', day: '2026-11-21', techId: TECH, start: 560, addedDriveMin: 4 },
-      { estimateId: 'e2', day: '2026-11-21', techId: TECH, start: 720, addedDriveMin: 9 },
-      { estimateId: 'e1', day: '2026-11-21', techId: TECH, start: 780, addedDriveMin: 12 },
+      { estimateId: 'e1', day: '2026-11-21', techId: TECH, window: '09:00', start: 560, addedDriveMin: 4 },
+      { estimateId: 'e2', day: '2026-11-21', techId: TECH, window: '12:00', start: 720, addedDriveMin: 9 },
+      { estimateId: 'e1', day: '2026-11-21', techId: TECH, window: '13:00', start: 780, addedDriveMin: 12 },
     ] });
     expect(_internals.fillMetadata({ error: 'a read failed' }, sum.blocks)).toEqual({ error: 'a read failed' });
   });
@@ -211,14 +214,15 @@ describe('runOpenBlocksAlert', () => {
 
   test('the fill list gets the listed blocks and this morning; its lines, count and metadata reach the row', async () => {
     fillList.mockImplementationOnce(async (_c, blocks) => ({ checked: 1, fitted: 1, noLocation: 0, unread: 0,
-      byBlock: blocks.map((_b, i) => (i ? [] : [{ estimateId: 'e1', name: 'Pat e1', label: 'Pest Control', length: 60, startMin: 720, endMin: 780, addedDriveMin: 7 }])) }));
+      byBlock: blocks.map((_b, i) => (i ? [] : [{ estimateId: 'e1', name: 'Pat e1', label: 'Pest Control', length: 60, windowStart: '11:00', startMin: 720, endMin: 780, addedDriveMin: 7 }])) }));
     const { conn } = saturday();
     await runOpenBlocksAlert({ conn, now: NOW });
     expect(fillList).toHaveBeenCalledWith(conn, [expect.objectContaining({ day: '2026-11-21', techId: TECH, start: 695, min: 325 })], NOW);
     const [, spec, opts] = raiseAdminAlert.mock.calls[0];
     expect(spec.why).toBe('Biggest block: Sat Nov 21, 11:35 AM to 5:00 PM. 1 open estimate fits an opening.');
     expect(opts.detail).toContain('- Sat Nov 21, Pat: 11:35 AM to 5:00 PM (5 h 25 min, room for 4 jobs)\n  - Open estimate, Pat e1 (Pest Control, 1 h): +7 min drive, finishes 1:00 PM');
-    expect(opts.metadata.fill).toEqual({ checked: 1, fitted: 1, lines: [{ estimateId: 'e1', day: '2026-11-21', techId: TECH, start: 720, addedDriveMin: 7 }] });
+    // The 11:00 window with the van there at noon: the row keeps both, so a booking at 11:00 matches the line.
+    expect(opts.metadata.fill).toEqual({ checked: 1, fitted: 1, lines: [{ estimateId: 'e1', day: '2026-11-21', techId: TECH, window: '11:00', start: 720, addedDriveMin: 7 }] });
   });
 
   test('a fill list that fails leaves the notice as it was, with the reason', async () => {

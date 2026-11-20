@@ -55,9 +55,10 @@ async function loadGapCandidate(serviceId, conn) {
  * page offers (resolveCatalogSlotProfile). The customer's day and time rules apply as for loadGapCandidate, and a
  * technician needs the capability for every service the visit performs (a combined visit's too). It is checked as a new
  * visit (`prospective`, analyzeGapCandidate): at every place in the route, as the staff finder checks a new customer.
- * `firstVisitOpen(date)` is the booking page's first-visit date rule: a seasonal mosquito program starts in season, and
- * a new-home estimate not before the move-in date. `{ unavailable: 'no_stored_location' }` when no stored location can
- * stand in. A failed read throws.
+ * `dayOpen(date)` holds the visit's own day rules beyond analyzeGapCandidate's: the booking page's first-visit dates
+ * (a seasonal mosquito program starts in season; a new-home estimate not before the move-in date) and the mowing-day
+ * rule over every service the visit performs (a pest-first visit with lawn care too). `{ unavailable:
+ * 'no_stored_location' }` when no stored location can stand in. A failed read throws.
  */
 async function estimateGapCandidate(estimate, conn) {
   const slots = require('../estimate-slot-availability');
@@ -84,8 +85,10 @@ async function estimateGapCandidate(estimate, conn) {
   const deactivated = await conn('technician_capabilities').whereIn('service_category', categories).where('active', false).pluck('technician_id');
   const seasonal = slots.seasonalSelectionProfile(profile);
   const moveInDate = await slots.estimateMoveInDate(estimate);
-  const firstVisitOpen = (date) => (!seasonal || slots.inMosquitoSeason(date)) && (!moveInDate || date >= moveInDate);
-  return { service, preferences, holds: [], siblingDates: [], deactivated, label: profile.serviceLabel, prospective: true, firstVisitOpen };
+  const mowing = mowingDays.unitRule(preferences, performs);
+  const dayOpen = (date) => (!seasonal || slots.inMosquitoSeason(date)) && (!moveInDate || date >= moveInDate)
+    && !mowingDays.blocksLive(date, mowing);
+  return { service, preferences, holds: [], siblingDates: [], deactivated, label: profile.serviceLabel, prospective: true, dayOpen };
 }
 
 function analyzeGapCandidate(candidate, rows, {

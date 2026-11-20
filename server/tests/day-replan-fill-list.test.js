@@ -25,6 +25,13 @@ jest.mock('../services/scheduling/tech-start-point', () => ({
 }));
 jest.mock('../services/scheduling/departure-time', () => ({ dayDepartureMinutes: jest.fn(async () => 480) }));
 jest.mock('../services/day-replan/route-check', () => ({ DISPATCH_DAY_END: 18 * 60 }));
+// The estimate page's own reads: a guarantee-only renewal, and an upcoming visit its page would adopt.
+jest.mock('../routes/estimate-public', () => ({
+  parseEstimateDataSafe: jest.fn((row) => (typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data || {})),
+  isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
+  findLinkedUpcomingAppointment: jest.fn(async () => null),
+  adoptionServiceModesForContract: jest.fn(() => ['recurring']),
+}));
 // The real check, watched: the list must yield to the event loop between checks.
 jest.mock('../services/scheduling/gap-candidates', () => {
   const actual = jest.requireActual('../services/scheduling/gap-candidates');
@@ -32,6 +39,7 @@ jest.mock('../services/scheduling/gap-candidates', () => {
 });
 
 const logger = require('../services/logger');
+const page = require('../routes/estimate-public');
 const slots = require('../services/estimate-slot-availability');
 const { getCustomerSchedulingPreferences, normalizePreferences } = require('../services/auto-dispatch/preferences');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
@@ -103,7 +111,7 @@ describe('open estimates', () => {
         estimate('e4', { customer_id: '3274944a-f509-413c-9dee-a8b0cdb16493' })],
       taken: ['e3'],
     });
-    expect((await _internals.openEstimates(conn, NOW)).map((e) => e.id)).toEqual(['e1']);
+    expect((await _internals.openEstimates(conn, NOW)).estimates.map((e) => e.id)).toEqual(['e1']);
     expect(calls).toEqual(expect.arrayContaining([
       ['estimates', 'whereIn', ['status', ['sent', 'viewed']]], ['estimates', 'whereNull', ['archived_at']],
       ['estimates', 'whereNotNull', ['customer_id']], ['estimates', 'whereNull', ['expires_at']], ['estimates', 'orWhere', ['expires_at', '>', NOW]],
@@ -117,15 +125,54 @@ describe('open estimates', () => {
     const tests = Array.from({ length: 45 }, (_, i) => estimate(`t${i}`, { customer_name: 'Shakedown Test' }));
     const older = Array.from({ length: 45 }, (_, i) => estimate(`o${i}`));
     const { conn, calls } = fakeConn({ estimates: [...tests, ...older], taken: ['o0'] });
-    const open = await _internals.openEstimates(conn, NOW);
+    const { estimates: open } = await _internals.openEstimates(conn, NOW);
     expect(open).toHaveLength(_internals.MAX_ESTIMATES);
     expect(open[0].id).toBe('o1');
     expect(calls.some(([table, m]) => table === 'estimates' && m === 'limit')).toBe(false);
+    // The page's lookup runs for the estimates it keeps, and stops at the cap.
+    expect(page.findLinkedUpcomingAppointment).toHaveBeenCalledTimes(_internals.MAX_ESTIMATES);
+  });
+
+  test('an estimate with no visit to book, or whose page already shows an appointment, is left out', async () => {
+    page.isRodentGuaranteeOnlyEstimate.mockImplementation((row) => row.id === 'renewal');
+    page.findLinkedUpcomingAppointment.mockImplementation(async (row) => (row.id === 'booked' ? { id: 'visit-1' } : null));
+    try {
+      // estimate_data as a JSON string: the page's helpers get it parsed, as the page's view passes it.
+      const stored = { estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control' }] } } }) };
+      const parsed = JSON.parse(stored.estimate_data);
+      const { conn } = fakeConn({ estimates: [estimate('renewal', stored), estimate('booked', stored), estimate('open', stored)] });
+      expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [expect.objectContaining({ id: 'open' })], unread: 0 });
+      expect(page.isRodentGuaranteeOnlyEstimate).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }), parsed);
+      // As the page's view asks it: the estimate's own service modes, on this connection.
+      expect(page.adoptionServiceModesForContract).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }), parsed);
+      expect(page.findLinkedUpcomingAppointment).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }), parsed,
+        { database: conn, serviceModes: ['recurring'] });
+      expect(page.findLinkedUpcomingAppointment).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'renewal' }), expect.anything(), expect.anything());
+    } finally {
+      page.isRodentGuaranteeOnlyEstimate.mockImplementation(() => false);
+      page.findLinkedUpcomingAppointment.mockImplementation(async () => null);
+    }
+  });
+
+  test('an estimate whose page lookup fails is left off, counted as unread and logged; the rest are still checked', async () => {
+    page.findLinkedUpcomingAppointment.mockImplementation(async (row) => {
+      if (row.id === 'down') throw new Error('lookup timeout');
+      return null;
+    });
+    try {
+      const { conn } = fakeConn({ estimates: [estimate('down'), estimate('ok')] });
+      expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [expect.objectContaining({ id: 'ok' })], unread: 1 });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate down unread (lookup timeout)'));
+      // The notice's count: the estimate was checked, and could not be read.
+      expect(await fillList(conn, [], NOW)).toEqual({ checked: 2, fitted: 0, noLocation: 0, unread: 1, byBlock: [] });
+    } finally {
+      page.findLinkedUpcomingAppointment.mockImplementation(async () => null);
+    }
   });
 
   test('none open: the visits are not read, and with no block nothing else is read', async () => {
     const { conn, calls } = fakeConn();
-    expect(await _internals.openEstimates(conn, NOW)).toEqual([]);
+    expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [], unread: 0 });
     expect(calls.some(([table]) => table === 'scheduled_services')).toBe(false);
     const open = fakeConn({ estimates: [estimate('e1')] });
     expect(await fillList(open.conn, [], NOW)).toEqual({ checked: 1, fitted: 0, noLocation: 0, unread: 0, byBlock: [] });
@@ -140,8 +187,9 @@ describe('a fit inside the block', () => {
     const late = { windowStart: '09:00', windowEnd: '10:00', estimatedArrival: '09:40', addedDriveMinutes: 3 };
     const early = { windowStart: '09:00', windowEnd: '10:00', estimatedArrival: '08:50', addedDriveMinutes: 5.5 };
     // Arriving at 9:40, the visit ends at 10:40, past the block: the next fit is taken.
-    expect(_internals.fitInside(block, [late, early])).toEqual({ startMin: 540, endMin: 600, length: 60, addedDriveMin: 6 });
-    expect(_internals.fitInside({ start: 9 * 60, min: 100 }, [late])).toEqual({ startMin: 580, endMin: 640, length: 60, addedDriveMin: 3 });
+    expect(_internals.fitInside(block, [late, early])).toEqual({ windowStart: '09:00', startMin: 540, endMin: 600, length: 60, addedDriveMin: 6 });
+    // The offered window stays 9:00 when the van comes at 9:40.
+    expect(_internals.fitInside({ start: 9 * 60, min: 100 }, [late])).toEqual({ windowStart: '09:00', startMin: 580, endMin: 640, length: 60, addedDriveMin: 3 });
     expect(_internals.fitInside({ start: 9 * 60 + 1, min: 120 }, [early])).toBeNull();
     expect(_internals.fitInside(block, [{ ...early, addedDriveMinutes: -0.4 }]).addedDriveMin).toBe(0);
   });
@@ -285,6 +333,24 @@ describe('fillList', () => {
     expect(offForLawn.calls).toContainEqual(['technician_capabilities', 'whereIn', ['service_category', ['general', 'lawn']]]);
     const offForMosquito = fakeConn({ estimates: [estimate('near')], inactive: { mosquito: [TECH] } });
     expect((await fillList(offForMosquito.conn, [morning], NOW)).byBlock[0]).toEqual([expect.objectContaining({ label: 'Pest Control + Lawn Care' })]);
+  });
+
+  test('the mowing-day rule covers every service the visit performs: a pest-first visit with lawn care', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00')] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    // DAY is a Monday (weekday 1): the customer's mowing rule blocks it.
+    const mowingPrefs = async (_id, type) => ({ ...normalizePreferences(null, type), service_category: 'pest_control',
+      mowing: { mode: 'true', blocked_weekdays: [1], days: [] } });
+    const combined = { ...PROFILE, reservationServiceMix: true, serviceLabel: 'Pest Control + Lawn Care',
+      services: [{ service: 'pest_control', label: 'Pest Control' }, { service: 'lawn_care', label: 'Lawn Care' }] };
+    const { conn } = fakeConn({ estimates: [estimate('near')] });
+    slots.resolveCatalogSlotProfile.mockResolvedValue(combined);
+    getCustomerSchedulingPreferences.mockImplementationOnce(mowingPrefs);
+    expect((await fillList(conn, [morning], NOW)).byBlock[0]).toEqual([]);
+    // Pest alone: the mowing day does not hold it.
+    slots.resolveCatalogSlotProfile.mockResolvedValue(PROFILE);
+    getCustomerSchedulingPreferences.mockImplementationOnce(mowingPrefs);
+    expect((await fillList(conn, [morning], NOW)).byBlock[0]).toHaveLength(1);
   });
 
   test('the day\'s schedule blocks hold the technician: the technician\'s own and everyone\'s, not another technician\'s', async () => {
