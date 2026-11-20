@@ -239,6 +239,27 @@ describe('PortalUpdateBar', () => {
     }
   });
 
+  test('Reload anyway past a named save names a read that started since, as the read can lead to a send', async () => {
+    renderAt('/admin/dashboard');
+    goLive('bbb222bbb222');
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => { pending.push(resolve); }) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const save = target.fetch('/api/admin/schedule/1/invoice', { method: 'POST' });
+      fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+      expect(screen.getByText('A save is still on its way.')).toBeTruthy();
+      const read = target.fetch('/api/admin/discounts/stacking');
+      fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+      expect(reload).not.toHaveBeenCalled();
+      expect(screen.getByText('A save is still on its way. A request is still on its way.')).toBeTruthy();
+      pending.forEach((resolve) => resolve({ headers: new Headers() }));
+      await Promise.all([save, read]);
+    } finally {
+      uninstall();
+    }
+  });
+
   test('an offline tab: Reload names it first, then Reload anyway reloads', () => {
     renderAt('/admin/dashboard');
     goLive('bbb222bbb222');

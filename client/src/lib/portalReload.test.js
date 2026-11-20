@@ -110,7 +110,7 @@ describe('offline', () => {
 });
 
 describe('reloadBlockers', () => {
-  test('a request still open blocks every reload button: a read as request, a save as saving', async () => {
+  test('a request still open blocks every reload button: a read as request, a save as saving, and both while both are open', async () => {
     const pending = [];
     const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
     const uninstall = installPortalVersionWatch({ target });
@@ -118,9 +118,12 @@ describe('reloadBlockers', () => {
       const read = target.fetch('/api/admin/discounts/stacking');
       expect(reloadBlockers()).toEqual(['request']);
       const save = target.fetch('/api/admin/schedule/1/invoice', { method: 'POST' });
+      expect(reloadBlockers()).toEqual(['saving', 'request']);
+      pending[0]({ headers: new Headers() });
+      await read;
       expect(reloadBlockers()).toEqual(['saving']);
-      pending.forEach((resolve) => resolve({ headers: new Headers() }));
-      await Promise.all([read, save]);
+      pending[1]({ headers: new Headers() });
+      await save;
       expect(reloadBlockers()).toEqual([]);
     } finally {
       uninstall();

@@ -74,12 +74,13 @@ const savesInFlight = () => writesInFlight() + deviceWritesInFlight();
 // and every write to the device's storage. The automatic reload waits for it.
 const workInFlight = () => requestsInFlight() + deviceWritesInFlight();
 
-// What a reload would cut off right now: 'saving' for a save still open, or
-// 'request' for a request still open with no save (a read can be the first
-// step of a send).
+// What a reload would cut off right now: 'saving' for a save still open, and
+// 'request' for a read still open (a read can be the first step of a send).
+// Both are named when both are open, so "Reload anyway" past a named save
+// never cuts off a read that started since. A body read counts as a read.
 function workBlockers() {
-  if (savesInFlight() > 0) return ['saving'];
-  return workInFlight() > 0 ? ['request'] : [];
+  const reads = requestsInFlight() - writesInFlight();
+  return [...(savesInFlight() > 0 ? ['saving'] : []), ...(reads > 0 ? ['request'] : [])];
 }
 
 // Everything that stops a reload right now: the work above, then each
