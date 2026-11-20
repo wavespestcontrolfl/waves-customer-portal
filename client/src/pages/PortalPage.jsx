@@ -11012,6 +11012,10 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   const [startingPlan, setStartingPlan] = useState(false);
   const [planStartUrl, setPlanStartUrl] = useState('');
   const planStartTimer = useRef(null);
+  // The tap's session check for the estimate on screen (codex pre-push P0): the hand-off, on the
+  // timer or on "Open it now", opens the estimate only while that session is active and drops it
+  // otherwise. "Open it now" is a button, so the page never holds the estimate link itself.
+  const planStartSession = useRef(null);
   // A start the server is still minting, whatever option is on screen now. The mint archives
   // the account's other live plan-start quote, so a second start before the first settles could
   // archive the quote the browser then opens: starts run one at a time (codex pre-push P1).
@@ -11023,8 +11027,13 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   const dropPendingPlanStart = () => {
     planStartSeq.current += 1;
     clearTimeout(planStartTimer.current);
+    planStartSession.current = null;
     setPlanStartUrl('');
     setStartingPlan(false);
+  };
+  const openPlanStart = (url) => {
+    if (planStartSession.current?.()) window.location.assign(url);
+    else dropPendingPlanStart();
   };
   // Bumped on every pricing query and when the card goes away: only the latest
   // answer may set the result, the option, the error or the loading state, so
@@ -11126,11 +11135,10 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
       return;
     }
     if (out?.url) {
-      // Same hand-off as the cancelled-plan restart: a beat on screen, plus a link if navigation is blocked.
+      // Same hand-off as the cancelled-plan restart: a beat on screen, plus a button if navigation is blocked.
+      planStartSession.current = tapSessionActive;
       setPlanStartUrl(out.url);
-      planStartTimer.current = setTimeout(() => {
-        if (tapSessionActive()) window.location.assign(out.url);
-      }, 1500);
+      planStartTimer.current = setTimeout(() => openPlanStart(out.url), 1500);
       return;
     }
     setStartingPlan(false);
@@ -11360,7 +11368,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     </span>
                   ) : planStartUrl ? (
                     <span style={{ color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
-                      Opening your estimate... <a href={planStartUrl} style={{ color: B.wavesBlue }}>Open it now</a>
+                      Opening your estimate... <button type="button" onClick={() => openPlanStart(planStartUrl)} style={{ color: B.wavesBlue, background: 'none', border: 0, padding: 0, font: 'inherit', textDecoration: 'underline', cursor: 'pointer' }}>Open it now</button>
                     </span>
                   ) : canStartPlan ? (
                     <div style={{ display: 'grid', gap: 6 }}>

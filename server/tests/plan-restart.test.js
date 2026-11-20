@@ -355,6 +355,17 @@ describe('mintRestartEstimate', () => {
     expect(releaseHolds).not.toHaveBeenCalled();
   });
 
+  test('a quote that expires while the tap waits on its locks is not handed back: liveness reads the clock after the locks (codex pre-push P1)', async () => {
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    tables.estimates[0].expires_at = '2026-09-01T12:00:00.000Z';
+    // The tap starts a second before the quote expires; its locked read lands a second after.
+    let calls = 0;
+    const now = () => new Date(calls++ === 0 ? '2026-09-01T11:59:59Z' : '2026-09-01T12:00:01Z');
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), now, randomBytes: () => Buffer.from('0123456789abcdef') });
+    expect(again.reused).toBe(false);
+    expect(again.estimateId).not.toBe(first.estimateId);
+  });
+
   test('a live quote from a PRIOR attempt is never reused — same families re-cancelled re-mint at today\'s price (codex GH r16 P1)', async () => {
     // Reactivate-then-recancel of the SAME families: the accept-time
     // identity check refuses the old token, so reusing it would hand back

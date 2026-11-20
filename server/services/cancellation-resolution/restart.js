@@ -999,7 +999,10 @@ async function mintPricedEstimate({
     .whereIn('id', priorRows.map((row) => row.id))
     .orderBy('created_at', 'desc')
     .forUpdate();
-  const live = liveRestartEstimate(lockedPriorRows, nowDate);
+  // Liveness on the clock after the locks (codex pre-push P1): nowDate was read before this
+  // transaction waited on its locks and repriced, so a quote that expired meanwhile would be
+  // handed back as live.
+  const live = liveRestartEstimate(lockedPriorRows, now());
   if (live) {
     const liveData = parseJson(live.estimate_data, {});
     const cents = (v) => Math.round(Number(v || 0) * 100);

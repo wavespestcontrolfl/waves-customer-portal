@@ -80,7 +80,9 @@ it('posts the selected option and every amount it shows, then hands off to the e
     await waitFor(() => expect(api.startPlan).toHaveBeenCalledWith({
       serviceKey: 'pest_control', optionId: 'pest-quarterly', shown: { monthly: 31.67, perVisit: 95, dueAtStart: null, oneTime: null, setupFee: null },
     }));
-    expect(await screen.findByRole('link', { name: 'Open it now' })).toHaveAttribute('href', '/estimate/tok123');
+    await screen.findByRole('button', { name: 'Open it now' });
+    // A button: the page never holds the estimate link itself (codex pre-push P0).
+    expect(screen.queryByRole('link', { name: 'Open it now' })).toBeNull();
     expect(api.createRequest).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1600);
     expect(assign).toHaveBeenCalledWith('/estimate/tok123');
@@ -137,7 +139,7 @@ it('a start whose answer was lost asks once more and opens the quote; it never f
       .mockResolvedValueOnce({ ok: true, url: '/estimate/tok123', estimateId: 'e1', reused: true });
     await priceIt(priced(OFFER));
     fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
-    expect(await screen.findByRole('link', { name: 'Open it now' })).toHaveAttribute('href', '/estimate/tok123');
+    await screen.findByRole('button', { name: 'Open it now' });
     expect(api.startPlan).toHaveBeenCalledTimes(2);
     vi.advanceTimersByTime(1600);
     expect(assign).toHaveBeenCalledWith('/estimate/tok123');
@@ -238,7 +240,7 @@ it.each([
       fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
       await waitFor(() => expect(screen.getByRole('button', { name: 'See my price and book' })).toBeEnabled());
       vi.advanceTimersByTime(1600);
-      expect(screen.queryByRole('link', { name: 'Open it now' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Open it now' })).toBeNull();
       expect(assign).not.toHaveBeenCalled();
       expect(api.createRequest).not.toHaveBeenCalled();
       expect(alerts).toEqual([]);
@@ -254,10 +256,39 @@ it('the hand-off checks the session again before it opens the estimate (codex pr
     api.startPlan.mockResolvedValue({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false });
     await priceIt(priced(OFFER));
     fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
-    await screen.findByRole('link', { name: 'Open it now' });
+    await screen.findByRole('button', { name: 'Open it now' });
     api.token = OTHER_ACCOUNT; // another account became active during the beat on screen
     vi.advanceTimersByTime(1600);
     expect(assign).not.toHaveBeenCalled();
+    // The hand-off is dropped, so nothing on screen can open it later.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Open it now' })).toBeNull());
+  });
+});
+
+it('"Open it now" checks the tap\'s session when tapped: under another account it opens nothing and drops the hand-off (codex pre-push P0)', async () => {
+  await withNavigation(async (assign) => {
+    api.token = TAP_TOKEN;
+    api.startPlan.mockResolvedValue({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false });
+    await priceIt(priced(OFFER));
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    const open = await screen.findByRole('button', { name: 'Open it now' });
+    api.token = OTHER_ACCOUNT; // another account became active while the card stayed on screen
+    fireEvent.click(open);
+    expect(assign).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Open it now' })).toBeNull());
+    vi.advanceTimersByTime(1600);
+    expect(assign).not.toHaveBeenCalled();
+  });
+});
+
+it('"Open it now" in the tap\'s session opens the estimate at once', async () => {
+  await withNavigation(async (assign) => {
+    api.token = TAP_TOKEN;
+    api.startPlan.mockResolvedValue({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false });
+    await priceIt(priced(OFFER));
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open it now' }));
+    expect(assign).toHaveBeenCalledWith('/estimate/tok-a');
   });
 });
 
@@ -270,7 +301,7 @@ it('a token refreshed within the same session keeps the reply: the hand-off goes
     });
     await priceIt(priced(OFFER));
     fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
-    expect(await screen.findByRole('link', { name: 'Open it now' })).toHaveAttribute('href', '/estimate/tok-a');
+    await screen.findByRole('button', { name: 'Open it now' });
     vi.advanceTimersByTime(1600);
     expect(assign).toHaveBeenCalledWith('/estimate/tok-a');
   });
@@ -333,7 +364,7 @@ it.each([
     fireEvent.change(optionSelect(), { target: { value: 'pest-bimonthly' } });
     await act(async () => { finish(settle); });
     vi.advanceTimersByTime(1600);
-    expect(screen.queryByRole('link', { name: 'Open it now' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Open it now' })).toBeNull();
     expect(assign).not.toHaveBeenCalled();
     expect(api.createRequest).not.toHaveBeenCalled();
     expect(await screen.findByRole('button', { name: 'Request This' })).toBeEnabled();
@@ -370,7 +401,7 @@ it('a second start waits until the first settles: the mint archives the account\
     fireEvent.click(screen.getByRole('button', { name: 'See my price and book' }));
     await waitFor(() => expect(api.startPlan).toHaveBeenCalledTimes(2));
     expect(api.startPlan).toHaveBeenLastCalledWith(expect.objectContaining({ serviceKey: 'lawn_care', optionId: 'lawn-enhanced' }));
-    await screen.findByRole('link', { name: 'Open it now' });
+    await screen.findByRole('button', { name: 'Open it now' });
     vi.advanceTimersByTime(1600);
     expect(assign).toHaveBeenCalledOnce();
     expect(assign).toHaveBeenCalledWith('/estimate/lawn');
