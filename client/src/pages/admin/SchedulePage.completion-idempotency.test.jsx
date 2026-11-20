@@ -325,7 +325,7 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
 
   it("a backdated closeout kept off only by the backdate box reads the preview once more at submit and stops when it now keeps the ask (source contract)", () => {
     const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
-    expect(src).toMatch(/!willReview && backfillQuietCloseout\s*\n\s*&& visitOutcome === "completed" && reviewSuppressionReason === "backfill" && !previewRecheckRef\.current\) \{/);
+    expect(src).toMatch(/!willReview && backfillQuietCloseout\s*\n\s*&& visitOutcome === "completed" && reviewSuppressionReason === "backfill"\) \{\s*\n\s*\/\/ A second tap[^\n]*\n\s*if \(!claimPreviewRecheck\(previewRecheckRef\)\) return;/);
     expect(src).toMatch(/if \(lateCloseAskKeptFrom\(probe\)\) \{\s*\n\s*setReviewSendPreview\(probe\);\s*\n\s*setReviewLateCloseAskKept\(true\);\s*\n\s*alert\(LATE_CLOSE_NOW_KEPT_MESSAGE\);\s*\n\s*return;/);
   });
 

@@ -79,6 +79,7 @@ import {
   alreadyReviewedFrom,
   lateCloseAskKeptFrom,
   runPreviewReadWithRetry,
+  claimPreviewRecheck,
   LATE_CLOSE_NOW_KEPT_MESSAGE,
   backfillCheckboxHint,
   customReviewTimeProblem,
@@ -18727,8 +18728,9 @@ export function CompletionPanel({
     // and if it now says the closeout keeps its review request, show that and stop, so the operator confirms the choice.
     // null or false submits as today: suppressed.
     if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && !willReview && backfillQuietCloseout
-      && visitOutcome === "completed" && reviewSuppressionReason === "backfill" && !previewRecheckRef.current) {
-      previewRecheckRef.current = true;
+      && visitOutcome === "completed" && reviewSuppressionReason === "backfill") {
+      // A second tap while the read is pending returns, as the review-box branch below does.
+      if (!claimPreviewRecheck(previewRecheckRef)) return;
       let probe;
       try {
         probe = await fetchReviewSendPreview();

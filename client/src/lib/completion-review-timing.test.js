@@ -14,6 +14,8 @@ import {
   alreadyReviewedFrom,
   lateCloseAskKeptFrom,
   runPreviewReadWithRetry,
+  claimPreviewRecheck,
+  LATE_CLOSE_UNAVAILABLE_MESSAGE,
   previewAnswerSettled,
   backfillCheckboxHint,
   LATE_CLOSE_ASK_LABEL,
@@ -311,7 +313,7 @@ describe('backdate checkbox hint (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
     expect(backfillCheckboxHint({ backfillCloseout: true })).toBe('Records to the visit day, sends no customer messages, and skips auto-charge.');
   });
   test('checked and the review ask goes: keeps the review request without promising delivery', () => {
-    expect(backfillCheckboxHint({ backfillCloseout: true, reviewAskGoes: true })).toBe('Records to the visit day, sends no customer messages, keeps the review request under the normal review rules, and skips auto-charge.');
+    expect(backfillCheckboxHint({ backfillCloseout: true, reviewAskGoes: true })).toBe('Records to the visit day. Skips the completion text, report email and auto-charge; a separate review request may still go.');
   });
   test('unchecked: the normal-messages line either way', () => {
     expect(backfillCheckboxHint({ backfillCloseout: false, reviewAskGoes: true })).toBe('Unchecked: completes as today with the normal customer messages.');
@@ -393,9 +395,9 @@ describe('reviewPreviewSubmitVerdict with the late-close verdict (GATE_REVIEW_LA
     const verdict = reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: false }, shown: same, failureNoticed: false, lateCloseShown: true });
     expect(verdict.message).toMatch(/no review request will be sent/);
   });
-  test('a verdict that flipped to true, or went unknown (null), also pauses it', () => {
+  test('a verdict that flipped to true, or went unknown (null: check unavailable), also pauses it', () => {
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: true }, shown: same, failureNoticed: false, lateCloseShown: false }).message).toMatch(/now keeps its review request/);
-    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: null }, shown: same, failureNoticed: false, lateCloseShown: true }).message).toMatch(/no review request will be sent/);
+    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: null }, shown: same, failureNoticed: false, lateCloseShown: true }).message).toMatch(/review check is unavailable/);
   });
   test('an unchanged verdict, or not a backdated closeout (lateCloseShown null), goes on as before', () => {
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: true }, shown: same, failureNoticed: false, lateCloseShown: true })).toBeNull();
@@ -403,5 +405,24 @@ describe('reviewPreviewSubmitVerdict with the late-close verdict (GATE_REVIEW_LA
   });
   test('a failed re-check keeps its own once-only notice', () => {
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: null, shown: same, failureNoticed: false, lateCloseShown: true }).noticed).toBe(true);
+  });
+});
+
+describe('submit-time late-close re-check (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
+  test('a second tap while the re-check is pending is refused until it is released', () => {
+    const ref = { current: false };
+    expect(claimPreviewRecheck(ref)).toBe(true);
+    expect(claimPreviewRecheck(ref)).toBe(false);
+    expect(claimPreviewRecheck(ref)).toBe(false);
+    ref.current = false;
+    expect(claimPreviewRecheck(ref)).toBe(true);
+  });
+
+  test('an unknown late-close answer (null) says the check is unavailable, not that 3 days passed; a plain false still says the window passed', () => {
+    const base = { reviewTiming: 'auto', shown: { at: '2026-11-20T15:00:00Z', bucket: 'b' }, failureNoticed: false, lateCloseShown: true };
+    const unknown = reviewPreviewSubmitVerdict({ ...base, fresh: { ...base.shown, lateCloseAskKept: null } });
+    expect(unknown.message).toBe(LATE_CLOSE_UNAVAILABLE_MESSAGE);
+    expect(unknown.message).toMatch(/review request off/);
+    expect(reviewPreviewSubmitVerdict({ ...base, fresh: { ...base.shown, lateCloseAskKept: false } }).message).toMatch(/past the 3 days/);
   });
 });
