@@ -16,10 +16,17 @@ const MOSQUITO_DEFAULT_LOT_CATEGORIES = constants.MOSQUITO.lotCategories.map(c =
 const PEST_INITIAL_ROACH_DISPLAY_DEFAULTS = JSON.parse(JSON.stringify(constants.PEST.pestInitialRoach.display));
 // Pristine in-code values for recurringPestPriceIsFromRows (below), read
 // before any sync changes the constants: the value of the one optional pest
-// field, and the property types and the tiers the engine knows.
+// field, the property types and the tiers the engine knows, and the service
+// count that earns each tier.
 const PEST_ATTACHED_GARAGE_DEFAULT = constants.PEST.additionalAdjustments.attachedGarage;
 const PEST_PROPERTY_TYPE_KEYS = Object.freeze(Object.keys(constants.PROPERTY_TYPE_ADJ));
 const WAVEGUARD_TIER_KEYS = Object.freeze(Object.keys(constants.WAVEGUARD.tiers));
+// The engine's tier picker (determineWaveGuardTier, discount-engine.js) counts
+// by these fixed thresholds and never reads the minServices a sync loads. The
+// pest price rows suite pins the picker to them.
+const WAVEGUARD_TIER_ENGINE_MIN_SERVICES = Object.freeze(Object.fromEntries(
+  WAVEGUARD_TIER_KEYS.map((tier) => [tier, constants.WAVEGUARD.tiers[tier].minServices]),
+));
 // Pristine code defaults for the rodent bracket ladder (codex #3591 r54
 // P1): a DB row that disappears or invalidates after a prior sync must
 // fall back to these, not keep the stale process-global values.
@@ -794,11 +801,19 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 //   pest_features       each field the sync reads but attached_garage
 //   pest_property_type  each property type the engine knows
 //   waveguard_tiers     for each tier the engine knows: discount (0 up to,
-//                       not including, 1) and min_services (a whole number,
-//                       1 or more), the bounds the Pricing Logic route saves
+//                       not including, 1, the bound the Pricing Logic route
+//                       saves) and min_services (the count the engine's tier
+//                       picker uses for that tier: 1, 2, 3, 4)
 // That is what the migrated schema seeds and what production carries, and
 // the route refuses a save that drops a stored key. A direct write or a
 // migration can still leave a row without a field.
+// min_services is the one field the engine's own picker does not read: it
+// counts by fixed thresholds, and the estimate converter picks the tier of an
+// accepted estimate from the loaded ones. The route saves any whole number of
+// 1 or more, and with a threshold other than the picker's the two disagree
+// (a silver threshold of 1: the engine quotes one pest service at bronze, the
+// converter starts it at silver). Such a row does not state the price the
+// engine quotes, so the answer is no for it.
 // The answer is a function of the rows of that ONE sync. It does not depend
 // on what an earlier sync of the process loaded, so a process that just
 // started and a warm one answer the same for the same rows.
@@ -840,7 +855,7 @@ function recurringPestPriceFieldsInRows(config) {
   for (const tier of WAVEGUARD_TIER_KEYS) {
     const values = row('waveguard_tiers')[tier] || {};
     add(`waveguard_tiers.${tier}.discount`, isRowNumber(values.discount) && values.discount >= 0 && values.discount < 1);
-    add(`waveguard_tiers.${tier}.min_services`, Number.isInteger(values.min_services) && values.min_services >= 1);
+    add(`waveguard_tiers.${tier}.min_services`, isRowNumber(values.min_services) && values.min_services === WAVEGUARD_TIER_ENGINE_MIN_SERVICES[tier]);
   }
   return fields;
 }

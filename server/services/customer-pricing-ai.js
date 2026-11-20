@@ -1,6 +1,9 @@
 const pricingEngine = require('./pricing-engine');
 const logger = require('./logger');
-const { loadExistingQualifyingServiceKeys, loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
+const {
+  loadExistingQualifyingServiceKeys, loadOwnedRecurringServiceKeys,
+  loadLiveRecurringObligationRows, filterRowsToStreet, ownershipKeysForRow, isActivePlanCustomer,
+} = require('./waveguard-existing-services');
 const { storiesSourceForPricing } = require('./estimator-engine/draft-builder');
 // Story provenances under which a lookup living area may stand in for the
 // building footprint on the Tree & Shrub open-parcel basis — the resolver's
@@ -272,10 +275,21 @@ async function safeSelect(db, table, buildQuery) {
   }
 }
 
-// strict (strictPriceSettings, a price nobody watches): a failed read of the
-// qualifying services is not "no current services". The reader's own strict
-// form throws where its default reads a failure as "not a member", and
-// pricing is then withheld, as for a failed ownership read.
+// strict (strictPriceSettings, a price nobody watches) adds three things.
+// 1. A failed read of the qualifying services is not "no current services".
+//    The reader's own strict form throws where its default reads a failure as
+//    "not a member", and pricing is then withheld, as for a failed ownership
+//    read.
+// 2. otherLiveObligation: does the customer have, at the priced property, a
+//    live recurring obligation that is not pest control and nothing else?
+//    The two key sets cannot answer that. The owned keys leave out a row
+//    that maps to no service family (a palm injection, a termite bond), and
+//    the reader says so itself: "has a live recurring plan" is its ROWS,
+//    never its keys. So strict reads the rows, in the same street scope.
+// 3. planMember: does the account hold a plan today (a tier or a legacy
+//    monthly rate, the reader's own check, read from the database)? A member
+//    has a plan service also while none of its visits is on the calendar.
+// A failed read of 2 or 3 withholds pricing too.
 async function loadCurrentServiceKeys(db, customer, { strict = false } = {}) {
   if (!db || !customer?.id) return { currentServiceKeys: [], ownedServiceKeys: [] };
   try {
@@ -313,11 +327,21 @@ async function loadCurrentServiceKeys(db, customer, { strict = false } = {}) {
     }
     let ownedServiceKeys = [];
     let ownershipLookupFailed = false;
+    let otherLiveObligation = false;
+    let planMember = false;
     try {
       // Ownership is BROADER than qualification (codex #3253 r2): recurring
       // rodent bait monitoring never raises a tier but absolutely means the
       // customer has rodent service — the never-re-price rule must see it.
       ownedServiceKeys = (await loadOwnedRecurringServiceKeys(db, customer.id, { streetScope })).map(mapKey);
+      if (strict) {
+        const liveRows = await filterRowsToStreet(db, await loadLiveRecurringObligationRows(db, customer.id), streetScope);
+        otherLiveObligation = liveRows.some((row) => {
+          const keys = ownershipKeysForRow(row);
+          return !keys.length || keys.some((key) => key !== 'pest_control');
+        });
+        planMember = await isActivePlanCustomer(db, customer.id, { strict: true });
+      }
     } catch (err) {
       // FAIL CLOSED (codex #3253 r4): unknown ownership must not price —
       // the caller returns manual review instead of a fresh quote the
@@ -325,7 +349,10 @@ async function loadCurrentServiceKeys(db, customer, { strict = false } = {}) {
       ownershipLookupFailed = true;
       logger.warn(`[customer-pricing-ai] ownership lookup failed — pricing withheld: ${err.message}`);
     }
-    return { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed: ownershipLookupFailed || qualifyingLookupFailed };
+    return {
+      currentServiceKeys, ownedServiceKeys, otherLiveObligation, planMember,
+      ownershipLookupFailed: ownershipLookupFailed || qualifyingLookupFailed,
+    };
   } catch (err) {
     logger.warn(`[customer-pricing-ai] active service lookup failed — pricing withheld: ${err.message}`);
     return { currentServiceKeys: [], ownedServiceKeys: [], ownershipLookupFailed: true };
@@ -1221,17 +1248,19 @@ async function maybeSyncPricingEngine(db, { strict = false } = {}) {
 //    whether the rows of the last good refresh carried every input of the
 //    recurring pest price (recurringPestPriceIsFromRows), on both paths: a
 //    refresh that just ran, and settings that read fresh. The bridge has
-//    that proof for the recurring pest price only, which is why under strict
-//    the engine models pest control only: buildCustomerPricingResponse
-//    refuses another service to price (a caller's mistake), and a customer
-//    who has another service now (STRICT_PRICE_OTHER_SERVICE: the engine
-//    would price that service too, for the plan total and the tier).
+//    that proof for the recurring pest price only, which is why strict is
+//    the price of pest control for a customer who has no other service:
+//    buildCustomerPricingResponse refuses another service to price (a
+//    caller's mistake), and a customer who has another service now
+//    (STRICT_PRICE_OTHER_SERVICE). The engine would price a qualifying
+//    service too, for the plan total and the tier, and it cannot model the
+//    others at all.
 function priceSettingsUnavailable(message) {
   return Object.assign(new Error(message), { code: 'PRICING_CONFIG_UNAVAILABLE' });
 }
 function strictOtherService() {
   return Object.assign(
-    new Error('strictPriceSettings: the customer has a current service other than pest control'),
+    new Error('strictPriceSettings: the customer has, or may have, a service other than pest control'),
     { code: 'STRICT_PRICE_OTHER_SERVICE' },
   );
 }
@@ -1280,7 +1309,9 @@ async function buildCustomerPricingResponse({
   if (strictPriceSettings && (!db || !customer?.id)) {
     throw new Error('strictPriceSettings needs a database handle and a customer id');
   }
-  const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer, { strict: strictPriceSettings });
+  const {
+    currentServiceKeys, ownedServiceKeys, otherLiveObligation, planMember, ownershipLookupFailed,
+  } = await loadCurrentServiceKeys(db, customer, { strict: strictPriceSettings });
   // Two sets on purpose (codex #3253 r2): currentServiceKeys (WaveGuard
   // qualifying) keeps modeling the baseline plan/tier exactly as before;
   // ownedSet is the superset every never-re-price decision reads, so a
@@ -1348,21 +1379,34 @@ async function buildCustomerPricingResponse({
   const alreadyIncluded = requestedServices.filter(key => ownedAndNotRepeatable(key, ownedSet));
   const servicesToPrice = requestedServices.filter(key => !alreadyIncluded.includes(key));
   // strictPriceSettings: the bridge can prove "from the rows" for the
-  // recurring pest price only (strictPriceSettingsRefresh), so under strict
-  // the engine may model pest control and nothing else. Both refused before
-  // any lookup.
+  // recurring pest price only (strictPriceSettingsRefresh), so strict is the
+  // price of pest control for a customer who has no other service. Both
+  // refused before any lookup.
   if (strictPriceSettings) {
     // A service to price: a caller's mistake.
     if (servicesToPrice.some((key) => key !== 'pest_control')) {
       throw new Error('strictPriceSettings prices pest control only');
     }
-    // A service the customer has now. The engine prices those too (the
-    // current plan, and each option's plan total and tier beside it), from
-    // settings that have no proof. This is the customer's own state, so the
-    // error carries a code a caller can tell from its own mistake. (A failed
-    // read of the current services never reaches here under strict: pricing
-    // was withheld above, loadCurrentServiceKeys.)
-    if (currentServiceKeys.some((key) => key !== 'pest_control')) {
+    // A service the customer has now, or may have, by any of these readings:
+    // - a qualifying service: the engine prices those too (the current plan,
+    //   and each option's plan total and tier beside it), from settings that
+    //   have no proof;
+    // - an owned service that qualifies for no tier (recurring rodent
+    //   monitoring, a live lawn service on an account with no membership):
+    //   the engine does not model it, so it would price this customer as one
+    //   who has nothing;
+    // - a live recurring obligation that maps to no service family
+    //   (otherLiveObligation);
+    // - a plan member with no pest control visit on the calendar
+    //   (planMember): the account has a plan service, and none that is
+    //   visible is pest control.
+    // This is the customer's own state, so the error carries a code a caller
+    // can tell from its own mistake. (A failed read of any of them never
+    // reaches here under strict: pricing was withheld above,
+    // loadCurrentServiceKeys.)
+    if (otherLiveObligation
+      || [...ownedSet].some((key) => key !== 'pest_control')
+      || (planMember && !ownedSet.has('pest_control'))) {
       throw strictOtherService();
     }
   }

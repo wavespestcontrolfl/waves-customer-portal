@@ -133,7 +133,10 @@ describe('the answer after one sync', () => {
     REQUIRED_FEATURE_FIELDS.forEach((field, index) => { config.pest_features[field] = 20 + index; });
     PROPERTY_TYPES.forEach((type, index) => { config.pest_property_type[type] = -(30 + index); });
     const discounts = [0.01, 0.02, 0.03, 0.04];
-    const counts = [1, 3, 5, 7];
+    // The service counts are the ones the engine's tier picker uses: the answer takes no other ('the tier
+    // thresholds' below).
+    const counts = TIERS.map((tier) => constants.WAVEGUARD.tiers[tier].minServices);
+    expect(counts).toEqual([1, 2, 3, 4]);
     TIERS.forEach((tier, index) => { config.waveguard_tiers[tier] = { discount: discounts[index], min_services: counts[index] }; });
 
     await expect(sync(worker, config)).resolves.toBe(true);
@@ -204,6 +207,12 @@ describe('rows that lack a required input are refused by a cold worker and by a 
     ['a tier service count of 0', (config) => { config.waveguard_tiers.gold.min_services = 0; }],
     ['a tier service count that is not whole', (config) => { config.waveguard_tiers.gold.min_services = 2.5; }],
     ['a tier service count saved as text', (config) => { config.waveguard_tiers.gold.min_services = '3'; }],
+    // Whole numbers of 1 or more, which the Pricing Logic route saves, but not the counts the engine's tier
+    // picker uses.
+    ['a bronze service count of 2', (config) => { config.waveguard_tiers.bronze.min_services = 2; }],
+    ['a silver service count of 1', (config) => { config.waveguard_tiers.silver.min_services = 1; }],
+    ['a gold service count of 2', (config) => { config.waveguard_tiers.gold.min_services = 2; }],
+    ['a platinum service count of 5', (config) => { config.waveguard_tiers.platinum.min_services = 5; }],
   ])('%s', async (_label, change) => {
     expect(await answers(change)).toMatchObject(REFUSED_BY_BOTH);
   });
@@ -329,6 +338,74 @@ describe('the optional field (pest_features.attached_garage) has an explicit def
     await sync(warm, config);
     expect(warm.constants.PEST.additionalAdjustments.attachedGarage).toBe(inCode);
     expect(warm.bridge.recurringPestPriceIsFromRows()).toBe(false);
+  });
+});
+
+// min_services is the one field of these rows that the engine's own tier picker does not read. The picker
+// (determineWaveGuardTier) counts by fixed thresholds, and the estimate converter picks the tier of an accepted
+// estimate from the loaded ones. With another threshold in the row the two disagree, so the answer takes only
+// the picker's own counts.
+describe('the tier thresholds are the ones the engine\'s tier picker uses', () => {
+  const ONE_PEST_SERVICE = {
+    homeSqFt: 2200, lotSqFt: 8000, stories: 1, propertyType: 'single_family', features: {},
+    services: { pest: { frequency: 'quarterly' } },
+  };
+  // The tier the in-code thresholds give for a count of qualifying services: the highest tier it reaches.
+  const tierByThresholds = (constants, count) => TIERS.reduce(
+    (found, tier) => (count >= constants.WAVEGUARD.tiers[tier].minServices ? tier : found), 'bronze',
+  );
+
+  test('the picker gives the tier of the in-code thresholds for every count of qualifying services', () => {
+    const { constants } = freshWorker();
+    const { determineWaveGuardTier } = require('../services/pricing-engine/discount-engine');
+    const qualifying = constants.WAVEGUARD.qualifyingServices;
+    expect(qualifying.length).toBeGreaterThanOrEqual(5);
+    expect(TIERS.map((tier) => constants.WAVEGUARD.tiers[tier].minServices)).toEqual([1, 2, 3, 4]);
+    for (let count = 0; count <= qualifying.length; count += 1) {
+      expect([count, determineWaveGuardTier(qualifying.slice(0, count)).tier]).toEqual([count, tierByThresholds(constants, count)]);
+    }
+  });
+
+  test('a silver threshold of 1 in the row: the sync loads it, the picker and the engine still give one pest service bronze, and the answer is no', async () => {
+    const worker = freshWorker();
+    const { constants } = worker;
+    const config = fullRows(constants);
+    config.waveguard_tiers.silver = { discount: 0.1, min_services: 1 };
+    await expect(sync(worker, config)).resolves.toBe(true);
+    // The loaded threshold says one service earns silver ...
+    expect(constants.WAVEGUARD.tiers.silver).toMatchObject({ discount: 0.1, minServices: 1 });
+    expect(tierByThresholds(constants, 1)).toBe('silver');
+    // ... and the engine quotes one pest service at bronze, with no tier discount.
+    expect(require('../services/pricing-engine/discount-engine').determineWaveGuardTier(['pest_control']).tier).toBe('bronze');
+    const estimate = require('../services/pricing-engine').generateEstimate(ONE_PEST_SERVICE);
+    const line = estimate.lineItems.find((item) => item.service === 'pest_control');
+    expect(estimate.waveGuard.tier).toBe('bronze');
+    expect(line.annual).toBeGreaterThan(0);
+    expect(line.annualAfterDiscount).toBe(line.annual);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(false);
+  });
+
+  test('the same row with the picker\'s threshold: the same bronze quote, and the answer is yes', async () => {
+    const worker = freshWorker();
+    const config = fullRows(worker.constants);
+    config.waveguard_tiers.silver = { discount: 0.1, min_services: 2 };
+    await expect(sync(worker, config)).resolves.toBe(true);
+    const estimate = require('../services/pricing-engine').generateEstimate(ONE_PEST_SERVICE);
+    expect(estimate.waveGuard.tier).toBe('bronze');
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(true);
+  });
+
+  test('a warm worker that held the picker\'s thresholds refuses a row with another one, and answers yes again when it is back', async () => {
+    const warm = freshWorker();
+    await sync(warm, fullRows(warm.constants));
+    expect(warm.bridge.recurringPestPriceIsFromRows()).toBe(true);
+    const config = fullRows(warm.constants);
+    config.waveguard_tiers.gold.min_services = 2;
+    await expect(sync(warm, config)).resolves.toBe(true);
+    expect(warm.bridge.recurringPestPriceIsFromRows()).toBe(false);
+    config.waveguard_tiers.gold.min_services = 3;
+    await expect(sync(warm, config)).resolves.toBe(true);
+    expect(warm.bridge.recurringPestPriceIsFromRows()).toBe(true);
   });
 });
 

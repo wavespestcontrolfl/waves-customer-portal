@@ -2464,12 +2464,35 @@ describe('strictPriceSettings: the refresh of the price settings before the engi
       expect(result.code).not.toBe('PRICING_CONFIG_UNAVAILABLE');
     });
 
-    // The engine prices the services the customer has NOW too: the current plan, and each option's plan total
-    // and tier beside it. The bridge has no proof for the settings of those, so strict refuses the customer.
+    // Strict is the price of pest control for a customer who has no other service. The engine prices the
+    // qualifying services the customer has NOW too (the current plan, and each option's plan total and tier
+    // beside it), from settings the bridge has no proof for, and it cannot model the others at all.
     describe('a customer who has another service now', () => {
       const OTHER_SERVICE = { code: 'STRICT_PRICE_OTHER_SERVICE' };
       // The customer's live recurring visits, on a handle the bridge could refresh from.
       const withPlan = (serviceTypes) => Object.assign(activePlanDb(customer.id, serviceTypes), { schema: { hasTable: async () => false } });
+      // The same for any account. `account` is the customers row: no tier and no legacy rate is an account with
+      // no membership.
+      const withVisits = (account, serviceTypes, visit = {}) => Object.assign(dbForTables({
+        customers: [{ id: customer.id, active: true, ...account }],
+        scheduled_services: serviceTypes.map((service_type, index) => ({
+          id: `svc-${index + 1}`, service_type, scheduled_date: FUTURE_SCHEDULED_DATE, status: 'scheduled', is_recurring: true, ...visit,
+        })),
+      }), { schema: { hasTable: async () => false } });
+      const NO_MEMBERSHIP = { waveguard_tier: null, monthly_rate: null };
+      const MEMBER = { waveguard_tier: 'Bronze', monthly_rate: 55 };
+      // Counts the reads of one table, and fails every one after `allowed`.
+      const counting = (table, allowed = Infinity) => {
+        const base = withVisits(NO_MEMBERSHIP, []);
+        const state = { reads: 0 };
+        return Object.assign((name) => {
+          if (name === table) {
+            state.reads += 1;
+            if (state.reads > allowed) throw new Error(`${table} read down`);
+          }
+          return base(name);
+        }, { schema: base.schema, state });
+      };
 
       test.each([
         ['lawn care', ['Lawn Care']],
@@ -2498,11 +2521,134 @@ describe('strictPriceSettings: the refresh of the price settings before the engi
         expect(result.options).toEqual([]);
       });
 
-      test('strict: a customer with no service now is priced', async () => {
+      test('strict: an account with no membership and no live recurring visit is priced', async () => {
         sync.mockResolvedValue(true);
-        const result = await price({ strictPriceSettings: true, db: withPlan([]) });
+        const result = await price({ strictPriceSettings: true, db: withVisits(NO_MEMBERSHIP, []) });
         expect(result.currentServices).toEqual([]);
         expect(result.options.length).toBeGreaterThan(0);
+      });
+
+      // A member has a plan service also while none of its visits is on the calendar (a series between
+      // visits). The key sets and the rows are empty then, and the engine would price a customer who has
+      // nothing.
+      test.each([
+        ['a tier', { waveguard_tier: 'Silver', monthly_rate: null }],
+        ['a legacy monthly rate and no tier', { waveguard_tier: null, monthly_rate: 55 }],
+      ])('a plan member (%s) with no visit on the calendar: the default prices pest control, strict refuses the customer', async (_label, account) => {
+        sync.mockResolvedValue(true);
+        const byDefault = await price({ db: withVisits(account, []) });
+        expect(byDefault.currentServices).toEqual([]);
+        expect(byDefault.options.length).toBeGreaterThan(0);
+
+        sync.mockClear();
+        const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
+        await expect(price({ strictPriceSettings: true, db: withVisits(account, []), propertyLookup })).rejects.toMatchObject(OTHER_SERVICE);
+        expect(propertyLookup).not.toHaveBeenCalled();
+        expect(sync).not.toHaveBeenCalled();
+      });
+
+      test('strict: an account whose tier says "no plan" and an inactive account are not plan members', async () => {
+        sync.mockResolvedValue(true);
+        for (const account of [{ waveguard_tier: 'None' }, { waveguard_tier: 'One-Time' }, { waveguard_tier: 'Gold', active: false }]) {
+          expect((await price({ strictPriceSettings: true, db: withVisits(account, []) })).options.length).toBeGreaterThan(0);
+        }
+      });
+
+      // A service the customer owns that qualifies for no tier. The qualifying read finds nothing (it counts
+      // services for a member only), so the engine would price this customer as one who has nothing.
+      test.each([
+        ['a live lawn service on an account with no membership', NO_MEMBERSHIP, ['Lawn Care']],
+        ['recurring rodent bait monitoring on an account with no membership', NO_MEMBERSHIP, ['Rodent Bait Station Monitoring']],
+      ])('%s: the default prices pest control as for a customer who has nothing, strict refuses the customer', async (_label, account, serviceTypes) => {
+        sync.mockResolvedValue(true);
+        const byDefault = await price({ db: withVisits(account, serviceTypes) });
+        expect(byDefault.currentServices).toEqual([]);
+        expect(byDefault.options.length).toBeGreaterThan(0);
+
+        sync.mockClear();
+        const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
+        await expect(price({ strictPriceSettings: true, db: withVisits(account, serviceTypes), propertyLookup })).rejects.toMatchObject(OTHER_SERVICE);
+        expect(propertyLookup).not.toHaveBeenCalled();
+        expect(sync).not.toHaveBeenCalled();
+      });
+
+      // A live recurring obligation that maps to no service family is in neither key set. The reader's rule:
+      // "has a live recurring plan" is its rows, never its keys.
+      test.each([
+        ['a recurring palm injection', 'Palm Injection'],
+        ['a termite bond', 'Termite Bond Renewal'],
+        ['recurring rodent trapping', 'Rodent Trapping'],
+      ])('%s (no service family): the default prices pest control, strict refuses the customer', async (_label, serviceType) => {
+        sync.mockResolvedValue(true);
+        const { ownershipKeysForRow } = require('../services/waveguard-existing-services');
+        expect(ownershipKeysForRow({ service_type: serviceType })).toEqual([]);
+        for (const account of [MEMBER, NO_MEMBERSHIP]) {
+          const byDefault = await price({ db: withVisits(account, [serviceType]) });
+          expect(byDefault.currentServices).toEqual([]);
+          expect(byDefault.options.length).toBeGreaterThan(0);
+
+          sync.mockClear();
+          const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
+          await expect(price({ strictPriceSettings: true, db: withVisits(account, [serviceType]), propertyLookup })).rejects.toMatchObject(OTHER_SERVICE);
+          expect(propertyLookup).not.toHaveBeenCalled();
+          expect(sync).not.toHaveBeenCalled();
+        }
+      });
+
+      test('strict: pest control visits and nothing else are not "another service", with or without a membership', async () => {
+        sync.mockResolvedValue(true);
+        for (const account of [MEMBER, NO_MEMBERSHIP]) {
+          const result = await price({ strictPriceSettings: true, db: withVisits(account, ['Quarterly Pest Control', 'Pest Control']) });
+          expect(result.alreadyIncluded).toEqual(['Pest Control']);
+          expect(result.options).toEqual([]);
+        }
+      });
+
+      // The rows are read in the same street scope as the two key sets: the pricer prices the primary address.
+      // The membership is the account's, whatever the address.
+      test('strict: a service that is live only at a second property is not "another service" at the priced one, for an account with no membership', async () => {
+        sync.mockResolvedValue(true);
+        const stamped = (account) => {
+          const base = withVisits(account, ['Palm Injection', 'Lawn Care'], { service_address_line1: '200 Oak Ave' });
+          return Object.assign((table) => {
+            const q = base(table);
+            if (table === 'scheduled_services') {
+              q.columnInfo = () => ({ is_recurring: {}, service_address_line1: {}, service_address_city: {}, service_address_zip: {} });
+            }
+            return q;
+          }, { schema: base.schema });
+        };
+        const atPrimary = { ...customer, address_line1: '100 Main St' };
+        const result = await price({ strictPriceSettings: true, db: stamped(NO_MEMBERSHIP), customer: atPrimary });
+        expect(result.currentServices).toEqual([]);
+        expect(result.options.length).toBeGreaterThan(0);
+        // The same visits with no address stamp are at the primary address: refused.
+        await expect(price({ strictPriceSettings: true, db: withVisits(NO_MEMBERSHIP, ['Palm Injection', 'Lawn Care']), customer: atPrimary }))
+          .rejects.toMatchObject(OTHER_SERVICE);
+        // A plan member is refused at either address.
+        await expect(price({ strictPriceSettings: true, db: stamped(MEMBER), customer: atPrimary })).rejects.toMatchObject(OTHER_SERVICE);
+      });
+
+      // Strict reads the live rows and the membership once more than the default. When one of those reads
+      // fails there is no proof that the customer has nothing else: pricing is withheld.
+      test.each([
+        ['the live recurring rows', 'scheduled_services'],
+        ['the membership', 'customers'],
+      ])('strict: a failed read of %s withholds pricing', async (_label, table) => {
+        sync.mockResolvedValue(true);
+        const defaultDb = counting(table);
+        expect((await price({ db: defaultDb })).options.length).toBeGreaterThan(0);
+        const strictDb = counting(table);
+        expect((await price({ strictPriceSettings: true, db: strictDb })).options.length).toBeGreaterThan(0);
+        expect(strictDb.state.reads).toBeGreaterThan(defaultDb.state.reads);
+
+        // The default makes none of the extra reads, so it still prices on this handle.
+        const failing = () => counting(table, defaultDb.state.reads);
+        expect((await price({ db: failing() })).options.length).toBeGreaterThan(0);
+        sync.mockClear();
+        const strict = await price({ strictPriceSettings: true, db: failing() });
+        expect(strict).toMatchObject({ ok: false, code: 'PRICING_UNAVAILABLE', options: [] });
+        expect(sync).not.toHaveBeenCalled();
       });
 
       // The services reader's default reads a failed customer read as "not a member": no current services.

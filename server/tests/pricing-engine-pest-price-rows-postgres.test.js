@@ -138,6 +138,27 @@ postgres('recurring pest price rows (live Postgres)', () => {
     expect(cold.bridge.recurringPestPriceIsFromRows()).toBe(false);
   });
 
+  // min_services must be the count the engine's tier picker uses. The Pricing Logic route saves any whole number
+  // of 1 or more, and the estimate converter reads the loaded one.
+  test('waveguard_tiers.silver.min_services of 1: the refresh takes it, and a warm worker and one that just started refuse it', async () => {
+    const setSilver = (count) => trx.raw("UPDATE pricing_config SET data = jsonb_set(data, '{silver,min_services}', ?::jsonb) WHERE config_key = 'waveguard_tiers'", [String(count)]);
+    const warm = freshWorker();
+    await refresh(warm);
+    expect(warm.constants.WAVEGUARD.tiers.silver.minServices).toBe(2);
+    expect(warm.bridge.recurringPestPriceIsFromRows()).toBe(true);
+    expect((await setSilver(1)).rowCount).toBe(1);
+    await expect(refresh(warm)).resolves.toBe(true);
+    expect(warm.constants.WAVEGUARD.tiers.silver.minServices).toBe(1);
+    expect(warm.bridge.recurringPestPriceIsFromRows()).toBe(false);
+    const cold = freshWorker();
+    await expect(refresh(cold)).resolves.toBe(true);
+    expect(cold.bridge.recurringPestPriceIsFromRows()).toBe(false);
+
+    await setSilver(2);
+    await expect(refresh(warm)).resolves.toBe(true);
+    expect(warm.bridge.recurringPestPriceIsFromRows()).toBe(true);
+  });
+
   // The pricer's strict option on the real rows. The default pricer is the one a person reads from: it still
   // prices from what the engine holds.
   describe('strictPriceSettings on the real rows', () => {
@@ -177,33 +198,56 @@ postgres('recurring pest price rows (live Postgres)', () => {
       expect((await ask(worker, { strictPriceSettings: true })).options.length).toBeGreaterThan(0);
     });
 
-    // The engine prices the services the customer has now too (the plan total and the tier beside each
-    // option), from settings the bridge has no proof for. The real ownership read finds the lawn visit.
-    test('a customer with a live recurring lawn visit who asks for pest control alone: the default prices it beside the lawn plan, strict refuses the customer', async () => {
+    // The loaded threshold says one service earns silver; the engine's picker counts by its own thresholds.
+    test('a silver threshold of 1 in the row: the default quotes one pest service at bronze, strict throws', async () => {
+      await trx.raw("UPDATE pricing_config SET data = jsonb_set(data, '{silver,min_services}', '1'::jsonb) WHERE config_key = 'waveguard_tiers'");
+      const worker = freshWorker();
+      const byDefault = await ask(worker);
+      expect(worker.constants.WAVEGUARD.tiers.silver.minServices).toBe(1);
+      expect(byDefault.options.length).toBeGreaterThan(0);
+      expect(byDefault.options.map((option) => String(option.waveguardTier).toLowerCase())).toEqual(byDefault.options.map(() => 'bronze'));
+      await expect(ask(worker, { strictPriceSettings: true })).rejects.toMatchObject(UNAVAILABLE);
+      expect(worker.bridge.needsSync()).toBe(false);
+    });
+
+    // Strict is the price of pest control for a customer who has no other service. The real readers find the
+    // visit: a qualifying service (the engine prices it too), an owned service that qualifies for no tier (the
+    // engine would price the customer as one who has nothing), and a live recurring obligation that maps to no
+    // service family. They also find the membership of an account with no visit on the calendar.
+    test.each([
+      ['a plan member with a live recurring lawn visit', { waveguard_tier: 'Bronze' }, 'Bi-Monthly Lawn Care Service', ['Lawn Care']],
+      ['an account with no membership and a live recurring lawn visit', {}, 'Bi-Monthly Lawn Care Service', []],
+      ['a plan member with a recurring palm injection', { waveguard_tier: 'Bronze' }, 'Palm Injection', []],
+    ])('%s who asks for pest control alone: the default prices it, strict refuses the customer', async (_label, account, serviceType, currentServices) => {
       const worker = freshWorker();
       const tag = hex(4);
-      const [lawnCustomer] = await trx('customers').insert({
+      const [seeded] = await trx('customers').insert({
         first_name: 'Jordan', last_name: 'Example', email: `jordan.${tag}@example.test`,
         phone: `+1941${String(parseInt(tag, 16) % 10000000).padStart(7, '0')}`,
         address_line1: `${(parseInt(tag, 16) % 9000) + 100} Example Test Ln`, city: 'Parrish', state: 'FL', zip: '34219',
-        // A plan member: the services reader counts current services for a member only.
-        active: true, pipeline_stage: 'won', waveguard_tier: 'Bronze',
+        active: true, pipeline_stage: 'won', ...account,
       }).returning('*');
       await trx('scheduled_services').insert({
-        customer_id: lawnCustomer.id, scheduled_date: etDateString(addETDays(new Date(), 10)), service_type: 'Bi-Monthly Lawn Care Service',
+        customer_id: seeded.id, scheduled_date: etDateString(addETDays(new Date(), 10)), service_type: serviceType,
         status: 'confirmed', is_recurring: true,
       });
       const askFor = (extra = {}) => worker.pricer.buildCustomerPricingResponse({
-        customer: lawnCustomer, prompt: 'I am interested in adding pest control', db: trx, propertyLookup: async () => SAVED_LOOKUP, ...extra,
+        customer: seeded, prompt: 'I am interested in adding pest control', db: trx, propertyLookup: async () => SAVED_LOOKUP, ...extra,
       });
 
       const result = await askFor();
-      expect(result.currentServices).toEqual(['Lawn Care']);
+      expect(result.currentServices).toEqual(currentServices);
       expect(result.options.length).toBeGreaterThan(0);
       await expect(askFor({ strictPriceSettings: true })).rejects.toMatchObject({ code: 'STRICT_PRICE_OTHER_SERVICE' });
 
-      // Without the lawn visit the same customer is priced under strict.
-      await trx('scheduled_services').where({ customer_id: lawnCustomer.id }).del();
+      // Without the visit: a plan member is still refused (the account has a plan service, none on the
+      // calendar), and an account with no membership is priced.
+      await trx('scheduled_services').where({ customer_id: seeded.id }).del();
+      if (account.waveguard_tier) {
+        expect((await askFor()).options.length).toBeGreaterThan(0);
+        await expect(askFor({ strictPriceSettings: true })).rejects.toMatchObject({ code: 'STRICT_PRICE_OTHER_SERVICE' });
+        await trx('customers').where({ id: seeded.id }).update({ waveguard_tier: null });
+      }
       expect((await askFor({ strictPriceSettings: true })).options.length).toBeGreaterThan(0);
     });
 
