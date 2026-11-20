@@ -8,7 +8,7 @@ const MISSING = '33333333-3333-4333-8333-333333333333';
 const CUST = '44444444-4444-4444-8444-444444444444';
 const EST2 = '55555555-5555-4555-8555-555555555555';
 
-jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const logger = require('../services/logger');
 
 // In-memory roof_entry_reads (plus the estimates / customers the references are checked against): just the chains
@@ -21,6 +21,7 @@ let mockDbCalls;
 let mockEvents;
 let mockOnConflict;
 let mockOnClaimed;
+let mockSelectError;
 jest.mock('../models/db', () => {
   const table = (name) => {
     let where = {};
@@ -48,13 +49,16 @@ jest.mock('../models/db', () => {
       },
       orderBy() { return b; },
       async first() { return match()[0]; },
-      async select() { return match(); },
+      async select() {
+        if (mockSelectError && name === 'roof_entry_reads') { const err = mockSelectError; mockSelectError = null; throw err; }
+        return match();
+      },
       insert(record) {
         const run = (ignoreConflict) => async () => {
           // The two unique partial indexes: one pending row per crop, one copy per (source, estimate, customer).
           const pendingTaken = record.status === 'pending' && mockRows.some((r) => r.lookup_key === record.lookup_key && r.status === 'pending');
           const copyTaken = !!record.source_id && mockRows.some((r) => r.source_id === record.source_id
-            && (r.estimate_id || null) === (record.estimate_id || null) && (r.customer_id || null) === (record.customer_id || null));
+            && r.context_key === record.context_key);
           if (ignoreConflict && (pendingTaken || copyTaken)) {
             if (pendingTaken && mockOnConflict) mockOnConflict();
             return [];
@@ -78,9 +82,11 @@ jest.mock('../models/db', () => {
           onConflict: () => ({ ignore: () => ({ returning: run(true) }) }),
         };
       },
-      update(patch) {
+      update(rawPatch) {
+        const renewing = !!(rawPatch.claimed_at && rawPatch.claimed_at.raw);
+        const patch = renewing ? { claimed_at: new Date().toISOString() } : rawPatch;
         return settled(() => {
-          mockEvents.push(`update:${patch.status || ''}`);
+          mockEvents.push(renewing ? 'renew' : `update:${patch.status || ''}`);
           const rows = match();
           rows.forEach((r) => Object.assign(r, patch));
           return rows;
@@ -99,6 +105,7 @@ jest.mock('../models/db', () => {
   };
   const db = jest.fn((name) => { mockDbCalls.push(name); return table(name); });
   db.fn = { now: () => 'NOW' };
+  db.raw = (sql) => ({ raw: sql });
   db.transaction = jest.fn();
   return db;
 });
@@ -168,6 +175,7 @@ beforeEach(() => {
   mockEvents = [];
   mockOnConflict = null;
   mockOnClaimed = null;
+  mockSelectError = null;
   mockAuth.mockClear();
   logger.info.mockClear();
   logger.warn.mockClear();
@@ -437,6 +445,7 @@ describe('references and county text', () => {
 
 const CROP_KEY = () => svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 });
 const crop = (over = {}) => ({
+  context_key: svc.contextKey({ estimateId: over.estimate_id, customerId: over.customer_id }),
   id: 'row-x', lookup_key: CROP_KEY(), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
   ai_flags: '{}', ai_tier: 'pending', status: 'pending', cost_estimate_cents: 0, estimate_id: null, customer_id: null,
   tech_final_count: null, tech_final_flags: null, created_at: new Date().toISOString(), claimed_at: new Date().toISOString(), ...over,
@@ -448,7 +457,7 @@ describe('claim row', () => {
     await post(home());
     // Prices are read before the claim; the claim, the fetch, the model call and the write happen in this order, each
     // database step its own statement, so no connection is held across the slow, paid steps.
-    expect(mockEvents).toEqual(['prices', 'claim', 'image', 'model', 'update:done']);
+    expect(mockEvents).toEqual(['prices', 'claim', 'image', 'renew', 'model', 'update:done']);
     expect(require('../models/db').transaction).not.toHaveBeenCalled();
     expect(mockRows).toHaveLength(1);
     expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'done', ai_tier: 'med', model: 'test-vision' }));
@@ -561,6 +570,135 @@ describe('claim row', () => {
     // The service is called directly the same way.
     const direct = await svc.runRoofEntryRead({ lat: 27.46, lng: -82.57, county: 'Manatee', estimateId: EST.toUpperCase() });
     expect(direct.read.id).toBe(first.json.read.id);
+  });
+});
+
+describe('claim ownership', () => {
+  it('stops before the call when the claim was taken over during the image fetch, and never revives the expired row', async () => {
+    fetchSpy.mockImplementation(async () => {
+      mockEvents.push('image');
+      mockRows[0].status = 'failed'; // the 5-minute takeover marked it failed
+      return jpeg();
+    });
+    const res = await post(home());
+    expect(res.json).toEqual({ status: 'in_progress', cached: false, read: null });
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockRows[0].status).toBe('failed');
+    expect(mockEvents).not.toContain('update:done');
+  });
+
+  it('does not overwrite a row another worker owns when the claim is lost during the call', async () => {
+    mockDispatch.mockImplementation(async () => {
+      mockEvents.push('model');
+      mockRows[0].status = 'failed';
+      return { ok: true, provider: 'gemini', model: 'test-vision', json: goodWithPins(), usage: { input_tokens: 10, output_tokens: 10 } };
+    });
+    const res = await post(home());
+    expect(res.json).toEqual({ status: 'in_progress', cached: false, read: null });
+    expect(mockRows).toHaveLength(1);
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', ai_tier: 'pending', cost_estimate_cents: 0 }));
+    expect(mockRows[0].ai_flags).toBe('{}');
+    expect(logger.debug).toHaveBeenCalled();
+  });
+
+  it('also refuses to write when the row is still pending but was renewed by someone else (claimed_at changed)', async () => {
+    mockDispatch.mockImplementation(async () => {
+      mockEvents.push('model');
+      mockRows[0].claimed_at = 'renewed-by-another-worker';
+      return { ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: {} };
+    });
+    expect((await post(home())).json.status).toBe('in_progress');
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'pending', ai_tier: 'pending', claimed_at: 'renewed-by-another-worker' }));
+  });
+
+  it('answers from the read the other worker finished when the claim is lost during the call', async () => {
+    mockDispatch.mockImplementation(async () => {
+      mockEvents.push('model');
+      mockRows[0].status = 'failed';
+      mockRows.push(crop({ id: 'taker-done', status: 'done', ai_tier: 'high', ai_flags: JSON.stringify(goodJson().flags), cost_estimate_cents: 3, claimed_at: null }));
+      return { ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: {} };
+    });
+    const res = await post(home());
+    expect(res.json).toEqual(expect.objectContaining({ status: 'ok', cached: true }));
+    expect(res.json.read.id).toBe('taker-done');
+  });
+
+  it('renews the claim with a fresh claimed_at right before the call, and writes only against that value', async () => {
+    let atCall;
+    mockDispatch.mockImplementation(async () => {
+      atCall = mockRows[0].claimed_at;
+      return { ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: {} };
+    });
+    await post(home());
+    expect(mockEvents.indexOf('renew')).toBeLessThan(mockEvents.indexOf('update:done'));
+    expect(atCall).toEqual(expect.any(String));
+    expect(mockRows[0].status).toBe('done');
+  });
+});
+
+describe('cleanup after the claim', () => {
+  it('releases the claim when the recheck right after it throws, so the crop is not left pending', async () => {
+    mockOnClaimed = () => { mockOnClaimed = null; mockSelectError = new Error('db blip'); };
+    const res = await post(home());
+    expect(res.status).toBe(500);
+    expect(mockRows).toHaveLength(1);
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', ai_tier: 'unknown' }));
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // The next request claims and pays normally.
+    expect((await post(home())).json.read.tier).toBe('med');
+  });
+
+  it('leaves a row another worker already finished untouched when its own error cleanup runs', async () => {
+    mockDispatch.mockImplementation(async () => {
+      mockRows[0].status = 'done';
+      throw new Error('boom');
+    });
+    expect((await post(home())).status).toBe(500);
+    expect(mockRows[0].status).toBe('done');
+  });
+});
+
+describe('context key', () => {
+  it('is lower(estimate) | lower(customer), either side may be empty, and fits varchar(80)', () => {
+    expect(svc.contextKey({ estimateId: EST.toUpperCase(), customerId: CUST })).toBe(`${EST}|${CUST}`);
+    expect(svc.contextKey({ estimateId: null, customerId: CUST })).toBe(`|${CUST}`);
+    expect(svc.contextKey({ estimateId: EST, customerId: null })).toBe(`${EST}|`);
+    expect(svc.contextKey({ estimateId: null, customerId: null })).toBe('|');
+    expect(svc.contextKey({ estimateId: EST, customerId: CUST }).length).toBeLessThanOrEqual(80);
+  });
+
+  it('is written on every row: the paid row, and each copy', async () => {
+    await post(home({ estimate_id: EST }));
+    await post(home({ customer_id: CUST }));
+    expect(mockRows.map((r) => r.context_key)).toEqual([`${EST}|`, `|${CUST}`]);
+  });
+
+  it('keeps matching by context after a foreign key is set null, and a new copy no longer collides', async () => {
+    await post(home());
+    const withBoth = await post(home({ estimate_id: EST, customer_id: CUST }));
+    const customerOnly = await post(home({ customer_id: CUST }));
+    expect(new Set([withBoth.json.read.id, customerOnly.json.read.id]).size).toBe(2);
+    // The estimate is deleted: ON DELETE SET NULL turns copy (EST, CUST) into (null, CUST), the same as the other copy.
+    mockRows.find((r) => r.id === withBoth.json.read.id).estimate_id = null;
+    mockRefs.estimates = mockRefs.estimates.filter((e) => e.id !== EST);
+    const rowsBefore = mockRows.length;
+    // A fresh copy for another context still inserts: the unique key is the immutable context_key.
+    const other = await post(home({ estimate_id: EST2, customer_id: CUST }));
+    expect(other.json.cached).toBe(true);
+    expect(mockRows).toHaveLength(rowsBefore + 1);
+    // The customer-only context still returns ITS copy, never the row whose estimate was nulled.
+    expect((await post(home({ customer_id: CUST }))).json.read.id).toBe(customerOnly.json.read.id);
+    expect(mockRows).toHaveLength(rowsBefore + 1);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('still finds a context\'s copy by its context key after its estimate foreign key was nulled', async () => {
+    await post(home());
+    const copy = await post(home({ estimate_id: EST }));
+    mockRows.find((r) => r.id === copy.json.read.id).estimate_id = null;
+    const again = await svc.runRoofEntryRead({ lat: 27.46, lng: -82.57, county: 'Manatee', estimateId: EST });
+    expect(again.read.id).toBe(copy.json.read.id);
+    expect(mockRows).toHaveLength(2);
   });
 });
 
@@ -714,9 +852,10 @@ describe('one row per estimate or customer context', () => {
     const key = svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 });
     const day = 86400000;
     const base = { lookup_key: key, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm', ai_flags: JSON.stringify(goodJson().flags), ai_tier: 'med', status: 'done', tech_final_count: null, tech_final_flags: null };
+    const ctxKey = (estimateId) => svc.contextKey({ estimateId, customerId: null });
     // Paid 91 days ago; a copy for estimate 2 was made at day 86 (5 days ago).
-    mockRows.push({ ...base, id: 'paid', cost_estimate_cents: 2, estimate_id: null, customer_id: null, created_at: new Date(Date.now() - 91 * day).toISOString() });
-    mockRows.push({ ...base, id: 'copy', cost_estimate_cents: 0, estimate_id: EST2, customer_id: null, created_at: new Date(Date.now() - 5 * day).toISOString() });
+    mockRows.push({ ...base, id: 'paid', context_key: ctxKey(null), cost_estimate_cents: 2, estimate_id: null, customer_id: null, created_at: new Date(Date.now() - 91 * day).toISOString() });
+    mockRows.push({ ...base, id: 'copy', context_key: ctxKey(EST2), cost_estimate_cents: 0, estimate_id: EST2, customer_id: null, created_at: new Date(Date.now() - 5 * day).toISOString() });
     const res = await post(home({ estimate_id: EST2 }));
     expect(res.json.cached).toBe(false);
     expect(mockDispatch).toHaveBeenCalledTimes(1);

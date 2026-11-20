@@ -277,7 +277,13 @@ function publicRead(row) {
   };
 }
 
-const sameContext = (row, ctx) => (row.estimate_id || null) === ctx.estimateId && (row.customer_id || null) === ctx.customerId;
+/**
+ * The immutable context of a row: lower-case estimate id, '|', lower-case customer id (either may be empty), written once
+ * at insert on EVERY row (paid, claim and copy). Matching and copy dedupe use this, never the estimate_id / customer_id
+ * foreign keys, which ON DELETE SET NULL can change after the fact. At most 73 characters (varchar(80)).
+ */
+const contextKey = ({ estimateId, customerId }) => `${estimateId || ''}|${customerId || ''}`.toLowerCase();
+const sameContext = (row, ctx) => row.context_key === contextKey(ctx);
 const timeOf = (row) => new Date(row.created_at).getTime();
 
 /**
@@ -302,7 +308,7 @@ async function reuseCandidates(key) {
  * The row to hand this request: the source itself when it belongs to the same (estimate, customer) context, else a
  * NEW row for this context that copies the paid AI result with cost 0 and empty technician fields. One row per
  * context keeps the technician's count for estimate B from overwriting estimate A's. The copy names its paid source
- * in source_id, and a unique index on (source_id, estimate, customer) lets two requests race for it: the loser's
+ * in source_id, and a unique index on (source_id, context_key) lets two requests race for it: the loser's
  * insert does nothing and both return the winning row. Only copies carry a source_id, so no paid row is in that index.
  */
 async function answerFor(source, ctx) {
@@ -311,6 +317,7 @@ async function answerFor(source, ctx) {
     source_id: source.id,
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
+    context_key: contextKey(ctx),
     lookup_key: source.lookup_key,
     county: source.county,
     image_source: source.image_source,
@@ -321,7 +328,7 @@ async function answerFor(source, ctx) {
     status: STATUS_DONE,
     cost_estimate_cents: 0,
   }).onConflict().ignore().returning('*');
-  const row = inserted || await db(TABLE).where({ source_id: source.id, estimate_id: ctx.estimateId, customer_id: ctx.customerId }).first();
+  const row = inserted || await db(TABLE).where({ source_id: source.id, context_key: contextKey(ctx) }).first();
   return publicRead(row);
 }
 
@@ -345,7 +352,8 @@ async function callModel(image) {
     jsonSchema: READ_SCHEMA,
     maxTokens: 2048,
     temperature: 0.2,
-    reasoningEffort: 'low',
+    // The Gemini adapter reads thinkingLevel (reasoningEffort is the OpenAI/Anthropic knob); the policy has no other leg.
+    thinkingLevel: 'LOW',
     timeoutMs: MODEL_TIMEOUT_MS,
     laneId: 'satellite',
   }, {
@@ -373,6 +381,7 @@ async function insertClaim(key, county, ctx) {
   const rows = await db(TABLE).insert({
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
+    context_key: contextKey(ctx),
     lookup_key: key,
     county,
     image_source: src.source,
@@ -404,44 +413,64 @@ async function claimCrop(key, county, ctx) {
   return (await expireStaleClaim(key)) ? insertClaim(key, county, ctx) : null;
 }
 
-// What the paid call produced, written to the claimed row by id. A finished read is 'done'. A call that was billed but
-// gave nothing usable (unparseable or schema-breaking answer) is 'failed' with its cost and tier 'unknown'. A claim
-// with nothing to keep (no image, or a call that failed before billing) is deleted, so the crop can be claimed again.
-async function finishClaim(claim, settled, prices) {
-  const patch = {
-    model: settled.model,
-    ai_flags: JSON.stringify(settled.checked ? settled.checked.flags : {}),
-    ai_tier: settled.checked ? settled.checked.tier : TIER_UNKNOWN,
-    status: settled.checked ? STATUS_DONE : STATUS_FAILED,
-    cost_estimate_cents: estimateCostCents(settled.billed, prices),
-  };
-  const [row] = await db(TABLE).where({ id: claim.id }).update(patch).returning('*');
-  return publicRead(row || { ...claim, ...patch });
+// Just before the paid call, renew the claim: an atomic UPDATE that only a claim still pending can win. It returns the
+// new claimed_at (set to millisecond precision so it round-trips through a JS Date), or null when the claim was lost
+// (a 5-minute takeover marked it failed while this worker was fetching the image): then no call may be made.
+async function renewClaim(claim) {
+  const rows = await db(TABLE)
+    .where({ id: claim.id, status: STATUS_PENDING })
+    .update({ claimed_at: db.raw("date_trunc('milliseconds', now())") })
+    .returning('claimed_at');
+  return rows[0] ? rows[0].claimed_at : null;
 }
 
-const releaseClaim = (claim) => db(TABLE).where({ id: claim.id }).del();
+// What the paid call produced, written to the claimed row by id, but only while the claim is still this worker's: still
+// pending AND still at the renewed claimed_at. A finished read is 'done'. A call that was billed but gave nothing usable
+// (unparseable or schema-breaking answer) is 'failed' with its cost and tier 'unknown'. Returns null when another worker
+// owns the row now: the expired claim is never revived or overwritten.
+async function finishClaim(claim, renewedAt, settled, prices) {
+  const [row] = await db(TABLE)
+    .where({ id: claim.id, status: STATUS_PENDING, claimed_at: renewedAt })
+    .update({
+      model: settled.model,
+      ai_flags: JSON.stringify(settled.checked ? settled.checked.flags : {}),
+      ai_tier: settled.checked ? settled.checked.tier : TIER_UNKNOWN,
+      status: settled.checked ? STATUS_DONE : STATUS_FAILED,
+      cost_estimate_cents: estimateCostCents(settled.billed, prices),
+    })
+    .returning('*');
+  return row ? publicRead(row) : null;
+}
 
-// The paid part, with NO connection held: image fetch, then one model call, then the write to the claimed row.
-async function payForRead({ claim, lat, lng, county, prices }) {
-  try {
-    const image = await fetchAerial(lat, lng, county);
-    if (!image) {
-      await releaseClaim(claim);
-      return { status: 'no_image', cached: false, read: null };
-    }
-    const outcome = await callModel(image);
-    const settled = settleOutcome(outcome);
-    if (!settled) {
-      logger.warn(`[roof-entry-read] model call failed: ${outcome.reason || 'unknown'}`);
-      await releaseClaim(claim);
-      return { status: 'model_failed', cached: false, read: null };
-    }
-    return { status: 'ok', cached: false, read: await finishClaim(claim, settled, prices) };
-  } catch (err) {
-    // Never leave the crop pending for 5 minutes behind an unexpected error.
-    await db(TABLE).where({ id: claim.id }).update({ status: STATUS_FAILED, ai_tier: TIER_UNKNOWN }).catch(() => {});
-    throw err;
+// A claim with nothing to keep (no image, or a call that failed before billing) is deleted so the crop can be claimed
+// again; the status condition keeps a row another worker has since taken over untouched.
+const releaseClaim = (claim) => db(TABLE).where({ id: claim.id, status: STATUS_PENDING }).del();
+
+// This worker lost its claim: answer from a read another worker finished, else tell the caller to retry. No call is made.
+async function afterLostClaim(key, ctx) {
+  logger.debug('[roof-entry-read] the claim is no longer this worker\'s; nothing is overwritten');
+  const finished = await reuseCandidates(key);
+  return finished ? reuseAnswer(finished, ctx) : { status: 'in_progress', cached: false, read: null };
+}
+
+// The paid part, with NO connection held: image fetch, renew the claim, one model call, then the conditional write.
+async function payForRead({ claim, key, ctx, lat, lng, county, prices }) {
+  const image = await fetchAerial(lat, lng, county);
+  if (!image) {
+    await releaseClaim(claim);
+    return { status: 'no_image', cached: false, read: null };
   }
+  const renewedAt = await renewClaim(claim);
+  if (!renewedAt) return afterLostClaim(key, ctx);
+  const outcome = await callModel(image);
+  const settled = settleOutcome(outcome);
+  if (!settled) {
+    logger.warn(`[roof-entry-read] model call failed: ${outcome.reason || 'unknown'}`);
+    await releaseClaim(claim);
+    return { status: 'model_failed', cached: false, read: null };
+  }
+  const read = await finishClaim(claim, renewedAt, settled, prices);
+  return read ? { status: 'ok', cached: false, read } : afterLostClaim(key, ctx);
 }
 
 // The answer for a reusable read, for this request's context (a copy row when the context differs).
@@ -460,14 +489,21 @@ async function readCrop({ input, county, key, ctx, hit }) {
     if (again) return reuseAnswer(again, ctx);
     return { status: 'in_progress', cached: false, read: null };
   }
-  // The unique index covers pending rows only: another worker may have finished this crop between our reuse check and
-  // our claim. Look again; a finished read makes the claim redundant, so drop it and answer from that read.
-  const finished = await reuseCandidates(key);
-  if (finished) {
-    await releaseClaim(claim);
-    return reuseAnswer(finished, ctx);
+  // Everything after the claim insert runs inside this cleanup: an error anywhere releases THIS request's claim (only
+  // while it is still pending), so the crop is never left pending for 5 minutes behind a failure.
+  try {
+    // The unique index covers pending rows only: another worker may have finished this crop between our reuse check and
+    // our claim. Look again; a finished read makes the claim redundant, so drop it and answer from that read.
+    const finished = await reuseCandidates(key);
+    if (finished) {
+      await releaseClaim(claim);
+      return await reuseAnswer(finished, ctx);
+    }
+    return await payForRead({ claim, key, ctx, lat: input.lat, lng: input.lng, county, prices });
+  } catch (err) {
+    await db(TABLE).where({ id: claim.id, status: STATUS_PENDING }).update({ status: STATUS_FAILED, ai_tier: TIER_UNKNOWN }).catch(() => {});
+    throw err;
   }
-  return payForRead({ claim, lat: input.lat, lng: input.lng, county, prices });
 }
 
 // Fast path only: one in-flight read per crop and context in this process. The claim row is what holds across instances.
@@ -515,6 +551,7 @@ module.exports = {
   IMAGE_SOURCES,
   REUSE_DAYS,
   FALLBACK_COST_CENTS,
+  contextKey,
   cropBounds,
   exportRequestUrl,
   fetchAerial,

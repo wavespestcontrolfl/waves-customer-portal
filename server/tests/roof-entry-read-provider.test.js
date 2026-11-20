@@ -20,13 +20,17 @@ jest.mock('../models/db', () => {
         const make = async () => { const row = { id: 'read-1', created_at: 'T', ...record }; mockRows.push(row); return [row]; };
         return { returning: make, onConflict: () => ({ ignore: () => ({ returning: make }) }) };
       },
-      update(patch) { return run(() => { Object.assign(mockRows[0], patch); return [mockRows[0]]; }); },
+      update(patch) {
+        const next = patch.claimed_at && patch.claimed_at.raw ? { claimed_at: 'T2' } : patch;
+        return run(() => { Object.assign(mockRows[0], next); return [mockRows[0]]; });
+      },
       del() { return run(() => { mockRows.length = 0; return 1; }); },
     };
     return b;
   };
   const db = jest.fn(() => table());
   db.fn = { now: () => 'NOW' };
+  db.raw = (sql) => ({ raw: sql });
   return db;
 });
 
@@ -42,9 +46,11 @@ const svc = require('../services/roof-entry-read');
 
 const realFetch = global.fetch;
 let providerCalls;
+let geminiBodies;
 beforeEach(() => {
   mockRows = [];
   providerCalls = { gemini: 0, openai: 0, image: 0 };
+  geminiBodies = [];
   mockPrices.clear();
   mockPrices.set(llmCost.normalizeModelId(MODELS.TEXT_POLICIES.estimateVision.primary.model), { input: 0.3, output: 2.5, cacheRead: null, cacheWrite: null, reasoning: null, tiers: [] });
   process.env.GATE_ROOF_ENTRY_READ = 'true';
@@ -58,10 +64,11 @@ const geminiBody = (text) => ({
 });
 
 function fakeNetwork(geminiText) {
-  global.fetch = jest.fn(async (url) => {
+  global.fetch = jest.fn(async (url, opts) => {
     const u = String(url);
     if (u.includes('generativelanguage.googleapis.com')) {
       providerCalls.gemini += 1;
+      geminiBodies.push(JSON.parse(opts.body));
       return { ok: true, status: 200, json: async () => geminiBody(geminiText) };
     }
     if (u.includes('api.openai.com')) {
@@ -77,6 +84,8 @@ it('a billed, unparseable Gemini answer makes exactly one provider call, stores 
   fakeNetwork('this is not json {');
   const out = await svc.runRoofEntryRead({ lat: 27.46, lng: -82.57, county: 'Manatee' });
   expect(providerCalls).toEqual({ gemini: 1, openai: 0, image: 1 });
+  // The Gemini adapter reads thinkingLevel; the outgoing request must carry it.
+  expect(geminiBodies[0].generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'LOW' });
   expect(out.status).toBe('ok');
   expect(out.read).toEqual(expect.objectContaining({ tier: 'unknown', flags: {} }));
   expect(mockRows).toHaveLength(1);
