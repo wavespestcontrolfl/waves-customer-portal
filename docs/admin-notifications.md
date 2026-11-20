@@ -692,17 +692,17 @@ moot close), rings the bell once for each `call_phone_yes` card when it is filed
 short: an open estimate on the card expires within 24 hours, or the soonest visit to come that keeps the card open (a pest visit the
 call booked, on the calendar and not linked to an estimate) starts within 48 hours. Only a card with status `open` whose evidence
 still matches it rings or is rewritten: the pass reads the card's state again under the lock (`cardState`), and a card with a
-change not yet written (an estimate accepted, a yes taken back) or whose read fails rings nothing until a later run writes it,
-and so does a card while a call in its word's window still owes a read (the card shows nothing new then, and the tap refuses).
+change not yet written (an estimate accepted, a yes taken back) or whose read fails rings nothing until a later run writes it.
+While a call in the card's word window still owes a read, the card rings nothing new (the read may take the yes back, and the
+tap refuses meanwhile), but its open row still follows the card quietly (the moot pass marks a yes being read again).
 The time short is read by the clock after the card's lock. A claimed card (`in_progress`) keeps its row until it closes. Nothing rings while every active admin has the type's Bell switch off in
 Push Settings (no row, so no banner either; open rows are still rewritten and closed): the switch is read for each ring, under the
 card's lock, by the rule `triggerNotification` writes a shared bell row by (`bellWanted`); a card that rang nothing meanwhile
 rings once the switch is on again, if it is still open. Category `estimate` with
-`bell: true`, headline "Estimates — accept <who>'s estimate" for a card with the caller's yes while the card's tap would accept it
-(`tapCheck`, read in the ring's transaction); "check <who>'s estimate" when no yes was heard, the yes is being read again, or the
-tap would refuse (an expired estimate, more than one open estimate or visit, a visit in the past, a yes that is not the latest
-word about the estimate it would take; the card's tap says why); "check <who>'s booked visit" once an estimate on the card was
-accepted and the visit is not linked), subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
+`bell: true`, headline "Estimates — check <who>'s estimate" (the why says whether the caller said yes, no yes was heard, or the
+yes is being read again) or "check <who>'s booked visit" once an estimate on the card was accepted and the visit is not linked;
+never "accept": the card's tap decides whether it can accept, checking everything again under its own locks when tapped, and no
+bell can keep that answer true until the office taps. Subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
 Keys `call-phone-yes:<card id>` (filed) and `call-phone-yes-due:<card id>` (time short), both without `dedupeOpenOnly`: a closed row
 still holds its key, so each key rings at most once and no `RERING` entry is owed. The filed row closes in the commit that writes the
 time-short row (every pass retries that close, and a raise that wrote no row closes nothing), so a card has one open row; the close also

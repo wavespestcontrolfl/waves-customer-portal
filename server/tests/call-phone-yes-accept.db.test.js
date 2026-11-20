@@ -197,7 +197,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     // The office's bell rings for the new card, once (call-phone-yes-bell.js; its rows: call-phone-yes-bell.db.test.js).
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(notifyAdmin).toHaveBeenCalledWith('estimate', "Estimates — accept Pat Sampleton's estimate", expect.any(String),
+    expect(notifyAdmin).toHaveBeenCalledWith('estimate', "Estimates — check Pat Sampleton's estimate", expect.any(String),
       expect.objectContaining({ bell: true, bannerKind: 'call_phone_yes', dedupeKey: `call-phone-yes:${card.id}` }));
     // One card per call, ever.
     await expect(sweep()).resolves.toMatchObject({ filed: 0, closed: 0 });

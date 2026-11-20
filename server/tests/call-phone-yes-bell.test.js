@@ -86,10 +86,11 @@ describe('the words, by card state', () => {
   });
 
   test.each([
+    // A yes says "check", never "accept": the card's tap decides whether it can accept.
     ['a yes', { yes_heard: true, caller_words: WORDS }, VISIT,
-      "accept Pat Sampleton's estimate", 'The caller said yes to pay per application on a call, and the visit is Tue, Nov 24.'],
+      "check Pat Sampleton's estimate", 'The caller said yes to pay per application on a call, and the visit is Tue, Nov 24.'],
     ['a yes and no visit on the calendar', { yes_heard: true, caller_words: WORDS }, null,
-      "accept Pat Sampleton's estimate", 'The caller said yes to pay per application on a call.'],
+      "check Pat Sampleton's estimate", 'The caller said yes to pay per application on a call.'],
     ['no yes heard', { yes_heard: false }, VISIT,
       "check Pat Sampleton's estimate", 'A call booked a pest visit for Tue, Nov 24 while an estimate is open; no yes was heard.'],
     ['no yes heard and no visit on the calendar', { yes_heard: false }, null,
@@ -99,8 +100,7 @@ describe('the words, by card state', () => {
     ['an estimate accepted, the visit not linked', { yes_heard: true, caller_words: WORDS, estimate_accepted: true }, VISIT,
       "check Pat Sampleton's booked visit", 'An estimate was accepted, but the visit the call booked for Tue, Nov 24 is not linked to it yet.'],
   ])('%s', (_label, payload, visit, action, why) => {
-    // The card's tap would accept (canAccept): a yes says "accept".
-    const text = textFor({ name: 'Pat Sampleton', card: card(payload), visit, canAccept: true });
+    const text = textFor({ name: 'Pat Sampleton', card: card(payload), visit });
     expect(text).toMatchObject({ action, why });
     expect(() => passesRules(text)).not.toThrow();
   });
@@ -111,27 +111,9 @@ describe('the words, by card state', () => {
       'An open estimate on the card expires Tue, Nov 24 and is not accepted yet.'],
     ['the visit is soon', { due: 'visit_soon' }, 'The visit the call booked is Tue, Nov 24, and its card in Triage is still open.'],
   ])('time short: %s', (_label, facts, why) => {
-    const text = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: WORDS }), visit: VISIT, canAccept: true, ...facts });
-    expect(text).toMatchObject({ action: "accept Pat Sampleton's estimate", why });
+    const text = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: WORDS }), visit: VISIT, ...facts });
+    expect(text).toMatchObject({ action: "check Pat Sampleton's estimate", why });
     expect(() => passesRules(text)).not.toThrow();
-  });
-
-  test("a yes the card's tap would refuse asks for a check, not an accept; so does a yes with no tap answer read", () => {
-    const yes = card({ yes_heard: true, caller_words: WORDS });
-    const filed = textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT, canAccept: false });
-    expect(filed).toMatchObject({
-      action: "check Pat Sampleton's estimate",
-      why: "The caller said yes to pay per application, but the card's tap cannot accept it now.",
-    });
-    expect(textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT })).toEqual(filed);
-    const short = textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT, due: 'visit_soon', canAccept: false });
-    expect(short).toMatchObject({
-      action: "check Pat Sampleton's estimate", why: 'The visit the call booked is Tue, Nov 24, and its card in Triage is still open.',
-    });
-    for (const text of [filed, short]) expect(() => passesRules(text)).not.toThrow();
-    // An accepted estimate's card asks about its visit either way.
-    expect(textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, estimate_accepted: true }), visit: VISIT, canAccept: false }).action)
-      .toBe("check Pat Sampleton's booked visit");
   });
 
   test('a long name is cut to fit the headline', () => {
@@ -149,7 +131,7 @@ describe('the words, by card state', () => {
   ])("%s: the caller's words never reach the bell", (_label, words, secret) => {
     for (const payload of [{ yes_heard: true, caller_words: words }, { yes_heard: true, caller_words: words, estimate_accepted: true }]) {
       for (const due of [null, 'visit_soon']) {
-        const text = JSON.stringify(textFor({ name: 'Pat Sampleton', card: card(payload), visit: VISIT, due, canAccept: true }));
+        const text = JSON.stringify(textFor({ name: 'Pat Sampleton', card: card(payload), visit: VISIT, due }));
         expect(text).not.toMatch(secret);
         expect(text).not.toMatch(/[“”]/);
       }

@@ -31,30 +31,13 @@ const Bell = require('../services/call-phone-yes-bell');
 const NotificationService = require('../services/notification-service');
 const { etDateString, formatETDayDate, parseETDateTime } = require('../utils/datetime-et');
 const {
-  tapStateOf, _private: { ringOpenCardsForTest, cardStateForTest, applyCardStateForTest, openCardNowForTest },
+  _private: { ringOpenCardsForTest, cardStateForTest, applyCardStateForTest, openCardNowForTest },
 } = require('../services/call-phone-yes-accept');
 
 const describeDb = SKIP ? describe.skip : describe;
 const DAY = 86400000;
 const HOUR = 3600000;
 const WORDS = "Let's do the quarterly plan, just bill me each time you come out.";
-// The why of a yes the card's tap would refuse.
-const TAP_REFUSES = "The caller said yes to pay per application, but the card's tap cannot accept it now.";
-// Quarterly pest, as in call-phone-yes-accept.db.test.js: 4 visits a year at $45 = $180 a year = $15 a month, no setup
-// fee. The tap reads its plan from it (planTermsOf), so a card on one estimate and one visit is one the tap would accept.
-const planData = () => ({
-  customerSelection: { frequency: 'quarterly' },
-  setupFeeQuote: { amount: 0, waived: true },
-  result: {
-    totals: { year2mo: 15, year2: 180 },
-    results: { pestTiers: [{ label: 'Quarterly', mo: 15, ann: 180, apps: 4, pa: 45 }] },
-    recurring: {
-      discount: 0, monthlyTotal: 15, grandTotal: 15,
-      services: [{ name: 'Pest Control', service: 'pest_control', mo: 15, visitsPerYear: 4, perTreatment: 45 }],
-    },
-    oneTime: { items: [], membershipFee: 0 },
-  },
-});
 // A call's V2 extraction and labeled transcript (as in call-phone-yes-accept.db.test.js): the caller picks pay per
 // application in WORDS, or makes no choice; `intent` is the call's ask (a cancel takes an earlier yes back).
 const extractionWith = (choice, intent = null) => ({
@@ -127,7 +110,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
   }
 
   // One open phone-yes card as the sweep files and keeps it: a customer, the estimates it names (each { hours } until it
-  // expires, its status, and `sentHoursAgo`, two days by default; made `madeHoursAgo` hours ago), the call with the yes a day ago
+  // expires, and its status; made `madeHoursAgo` hours ago and sent two days ago), the call with the yes a day ago
   // (`yes`; none when false), the booking call two hours ago and the pest visit it booked (`visitDays` from today). One
   // estimate is the card's own; two or more are a card that names several. A call that booked several visits files its
   // card with no visit of its own (`cardVisit` false); `moreVisits` are the call's other visits.
@@ -140,12 +123,11 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       id: customerId, first_name: 'Pat', last_name: 'Sampleton', phone: `+1941555${String(6000 + seq)}`, email: `qa-${customerId.slice(0, 8)}@example.test`, active: true,
     });
     const estimateIds = [];
-    for (const { hours, status: estimateStatus = 'sent', sentHoursAgo = 48 } of estimates) {
+    for (const { hours, status: estimateStatus = 'sent' } of estimates) {
       const [row] = await trx('estimates').insert({
         customer_id: customerId, status: estimateStatus, token: randomUUID().replace(/-/g, ''), customer_name: 'Pat Sampleton',
         address: '100 Example Lane, Sampleton, FL 34200', monthly_total: 15, annual_total: 180, onetime_total: 0, category: 'RESIDENTIAL',
-        waveguard_tier: 'Bronze', show_one_time_option: false, bill_by_invoice: false, estimate_data: JSON.stringify(planData()),
-        created_at: new Date(Date.now() - madeHoursAgo * HOUR), sent_at: new Date(Date.now() - sentHoursAgo * HOUR), expires_at: new Date(Date.now() + hours * HOUR),
+        created_at: new Date(Date.now() - madeHoursAgo * HOUR), sent_at: new Date(Date.now() - 2 * DAY), expires_at: new Date(Date.now() + hours * HOUR),
       }).returning('id');
       estimateIds.push(String(row.id || row));
     }
@@ -199,7 +181,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(count).toBe(1);
     expect(due).toBeUndefined();
     expect(filed).toEqual(expect.objectContaining({
-      category: 'estimate', title: "Estimates — accept Pat Sampleton's estimate", link: '/admin/communications#tab=triage',
+      category: 'estimate', title: "Estimates — check Pat Sampleton's estimate", link: '/admin/communications#tab=triage',
       read_at: null, done_at: null,
     }));
     expect(filed.body).toBe(`The caller said yes to pay per application on a call, and the visit is ${dayWords(5)}.`);
@@ -227,7 +209,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
 
     const { filed, due } = await bellsOf(card.id);
     expect(due).toEqual(expect.objectContaining({
-      title: "Estimates — accept Pat Sampleton's estimate",
+      title: "Estimates — check Pat Sampleton's estimate",
       body: `The visit the call booked is ${dayWords(1)}, and its card in Triage is still open.`, done_at: null,
     }));
     expect(due.metadata).toEqual(expect.objectContaining({ due: 'visit_soon', triageItemId: card.id }));
@@ -358,7 +340,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     // A later call takes the yes back. Until the sweep writes that on the card, the bell says nothing new.
     await call(card.customerId, { intent: 'cancellation_request' });
     await pass();
-    expect((await bellsOf(card.id)).filed.title).toBe("Estimates — accept Pat Sampleton's estimate");
+    expect((await bellsOf(card.id)).filed.title).toBe("Estimates — check Pat Sampleton's estimate");
     await keepCurrent(card.id);
     await pass();
 
@@ -386,7 +368,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     const { filed, due, count } = await bellsOf(card.id);
     expect(count).toBe(1);
     expect(due).toBeUndefined();
-    expect(filed).toEqual(expect.objectContaining({ title: "Estimates — accept Pat Sampleton's estimate", done_at: null }));
+    expect(filed).toEqual(expect.objectContaining({ title: "Estimates — check Pat Sampleton's estimate", done_at: null }));
     expect(bannersFor(card.id)).toBe(1);
   });
 
@@ -396,8 +378,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     // The lawn visit tomorrow is no reason; the pest visit is in five days.
     let bells = await bellsOf(card.id);
     expect(bells).toEqual(expect.objectContaining({ due: undefined, count: 1 }));
-    // The call booked more than one visit, so the card's tap would refuse: the bell asks for a check.
-    expect(bells.filed.body).toBe(TAP_REFUSES);
+    expect(bells.filed.body).toBe(`The caller said yes to pay per application on a call, and the visit is ${dayWords(5)}.`);
 
     // The call's second pest visit, tomorrow: time runs short.
     await addVisit(card, { days: 1 });
@@ -446,7 +427,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     // No alert to accept an accepted estimate, and the time-short key is not spent on one.
     let bells = await bellsOf(card.id);
     expect(bells).toEqual(expect.objectContaining({ due: undefined, count: 1 }));
-    expect(bells.filed.title).toBe("Estimates — accept Pat Sampleton's estimate");
+    expect(bells.filed.title).toBe("Estimates — check Pat Sampleton's estimate");
     expect(bannersFor(card.id)).toBe(1);
 
     // The next run writes the accept on the card; then the time-short bell says what the card says.
@@ -535,33 +516,31 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(bannersFor(card.id)).toBe(2);
   });
 
-  test("a yes the card's tap would refuse asks for a check, not an accept, at filing and when time runs short", async () => {
-    // Filed after its estimate expired.
-    const lapsed = await phoneYesCard({ estimates: [{ hours: -1 }] });
-    // The yes came before the open estimate was sent (the other one expired): the tap reads the word about the open one
-    // from its send, finds no yes there, and refuses.
-    const before = await phoneYesCard({ estimates: [{ hours: -1 }, { hours: 5 * 24, sentHoursAgo: 12 }] });
-    const { message } = await tapStateOf(await trx('triage_items').where({ id: before.id }).first());
-    expect(message).toContain('not the latest word about the estimate the tap would accept');
-    // Filed while its estimate is open, and the tap would accept: an accept.
+  test('while the call with the yes is read again, nothing new rings; the open row says so quietly and keeps its read state', async () => {
     const card = await phoneYesCard();
     await pass();
-    for (const refused of [lapsed, before]) {
-      expect((await bellsOf(refused.id)).filed).toEqual(expect.objectContaining({
-        title: "Estimates — check Pat Sampleton's estimate", body: TAP_REFUSES,
-      }));
-    }
-    expect((await bellsOf(card.id)).filed.title).toBe("Estimates — accept Pat Sampleton's estimate");
-
-    // Its estimate expires, then the visit moves to tomorrow: the time-short bell asks for a check.
-    await trx('estimates').whereIn('id', card.estimateIds).update({ expires_at: new Date(Date.now() - HOUR) });
-    await trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(1) });
+    const readAt = new Date(Date.now() - 60000);
+    await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [filedKey(card.id)]).update({ read_at: readAt });
+    // The call with the yes is read again: the moot pass marks the card, and the bell's open row follows it.
+    await trx('call_log').where({ id: card.yesCallId }).update({ processing_status: 'processing' });
     await keepCurrent(card.id);
+    const { payload } = await trx('triage_items').where({ id: card.id }).first('payload');
+    expect(typeof payload === 'string' ? JSON.parse(payload) : payload).toEqual(expect.objectContaining({ yes_rechecking: true }));
     await pass();
-    expect((await bellsOf(card.id)).due).toEqual(expect.objectContaining({
+    const { filed, count } = await bellsOf(card.id);
+    expect(count).toBe(1);
+    expect(filed).toEqual(expect.objectContaining({
       title: "Estimates — check Pat Sampleton's estimate",
-      body: `The visit the call booked is ${dayWords(1)}, and its card in Triage is still open.`,
+      body: `A call booked a pest visit for ${dayWords(5)} while an estimate is open; its yes is being read again.`, done_at: null,
     }));
+    expect(new Date(filed.read_at).getTime()).toBe(readAt.getTime());
+    expect(bannersFor(card.id)).toBe(1);
+
+    // Time runs short while the read goes on: still nothing rings.
+    await trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(1) });
+    await pass();
+    expect((await bellsOf(card.id)).due).toBeUndefined();
+    expect(bannersFor(card.id)).toBe(1);
   });
 
   test('the filed row closes in the commit that writes the time-short row, before the pass reads the next card', async () => {
@@ -604,8 +583,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     await ringOpenCardsForTest(new Date(Date.now() - 2 * DAY));
     const startedBells = await bellsOf(started.id);
     expect(startedBells.due).toBeUndefined();
-    // The filed key rang, with a check: the tap refuses a visit in the past (visit_in_past).
-    expect(startedBells.filed.body).toBe(TAP_REFUSES);
+    expect(startedBells.filed.body).toBe('The caller said yes to pay per application on a call.');
     const soonBells = await bellsOf(soon.id);
     expect(soonBells.filed).toBeUndefined();
     expect(soonBells.due.body).toBe(`The visit the call booked is ${dayWords(1)}, and its card in Triage is still open.`);
