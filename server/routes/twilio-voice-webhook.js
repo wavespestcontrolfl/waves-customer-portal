@@ -2972,9 +2972,11 @@ router.post('/recording-status', async (req, res) => {
       // quarantine predicate and a recording_sid fence, so a stamp or a
       // competing delivery landing between this read and the write makes
       // the write skip instead of overwriting.
+      // processing_generation: a duplicate delivery's timers are scheduled
+      // on it (an attach or a replace takes the one its write returns).
       const ATTACH_COLUMNS = [
         'id', 'twilio_call_sid', 'recording_sid', 'recording_url', 'recording_duration_seconds',
-        'processing_status', 'transcription_metadata', 'metadata',
+        'processing_status', 'transcription_metadata', 'metadata', 'processing_generation',
       ];
       let targetRow = null;
       if (ParentCallSid) {
@@ -3007,6 +3009,12 @@ router.post('/recording-status', async (req, res) => {
       }
       let updated = 0;
       let matchedSid = null;
+      // The processing_generation the timers below are scheduled on: the one
+      // the write that landed the recording returned, so only a pass that
+      // claims the row after that write can overtake them (pre-push Codex P1,
+      // rounds 8 and 9). A row read without it gives null: no fence.
+      let matchedGeneration = null;
+      const generationOf = (row) => (row?.processing_generation == null ? null : Number(row.processing_generation));
       let attach = null;
       // A duplicate delivery for a row in a SETTLED state schedules no pass
       // (Codex #3736 r15 P1): the non-force dedup guard skips only
@@ -3045,6 +3053,7 @@ router.post('/recording-status', async (req, res) => {
           if (attach.reason === 'already_parked') await park(targetRow, 'retry');
           duplicateOfSettledRow = !RETRYABLE_STATUSES.has(targetRow.processing_status || null);
           matchedSid = targetRow.twilio_call_sid;
+          matchedGeneration = generationOf(targetRow);
           logger.info(`[recording-status] duplicate delivery of ${maskSid(RecordingSid)} for ${maskSid(matchedSid)} — row untouched`);
           break;
         }
@@ -3115,13 +3124,14 @@ router.post('/recording-status', async (req, res) => {
           );
         }
         const baseline = targetRow;
+        let writtenGeneration = null;
         // A failed attach/replace transaction (a deadlock, a transient
         // error in the swap or the card retirement) must reach the handler's
         // catch as a redelivery request (Codex #3736 r16 P1): a 200 would
         // tell Twilio the SID was stored while it is stored nowhere, and the
         // recovery sweep cannot find it (the row still has its old URL).
         updated = await db.transaction(async (trx) => {
-        const n = await trx('call_log')
+        const written = await trx('call_log')
           .where({ id: baseline.id })
           .where(notQuarantined)
           // Fence on the recording this decision was made against.
@@ -3134,7 +3144,9 @@ router.post('/recording-status', async (req, res) => {
           // write (and start transcribing the old audio, or finalize without
           // the new audio). Re-checked in the write; zero rows re-decides.
           .whereRaw(NOT_LOAD_BEARING_SQL)
-          .update(write);
+          .update(write, ['processing_generation']);
+        const n = written.length;
+        writtenGeneration = generationOf(written[0]);
         // A replace retires the review cards the OLD audio raised (address,
         // scheduling, email, routing): they describe a recording this call
         // no longer has, and the re-run's ON CONFLICT DO NOTHING inserts
@@ -3174,6 +3186,7 @@ router.post('/recording-status', async (req, res) => {
         }).catch((err) => { err.attachFailed = true; throw err; });
         if (updated > 0) {
           matchedSid = baseline.twilio_call_sid;
+          matchedGeneration = writtenGeneration;
           break;
         }
         // Stale decision. Re-read and go round once more; on the second
@@ -3267,11 +3280,15 @@ router.post('/recording-status', async (req, res) => {
               // between the earlier lookup and this transaction means the
               // guarded update silently skips, and the just-arrived
               // recording must be quarantine-deleted, not left at Twilio.
-              const guardedCount = await trx('call_log').where({ id: existing.id }).where(notQuarantined).update(recordingData);
-              if (guardedCount === 0) {
+              // The timers fence on the generation this write left (pre-push
+              // Codex P1, round 9).
+              const guarded = await trx('call_log').where({ id: existing.id }).where(notQuarantined)
+                .update(recordingData, ['processing_generation']);
+              if (guarded.length === 0) {
                 stampedRaceRow = existing;
               } else {
                 matchedSid = primaryCallSid;
+                matchedGeneration = generationOf(guarded[0]);
                 logger.info(`[recording-status] Attached recording ${maskSid(RecordingSid)} to existing Studio-originated call ${maskSid(primaryCallSid)}`);
               }
               return;
@@ -3295,7 +3312,7 @@ router.post('/recording-status', async (req, res) => {
             const numberConfig = TWILIO_NUMBERS.findByNumber(toPhone);
             const customer = fromPhone ? await findSingleCustomerByPhone(trx, fromPhone) : null;
 
-            await trx('call_log').insert({
+            const [created] = await trx('call_log').insert({
               customer_id: customer?.id || null,
               direction: 'inbound',
               from_phone: fromPhone,
@@ -3311,8 +3328,9 @@ router.post('/recording-status', async (req, res) => {
                 source: twilioCall ? 'twilio_recording_status_recovered' : 'twilio_studio_recording_status',
               }),
               ...recordingData,
-            });
+            }, ['processing_generation']);
             matchedSid = primaryCallSid;
+            matchedGeneration = generationOf(created);
             logger.info(`[recording-status] Created Studio-originated call_log row from recording callback ${maskSid(CallSid)}`);
           });
         } catch (insertErr) {
@@ -3389,9 +3407,18 @@ router.post('/recording-status', async (req, res) => {
           const processor = require('../services/call-recording-processor');
           const earlyDelayMs = Number(process.env.CALL_PROC_EARLY_PROCESS_DELAY_MS) || 2 * 60 * 1000;
           const fallbackDelayMs = 10 * 60 * 1000;
-          const attempt = async (label) => {
+          // Each timer carries the claim generation it was scheduled on
+          // (pre-push Codex P1, rounds 8 and 9): a pass that claims the row
+          // while the timer waits (the sweep) leaves a higher generation, and
+          // the claim then runs the timer only on a row still owed a pass. The
+          // early timer takes the generation this webhook's write returned.
+          // The fallback takes the early pass's own claim when it deferred
+          // (that pass must not fence it), and keeps the early timer's when
+          // the early pass returned none (it threw).
+          const scheduledGeneration = matchedGeneration;
+          const attempt = async (label, generation) => {
             try {
-              return await processor.processRecording(matchedSid);
+              return await processor.processRecording(matchedSid, { scheduledGeneration: generation });
             } catch (e) {
               logger.error(`Auto-process recording failed (${label}): ${e.message}`);
               return null;
@@ -3407,10 +3434,11 @@ router.post('/recording-status', async (req, res) => {
           // restarts and both in-memory timers are lost, the 5-min cron is
           // still the backstop, unchanged.
           setTimeout(async () => {
-            const result = await attempt('early');
+            const result = await attempt('early', scheduledGeneration);
             const needsFallback = !result || result.reason === 'recording_not_ready';
             if (needsFallback) {
-              setTimeout(() => attempt('fallback'), Math.max(fallbackDelayMs - earlyDelayMs, 60 * 1000));
+              const fallbackGeneration = result?.generation != null ? Number(result.generation) : scheduledGeneration;
+              setTimeout(() => attempt('fallback', fallbackGeneration), Math.max(fallbackDelayMs - earlyDelayMs, 60 * 1000));
             }
           }, earlyDelayMs);
         } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
