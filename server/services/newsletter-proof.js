@@ -156,6 +156,9 @@ async function alternateSuggestionLine(send) {
 const { assertInternalEmailRecipient, normalizeEmail } = require('../utils/internal-email-recipients');
 
 const PROOF_SUBJECT_RE = /\[PROOF-([0-9a-f]{8})\]/i;
+// A planned issue's FYI banner heading: it opens the copy's text (pestInsiderBannerText/Html,
+// isProofCopyItself).
+const FYI_BANNER_HEADING = 'Sends by itself — no reply needed';
 const DEFAULT_PROOF_RECIPIENT = 'contact@wavespestcontrol.com';
 
 function isProofApprovalEnabled() {
@@ -407,14 +410,20 @@ function verifiedHoldSender(email, fyiTos) {
 // with no reply or forward prefix ahead of it.
 const PROOF_COPY_SUBJECT_RE = /^\s*(?:FYI|ACT)\s*:\s*\[PROOF-[0-9a-f]{8}\]/i;
 
+const foldText = (text) => String(text || '').replace(/\s+/g, ' ').toLowerCase();
+
 /**
  * The FYI copy itself, wherever it lands (in this mailbox when the proof address is this mailbox, a
- * group that relays it, or a rule that forwards it on): its subject is the copy's own. It carries the
- * token and the HOLD line, so whoever it comes from, it is never an answer to itself. A reply to it
- * carries a reply prefix ahead of that subject, also one from the address the copy came from.
+ * group that relays it, or a rule that forwards it on): it has the copy's own subject, and its own
+ * text, not a quote of it, carries the banner heading (pestInsiderBannerText/Html). It carries the
+ * token and the HOLD line, so whoever it comes from, it is never an answer to itself. A reply has
+ * its sender's own words on top, the copy quoted below: it holds, also one from the address the
+ * copy came from, and also one whose sender removed the reply prefix.
  */
 function isProofCopyItself(email) {
-  return PROOF_COPY_SUBJECT_RE.test(String(email?.subject || ''));
+  if (!PROOF_COPY_SUBJECT_RE.test(String(email?.subject || ''))) return false;
+  const top = extractTopReplyText(email?.body_text || htmlReplyToText(email?.body_html));
+  return foldText(top).includes(foldText(FYI_BANNER_HEADING));
 }
 
 /**
@@ -585,16 +594,16 @@ function autoSendBannerText(recipientCount) {
 
 // The owner's copy of a Waves Pest Insider issue the auto-send switch queued. The HOLD deadline is
 // half an hour before the 7:00 AM send, so the reply has reached the mailbox when the send-time
-// check reads it (holdReplyOnRecord).
+// check reads it (holdReplyOnRecord). Its heading opens the copy's text (isProofCopyItself).
 function pestInsiderBannerHtml(recipientCount, issueContext) {
   return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
-<p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Sends by itself — no reply needed</p>
+<p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">${FYI_BANNER_HEADING}</p>
 <p style="margin:0;font-size:14px;color:#1f2937;">This Waves Pest Insider issue goes to <strong>${recipientCount}</strong> readers <strong>${issueSendTimeCopy(issueContext)}</strong>. To skip this issue, reply <strong>HOLD</strong> by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.</p>
 </div>\n`;
 }
 
 function pestInsiderBannerText(recipientCount, issueContext) {
-  return `SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to ${recipientCount} readers ${issueSendTimeCopy(issueContext)}. To skip this issue, reply HOLD by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
+  return `${FYI_BANNER_HEADING.toUpperCase()}\nThis Waves Pest Insider issue goes to ${recipientCount} readers ${issueSendTimeCopy(issueContext)}. To skip this issue, reply HOLD by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
 }
 
 // Internal panel for a planned Waves Pest Insider issue (proof email only):

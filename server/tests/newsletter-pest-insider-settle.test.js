@@ -331,7 +331,7 @@ test.each([
   else expect(mockTrigger).not.toHaveBeenCalled();
 });
 
-test('a refusal is a hard bounce or a message SendGrid dropped for an address on its unsubscribe list, with or without an acceptance timestamp; a complaint stays reached', async () => {
+test('a refusal is a hard bounce or a message SendGrid dropped for an address on its unsubscribe list, with or without an acceptance timestamp; a complaint or an unsubscribe after delivery is reached', async () => {
   const queries = [];
   fakeDb({ issues: [{ ...ISSUE, status: 'sent' }], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 0, left: 0, refused: 85 } });
   const real = db.getMockImplementation();
@@ -350,9 +350,13 @@ test('a refusal is a hard bounce or a message SendGrid dropped for an address on
   expect(refused.nested.map(([m]) => m)).not.toContain('orWhereNotNull');
   // 'complained' is also a reader's own spam report after delivery, so it is never read as a drop.
   expect(JSON.stringify(refused.nested)).not.toContain('complained');
-  // Reached: a success signal, and not that refusal.
+  // Reached: a success signal, or a reader's own spam report or unsubscribe (only a delivered message
+  // gets one, also when the sender lost SendGrid's acceptance), and not that refusal.
   const reached = queries.find((q) => q.notGroup);
-  expect(reached.nested).toEqual(expect.arrayContaining([['orWhereNotNull', 'sent_at'], ['whereNotNull', 'bounced_at'], ['where', 'status', 'unsubscribed']]));
+  expect(reached.nested).toEqual(expect.arrayContaining([
+    ['orWhereNotNull', 'sent_at'], ['orWhereNotNull', 'complained_at'], ['orWhereNotNull', 'unsubscribed_at'],
+    ['whereNotNull', 'bounced_at'], ['where', 'status', 'unsubscribed'],
+  ]));
 });
 
 test('a failed issue whose send became sent (a Resume that finished, or delivery confirmations that came late) becomes sent, with one correction for the alert it had', async () => {

@@ -1120,7 +1120,7 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(await maybeHandleProofApproval({
       ...HOLD, subject: HOLD.subject.slice(4), from_address: PI_QUEUED.from_email, label_ids: ['INBOX'],
       authentication_results: 'mx.google.com; dkim=pass header.i=@wavespestcontrol.com header.s=s1 header.b=abc',
-      body_text: 'To skip this issue, reply HOLD by 6:30 AM ET that day',
+      body_text: 'SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to 85 readers. To skip this issue, reply HOLD by 6:30 AM ET that day.',
     })).toBe(false);
     expect(issuesChain.update).not.toHaveBeenCalled();
     expect(mockTrigger).not.toHaveBeenCalled();
@@ -1256,7 +1256,8 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     expect(await holdReplyOnRecord(SEND)).toBe(false);
   });
 
-  const FYI_COPY_TEXT = 'To skip this issue, reply HOLD by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.';
+  // The copy's own text opens with its banner (pestInsiderBannerText).
+  const FYI_COPY_TEXT = 'SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to 85 readers Thursday, August 6 at 7:00 AM ET. To skip this issue, reply HOLD by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.';
   test.each([
     ['its sender set as an approver', () => { process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com, Newsletter@news.wavespestcontrol.com'; }, null, 'newsletter@news.wavespestcontrol.com', 'news.wavespestcontrol.com'],
     ['its sender set as the proof address', () => { process.env.NEWSLETTER_PROOF_EMAIL = 'newsletter@news.wavespestcontrol.com'; }, null, 'newsletter@news.wavespestcontrol.com', 'news.wavespestcontrol.com'],
@@ -1272,6 +1273,13 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
   test("a reply from the FYI copy's own sender, set as an approver, still holds: only the copy itself is left out", async () => {
     process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com, newsletter@news.wavespestcontrol.com';
     wireMailbox({ searched: [received('newsletter@news.wavespestcontrol.com', signedBy('news.wavespestcontrol.com'), { body_text: `HOLD\n\n> ${FYI_COPY_TEXT}` })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+  });
+
+  test("a reply whose sender removed the reply prefix still holds: its own words are on top, the copy quoted below", async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
+    const quoted = `HOLD please\n\nOn Wed, Aug 5, 2026 at 1:05 PM Waves <newsletter@news.wavespestcontrol.com> wrote:\n> ${FYI_COPY_TEXT.split('\n').join('\n> ')}`;
+    wireMailbox({ searched: [received('owner@example.com', signedBy('example.com'), { subject: FYI_SUBJECT, body_text: quoted })] });
     expect(await holdReplyOnRecord(SEND)).toBe(true);
   });
 
