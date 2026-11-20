@@ -7688,8 +7688,12 @@ page gets the answer an account change under the booking fence already gets:
 `SLOT_TAKEN` with `address_changed: true`, the address on file and no times, or
 `422 address_unresolved` when the token no longer reaches that customer. Every list that knows the trusted customer (GET,
 `POST /:token/availability`, `POST /:token/find-slots`, the new_lead email
-times and a refused booking's list) reads the same fallback, so a list never
-offers an hour that zone refuses. The commit's own builds read it too, so the
+times and a refused booking's list) reads the same fallback when the address
+is that customer's own property (the same street and unit, and ZIP or pin), so a
+list never offers an hour that zone refuses. For another street the city on
+file named the old address: phase one books it on a corrected or another profile
+with its own city, and makes that profile the trusted one, so a retry's list
+reads it. The commit's own builds read it too, so the
 commit gives the hour to the truck its list offered. A matched profile at another stored location books with its
 own address (the slot is checked again with it); at the same pin the booking
 keeps the typed address, as the list read it. When the customer's city decides
@@ -7705,7 +7709,7 @@ commit reads this one's inputs: an address typed (the page sends it again) at
 the same pin. They are built there with that address and the trusted customer
 read again (phase one's copy can be stale by then), as the next commit's first
 build reads them. A typed address a geocode review now quarantines for that
-customer answers the next commit's own `422 address_unresolved` in place of
+customer, at the same pin or a moved one, answers the next commit's own `422 address_unresolved` in place of
 `SLOT_TAKEN`, by the rule the next commit's phase one applies (a blocked
 profile with no address on file takes no typed address there), and the page
 shows its address message. A failed read, and any

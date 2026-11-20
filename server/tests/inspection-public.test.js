@@ -2369,11 +2369,12 @@ describe('POST /:token commit', () => {
     });
 
     // Phase 1 corrects the flow's own prospect (no visits yet) in place to a typed address on another street, so it
-    // writes the typed city (Laurel, in no zone). The list read the prospect's city on file (Nokomis), but that city
-    // named the old street. The booking reads its own row's city, the one its lock fences (pre-push P1 on af15b468fd:
-    // a city kept from the first build could be stale by then), as a refusal's fresh times and the retry do: the new
-    // street is in no zone. The hour the list gave tech-2 is one any truck may take there, so nothing is re-checked.
-    // A staff-verified pin for the old street is not kept: the typed address is another street.
+    // writes the typed city (Laurel, in no zone). The prospect's city on file (Nokomis) named the old street, so the
+    // list and the commit's first build read no zone from it (pre-push P1 on 1ef6ba1b16: they read Nokomis, whose zone
+    // dropped tech-1's opening, the only one free, though the booking reads no zone there). The booking reads its own
+    // row's city, the one its lock fences (pre-push P1 on af15b468fd), as a refusal's fresh times and the retry do:
+    // the new street is in no zone, so nothing is re-checked. A staff-verified pin for the old street is not kept: the
+    // typed address is another street.
     test.each([
       ['', false],
       [', past a staff-verified pin for its old street', true],
@@ -2397,21 +2398,29 @@ describe('POST /:token commit', () => {
       firstResults.call_log = null;
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       listResults.scheduled_services = [];
+      // Only tech-1 is free at 09:00. In the Nokomis zone tech-2 drives south that day, so the funnel drops tech-1's
+      // opening and nothing is left; in no zone tech-1 keeps it.
       mockBuildAvailability.mockImplementation(async (a) => ({
-        days: [{ date: FUTURE_DATE, slots: [{
-          start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM',
-          technician_id: a.zoneFunnelCustomerCity === 'Nokomis' ? 'tech-2' : 'tech-1',
+        days: [{ date: FUTURE_DATE, slots: a.zoneFunnelCustomerCity === 'Nokomis' ? [] : [{
+          start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1',
         }] }],
       }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = '45 Gulf Dr, Laurel, FL 34272';
 
-      const booked = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '45 Gulf Dr, Laurel, FL 34272' });
+      const list = await callAvailability(token, { address: typed });
+
+      expect(list.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['09:00']);
+
+      mockBuildAvailability.mockClear();
+      const booked = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: typed });
 
       expect(booked.statusCode).toBe(200);
       expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload))
         .toEqual([expect.objectContaining({ address_line1: '45 Gulf Dr', city: 'Laurel' })]);
-      expect(mockBuildAvailability.mock.calls.map(([a]) => a.zoneFunnelCustomerCity)).toEqual(['Nokomis']);
+      expect(mockBuildAvailability.mock.calls.map(([a]) => a.zoneFunnelCustomerCity)).toEqual([null]);
       const booking = mockCreateSelfBooking.mock.calls[0][0];
-      expect(booking).toMatchObject({ technician_id: 'tech-2', authedCustomer: { id: 'cust-prospect', city: 'Laurel' } });
+      expect(booking).toMatchObject({ technician_id: 'tech-1', authedCustomer: { id: 'cust-prospect', city: 'Laurel' } });
       const zoneAddress = booking.callbackVisit.zoneAddress(booking.authedCustomer);
       expect(zoneAddress).toEqual({ address: '45 Gulf Dr, Laurel, FL, 34272', city: 'Laurel' });
       expect((await require('../services/slot-zone').leadBookingZone(db, zoneAddress, booking.authedCustomer.city)).zone).toBeNull();
@@ -2549,13 +2558,16 @@ describe('POST /:token commit', () => {
     // Pre-push P1 on 756cfc2628: a moved booking drops the typed address only when the next commit, with none typed,
     // resolves to the property this booking moved to: the same profile, with the stored pin and address phase 1 adopted.
     // Staff may have moved that profile since; the next commit would then book the new property, so the typed address
-    // stays.
+    // stays. Pre-push P1 on 1ef6ba1b16: staff may also have sent that address to review since phase 1. The quarantined
+    // row has no pin to compare, so the refusal answered no change, and the page kept the typed address, which its own
+    // list then refused with a 422 it does not show. The refusal answers the next commit's address refusal there too.
     test.each([
-      ['its stored pin and address unchanged', true, {}],
-      ['a new pin since phase 1', false, { latitude: 27.5, longitude: -82.6 }],
-      ['a new address since phase 1', false, { address_line1: '9 Home St' }],
-      ['another profile at that pin and address', false, { id: 'cust-0', account_id: 'acct-0' }],
-    ])('a typed address whose booking moved to the trusted profile, %s: address_changed %s', async (_label, expected, edit) => {
+      ['its stored pin and address unchanged', { addressChanged: true }, {}, null],
+      ['a new pin since phase 1', { addressChanged: false }, { latitude: 27.5, longitude: -82.6 }, null],
+      ['a new address since phase 1', { addressChanged: false }, { address_line1: '9 Home St' }, null],
+      ['another profile at that pin and address', { addressChanged: false }, { id: 'cust-0', account_id: 'acct-0' }, null],
+      ['that address sent to review since phase 1', { failure: 'address_unresolved' }, {}, 'needs_pin'],
+    ])('a typed address whose booking moved to the trusted profile, %s: %j', async (_label, expected, edit, review) => {
       mockFarSouthGates.funnel = true;
       firstResults.leads = { ...LINKED_LEAD, customer_id: edit.id || 'cust-9' };
       firstResults.call_log = { from_phone: '+19415550101' };
@@ -2563,16 +2575,23 @@ describe('POST /:token commit', () => {
         address_line1: '123 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.1, longitude: -82.2,
       };
       seedPhoneHousehold({ id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101', ...adopted, ...edit });
+      if (review) {
+        gateState.reviewLive = true;
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-9', status: review, address_snapshot: ['123 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+          latitude: null, longitude: null, updated_at: new Date(),
+        };
+      }
       const { nextCommitRefresh } = inspectionPublicRouter._test;
       const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+      const typed = { line1: '123 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
 
       const refresh = await nextCommitRefresh({
-        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied' }, custRow: { id: 'cust-9', ...adopted },
-        bookingAddress: { line1: '123 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' },
-        bookingLocation: { lat: 27.1, lng: -82.2 }, locationMoved: true,
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied', address: typed }, custRow: { id: 'cust-9', ...adopted },
+        bookingAddress: typed, bookingLocation: { lat: 27.1, lng: -82.2 }, locationMoved: true,
       });
 
-      expect(refresh).toEqual({ location: null, addressChanged: expected });
+      expect(refresh).toEqual({ location: null, ...expected });
     });
 
     // Pre-push P1 on c08db66cc0: at the same pin, the fresh times are built with the trusted customer the next commit

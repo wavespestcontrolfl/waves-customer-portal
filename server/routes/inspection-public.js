@@ -651,7 +651,10 @@ function storedAddressCandidates(lead, custRow) {
 // 'address_unresolved', which sendSlotTaken sends in place of SLOT_TAKEN), so
 // the page shows its address message, not the times it holds. The rule is the
 // next commit's phase 1 rule (reviewRefusesBooking; pre-push P1s on
-// 23dfae53de, 172712852a and 756cfc2628). Any other refusal carries no times (`location` null), and
+// 23dfae53de, 172712852a and 756cfc2628), and it applies at a moved pin too
+// (pre-push P1 on 1ef6ba1b16: a quarantined row has no pin to move to, so the
+// page kept the typed address, and its own list then refused it with a 422
+// it does not show). Any other refusal carries no times (`location` null), and
 // the page reloads its own list (GET, or POST /:token/availability with a
 // typed address), which reads the same resolver and trusted customer as the
 // next commit. A booking moved to a matched profile's other stored location
@@ -675,8 +678,8 @@ async function nextCommitRefresh({ lead, verified, resolved, custRow, bookingAdd
       logger.warn(`[inspection-public] next-commit customer read failed for lead ${lead.id}: ${err.message}`);
       return null;
     });
+  if (reviewRefusesBooking(nextCust, nextCust, resolved)) return { location: null, failure: 'address_unresolved' };
   if (!locationMoved) {
-    if (reviewRefusesBooking(nextCust, nextCust, resolved)) return { location: null, failure: 'address_unresolved' };
     return nextCust ? { location: bookingLocation, address: bookingAddress, customer: nextCust } : { location: null };
   }
   const stored = nextCust && String(nextCust.id) === String(custRow.id) ? storedCoordsResolution(nextCust) : null;
@@ -861,7 +864,10 @@ const customerAddressFields = (cust) => ({
 // per truck (owner rule B) they drop the same openings as the list (zone-day-funnel.js dropOtherTruckDays).
 // `customer`: the trusted customer, which a list (and a refusal's list) passes so that an address in no zone takes
 // the zone of its city on file, the zone the booking falls back to (slot-zone.js leadBookingZone; pre-push P1 on
-// aa30bd86f1).
+// aa30bd86f1). Only for that customer's own property (profileMatchesAddress: the same street and unit, and ZIP or
+// pin): phase 1 books another street on a corrected or another profile, with the typed city, so the city on file
+// there named the old street, and its zone would drop another truck's opening the booking admits (pre-push P1 on
+// 1ef6ba1b16). Phase 1 makes the profile it books this lead's trusted one, so a retry's list reads that profile.
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
@@ -901,7 +907,11 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // same gate and grace value.
     bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
-    ...(zoneInputs ? { zoneFunnelAddress: zoneInputs.address, zoneFunnelCity: zoneInputs.city, zoneFunnelCustomerCity: customer?.city } : {}),
+    ...(zoneInputs ? {
+      zoneFunnelAddress: zoneInputs.address,
+      zoneFunnelCity: zoneInputs.city,
+      zoneFunnelCustomerCity: customer && profileMatchesAddress(customer, address, coords) ? customer.city : null,
+    } : {}),
   });
 }
 
