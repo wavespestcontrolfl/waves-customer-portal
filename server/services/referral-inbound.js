@@ -435,7 +435,8 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
   // transaction; its credit step below can find only a plan visit that
   // completed while the confirm ran (that visit's own credit found no referral
   // yet), so the visit's credit is not lost.
-  const result = { referralId: referral.id, converted: deferredOnly, creditsNow: false, credited: null, error: null };
+  // `step2`: GATE_REFERRAL_STEP2 is on, so the amounts vary and the Queue words them from `credited`.
+  const result = { referralId: referral.id, converted: deferredOnly, creditsNow: false, credited: null, error: null, ...(isEnabled('referralStep2') ? { step2: true } : {}) };
   if (!deferredOnly) {
     try {
       const conversion = await engine.convertReferral(referral.id, {
@@ -461,7 +462,9 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
   if (firstVisit && (settings.require_service_completion || isEnabled('referralStep2'))) {
     try {
       const credit = await engine.creditReferralOnFirstService({ customerId, serviceId: firstVisit.id });
-      result.credited = credit ? { referrerDollars: credit.referrerDollars, refereeDollars: credit.refereeDollars } : null;
+      result.credited = credit
+        ? { referrerDollars: credit.referrerDollars, refereeDollars: credit.refereeDollars, ...(credit.referrerReason ? { referrerReason: credit.referrerReason } : {}) }
+        : null;
     } catch (err) {
       logger.warn(`[referral-inbound] credit failed for referral ${referral.id}: ${err.code || err.message}`);
       result.error = 'credit_failed';
@@ -491,7 +494,6 @@ module.exports = {
   CODE_RE,
   customerForCode,
   sameHousehold,
-  performedRecurringVisits,
   listInboundReferrals,
   sureReferrerOf,
   confirmInboundReferral,

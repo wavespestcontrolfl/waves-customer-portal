@@ -382,11 +382,21 @@ function inboundEvidenceLine(evidence) {
 function inboundConfirmedMessage(result) {
   if (result.error === "convert_failed")
     return "Error: referral saved, but the conversion failed. Use Convert on it in the queue below.";
+  // result.step2: the amounts vary (near, yearly limit), so the words come from what posted.
   if (result.error === "credit_failed")
-    return "Referral confirmed, but the $25 credits did not post. They post at the next plan visit.";
+    return result.step2
+      ? "Referral confirmed, but the credits did not post. They post at the next plan visit."
+      : "Referral confirmed, but the $25 credits did not post. They post at the next plan visit.";
+  if (result.credited && result.step2) {
+    const { referrerDollars, refereeDollars, referrerReason } = result.credited;
+    const limit = referrerReason === "cap_reached" ? " The member is at the yearly limit." : "";
+    return `Referral confirmed. $${referrerDollars} credited to the member and $${refereeDollars} to the friend.${limit}`;
+  }
   if (result.credited) return "Referral confirmed. $25 credited to both accounts.";
   if (!result.creditsNow)
-    return "Referral confirmed. The $25 credits post at the next completed plan visit.";
+    return result.step2
+      ? "Referral confirmed. The credits post at the next completed plan visit."
+      : "Referral confirmed. The $25 credits post at the next completed plan visit.";
   return "Referral confirmed. The credit step posted nothing; check the referral in the queue below.";
 }
 

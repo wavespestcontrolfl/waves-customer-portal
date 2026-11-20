@@ -5,7 +5,6 @@
  *   amount   the member's credit: the near amount when both homes have a map point and the straight-line distance
  *            is within step2_near_radius_miles, else the standard amount
  *   year     the member's credit cap counts a calendar year in America/New_York
- *   settled  the member is paid after the friend's first plan visit is paid
  */
 const { haversine } = require('./route-optimizer');
 const { parseETDateTime, etParts } = require('../utils/datetime-et');
@@ -62,16 +61,4 @@ function capReached(creditsThisYear, settings) {
   return Number(creditsThisYear) >= step2Settings(settings).step2_annual_credit_cap;
 }
 
-// Whether the friend's first plan visit is settled. `invoices`: every invoice that bills the visit. With a live (not
-// void or cancelled) invoice, every one must be paid or prepaid (covered in full). With none, the visit counts only
-// when it is provably covered without an invoice of its own (`covered`: a prepaid stamp, or dues collected for a
-// monthly member): an unbilled visit that nothing covers has not been paid for.
-const DEAD_INVOICE_STATUSES = ['void', 'voided', 'cancelled', 'canceled'];
-const SETTLED_INVOICE_STATUSES = ['paid', 'prepaid'];
-function visitSettled(invoices = [], covered = false) {
-  const live = invoices.filter((i) => !DEAD_INVOICE_STATUSES.includes(String(i.status || '').toLowerCase()));
-  if (!live.length) return covered === true;
-  return live.every((i) => SETTLED_INVOICE_STATUSES.includes(String(i.status || '').toLowerCase()));
-}
-
-module.exports = { STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, visitSettled };
+module.exports = { STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached };

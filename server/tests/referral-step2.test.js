@@ -5,7 +5,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const {
-  step2Settings, memberCredit, etYearBounds, capReached, visitSettled, STEP2_DEFAULTS,
+  step2Settings, memberCredit, etYearBounds, capReached, STEP2_DEFAULTS,
 } = require('../services/referral-step2');
 
 describe('step2Settings', () => {
@@ -83,26 +83,5 @@ describe('etYearBounds', () => {
     const before = new Date('2027-01-01T04:59:00Z');
     expect(before >= start).toBe(false);
     expect(end.toISOString()).toBe('2028-01-01T05:00:00.000Z');
-  });
-});
-
-describe('visitSettled', () => {
-  test('paid and prepaid (covered in full) are settled; sent, viewed, overdue, draft, processing and refunded are not', () => {
-    expect(visitSettled([{ status: 'paid' }])).toBe(true);
-    expect(visitSettled([{ status: 'Prepaid' }])).toBe(true);
-    for (const status of ['sent', 'viewed', 'overdue', 'draft', 'processing', 'refunded']) {
-      expect(visitSettled([{ status }])).toBe(false);
-      expect(visitSettled([{ status }], true)).toBe(false);
-    }
-  });
-  test('a voided or cancelled invoice is ignored; one open invoice among paid ones is not settled', () => {
-    expect(visitSettled([{ status: 'void' }, { status: 'paid' }])).toBe(true);
-    expect(visitSettled([{ status: 'paid' }, { status: 'sent' }])).toBe(false);
-  });
-  test('a visit with no live invoice is settled only when provably covered', () => {
-    expect(visitSettled([])).toBe(false);
-    expect(visitSettled([{ status: 'cancelled' }])).toBe(false);
-    expect(visitSettled([], true)).toBe(true);
-    expect(visitSettled([{ status: 'void' }], true)).toBe(true);
   });
 });

@@ -1,7 +1,7 @@
 // Runs with the existing CI PostgreSQL pass; never a production connection.
 // Referral Step 2, member side (GATE_REFERRAL_STEP2) against real Postgres and the real credit ledger: the member's
-// $25 / $50-near credit at the friend's first PAID recurring service, the 10-a-year cap, the payment wait and its
-// retry sweep, and the gate-off path that must stay exactly as it was. A private schema keeps CI's migrated tables
+// $25 / $50-near credit at the friend's first performed recurring service, the 10-a-year cap, the promoter's total
+// earned, and the gate-off path that must stay exactly as it was. A private schema keeps CI's migrated tables
 // untouched; the Step 2 migration builds its own columns.
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
@@ -94,11 +94,6 @@ const DAY = 86400000;
     return row;
   }
 
-  async function invoice(customerId, { status = 'sent', fields = {} } = {}) {
-    const [row] = await db('invoices').insert({ customer_id: customerId, total: 119, status, ...fields }).returning('*');
-    return row;
-  }
-
   const convert = (ref, friend) => engine.convertReferral(ref.id, { customerId: friend.id, tier: 'Silver', monthlyValue: 119.1 });
   const firstService = (friend, visit) => engine.creditReferralOnFirstService({ customerId: friend.id, serviceId: visit.id });
   const credits = (customerId) => db('customer_credit_ledger').where({ customer_id: customerId }).orderBy('created_at').select('*');
@@ -108,12 +103,11 @@ const DAY = 86400000;
   // 0.005 degree of latitude is about 0.35 mile; 0.01 is about 0.69 mile.
   const HOME = { latitude: 27.499, longitude: -82.57 };
 
-  // A performed first plan visit with its invoice paid (`paid: false`: no invoice yet), the referral converted.
-  async function performed({ memberFields = {}, friendFields = {}, paid = true } = {}) {
+  // A performed first plan visit, the referral converted.
+  async function performed({ memberFields = {}, friendFields = {} } = {}) {
     const member = await customer(memberFields);
     const friend = await planFriend(friendFields);
     const visit = await recurringVisit(friend.id, { status: 'completed' });
-    if (paid) await invoice(friend.id, { status: 'paid', fields: { scheduled_service_id: visit.id } });
     const ref = await referral(member, friend, { ageDays: 2 });
     await convert(ref, friend);
     return { member, friend, visit, ref };
@@ -132,7 +126,6 @@ const DAY = 86400000;
       t.string('email');
       t.uuid('account_id');
       t.boolean('active').defaultTo(true);
-      t.string('billing_mode');
       t.decimal('monthly_rate', 10, 2);
       t.string('waveguard_tier');
       t.decimal('latitude', 10, 7);
@@ -224,8 +217,6 @@ const DAY = 86400000;
       t.boolean('is_recurring').defaultTo(false);
       t.string('recurring_pattern', 30);
       t.date('scheduled_date');
-      t.timestamp('prepaid_at', { useTz: true });
-      t.uuid('first_application_invoice_id');
       t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
     });
     await s.createTable('service_records', (t) => {
@@ -235,35 +226,6 @@ const DAY = 86400000;
       t.string('status');
       t.jsonb('structured_notes');
       t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
-    });
-    await s.createTable('invoices', (t) => {
-      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
-      t.uuid('customer_id').notNullable();
-      t.uuid('scheduled_service_id');
-      t.uuid('service_record_id');
-      t.uuid('visit_completion_packet_id');
-      t.string('status', 20).defaultTo('sent');
-      t.decimal('total', 10, 2).notNullable().defaultTo(0);
-      t.integer('payer_id');
-      t.jsonb('line_items').defaultTo('[]');
-      t.string('invoice_number');
-    });
-    await s.createTable('visit_completion_packets', (t) => {
-      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
-      t.uuid('visit_id');
-    });
-    await s.createTable('visit_completion_packet_items', (t) => {
-      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
-      t.uuid('packet_id');
-      t.uuid('scheduled_service_id');
-    });
-    await s.createTable('payments', (t) => {
-      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
-      t.uuid('customer_id');
-      t.string('status');
-      t.jsonb('metadata');
-      t.date('payment_date');
-      t.string('description');
     });
     await s.createTable('referral_clicks', (t) => {
       t.increments('id');
@@ -302,7 +264,7 @@ const DAY = 86400000;
   beforeEach(async () => {
     jest.clearAllMocks();
     gates.referralStep2 = true;
-    for (const table of ['visit_completion_packet_items', 'visit_completion_packets', 'payments', 'invoices',
+    for (const table of [
       'referral_clicks', 'referral_payouts', 'customer_credit_ledger', 'service_records', 'scheduled_services']) {
       await db(table).del();
     }
@@ -362,6 +324,32 @@ const DAY = 86400000;
       expect(await row(ref.id)).toMatchObject({ referrer_credit_cents: 5000, referrer_reward_reason: 'near' });
     });
 
+    test("the promoter's total earned follows the real credit: $50 near, $0 at the cap", async () => {
+      const near = await performed({ memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.005, longitude: HOME.longitude } });
+      const staged = await db('referral_promoters').where({ id: near.ref.promoter_id }).first();
+      expect(staged).toMatchObject({ total_earned_cents: 2500, pending_earnings_cents: 2500 });
+      await firstService(near.friend, near.visit);
+      expect(await db('referral_promoters').where({ id: near.ref.promoter_id }).first())
+        .toMatchObject({ total_earned_cents: 5000, pending_earnings_cents: 0 });
+
+      // At the cap: the staged $25 comes back out of total earned.
+      const capped = await performed({ memberFields: HOME });
+      await db('customer_credit_ledger').del();
+      for (let i = 0; i < 10; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: capped.member.id, referee_name: `Prior ${i}`, referee_phone: `+1941559${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: capped.member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      await firstService(capped.friend, capped.visit);
+      expect(await row(capped.ref.id)).toMatchObject({ referrer_reward_reason: 'cap_reached' });
+      expect(await db('referral_promoters').where({ id: capped.ref.promoter_id }).first())
+        .toMatchObject({ total_earned_cents: 0, pending_earnings_cents: 0 });
+    });
+
     test('a home with no map point pays $25', async () => {
       const { member, friend, visit } = await performed({ memberFields: HOME });
       await firstService(friend, visit);
@@ -387,7 +375,6 @@ const DAY = 86400000;
       const member = await customer();
       const friend = await planFriend();
       const visit = await recurringVisit(friend.id, { status: 'completed' });
-      await invoice(friend.id, { status: 'paid', fields: { scheduled_service_id: visit.id } });
       const ref = await referral(member, friend, { ageDays: 2 });
       await priorCredits(member.id, count, at);
       await convert(ref, friend);
@@ -429,7 +416,6 @@ const DAY = 86400000;
       const member = await customer();
       const friend = await planFriend();
       const visit = await recurringVisit(friend.id, { status: 'completed' });
-      await invoice(friend.id, { status: 'paid', fields: { scheduled_service_id: visit.id } });
       const ref = await referral(member, friend, { ageDays: 2 });
       await priorCredits(member.id, 9);
       const other = await customer();
@@ -452,7 +438,6 @@ const DAY = 86400000;
       for (let i = 0; i < 2; i += 1) {
         const friend = await planFriend();
         const visit = await recurringVisit(friend.id, { status: 'completed' });
-        await invoice(friend.id, { status: 'paid', fields: { scheduled_service_id: visit.id } });
         const ref = await referral(member, friend, { ageDays: 2 });
         await convert(ref, friend);
         pairs.push({ friend, visit, ref });
@@ -464,145 +449,12 @@ const DAY = 86400000;
     });
   });
 
-  describe('the member is paid only after the friend\'s first plan visit is paid', () => {
-    // The unpaid state: nothing consumed, the referral still waiting.
-    async function expectWaiting({ member, friend, visit, ref }) {
-      expect(await firstService(friend, visit)).toBeNull();
-      expect(await credits(member.id)).toHaveLength(0);
-      expect(await credits(friend.id)).toHaveLength(0);
-      expect(await row(ref.id)).toMatchObject({ status: 'signed_up', first_service_completed: false, referrer_reward_status: 'pending_service' });
-    }
-
-    test("the visit's own invoice: unpaid waits, paid pays, and the sweep finishes the wait", async () => {
-      const ctx = await performed({ paid: false });
-      const bill = await invoice(ctx.friend.id, { fields: { scheduled_service_id: ctx.visit.id } });
-      await expectWaiting(ctx);
-      expect(await engine.sweepReferralsAwaitingPayment()).toEqual({ checked: 1, credited: 0 });
-      await db('invoices').where({ id: bill.id }).update({ status: 'paid' });
-      expect(await engine.sweepReferralsAwaitingPayment()).toEqual({ checked: 1, credited: 1 });
-      expect(await amounts(ctx.member.id)).toEqual([25]);
-      expect(await amounts(ctx.friend.id)).toEqual([25]);
-      // Nothing more on a later sweep or completion.
-      expect(await engine.sweepReferralsAwaitingPayment()).toEqual({ checked: 0, credited: 0 });
-      expect(await firstService(ctx.friend, ctx.visit)).toBeNull();
-      expect(await credits(ctx.member.id)).toHaveLength(1);
-    });
-
-    test('an invoice linked only through the service record counts', async () => {
-      const ctx = await performed({ paid: false });
-      await invoice(ctx.friend.id, { fields: { service_record_id: ctx.visit.record_id } });
-      await expectWaiting(ctx);
-    });
-
-    test('an invoice linked only through a visit completion packet counts (packet visit, and a packet item)', async () => {
-      const ctx = await performed({ paid: false });
-      const [packet] = await db('visit_completion_packets').insert({ visit_id: ctx.visit.id }).returning('id');
-      const bill = await invoice(ctx.friend.id, { fields: { visit_completion_packet_id: packet.id } });
-      await expectWaiting(ctx);
-      await db('invoices').where({ id: bill.id }).update({ status: 'paid' });
-      expect(await firstService(ctx.friend, ctx.visit)).toMatchObject({ referrerDollars: 25 });
-
-      const other = await performed({ paid: false });
-      const [shared] = await db('visit_completion_packets').insert({ visit_id: randomUUID() }).returning('id');
-      await db('visit_completion_packet_items').insert({ packet_id: shared.id, scheduled_service_id: other.visit.id });
-      await invoice(other.friend.id, { fields: { visit_completion_packet_id: shared.id } });
-      await expectWaiting(other);
-    });
-
-    test('the first-application invoice stamped on the visit counts', async () => {
-      const ctx = await performed({ paid: false });
-      const bill = await invoice(ctx.friend.id);
-      await db('scheduled_services').where({ id: ctx.visit.id }).update({ first_application_invoice_id: bill.id });
-      await expectWaiting(ctx);
-    });
-
-    test('a prepaid (covered in full) invoice is settled', async () => {
-      const ctx = await performed({ paid: false });
-      await invoice(ctx.friend.id, { status: 'prepaid', fields: { scheduled_service_id: ctx.visit.id } });
-      expect(await firstService(ctx.friend, ctx.visit)).toMatchObject({ referrerDollars: 25 });
-    });
-
-    test('no invoice at all is NOT settled by itself; a prepaid stamp on the visit is', async () => {
-      const ctx = await performed({ paid: false });
-      await expectWaiting(ctx);
-      await db('scheduled_services').where({ id: ctx.visit.id }).update({ prepaid_at: new Date() });
-      expect(await firstService(ctx.friend, ctx.visit)).toMatchObject({ referrerDollars: 25 });
-    });
-
-    test('no invoice for a monthly member: settled only when the dues are collected for the visit month', async () => {
-      const member = await customer();
-      const friend = await planFriend({ billing_mode: 'monthly_membership' });
-      const visit = await recurringVisit(friend.id, { status: 'completed', date: '2026-11-10' });
-      const ref = await referral(member, friend, { ageDays: 2 });
-      await convert(ref, friend);
-      await expectWaiting({ member, friend, visit, ref });
-      await db('payments').insert({
-        customer_id: friend.id, status: 'paid', metadata: JSON.stringify({ billed_month: '2026-11' }), payment_date: '2026-11-08', description: 'WaveGuard Monthly',
-      });
-      expect(await firstService(friend, visit)).toMatchObject({ referrerDollars: 25 });
-    });
-
-    test('gate off pays at completion with the invoice unpaid, as today, and the sweep does nothing', async () => {
-      const ctx = await performed({ paid: false });
-      await invoice(ctx.friend.id, { fields: { scheduled_service_id: ctx.visit.id } });
-      gates.referralStep2 = false;
-      expect(await engine.sweepReferralsAwaitingPayment()).toEqual({ checked: 0, credited: 0 });
-      expect(await firstService(ctx.friend, ctx.visit)).toEqual({ referralId: ctx.ref.id, referrerDollars: 25, refereeDollars: 25 });
-    });
-  });
-
-  describe('the retry sweep', () => {
-    test('a referral stays eligible past 90 days until it settles', async () => {
-      const ctx = await performed({ paid: false });
-      await invoice(ctx.friend.id, { fields: { scheduled_service_id: ctx.visit.id } });
-      await db('referrals').where({ id: ctx.ref.id }).update({ converted_at: new Date(Date.now() - 200 * DAY) });
-      expect(await engine.sweepReferralsAwaitingPayment()).toEqual({ checked: 1, credited: 0 });
-      await db('referrals').where({ id: ctx.ref.id }).update({ converted_at: new Date(Date.now() - 400 * DAY) });
-      expect(await engine.sweepReferralsAwaitingPayment()).toEqual({ checked: 0, credited: 0 });
-    });
-
-    test('two profiles on the friend\'s phone are skipped, never guessed', async () => {
-      const ctx = await performed({ paid: false });
-      await invoice(ctx.friend.id, { status: 'paid', fields: { scheduled_service_id: ctx.visit.id } });
-      await planFriend({ phone: ctx.friend.phone });
-      expect(await engine.sweepReferralsAwaitingPayment()).toEqual({ checked: 1, credited: 0 });
-      expect(await credits(ctx.member.id)).toHaveLength(0);
-    });
-
-    test('a rotating cursor reaches rows behind a full page of unpaid referrals', async () => {
-      // 201 unpaid referrals ahead of one paid one: the first pass takes the oldest 200, the next reaches the paid one.
-      const member = await customer();
-      const promoter = await promoterFor(member);
-      const base = Date.now() - 100 * DAY;
-      const rows = [];
-      for (let i = 0; i < 200; i += 1) {
-        rows.push({
-          referrer_customer_id: member.id, referee_name: `Idle ${i}`, referee_phone: `+1941557${String(1000 + i)}`, referral_code: 'WAVES-IDLE',
-          status: 'signed_up', referrer_reward_status: 'pending_service', promoter_id: promoter.id, converted_at: new Date(base + i * 1000),
-        });
-      }
-      await db('referrals').insert(rows);
-      const friend = await planFriend();
-      const visit = await recurringVisit(friend.id, { status: 'completed' });
-      await invoice(friend.id, { status: 'paid', fields: { scheduled_service_id: visit.id } });
-      const late = await referral(member, friend, { ageDays: 1, fields: { status: 'signed_up', referrer_reward_status: 'pending_service', converted_at: new Date() } });
-
-      const first = await engine.sweepReferralsAwaitingPayment();
-      expect(first).toEqual({ checked: 200, credited: 0 });
-      expect(await row(late.id)).toMatchObject({ first_service_completed: false });
-      const second = await engine.sweepReferralsAwaitingPayment();
-      expect(second).toEqual({ checked: 1, credited: 1 });
-      expect(await row(late.id)).toMatchObject({ status: 'credited' });
-    });
-  });
-
   describe('Step 2 governs even when the program pays at once', () => {
     test('require_service_completion off + gate on: conversion defers and the member gets the Step 2 amount', async () => {
       await db('referral_program_settings').where({ id: 1 }).update({ require_service_completion: false });
       const member = await customer(HOME);
       const friend = await planFriend({ latitude: HOME.latitude + 0.005, longitude: HOME.longitude });
       const visit = await recurringVisit(friend.id, { status: 'completed' });
-      await invoice(friend.id, { status: 'paid', fields: { scheduled_service_id: visit.id } });
       const ref = await referral(member, friend, { ageDays: 1 });
       const result = await convert(ref, friend);
       expect(result.requiresServiceCompletion).toBe(true);
@@ -621,7 +473,6 @@ const DAY = 86400000;
       const member = await customer(HOME);
       const near = await planFriend({ latitude: HOME.latitude + 0.005, longitude: HOME.longitude });
       const nearVisit = await recurringVisit(near.id, { status: 'completed' });
-      await invoice(near.id, { status: 'paid', fields: { scheduled_service_id: nearVisit.id } });
       const nearRef = await referral(member, near, { ageDays: 1 });
       await convert(nearRef, near);
       await firstService(near, nearVisit);
@@ -682,6 +533,8 @@ const DAY = 86400000;
         status: 'credited', referee_credited: true, referrer_credited: true,
         referrer_credit_cents: null, referrer_reward_reason: null,
       });
+      // Total earned keeps the staged amount, exactly as today.
+      expect(await db('referral_promoters').where({ id: ref.promoter_id }).first()).toMatchObject({ total_earned_cents: 2500, pending_earnings_cents: 0 });
     });
   });
 });

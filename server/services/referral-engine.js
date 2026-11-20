@@ -1167,12 +1167,12 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   const settings = await getSettings();
   const refereeCents = Number(settings.referee_discount_cents) || 0;
   const refereeDollars = round2(refereeCents / 100);
+  // GATE_REFERRAL_STEP2: the member is paid at the same moment and call site as the live program today, the friend's
+  // first performed recurring plan visit (the caller contract already excludes an inspection, a decline and an
+  // incomplete visit); only the amount changes ($25, $50 near, nothing at the yearly cap). Payment settlement is
+  // deliberately not checked: an account credit has no cash value and only reduces the member's own invoices, and
+  // detecting settlement across ACH, prepay, dues, packet and payer-billed lanes is out of scope.
   const step2On = isEnabled('referralStep2');
-
-  // GATE_REFERRAL_STEP2: nothing is paid (the friend's flat credit included) until the friend's first plan visit is
-  // PAID. Closeout calls this for a performed visit whose invoice is only issued; returning here consumes no guard,
-  // and sweepReferralsAwaitingPayment calls this again once the invoice settles.
-  if (step2On && !(await firstVisitSettled(db, customerId, serviceId))) return null;
 
   const outcome = await db.transaction(async (trx) => {
     // Re-read under lock; these guards are the single-use protection.
@@ -1249,10 +1249,14 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // immediately-earned referral (already paid at conversion) is never clobbered.
     await supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId: referral.id });
 
-    // Promoter bookkeeping: drain the exact pending amount staged at conversion.
+    // Promoter bookkeeping: drain the exact pending amount staged at conversion. Under GATE_REFERRAL_STEP2 the
+    // member's real credit can differ from the amount staged ($50 near, $0 at the cap), so total earned moves by
+    // the difference and the promoter dashboard shows what was truly earned.
     if (referral.promoter_id) {
+      const earnedAdjust = memberCredit ? Math.round(memberCredit.dollars * 100) - referrerCents : 0;
       await trx('referral_promoters').where({ id: referral.promoter_id }).update({
         pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [referrerCents]),
+        ...(earnedAdjust ? { total_earned_cents: db.raw('GREATEST(total_earned_cents + ?, 0)', [earnedAdjust]) } : {}),
         updated_at: new Date(),
       });
     }
@@ -1271,108 +1275,7 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   };
 }
 
-// The friend's first performed plan visit (the one the member's reward waits on), or null.
-async function firstPerformedPlanVisit(conn, customerId) {
-  const { performedRecurringVisits } = require('./referral-inbound');
-  return performedRecurringVisits(conn)
-    .where('ss.customer_id', customerId)
-    .orderBy('ss.scheduled_date', 'asc')
-    .orderBy('ss.id', 'asc')
-    .first('ss.id', 'ss.scheduled_date', 'ss.prepaid_at', 'ss.first_application_invoice_id');
-}
-
-// Every invoice that bills a visit, however it was minted: its own scheduled_service_id link, the invoice of one of
-// its service records (completion closeout), the invoice of a visit-completion packet that carries it (a packet
-// invoice has no scheduled_service_id of its own), and the first-application invoice stamped on the visit.
-async function invoicesBillingVisit(conn, visit) {
-  return conn('invoices as i')
-    .where(function billsVisit() {
-      this.where('i.scheduled_service_id', visit.id)
-        .orWhereIn('i.service_record_id', conn('service_records').where({ scheduled_service_id: visit.id }).select('id'))
-        .orWhereIn('i.visit_completion_packet_id', conn('visit_completion_packets').where({ visit_id: visit.id }).select('id'))
-        .orWhereIn('i.visit_completion_packet_id', conn('visit_completion_packet_items').where({ scheduled_service_id: visit.id }).select('packet_id'));
-      if (visit.first_application_invoice_id) this.orWhere('i.id', visit.first_application_invoice_id);
-    })
-    .select('i.id', 'i.status');
-}
-
-// A visit with no invoice of its own is settled only when it is provably paid for another way: a prepaid stamp on
-// the visit (annual prepay and prepaid visits), or a monthly member whose dues are collected (paid or processing
-// payment, or a live dues invoice) for the visit's month. Anything else has not been paid for, so the reward waits.
-async function visitCoveredWithoutInvoice(conn, customerId, visit) {
-  if (visit.prepaid_at) return true;
-  const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
-  const customer = await conn('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate', 'waveguard_tier');
-  if (!customer || resolveBillingLane(customer).mode !== 'monthly_membership') return false;
-  const { parseETDateTime } = require('../utils/datetime-et');
-  const { dateOnlyString } = require('../utils/date-only');
-  const day = dateOnlyString(visit.scheduled_date);
-  return monthlyDuesCollected(conn, customerId, day ? parseETDateTime(`${day}T12:00`) : new Date(), { openInvoiceCovers: false });
-}
-
-// Whether the friend's first performed plan visit (the passed visit when none is on record yet) is settled.
-async function firstVisitSettled(conn, customerId, serviceId) {
-  const visit = (await firstPerformedPlanVisit(conn, customerId))
-    || await conn('scheduled_services').where({ id: serviceId, customer_id: customerId }).first('id', 'scheduled_date', 'prepaid_at', 'first_application_invoice_id');
-  if (!visit) return false;
-  const invoices = await invoicesBillingVisit(conn, visit);
-  return step2.visitSettled(invoices, invoices.length ? false : await visitCoveredWithoutInvoice(conn, customerId, visit));
-}
-
-// GATE_REFERRAL_STEP2 retry for the payment wait above. A referral whose friend has a performed first plan visit
-// but whose invoice was unpaid at closeout is tried again here, so the member is paid once it settles. A bounded
-// sweep in the existing hourly scheduler block was chosen over a hook on every place an invoice becomes paid
-// (Stripe webhook, saved-card charge, Terminal, cash and check entry, credit cover): one place, no new coupling in
-// the payment code, at most an hour of delay on a reward that waits on payment anyway. A referral stays eligible
-// until its reward is paid or the referral is rejected or superseded; the one bound is a year since conversion
-// (a friend who has not paid in a year is not coming back, and the query stays small). Each pass takes the next
-// 200 rows on a rotating cursor over (converted_at, id), so a backlog of unpaid referrals at the front can never
-// starve the ones behind it; the cursor wraps at the end and restarts from the front after a restart. The friend
-// is the one customer the phone names (referrals hold no customer id): two matching profiles are skipped as
-// ambiguous, never guessed.
-const AWAITING_PAYMENT_WINDOW_DAYS = 365;
-const AWAITING_PAYMENT_LIMIT = 200;
-let awaitingPaymentCursor = null;
-async function sweepReferralsAwaitingPayment({ now = new Date() } = {}) {
-  if (!isEnabled('referralStep2')) return { checked: 0, credited: 0 };
-  const eligible = () => db('referrals')
-    .where({ status: 'signed_up', referrer_reward_status: 'pending_service', first_service_completed: false })
-    .where('converted_at', '>=', new Date(now.getTime() - AWAITING_PAYMENT_WINDOW_DAYS * 86400000))
-    .orderBy([{ column: 'converted_at', order: 'asc' }, { column: 'id', order: 'asc' }])
-    .limit(AWAITING_PAYMENT_LIMIT)
-    .select('id', 'referee_phone', 'converted_at');
-  let waiting = awaitingPaymentCursor
-    ? await eligible().where(function afterCursor() {
-      this.where('converted_at', '>', awaitingPaymentCursor.at)
-        .orWhere(function sameInstant() { this.where('converted_at', awaitingPaymentCursor.at).where('id', '>', awaitingPaymentCursor.id); });
-    })
-    : await eligible();
-  if (!waiting.length && awaitingPaymentCursor) {
-    awaitingPaymentCursor = null;
-    waiting = await eligible();
-  }
-  const last = waiting[waiting.length - 1];
-  awaitingPaymentCursor = waiting.length < AWAITING_PAYMENT_LIMIT || !last ? null : { at: last.converted_at, id: last.id };
-  let credited = 0;
-  for (const row of waiting) {
-    try {
-      const variants = phoneMatchDigits(normalizePhone(row.referee_phone) || row.referee_phone);
-      if (!variants.length) continue;
-      const friends = await db('customers')
-        .whereNull('deleted_at')
-        .whereRaw(`${PHONE_DIGITS_SQL('phone')} IN (${variants.map(() => '?').join(', ')})`, variants)
-        .select('id');
-      if (friends.length !== 1) continue;
-      const visit = await firstPerformedPlanVisit(db, friends[0].id);
-      if (visit && await creditReferralOnFirstService({ customerId: friends[0].id, serviceId: visit.id })) credited += 1;
-    } catch (err) {
-      logger.warn(`[ReferralEngine] awaiting-payment sweep: referral ${row.id} not credited: ${err.code || err.message}`);
-    }
-  }
-  return { checked: waiting.length, credited };
-}
-
-// Step 2's member credit for the friend's first paid recurring service, inside creditReferralOnFirstService's
+// Step 2's member credit for the friend's first performed recurring service, inside creditReferralOnFirstService's
 // transaction with the referral row locked. { dollars, reason }: 'near' (both homes have a map point and the
 // straight-line distance is within step2_near_radius_miles), 'standard', or 'cap_reached' (dollars 0: the member
 // already has step2_annual_credit_cap credits this America/New_York calendar year). The member's customer row is
@@ -1750,7 +1653,6 @@ module.exports = {
   convertReferral,
   updateReferralStatus,
   creditReferralOnFirstService,
-  sweepReferralsAwaitingPayment,
   sendDueReferralRewardEmails,
   nextRewardEmailAt,
   recentRewardCreditsQuery,
