@@ -12,6 +12,7 @@ const { sendLeadAutoReplyOnce, sendCurrentCustomerQuoteText } = require('../serv
 
 const { aiTriageLead } = require('../services/lead-triage');
 const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
+const { normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizIsCommercial } = require('../services/lead-quiz');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
@@ -357,6 +358,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       serviceInterest: submittedServiceInterest,
       serviceKey,
       timeline,
+      quiz,
       leadSource,
       heardAbout,
       heardAboutPrompt,
@@ -386,6 +388,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     const signHostNote = signHost
       ? `Saw our yard sign at: ${signHost} (neighbor page; that home gets a $25 thank-you credit after a new customer's first service)`
       : '';
+    // The quiz pages' three tap answers (services/lead-quiz.js): fixed tokens,
+    // never typed text. They ride on the lead's extracted_data, both Customer
+    // 360 notes and the new-lead bell.
+    const quizAnswers = quizAnswersLine(quiz, timeline);
+    const quizNote = quizNoteLine(quiz, timeline);
 
     // Inline street unit and dedicated unit field disagree — ambiguous. Fail
     // closed BEFORE any lead/customer mutation (same guard as
@@ -478,6 +485,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         body: `Submitted contact (not applied to profile): email ${email || '—'}; address ${fullAddress || '—'}`
           + (additionalPropertiesNote ? `\n${additionalPropertiesNote}` : '')
           + (signHostNote ? `\n${signHostNote}` : '')
+          + (quizNote ? `\n${quizNote}` : '')
           + `\nSubmitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`,
         metadata: JSON.stringify({
           formId, formName, utmSource, utmMedium, utmCampaign,
@@ -544,7 +552,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       await db('customer_interactions').insert({
         customer_id: customer.id, interaction_type: 'note',
         subject: `New lead from ${leadSource.detail || leadSource.source}`,
-        body: `${signHostNote ? `${signHostNote}. ` : ''}Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. Address: ${fullAddress || 'not provided'}.${additionalPropertiesNote ? ` ${additionalPropertiesNote}.` : ''}`,
+        body: `${signHostNote ? `${signHostNote}. ` : ''}${quizNote ? `${quizNote}. ` : ''}Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. Address: ${fullAddress || 'not provided'}.${additionalPropertiesNote ? ` ${additionalPropertiesNote}.` : ''}`,
         metadata: JSON.stringify({ leadSource, formId, address: normalizedAddress }),
       });
 
@@ -592,6 +600,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       address: normalizedAddress,
       ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
       ...(signHost ? { sign_host: signHost } : {}),
+      ...(quiz ? { quiz } : {}),
       ...(sourceEvidence ? { source_evidence: sourceEvidence } : {}),
     };
     const buildPrefillAttachFields = () => ({
@@ -1006,9 +1015,13 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       const { triggerNotification } = require('../services/notification-triggers');
       const stats = await triggerNotification('new_lead', {
         name: `${firstName || ''} ${lastName || ''}`.trim() || phoneFormatted,
-        source: leadSource.detail || leadSource.source,
+        // A quiz lead's bell names the quiz and its answers ("via Pest Quiz
+        // (34202) - Roaches, condo, wants it today"). The lead row keeps its
+        // real source (lead_source_id) either way.
+        source: quizName(quiz) || leadSource.detail || leadSource.source,
         zip: customer.zip,
         service: serviceInterest || null,
+        ...(quizAnswers ? { quizAnswers } : {}),
         leadId: leadRecord?.id || customer.id,
         // The bell's Call (alert-call-button.js) dials the lead row's number, or this customer's when the lead row
         // failed and leadId above is the customer id.
@@ -1071,7 +1084,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             if (triageResult.extractedData) {
               // source_evidence is server-owned intake evidence. The model may
               // summarize the source, but it cannot replace that proof.
-              const { source_evidence: _ignoredSourceEvidence, ...safeTriageExtracted } = triageResult.extractedData;
+              // quiz is the visitor's own tap answers (services/lead-quiz.js),
+              // owned by intake the same way.
+              const { source_evidence: _ignoredSourceEvidence, quiz: _ignoredQuiz, ...safeTriageExtracted } = triageResult.extractedData;
               // On an attached call-pipeline lead, MERGE — a wholesale replace
               // here would clobber the voicemail provenance and the text-back
               // one-shot stamp the attach just preserved. The replace branch
@@ -1624,6 +1639,7 @@ const TRIAGE_REPLACE_EXTRACTED_SQL = "jsonb_strip_nulls(jsonb_build_object("
   + "'additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', "
   + "'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', "
   + "'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host', "
+  + "'quiz', COALESCE(extracted_data, '{}'::jsonb)->'quiz', "
   + "'source_evidence', COALESCE(extracted_data, '{}'::jsonb)->'source_evidence'"
   + ")) || ((?::jsonb - 'attribution') - 'source_evidence') || jsonb_strip_nulls(jsonb_build_object("
   + "'attribution', NULLIF(jsonb_strip_nulls(jsonb_build_object("
@@ -1662,6 +1678,8 @@ function buildLeadWebhookIntake(body = {}) {
   // Declared "when do you want this handled?" — exact key only (a substring
   // sweep would catch address/attribution fields, same trap as `message`).
   const timeline = normalizeTimeline(body.timeline ?? body['Timeline']);
+  // The quiz pages' tap answers — exact key only, allowlisted tokens.
+  const quiz = normalizeQuiz(body.quiz);
   const leadSource = determineLeadSource(
     attribution.pageUrl,
     attribution.landingUrl,
@@ -1711,6 +1729,12 @@ function buildLeadWebhookIntake(body = {}) {
     serviceInterest,
     serviceKey,
     timeline,
+    quiz,
+    // "Business" on the quiz's property question is a stated commercial
+    // premises: the readiness gate reads it off the intake
+    // (structuredCommercialSignal), so the lead is marked commercial and no
+    // residential draft is priced for it.
+    ...(quizIsCommercial(quiz) ? { isCommercial: true } : {}),
     leadSource,
     sourceEvidence,
     heardAbout,

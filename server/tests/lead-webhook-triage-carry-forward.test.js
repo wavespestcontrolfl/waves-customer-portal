@@ -47,6 +47,14 @@ describeDb('AI triage extracted_data replace', () => {
     });
   });
 
+  test('keeps the quiz answers a quiz page lead carries', async () => {
+    const quiz = { kind: 'pest', seeing: 'roaches', property: 'condo' };
+    expect(await replace({ stage: 'lead_webhook_received', timeline: 'now', quiz }, { summary: 'Roaches in a condo' }))
+      .toEqual({ stage: 'lead_webhook_received', timeline: 'now', quiz, summary: 'Roaches in a condo' });
+    // A lead with no quiz gains no key.
+    expect(await replace({ stage: 'lead_webhook_received' }, { summary: 's' })).toEqual({ stage: 'lead_webhook_received', summary: 's' });
+  });
+
   test('an intake with no page URLs adds no attribution key at all', async () => {
     // webhookStageBase stores missing URLs as empty strings
     expect(await replace({ stage: 'lead_webhook_received', attribution: { pageUrl: '', landingUrl: ' ', utm: { source: 'x' } } }, { summary: 's' }))

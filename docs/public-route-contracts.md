@@ -4409,7 +4409,37 @@ the new-lead / existing-customer Customer 360 note so the office can give
 the sign host the $25 thank-you credit. STAFF-ONLY: it never joins
 `message`, the AI triage prose or the Lead Response Agent's message, and
 the agent's `get_lead_details` tool strips it; a missing, blank or
-non-string value is a no-op; and both accept an OPTIONAL `heard_about` —
+non-string value is a no-op; and both accept an OPTIONAL `quiz` object —
+the hub's two quiz pages (`/pest-control-quiz/`, `/lawn-care-quiz/`: the
+shared quote form with three tap questions in front of its contact steps,
+owner *build* 2026-11-19). Shape `{ kind, seeing, property }`, read from
+that exact key and reduced to FIXED tokens by `normalizeQuiz`
+(`server/services/lead-quiz.js`): `kind` `pest` | `lawn`; `seeing` one of
+that quiz's nine tiles (pest: `ants`, `roaches`, `spiders`, `rodents`,
+`termites`, `wasps`, `mosquitoes`, `bedbugs`, `unsure`; lawn: `weeds`,
+`patches`, `thinning`, `yellowing`, `bugs`, `fungus`, `shrubs`, `palms`,
+`unsure`); `property` `house` | `townhome` | `condo` | `business`. An
+unknown `kind`, a non-object or an absent key is a no-op; an unknown
+`seeing` / `property` is SILENTLY DROPPED and the rest kept; no other key
+of the object and no typed text is ever stored. The third quiz answer is
+the `timeline` field above. Stored in `extracted_data.quiz` (kept through
+the AI triage's extracted_data replace; a `quiz` key in the model's output
+is dropped, so it can never replace the visitor's answers; kept on the
+unverified hold's stage too) and written as a "Pest Quiz: Roaches, condo,
+wants it today" line on the new-lead / existing-customer Customer 360 note.
+The new-lead bell reads "<name> via Pest Quiz (<zip>) - Roaches, condo,
+wants it today"; the lead's source row (`lead_source_id`) is NOT changed by
+a quiz: a quiz is a form, not a traffic source.
+`property: business` is a stated commercial premises: it sets the intake's
+`isCommercial`, so the readiness gate records
+`commercial_category_conflict`, the lead row is marked `is_commercial`, and
+no residential draft is priced (under `GATE_UNIT_SCOPE_GUARDRAILS`, as for
+every other commercial signal). The quiz answers are NOT a pricing input:
+`property` never becomes the draft's property type. They are not
+staff-only: the Lead Response Agent may read them. The response is
+unchanged. Safe in either deploy order: a portal without this change
+ignores the unknown key and files an ordinary form lead;
+and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`
 `sanitizeHeardAbout`, shared with the online quote wizard): `google_search`, `google_maps`, `chatgpt`,

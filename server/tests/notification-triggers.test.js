@@ -134,6 +134,19 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/invoices?invoice=inv_123');
   });
 
+  test('a quiz lead\'s bell names the quiz and its answers in place of the service line', () => {
+    const built = TRIGGER_REGISTRY.new_lead.build({
+      name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Cockroach Control',
+      quizAnswers: 'Roaches, condo, wants it today', leadId: 'lead-9',
+    });
+    expect(built.title).toBe('New lead');
+    expect(built.body).toBe('Pat Sample via Pest Quiz (34202) - Roaches, condo, wants it today');
+    expect(built.link).toBe('/admin/leads?lead=lead-9');
+    // Every other lead keeps the service line.
+    expect(TRIGGER_REGISTRY.new_lead.build({ name: 'Pat Sample', source: 'Main site', zip: '34202', service: 'Pest Control', leadId: 'lead-9' }).body)
+      .toBe('Pat Sample via Main site (34202) - Wants Pest Control');
+  });
+
   test('new lead trigger can carry tracking number context', () => {
     const built = TRIGGER_REGISTRY.new_lead.build({
       title: 'New lead from palmettoexterminator.com',

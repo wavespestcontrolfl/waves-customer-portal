@@ -140,6 +140,8 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
     ...(intake.additionalProperties && intake.additionalProperties.length
       ? { additional_properties: intake.additionalProperties } : {}),
     ...(intake.signHost ? { sign_host: intake.signHost } : {}),
+    // The quiz pages' tap answers (services/lead-quiz.js), as on the verified path.
+    ...(intake.quiz ? { quiz: intake.quiz } : {}),
     source_evidence: intake.sourceEvidence || null,
   };
 
