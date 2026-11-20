@@ -1883,6 +1883,33 @@ describe('admin actions', () => {
     expect(mockPublish.mock.calls[0][0].expectedAccountFingerprint).toBeUndefined();
   });
 
+  test('postNow re-attempts a parked manual attempt (before the sync restores it) as written, held to the grounding its attempt recorded', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const text = 'Thanks Dana, we will be back Tuesday for the garage.';
+    const base = row({ id: 'rp', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', review_reply: null, auto_reply_draft: text, auto_reply_version: 'human', auto_reply_mode: null });
+    const grounding = { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: null };
+    state.rows = [{ ...base, auto_reply_grounding: grounding, review_text: 'Edited: they missed the garage' }];
+    await expect(Runner.postNow('rp', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/review or its customer link changed/) });
+    expect(mockPublish).not.toHaveBeenCalled();
+    // A person's own words: posted as written (the publisher's live read
+    // promotes it if it had landed), the person's app-name rule, no account
+    // check, its grounding kept.
+    state.rows = [{ ...base, auto_reply_grounding: grounding }];
+    expect((await Runner.postNow('rp', { type: 'admin' }, { expectedDraft: text })).outcome).toBe('posted');
+    expect(mockVerify).not.toHaveBeenCalled();
+    expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, fromDraft: false, auditMeta: { version: 'human' }, autoFields: { auto_reply_draft: text, auto_reply_grounding: JSON.stringify(grounding) } });
+    expect(mockPublish.mock.calls[0][0].expectedAccountFingerprint).toBeUndefined();
+    // An Intelligence Bar attempt: agent text, and its account facts re-checked.
+    const ib = { ...base, auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_grounding: { ...grounding, accountFingerprint: 'fp:Venice|new' } };
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    state.rows = [{ ...ib }];
+    expect((await Runner.postNow('rp', { type: 'admin' }, { expectedDraft: ib.auto_reply_draft })).outcome).toBe('posted');
+    expect(mockPublish.mock.calls[1][0]).toMatchObject({ text: ib.auto_reply_draft, fromDraft: true, expectedAccountFingerprint: 'fp:Venice|new' });
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    state.rows = [{ ...ib }];
+    await expect(Runner.postNow('rp', { type: 'admin' }, { expectedDraft: ib.auto_reply_draft })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/customer facts changed/) });
+  });
+
   test('pipelineDraftGuard (Use Draft): a restored manual attempt posted verbatim meets the grounding its attempt recorded; edited text takes the human path', async () => {
     const text = 'Thanks Dana. Glad the Waves app helps.';
     const base = row({ id: 'ug', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'agent_ops' });

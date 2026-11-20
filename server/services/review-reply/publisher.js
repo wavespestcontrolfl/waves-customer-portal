@@ -586,6 +586,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // retracted one, an overwritten one) never dates it. The sync stamps
       // Google's time when it finds the reply landed.
       uncertain.auto_reply_published_at = null;
+      // A person's attempt takes the row from the automatic runner, as a
+      // posted manual reply does (manualReplyCloseFields): a runner that
+      // claimed it mid-draft can no longer store or release over this park.
+      uncertain.auto_reply_claimed_until = null;
       // The attempted text replaces a [DRAFT] in the slot this write compares
       // against (the pipeline's, an Agent Ops draft, a restored one), as a
       // landed reply and the sync's restore both do. Until that sync the card

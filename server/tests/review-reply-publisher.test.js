@@ -700,6 +700,8 @@ describe('publishReviewReply', () => {
 
   test('an Intelligence Bar post that times out records its exact text, version agent_ops and its own grounding on a never-queued row', async () => {
     state.rows[0].auto_reply_status = null;
+    // An automatic runner had claimed the row mid-draft.
+    state.rows[0].auto_reply_claimed_until = '2099-01-01T00:00:00.000Z';
     const { reviewFingerprint } = require('../services/review-reply/fingerprint');
     const fingerprint = reviewFingerprint(state.rows[0]);
     await ibTimeout();
@@ -707,6 +709,8 @@ describe('publishReviewReply', () => {
     // the automatic lane), or marks it posted once Google shows it.
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_mode: null });
     expect(JSON.parse(state.rows[0].auto_reply_grounding)).toEqual({ fingerprint, accountFingerprint: 'acct-fp-1' });
+    // The person's attempt takes the row from that runner, as a posted manual reply does.
+    expect(state.rows[0].auto_reply_claimed_until).toBeNull();
   });
 
   test('an Intelligence Bar timeout on a skipped review with no reply records the attempt: the status the claim read, not the automatic lane\'s', async () => {
