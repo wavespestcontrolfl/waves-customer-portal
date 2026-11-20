@@ -62,15 +62,18 @@ function sweepLengthOk(row, now = Date.now()) {
 }
 
 // A retry state (no_transcription / extraction_failed) on a recording of
-// 10 s or less, not PAN-quarantined, is SETTLED below the attempt cap: the
-// sweep keeps its floor for retry states, gate on or off, and recording
-// recovery and the live-text pass take only calls with no recording. No pass
-// revisits it unless someone reprocesses it, and that claim is in flight
-// again. Readers that judge "still retrying" by the cap and the 7-day window
-// read it as settled too: the estimate guard (callReprocessInFlight), the
-// callback reconciliation (call-commitments' exhaustedExtractionSql) and the
-// promise-chaser bell, so a linked estimate, a parent's cards or a chaser
-// alert never wait on a retry that will not come (pre-push Codex P1, round 7).
+// 10 s or less, not PAN-quarantined, is SETTLED below the attempt cap: no
+// automatic pass takes it. The sweep keeps its floor for retry states, gate
+// on or off; every other unattended claim refuses it too (the processor's
+// whereUnattendedClaim, pre-push Codex P0, round 8); and recording recovery
+// and the live-text pass take only calls with no recording. Only an
+// operator's Process or Reprocess runs it again, and that claim holds a token,
+// which every reader below reads as in flight. Readers that judge "still
+// retrying" by the cap and the 7-day window read it as settled too: the
+// estimate guard (callReprocessInFlight), the callback reconciliation
+// (call-commitments' exhaustedExtractionSql) and the promise-chaser bell, so a
+// linked estimate, a parent's cards or a chaser alert never wait on a retry
+// that will not come (pre-push Codex P1, round 7).
 // Every JS caller selects processing_status and SHORT_RETRY_COLUMNS.
 const SHORT_RETRY_COLUMNS = ['recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription_metadata'];
 const RETRY_STATES = ['no_transcription', 'extraction_failed'];
@@ -91,9 +94,10 @@ function shortRetrySettled(row) {
   return (Number(row.recording_duration_seconds ?? row.duration_seconds ?? 0) || 0) <= SWEEP_MIN_SECONDS;
 }
 
-// The SQL twin, over a call_log alias (the table itself by default).
+// The SQL twin, over a call_log alias (the table itself by default). Never
+// NULL (a NULL status reads false), so the claim can negate it safely.
 function shortRetrySettledSql(t = 'call_log') {
-  return `(${t}.processing_status IN (${RETRY_STATES.map((s) => `'${s}'`).join(', ')})`
+  return `(COALESCE(${t}.processing_status IN (${RETRY_STATES.map((s) => `'${s}'`).join(', ')}), false)`
     + ` AND NULLIF(btrim(${t}.recording_url), '') IS NOT NULL`
     + ` AND COALESCE(${t}.recording_duration_seconds, ${t}.duration_seconds, 0) <= ${SWEEP_MIN_SECONDS}`
     + ` AND (${t}.transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true')`;

@@ -220,8 +220,32 @@ describe('the sweep query text', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     const query = src.slice(src.indexOf('  pendingCandidatesQuery() {'), src.indexOf('.limit(20);'));
     expect(query).toContain('.where(function sweepCandidate() { whereSweepCandidate(this); })');
-    // Once: in the ordinary claim, the one a sweep pass takes (it never sends force).
-    expect(src.split('.where(function sweepStillSelects() { if (opts.sweep) whereSweepCandidate(this); })')).toHaveLength(2);
+    // Once: in the ordinary claim, the one every unattended pass takes (none of them sends force).
+    expect(src.split('.where(function unattendedClaim() { whereUnattendedClaim(this, opts); })')).toHaveLength(2);
+    expect(src).toContain('if (opts.sweep) qb.where(function sweepStillSelects() { whereSweepCandidate(this); });');
+  });
+
+  // The ordinary claim's fences for a pass nobody pressed a button for (whereUnattendedClaim; pre-push Codex rounds 4,
+  // 5 and 8): no automatic pass takes a short call's failed retry state, an operator still can, and a webhook timer
+  // refuses a call a newer pass finished while it waited.
+  test('the unattended claim: a short failed retry is settled for every automatic pass, not an operator; a timer refuses a newer verdict', async () => {
+    const sql = (opts) => db('call_log').where(function claim() { processor.whereUnattendedClaim(this, opts); }).toString();
+    const SHORT = "NOT (COALESCE(call_log.processing_status IN ('no_transcription', 'extraction_failed'), false)"
+      + " AND NULLIF(btrim(call_log.recording_url), '') IS NOT NULL"
+      + ' AND COALESCE(call_log.recording_duration_seconds, call_log.duration_seconds, 0) <= 10'
+      + " AND (call_log.transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true')";
+    for (const value of [undefined, 'true']) {
+      await withGate(value, () => {
+        expect(sql({})).toContain(SHORT); // a webhook timer or pass, the live-text pass
+        expect(sql({ sweep: true })).toContain(SHORT);
+        expect(sql({ operator: true })).not.toContain('NOT (COALESCE(');
+        expect(sql({})).not.toContain('processing_generation');
+      });
+    }
+    expect(sql({ scheduledGeneration: 4 })).toContain(
+      `("processing_generation" <= 4 or "processing_status" is null or "processing_status" not in ('processed', 'voicemail', 'spam'))`,
+    );
+    expect(sql({ sweep: true })).toContain(`"updated_at" < NOW() - INTERVAL '10 minutes'`);
   });
 
   test('no stuck-transcript fallback: the fresh branch takes only NULL / pending, the retry branches keep the cap', async () => {
@@ -264,8 +288,12 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
   };
   const SID_PAN_RETRY = sid('sa'); // 4 s, extraction failed once: the sweep's masked-transcript branch takes it, gate on or off
   const SID_PAN_FINISHED = sid('sb'); // 4 s, a timer finished it as voicemail: never swept, and a sweep pass's claim refuses it
+  // A duplicate callback scheduled a webhook timer at generation 0; the sweep then claimed the stranded call
+  // (generation 1) and finished it before the timer fired.
+  const SID_SWEPT_VOICEMAIL = sid('sd'); // 8 s
+  const SID_SWEPT_SPAM = sid('se'); // 8 s
   const ALL_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG, SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP, SID_SHORT_DIED, SID_SHORT_VOICEMAIL,
-    SID_PAN_RETRY, SID_PAN_FINISHED, SID_LONG_VOICEMAIL];
+    SID_PAN_RETRY, SID_PAN_FINISHED, SID_LONG_VOICEMAIL, SID_SWEPT_VOICEMAIL, SID_SWEPT_SPAM];
   const REC = 'RE' + '9'.repeat(32);
   const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
 
@@ -311,6 +339,8 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     await insertCall(SID_LONG_VOICEMAIL, { seconds: 60, createdMinutesAgo: 120, updatedMinutesAgo: 60, processing_status: 'voicemail' });
     await insertCall(SID_PAN_RETRY, { seconds: 4, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...PAN_QUARANTINED, processing_status: 'extraction_failed', extraction_attempts: 1 });
     await insertCall(SID_PAN_FINISHED, { seconds: 4, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...PAN_QUARANTINED, processing_status: 'voicemail' });
+    await insertCall(SID_SWEPT_VOICEMAIL, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_status: 'voicemail', processing_generation: 1 });
+    await insertCall(SID_SWEPT_SPAM, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_status: 'spam', processing_generation: 1 });
   });
 
   afterAll(async () => {
@@ -344,6 +374,36 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
         expect(out).toMatchObject({ success: false, skipped: true });
         const row = await db('call_log').where({ twilio_call_sid: target }).first('processing_status', 'processing_token');
         expect(row).toEqual({ processing_status: 'voicemail', processing_token: null });
+      });
+    }
+  });
+
+  // No automatic pass takes a short call's failed retry state (pre-push Codex P0, round 8). The row is under the cap
+  // and past its 10-minute backoff, so before this rule a duplicate callback's timer could claim it.
+  test('an automatic pass (a webhook timer, with or without its generation) refuses a short failed retry, gate on or off', async () => {
+    for (const value of [undefined, 'true']) {
+      await withGate(value, async () => {
+        for (const opts of [{}, { scheduledGeneration: 0 }]) {
+          expect(await processor.processRecording(SID_SHORT_RETRY, opts)).toMatchObject({ success: false, skipped: true, reason: 'already_processing' });
+          const row = await db('call_log').where({ twilio_call_sid: SID_SHORT_RETRY })
+            .first('processing_status', 'processing_token', 'extraction_attempts', 'processing_generation');
+          expect(row).toEqual({ processing_status: 'no_transcription', processing_token: null, extraction_attempts: 1, processing_generation: 0 });
+        }
+      });
+    }
+  });
+
+  // The ordering where the sweep finishes first (pre-push Codex P1, round 8): the claim accepts a voicemail or spam
+  // row, so only the timer's generation fence refuses it.
+  test.each([
+    ['voicemail', SID_SWEPT_VOICEMAIL],
+    ['spam', SID_SWEPT_SPAM],
+  ])('a webhook timer scheduled before the sweep finished the call as %s refuses it and changes nothing, gate on or off', async (status, target) => {
+    for (const value of [undefined, 'true']) {
+      await withGate(value, async () => {
+        expect(await processor.processRecording(target, { scheduledGeneration: 0 })).toMatchObject({ success: false, skipped: true, reason: 'already_processing' });
+        const row = await db('call_log').where({ twilio_call_sid: target }).first('processing_status', 'processing_token', 'processing_generation');
+        expect(row).toEqual({ processing_status: status, processing_token: null, processing_generation: 1 });
       });
     }
   });

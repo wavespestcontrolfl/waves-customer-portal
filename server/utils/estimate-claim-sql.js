@@ -51,7 +51,8 @@ const INVALIDATION_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngin
 // retry that will claim it can change the call's identity and linkage
 // (pre-push P0, PR #3304 — the guard below treated the queue-to-claim
 // window as settled and could disclose or charge during it). A retry state
-// the sweep never retries (a recording of 10 s or less) is settled.
+// no automatic pass takes (a recording of 10 s or less: the ordinary claim
+// refuses it) is settled.
 // config/call-extraction-retry is a leaf (no top-level requires), so this
 // module stays dependency-free.
 const { SHORT_RETRY_COLUMNS, shortRetrySettled } = require('../config/call-extraction-retry');
@@ -64,8 +65,10 @@ function callReprocessInFlight(callRow, nowMs = Date.now()) {
   const status = callRow.processing_status == null ? null : String(callRow.processing_status).toLowerCase();
   if (CALL_IN_FLIGHT_STATUSES.has(status)) return true;
   // A retry state on a recording of 10 s or less is settled below the cap:
-  // the sweep never takes it again (config/call-extraction-retry,
-  // shortRetrySettled; pre-push Codex P1). Every caller selects
+  // no automatic pass takes it again, the claim itself refuses it
+  // (config/call-extraction-retry, shortRetrySettled; pre-push Codex P1
+  // round 7, P0 round 8). An operator's pass holds a token, read above as in
+  // flight. Every caller selects
   // SHORT_RETRY_COLUMNS (here: CALL_VERDICT_COLUMNS, settledCallGeneration);
   // a row read without them stays in flight.
   if (shortRetrySettled(callRow)) return false;

@@ -733,9 +733,9 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
       // still be retried and keep the promise, so it never rings.
       // no_transcription shares the cap (codex #6271 r39/r51): at the cap the
       // sweep retries neither lane, so both rows are settled. So is either
-      // lane on a recording of 10 s or less, below the cap: the sweep never
-      // retries it (config/call-extraction-retry, shortRetrySettledSql; its
-      // default alias is this query's table).
+      // lane on a recording of 10 s or less, below the cap: no automatic
+      // claim takes it (config/call-extraction-retry, shortRetrySettledSql;
+      // its default alias is this query's table).
       .whereRaw(`(processing_status IN (${settledStatuses.map(() => '?').join(', ')})
         OR (processing_status IN ('extraction_failed', 'no_transcription') AND COALESCE(extraction_attempts, 0) >= ?)
         OR ${shortRetrySettledSql()})`,

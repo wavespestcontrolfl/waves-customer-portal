@@ -311,7 +311,30 @@ describe('POST /recording-status', () => {
     expect(row.recording_duration_seconds).toBe(45);
     expect(row.transcription_status).toBe('pending');
     jest.advanceTimersByTime(2 * 60 * 1000 + 5);
-    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: null });
+  });
+
+  // Each timer carries the claim generation it was scheduled on, so a pass that finishes the call while the timer waits
+  // (the sweep, as voicemail or spam) makes the claim refuse it (pre-push Codex P1, round 8).
+  test('the early timer carries the generation of the row this webhook decided on', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: null, recording_url: null, processing_status: null, processing_generation: 3 });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1 }));
+    jest.advanceTimersByTime(2 * 60 * 1000 + 5);
+    expect(processor.processRecording).toHaveBeenCalledTimes(1);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: 3 });
+  });
+
+  test('the fallback timer carries the early pass\'s own claim, so that deferral never fences it', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: null, recording_url: null, processing_status: null, processing_generation: 3 });
+    processor.processRecording.mockImplementationOnce(() => Promise.resolve({ success: false, skipped: true, reason: 'recording_not_ready', generation: 4 }));
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1 }));
+    jest.advanceTimersByTime(2 * 60 * 1000 + 5);
+    for (let i = 0; i < 5; i += 1) await Promise.resolve(); // the early attempt settles, then schedules the fallback
+    jest.advanceTimersByTime(8 * 60 * 1000 + 5);
+    expect(processor.processRecording.mock.calls).toEqual([
+      [PARENT, { scheduledGeneration: 3 }],
+      [PARENT, { scheduledGeneration: 4 }],
+    ]);
   });
 
   test('a retried delivery of the same RecordingSid on a processed row writes NOTHING', async () => {
@@ -454,7 +477,7 @@ describe('POST /recording-status', () => {
     expect(row.recording_sid).toBe(REC_1);
     expect(row.metadata.superseded_recordings).toEqual([expect.objectContaining({ recording_sid: REC_2, superseded_by: REC_1 })]);
     jest.advanceTimersByTime(2 * 60 * 1000 + 5);
-    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: null });
   });
 
   test('a replace retires the old audio\'s cards but keeps missing_unit_number open, and the review flag follows the cards (codex #3764 gh-r3 P1 + #3736 gh-r14 P2)', async () => {
@@ -535,7 +558,7 @@ describe('POST /recording-status', () => {
     tables.call_log[0].processing_status = null;
     await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1, RecordingDuration: '45' }));
     jest.advanceTimersByTime(15 * 60 * 1000);
-    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: null });
   });
 
   test('a duplicate delivery WITHOUT ParentCallSid (voicemail on the parent) writes nothing and never takes the Studio-recovery insert path', async () => {
@@ -761,7 +784,7 @@ describe('POST /recording-status', () => {
     expect(row.metadata.superseded_recordings).toHaveLength(1);
     expect(row.metadata.superseded_recordings[0]).toMatchObject({ recording_sid: REC_1, recording_duration_seconds: 12, superseded_by: REC_2 });
     jest.advanceTimersByTime(2 * 60 * 1000 + 5);
-    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: null });
   });
 
   test('a row PAN-stamped between the read and the guarded write (the Studio race) deletes the arriving recording AND the row\'s current one now, not at the next sweep', async () => {

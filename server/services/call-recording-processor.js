@@ -1013,7 +1013,7 @@ function isImplausibleTranscript(transcription, recordingSeconds) {
 // under this cap (≥10 min between attempts via the sweep's age gate), which
 // rides out transient provider errors. At the cap a blocking triage item is
 // filed so the call can't die silently.
-const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, sweepLengthSql } = require('../config/call-extraction-retry');
+const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, sweepLengthSql, shortRetrySettledSql } = require('../config/call-extraction-retry');
 
 // Human-readable "confirm before dispatch" reasons surfaced by the address /
 // identity bridge below. Shown on the lead's AI-triage activity so Virginia
@@ -4617,6 +4617,38 @@ function whereSweepCandidate(qb) {
         // readback was heard) — never duration-filter them out.
         .orWhereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
     });
+}
+
+// The ordinary (non-force) claim's fences for a pass nobody pressed a button
+// for, in one place. The claim is the one gate every pass goes through, so a
+// rule the readers rely on is enforced here instead of in each caller.
+// - `sweep` (processAllPending only): the sweep's whole candidate rule,
+//   re-checked atomically (pre-push Codex P1, rounds 4 and 5). A timer can
+//   finish a selected row as voicemail or spam, or quarantine a card number,
+//   before the sweep reaches it, and the rest of this claim accepts those.
+// - Not `operator`: a retry state on a recording of 10 s or less is settled
+//   (config/call-extraction-retry, shortRetrySettledSql). The sweep never
+//   retried one, but a duplicate recording-status callback's timer could, so
+//   the estimate guard and the callback readers could not read it as settled
+//   (pre-push Codex P0, round 8). An operator's Process (`operator`) and
+//   Reprocess (`force`, the other claim branch) still run it.
+// - `scheduledGeneration` (the recording webhook's timers): the
+//   processing_generation the timer saw when it was scheduled. A pass that
+//   claimed the row since (a higher generation) and left a finished verdict
+//   made the timer stale: the claim refuses, so a call the sweep finished as
+//   voicemail or spam before the timer fired is not run again (pre-push Codex
+//   P1, round 8). Any other state is still owed a pass, as before.
+function whereUnattendedClaim(qb, opts = {}) {
+  if (opts.sweep) qb.where(function sweepStillSelects() { whereSweepCandidate(this); });
+  if (!opts.operator) qb.whereRaw(`NOT ${shortRetrySettledSql()}`);
+  if (opts.scheduledGeneration != null) {
+    qb.where(function noVerdictSinceScheduled() {
+      this.where('processing_generation', '<=', Number(opts.scheduledGeneration))
+        .orWhereNull('processing_status')
+        .orWhereNotIn('processing_status', [...COMPLETED_STATUSES]);
+    });
+  }
+  return qb;
 }
 
 // Passes this process currently holds a claim for (call_log.id → claim token),
@@ -11666,13 +11698,12 @@ const CallRecordingProcessor = {
           // refuse (reason recording_changed below) instead of processing
           // audio the operator never chose (Codex #3736 r6 P1).
           .where(function expectedRecording() { if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid); })
-          // A sweep pass re-checks the sweep's whole candidate rule here,
-          // atomically (whereSweepCandidate, pre-push Codex P1 rounds 4 and
-          // 5): a timer can finish a selected row as voicemail or spam, or
-          // quarantine a card number, before the sweep reaches it, and this
-          // claim accepts those states. Such a row no longer matches, so the
-          // claim refuses it instead of running the paid pipeline again.
-          .where(function sweepStillSelects() { if (opts.sweep) whereSweepCandidate(this); })
+          // The fences for an unattended pass (whereUnattendedClaim): a sweep
+          // pass re-checks the sweep's candidate rule; no automatic pass takes
+          // a short call's failed retry state; a webhook timer never runs a
+          // call a newer pass finished while it waited. Each refusal leaves
+          // the row untouched instead of running the paid pipeline again.
+          .where(function unattendedClaim() { whereUnattendedClaim(this, opts); })
           .update({
             processing_status: 'processing',
             processing_token: procToken,
@@ -12285,7 +12316,10 @@ const CallRecordingProcessor = {
       });
       if (deferredRows) claimReleased = true;
       logger.info(`[call-proc] Deferred ${maskSid(callSid)} — recording not fully propagated yet (status restored to ${preClaimStatus || 'pending'})`);
-      return { success: false, skipped: true, reason: 'recording_not_ready' };
+      // `generation`: this pass's own claim. The webhook's fallback timer
+      // fences on it (whereUnattendedClaim), so this deferral never makes
+      // the fallback stale, while a pass that claims after it does.
+      return { success: false, skipped: true, reason: 'recording_not_ready', generation: procGeneration };
     }
 
     // Fallback: use Twilio's built-in transcription if OpenAI/Gemini failed or no recording URL.
@@ -26758,5 +26792,6 @@ CallRecordingProcessor.reconcileCorrectedCallbackVerdicts = reconcileCorrectedCa
 // "recordCommitmentsStep is not a function" (first apply 2026-10-20, 0 written).
 CallRecordingProcessor.recordCommitmentsStep = recordCommitmentsStep;
 
+CallRecordingProcessor.whereUnattendedClaim = whereUnattendedClaim;
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

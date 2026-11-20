@@ -2275,7 +2275,8 @@ const exhaustedExtractionSql = (t) => {
   // attempt cap inside the 7-day creation window; a no_transcription row
   // retries under the cap with no window (adoption resets the count). Past
   // either, no pass revisits the row; nor does it a retry state on a
-  // recording of 10 s or less, which keeps the sweep's floor (pre-push Codex P1).
+  // recording of 10 s or less, which no automatic claim takes (pre-push Codex
+  // P1 round 7, P0 round 8).
   const atCap = `COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
   return `((${t}.processing_status = 'extraction_failed' AND (${atCap} OR ${t}.created_at < now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days')) OR (${t}.processing_status = 'no_transcription' AND ${atCap}) OR ${shortRetrySettledSql(t)})`;
 };

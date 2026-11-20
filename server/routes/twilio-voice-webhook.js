@@ -2807,9 +2807,10 @@ router.post('/recording-status', async (req, res) => {
       // quarantine predicate and a recording_sid fence, so a stamp or a
       // competing delivery landing between this read and the write makes
       // the write skip instead of overwriting.
+      // processing_generation: the pass the timers below are scheduled on.
       const ATTACH_COLUMNS = [
         'id', 'twilio_call_sid', 'recording_sid', 'recording_url', 'recording_duration_seconds',
-        'processing_status', 'transcription_metadata', 'metadata',
+        'processing_status', 'transcription_metadata', 'metadata', 'processing_generation',
       ];
       let targetRow = null;
       if (ParentCallSid) {
@@ -3224,9 +3225,20 @@ router.post('/recording-status', async (req, res) => {
           const processor = require('../services/call-recording-processor');
           const earlyDelayMs = Number(process.env.CALL_PROC_EARLY_PROCESS_DELAY_MS) || 2 * 60 * 1000;
           const fallbackDelayMs = 10 * 60 * 1000;
-          const attempt = async (label) => {
+          // Each timer carries the claim generation it was scheduled on
+          // (pre-push Codex P1, round 8): a pass that claims and finishes the
+          // row while the timer waits (the sweep, as voicemail or spam) leaves
+          // a higher generation, and the claim refuses to run that call again.
+          // The early timer takes the row this webhook decided on; the
+          // fallback takes the early pass's own claim, since that pass
+          // deferred and must not fence it. Unknown (null) = no fence, as when
+          // the timer runs on a row other than the one decided on (a
+          // Studio-originated parent found or created above).
+          const decidedGeneration = targetRow?.twilio_call_sid === matchedSid && targetRow.processing_generation != null
+            ? Number(targetRow.processing_generation) : null;
+          const attempt = async (label, scheduledGeneration) => {
             try {
-              return await processor.processRecording(matchedSid);
+              return await processor.processRecording(matchedSid, { scheduledGeneration });
             } catch (e) {
               logger.error(`Auto-process recording failed (${label}): ${e.message}`);
               return null;
@@ -3242,10 +3254,11 @@ router.post('/recording-status', async (req, res) => {
           // restarts and both in-memory timers are lost, the 5-min cron is
           // still the backstop, unchanged.
           setTimeout(async () => {
-            const result = await attempt('early');
+            const result = await attempt('early', decidedGeneration);
             const needsFallback = !result || result.reason === 'recording_not_ready';
             if (needsFallback) {
-              setTimeout(() => attempt('fallback'), Math.max(fallbackDelayMs - earlyDelayMs, 60 * 1000));
+              const earlyGeneration = result?.generation != null ? Number(result.generation) : null;
+              setTimeout(() => attempt('fallback', earlyGeneration), Math.max(fallbackDelayMs - earlyDelayMs, 60 * 1000));
             }
           }, earlyDelayMs);
         } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
