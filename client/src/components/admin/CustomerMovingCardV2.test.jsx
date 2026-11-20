@@ -149,6 +149,13 @@ describe('CustomerMovingCardV2', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('renders nothing when the moves answer is unreadable', async () => {
+    adminFetch.mockImplementationOnce(async () => ({ ok: true, json: async () => { throw new Error('bad json'); } }));
+    const { container } = render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(1));
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it('shows the pause line under the status only when there is one', async () => {
     state.list = {
       moves: [{ id: 'm1', status: 'submitted', submitted_at: '2026-11-03T15:00:00Z', typed_address: null, move_out_date: '2026-11-15', pause_state: 'paused', pause_ends_on: '2027-01-14' }],

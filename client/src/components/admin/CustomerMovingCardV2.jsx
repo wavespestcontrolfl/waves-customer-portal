@@ -279,10 +279,12 @@ export default function CustomerMovingCardV2({ customerId }) {
     try {
       const res = await adminFetch(`/admin/customers/${encodeURIComponent(customerId)}/moves`, { signal });
       if (!res.ok) return;
-      const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => null);
       if (signal?.aborted) return;
+      // An unreadable answer leaves the card hidden, never an empty move history.
+      if (!data || !Array.isArray(data.moves)) return;
       setLoaded(true);
-      setMoves(Array.isArray(data.moves) ? data.moves : []);
+      setMoves(data.moves);
       setText(data.text || null);
       setEstimateEnabled(data.estimateEnabled === true);
     } catch {
