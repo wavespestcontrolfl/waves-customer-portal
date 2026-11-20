@@ -377,7 +377,7 @@ describe('call outcomes', () => {
   beforeEach(() => { db.mockReset(); });
 
   test('saves the outcome, who and when as one activity_log row, and changes nothing on the estimate', async () => {
-    const read = makeBuilder({ first: { id: 'e1', customer_id: 'c1' } });
+    const read = makeBuilder({ first: { id: 'e1', customer_id: 'c1', status: 'viewed' } });
     const write = insertBuilder('2026-11-20T14:42:00.000Z');
     db.mockImplementationOnce(() => read).mockImplementationOnce(() => write);
     const res = makeRes();
@@ -387,7 +387,7 @@ describe('call outcomes', () => {
     expect(db.mock.calls.map(([table]) => table)).toEqual(['estimates', 'activity_log']);
     expect(read.where).toHaveBeenCalledWith({ id: 'e1' });
     // No customer name is read or logged (AGENTS.md, PII in logs: a failed insert's error carries its bindings).
-    expect(read.first).toHaveBeenCalledWith('id', 'customer_id');
+    expect(read.first).toHaveBeenCalledWith('id', 'customer_id', 'status');
     expect(read.update).not.toHaveBeenCalled();
     expect(write.insert).toHaveBeenCalledWith({
       admin_user_id: 't1',
@@ -406,6 +406,15 @@ describe('call outcomes', () => {
     await handler({ params: { id: 'e1' }, body: { outcome }, technicianId: 't1' }, res, jest.fn());
     expect(res.status).toHaveBeenCalledWith(400);
     expect(db).not.toHaveBeenCalled();
+  });
+
+  // Only a draft can be deleted, and an outcome row would block that delete (activity_log.estimate_id has no ON DELETE).
+  test('a draft answers 409 and writes nothing', async () => {
+    db.mockImplementationOnce(() => makeBuilder({ first: { id: 'd1', customer_id: 'c1', status: 'draft' } }));
+    const res = makeRes();
+    await handler({ params: { id: 'd1' }, body: { outcome: 'booked' }, technicianId: 't1' }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(db).toHaveBeenCalledTimes(1);
   });
 
   test('an unknown estimate answers 404 and writes nothing', async () => {

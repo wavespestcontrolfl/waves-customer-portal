@@ -5901,8 +5901,11 @@ router.post('/:id/call-outcome', async (req, res, next) => {
     const { CALL_OUTCOME_ACTION, staffFirstName } = require('../services/estimate-call-list');
     const outcome = CALL_OUTCOMES.find((o) => o.key === req.body?.outcome);
     if (!outcome) return res.status(400).json({ error: 'Pick an outcome: Booked, Call back, Not interested or No answer.' });
-    const estimate = await db('estimates').where({ id: req.params.id }).first('id', 'customer_id');
+    const estimate = await db('estimates').where({ id: req.params.id }).first('id', 'customer_id', 'status');
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    // A draft was never sent, so no call came of it. Only a draft can be deleted, and an outcome row on it would block
+    // that delete (activity_log.estimate_id has no ON DELETE).
+    if (estimate.status === 'draft') return res.status(409).json({ error: 'A draft estimate has no call to log. Send it first.' });
     const [row] = await db('activity_log').insert({
       admin_user_id: req.technicianId || null,
       customer_id: estimate.customer_id || null,

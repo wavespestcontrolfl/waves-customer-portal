@@ -363,15 +363,24 @@ function withoutKey(collection, key) {
   return next;
 }
 export function useCallOutcomes({ setEstimates, refresh, onNotInterested }) {
-  // estimate id -> when a call to it was placed from the list (ms), until an outcome is tapped
+  // estimate id -> { placedAt: when the call was placed (this browser's clock, for the re-read window only),
+  // outcomeAt: the newest outcome the row carried then (the server's clock) }, until an outcome is tapped
   const [held, setHeld] = useState(() => new Map());
   const [saving, setSaving] = useState(() => new Set());
-  const hold = useCallback((id) => {
-    if (id) setHeld((prev) => new Map(prev).set(id, Date.now()));
+  const hold = useCallback((estimate) => {
+    if (estimate?.id)
+      setHeld((prev) =>
+        new Map(prev).set(estimate.id, {
+          placedAt: Date.now(),
+          outcomeAt: estimate.lastCallOutcome?.at ?? null,
+        }),
+      );
   }, []);
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
-  const newestHold = held.size ? Math.max(...held.values()) : null;
+  const newestHold = held.size
+    ? Math.max(...[...held.values()].map((h) => h.placedAt))
+    : null;
   useEffect(() => {
     if (newestHold === null) return undefined;
     const timer = setInterval(() => {
@@ -386,10 +395,13 @@ export function useCallOutcomes({ setEstimates, refresh, onNotInterested }) {
   const onCallToday = useCallback(
     (e) => {
       if (isCallTodayEstimate(e)) return true;
-      const placedAt = held.get(e.id);
-      if (placedAt === undefined || !isCallableEstimate(e) || e.callOutcomeUnknown) return false;
-      // A held row leaves once anyone logs an outcome for it after the call was placed.
-      return !(Date.parse(e.lastCallOutcome?.at) >= placedAt);
+      const h = held.get(e.id);
+      if (!h || !isCallableEstimate(e) || e.callOutcomeUnknown) return false;
+      // A held row leaves once anyone logs an outcome newer than the one it carried when the call was placed. Both
+      // times are the server's, so a browser clock that runs fast or slow changes nothing.
+      const latest = Date.parse(e.lastCallOutcome?.at);
+      if (Number.isNaN(latest)) return true;
+      return latest <= Date.parse(h.outcomeAt);
     },
     [held],
   );
@@ -2894,7 +2906,7 @@ function EstimatePipelineViewV2({
                                   filter === "call_today" &&
                                   isCallTodayEstimate(e)
                                 )
-                                  callOutcomes.hold(e.id);
+                                  callOutcomes.hold(e);
                               } catch (err) {
                                 alert("Call failed: " + err.message);
                               }
@@ -4800,7 +4812,7 @@ function EstimatesMobileListView({
               onPickReason={setReasonTarget}
               onCalled={(row) => {
                 if (filter === "call_today" && isCallTodayEstimate(row))
-                  callOutcomes.hold(row.id);
+                  callOutcomes.hold(row);
               }}
               onCallOutcome={filter === "call_today" ? callOutcomes.save : undefined}
               callOutcomeSaving={callOutcomes.saving.has(e.id)}

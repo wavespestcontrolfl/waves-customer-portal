@@ -568,7 +568,7 @@ it("a held row re-reads the list quietly once a minute, for at most 15 minutes a
       vi.advanceTimersByTime(5 * HELD_REFRESH_INTERVAL_MS);
     });
     expect(refresh).not.toHaveBeenCalled(); // nothing held, nothing re-read
-    act(() => result.current.hold("h-3"));
+    act(() => result.current.hold(viewed("h-3", "Held Offer", 5 * HOUR)));
     act(() => {
       vi.advanceTimersByTime(HELD_REFRESH_INTERVAL_MS);
     });
@@ -616,14 +616,29 @@ it("a held row leaves once anyone logs an outcome after the call was placed, not
   const { result } = renderHook(() =>
     useCallOutcomes({ setEstimates: vi.fn(), refresh: vi.fn(), onNotInterested: vi.fn() }),
   );
-  const called = viewed("h-1", "Held Offer", 5 * HOUR, { lastCalledAt: new Date().toISOString() });
-  expect(result.current.onCallToday(called)).toBe(false); // the answered call alone takes it off
-  act(() => result.current.hold("h-1"));
-  expect(result.current.onCallToday(called)).toBe(true);
+  // The row already carried yesterday's outcome when the call was placed.
   const earlier = { outcome: "call_back", at: ago(DAY), by: "Adam" };
-  expect(result.current.onCallToday({ ...called, lastCallOutcome: earlier })).toBe(true);
+  const called = viewed("h-1", "Held Offer", 5 * HOUR, { lastCalledAt: new Date().toISOString(), lastCallOutcome: earlier });
+  expect(result.current.onCallToday(called)).toBe(false); // the answered call alone takes it off
+  act(() => result.current.hold(called));
+  expect(result.current.onCallToday(called)).toBe(true);
   const later = { outcome: "booked", at: new Date(Date.now() + 1000).toISOString(), by: "Virginia" };
   expect(result.current.onCallToday({ ...called, lastCallOutcome: later })).toBe(false);
+  // This browser's clock runs 10 minutes fast: the server stamps another person's outcome "5 minutes ago" by the
+  // browser's clock, and it is still newer than the one the row carried, so the row leaves (codex pre-push P1).
+  const skewed = { outcome: "no_answer", at: ago(5 * 60000), by: "Virginia" };
+  expect(result.current.onCallToday({ ...called, lastCallOutcome: skewed })).toBe(false);
+});
+
+it("a held row with no outcome when the call was placed leaves at the first outcome anyone logs", () => {
+  const { result } = renderHook(() =>
+    useCallOutcomes({ setEstimates: vi.fn(), refresh: vi.fn(), onNotInterested: vi.fn() }),
+  );
+  const called = viewed("h-4", "Held Offer", 5 * HOUR, { lastCalledAt: new Date().toISOString() });
+  act(() => result.current.hold(called));
+  expect(result.current.onCallToday(called)).toBe(true);
+  const logged = { outcome: "call_back", at: ago(60000), by: "Virginia" };
+  expect(result.current.onCallToday({ ...called, lastCallOutcome: logged })).toBe(false);
 });
 
 it("a held row keeps the rule's row checks; only the answered call and a touch during the call are set aside", () => {
@@ -632,7 +647,7 @@ it("a held row keeps the rule's row checks; only the answered call and a touch d
   );
   const now = new Date().toISOString();
   const called = viewed("h-2", "Held Offer", 5 * HOUR, { lastCalledAt: now });
-  act(() => result.current.hold("h-2"));
+  act(() => result.current.hold(called));
   expect(result.current.onCallToday(called)).toBe(true);
   // The customer opens the estimate during the call: too fresh for the rule, still held.
   expect(result.current.onCallToday({ ...called, lastViewedAt: now })).toBe(true);
