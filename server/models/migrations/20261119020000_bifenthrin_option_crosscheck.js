@@ -10,10 +10,15 @@
  *  2. onetime_trenching {talstar_p,bifen_it}: the same bottle, label and warnings; the rate fields are kept.
  * Each product moves in every place db-bridge reads one from: the products map, a legacy product_costs map and the top-level key
  * (its overlays read (products || product_costs)[key] || row[key]), so the quote follows whichever one the bridge reads.
- * A product is rewritten only while it still holds the Talak values, or is exactly the admin seed's Talak product (41.57 / 96 with
- * its rate fields and nothing else: what ensureTable in routes/admin-pricing-config.js inserted from 2026-10-25 until this change,
- * when it creates the table). One already on Crosscheck is left alone silently (re-run); one an admin changed is left alone with a
- * warning. A missing table, row or key is never an error.
+ * A product is rewritten only while it still holds the Talak values, or has no label of its own and carries another bottle's
+ * figures or name. db-bridge sets only a non-empty label, so such a product shows the code's label, which this change moves to
+ * Crosscheck Plus: left as it is, it would quote another bottle's cost under Crosscheck Plus's name and label check. That is the
+ * admin seed's Talak product (41.57 / 96 with its rate fields: what ensureTable in routes/admin-pricing-config.js inserted from
+ * 2026-10-25 until this change, when it creates the table), with or without an admin's edits since, and an admin's price for that
+ * bottle (pre-push audit at the fifth push: the seed was matched whole, so a seed with an edited margin kept the Talak cost). Its
+ * bottle fields follow the code's bottle, and its other values (margin, rates, anything added) stay. One already on Crosscheck is
+ * left alone silently (re-run); one with a label of its own that an admin changed is left alone with a warning. A missing table,
+ * row or key is never an error.
  *
  * Sent quotes: a replay keeps the slab container cost or trench product surcharge a stored row priced with (the pins in
  * services/estimate-tree-shrub-knob-replay). An estimate that kept only its engine inputs has no stored row, so it prices the new
@@ -182,19 +187,13 @@ const TALAK_TRENCH = {
     'Do not attach long repair-and-retreat warranty without admin approval.',
   ],
 };
-// The admin seed's Talak product (ensureTable, 2026-10-25 until this change), matched whole: no label, so db-bridge would put the
-// code's Crosscheck label on the Talak cost.
-const SEED_PRESLAB = { container_cost: 41.57, container_oz: 96, product_oz_per_10_sqft: 1, margin_divisor: 0.5294 };
-const SEED_TRENCH = {
-  container_cost: 41.57, container_oz: 96, product_oz_per_finished_gallon_at_standard_rate: 1, product_oz_per_finished_gallon_at_high_rate: 2,
-};
 const OPTION_KEYS = ['talstar_p', 'bifen_it'];
 // Aliases db-bridge prefers over the snake_case keys written above.
 const SHADOWING_ALIASES = ['catalogProductName', 'packageLabel', 'containerCost', 'containerOz', 'bottleCost', 'bottle_cost', 'bottleOz', 'bottle_oz'];
 
 const PLANS = {
-  onetime_preslab: { from: TALAK_PRESLAB, seed: SEED_PRESLAB, to: CROSSCHECK_PRESLAB },
-  onetime_trenching: { from: TALAK_TRENCH, seed: SEED_TRENCH, to: CROSSCHECK_TRENCH },
+  onetime_preslab: { from: TALAK_PRESLAB, to: CROSSCHECK_PRESLAB },
+  onetime_trenching: { from: TALAK_TRENCH, to: CROSSCHECK_TRENCH },
 };
 
 const VENDOR_COLUMNS = ['previous_price', 'price', 'price_amount', 'landed_cost', 'price_per_oz', 'normalized_unit_price', 'landed_unit_price', 'last_checked_at',
@@ -577,6 +576,13 @@ async function restoreCatalogSeen(knex, before, written) {
     console.warn(`${LOG} down: the ${CATALOG_NAME} catalog price changed since this migration - leaving it alone`);
     return;
   }
+  // The quote or vendor the catalog held may be gone since (an admin deleted it): its id would break the catalog's foreign keys and
+  // abort down(), so the catalog is recalculated from the quotes that remain (pre-push audit at the fifth push).
+  if (await winnerGone(knex, seen)) {
+    console.warn(`${LOG} down: the quote or vendor the ${CATALOG_NAME} catalog held before this migration is gone - recalculating it`);
+    await recalcBestPrice(knex, productId);
+    return;
+  }
   await knex('products_catalog').where({ id: productId }).update(seen);
   const bestIds = Array.isArray(before.is_best_price_ids) ? before.is_best_price_ids : [];
   const setIds = (Array.isArray(written.is_best_price_ids) ? written.is_best_price_ids : []).filter((id) => !bestIds.includes(id));
@@ -586,6 +592,14 @@ async function restoreCatalogSeen(knex, before, written) {
   if (bestIds.length) {
     await knex('vendor_pricing').where({ product_id: productId, is_best_price: false }).whereIn('id', bestIds).update({ is_best_price: true });
   }
+}
+
+// True when the catalog up() saw names a quote or a vendor that no longer exists.
+async function winnerGone(knex, seen) {
+  for (const [table, id] of [['vendor_pricing', seen.best_vendor_pricing_id], ['vendors', seen.best_price_vendor_id_cached]]) {
+    if (filled(id) && !(await knex(table).where({ id }).first())) return true;
+  }
+  return false;
 }
 
 // True when it put back at least one quote's expiry.
@@ -619,7 +633,13 @@ async function recalcRestoringMark(knex, productId, seen) {
 
 const holds = (product, values) => Object.entries(values).every(([k, v]) => isDeepStrictEqual(product[k], v))
   && SHADOWING_ALIASES.every((alias) => product[alias] === undefined);
-const isTalak = (product, plan) => holds(product, plan.from) || isDeepStrictEqual(product, plan.seed);
+// A product with no label of its own (db-bridge sets only a non-empty one) that carries another bottle's figures or name, the
+// fields db-bridge reads as the bottle's own, with their aliases (see the header).
+const BOTTLE_FIELDS = ['container_cost', 'container_oz', 'catalog_product_name', 'package_label'];
+const ownLabel = (product) => typeof product.label === 'string' && product.label.trim() !== '';
+const carriesOtherBottle = (product, plan) => !ownLabel(product) && (SHADOWING_ALIASES.some((alias) => product[alias] !== undefined)
+  || BOTTLE_FIELDS.some((field) => field in plan.to && product[field] !== undefined && !isDeepStrictEqual(product[field], plan.to[field])));
+const isOldBottle = (product, plan) => holds(product, plan.from) || carriesOtherBottle(product, plan);
 
 function toCrosscheck(product, values) {
   const next = { ...product };
@@ -646,7 +666,7 @@ function rewriteRow(configKey, data, plan) {
     for (const key of OPTION_KEYS) {
       const product = source[key];
       if (!isObject(product) || holds(product, plan.to)) continue; // none here, or already Crosscheck (a re-run): not ours
-      if (!isTalak(product, plan)) {
+      if (!isOldBottle(product, plan)) {
         console.warn(`${LOG} ${configKey}.${placeName(place, key)} was edited since the Talak swap - leaving the admin's values alone`);
         continue;
       }

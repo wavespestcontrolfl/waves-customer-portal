@@ -497,7 +497,8 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
           normalized_unit_price: '0.2414', landed_unit_price: '0.2414', is_best_price: false,
         });
         const catalog = catalogRow({ unit_size_oz: size, best_price: price, best_price_amount_cached: cached, best_vendor_pricing_id: 'v1' });
-        const db = world({ vendors: [offer], catalog: [catalog] });
+        // The winner the catalog names still exists (its foreign key), as a SiteOne quote the office let expire: no quote offers it.
+        const db = world({ vendors: [offer, vendorRow({ expires_at: new Date('2026-11-01T00:00:00.000Z') })], catalog: [catalog] });
         const knex = fakeKnex(db);
         await migration.up(knex);
         expectRecalculated(knex);
@@ -913,6 +914,37 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       else expect(db.vendor_pricing[0].expires_at).toBeUndefined();
     });
 
+    // Pre-push audit at the fifth push: when the recalculation alone ran, down() puts back the catalog up() saw, winner included. That
+    // quote (or its vendor) can be deleted since: its id would break the catalog's foreign keys and abort the rollback, so down()
+    // recalculates from the quotes that remain instead.
+    const OFFER_3090 = vendorRow({
+      id: 'v2', vendor_id: 'ven2', vendor_sku: 'X1', price: '30.90', price_amount: '30.9000', landed_cost: '30.90', price_per_oz: '0.2414',
+      normalized_unit_price: '0.2414', landed_unit_price: '0.2414', is_best_price: false,
+    });
+    test.each([
+      ['the quote', { best_vendor_pricing_id: 'v1' }, (db) => { db.vendor_pricing = db.vendor_pricing.filter((v) => v.id !== 'v1'); }],
+      ['its vendor, with its quotes', { best_vendor_pricing_id: null, best_price_vendor_id_cached: 'ven1' }, (db) => {
+        db.vendors = db.vendors.filter((v) => v.id !== 'ven1');
+        db.vendor_pricing = db.vendor_pricing.filter((v) => v.vendor_id !== 'ven1');
+      }],
+    ])('the winner up() saw is gone since (%s): down() recalculates the catalog instead of restoring it', async (_name, seen, remove) => {
+      const expired = vendorRow({ expires_at: new Date('2026-11-01T00:00:00.000Z') });
+      const db = world({ vendors: [OFFER_3090, expired], catalog: [catalogRow(seen)] });
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v2', best_price_status: 'current' });
+      expect(JSON.parse(db.pricing_config_audit.find((r) => r.config_key === migration.STALE_AUDIT_KEY).new_value).catalog_only).toBe(true);
+      remove(db);
+      await migration.down(knex);
+      const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
+      expect(warnings).toMatch(/down: the quote or vendor the LESCO Crosscheck Plus catalog held before this migration is gone - recalculating it/);
+      expectRecalculated(knex, 2); // up(), then down() over the quotes that remain
+      expect(db.products_catalog[0]).toMatchObject({
+        best_price: 30.9, best_vendor_pricing_id: 'v2', best_price_vendor_id_cached: 'ven2', best_price_status: 'current',
+      });
+      expect(db.pricing_config_audit).toEqual([]);
+    });
+
     test('a quote changed since up() keeps its expiry state through down(); the products still restore', async () => {
       const db = world({ vendors: [vendorRow({ shipping_cost: '5.00' })] });
       const knex = fakeKnex(db);
@@ -985,18 +1017,39 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
     });
 
-    test('a seed-shaped product with anything added or changed is an admin edit and is left alone', async () => {
+    // Pre-push audit at the fifth push: a product with no label of its own shows the code's label (db-bridge sets only a non-empty
+    // one), Crosscheck Plus after this change. One that carries another bottle's figures takes the new bottle whatever else an admin
+    // changed (its margin, rates and anything added stay); one with a label of its own that an admin changed is left alone.
+    test('a product with no label of its own takes the new bottle whatever an admin changed; one with its own label is left alone', async () => {
       const db = world({
-        preslab: preslabRow({ ...SEED_PRESLAB, container_cost: 40 }, { ...SEED_PRESLAB, positioning: 'premium' }),
-        trench: trenchRow({ ...SEED_TRENCH, label: 'Mine' }, SEED_TRENCH),
+        preslab: preslabRow({ ...SEED_PRESLAB, margin_divisor: 0.6, requires_label_confirmation: true }, { ...SEED_PRESLAB, container_cost: 45 }),
+        trench: trenchRow({ ...SEED_TRENCH, label: 'Mine' }, { ...SEED_TRENCH, product_oz_per_finished_gallon_at_high_rate: 1.5, label: ' ' }),
         catalog: [],
         vendors: [],
       });
-      await migration.up(fakeKnex(db));
-      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual({ ...SEED_PRESLAB, container_cost: 40 });
-      expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual({ ...SEED_PRESLAB, positioning: 'premium' });
+      const original = JSON.stringify(db.pricing_config);
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual({ ...PRESLAB_REWRITTEN, margin_divisor: 0.6, requires_label_confirmation: true });
+      expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual(PRESLAB_REWRITTEN);
       expect(productOf(db, 'onetime_trenching', 'talstar_p')).toEqual({ ...SEED_TRENCH, label: 'Mine' });
-      expect(productOf(db, 'onetime_trenching', 'bifen_it')).toEqual(TRENCH_REWRITTEN);
+      expect(productOf(db, 'onetime_trenching', 'bifen_it')).toEqual({ ...TRENCH_REWRITTEN, product_oz_per_finished_gallon_at_high_rate: 1.5 });
+      const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
+      expect(warnings).toMatch(/onetime_trenching\.products\.talstar_p was edited since the Talak swap/);
+      expect(warnings).not.toMatch(/onetime_preslab\.products|onetime_trenching\.products\.bifen_it/);
+      await migration.down(knex);
+      expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
+    });
+
+    // Only another bottle's figures or name move a product with no label of its own: one with none, or with Crosscheck Plus's own,
+    // already quotes Crosscheck Plus, and is left as it is, with no warning about another bottle.
+    test('a product with no label of its own and no other bottle\'s figures is left alone', async () => {
+      const bare = { margin_divisor: 0.6 };
+      const own = { container_cost: 30.9, container_oz: 128, margin_divisor: 0.6 };
+      const db = world({ preslab: preslabRow(bare, own), trench: trenchRow(PROD_TRENCH_PRODUCT, PROD_TRENCH_PRODUCT), catalog: [], vendors: [] });
+      await migration.up(fakeKnex(db));
+      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual(bare);
+      expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual(own);
     });
 
     test('through the bridge: the seed row prices a 6,832 sq ft slab at $993 before up() and $743 after (no catalog row)', async () => {
@@ -1017,6 +1070,12 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(await price(rowOf(db, 'onetime_preslab'))).toEqual([993, 993]);
       await migration.up(fakeKnex(db));
       expect(await price(rowOf(db, 'onetime_preslab'))).toEqual([743, 743]);
+      // Pre-push audit at the fifth push: a seed with an edited margin (0.6) quoted $876, the Talak cost under Crosscheck Plus's name
+      // and label check. After up() it quotes Crosscheck Plus's cost at the admin's margin, $655.
+      const edited = world({ preslab: preslabRow({ ...SEED_PRESLAB, margin_divisor: 0.6 }, SEED_PRESLAB), catalog: [], vendors: [] });
+      expect(await price(rowOf(edited, 'onetime_preslab'))).toEqual([876, 993]);
+      await migration.up(fakeKnex(edited));
+      expect(await price(rowOf(edited, 'onetime_preslab'))).toEqual([655, 743]);
     });
 
     // db-bridge over this world's rows with the catalog link on: the real queries' filters (active, priced catalog rows by
