@@ -196,16 +196,17 @@ function readableEmail(email) {
 
 // email-strip's inline "On ... wrote:" pattern takes any case, so its match can start at an "on" of
 // the sender's own words ("The sale ends on April 30. On Apr 13, 2026 at 9:00 AM Sam wrote: ..."),
-// and a cut there drops the deadline. The header starts at its own "On": the last capital "On" before
-// "wrote:" that a digit, a weekday or a month follows ("On Mon, ...", "On Apr 13, ...", "On 4/13/26,
-// ..."). With no such "On", the cut stays at the match.
-const HEADER_ON = /\bOn\s+(?=\d|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))/g;
+// and a cut there drops the deadline. The header starts at its own "On": the last "on", in any case,
+// before "wrote:" that a digit, a weekday or a month follows ("On Mon, ...", "on Apr 13, ...", "On
+// 4/13/26, ..."). With no such "on", the cut stays at the match.
+const HEADER_ON = /\bon\s+(?=\d|(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b)/gi;
 const WROTE = /\swrote:/i;
 
 /** Where reply history starts in `kept` (its length when it has none): the earliest of email-strip's headers. */
 function historyStart(kept) {
-  // The headers are matched on the text as one line (same length), so a header wrapped onto two lines still cuts.
-  const oneLine = kept.replace(/\n/g, ' ');
+  // The search runs on one line of the same length: a header wrapped onto two lines still cuts, and a
+  // quoted line (">", dropped on its own) is blanked, so a header in it keeps the sender's text below it.
+  const oneLine = kept.replace(QUOTED_LINE, (line) => ' '.repeat(line.length)).replace(/\n/g, ' ');
   return Math.min(kept.length, ...HISTORY_HEADERS.map((re) => {
     const m = re.exec(oneLine);
     if (!m) return kept.length;

@@ -127,6 +127,11 @@ describe('readableEmail', () => {
     expect(readableEmail({ subject: 'Deal', body_text: ownOn })).toEqual({ subject: 'Deal', text: 'The sale ends on April 30.', cut: false, partial: true });
     const ownCapitalOn = 'Hi. On April 30 prices go up. On Apr 13, 2026 at 9:00 AM Sam Rep wrote: Flash sale ends tomorrow.';
     expect(readableEmail({ subject: 'Deal', body_text: ownCapitalOn }).text).toBe('Hi. On April 30 prices go up.');
+    // Pre-push audit on 1e7d63d07c (P1): a lowercase header, and a header inside a quoted line, cut the sender's words.
+    const lowerOn = 'Sale ends on April 30. on Apr 13, 2026 Sam wrote: Flash sale ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: lowerOn }).text).toBe('Sale ends on April 30.');
+    const quotedHeader = '> Earlier note: On Apr 13, 2026 Sam wrote: old offer\nOur new offer ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: quotedHeader })).toEqual({ subject: 'Deal', text: 'Our new offer ends tomorrow.', cut: false, partial: true });
     // Prose is no header: with no date, time or address before "wrote:", the text stays whole.
     const prose = 'Big savings. On sale now: our rep wrote: ends Friday.';
     expect(readableEmail({ subject: 'Deal', body_text: prose })).toEqual({ subject: 'Deal', text: prose, cut: false, partial: false });
