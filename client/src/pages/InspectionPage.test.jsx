@@ -724,6 +724,75 @@ describe('InspectionPage: an address race without availability refreshes at the 
     const availabilityPosts = fetchMock.mock.calls.filter(([url, opts]) => String(url).includes('/availability') && opts?.method === 'POST');
     expect(availabilityPosts).toHaveLength(1); // only the gate's own resolve, never a refresh with the stale address
   });
+
+  // Pre-push P1 on 979f0dbec9: the page dropped the typed address, so the next
+  // confirm books the address on file. When that reload fails, the calendar
+  // offered for the typed address must not stay bookable.
+  it('address_changed + a failed reload → the old times are cleared, with a reload message', async () => {
+    let commitCalls = 0;
+    let getCalls = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/availability') && opts.method === 'POST') {
+        return Promise.resolve(jsonResponse({ availability: okPayload().availability, needs_address: false }));
+      }
+      if (opts.method === 'POST') {
+        commitCalls += 1;
+        return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', address_changed: true, availability: null }, 409));
+      }
+      getCalls += 1;
+      if (getCalls === 1) {
+        return Promise.resolve(jsonResponse(okPayload({
+          needs_address: true,
+          availability: null,
+          lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+        })));
+      }
+      return Promise.resolve(jsonResponse({ error: 'unavailable' }, 503));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(commitCalls).toBe(1));
+    await waitFor(() => expect(getCalls).toBe(2));
+
+    expect(await screen.findByText(/couldn't load the latest open times\. Please reload this page/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Book /i })).not.toBeInTheDocument();
+  });
+
+  // Any other refusal keeps the current calendar when the reload fails, as
+  // before: the address it was offered for still stands.
+  it('a plain SLOT_TAKEN + a failed reload → the current calendar stays', async () => {
+    let commitCalls = 0;
+    let getCalls = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') {
+        commitCalls += 1;
+        return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: null }, 409));
+      }
+      getCalls += 1;
+      return Promise.resolve(getCalls === 1 ? jsonResponse(okPayload()) : jsonResponse({ error: 'unavailable' }, 503));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(commitCalls).toBe(1));
+    await waitFor(() => expect(getCalls).toBe(2));
+
+    expect(await screen.findByText(/That time was just taken — here are the latest open times\./i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load the latest open times/i)).not.toBeInTheDocument();
+  });
 });
 
 // Codex pre-push P1, round 8, 2026-09-24 — an addressless lead's held

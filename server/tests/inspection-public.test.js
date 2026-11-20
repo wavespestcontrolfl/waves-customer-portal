@@ -138,7 +138,9 @@ jest.mock('../models/db', () => {
     // A list result may be a function of the query's selected columns.
     q.select = (...cols) => { q.selectedColumns = cols; return q; };
     const listFor = () => (typeof listResults[table] === 'function' ? listResults[table](q) : listResults[table]) || [];
-    q.first = async () => {
+    // `first`'s own columns are recorded too (q.firstColumns), so a fixture may answer one read by them.
+    q.first = async (...cols) => {
+      q.firstColumns = cols;
       const v = firstResults[table];
       if (typeof v === 'function') return v(q);
       return v !== undefined ? v : null;
@@ -2094,8 +2096,9 @@ describe('POST /:token commit', () => {
     // re-check (per truck only: a one-day build funnels to itself with one truck) and a 409's fresh times build from
     // the profile's own address: the re-check books the truck that zone allows, and a refreshed time is one the next
     // commit books. The booking's own zone address stays the typed one; it falls back itself, on its own customer row.
-    // With the funnel off nothing is looked up and the fresh times keep the typed address, as before; a failed lookup
-    // keeps it too (logged), and the booking still runs (pre-push P1 on 84c9b2d840). A profile city whose zone the
+    // With the funnel off nothing is looked up and the fresh times keep the typed address with no fallback city, as
+    // before (pre-push P1 on 979f0dbec9); a failed lookup keeps it too (logged), and the booking still runs (pre-push P1
+    // on 84c9b2d840). A profile city whose zone the
     // funnel does not cover has no truck rule to apply, so there is no re-check either: it would only repeat the first
     // build and its travel lookups (pre-push P1 on 5fc5e4d648). Every build passes the typed address and the trusted
     // customer, and the builder applies the same fallback (pre-push P1 on 4eb9c11d2a): the lead is unlinked before
@@ -2106,7 +2109,7 @@ describe('POST /:token commit', () => {
       ['per truck', { perTruck: true, funnel: true }, 'read', [FIRST, LINKED, LINKED], 'tech-2'],
       ['per truck, a zone the funnel does not cover', { perTruck: true, funnel: true }, 'unfunneled', [FIRST, LINKED], 'tech-1'],
       ['one truck', { perTruck: false, funnel: true }, 'read', [FIRST, LINKED], 'tech-1'],
-      ['the funnel off: no lookup', { perTruck: true, funnel: false }, 'none', [FIRST, LINKED], 'tech-1'],
+      ['the funnel off: no lookup', { perTruck: true, funnel: false }, 'none', [FIRST, FIRST], 'tech-1'],
       ['a failed lookup', { perTruck: true, funnel: true }, 'fails', [FIRST, LINKED], 'tech-1'],
     ])('the typed city in no zone, the profile\'s city in one (%s): the re-check and the fresh times', async (_label, gates, zoneLookup, builds, bookedTech) => {
       Object.assign(mockFarSouthGates, gates);
@@ -2321,6 +2324,47 @@ describe('POST /:token commit', () => {
       expect(booked.statusCode).toBe(status);
       expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(cityWrites);
       expect(mockCreateSelfBooking.mock.calls.map(([b]) => [b.technician_id, b.authedCustomer.city])).toEqual(bookings);
+    });
+
+    // Pre-push P1 on 979f0dbec9: a failed read of that customers row is no fallback city, so the list is still
+    // offered, unfiltered as the funnel fails open: tech-1's hour. The commit's zone re-check reads the city phase 1
+    // keeps, Punta Gorda, where tech-1 is not the truck going south, so the hour does not book.
+    test('a failed read of the customers row: the list is still offered, and the commit\'s re-check still applies rule B', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      const address = { address_line1: '123 Palm Ave', address_line2: null, city: 'Punta Gorda', state: 'FL', zip: '33950' };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, ...address, phone: '9415550101', latitude: 27.4, longitude: -82.5,
+      });
+      const household = firstResults.customers;
+      firstResults.customers = (q) => {
+        if (q.firstColumns.includes('latitude') && !q.firstColumns.includes('city')) throw new Error('connection reset');
+        return household(q);
+      };
+      gateState.reviewLive = true;
+      firstResults.customer_properties = { id: 'property-9', customer_id: 'cust-9', active: true, is_primary: true, ...address, latitude: 27.4, longitude: -82.5 };
+      firstResults.customer_geocode_reviews = {
+        customer_id: 'cust-9', status: 'verified', reason: 'staff_verified',
+        address_snapshot: ['123 Palm Ave', null, 'Punta Gorda', 'FL', '33950'], latitude: 27.4, longitude: -82.5,
+      };
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: a.zoneFunnelCustomerCity === 'Punta Gorda' ? [] : [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = '123 Palm Ave, Laurel, FL';
+
+      const list = await callAvailability(token, { address: typed });
+      const booked = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: typed });
+
+      expect(list.statusCode).toBe(200);
+      expect(mockBuildAvailability.mock.calls[0][0].zoneFunnelCustomerCity).toBeNull();
+      expect(list.body.availability.days.flatMap((d) => d.slots).map((sl) => sl.start_time)).toEqual(['09:00']);
+      expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('fallback-city read failed for customer cust-9'));
+      expect(booked.statusCode).toBe(409);
+      expect(mockBuildAvailability.mock.calls.map(([a]) => a.zoneFunnelCustomerCity)).toContain('Punta Gorda');
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
     });
 
     // Pre-push P1 on 63e29d5511: phase 1 kept the profile's city for any typed address that matched the profile, with
@@ -4006,6 +4050,7 @@ describe('listFallbackCity (a list\'s fallback city, with phase 1\'s own whole-p
     const conn = (table) => ({ where: (w) => ({ first: async (...cols) => { reads.push([table, w, cols]); return row; } }) });
     return { conn, reads };
   };
+  beforeEach(() => { mockFarSouthGates.funnel = true; });
   test.each([
     ['the customers row has the matching pin: phase 1 keeps the whole profile', 'Punta Gorda', { ...trusted }],
     ['only the primary property has the pin: phase 1 writes over the profile', null, { ...trusted, latitude: null, longitude: null }],
@@ -4020,6 +4065,23 @@ describe('listFallbackCity (a list\'s fallback city, with phase 1\'s own whole-p
     const { conn, reads } = connFor({ ...trusted });
     await expect(inspectionPublicRouter._test.listFallbackCity(conn, { ...trusted, verified_by_review: undefined, city: 'Nokomis' }, typedNoZip, { lat: 27.4, lng: -82.5 })).resolves.toBe('Nokomis');
     expect(reads).toEqual([]);
+  });
+
+  // Pre-push P1 on 979f0dbec9: with the funnel off nothing reads the city, so a staff-verified profile reads no row
+  // either; with it on, a failed read is no fallback city (logged), never an error into the list or the commit.
+  test('with the funnel off, a staff-verified profile reads no row', async () => {
+    mockFarSouthGates.funnel = false;
+    const { conn, reads } = connFor({ ...trusted });
+    await expect(inspectionPublicRouter._test.listFallbackCity(conn, trusted, typedNoZip, { lat: 27.4, lng: -82.5 })).resolves.toBeNull();
+    expect(reads).toEqual([]);
+  });
+
+  test('a failed read of the customers row is no fallback city, logged', async () => {
+    const logger = require('../services/logger');
+    const conn = () => ({ where: () => ({ first: async () => { throw new Error('connection reset'); } }) });
+    // Nokomis is a city phase 1 keeps with or without the whole profile, so only the failed read drops it.
+    await expect(inspectionPublicRouter._test.listFallbackCity(conn, { ...trusted, city: 'Nokomis' }, typedNoZip, { lat: 27.4, lng: -82.5 })).resolves.toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('fallback-city read failed for customer cust-pg (no fallback city): connection reset'));
   });
 });
 

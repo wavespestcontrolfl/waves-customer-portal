@@ -7697,7 +7697,10 @@ the city is one phase one keeps (never a place the area check refuses, nor over
 a typed South Hillsborough town, unless phase one keeps the whole profile: a
 staff-verified pin, and the typed address matches the customer's row by its own
 ZIP or pin, which the list reads from that row too), so a list never offers an hour that
-zone refuses, nor hides one the booking admits. For another street the city on
+zone refuses, nor hides one the booking admits. With the funnel off a list reads no
+fallback and no row. A failed read of that row is no fallback (logged): the list
+reads the address's own zone only, and with none it serves the unfiltered list, as
+the funnel fails open. For another street the city on
 file named the old address: phase one books it on a corrected or another profile
 with its own city, and makes that profile the trusted one, so a retry's list
 reads it. The commit's own builds read it too, so the
@@ -7732,7 +7735,11 @@ profile is the trusted customer the next commit loads and still has the stored
 pin and address phase one adopted: the page drops the typed address, so its
 reload and its retry read that profile's stored location and address. When the
 next commit would load another profile, staff changed that profile's pin or
-address since phase one, or that read fails, the typed address stays. A failed build answers with no times too. With the
+address since phase one, or that read fails, the typed address stays. A failed build answers with no times too.
+When the page drops the typed address on `address_changed` (this answer or the
+account-change one) and its own reload then fails, it clears its times, the
+emailed time included, and asks the customer to reload the page: those times were
+offered for the address it dropped. With the
 funnel off, every refusal carries fresh times at the booking location, as
 before. No field,
 status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search

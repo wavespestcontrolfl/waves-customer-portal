@@ -2269,10 +2269,13 @@ export default function ScheduleFlowPage({ flow }) {
         // race answers with the customer's CURRENT address (round-10 P2) —
         // drop the held supplied address so the next confirm doesn't
         // resubmit the stale one, and show the address actually on file.
+        // A refused booking that moved to the matched profile's address on
+        // file says so too, with no address (the reload brings it).
         if (flow === 'inspection' && body.address_changed) {
           setResolvedAddress('');
           if (body.lead) mergeData({ lead: body.lead });
         }
+        let staleTimes = false;
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
         } else if (inspectionLike) {
@@ -2280,12 +2283,22 @@ export default function ScheduleFlowPage({ flow }) {
           // to a client-side refresh through the SAME address-aware helper
           // showAllTimes uses, never the bare load()/GET below: an
           // addressless lead's held resolvedAddress must not be dropped
-          // here either (Codex pre-push P1, 2026-09-24).
-          try {
-            await refreshInspectionAvailability({ ignoreHeldAddress: Boolean(body.address_changed) });
-          } catch { /* keep the current calendar rather than blanking it */ }
+          // here either (Codex pre-push P1, 2026-09-24). A failed refresh
+          // keeps the current calendar rather than blanking it, unless the
+          // address changed: the next confirm books the address on file,
+          // and those times were offered for the one just dropped
+          // (pre-push P1 on 979f0dbec9).
+          staleTimes = await refreshInspectionAvailability({ ignoreHeldAddress: Boolean(body.address_changed) })
+            .then(() => false, () => Boolean(body.address_changed));
         } else {
           await load();
+        }
+        // No stale time stays bookable (the emailed pick follows the
+        // calendar) until a reload shows the times for the address on file.
+        if (staleTimes) {
+          mergeData({ availability: null });
+          setSubmitError('That time was just taken, and we couldn\'t load the latest open times. Please reload this page, or text us and we\'ll help.');
+          return;
         }
         // SERIES_PROJECTION (reschedule): the chosen WINDOW conflicts with
         // this plan's upcoming visits (a shifted future occurrence at that

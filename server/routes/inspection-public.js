@@ -877,7 +877,10 @@ const customerAddressFields = (cust) => ({
 // view of the profile as the list (its pin can be the primary property's). A list reads it through listFallbackCity,
 // which asks the customers row itself whether phase 1 keeps the whole profile, as phase 1 does (pre-push P1 on
 // cebd106404: a list took a staff-verified pin on the primary property alone for that, and so dropped the only free
-// truck for a refused city that phase 1 then wrote over).
+// truck for a refused city that phase 1 then wrote over). With the funnel off (GATE_SOUTH_ZONE_DAY_FUNNEL) nothing
+// reads the city, so it reads no row, and a failed read is no fallback city, logged (pre-push P1 on 979f0dbec9): the
+// list then reads the address's own zone only, and with none it serves the unfiltered list, as offerFunnelView fails
+// open; the commit's zone re-check then reads the city on file (revalidateSlotAt `zoneMoved`).
 // `fallbackCity`: a caller that already knows the city passes it. The commit's first build passes the one its zone
 // re-check compares with. The re-check runs after phase 1, so it passes the city on file of the profile phase 1
 // booked, the city createSelfBooking falls back to: a sibling phase 1 reused keeps its own city, even a refused place.
@@ -888,9 +891,16 @@ const zoneFallbackCity = (customer, address, coords, { retained = false } = {}) 
     ? customer.city : null
 );
 async function listFallbackCity(conn, customer, address, coords) {
-  const row = customer?.verified_by_review
-    ? await conn('customers').where({ id: customer.id }).first('address_line1', 'address_line2', 'zip', 'latitude', 'longitude')
-    : null;
+  if (!funnelOn()) return null;
+  let row = null;
+  if (customer?.verified_by_review) {
+    try {
+      row = await conn('customers').where({ id: customer.id }).first('address_line1', 'address_line2', 'zip', 'latitude', 'longitude');
+    } catch (err) {
+      logger.warn(`[inspection-public] fallback-city read failed for customer ${customer.id} (no fallback city): ${err.message}`);
+      return null;
+    }
+  }
   return zoneFallbackCity(customer, address, coords, { retained: Boolean(row) && profileMatchesAddress(row, address, coords) });
 }
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer, fallbackCity }) {
