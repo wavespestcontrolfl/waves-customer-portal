@@ -49,6 +49,9 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   // alert list". The morning summary is the one non-customer phone banner the owner asked for. It is pushOnly, so it
   // never writes a bell row, but the policy still gates the push once per event.
   'waiting_summary',
+  // Owner 2026-11-19 (plan page "Lead to Customer Plan", phase 1): the 9 AM "Call today" estimate banner, pushOnly like the
+  // morning summary: no bell row, the policy still gates the push once per event.
+  'estimate_call_today',
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
   'reservice_self_booked',          // a customer booked a free re-service and described the problem (owner 2026-10-05)
   // Owner ruling 2026-09-11: a declined card / returned ACH is the one money

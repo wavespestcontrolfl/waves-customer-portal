@@ -142,7 +142,7 @@ describe('retention: only an fyi type is shortened, never a customer row', () =>
 
   test('the fyi types that start to expire at 7 days are exactly these', () => {
     const fyi = entries.filter(([key]) => retention.judgeRow(rowFor(key, metaFor(key), 8), NOW).expire).map(([k]) => k).sort();
-    expect(fyi).toEqual(['job_application_withdrawn', 'job_complete', 'job_interview_booked', 'newsletter_proof_approved',
+    expect(fyi).toEqual(['estimate_call_today', 'job_application_withdrawn', 'job_complete', 'job_interview_booked', 'newsletter_proof_approved',
       'one_tap_purchase_completed', 'open_visits_nudge', 'payment_refunded', 'payment_succeeded', 'waiting_summary']);
   });
 
