@@ -67,9 +67,9 @@
  * row. The estimate page's holds do not re-check it: like the cluster choice
  * (Deliberate boundaries), two offers held before either is written can send
  * a second truck south that day, bounded by the offer-token TTL. The stop read
- * counts a visit staff booked even when it keeps its old hold time, and an
- * unclaimed hold by the real clock (clock_timestamp), not the writer's
- * transaction start (reservation-occupancy.js). The
+ * counts a hold by the real clock (clock_timestamp), not the writer's
+ * transaction start; under the date lock it also counts a visit staff booked
+ * that keeps its old hold time (zoneStopDays). The
  * assessment link's list and its booking resolve the zone from the one booking
  * address the same way (slot-zone.js leadBookingZone: its city decides, its text
  * only without one, else the customer's own city on file when the list knows the
@@ -208,18 +208,25 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 // YYYY-MM-DD dates with at least one live scheduled service (assigned or
 // unassigned — either means a truck is in the zone that day) matching the
 // estimate's zone. `techs`: each of those dates -> the technician ids of its
-// stops (null = an unassigned stop). A visit staff booked counts even when it
-// keeps its old hold time; an unclaimed hold counts only while unexpired.
-async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo) {
+// stops (null = an unassigned stop).
+// Holds follow main's split by side (occupancy.js occupiedHoldFilter, #7993). The offer reads count a hold only while
+// unexpired, as the estimate page's collision and packing reads and the booking lists do, so the zone days agree with
+// the openings those reads leave (pre-push P1 on b4fc39b372). The check under the date lock
+// (`includeClaimedReservations`, truckMayTakeDate) also counts a visit staff booked that keeps its old hold time, as
+// the reservation and confirmation checks do: that visit is its truck's stop until the cleanup job clears the time
+// (pre-push P1 on 5061a1da2b). Both read the real clock, not NOW() (the transaction's start): a writer reads this under
+// its date lock after waiting for it, and an unclaimed hold that ran out meanwhile no longer holds the day (owner
+// rule B).
+function liveHoldByRealClock(q) {
+  q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > clock_timestamp()');
+}
+
+async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo, { includeClaimedReservations = false } = {}) {
   const rows = await dbc('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-    // The commit side's hold rule (bookedVisitOrLiveHold, #7993): staff can book a hold without clearing its time, and
-    // that visit is the truck's stop until the cleanup job clears it (pre-push P1 on 5061a1da2b). By the real clock,
-    // not NOW() (the transaction's start): a writer reads this under its date lock after waiting for it, and an
-    // unclaimed hold that ran out meanwhile no longer holds the day (owner rule B).
-    .andWhere(bookedVisitOrLiveHoldByRealClock)
+    .andWhere(includeClaimedReservations ? bookedVisitOrLiveHoldByRealClock : liveHoldByRealClock)
     .select(
       'scheduled_services.scheduled_date',
       'scheduled_services.zone',
@@ -319,7 +326,7 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = 
 // does not apply (gate off, fleet view, no technician, no funneled zone), with no read. A query failure throws, so the writer's transaction fails closed like its other reads.
 async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
   if (technicianId == null || !perTruckLive() || !isFunnelZone(estimateZone)) return true;
-  const { dates, techs } = await zoneStopDays(conn, estimateZone, date, date);
+  const { dates, techs } = await zoneStopDays(conn, estimateZone, date, date, { includeClaimedReservations: true });
   return !dates.has(date) || onZoneDay(date, technicianId, dates, techs);
 }
 

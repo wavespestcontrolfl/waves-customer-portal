@@ -1421,10 +1421,11 @@ rebuilt the same new day before either booked never send two technicians south:
 the second answers `SLOT_TAKEN`. The estimate page's holds and accepts book the
 offered slot's own technician and do not check the rule again (follow-up): two
 offers held before either is written can send a second technician south that
-day, bounded by the offer-token TTL. The stop read counts a visit staff booked
-even when it keeps its old hold time (`bookedVisitOrLiveHold`), and an unclaimed
-hold by the real clock, so a hold that ran out while its writer waited on the
-date lock no longer holds the day. The assessment
+day, bounded by the offer-token TTL. The stop read counts a hold by the real
+clock, so a hold that ran out while its writer waited on the date lock no
+longer holds the day. Under that lock it also counts a visit staff booked that
+keeps its old hold time (`bookedVisitOrLiveHold`); the lists count a hold only
+while unexpired, as main's other list reads do. The assessment
 link's list and its booking resolve the zone from the one booking address the
 same way (its city decides, its text only without one; `callbackVisit.zoneAddress`,
 read only with the far-south funnel on), so a list never offers a time that
@@ -7771,8 +7772,8 @@ changes of address the latest one wins. A booking and a search or reset never ov
 while a booking runs, no search or reset starts, so that booking's refusal always shows;
 while a search or reset runs, every Book button is off, because a reset answers the
 address on file now, and a booking from the calendar it replaces would book that address.
-No search starts while a reset runs, so a search never cancels the reset that brings that
-address; a reset may cancel a search. A list for another address (the street, city and ZIP
+No search or second reset starts while a reset runs, so nothing but a change of address
+cancels the reset that brings that address; a reset may cancel a search. A list for another address (the street, city and ZIP
 the page shows) keeps no picked or emailed time, even at the same start. A change of unit
 alone keeps the pick: the commit books the unit on file either way. A
 booking's success or terminal state always shows. A held address's reload that answers `422 out_of_area` stops on the

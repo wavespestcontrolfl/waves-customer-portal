@@ -339,6 +339,10 @@ function AskCard({ onSearch, aiFiltered, onShowAll, closed, busy, resetting }) {
   // No search starts while one runs, while the page books a time, or while
   // a reset runs.
   const off = asking || busy || resetting;
+  // "Show all open times" may cancel a search, never a booking or its own
+  // reset: a second tap would drop the first reset's answer, which may bring
+  // the address on file (pre-push P1 on b4fc39b372).
+  const showAllOff = busy || resetting;
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
@@ -430,8 +434,8 @@ function AskCard({ onSearch, aiFiltered, onShowAll, closed, busy, resetting }) {
             <button
               type="button"
               onClick={onShowAll}
-              disabled={busy}
-              style={{ border: 0, background: 'transparent', color: COLORS.glassNavy, font: 'inherit', fontSize: 14, fontWeight: 700, textDecoration: 'underline', cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.65 : 1, whiteSpace: 'nowrap', padding: 0 }}
+              disabled={showAllOff}
+              style={{ border: 0, background: 'transparent', color: COLORS.glassNavy, font: 'inherit', fontSize: 14, fontWeight: 700, textDecoration: 'underline', cursor: showAllOff ? 'not-allowed' : 'pointer', opacity: showAllOff ? 0.65 : 1, whiteSpace: 'nowrap', padding: 0 }}
             >
               Show all open times
             </button>

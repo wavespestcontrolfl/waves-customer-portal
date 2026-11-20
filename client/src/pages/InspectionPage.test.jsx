@@ -1205,7 +1205,9 @@ describe('InspectionPage: an address race without availability refreshes at the 
   // Pre-push P1 on 2bb65f3c3a: the search is off while "Show all open times"
   // runs. The reset brings the address on file now and a search only times,
   // so a search must not cancel it: the reset's address always lands.
-  it('the search is off while "Show all open times" runs, so the reset\'s address always lands', async () => {
+  // Pre-push P1 on b4fc39b372: a second tap on "Show all open times" would
+  // cancel it too, so that button is off while its reset runs.
+  it('the search and "Show all open times" are off while its reset runs, so the reset\'s address always lands', async () => {
     let searches = 0;
     let finishReset = null;
     let getCalls = 0;
@@ -1228,6 +1230,10 @@ describe('InspectionPage: an address race without availability refreshes at the 
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Show all open times' }));
     await waitFor(() => expect(finishReset).not.toBeNull());
+    const showAll = screen.getByRole('button', { name: 'Show all open times' });
+    expect(showAll).toBeDisabled();
+    fireEvent.click(showAll);
+    expect(getCalls).toBe(2);
     const input = screen.getByLabelText('Search for a service date or time');
     fireEvent.change(input, { target: { value: 'monday morning' } });
     expect(screen.getByRole('button', { name: 'Search' })).toBeDisabled();

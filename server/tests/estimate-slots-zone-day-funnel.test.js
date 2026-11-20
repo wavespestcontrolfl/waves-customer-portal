@@ -318,6 +318,19 @@ describe('isFunnelZone / zone matching', () => {
     expect(techs).toEqual(new Map([['2027-05-20', new Set(['tech-1', null])], ['2027-05-21', new Set(['tech-2'])]]));
   });
 
+  // Pre-push P1 on b4fc39b372: the offer reads keep main's offer-side hold rule (#7993), as the estimate page's
+  // collision and packing reads do, so a zone day never rests on a visit those reads leave out. Only the check under
+  // the date lock counts a visit staff booked that keeps an old hold time (truckMayTakeDate's tests).
+  test('the offer read counts a hold only while unexpired, by the real clock', async () => {
+    const chain = scheduledServicesChain([]);
+    const dbc = jest.fn(() => chain);
+    await getZoneFunnelDays(dbc, { estimateZone: VENICE_ZONE, dateFrom: '2027-05-18', dateTo: '2027-05-22' });
+    const q = { whereNull: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
+    chain.andWhere.mock.calls[0][0](q);
+    expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
+    expect(q.orWhereRaw.mock.calls).toEqual([['scheduled_services.reservation_expires_at > clock_timestamp()']]);
+  });
+
   test('getZoneFunnelDays: the per-truck view only with GATE_MULTI_TECH_CONFIRM on, read at call time', async () => {
     const prev = process.env.GATE_MULTI_TECH_CONFIRM;
     const dbc = jest.fn(() => scheduledServicesChain([zoneStopRow()]));
@@ -758,8 +771,9 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
     // Pre-push P1 on e78306a32d: a writer reads the stops under its date lock, after waiting for it. NOW() is its
     // transaction's start, so a hold that ran out meanwhile would still count as its truck's stop; the read counts an
     // unclaimed hold by the real clock. Pre-push P1 on 5061a1da2b: staff can book a hold without clearing its time, so
-    // a visit with a customer counts whatever its hold time says (the commit side's bookedVisitOrLiveHold, #7993).
-    test('the stop read counts a booked visit that keeps an old hold time, and an unclaimed hold by the real clock', async () => {
+    // under the lock a visit with a customer counts whatever its hold time says (the commit side's
+    // bookedVisitOrLiveHold, #7993).
+    test('the check counts a booked visit that keeps an old hold time, and an unclaimed hold by the real clock', async () => {
       await withTruckGate('true', async () => {
         const chain = scheduledServicesChain([]);
         db.mockImplementation(() => chain);
