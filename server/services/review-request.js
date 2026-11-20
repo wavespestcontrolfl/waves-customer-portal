@@ -134,14 +134,17 @@ function resultsVisitKeys(row) {
   const combo = require("./visit-prep-combo-types");
   // An explicit combined label ("Lawn Care + Pest Control") keeps every line it names even when
   // the catalog names one.
-  const keys = combo.isComboServiceType(row.service_type)
+  let keys = combo.isComboServiceType(row.service_type)
     ? [...new Set([...qualifyingKeysForRow(row), ...toQualifyingKeys(row.service_type)])]
     : qualifyingKeysForRow(row);
-  // Pest drops only on a positive plant-pest match: a label says pest and every pest word sits in
-  // a plant-line segment ("Tree & Shrub Pest Control" = ONE plant treatment). A standalone pest
-  // segment in the service_type or the catalog name keeps pest (fail toward asking).
+  // A standalone pest segment in the service_type or the catalog name is a pest service whatever
+  // the catalog link says ("Pest Control + Lawn Care + Rodent Control" on a lawn catalog row).
   const labels = [row.service_type, row.service_name];
-  const plantPestOnly = labels.some((l) => /pest/i.test(String(l || ""))) && !labels.some(combo.hasStandalonePestSegment);
+  const standalonePest = labels.some(combo.hasStandalonePestSegment);
+  if (standalonePest && !keys.includes("pest_control")) keys = [...keys, "pest_control"];
+  // Pest drops only on a positive plant-pest match: a label says pest and every pest word sits in
+  // a plant-line segment ("Tree & Shrub Pest Control" = ONE plant treatment). Fail toward asking.
+  const plantPestOnly = !standalonePest && labels.some((l) => /pest/i.test(String(l || "")));
   return plantPestOnly && keys.some((k) => RESULTS_VISIT_MIN[k]) ? keys.filter((k) => k !== "pest_control") : keys;
 }
 // Whether the visit's treatment was performed: no linked record, or any record not marked
