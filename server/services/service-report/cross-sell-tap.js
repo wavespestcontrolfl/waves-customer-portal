@@ -197,7 +197,9 @@ async function handleCrossSellTap({ db, serviceRecordId, metadata = {}, surface,
             // pricing_revision pointer is advisory display linkage only.
             mintedEstimate = await mintReportClickEstimate(trx, {
               customer: crossSell.engineContext.customer,
-              service: { id: serviceRecordId },
+              // The full service-record row, as the report route passed
+              // before the move (the mint reads service.id today).
+              service: joined,
               crossSell,
               requestRow: row,
               deduped,

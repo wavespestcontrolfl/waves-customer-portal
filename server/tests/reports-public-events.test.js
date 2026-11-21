@@ -429,6 +429,10 @@ describe('click-to-estimate mint (GATE_REPORT_CLICK_TO_ESTIMATE)', () => {
     const [, mintArgs] = mintReportClickEstimate.mock.calls[0];
     expect(mintArgs.customer).toBe(ENGINE_CONTEXT.customer);
     expect(mintArgs.crossSell).toBe(PRICED_OFFER);
+    // The mint is told which visit the tap came from (its lineage stamps
+    // serviceRecordId) — the shared tap passes the report's own record.
+    expect(mintArgs.service.id).toBe(mintArgs.revisionSnapshot.serviceRecordId);
+    expect(mintArgs.service.id).toBeTruthy();
     // The stored request snapshot must NOT embed the server-internal engine
     // context: the customer row's incidental fields move between taps, so
     // embedding it would turn every identical tap into a "material refresh"
