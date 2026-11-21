@@ -3203,6 +3203,11 @@ const EMPTY_TECH_FORM = {
   // seven = every day (sent as null). Only sent while the server says the
   // gate is on (workDaysEnabled).
   workDays: [0, 1, 2, 3, 4, 5, 6],
+  // GATE_TECH_SHIFT_HOURS: the hours of each work day, "HH:MM" Eastern. Both
+  // empty = no set hours (sent as null). Only sent while the server says the
+  // gate is on (shiftHoursEnabled).
+  shiftStart: "",
+  shiftEnd: "",
 };
 
 // Work-days toggles in display order (Mon to Sun); values are stored 0 = Sunday.
@@ -3250,6 +3255,36 @@ function buildWorkDaysPayload(enabled, workDays) {
   if (!enabled) return {};
   const days = [...new Set(workDays || [])].sort((a, b) => a - b);
   return { workDays: days.length === 7 ? null : days };
+}
+
+// `shiftHours` on the wire: nothing while the gate is off; null when both times
+// are empty (no set hours); otherwise { start, end } as "HH:MM".
+function buildShiftHoursPayload(enabled, shiftStart, shiftEnd) {
+  if (!enabled) return {};
+  if (!shiftStart && !shiftEnd) return { shiftHours: null };
+  return { shiftHours: { start: shiftStart, end: shiftEnd } };
+}
+
+// Why the shift hours cannot be saved yet, or "" when they can: both times or
+// neither, and the end after the start (the server refuses the same cases).
+function shiftHoursProblem(form) {
+  if (!form.shiftStart && !form.shiftEnd) return "";
+  if (!form.shiftStart || !form.shiftEnd) return "Enter both shift times, or clear both";
+  if (form.shiftEnd <= form.shiftStart) return "The shift must end after it starts";
+  return "";
+}
+
+// "8:00 AM–6:00 PM" from stored "HH:MM" times; empty when either is missing.
+function describeShiftHours(start, end) {
+  const label = (value) => {
+    const m = /^(\d{2}):(\d{2})/.exec(value || "");
+    if (!m) return "";
+    const hour = Number(m[1]);
+    return `${hour % 12 || 12}:${m[2]} ${hour < 12 ? "AM" : "PM"}`;
+  };
+  const from = label(start);
+  const to = label(end);
+  return from && to ? `${from}–${to}` : "";
 }
 
 function startPointNeedsPick(form) {
@@ -3306,6 +3341,9 @@ export function TeamTab({ showToast }) {
   // GATE_TECH_WORK_DAYS: the server marks the roster response when the gate is
   // on; off, the Work days row and summary never render and nothing is sent.
   const [workDaysEnabled, setWorkDaysEnabled] = useState(false);
+  // GATE_TECH_SHIFT_HOURS: the server marks the roster response when the gate is
+  // on; off, the Shift hours row and summary never render and nothing is sent.
+  const [shiftHoursEnabled, setShiftHoursEnabled] = useState(false);
   // GATE_SERVICE_LINE_MAP=shadow: the server marks the roster response; off, the
   // Service lines card never renders and nothing is fetched.
   const [serviceLinesEnabled, setServiceLinesEnabled] = useState(false);
@@ -3391,6 +3429,7 @@ export function TeamTab({ showToast }) {
       if (request !== loadRequestRef.current) return;
       setTechs(res.technicians || []);
       setWorkDaysEnabled(res.workDaysEnabled === true);
+      setShiftHoursEnabled(res.shiftHoursEnabled === true);
       setServiceLinesEnabled(res.serviceLinesEnabled === true);
       setTerritoryReadoutEnabled(res.territoryReadoutEnabled === true);
       setGoogleSigninEnabled(res.googleSigninEnabled === true);
@@ -3430,13 +3469,22 @@ export function TeamTab({ showToast }) {
       showToast("Pick at least one work day");
       return;
     }
+    if (shiftHoursEnabled && shiftHoursProblem(form)) {
+      showToast(shiftHoursProblem(form));
+      return;
+    }
     setSaving(true);
     try {
       if (editingId) {
-        const { startMode, startText, startPoint, workDays, googleEmail: _googleEmail, ...rest } = form;
+        const { startMode, startText, startPoint, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
-          body: JSON.stringify({ ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays), startPoint: buildStartPointPayload(form) }),
+          body: JSON.stringify({
+            ...rest,
+            ...buildWorkDaysPayload(workDaysEnabled, workDays),
+            ...buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd),
+            startPoint: buildStartPointPayload(form),
+          }),
         });
         // Leaving the dispatch pool through Edit (Employment → Inactive or
         // Prospective, or field eligibility removed) surfaces the same
@@ -3450,10 +3498,14 @@ export function TeamTab({ showToast }) {
         );
         await saveGoogleSignin(editingId);
       } else {
-        const { startMode, startText, startPoint, workDays, googleEmail: _googleEmail, ...rest } = form;
+        const { startMode, startText, startPoint, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
         const created = await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
-          body: JSON.stringify({ ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays) }),
+          body: JSON.stringify({
+            ...rest,
+            ...buildWorkDaysPayload(workDaysEnabled, workDays),
+            ...buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd),
+          }),
         });
         showToast("Technician added");
         await saveGoogleSignin(created.technician.id);
@@ -3595,6 +3647,8 @@ export function TeamTab({ showToast }) {
       workDays: Array.isArray(tech.work_days) && tech.work_days.length
         ? tech.work_days.map(Number)
         : [0, 1, 2, 3, 4, 5, 6],
+      shiftStart: tech.shift_start || "",
+      shiftEnd: tech.shift_end || "",
       ...(tech.start_address && tech.start_lat != null && tech.start_lng != null
         ? {
             startMode: "home",
@@ -3890,6 +3944,49 @@ export function TeamTab({ showToast }) {
                 {form.workDays.length === 0 && (
                   <div role="alert" style={{ fontSize: 14, color: D.amber, marginTop: 4 }}>
                     Pick at least one work day
+                  </div>
+                )}
+              </div>
+            )}
+            {/* Shift hours (GATE_TECH_SHIFT_HOURS): the hours of each work day,
+                Eastern time. Both empty = no set hours. */}
+            {shiftHoursEnabled && (
+              <div style={{ gridColumn: "1 / -1" }}>
+                {" "}
+                <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
+                  Shift hours
+                </div>{" "}
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                  <input
+                    id="tech-shift-start"
+                    type="time"
+                    aria-label="Shift start"
+                    value={form.shiftStart}
+                    onChange={(e) => setForm((f) => ({ ...f, shiftStart: e.target.value }))}
+                    style={{ ...sInput, width: 140 }}
+                  />
+                  <span style={{ fontSize: 14, color: D.muted }}>to</span>
+                  <input
+                    id="tech-shift-end"
+                    type="time"
+                    aria-label="Shift end"
+                    value={form.shiftEnd}
+                    onChange={(e) => setForm((f) => ({ ...f, shiftEnd: e.target.value }))}
+                    style={{ ...sInput, width: 140 }}
+                  />
+                  {(form.shiftStart || form.shiftEnd) && (
+                    <button
+                      type="button"
+                      onClick={() => setForm((f) => ({ ...f, shiftStart: "", shiftEnd: "" }))}
+                      style={sBtn("transparent", D.muted)}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>{" "}
+                {shiftHoursProblem(form) && (
+                  <div role="alert" style={{ fontSize: 14, color: D.amber, marginTop: 4 }}>
+                    {shiftHoursProblem(form)}
                   </div>
                 )}
               </div>
@@ -4293,10 +4390,10 @@ export function TeamTab({ showToast }) {
             {" "}
             <button
               onClick={handleSave}
-              disabled={saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0)}
+              disabled={saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0) || (shiftHoursEnabled && !!shiftHoursProblem(form))}
               style={{
                 ...sBtn(D.green, D.white),
-                opacity: saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0) ? 0.5 : 1,
+                opacity: saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0) || (shiftHoursEnabled && !!shiftHoursProblem(form)) ? 0.5 : 1,
               }}
             >
               {saving ? "Saving..." : editingId ? "Update" : "Add"}
@@ -4419,6 +4516,11 @@ export function TeamTab({ showToast }) {
                   {workDaysEnabled && describeWorkDays(t.work_days) && (
                     <div style={{ fontSize: 14, fontWeight: 400, color: D.muted, marginTop: 2 }}>
                       {`Works ${describeWorkDays(t.work_days)}`}
+                    </div>
+                  )}
+                  {shiftHoursEnabled && describeShiftHours(t.shift_start, t.shift_end) && (
+                    <div style={{ fontSize: 14, fontWeight: 400, color: D.muted, marginTop: 2 }}>
+                      {`Shift ${describeShiftHours(t.shift_start, t.shift_end)}`}
                     </div>
                   )}
                   {(t.job_title || t.pay_rate) && (

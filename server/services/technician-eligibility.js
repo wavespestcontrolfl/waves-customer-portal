@@ -14,14 +14,17 @@
  * never derived from either flag.
  */
 const db = require('../models/db');
-const { dateOnlyString } = require('../utils/datetime-et');
+const { dateOnlyString, etDateString, etParts } = require('../utils/datetime-et');
+const { STAFF_WORK_DATE_SQL } = require('../utils/staff-time-work-date');
 const featureGates = require('../config/feature-gates');
+const logger = require('./logger');
 
 // Looked up on the module at call time, not destructured at load: this seam is
 // loaded under many partial feature-gates mocks, and a missing reader must read
 // as "gate off" (today's behavior) rather than throw.
 const techWorkDaysLive = () => typeof featureGates.techWorkDaysLive === 'function' && featureGates.techWorkDaysLive();
 const techJobTypeChecksLive = () => typeof featureGates.techJobTypeChecksLive === 'function' && featureGates.techJobTypeChecksLive();
+const techShiftHoursLive = () => typeof featureGates.techShiftHoursLive === 'function' && featureGates.techShiftHoursLive();
 
 const EMPLOYMENT_STATUSES = Object.freeze(['prospective', 'active', 'inactive']);
 const NOT_ASSIGNABLE = 'TECH_NOT_ASSIGNABLE';
@@ -334,6 +337,94 @@ async function offDayTechDays(conn, { dateFrom, dateTo, technicianIds = null } =
   return days;
 }
 
+/**
+ * Minutes after midnight of a stored or submitted wall-clock time ('HH:MM' or
+ * the Postgres 'HH:MM:SS' form; seconds are dropped), or null when it is not
+ * one. Pure.
+ */
+function shiftMinutes(value) {
+  const m = /^(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/.exec(String(value == null ? '' : value).trim());
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+/**
+ * A technician row's stored shift as { startMin, endMin }, or null when the row
+ * has no set hours (or unreadable ones). `tech` needs shift_start and shift_end.
+ * Pure.
+ */
+function storedShift(tech) {
+  const startMin = shiftMinutes(tech && tech.shift_start);
+  const endMin = shiftMinutes(tech && tech.shift_end);
+  if (startMin === null || endMin === null || endMin <= startMin) return null;
+  return { startMin, endMin };
+}
+
+/**
+ * Each technician's shift for a date (GATE_TECH_SHIFT_HOURS; owner 2026-11-19,
+ * page item D4: "each tech's 10-hour day on every booking path"; "Shifts come
+ * from clock-in today and the roster ahead").
+ *
+ * Reads the set hours (technicians.shift_start / shift_end, the Team tab
+ * "Shift hours") once, and today's clock-ins, and returns a pure lookup
+ * shiftOf(technicianId, date) -> { startMin, endMin, source } | null, in
+ * minutes after midnight Eastern:
+ *   - a date after today, or today before a clock-in: the set hours
+ *     (source 'roster');
+ *   - today, once the technician has clocked in (the first shift clock-in that
+ *     is not voided, on today's Staff work date): the same length of day from
+ *     that clock-in (source 'clock_in'). An earlier clock-in ends the day
+ *     earlier, a later one ends it later; never past midnight.
+ *   - null: the gate is off (no read at all), the technician has no set hours,
+ *     or `date` is not a date. The caller keeps its own day bounds.
+ * Work days, absences and closures stay with their own readers
+ * (absentTechDays, blackout dates); this answers only the hours of a day.
+ * A failed clock-in read keeps the set hours for today (logged); a failed read
+ * of the hours themselves throws, as absentTechDays does.
+ * `technicianIds` narrows the reads (an empty list reads every technician).
+ */
+async function loadTechShifts(conn, { technicianIds = null, now = new Date() } = {}) {
+  const none = () => null;
+  if (!techShiftHoursLive()) return none;
+  let query = conn('technicians').whereNotNull('shift_start').whereNotNull('shift_end');
+  if (Array.isArray(technicianIds) && technicianIds.length) query = query.whereIn('id', technicianIds);
+  const shifts = new Map();
+  for (const row of await query.select('id', 'shift_start', 'shift_end')) {
+    const shift = storedShift(row);
+    if (shift) shifts.set(String(row.id), shift);
+  }
+  if (!shifts.size) return none;
+  const today = etDateString(now);
+  const clockIns = new Map();
+  try {
+    const rows = await conn('time_entries')
+      .where({ entry_type: 'shift' })
+      .whereNot({ status: 'voided' })
+      .whereIn('technician_id', [...shifts.keys()])
+      .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [today])
+      .groupBy('technician_id')
+      .select('technician_id')
+      .min({ clock_in: 'clock_in' });
+    for (const row of rows) {
+      const at = row.clock_in instanceof Date ? row.clock_in : new Date(row.clock_in);
+      if (Number.isNaN(at.getTime())) continue;
+      const { hour, minute } = etParts(at);
+      clockIns.set(String(row.technician_id), hour * 60 + minute);
+    }
+  } catch (err) {
+    logger.warn(`[technician-eligibility] today's clock-ins unread (${err.message}); the set hours stand for today`);
+    clockIns.clear();
+  }
+  return (technicianId, date) => {
+    const shift = shifts.get(String(technicianId));
+    const day = date ? dateOnlyString(date) : null;
+    if (!shift || dayOfWeekOfDate(day) === null) return null;
+    const clockIn = day === today ? clockIns.get(String(technicianId)) : undefined;
+    if (clockIn === undefined) return { ...shift, source: 'roster' };
+    return { startMin: clockIn, endMin: Math.min(24 * 60, clockIn + (shift.endMin - shift.startMin)), source: 'clock_in' };
+  };
+}
+
 module.exports = {
   EMPLOYMENT_STATUSES,
   NOT_ASSIGNABLE,
@@ -344,6 +435,9 @@ module.exports = {
   employmentPatch,
   absentTechDays,
   offDayTechDays,
+  loadTechShifts,
+  shiftMinutes,
+  storedShift,
   normalizeWorkDays,
   dayOfWeekOfDate,
   isOffDay,
