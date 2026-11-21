@@ -236,7 +236,7 @@ describe('hold countdown bar', () => {
     // first re-offers the rejected hold as existing_appointment.
     expect(fn).toContain('releaseHeldReservation(deadHoldId)');
     expect(fn.indexOf('releaseHeldReservation(deadHoldId)')).toBeLessThan(fn.indexOf('loadEstimate({ preserveSelection: false })'));
-    expect(fn).toContain('const deadHoldId = reservationRef.current?.scheduledServiceId');
+    expect(fn).toContain('const deadHoldId = holdId\n      || reservationRef.current?.scheduledServiceId');
     expect(fn).toContain('setReservation(null);');
     expect(fn).toContain('setSlotsRefreshSignal((v) => v + 1);');
     // Both recovery callers go through it; neither repeats the reset.
@@ -510,7 +510,7 @@ describe('hold countdown bar', () => {
     // Re-seeds when configure state clears `reservation` without releasing
     // the server hold — "Go back", a frequency change, a service-mode change
     // (codex r12 P1). Idempotent, so it cannot loop.
-    expect(eff).toContain('reservation?.scheduledServiceId, ctaPhase]');
+    expect(eff).toContain('reservation?.scheduledServiceId, ctaPhase, quoteRefusalCode, readOnlyPreview, pdfDocumentMode,\n    recoverFromDeadHold]');
     // …but NOT while a recovery is releasing that hold, and not in a
     // terminal phase (codex r12 P1) — hydrating there restored the hold
     // being deleted and restarted its countdown.

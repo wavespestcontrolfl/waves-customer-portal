@@ -38,6 +38,17 @@ it('keeps booking unavailable when a line has no quoted amount', () => {
   expect(screen.queryByRole('button', { name: /book my service/i })).not.toBeInTheDocument();
 });
 
+it('a notice from the page (a refused plan quote) takes the place of booking and the contact line on the quote step (codex pre-push P1)', () => {
+  const priced = { items: [{ service: 'wasp', label: 'Wasp Nest Removal', amount: 150 }] };
+  const { rerender } = render(<WebsiteEstimateFlow {...base} canBook={false} oneTimeBreakdown={priced}
+    quoteNotice={<div role="status">This quote changed. Get a current quote from your portal.</div>} />);
+  expect(screen.getByRole('status')).toHaveTextContent('This quote changed. Get a current quote from your portal.');
+  expect(screen.queryByText('Our team will contact you to arrange your service.')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /book my service/i })).not.toBeInTheDocument();
+  rerender(<WebsiteEstimateFlow {...base} canBook={false} oneTimeBreakdown={priced} />);
+  expect(screen.getByText('Our team will contact you to arrange your service.')).toBeInTheDocument();
+});
+
 it('preserves a server-supplied one-time label without doubling its prefix', () => {
   render(<WebsiteEstimateFlow {...base} oneTimeBreakdown={{ items: [{ service: 'one_time_pest', label: 'One-Time Pest Treatment', amount: 199 }] }} />);
   expect(screen.getByText('One-Time Pest Control Service')).toBeInTheDocument();

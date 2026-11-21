@@ -1089,6 +1089,28 @@ async function recomputeOffer(mint, estimateData, propertySeed) {
 // another tab while today's price is computed can drop the frozen
 // snapshot they check. Locked, the rows hold still until this transaction
 // commits, so the checks read the row the link opens.
+// A staff delivery option on a customer's own mint (codex pre-push r29 on #8132). The mint never
+// turns on the one-time option or invoice billing, and staff can no longer turn either on
+// (selfServeMintEditRefusal), so a quote with one on was changed by staff before that rule. The
+// next tap re-mints it (reuseLiveQuote), and both accept re-checks refuse it, so an old link
+// never accepts it (codex pre-push P0): the accept acts on these values as the handler read them.
+function staffChangedDeliveryOptions(estimate) {
+  return !!(estimate?.show_one_time_option || estimate?.bill_by_invoice);
+}
+
+// The refusal such a quote gets, by source, or null. The accept route answers it before it checks any
+// field of the request body: invoice mode skips the slot pick, and a one-time restart request reads
+// as restart_quote_frozen, so a later answer would not send the customer back to the portal (codex
+// pre-push P1 x2). Both locked re-checks answer it again.
+const STAFF_CHANGED_REFUSALS = Object.freeze({
+  plan_restart: Object.freeze({ code: 'RESTART_STATE_CHANGED', message: 'This restart quote changed since it was created — please reopen "Restart my plan" for a current quote.' }),
+  plan_start: Object.freeze({ code: 'PLAN_START_STATE_CHANGED', message: 'This estimate changed since it was created — please go back to your portal for a current price.' }),
+});
+function staffChangedQuoteRefusal(estimate, source = estimate?.source) {
+  if (!staffChangedDeliveryOptions(estimate)) return null;
+  return STAFF_CHANGED_REFUSALS[String(source || '')] || null;
+}
+
 // Returns the live quote's { estimateId, token, url, reused: true }, or null.
 async function reuseLiveQuote(mint, {
   priorRows, offer, estimateData, primaryStreet, premisesStamp,
@@ -1126,6 +1148,8 @@ async function reuseLiveQuote(mint, {
     && sameAddress
     && sameStamp
     && sameTotals
+    // Never handed back as staff changed it: re-minted instead.
+    && !staffChangedDeliveryOptions(live)
     && offerFingerprint(liveData) === offerFingerprint(estimateData)
     // The page still sells its frozen snapshot (codex pre-push P0): the
     // fingerprint omits sendSnapshot, and the page's tier selection can
@@ -1536,19 +1560,24 @@ async function tryPropertyPreferencesKey(trx, customerId) {
 //   3. the customers row FOR UPDATE. A reactivation is an UPDATE on this row, so it commits
 //      strictly before or after this check, never inside it.
 async function readRestartAcceptState(trx, estimate) {
-  const row = (await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data')) || {};
+  const row = (await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data', 'show_one_time_option', 'bill_by_invoice')) || {};
   // The owner the handler read before the row lock (the plan-start check's rule, codex pre-push
   // P0). The handler books for estimate.customer_id, so an estimate that a merge or its undo moved
   // to another customer since then reads, and locks, no customer here and refuses as changed.
   const customerId = row.customer_id === estimate.customer_id ? row.customer_id : null;
   const planRestart = parseJson(row.estimate_data, {})?.planRestart;
   const state = {
+    // The staff options as the row reads under the caller's estimate row lock (codex pre-push P1):
+    // the caller judged the row it read before that lock, and a writer from before the write
+    // refusal could commit between the two. Such a row takes no lock and reads no customer.
+    staffChanged: staffChangedQuoteRefusal(row, 'plan_restart'),
     quoted: Array.isArray(planRestart?.families) ? planRestart.families : null,
     quotedAttempt: { caseId: planRestart?.cancellationCaseId ?? null, requestId: planRestart?.cancellationRequestId ?? null },
     fresh: null,
     ownedFamilies: [],
     latestAttempt: { families: [], caseId: null, requestId: null },
   };
+  if (state.staffChanged) return state;
   await lockCustomerComms(trx, customerId);
   if (!customerId) return state;
   await tryPropertyPreferencesKey(trx, customerId);
@@ -1592,6 +1621,7 @@ async function assertRestartAcceptEligible(trx, estimate) {
     // payment choice for the retry this message asks for.
     throw Object.assign(refuse('We could not re-verify this restart just now — please try again in a moment.'), { code: 'RESTART_RECHECK_RETRY' });
   }
+  if (state.staffChanged) throw refuse(state.staffChanged.message);
   const { quoted, quotedAttempt, fresh, ownedFamilies, latestAttempt } = state;
   // A plan_restart estimate without its quoted families (or its customer)
   // is malformed — never accept it.
@@ -1653,13 +1683,17 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   let commercial;
   let ownsPlan;
   let premisesStreet;
+  let lockedStaffChange = null;
   try {
-    const row = (await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data', 'address')) || {};
+    const row = (await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data', 'address', 'show_one_time_option', 'bill_by_invoice')) || {};
+    // The staff options as the row reads under the caller's estimate row lock (the restart
+    // check's rule, codex pre-push P1). Such a row reads, and locks, no customer.
+    lockedStaffChange = staffChangedQuoteRefusal(row, 'plan_start');
     // The owner the handler read before the row lock (codex pre-push P0). The handler books and
     // updates contacts for estimate.customer_id, so an estimate a merge or its undo moved to
     // another customer since then reads, and locks, no customer here: the account checks below
     // refuse it as a changed account.
-    const customerId = row.customer_id === estimate.customer_id ? row.customer_id : null;
+    const customerId = !lockedStaffChange && row.customer_id === estimate.customer_id ? row.customer_id : null;
     const planStart = parseJson(row.estimate_data, {})?.planStart;
     quoted = Array.isArray(planStart?.families) ? planStart.families : [];
     quotedStreet = require('../estimate-property-linkage').normalizedEstimateStreet(row.address);
@@ -1690,6 +1724,7 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     // page to keep the held time and the payment choice for the retry this message asks for.
     throw Object.assign(refuse('We could not re-verify this estimate just now — please try again in a moment.'), { code: 'PLAN_START_RECHECK_RETRY' });
   }
+  if (lockedStaffChange) throw refuse(lockedStaffChange.message);
   const changed = () => refuse('This account changed since this estimate was created — please go back to your portal for a current price.');
   // A plan_start estimate without its quoted families (or its customer) is malformed — never accept it.
   if (!quoted.length || !fresh) throw changed();
@@ -1722,5 +1757,6 @@ module.exports = {
   TURF_PRICED_KEYS,
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
+  staffChangedQuoteRefusal,
   _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },
 };

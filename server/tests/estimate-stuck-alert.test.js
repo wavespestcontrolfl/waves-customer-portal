@@ -292,6 +292,8 @@ describe('what never raises', () => {
     expect(routine).toEqual(expect.arrayContaining([
       'TERMS_VERSION_STALE', 'ACCEPT_INVOICE_BUSY_RETRY', 'SLOT_UNAVAILABLE', 'RESERVATION_EXPIRED', 'ACCEPT_NEEDS_OFFICE_REVIEW',
       'BERMUDA_SUPPRESSION_GATED', 'AREA_ADDON_YEARLY_LIMIT_REACHED', 'MOSQUITO_MISTING_GATED',
+      // A refused plan quote: the page's banner sends the customer back to the portal (codex pre-push P1).
+      'RESTART_STATE_CHANGED', 'PLAN_START_STATE_CHANGED',
     ]));
     for (const code of routine) await stuck.noteAcceptRefused(REQ, EST, 409, { error: 'Please confirm again.', code });
     for (const status of [402, 404, 429]) await stuck.noteAcceptRefused(REQ, EST, status, { error: 'Card needed.', code: 'odd' });

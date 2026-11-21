@@ -53,6 +53,8 @@ const ROUTINE_ACCEPT_CODES = new Set([
   'BERMUDA_SUPPRESSION_GATED', 'AREA_ADDONS_GATED', 'AREA_ADDON_YEARLY_LIMIT_REACHED', 'AREA_ADDON_HISTORY_UNAVAILABLE',
   'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY', 'MOSQUITO_MISTING_GATED', 'MOSQUITO_MISTING_ACCEPT_PENDING',
   'MOSQUITO_MISTING_INSTALL_UNRESOLVED',
+  // A refused plan quote: the page's banner sends the customer back to the portal for a current quote.
+  'RESTART_STATE_CHANGED', 'PLAN_START_STATE_CHANGED',
 ]);
 const ROUTINE_ACCEPT_STATUSES = new Set([402, 404, 429]);
 // The page's own reads of a refusal's words: these two reload the estimate whatever the code, and an uncoded body
