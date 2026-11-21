@@ -156,18 +156,24 @@ async function hasInboundSmsSince(est, cutoff) {
     .where((q) => { q.whereNull("messages.message_type").orWhere("messages.message_type", "not like", "job\\_%"); })
     .where("messages.created_at", ">=", cutoff)
     .first("messages.id");
-  if (est.customer_id) {
-    q.andWhere(function () {
-      this.where("conversations.customer_id", est.customer_id);
-      if (est.customer_phone)
-        this.orWhere("conversations.contact_phone", est.customer_phone);
-    });
-  } else if (est.customer_phone) {
-    q.andWhere("conversations.contact_phone", est.customer_phone);
-  } else {
-    return false;
-  }
+  // The estimate can hold the phone as staff typed it ("(941) 555-0123"); an inbound text's
+  // conversation holds Twilio's E.164 form. Match either, or a lead's reply is never seen.
+  const phones = replyPhoneForms(est.customer_phone);
+  if (!est.customer_id && !phones.length) return false;
+  q.andWhere(function () {
+    if (est.customer_id) this.where("conversations.customer_id", est.customer_id);
+    for (const phone of phones) this.orWhere("conversations.contact_phone", phone);
+  });
   return !!(await q);
+}
+
+// The stored phone and its E.164 form (utils/phone toE164: US ten-digit numbers; it returns
+// the input unchanged when it cannot parse it), without blanks or repeats.
+function replyPhoneForms(phone) {
+  const stored = String(phone || "").trim();
+  if (!stored) return [];
+  const e164 = String(require("../utils/phone").toE164(stored) || "").trim();
+  return [...new Set([stored, e164].filter(Boolean))];
 }
 
 // Email arm (owner 2026-11-02, option A: an email reply pauses the follow-up
