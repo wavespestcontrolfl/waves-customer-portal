@@ -1261,6 +1261,104 @@ describe('mintRestartEstimate', () => {
 
 // ── accept-time revalidation (codex GH r4 P1): the checks the public accept
 // transaction re-runs on a plan_restart estimate under the estimate row lock.
+// The cap on how many mints hold a transaction at once in one process (#8132 pre-push r26, r40): a mint
+// holds its transaction's connection and reads on a second one from the pool, so as many mints as the pool
+// has connections could each hold one and wait for a second that no one can give. plan-mint-pool.db.test.js
+// proves the cap on a real pool; this pins its rules.
+describe('mintTransaction', () => {
+  const { mintTransaction } = actualRestart;
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  // A handle whose transaction runs the work, as knex does. Its pool has `max` connections, or is unknown.
+  const handle = (max) => ({
+    ...(max === undefined ? {} : { client: { pool: { max } } }),
+    transaction: (work) => work('trx'),
+  });
+  // Starts `count` mints that each wait for their own release. Returns what has started, and the releases.
+  function start(dbh, count) {
+    const started = [];
+    const ended = [];
+    const releases = [];
+    const settled = Array.from({ length: count }, (_unused, i) => mintTransaction(dbh, async (trx) => {
+      started.push(i);
+      await new Promise((resolve) => { releases[i] = resolve; });
+      ended.push(i);
+      return `${trx}-${i}`;
+    }));
+    return { started, ended, releases, settled };
+  }
+  async function drain(run) {
+    for (let i = 0; i < run.settled.length; i += 1) {
+      while (!run.releases[i]) await tick();
+      run.releases[i]();
+      await run.settled[i];
+    }
+  }
+
+  test('one mint for every four pool connections runs at once; the rest wait in line, first come first served', async () => {
+    const run = start(handle(8), 5);
+    await tick();
+    expect(run.started).toEqual([0, 1]);
+    // A finished mint hands its slot to the first one in line: never to a later one, never two at once.
+    run.releases[1]();
+    await run.settled[1];
+    await tick();
+    expect(run.started).toEqual([0, 1, 2]);
+    run.releases[0]();
+    await tick();
+    expect(run.started).toEqual([0, 1, 2, 3]);
+    await drain(run);
+    expect(run.started).toEqual([0, 1, 2, 3, 4]);
+    // Each mint gets its own transaction's answer.
+    expect(await Promise.all(run.settled)).toEqual(['trx-0', 'trx-1', 'trx-2', 'trx-3', 'trx-4']);
+  });
+
+  test.each([
+    [20, 5], [10, 2], [7, 1], [4, 1], [2, 1], [1, 1], [0, 5], [undefined, 5], ['not a number', 5],
+  ])('a pool of %s connections runs %s mints at once', async (max, limit) => {
+    const run = start(handle(max), 7);
+    await tick();
+    expect(run.started).toHaveLength(limit);
+    await drain(run);
+    expect(run.ended).toHaveLength(7);
+  });
+
+  test('a mint that fails frees its slot, and its error reaches its own caller', async () => {
+    const dbh = handle(4);
+    const failed = mintTransaction(dbh, async () => { throw new Error('mint boom'); });
+    const cannotOpen = mintTransaction({ ...dbh, transaction: () => { throw new Error('pool gone'); } }, async () => 'never');
+    const after = mintTransaction(dbh, async () => 'ran');
+    await expect(failed).rejects.toThrow('mint boom');
+    await expect(cannotOpen).rejects.toThrow('pool gone');
+    await expect(after).resolves.toBe('ran');
+    // Nothing is left held: the next mints start at once, up to the limit.
+    const run = start(handle(8), 3);
+    await tick();
+    expect(run.started).toEqual([0, 1]);
+    await drain(run);
+  });
+
+  test('the restart mint runs in it: on a pool of four, three taps hold one transaction at a time', async () => {
+    tables.customers = [{ ...CUSTOMER }];
+    tables.cancellation_cases = [{ id: 'case-1', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-22' }];
+    tables.estimates = [];
+    recompute.mockResolvedValue({ recomputed: true, result: { engineVersion: 'v9.9' }, monthlyTotal: 45, annualTotal: 540, onetimeTotal: 0, serverTier: 'Bronze' });
+    let open = 0;
+    let peak = 0;
+    const pooled = {
+      client: { pool: { max: 4 } },
+      transaction: async (fn) => {
+        open += 1;
+        peak = Math.max(peak, open);
+        try { await tick(); return await fn(fakeTrx()); } finally { open -= 1; }
+      },
+    };
+    const taps = await Promise.allSettled([1, 2, 3].map(() => actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ db: pooled }) })));
+    // The first tap mints; the next two find its live quote.
+    expect(taps.map((tap) => [tap.status, tap.value?.reused])).toEqual([['fulfilled', false], ['fulfilled', true], ['fulfilled', true]]);
+    expect(peak).toBe(1);
+  });
+});
+
 describe('assertRestartAcceptEligible', () => {
   const trx = fakeTrx();
   // The handler's pre-lock read of the row: its id and the customer it books for.

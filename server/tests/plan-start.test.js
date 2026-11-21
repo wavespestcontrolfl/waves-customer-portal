@@ -1069,6 +1069,30 @@ describe('mintPlanStartEstimate', () => {
   });
 });
 
+// The plan-start mint shares the restart mint's capped transaction (plan-restart.test.js pins the cap's rules).
+describe('mintPlanStartEstimate and the mint cap', () => {
+  test('on a pool of four, three taps hold one transaction at a time', async () => {
+    tables.customers = [{ ...LEAD }];
+    tables.cancellation_cases = [];
+    recompute.mockResolvedValue(pricedAs(PEST_LINE));
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    let open = 0;
+    let peak = 0;
+    const pooled = {
+      client: { pool: { max: 4 } },
+      transaction: async (fn) => {
+        open += 1;
+        peak = Math.max(peak, open);
+        try { await tick(); return await fn(fakeTrx()); } finally { open -= 1; }
+      },
+    };
+    const taps = await Promise.allSettled([1, 2, 3].map(() => mint({}, { db: pooled })));
+    // The first tap mints; the next two find its live quote.
+    expect(taps.map((tap) => [tap.status, tap.value?.reused])).toEqual([['fulfilled', false], ['fulfilled', true], ['fulfilled', true]]);
+    expect(peak).toBe(1);
+  });
+});
+
 describe('assertPlanStartAcceptEligible', () => {
   // Reads return only the columns they name, as Postgres does, so a column the check needs and
   // does not select reads as missing here too.

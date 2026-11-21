@@ -1364,13 +1364,48 @@ async function publishMintedEstimate(mint, { offer, estimateData }) {
   return { estimateId: created.id, token, url: `/estimate/${token}`, reused: false };
 }
 
+// mintTransaction: the transaction both mints run in, with a cap on how many
+// run at once in this process (#8132 pre-push r26, r40). A mint holds its
+// transaction's connection from its first lock to the commit, and some of
+// its reads take a second one from the pool (the cached property lookup,
+// the verified-correction probe, the send snapshot's pricing bundle). With
+// no cap, as many mints as the pool has connections can each hold one and
+// wait for a second that no one can give. Every one of them fails when the
+// pool's wait ends, and until then no other request gets a connection.
+// A mint that waits here holds no connection. One mint for every
+// MINT_POOL_SHARE pool connections runs at once (5 on the default 20), so
+// the mints together use at most half of the pool. First come, first served.
+const MINT_POOL_SHARE = 4;
+const MINT_SLOTS_UNKNOWN_POOL = 5;
+const mintSlots = { running: 0, waiting: [] };
+function mintSlotLimit(dbh) {
+  const poolMax = Number(dbh?.client?.pool?.max);
+  if (!Number.isFinite(poolMax) || poolMax <= 0) return MINT_SLOTS_UNKNOWN_POOL;
+  return Math.max(1, Math.floor(poolMax / MINT_POOL_SHARE));
+}
+async function mintTransaction(dbh, work) {
+  if (mintSlots.running < mintSlotLimit(dbh)) {
+    mintSlots.running += 1;
+  } else {
+    // The mint that finishes hands its slot to the first one in line.
+    await new Promise((resolve) => { mintSlots.waiting.push(resolve); });
+  }
+  try {
+    return await dbh.transaction(work);
+  } finally {
+    const next = mintSlots.waiting.shift();
+    if (next) next();
+    else mintSlots.running -= 1;
+  }
+}
+
 async function mintRestartEstimate({ customer, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {} }) {
   if (!customer || !customer.id) throw new Error('mintRestartEstimate requires a customer row');
   const mintDeps = resolveMintDeps(deps);
   const dbh = deps.db || db;
   const nowDate = now();
 
-  return dbh.transaction(async (trx) => {
+  return mintTransaction(dbh, async (trx) => {
     // Customer-comms advisory lock FIRST (lock-order contract §1,
     // utils/customer-comms-lock.js — before this txn's own customers row
     // lock). It is also the FIRST lock the public accept transaction takes
@@ -1500,7 +1535,7 @@ async function mintPlanStartEstimate({
   const dbh = deps.db || db;
   const nowDate = now();
 
-  return dbh.transaction(async (trx) => {
+  return mintTransaction(dbh, async (trx) => {
     // Same lock order as the restart mint and the public accept (contract §1).
     await lockCustomerComms(trx, customer.id);
     const fresh = await trx('customers').where({ id: customer.id }).whereNull('deleted_at').forUpdate().first();
@@ -1800,6 +1835,7 @@ module.exports = {
   RestartUnavailableError,
   cancelledFamiliesFor,
   mintRestartEstimate,
+  mintTransaction,
   assertRestartAcceptEligible,
   PLAN_START_SOURCE,
   PLAN_START_SERVICE_KEYS,
