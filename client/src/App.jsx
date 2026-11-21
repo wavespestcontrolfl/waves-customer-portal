@@ -1,8 +1,11 @@
 import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
-import { CHUNK_RELOAD_FLAG, isStaleChunkReloadPending, markStaleChunkReloadPending } from './lib/staleChunkReload';
-import { PortalUpdateBar, PortalUpdateGate } from './components/PortalUpdate';
+import {
+  CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, missingCodeIsNewVersion,
+  noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, trackStaffImport, usedOnPageInView,
+} from './lib/staleChunkReload';
+import { PortalUpdateBar, PortalUpdateGate, useBrowserOffline, useHoldAwareReload, useNewerBuild, usePageUse } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -77,17 +80,26 @@ function CustomerFailureScreen({ title, message, onRetry }) {
 }
 
 export class PageErrorBoundary extends Component {
-  constructor(props) { super(props); this.state = { error: null }; }
-  static getDerivedStateFromError(error) { return { error }; }
+  constructor(props) { super(props); this.state = { error: null, missingStaffCode: false }; }
+  // On a staff tab, a plain React.lazy whose code the live build no longer
+  // serves throws here: the stale-chunk handler leaves its import to fail
+  // (lib/staleChunkReload.js). It gets the recovery lazyWithRetry gives a
+  // page (MissingPageCode).
+  static getDerivedStateFromError(error) {
+    return { error, missingStaffCode: isChunkError(error) && staffTab() };
+  }
   componentDidCatch(error, info) {
     // A stale-chunk reload is already under way: the swallowed import made
     // React.lazy throw, and the page is about to reload into the new build.
     if (isStaleChunkReloadPending()) return;
+    // Expected after a deploy: MissingPageCode recovers it.
+    if (this.state.missingStaffCode) return;
     console.error('[Page crash]', error, info.componentStack);
     reportError(error, { context: 'PageErrorBoundary', componentStack: info.componentStack });
   }
   render() {
     if (this.state.error && isStaleChunkReloadPending()) return <RouteFallback />;
+    if (this.state.error && this.state.missingStaffCode) return <MissingPageCode />;
     if (this.state.error) {
       if (this.props.customerGlass) {
         return (
@@ -262,7 +274,7 @@ import BiometricGate from './components/BiometricGate';
 import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
 import useAdminBookmarkMeta from './hooks/useAdminBookmarkMeta';
 import useAdminViewport from './hooks/useAdminViewport';
-import { isAdminPath, isFieldPath } from './lib/adminBookmarkMeta';
+import { isAdminPath, isFieldPath, routerPath } from './lib/adminBookmarkMeta';
 import AdminTabRedirect from './components/admin/AdminTabRedirect';
 // Static, not lazy: on a phone the Settings tab is the one full admin menu, and
 // the service worker caches a lazy page only after a first visit, so a lazy
@@ -273,61 +285,72 @@ import { isNativeApp } from './native/platform';
 import WavesShell from './components/brand/WavesShell';
 import { lazy, Suspense } from 'react';
 
-function showReloadToast() {
-  if (document.getElementById('chunk-reload-toast')) return;
-  const el = document.createElement('div');
-  el.id = 'chunk-reload-toast';
-  el.textContent = 'New version available — reloading…';
-  Object.assign(el.style, {
-    position: 'fixed', top: '20px', left: '50%', transform: 'translateX(-50%)',
-    background: '#009CDE', color: '#fff', padding: '10px 20px', borderRadius: '8px',
-    fontSize: '14px', fontWeight: '600', fontFamily: "'DM Sans', sans-serif",
-    boxShadow: '0 4px 12px rgba(0,0,0,0.25)', zIndex: '99999',
-  });
-  document.body.appendChild(el);
-}
-
 // Rendered when a lazy chunk still fails after the one automatic reload —
-// a friendly retry beats the blank screen the rethrow used to produce.
-function ChunkLoadFallback() {
-  const operatorPath = /^\/(admin|tech)(\/|$)/.test(window.location.pathname);
+// a friendly retry beats the blank screen the rethrow used to produce. On a
+// staff page it also shows while open or held work keeps the tab
+// (MissingPageCode). When the server names a newer build (`newVersion`), the
+// page's code is gone because the portal has a new version, so it says so;
+// otherwise it asks to check the connection. Its button names that
+// work first, as the Reload bar does (components/PortalUpdate.jsx), and
+// becomes "Reload anyway". When the tab was used on this page since the last
+// page move, it asks once about the page too, as the bar does after a use.
+function ChunkLoadFallback({ newVersion = false, staff = false }) {
+  // A page asked for on a staff tab (`staff`, MissingPageCode), a staff page
+  // in view or at the address (staffTab: Back changes the address before the
+  // routes render), or a /tech URL. Paths are read as the routes match them
+  // (routerPath): /ADMIN/... is a staff page too.
+  const operatorPath = staff || staffTab() || /^\/tech(\/|$)/.test(routerPath(window.location.pathname));
+  const { named, heldText, tryReload, clearNamed } = useHoldAwareReload(null, clearChunkReloadFlag);
+  // The staff layout can stay around this screen, the Ask Waves draft
+  // included: a use of the page clears what the button named, so it asks
+  // again, as the Reload bar does.
+  usePageUse(clearNamed);
   if (!operatorPath) {
     return (
       <CustomerFailureScreen
         title="Couldn’t load this page"
         message="Check your connection and try again."
-        onRetry={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
+        onRetry={() => { clearChunkReloadFlag(); window.location.reload(); }}
       />
     );
   }
+  const idle = newVersion
+    ? { text: 'The portal has a new version.', button: 'Reload' }
+    : { text: 'Check your connection and try again.', button: 'Retry' };
   return (
     <div style={{
       minHeight: '100vh', background: '#FAF8F3', display: 'flex', alignItems: 'center',
       justifyContent: 'center', padding: 24, fontFamily: FONTS.body, boxSizing: 'border-box',
     }}>
-      <div style={{
+      <div data-portal-reload-prompt="" style={{
         width: 'min(420px, 100%)', background: '#fff', border: '1px solid #E7E2D7',
         borderRadius: 8, padding: 24, textAlign: 'center', boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
       }}>
         <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>
           Couldn&rsquo;t load this page
         </div>
-        <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
-          Check your connection and try again.
+        <div style={{ fontSize: 14, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
+          {named ? heldText : idle.text}
         </div>
         <button
-          onClick={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
+          onClick={() => tryReload(usedOnPageInView())}
           style={{
             minHeight: 42, padding: '0 18px', background: COLORS.glassNavy, color: '#fff',
             border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700,
             fontFamily: FONTS.heading, cursor: 'pointer',
           }}
         >
-          Retry
+          {named ? 'Reload anyway' : idle.button}
         </button>
       </div>
     </div>
   );
+}
+
+// Best effort: with session storage blocked there is no flag to clear, and
+// the reload must still run.
+function clearChunkReloadFlag() {
+  try { sessionStorage.removeItem(CHUNK_RELOAD_FLAG); } catch { /* storage blocked */ }
 }
 
 // Route-level Suspense placeholder. One element for every lazy page instead
@@ -342,33 +365,70 @@ function RouteFallback({ label = 'Loading...' }) {
   );
 }
 
+// A page asked for on a staff tab, whose code the live build no longer
+// serves: the stale-chunk handler leaves its import to fail
+// (lib/staleChunkReload.js), so this page decides while it is mounted, by the
+// staff rules, also once the move that asked for it, such as Back, opened a
+// customer page. Its retry screen is the staff one, whose button asks the
+// holds first. It waits for open work, as a page move does, then reloads
+// once. When work still holds the tab, the tab was used on this page
+// meanwhile, or the one reload for a missing chunk already ran, it shows the
+// retry screen. It says the portal has a new version only when the server
+// names a newer build (missingCodeIsNewVersion): after the one reload,
+// offline, or with no newer build named, the code may be out of reach rather
+// than replaced, so the screen asks to check the connection.
+function MissingPageCode() {
+  const [blocker, setBlocker] = useState(null);
+  const newVersion = missingCodeIsNewVersion(useNewerBuild(), useBrowserOffline());
+  // The path of the route whose code is missing, as the router rendered it.
+  // Back can move the address on before this effect starts.
+  const { pathname } = useLocation();
+  useEffect(() => {
+    let current = true;
+    reloadForMissingCode({ pathname, current: () => current }).then((reason) => {
+      if (current && reason) setBlocker(reason);
+    });
+    return () => { current = false; };
+  }, [pathname]);
+  if (!blocker) return <RouteFallback label={newVersion ? 'Loading the new version...' : 'Loading...'} />;
+  return <ChunkLoadFallback newVersion={newVersion} staff />;
+}
+
 export function lazyWithRetry(factory) {
   return lazy(async () => {
+    // A page asked for on a staff tab keeps the staff rules, even when its
+    // code fails after Back opened a customer page (lib/staleChunkReload.js).
+    const staff = staffTab();
     try {
-      const mod = await factory();
+      const mod = await (staff ? trackStaffImport(factory) : factory());
       // main.jsx's vite:preloadError handler swallowed a stale chunk: the
       // import resolved undefined and a reload is in flight. Hold the loading
       // placeholder and keep the one-shot flag; clearing it here would let a
       // still-stale build reload-loop.
       if (!mod && isStaleChunkReloadPending()) return { default: RouteFallback };
-      sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
+      noteChunkLoaded();
       return mod;
     } catch (err) {
       // A CSS preload already started the reload, then the chunk itself
       // failed too: same reload, same placeholder.
       if (isStaleChunkReloadPending()) return { default: RouteFallback };
-      const msg = String(err?.message || '');
-      const isChunkError = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError/i.test(msg);
-      if (isChunkError) {
-        if (!sessionStorage.getItem(CHUNK_RELOAD_FLAG)) {
-          sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+      if (isChunkError(err)) {
+        // A staff tab obeys the holds of an out-of-date tab, while a staff
+        // page is in view or at the address, or when one asked for this
+        // page (lib/staleChunkReload.js).
+        if (staff || staffTab()) return { default: MissingPageCode };
+        // A customer page: the stale-chunk handler left its import to fail
+        // while code a staff tab asked for is on its way. It reloads at once,
+        // as the handler reloads a customer page, in the same task as the
+        // failed import: a reload later could open a staff page that Back
+        // opened meanwhile, past that page's holds.
+        if (takeChunkReload()) {
           markStaleChunkReloadPending();
-          showReloadToast();
-          setTimeout(() => window.location.reload(), 1200);
-          return { default: () => null };
+          window.location.reload();
+          return { default: RouteFallback };
         }
-        // Already auto-reloaded once — show a retry screen instead of
-        // rethrowing into a blank page.
+        // Already auto-reloaded once, or no session storage to stop a loop —
+        // show a retry screen instead of rethrowing into a blank page.
         return { default: ChunkLoadFallback };
       }
       throw err;

@@ -229,6 +229,46 @@ describe('handleEstimateView — SSR viewability gate', () => {
     });
   });
 
+  // A customer's own plan quote: only the React page answers its state-changed 409 (the refused-quote banner and its
+  // portal link). The legacy page reads that 409 as a slot conflict, so the customer would pick time after time into
+  // the same refusal (codex pre-push P1). The mint never sets use_v2_view.
+  describe('a customer\'s own plan quote is never served the legacy page', () => {
+    const planRow = (source, overrides = {}) => ({
+      status: 'sent', expires_at: FUTURE, use_v2_view: false, sent_at: PAST, customer_id: 'cust-x', token: 'tok-ssr-gate', source, ...overrides,
+    });
+
+    test.each(['plan_restart', 'plan_start'])('a %s row on the /estimate/ mount falls through to the React view', async (source) => {
+      const { res, next } = await runView(planRow(source), ESTIMATE_MOUNT);
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(res.sent).toBe(false);
+    });
+
+    test.each(['plan_restart', 'plan_start'])('a %s row on the /api/estimates mount redirects to the React URL instead of rendering the legacy page', async (source) => {
+      const { res, next } = await runView(planRow(source), API_MOUNT);
+      expect(next).not.toHaveBeenCalled();
+      expect(res.statusCode).toBe(302);
+      expect(res.redirectUrl).toBe('/estimate/tok-ssr-gate');
+      expect(res.sent).toBe(false);
+    });
+
+    test('an expired plan quote cannot accept, so it keeps its personalized SSR expired page', async () => {
+      const { res, next } = await runView(planRow('plan_start', { expires_at: PAST }), ESTIMATE_MOUNT);
+      expect(next).not.toHaveBeenCalled();
+      expect(res.body).toContain('This estimate has expired');
+    });
+
+    test('control: the same accept-active row from staff is neither redirected nor handed to React', async () => {
+      currentRow = { monthly_total: 384.62, ...PII, ...planRow('admin') };
+      const res = makeRes();
+      const next = jest.fn();
+      // It goes on to the legacy renderer, whose view-tracking write this harness cannot run; that error is
+      // expected and ignored, since getting there is the point.
+      await handleEstimateView(makeReq(API_MOUNT), res, (err) => { if (err) throw err; return next(); }).catch(() => {});
+      expect(res.redirectUrl).toBeUndefined();
+      expect(next).not.toHaveBeenCalled();
+    });
+  });
+
   // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): only the React page can ask for the FDACS-13692, so an
   // accept-active termite estimate never gets the legacy page, whose accept would be refused with nothing to sign.
   describe('an estimate that needs the Florida consumer notice is never served the legacy page', () => {

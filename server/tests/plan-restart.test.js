@@ -371,6 +371,18 @@ describe('mintRestartEstimate', () => {
     expect(releaseHolds).not.toHaveBeenCalled();
   });
 
+  test.each(['show_one_time_option', 'bill_by_invoice'])('a live quote with %s turned on by staff is re-minted, never handed back as staff changed it (codex pre-push r29 on #8132)', async (column) => {
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    tables.estimates[0] = { ...tables.estimates[0], [column]: true };
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('0123456789abcdef') });
+    expect(again.reused).toBe(false);
+    expect(again.estimateId).not.toBe(first.estimateId);
+    expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
+    // The new quote carries neither option: the mint never sets them.
+    const minted = tables.estimates.find((r) => r.id === again.estimateId);
+    expect(!!minted.show_one_time_option || !!minted.bill_by_invoice).toBe(false);
+  });
+
   test('an identical tap at an address that does not parse back to its home reuses the live quote: its stored address is today\'s own string (codex pre-push r38 P1)', async () => {
     // With no city, the unit line "Building 2" reads back as the stored address's city.
     const unitOnly = { ...CUSTOMER, address_line2: 'Building 2', city: null };
@@ -1432,6 +1444,26 @@ describe('assertRestartAcceptEligible', () => {
     await expect(actualRestart.assertRestartAcceptEligible(fakeTrx(ops), { id: 'est-r1', customer_id: 'cust-0' }))
       .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
     expect(ops.some((op) => op.startsWith('read:customers') || op.startsWith('raw:'))).toBe(false);
+  });
+
+  test.each(['bill_by_invoice', 'show_one_time_option'])('a quote staff changed after the handler read it (%s on the locked row) refuses as changed and takes no lock (codex pre-push P1)', async (column) => {
+    // The handler read the row with both options off; a writer from before the write refusal
+    // turned one on before the accept took the estimate row lock. Reads return only the columns
+    // they name, as Postgres does, so the re-check must select both options.
+    const namedColumns = (table) => {
+      const b = builder(table);
+      const first = b.first;
+      b.first = async (...cols) => {
+        const row = await first();
+        return row && cols.length ? Object.fromEntries(cols.filter((c) => c in row).map((c) => [c, row[c]])) : row;
+      };
+      return b;
+    };
+    tables.estimates[0][column] = true;
+    const ops = [];
+    await expect(actualRestart.assertRestartAcceptEligible(fakeTrx(ops, namedColumns), RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED', message: expect.stringMatching(/restart quote changed since it was created/) });
+    expect(ops).toEqual(['read:estimates']);
   });
 
   test('an unacquirable advisory lock fails closed with the retry code (never proceeds unfenced)', async () => {

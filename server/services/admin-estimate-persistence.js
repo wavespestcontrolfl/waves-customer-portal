@@ -2958,6 +2958,12 @@ const REVISE_REFUSED_MINT_SOURCES = new Map([
   ['plan_start', 'This is a customer portal plan quote — it always prices at the current mint. It cannot be edited in place; create a new estimate for a different offer.'],
 ]);
 
+// The refusal a staff change to a customer's own mint gets (REVISE_REFUSED_MINT_SOURCES), or null.
+// The revise below and the delivery options (admin PATCH /:id, the IB one-time toggle) read it.
+function selfServeMintEditRefusal(estimate) {
+  return REVISE_REFUSED_MINT_SOURCES.get(String(estimate?.source || '')) || null;
+}
+
 // Single source of truth for "can this estimate be edited in place?" —
 // consumed by the revise write below and by GET /:id/edit-source so the
 // builder can explain a non-editable row instead of failing on save.
@@ -2993,7 +2999,7 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
     return { message: 'This estimate is price-locked (accepted) and can no longer be edited.', statusCode: 409 };
   }
   // Customer self-serve mints are never revised in place (REVISE_REFUSED_MINT_SOURCES).
-  const mintRefusal = REVISE_REFUSED_MINT_SOURCES.get(String(estimate?.source || ''));
+  const mintRefusal = selfServeMintEditRefusal(estimate);
   if (mintRefusal) {
     return { message: mintRefusal, statusCode: 409 };
   }
@@ -4026,6 +4032,7 @@ module.exports = {
   sweepWedgedPendingInvalidations,
   estimateViewUrl,
   estimateReviseBlock,
+  selfServeMintEditRefusal,
   normalizeClientPestFloorMetadata,
   reviseAdminEstimate,
   serverRecomputeFromEstimateData,

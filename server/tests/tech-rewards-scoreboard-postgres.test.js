@@ -355,7 +355,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     const [check] = await insertChecks([{ run_id: run.id, technician_id: yan.id, status: 'finalized', week_start: '2026-09-07', gross_cents: 6000, regular_pay_cents: 0 }]).returning('id');
     await db('payroll_pay_lines').insert({ technician_id: yan.id, check_id: check.id, kind: 'health_allowance', status: 'paid', earned_week_start: '2026-09-07', covers_from: '2026-08-01', covers_to: '2026-08-31', amount_cents: 6000 });
     const board = await service.getScoreboard(yan.id, { now: NOW });
-    expect(board.seasonBonus.grossCents).toBe(5000 + 143); // six weeks of 1000; the Aug 31 week is 1 of 7 days in the season
+    expect(board.seasonBonus.grossCents).toBe(6000); // six weeks of 1000, every covered day in August
   });
 
   test('review asks are counted in SQL on each send time: an initial ask outside the season does not drag its in-season follow-up out', async () => {
