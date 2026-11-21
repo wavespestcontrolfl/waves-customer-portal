@@ -34,6 +34,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // removed by hand: the pay run works them out, and a hand-made one would pay a bonus the plan never earned.
 const KINDS = ['review_bonus', 'commission', 'health_allowance', 'hsa_employer'];
 const TECH_REWARD_KINDS = ['season_bonus', 'stay_bonus', 'december_gift'];
+// source_type of the lines the pay run's Tech Rewards sync writes and owns (tech-rewards-pay-lines.js).
+const TECH_REWARDS_SOURCE = 'tech_rewards';
 const STATUSES = ['open', 'paid', 'voided'];
 const KIND_WORDS = {
   review_bonus: 'Review bonus',
@@ -235,10 +237,12 @@ async function openLinesFor(conn, end, { lock = false } = {}) {
     .join('technicians as t', 't.id', 'l.technician_id')
     .where('l.status', 'open')
     .where('l.earned_week_start', '<=', end)
-    // A Tech Rewards line is paid by the run of its own earned week only (the run that wrote it): a later run never picks up one
-    // that belongs to an earlier week (tech-rewards-pay-lines.js).
+    // A line the Tech Rewards sync wrote is paid by the run of its own earned week only (the run that wrote it): a later run
+    // never picks up one that belongs to an earlier week (tech-rewards-pay-lines.js). Every other line carries forward as
+    // before, whatever its kind, also one with no source.
     .where(function ownWeekOnly() {
-      this.whereNotIn('l.kind', TECH_REWARD_KINDS).orWhere('l.earned_week_start', addStaffWorkDays(end, -6));
+      this.whereNull('l.source_type').orWhereNot('l.source_type', TECH_REWARDS_SOURCE)
+        .orWhere('l.earned_week_start', addStaffWorkDays(end, -6));
     })
     .where('t.employment_type', 'w2')
     .orderBy([{ column: 'l.earned_week_start' }, { column: 'l.created_at' }, { column: 'l.id' }]);
@@ -389,6 +393,7 @@ function totalsOf(lines) {
 module.exports = {
   KINDS,
   TECH_REWARD_KINDS,
+  TECH_REWARDS_SOURCE,
   KIND_WORDS,
   payLinesOn,
   listPayLines,

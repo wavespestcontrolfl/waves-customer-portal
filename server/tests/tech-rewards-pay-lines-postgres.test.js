@@ -123,7 +123,7 @@ postgres('tech rewards pay lines: the December gift', () => {
   const checkOf = (run, technicianId) => run.checks.find((c) => c.technicianId === technicianId);
   const notesOf = async (runId) => (await api('GET', `/runs/${runId}`)).body.run.techRewardsNotes || [];
   // the note for a gift of 2026 that waits: the reason, then the last pay date that can carry it (Dec 18 + 60 days)
-  const waits = (name, why) => `December gift for ${name} waits: ${why}. A pay run dated Feb 16, 2027 or earlier can add it`;
+  const waits = (name, why) => `December gift for ${name} waits: ${why}. Only a pay run dated Feb 16, 2027 or earlier can add it`;
   const syncEvents = () => trx('audit_log').where({ action: 'payroll.tech_rewards_lines_synced' }).orderBy('created_at');
   const runRow = async (runId) => {
     const row = await trx('payroll_runs').where({ id: runId }).first();
@@ -420,17 +420,35 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(checkOf(next, alpha)).toMatchObject({ techRewardsCents: GIFT, grossCents: GIFT });
     });
 
-    it('says when no pay run can add a gift any more: 60 days after the gift date the note stops promising one', async () => {
+    it('states the last pay date by the date on the checks, not by today: a run dated inside it still pays the gift months later', async () => {
       const tech = await readyTech('Sample Alpha');
       await approvedWeek(tech, '2026-11-02'); // approved, never paid
       await approvedWeek(tech, GIFT_WEEK);
       const run = await draft(GIFT_WEEK);
-      await finalize(run.id);
       expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Nov 2, 2026 is not paid yet')]);
-      jest.setSystemTime(Date.parse('2027-02-16T17:00:00Z')); // the last day
+      // months later the note says the same thing, and a catch-up run dated inside the 60 days still carries the gift
+      jest.setSystemTime(Date.parse('2027-04-06T17:00:00Z'));
       expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Nov 2, 2026 is not paid yet')]);
-      jest.setSystemTime(Date.parse('2027-02-17T17:00:00Z'));
-      expect(await notesOf(run.id)).toEqual(['December gift for Sample Alpha was not paid: the week of Nov 2, 2026 is not paid yet, and no pay run dated Feb 16, 2027 or earlier added it. No pay run adds it now']);
+      const catchUp = await draft('2026-11-02', '2026-12-16'); // dated before the gift date: no gift
+      expect(checkOf(catchUp, tech)).not.toHaveProperty('techRewardsCents');
+      await finalize(catchUp.id);
+      const again = await recompute(run.id); // the Dec 18 draft: the November week is paid now
+      expect(checkOf(again, tech).techRewardsCents).toBe(GIFT);
+      expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('does not wait for time off the pay run does not pay: with GATE_PAYROLL_TIME_OFF off a time-off week needs no check', async () => {
+      const tech = await readyTech('Sample Alpha');
+      await trx('payroll_time_off').insert({ technician_id: tech, work_date: '2026-07-03', kind: 'holiday', minutes: '480.00' });
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK); // the gate is off: no run pays that day, so nothing is owed for the week
+      expect(checkOf(run, tech).techRewardsCents).toBe(GIFT);
+      expect(await notesOf(run.id)).toEqual([]);
+      // with the gate on, the pay run pays time off: the week of Jun 29 needs its check first
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      const again = await recompute(run.id);
+      expect(checkOf(again, tech)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Jun 29, 2026 is not paid yet')]);
     });
 
     it('waits when no paycheck can be worked out for the technician, so a gift alone never blocks the run', async () => {
@@ -440,7 +458,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       const run = await draft(GIFT_WEEK);
       expect(await linesOf(alpha)).toHaveLength(0);
       expect([run.waiting, run.blocked]).toEqual([[], []]);
-      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'no paycheck can be worked out for them on this pay run (check the pay rate)')]);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'no paycheck can be worked out for them on this pay run (check their pay rate, and the tax tables for the pay date)')]);
       const final = await finalize(run.id);
       expect(checkOf(final, bravo).techRewardsCents).toBe(GIFT);
       expect(checkOf(final, alpha)).toBeUndefined();
@@ -494,6 +512,20 @@ postgres('tech rewards pay lines: the December gift', () => {
   });
 
   describe('an open line belongs to the draft run that wrote it', () => {
+    it('leaves every line the sync did not write to carry forward as before, also a reward kind with no source', async () => {
+      const tech = await readyTech('Sample Alpha');
+      delete process.env.GATE_TECH_REWARDS_PAY_LINES; // the sync writes nothing, so the check shows the hand-made row alone
+      // a row with no source, earned in an earlier week that no run paid
+      await trx('payroll_pay_lines').insert({
+        technician_id: tech, kind: 'december_gift', amount_cents: 12345, earned_week_start: EARLY_WEEK, covers_from: EARLY_WEEK, covers_to: '2026-12-06',
+      });
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(checkOf(run, tech).techRewardsCents).toBe(12345); // carried forward to the first run that can pay it
+      await finalize(run.id);
+      expect((await trx('payroll_pay_lines').where({ technician_id: tech }).first()).status).toBe('paid');
+    });
+
     it('is paid only by that run: a later run does not pick it up, and voiding the owner frees it for the next run', async () => {
       const tech = await readyTech('Sample Alpha');
       await approvedWeek(tech, NEXT_WEEK);

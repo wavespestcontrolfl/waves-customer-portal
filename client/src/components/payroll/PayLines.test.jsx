@@ -270,12 +270,12 @@ describe('pay run with pay lines', () => {
     cleanup();
     const original = adminFetch.getMockImplementation();
     adminFetch.mockImplementation((path, options) => {
-      if (path === '/admin/payroll/runs/run-1') return reply({ run: { ...RUN, techRewardsNotes: ['December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. A pay run dated Feb 16, 2027 or earlier can add it'] } });
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: { ...RUN, techRewardsNotes: ['December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a pay run dated Feb 16, 2027 or earlier can add it'] } });
       return original(path, options);
     });
     await openRun();
     const list = await screen.findByRole('list', { name: 'Bonuses waiting' });
-    expect(within(list).getByText('December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. A pay run dated Feb 16, 2027 or earlier can add it')).toBeInTheDocument();
+    expect(within(list).getByText('December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a pay run dated Feb 16, 2027 or earlier can add it')).toBeInTheDocument();
   });
 
   it('shows the lines and the employer HSA contribution on the stub, outside gross pay', async () => {
