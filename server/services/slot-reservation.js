@@ -3094,12 +3094,13 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
         expectedMinutes: await candidateExpectedMinutesFromRow(trx, row, extendWindowMinutes),
       },
     });
+    // Owner rule B per truck (holdKeepsSouthDay): another truck may have taken this far-south day while the hold was
+    // lapsed. A refused hold can only lose at accept, so it is superseded like a clashing one. Read BEFORE the gate
+    // read below, which must stay the last read ahead of the writes.
+    const southDayTaken = !(await holdKeepsSouthDay(trx, { stamp: row.zone, date: scheduledDate, techId: row.technician_id }));
     // The gate read again right before the writes (Codex pre-push P1): a make-room hold whose gate went off while its
     // proof ran is superseded like one that no longer proves (its probes above skipped the stops it would move).
     const makeRoomGateOff = !!makeRoom && !makeRoomHoldsOn();
-    // Owner rule B per truck (holdKeepsSouthDay): another truck may have taken this far-south day while the hold was
-    // lapsed. A refused hold can only lose at accept, so it is superseded like a clashing one.
-    const southDayTaken = !(await holdKeepsSouthDay(trx, { stamp: row.zone, date: scheduledDate, techId: row.technician_id }));
     if (clash.length || makeRoomRefused || makeRoomGateOff || southDayTaken) {
       // Supersede — same narrow still-uncommitted predicate releaseReservation
       // uses — rather than leave a hold extending is guaranteed to lose at

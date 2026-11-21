@@ -274,6 +274,25 @@ describe('extendReservation — a far-south hold per truck (owner rule B)', () =
     expect(update.update).not.toHaveBeenCalled();
   });
 
+  // The make-room gate is read after the far-south check, as the last read ahead of the writes (pre-push P1 on
+  // bba7591e08): a gate that goes off while the far-south stops are read still supersedes a make-room hold.
+  test('the make-room gate turns off while the far-south check runs: a make-room hold is superseded, never extended', async () => {
+    const moves = [{ id: 'visit-b', from: '09:00', to: '10:00', widthMin: 60 }, { id: 'visit-c', from: '10:00', to: '11:00', widthMin: 60 }];
+    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+    estimateSlotAvailability.verifyMakeRoomOffer.mockResolvedValue({ shiftMin: 60, moves });
+    const mayTake = jest.fn(async () => { makeRoom.bookingMakeRoomMode.mockReturnValue('off'); return true; });
+    spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+    const probeOf = () => chain({ first: jest.fn().mockResolvedValue(null) });
+    const { dead, update } = harness({
+      hold: { ...TRUCK_HOLD, _already_lapsed: false, lat: 27.1, lng: -82.45, make_room_moves: { v: 1, date: DATE, techId: 'tech-1', shiftMin: 60, moves } },
+      chainProbes: [probeOf(), probeOf(), probeOf()], superseded: true, zones: [VENICE],
+    });
+    await expect(extend()).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_09-00_tech-1` });
+    expect(mayTake).toHaveBeenCalledTimes(1);
+    expect(dead.del).toHaveBeenCalledTimes(1);
+    expect(update.update).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['a hold with no zone stamp (its list did not funnel it)', { zone: null }, true],
     ['gate off (one truck)', {}, false],

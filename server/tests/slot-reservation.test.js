@@ -540,6 +540,10 @@ describe('slot reservation helpers', () => {
     // An accept graduates the hold: checked in its stamp under the accept's date lock, lapsed or live (a live hold
     // passes on its own row), before the technician check; refused, the customer re-picks (slot-taken).
     function commitHold({ zone = 'venice', lapsed = true, verdict = true } = {}) {
+      // A fixed clock, as the reserve and re-tap fixtures use: the held date must stay outside the booking notice
+      // window, which commitReservation checks before the far-south check.
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
       const mayTake = jest.fn().mockResolvedValue(verdict);
       spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
       const chainOf = (first) => {
