@@ -215,7 +215,75 @@ async function estimateAcceptedForFollowUp(enrollment) {
   return !!accepted;
 }
 
-async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null }) {
+// GATE_ESTIMATE_TWO_HOUR_EMAIL_STOPS (owner 2026-11-21): the 2-hour estimate_sent email (step 0) reads its estimate at delivery and
+// is not sent, and its enrollment ends, when the estimate is final, opted out, or the customer replied. It sends no new message
+// and changes no words. Only an enrollment that carries metadata.estimate_id, a real estimate row, gate on, and not a test send
+// (automationDeliveryBlock returns early for a test); anything else is exactly as before.
+async function twoHourEstimateFor(enrollment) {
+  if (require('../config/feature-gates').estimateTwoHourEmailStopsLive?.() !== true) return null;
+  const estimateId = enrollmentMetadata(enrollment).estimate_id;
+  if (!estimateId) return null;
+  return (await db('estimates').where({ id: estimateId }).first()) || null;
+}
+
+// The customer replied by text or email since the send that enrolled them (the engine's two reply arms). The cutoff is the
+// EARLIER of enrollment.enrolled_at and estimate.sent_at that can be read as times: a resend overwrites estimates.sent_at while
+// the enrollment stays active, so sent_at alone would miss a reply made before the resend. Neither readable: no check. A failed
+// read fails OPEN, as the engine's cron path does: the email goes. Only the error code or name is logged (a knex message
+// carries phone numbers and addresses).
+async function customerRepliedSinceEstimate(estimate, enrollment) {
+  const times = [enrollment.enrolled_at, estimate.sent_at]
+    .filter(Boolean)
+    .map((value) => new Date(value).getTime())
+    .filter(Number.isFinite);
+  if (!times.length) return false;
+  try {
+    return await require('./estimate-follow-up').hasRepliedSince(estimate, new Date(Math.min(...times)));
+  } catch (e) {
+    logger.warn(`[automation-runner] estimate reply check skipped for estimate ${estimate.id}: ${(e && (e.code || e.name)) || 'error'}`);
+    return false;
+  }
+}
+
+// The seeded 2-hour step of the estimate_sent sequence (migration 20260424000009). The gate's stops belong to this step alone;
+// any other step of the template keeps only the accept stop.
+const ESTIMATE_SENT_INITIAL_STEP_ORDER = 0;
+const isTwoHourStep = (step) => Number(step?.step_order) === ESTIMATE_SENT_INITIAL_STEP_ORDER;
+
+// The estimate_sent stops, read at delivery; each ends the enrollment the same way. The accept stop is on for every step, exactly
+// as before the gate. The others (step 0 only, gate on), in order: a final state, an opt-out, a reply. A status that is neither
+// final nor sent or viewed (draft, scheduled, sending, send_failed) may be transient: it is never a stop by itself.
+async function estimateSentStop(enrollment, step) {
+  if (await estimateAcceptedForFollowUp(enrollment)) {
+    return { reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' };
+  }
+  return isTwoHourStep(step) ? estimateSentTwoHourStop(enrollment) : null;
+}
+
+async function estimateSentTwoHourStop(enrollment) {
+  const estimate = await twoHourEstimateFor(enrollment);
+  if (!estimate) return null;
+  const ended = estimateEndedStop(estimate);
+  if (ended) return ended;
+  if (await customerRepliedSinceEstimate(estimate, enrollment)) {
+    return { reason: 'The customer replied since the estimate went out', cancelReason: 'estimate_replied' };
+  }
+  return null;
+}
+
+// A FINAL state (archived, a status in the engine's TERMINAL_STATUSES, or an expires_at already past; the status can still
+// read sent or viewed) ends the enrollment as estimate_closed; an estimate that opted out of automated follow-up as estimate_opted_out.
+function estimateEndedStop(estimate) {
+  const closed = { reason: 'The estimate is no longer open', cancelReason: 'estimate_closed' };
+  if (estimate.archived_at || require('./estimate-follow-up')._private.TERMINAL_STATUSES.has(estimate.status)) return closed;
+  if (estimate.expires_at && new Date(estimate.expires_at).getTime() < Date.now()) return closed;
+  if (require('./estimate-comms-eligibility').estimateOptedOutOfEngagement(estimate)) {
+    return { reason: 'The estimate opted out of follow-ups', cancelReason: 'estimate_opted_out' };
+  }
+  return null;
+}
+
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null, step = null }) {
   if (testRecipient) return null;
   if (handedOffStep) return completeHandedOffRetry(enrollment, handedOffStep);
   if (retryNotBound) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: 'not_bound' });
@@ -243,9 +311,9 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     return blockSendAndCancelEnrollment({ enrollment, sendId,
       reason: 'No termite bond on file', cancelReason: 'not_termite_bond' });
   }
-  if (template.key === 'estimate_sent' && await estimateAcceptedForFollowUp(enrollment)) {
-    return blockSendAndCancelEnrollment({ enrollment, sendId,
-      reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' });
+  if (template.key === 'estimate_sent') {
+    const stop = await estimateSentStop(enrollment, step);
+    if (stop) return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
   }
   if (template.key === 'referral_nudge') {
     const verdict = await referralNudgeVerdict(enrollment.customer_id);
@@ -1140,7 +1208,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
 
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
     sendId: sendRow.id, testRecipient, billingSend, retryNotBound: sendRow.retryNotBound,
-    handedOffStep: sendRow.retryHandedOff ? step : null });
+    handedOffStep: sendRow.retryHandedOff ? step : null, step });
   if (deliveryBlock) return deliveryBlock;
 
   const handoff = { started: false, accepted: null };
