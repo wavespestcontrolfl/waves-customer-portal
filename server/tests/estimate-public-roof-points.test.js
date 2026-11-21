@@ -65,7 +65,16 @@ function chainFor(result) {
   };
   return chain;
 }
-db.mockImplementation((table) => chainFor(dbRows[table]));
+// roof_entry_reads answers by its where clauses: the hide check asks for a hidden read of the estimate.
+function readsChain(rows = []) {
+  let where = {};
+  const chain = {
+    where: (w) => { where = { ...where, ...w }; return chain; },
+    first: async () => rows.find((r) => Object.entries(where).every(([k, v]) => r[k] === v)),
+  };
+  return chain;
+}
+db.mockImplementation((table) => (table === 'roof_entry_reads' ? readsChain(dbRows[table]) : chainFor(dbRows[table])));
 
 const ADDRESS = '123 Trust Ln, Bradenton, FL 34203';
 const SENT = '2026-11-20T16:00:00.000Z';
@@ -156,6 +165,10 @@ describe('GET /:token/data: roofPoints', () => {
     expect(none).not.toContain('roofPoints');
 
     dbRows = base({ tables: { estimate_roof_points: POINT, roof_entry_reads: [{ ...READ, hide_on_estimate: true }] } });
+    await withServer(async (baseUrl) => { expect(diffPaths(JSON.parse(await getText(baseUrl)), JSON.parse(none))).toEqual([]); });
+
+    // Hidden on a later read of the estimate that has no points: the copy's own read is not hidden, the estimate is.
+    dbRows = base({ tables: { estimate_roof_points: POINT, roof_entry_reads: [READ, { ...READ, id: 'read-2', tech_pins: null, hide_on_estimate: true }] } });
     await withServer(async (baseUrl) => { expect(diffPaths(JSON.parse(await getText(baseUrl)), JSON.parse(none))).toEqual([]); });
 
     dbRows = base({ estimate: { address: '99 Other Road, Sarasota, FL 34232' }, tables: { estimate_roof_points: POINT, roof_entry_reads: [READ] } });

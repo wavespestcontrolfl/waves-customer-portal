@@ -25,7 +25,8 @@
  *         With pins (a list or null), expected_pins is required too: the list the panel last loaded (null = none saved).
  *         The save or clear lands only while the row still holds exactly that list, else 409 (another window changed it).
  *         Points need a finished, readable read (else 400 "Read the roof again").
- *         hide_on_estimate true keeps the points off the customer estimate. Send only what changed: pins, crop and
+ *         hide_on_estimate true keeps the points off the customer estimate. It is one choice for the estimate: the save
+ *         writes it to every roof read of that estimate, and a new read of the estimate starts with it. Send only what changed: pins, crop and
  *         address only when the points were edited, hide_on_estimate only when the checkbox changed.
  *
  * Admin only, like the other admin estimate routes. The gate is this router's first middleware, ahead of the staff

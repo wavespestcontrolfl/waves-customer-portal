@@ -7026,9 +7026,10 @@ panel with the points and never read from the estimate row; checked at the freez
 latest handoff (`estimate_roof_points.delivered_at` is not older than `estimate_data.deliveryState.lastDeliveredAt`,
 so a copy that a later send could not replace or delete is not shown); the copy was frozen for the estimate's current
 address (the misting layout's address comparison, but an address missing on either side counts as no match); and
-staff have not hidden the points (checked at request time, each with its own query, against the frozen read, the
-estimate's newest finished read with or without points, and its newest finished read with saved points). Every other
-response stays byte-identical. A storage failure omits the key, never the response. The interactive estimate page
+staff have not hidden the points (checked at request time: hide or show is one choice for the estimate, written to
+every roof read of it and inherited by each new read, so the key is absent when the read the copy came from or any
+roof read of the estimate is hidden). "The same address" ignores case, spacing, punctuation and a trailing state, and
+a ZIP on one side only; two different ZIP codes are two homes. Every other response stays byte-identical. A storage failure omits the key, never the response. The interactive estimate page
 (`EstimateViewPage`, Waves AI card) shows it in the place of the satellite photo (a misting layout wins when both are
 present) and puts the satellite photo back when the picture fails to load. `EstimateProposalDocument` (the emailed PDF)
 ignores it, and the emailed-PDF fingerprint does not read it.

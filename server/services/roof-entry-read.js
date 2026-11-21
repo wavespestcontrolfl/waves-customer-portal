@@ -375,6 +375,16 @@ async function reuseCandidates(key) {
 }
 
 /**
+ * Staff hide or show an estimate's roof points as ONE choice for the estimate: saveTechCount writes it to every read of
+ * the estimate, and each new read of the estimate starts with it (true when any read of the estimate is hidden). A fresh
+ * read can therefore never bring back points staff hid.
+ */
+async function pointsHiddenFor(conn, estimateId) {
+  if (!estimateId) return false;
+  return Boolean(await conn(TABLE).where({ estimate_id: estimateId, hide_on_estimate: true }).first('id'));
+}
+
+/**
  * The row to hand this request: the source itself when it belongs to the same (estimate, customer) context, else a
  * NEW row for this context that copies the paid AI result with cost 0 and empty technician fields. One row per
  * context keeps the technician's count for estimate B from overwriting estimate A's. The copy names its paid source
@@ -384,10 +394,11 @@ async function reuseCandidates(key) {
 async function answerFor(source, ctx) {
   if (matchesContext(source, ctx)) return publicRead(source);
   let writtenKey;
-  const [inserted] = await writeOwned(ctx, (conn, key) => conn(TABLE).insert({
+  const [inserted] = await writeOwned(ctx, async (conn, key) => conn(TABLE).insert({
     source_id: source.id,
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
+    hide_on_estimate: await pointsHiddenFor(conn, ctx.estimateId),
     context_key: (writtenKey = key),
     lookup_key: source.lookup_key,
     county: source.county,
@@ -488,9 +499,10 @@ function settleOutcome(outcome) {
 // to every other request before the image fetch starts, and no connection stays open afterwards.
 async function insertClaim(key, county, ctx) {
   const src = IMAGE_SOURCES[county];
-  const rows = await writeOwned(ctx, (conn, contextKeyToWrite) => conn(TABLE).insert({
+  const rows = await writeOwned(ctx, async (conn, contextKeyToWrite) => conn(TABLE).insert({
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
+    hide_on_estimate: await pointsHiddenFor(conn, ctx.estimateId),
     context_key: contextKeyToWrite,
     lookup_key: key,
     county,
@@ -710,7 +722,8 @@ const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && 
 
 /**
  * Save the technician's answer. count / flags as before (flags merged in SQL, so two tabs keep both). hideOnEstimate:
- * staff hid the points from this estimate's customer page. pins: the confirmed points (validateTechPins output), saved
+ * staff hid the points from this estimate's customer page (the choice is the estimate's: it is written to every read
+ * of the estimate, see pointsHiddenFor). pins: the confirmed points (validateTechPins output), saved
  * whole (null clears them). Pins are drawn on the read's crop, so the caller also names the crop centre it drew on
  * ({ lat, lng }, the panel's map point): it must hash to this row's lookup_key, so no other roof's photo can carry these
  * pins, and the rounded centre is stored so the estimate can rebuild the same county crop. A centre that does not match
@@ -749,13 +762,22 @@ async function saveTechCount(id, { count, flags, pins, crop, address, expectedPi
     // lookup_key never changes, so this also proves the row still names the crop that was checked.
     where.lookup_key = row.lookup_key;
   }
-  let query = db(TABLE).where(where);
   // A points save or clear names the list it was edited from (expectedPins, the list the panel last loaded; null = none
   // saved). The UPDATE only lands while the row still holds exactly that list, so a stale tab cannot erase points another
   // tab saved in between: it throws code 'points_changed' and writes nothing.
   const checked = pins !== undefined && expectedPins !== undefined;
-  if (checked) query = query.whereRaw('tech_pins IS NOT DISTINCT FROM ?::jsonb', [expectedPins === null ? null : JSON.stringify(expectedPins)]);
-  const [row] = await query.update(patch).returning('*');
+  const save = async (conn) => {
+    let query = conn(TABLE).where(where);
+    if (checked) query = query.whereRaw('tech_pins IS NOT DISTINCT FROM ?::jsonb', [expectedPins === null ? null : JSON.stringify(expectedPins)]);
+    const [saved] = await query.update(patch).returning('*');
+    // Hide or show is the estimate's choice, not one photo's: every other read of the estimate takes it in the same
+    // transaction, so a later read, or the read a sent copy came from, never shows points staff hid.
+    if (saved?.estimate_id && hideOnEstimate !== undefined) {
+      await conn(TABLE).where({ estimate_id: saved.estimate_id }).whereNot({ id: saved.id }).update({ hide_on_estimate: patch.hide_on_estimate });
+    }
+    return saved;
+  };
+  const row = hideOnEstimate === undefined ? await save(db) : await db.transaction(save);
   if (row) return publicRead(row);
   if (checked && await db(TABLE).where({ id }).first('id')) {
     throw Object.assign(new Error('The points changed since they were loaded'), { code: 'points_changed' });

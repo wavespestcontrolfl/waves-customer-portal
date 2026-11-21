@@ -13,15 +13,15 @@
  *     Between sends the copy never changes, so a re-read, an edit or a label change cannot alter an estimate the
  *     customer already holds. Fail-soft by contract: it never throws, so it can never block or fail a send.
  *   - roofPointsDocBlock: the /data key `{ roofPoints: { imageUrl, imageYear, pins } }`, or `{}` so a response with no
- *     snapshot stays byte-identical. Staff hiding is immediate (checked against the read rows NOW); the content is the
- *     frozen copy. An estimate moved to another address since the send prints nothing, and so does a copy older than
+ *     snapshot stays byte-identical. Staff hiding is immediate (checked against the estimate's read rows NOW); the
+ *     content is the frozen copy. An estimate moved to another address since the send prints nothing, and so does a copy older than
  *     the estimate's latest handoff (a later send could not replace or delete it).
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { customerPointsFromRow } = require('./roof-entry-read');
-const { addressKey } = require('./misting-layout-validate');
+const { addressKey, addressZip } = require('./misting-layout-validate');
 
 const TABLE = 'estimate_roof_points';
 const READS = 'roof_entry_reads';
@@ -35,25 +35,27 @@ function parsed(v) {
   try { return JSON.parse(v); } catch { return null; }
 }
 
-const finishedReads = (estimateId, knex) => knex(READS).where({ estimate_id: estimateId, status: 'done' });
-
 /**
  * The newest finished read for the estimate on which the technician saved points (hidden or not), or undefined. A saved
  * empty list counts: the technician confirmed none, so an older read's points must not come back.
  */
-function newestPointsRead(estimateId, knex, columns = []) {
-  return finishedReads(estimateId, knex)
+function newestPointsRead(estimateId, knex) {
+  return knex(READS)
+    .where({ estimate_id: estimateId, status: 'done' })
     .whereRaw("tech_pins IS NOT NULL AND jsonb_typeof(tech_pins) = 'array'")
     .orderBy(NEWEST)
-    .first(...columns);
+    .first();
 }
 
 // The misting layout's address comparison (addressKey: case, spacing, punctuation and a trailing ZIP or state are
-// ignored), but both sides must name an address. With one missing, blank or only punctuation nothing proves the roof
-// is this home's, so nothing is shown.
+// ignored), with two stricter rules. Both sides must name an address: with one missing, blank or only punctuation
+// nothing proves the roof is this home's. And two different ZIP codes are two homes (the same street line exists in
+// more than one town); a ZIP on one side only still matches.
 function sameHome(a, b) {
   const key = addressKey(a);
-  return Boolean(key) && key === addressKey(b);
+  if (!key || key !== addressKey(b)) return false;
+  const [zipA, zipB] = [addressZip(a), addressZip(b)];
+  return !zipA || !zipB || zipA === zipB;
 }
 
 const timeMs = (v) => (v ? new Date(v).getTime() : NaN);
@@ -102,17 +104,16 @@ function copyIsCurrent(row, estimate) {
 }
 
 /**
- * True when staff hid the points NOW: on the frozen read, on the estimate's newest finished read (staff can hide without
- * saving any points, so it counts with or without a points list), or on its newest read with saved points. Each is its
- * own query, so no number of later reads can push a hidden one out of view.
+ * True when staff hid the estimate's roof points NOW. Hide or show is one choice for the estimate: saveTechCount writes
+ * it to every read of the estimate and a new read starts with it. So the answer is "any read of this estimate is
+ * hidden" (plus the read the copy came from, by id): no later read, with or without points, brings hidden points back.
  */
 async function hiddenNow(estimateId, readId, knex) {
-  const [frozen, newest, newestWithPoints] = await Promise.all([
+  const [frozen, anyHidden] = await Promise.all([
     readId ? knex(READS).where({ id: readId }).first('hide_on_estimate') : null,
-    finishedReads(estimateId, knex).orderBy(NEWEST).first('hide_on_estimate'),
-    newestPointsRead(estimateId, knex, ['hide_on_estimate']),
+    knex(READS).where({ estimate_id: estimateId, hide_on_estimate: true }).first('id'),
   ]);
-  return [frozen, newest, newestWithPoints].some((r) => Boolean(r?.hide_on_estimate));
+  return Boolean(frozen?.hide_on_estimate || anyHidden);
 }
 
 function cleanSnapshot(snapshot) {

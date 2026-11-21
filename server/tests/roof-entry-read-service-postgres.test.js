@@ -241,6 +241,30 @@ jest.setTimeout(60000);
       .rejects.toMatchObject({ code: 'address_missing' });
   });
 
+  test('hide is one choice for the estimate: a save writes every read of it, and a new read of it starts hidden', async () => {
+    const [est, other] = [await insertId('estimates'), await insertId('estimates')];
+    const a = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+    const elsewhere = (await svc.runRoofEntryRead(home({ estimateId: other }))).read;
+    const b = (await svc.runRoofEntryRead(home({ lat: 27.47, estimateId: est }))).read;
+    expect(new Set([a.id, b.id, elsewhere.id]).size).toBe(3);
+    const hidden = async () => Object.fromEntries((await rows()).map((r) => [r.id, r.hide_on_estimate]));
+    // Staff hide on read B: read A of the same estimate takes it, the other estimate's read does not.
+    expect((await svc.saveTechCount(b.id, { hideOnEstimate: true })).hide_on_estimate).toBe(true);
+    expect(await hidden()).toEqual({ [a.id]: true, [b.id]: true, [elsewhere.id]: false });
+    // A fresh read of the estimate (a third photo, then a reused photo) starts hidden; the other estimate's does not.
+    const c = (await svc.runRoofEntryRead(home({ lat: 27.48, estimateId: est }))).read;
+    expect(c.hide_on_estimate).toBe(true);
+    expect((await svc.runRoofEntryRead(home({ lat: 27.48, estimateId: other }))).read.hide_on_estimate).toBe(false);
+    // Showing again from read C clears it on every read of the estimate.
+    await svc.saveTechCount(c.id, { hideOnEstimate: false });
+    expect(Object.values(await hidden())).toEqual([false, false, false, false, false]);
+    // A save without the choice leaves the other reads alone.
+    await database('roof_entry_reads').where({ id: a.id }).update({ hide_on_estimate: true });
+    await svc.saveTechCount(b.id, { count: 3 });
+    expect((await hidden())[a.id]).toBe(true);
+    expect((await hidden())[b.id]).toBe(false);
+  });
+
   test('a customer retired by a duplicate merge (deleted_at + merged- phone) is refused; an archived one is not', async () => {
     const [survivor, loser, archived] = [await insertId('customers'), await insertId('customers'), await insertId('customers')];
     await svc.runRoofEntryRead(home());

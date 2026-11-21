@@ -326,6 +326,15 @@ describe('sendEstimateNow: roof points frozen at send', () => {
     expect(store).toEqual({});
   });
 
+  test('points saved for the same street in another ZIP are not copied; a ZIP on one side only still is', async () => {
+    reads = [read({ points_address: '12 Synthetic Way, Bradenton, FL 34208' })];
+    await router.sendEstimateNow(estimateRow(), 'email');
+    expect(store).toEqual({});
+    reads = [read({ points_address: '12 Synthetic Way, Bradenton, FL' })];
+    await router.sendEstimateNow(estimateRow(), 'email');
+    expect(store['est-1']).toBeDefined();
+  });
+
   test('an estimate whose address is blank or only punctuation gets no copy, whatever the points name', async () => {
     for (const [estimateAddress, pointsAddress] of [['   ', '12 Synthetic Way, Bradenton, FL 34203'], [' - ', ' - '], ['.', '   ']]) {
       const blank = estimateRow({ address: estimateAddress });

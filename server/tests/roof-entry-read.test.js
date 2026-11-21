@@ -1556,6 +1556,64 @@ describe('saveTechCount pins', () => {
   });
 });
 
+describe('hide or show is one choice for the estimate', () => {
+  const row = (extra = {}) => ({
+    id: READ_A, lookup_key: CROP_KEY(), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
+    ai_flags: {}, ai_tier: 'med', status: 'done', tech_final_count: null, tech_final_flags: null, tech_pins: null,
+    hide_on_estimate: false, created_at: new Date().toISOString(), ...extra,
+  });
+  const OTHER = '66666666-6666-4666-8666-666666666666';
+  const THIRD = '77777777-7777-4777-8777-777777777777';
+  const ELSEWHERE = '88888888-8888-4888-8888-888888888888';
+
+  it('a hide on one read is written to every read of that estimate in one transaction, and to no other read', async () => {
+    mockRows.push(
+      row({ estimate_id: EST }),
+      row({ id: OTHER, estimate_id: EST, lookup_key: 'b'.repeat(64) }),
+      row({ id: THIRD, estimate_id: EST, lookup_key: 'c'.repeat(64), status: 'pending' }),
+      row({ id: ELSEWHERE, estimate_id: EST2, lookup_key: 'd'.repeat(64) }),
+    );
+    mockEvents.length = 0;
+    const hidden = await svc.saveTechCount(OTHER, { hideOnEstimate: true });
+    expect(hidden.hide_on_estimate).toBe(true);
+    expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([true, true, true, false]);
+    expect(mockEvents[0]).toBe('tx');
+    expect(mockEvents[mockEvents.length - 1]).toBe('tx-end');
+    // Showing again from another read clears it on every read of the estimate.
+    await svc.saveTechCount(READ_A, { hideOnEstimate: false });
+    expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([false, false, false, false]);
+  });
+
+  it('a hide on a read with no estimate stays on that read; a save without the hide flag writes no other read', async () => {
+    mockRows.push(row(), row({ id: OTHER, lookup_key: 'b'.repeat(64) }), row({ id: THIRD, estimate_id: EST }), row({ id: ELSEWHERE, estimate_id: EST, hide_on_estimate: true }));
+    await svc.saveTechCount(READ_A, { hideOnEstimate: true });
+    expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([true, false, false, true]);
+    mockEvents.length = 0;
+    await svc.saveTechCount(THIRD, { count: 4 });
+    expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([true, false, false, true]);
+    expect(mockEvents).not.toContain('tx');
+  });
+
+  it('a new read of an estimate whose points are hidden starts hidden (a paid read and a reused copy alike)', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: null }, { id: EST2, customer_id: null }];
+    // EST hid its points on an earlier read of another photo.
+    mockRows.push(row({ id: OTHER, estimate_id: EST, lookup_key: 'b'.repeat(64), hide_on_estimate: true }));
+    const paid = await post(home({ estimate_id: EST }));
+    expect(paid.json.read.hide_on_estimate).toBe(true);
+    // The same photo for another estimate is a copy: that estimate hid nothing, so its copy shows.
+    const copy = await post(home({ estimate_id: EST2 }));
+    expect(copy.json.read.id).not.toBe(paid.json.read.id);
+    expect(copy.json.read.hide_on_estimate).toBe(false);
+    // And a copy for an estimate that hid its points starts hidden.
+    mockRows.length = 0;
+    mockRows.push(row({ id: OTHER, estimate_id: EST, lookup_key: 'b'.repeat(64), hide_on_estimate: true }));
+    await post(home());
+    expect((await post(home({ estimate_id: EST }))).json.read.hide_on_estimate).toBe(true);
+    // A read with no estimate never starts hidden.
+    expect(mockRows.find((r) => !r.estimate_id).hide_on_estimate).toBe(false);
+  });
+});
+
 describe('cropImageUrl and customerPointsFromRow', () => {
   const row = (over = {}) => ({
     status: 'done', image_source: 'manatee_2025_rgb', image_year: 2025, crop_lat: '27.46000', crop_lng: '-82.57000',

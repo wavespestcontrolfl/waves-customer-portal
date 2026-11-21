@@ -122,13 +122,28 @@ describe('roofPointsDocBlock', () => {
     expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
   });
 
-  test('an older hidden read under a newer visible one with points does not hide it; another estimate\'s hidden read does not either', async () => {
+  test('read A gave the copy, staff hid on newer read B (no points), then read C came with nothing hidden on it: still {}', async () => {
+    // The hide is the estimate's choice. A fresh read must never bring the points back.
     const reads = [
-      frozenRead({ id: 'read-0', hide_on_estimate: true, created_at: new Date('2026-11-19T15:00:00Z') }),
       frozenRead(),
-      frozenRead({ id: 'read-x', estimate_id: 'est-2', hide_on_estimate: true, created_at: new Date('2026-11-20T18:00:00Z') }),
+      frozenRead({ id: 'read-b', tech_pins: null, hide_on_estimate: true, created_at: new Date('2026-11-20T17:00:00Z') }),
+      frozenRead({ id: 'read-c', tech_pins: null, created_at: new Date('2026-11-20T18:00:00Z') }),
     ];
-    expect((await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).roofPoints).toEqual(SNAPSHOT);
+    expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
+  });
+
+  test('a hidden read of the estimate hides the points whatever its age or status; another estimate\'s hidden read does not', async () => {
+    const older = frozenRead({ id: 'read-0', hide_on_estimate: true, created_at: new Date('2026-11-19T15:00:00Z') });
+    expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads: [older, frozenRead()] }) })).toEqual({});
+    const pending = frozenRead({ id: 'read-p', status: 'pending', tech_pins: null, hide_on_estimate: true });
+    expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads: [frozenRead(), pending] }) })).toEqual({});
+    const elsewhere = frozenRead({ id: 'read-x', estimate_id: 'est-2', hide_on_estimate: true, created_at: new Date('2026-11-20T18:00:00Z') });
+    expect((await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads: [frozenRead(), elsewhere] }) })).roofPoints).toEqual(SNAPSHOT);
+  });
+
+  test('the read the copy came from is hidden but no longer names the estimate: {}', async () => {
+    const reads = [frozenRead({ estimate_id: null, hide_on_estimate: true })];
+    expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
   });
 
   test('the estimate moved to another address since the send: {}; so does a missing or blank address on either side', async () => {
@@ -142,7 +157,10 @@ describe('roofPointsDocBlock', () => {
       expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point({ address: blank }), reads: [frozenRead()] }) })).toEqual({});
       expect(await roofPointsDocBlock(est({ address: blank }), { knex: fakeKnex({ point: point({ address: ' - ' }), reads: [frozenRead()] }) })).toEqual({});
     }
-    // Case, spacing, punctuation and a trailing ZIP or state do not make it another home.
+    // The same street line in another ZIP is another home; a ZIP+4 of the same ZIP is not.
+    expect(await roofPointsDocBlock(est({ address: '12 Synthetic Way, Bradenton, FL 34208' }), { knex })).toEqual({});
+    expect((await roofPointsDocBlock(est({ address: '12 Synthetic Way, Bradenton, FL 34203-1187' }), { knex })).roofPoints).toEqual(SNAPSHOT);
+    // Case, spacing, punctuation, a trailing state and a ZIP on one side only do not make it another home.
     expect((await roofPointsDocBlock(est({ address: '12 synthetic way,  Bradenton FL' }), { knex })).roofPoints).toEqual(SNAPSHOT);
   });
 
