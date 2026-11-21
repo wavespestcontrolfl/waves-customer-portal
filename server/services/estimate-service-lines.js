@@ -459,36 +459,6 @@ function inferEstimateServiceLines(estimate = {}) {
   ];
 }
 
-// The keys of the estimator's ticked boxes (inputs.svc*), nothing else: never free text, never the stored service_interest.
-function tickedBoxServiceKeys(estimate = {}) {
-  const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
-  return selectedServiceKeysFromInputs(data?.inputs || data?.engineInputs || {});
-}
-
-// Does an enabled, itemized authored proposal define the offer? Its retained engine rows can be stale, so copy that names a
-// service does not read them (the persisted detector estimateDataCarriesAreaAddOns applies the same "enabled" test).
-function estimateHasAuthoredProposal(estimate = {}) {
-  const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
-  return !!(data && data.proposal && data.proposal.enabled === true);
-}
-
-// The keys of the estimate's STORED recurring rows only; [] when it has none. Ticked boxes never count here: they fold
-// one-time and recurring services into one family (svcOnetimePest and svcPest both read `pest`), so they prove no recurring plan.
-function recurringRowServiceKeys(estimate = {}) {
-  const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
-  return unique(recurringServicesFromData(data).map((line) => line.key).filter((key) => key && key !== 'unknown'));
-}
-
-// The keys of the one-time service lines the estimate carries (its one-time items and spec items, and its area add-ons), as
-// text keys: `unknown` stays when a line names no lane. [] when it carries none. A recurring estimate's inferred lines never
-// show these (inferEstimateServiceLines returns early on recurring rows), so copy that must not promise recurring terms
-// over a one-time job (trenching, pre-slab) reads them here.
-function oneTimeLineKeys(estimate = {}) {
-  const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
-  const addOns = areaAddOnLinesFromData(data, estimate.pricingAuthority ?? estimate.pricing_authority);
-  return unique([...oneTimeServicesFromData(data), ...addOns].map((line) => line.key));
-}
-
 function inferEstimateServiceInterest(estimate = {}) {
   const explicit = String(estimate.serviceInterest || estimate.service_interest || '').trim();
   if (explicit) return explicit;
@@ -501,12 +471,8 @@ function inferEstimateServiceInterest(estimate = {}) {
 
 module.exports = {
   SERVICE_LINE_LABELS,
-  estimateHasAuthoredProposal,
-  recurringRowServiceKeys,
-  tickedBoxServiceKeys,
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
-  oneTimeLineKeys,
   oneTimeServicesFromData,
   parseEstimateData,
   serviceKeysFromText,

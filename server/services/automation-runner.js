@@ -215,11 +215,11 @@ async function estimateAcceptedForFollowUp(enrollment) {
   return !!accepted;
 }
 
-// GATE_ESTIMATE_EMAILS_NAME_SERVICE (owner 2026-11-21): the 2-hour estimate_sent email reads its estimate at delivery.
+// GATE_ESTIMATE_TWO_HOUR_EMAIL (owner 2026-11-21): the 2-hour estimate_sent email reads its estimate at delivery.
 // Only an enrollment that carries metadata.estimate_id, a real estimate row, gate on, and not a test send. Anything else
 // returns null and the email goes exactly as before.
-async function nameServiceEstimateFor(enrollment) {
-  if (require('../config/feature-gates').estimateEmailsNameServiceLive?.() !== true) return null;
+async function twoHourEstimateFor(enrollment) {
+  if (require('../config/feature-gates').estimateTwoHourEmailLive?.() !== true) return null;
   const estimateId = enrollmentMetadata(enrollment).estimate_id;
   if (!estimateId) return null;
   return (await db('estimates').where({ id: estimateId }).first()) || null;
@@ -240,13 +240,13 @@ async function customerRepliedSinceEstimate(estimate, enrollment) {
 }
 
 // The estimate_sent stops, read at delivery; each ends the enrollment the same way. The accept stop is always on; the others
-// (GATE_ESTIMATE_EMAILS_NAME_SERVICE) are for an estimate no longer open to the customer (status not sent or viewed), one that
+// (GATE_ESTIMATE_TWO_HOUR_EMAIL) are for an estimate no longer open to the customer (status not sent or viewed), one that
 // opted out of automated follow-up, or a customer who replied since it went out.
 async function estimateSentStop(enrollment) {
   if (await estimateAcceptedForFollowUp(enrollment)) {
     return { reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' };
   }
-  return estimateSentNameServiceStop(enrollment);
+  return estimateSentTwoHourStop(enrollment);
 }
 
 // The estimate row each estimate_sent send evaluated its stops on, keyed by the enrollment object of that send. The body is
@@ -254,8 +254,8 @@ async function estimateSentStop(enrollment) {
 // cannot still get the email built for the old row.
 const stopEvaluatedEstimates = new WeakMap();
 
-async function estimateSentNameServiceStop(enrollment) {
-  const estimate = await nameServiceEstimateFor(enrollment);
+async function estimateSentTwoHourStop(enrollment) {
+  const estimate = await twoHourEstimateFor(enrollment);
   if (!estimate) return null;
   stopEvaluatedEstimates.set(enrollment, estimate);
   const closed = estimateNoLongerOpen(estimate);
@@ -283,29 +283,31 @@ const ESTIMATE_DELIVERY_TEMPLATE_KEYS = () => [
 ];
 const lowerTrim = (value) => String(value || '').trim().toLowerCase();
 
-// The link is a bearer link, so it goes only to the address the estimate was already emailed to: this step's recipient is the
-// estimate's current address AND the email log shows a delivery email for THIS estimate (email_messages.estimate_id, the
-// delivery template keys, the same accepted-status set the signup email uses) accepted for that address. An SMS-only send
-// enrolls too, and has no such row. A failed read is no proof.
+// The personalized 2-hour body (the opened state, the button, the answers) goes only to the address the estimate was already
+// emailed to: this step's recipient is the estimate's current address AND the email log shows a delivery email for THIS
+// estimate (email_messages.estimate_id, the delivery template keys, the same accepted-status set the signup email uses)
+// accepted for that address. An SMS-only send enrolls too, and has no such row. A failed read is no proof.
 async function estimateWasEmailedTo(estimate, address) {
-  const { QUERY_STATUSES, acceptedForSending } = require('./signup-single-email');
-  const rows = await db('email_messages')
-    .where({ estimate_id: estimate.id })
-    .whereIn('template_key', ESTIMATE_DELIVERY_TEMPLATE_KEYS())
-    .whereIn('status', QUERY_STATUSES)
-    .whereRaw('lower(recipient_email_snapshot) = ?', [address])
-    .limit(20)
-    .select('status');
-  return (rows || []).some(acceptedForSending);
+  try {
+    const { QUERY_STATUSES, acceptedForSending } = require('./signup-single-email');
+    const rows = await db('email_messages')
+      .where({ estimate_id: estimate.id })
+      .whereIn('template_key', ESTIMATE_DELIVERY_TEMPLATE_KEYS())
+      .whereIn('status', QUERY_STATUSES)
+      .whereRaw('lower(recipient_email_snapshot) = ?', [address])
+      .limit(20)
+      .select('status');
+    return (rows || []).some(acceptedForSending);
+  } catch (e) {
+    logger.warn(`[automation-runner] estimate delivery proof not read for estimate ${estimate.id}: ${(e && (e.code || e.name)) || 'error'}`);
+    return false;
+  }
 }
 
 // The View my estimate link: the engine's email-leg builder, behind the pricing-authority guard the manual follow-up route
-// applies, and only when the address proof above holds. Any refusal or failure is no link; the rest of the email still goes.
-async function estimateSentLink(estimate, recipient) {
+// applies. A refusal or a failed mint is no link; the rest of the email still goes.
+async function estimateSentLink(estimate) {
   try {
-    const address = lowerTrim(recipient);
-    if (!address || address !== lowerTrim(estimate.customer_email)) return null;
-    if (!(await estimateWasEmailedTo(estimate, address))) return null;
     if (!(await require('./pricing-authority-gate').estimateDeliverableUnderGate(db, estimate))) return null;
     const { emailUrl } = await require('./estimate-follow-up')._private.mintStageLinks(
       estimate, 'estimate_sent_automation', { emailOnly: true },
@@ -321,19 +323,18 @@ async function estimateSentLink(estimate, recipient) {
 // step of the template keeps its own configured body.
 const ESTIMATE_SENT_INITIAL_STEP_ORDER = 0;
 
-// The rendered content to send: the per-estimate body for the 2-hour estimate_sent email, else the content passed in
-// (today's step body: gate off, no estimate id, no estimate row, a test send, another template or another step). The estimate
-// is the row the stops judged (one read for both).
+// The rendered content to send: the personalized body for the 2-hour estimate_sent email, else the content passed in (today's
+// step body: gate off, no estimate id, no estimate row, a test send, another template or another step, a recipient that is not
+// the estimate's address, or no proof the estimate was emailed to it). The estimate is the row the stops judged (one read for both).
 async function withEstimateSentBody({ html, text }, { template, step, enrollment, recipient, testRecipient, personal, asmGroupId }) {
   if (template.key !== 'estimate_sent' || testRecipient || Number(step?.step_order) !== ESTIMATE_SENT_INITIAL_STEP_ORDER) return { html, text };
   const estimate = stopEvaluatedEstimates.get(enrollment);
   if (!estimate) return { html, text };
   stopEvaluatedEstimates.delete(enrollment);
-  // The address first: a step that goes anywhere but the estimate's own current address (a corrected address, the account
-  // holder) gets today's content, with nothing about this estimate: no opened state, no service word, no button.
-  if (lowerTrim(recipient) !== lowerTrim(estimate.customer_email) || !lowerTrim(recipient)) return { html, text };
+  const address = lowerTrim(recipient);
+  if (!address || address !== lowerTrim(estimate.customer_email) || !(await estimateWasEmailedTo(estimate, address))) return { html, text };
   const { buildEstimateSentEmail } = require('./estimate-sent-email-by-service');
-  const body = buildEstimateSentEmail({ estimate, estimateUrl: await estimateSentLink(estimate, recipient) });
+  const body = buildEstimateSentEmail({ estimate, estimateUrl: await estimateSentLink(estimate) });
   return renderAutomationStepContent({ template, htmlBody: body.html_body, textBody: body.text_body, customer: personal, asmGroupId });
 }
 
@@ -1265,7 +1266,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     handedOffStep: sendRow.retryHandedOff ? step : null });
   if (deliveryBlock) return deliveryBlock;
 
-  // GATE_ESTIMATE_EMAILS_NAME_SERVICE: the 2-hour estimate email, built for this estimate. Subject, sender and the
+  // GATE_ESTIMATE_TWO_HOUR_EMAIL: the 2-hour estimate email, built for this estimate. Subject, sender and the
   // wrapper stay the step's; a null body (gate off, no estimate) leaves today's content.
   ({ html, text } = await withEstimateSentBody({ html, text }, { template, step, enrollment, recipient, testRecipient, personal, asmGroupId }));
 
