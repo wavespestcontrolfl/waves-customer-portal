@@ -800,9 +800,10 @@ async function readCampaignGeoTargets(platformCampaignId) {
       const geoId = type === 'LOCATION' ? String(c.location?.geo_target_constant || '').split('/').pop() || null : null;
       return { resourceName: c.resource_name || null, type: type || null, geoId };
     });
-    // A target with no resource name could not be removed: the answer is not usable.
-    if (targets.some((t) => !t.resourceName)) {
-      logger.error(`[google-ads] readCampaignGeoTargets: campaign ${platformCampaignId} has a target with no resource name`);
+    // A target with no resource name could not be removed, and a place with no location id cannot be compared with
+    // a wanted ZIP (it would count as a removal and an addition of the same place): the answer is not usable.
+    if (targets.some((t) => !t.resourceName || (t.type === 'LOCATION' && !/^\d+$/.test(String(t.geoId ?? ''))))) {
+      logger.error(`[google-ads] readCampaignGeoTargets: campaign ${platformCampaignId} has a target with no resource name or no location id`);
       return null;
     }
     return {

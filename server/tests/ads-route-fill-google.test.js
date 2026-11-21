@@ -92,6 +92,19 @@ describe('readCampaignGeoTargets', () => {
     expect(await GoogleAds.readCampaignGeoTargets('9000000001')).toEqual({ search: true, presenceOnly: true, targets: [] });
   });
 
+  test.each([
+    ['no location id', null],
+    ['a location id that is not digits', 'geoTargetConstants/abc'],
+  ])('a place with %s makes the whole read null: it could not be compared with a wanted ZIP', async (_name, constant) => {
+    mockCustomer.query
+      .mockResolvedValueOnce(campaignRow(enums.PositiveGeoTargetType.PRESENCE))
+      .mockResolvedValueOnce([
+        criterion(9012001, enums.CriterionType.LOCATION, 9012001),
+        { campaign_criterion: { resource_name: 'customers/1234567890/campaignCriteria/9000000001~9012002', type: enums.CriterionType.LOCATION, location: constant ? { geo_target_constant: constant } : null } },
+      ]);
+    expect(await GoogleAds.readCampaignGeoTargets('9000000001')).toBeNull();
+  });
+
   test('an unknown campaign, a target with no resource name, and a failed read are all null', async () => {
     mockCustomer.query.mockResolvedValueOnce([]);
     expect(await GoogleAds.readCampaignGeoTargets('9000000001')).toBeNull();
