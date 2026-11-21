@@ -4,7 +4,7 @@ import { cn } from '../ui/cn';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
-import PrepGuideForm, { PREP_GUIDE_LINKS } from './PrepGuideForm';
+import PrepGuideForm, { PREP_GUIDE_LINKS, WELCOME_EMAIL_LINK } from './PrepGuideForm';
 
 // The composers' Quick Links picker: one searchable sheet over links, prep
 // guides and how-to guides. A guide row opens the send form (PrepGuideForm)
@@ -124,7 +124,7 @@ export default function InsertLinkSheet({
   }, [open, prepGuide]);
 
   const groups = useMemo(
-    () => buildLinkGroups([...(links || []), ...PREP_GUIDE_LINKS], query, activeCategory),
+    () => buildLinkGroups([...(links || []), WELCOME_EMAIL_LINK, ...PREP_GUIDE_LINKS], query, activeCategory),
     [links, query, activeCategory],
   );
   const hasQuery = Boolean(query.trim());
@@ -221,7 +221,7 @@ export default function InsertLinkSheet({
                   <div key={link.key}>
                   <button
                     type="button"
-                    onClick={() => (link.pestType || link.steps
+                    onClick={() => (link.pestType || link.steps || link.sendForm
                       ? setPrepGuide(link)
                       : link.channels
                       ? setChannelRowKey(chooserOpen ? null : link.key)

@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import PrepGuideForm from './PrepGuideForm';
+import PrepGuideForm, { WELCOME_EMAIL_LINK } from './PrepGuideForm';
 import ProjectFindingFieldInput from '../tech/ProjectFindingFieldInput';
 import { renderWithDidYouMean } from './DidYouMean';
 
@@ -67,6 +67,22 @@ describe('PrepGuideForm how-to guide', () => {
     expect(JSON.parse(init.body)).toEqual({ customerId: 'e1', guideKey: 'alerts_iphone' });
     fireEvent.click(screen.getByRole('button', { name: 'Put the steps in my message instead' }));
     expect(onInsertSteps).toHaveBeenCalled();
+  });
+});
+
+describe('PrepGuideForm welcome email', () => {
+  it('sends the welcome email again by email only, with no steps button', async () => {
+    const fetcher = stubCustomers([exact]);
+    render(<PrepGuideForm active guide={WELCOME_EMAIL_LINK} initialSearch="Orlan Stompf" onSendingChange={() => {}} onInsertSteps={() => {}} />);
+    expect(screen.queryByRole('radio')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Put the steps in my message instead' })).toBeNull();
+    fireEvent.click(await screen.findByText('Orlan Stompf'));
+    fetcher.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ success: true, message: 'Welcome email sent.' }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Send by email' }));
+    await screen.findByText('Welcome email sent.');
+    const [url, init] = fetcher.mock.calls.at(-1);
+    expect(String(url)).toContain('/admin/communications/send-welcome');
+    expect(JSON.parse(init.body)).toEqual({ customerId: 'e1' });
   });
 });
 

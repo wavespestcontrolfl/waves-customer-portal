@@ -1997,6 +1997,43 @@ router.post('/send-howto', async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
+// POST /api/admin/communications/send-welcome — the welcome email again, from
+// Quick Links (owner 2026-11-21). The welcome sender keeps its own checks: the
+// email opt-out, the suppression list and the template's on/off switch.
+router.post('/send-welcome', async (req, res, next) => {
+  try {
+    const { customerId } = req.body || {};
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    if (!(await technicianCustomerGuard(req, res, customerId))) return undefined;
+    const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+    if (!customer) return res.status(404).json({ error: 'That customer could not be found.' });
+    if (!String(customer.email || '').trim()) return res.status(400).json({ error: 'This customer has no email on file.' });
+    let outcome;
+    try {
+      ({ outcome } = await require('../services/new-recurring-welcome-sms').sendWelcomeEmail(customer, { resend: true }));
+    } catch (err) {
+      // Provider errors can echo the address: log the error name only.
+      logger.error(`[communications] welcome email resend failed for customer ${customer.id} (${err?.name || 'Error'})`);
+      return res.status(400).json({ error: "The welcome email may or may not have gone out — check the customer's email log before sending it again." });
+    }
+    if (outcome !== 'sent') {
+      return res.status(400).json({
+        error: outcome === 'skipped'
+          ? 'The welcome email was not sent — this customer turned off email, or the address is blocked.'
+          : "Couldn't send the welcome email — try again.",
+      });
+    }
+    await db('customer_interactions').insert({
+      customer_id: customer.id,
+      interaction_type: 'email_outbound',
+      admin_user_id: req.technicianId || null,
+      subject: 'Welcome email sent again (manual)',
+      body: `Welcome email sent again from Quick Links to ${String(customer.email).trim()}.`,
+    }).catch((err) => logger.warn(`[communications] welcome resend interaction log failed for customer ${customer.id}: ${err.name}`));
+    return res.json({ success: true, message: `Welcome email sent to ${String(customer.email).trim()}.` });
+  } catch (err) { return next(err); }
+});
+
 // GET /api/admin/communications/sender?phone=&customerId= — the line a
 // staff text to this person leaves from (home-line PR 3): the line they
 // texted within 30 days, else their home line, else main. GATE_HOME_LINE off
