@@ -1720,7 +1720,7 @@ const AREA_ADDONS = {
       minDaysApart: 60,
       limitProduct: 'Snapshot 2.5TG',
     },
-    // Arena 50 WDG at 0.147 oz/1,000 (6.4 oz/acre, $9.87/oz): the Florida
+    // Arena 50 WDG at 0.147 oz/1,000 (6.4 oz/acre, $7.42/oz): the Florida
     // 2(ee) rate for southern chinch bug on St. Augustine (sheet expires
     // 2028-12-31, on file in Staff documents; the applicator carries it).
     // Two applications 8 weeks apart equal the season limit of 12.8 oz/acre.
@@ -1731,7 +1731,7 @@ const AREA_ADDONS = {
       serviceKey: 'area_addon_lawn_insect_spot',
       category: 'lawn_care',
       areaLabel: 'treated lawn',
-      materialPer1000: 1.45,
+      materialPer1000: 1.09,
       setupMin: 8,
       minPer1000: 6,
       tiers: [1000, 2000, 3500],
