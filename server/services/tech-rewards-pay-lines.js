@@ -45,7 +45,8 @@
  * (lineOnlyCheckProblem: no pay rate, a rate under the minimum wage). The technician rows are read FOR SHARE under the pay run's lock, so a change to a technician's status,
  * field work or hire date waits for the pay run's transaction and a finalize never pays a gift that change took away.
  * No line is written, the run row keeps what waits (payroll_runs.tech_rewards_waits, replaced by every sync), the run view lists
- * it (techRewardsNotes, waitNotes) until the gift is paid, and the next run that is ready writes it.
+ * it (techRewardsNotes, waitNotes: with the reason on a draft, without it on a finalized run) until the gift is paid, and the
+ * next run that is ready writes it.
  *
  * Every skip, wait and change is recorded in one audit event per sync (payroll.tech_rewards_lines_synced): technician ids, kinds,
  * reason codes, weeks and line ids, never an amount. Money is integer cents.
@@ -414,28 +415,38 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {
 
 /**
  * Plain notes for a run's summary: what waited at the run's latest sync and is not paid since, with the last pay date that can
- * carry it, e.g. "December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a pay run dated
- * Feb 16, 2027 or earlier can add it". The limit is a PAY date (dueInRun), not today's date: a run dated inside it can still be
- * worked out and finalized later, so the note states the limit and never says what today allows. Read from the run row
- * (saveWaits). None with either gate off, none for a gift that is paid, and none for a technician who no longer gets a line
- * (left, or no longer a field technician), so an old run never says "waits" about a gift that is paid or that no run will pay.
+ * carry it. A DRAFT run says why, e.g. "December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a
+ * pay run dated Feb 16, 2027 or earlier can add it": its reasons are worked out again at every sync. A FINALIZED run is never
+ * worked out again, so its reason would go out of date (a hire date entered since, a week paid since): it says only "December
+ * gift for Sample Alpha was not on this pay run. Only a pay run dated Feb 16, 2027 or earlier can add it". The limit is a PAY
+ * date (dueInRun), not today's date: a run dated inside it can still be worked out and finalized later, so the note states
+ * the limit and never says what today allows. Read from the run row (saveWaits). No note with either gate off, for a gift
+ * that is paid, or for a technician who gets no gift from any run now (left, no longer a field technician, or a hire date on
+ * file that is after the gift date): an old run never says a gift waits that is paid or that no run will pay.
  * A gift whose line is open on another draft still shows here: it is not paid, and on this run it waited.
  */
 async function waitNotes(conn, runId) {
   if (!payLinesOn() || !techRewardsOn()) return [];
-  const row = await conn('payroll_runs').where({ id: runId }).first('tech_rewards_waits');
+  const row = await conn('payroll_runs').where({ id: runId }).first('status', 'tech_rewards_waits');
   const waits = (row && Array.isArray(row.tech_rewards_waits) ? row.tech_rewards_waits : [])
     .filter((w) => KIND_WORDS[w.kind] && WAIT_WORDS[w.reason] && SOURCE_ID_RE.test(w.source_id || ''));
   if (!waits.length) return [];
   const paid = new Set((await conn('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
     .whereIn('source_id', waits.map((w) => w.source_id)).select('source_id')).map((line) => line.source_id));
   // only for a technician who still gets a line (recipients): one who left since gets no gift from any run, so nothing waits
-  const names = new Map((await recipients(conn).whereIn('technicians.id', waits.map((w) => w.technician_id))
-    .select('technicians.id', 'technicians.name')).map((t) => [t.id, t.name]));
-  return waits.filter((w) => !paid.has(w.source_id) && names.has(w.technician_id))
+  const techs = new Map((await recipients(conn).whereIn('technicians.id', waits.map((w) => w.technician_id))
+    .select('technicians.id', 'technicians.name', conn.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date")))
+    .map((tech) => [tech.id, tech]));
+  const yearOfWait = (w) => Number(SOURCE_ID_RE.exec(w.source_id)[3]);
+  const canStillGet = (w) => {
+    const tech = techs.get(w.technician_id);
+    return Boolean(tech) && !paid.has(w.source_id) && !(tech.hire_date && tech.hire_date > decemberGiftDate(yearOfWait(w)));
+  };
+  return waits.filter(canStillGet)
     .map((w) => {
-      const last = lastPayDate(Number(SOURCE_ID_RE.exec(w.source_id)[3]));
-      return `${KIND_WORDS[w.kind]} for ${names.get(w.technician_id)} waits: ${WAIT_WORDS[w.reason](w)}. Only a pay run dated ${dayLabel(last)} or earlier can add it`;
+      const who = `${KIND_WORDS[w.kind]} for ${techs.get(w.technician_id).name}`;
+      const state = row.status === 'draft' ? `waits: ${WAIT_WORDS[w.reason](w)}` : 'was not on this pay run';
+      return `${who} ${state}. Only a pay run dated ${dayLabel(lastPayDate(yearOfWait(w)))} or earlier can add it`;
     })
     .sort();
 }

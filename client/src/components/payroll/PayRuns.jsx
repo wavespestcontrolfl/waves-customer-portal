@@ -170,7 +170,7 @@ function WaitingBonuses({ notes = [] }) {
   if (!notes.length) return null;
   return <div>
     <h4 className="m-0 mb-1 text-ui-body font-medium">Bonuses waiting</h4>
-    <p className="m-0 mb-1 text-ui-caption text-ink-secondary">These are not on this pay run. Each line says what it waits for and the last pay date that can add it.</p>
+    <p className="m-0 mb-1 text-ui-caption text-ink-secondary">These are not on this pay run. Each line gives the last pay date that can add it. A draft also says what the bonus waits for.</p>
     <ul className="m-0 grid list-none gap-1 p-0" aria-label="Bonuses waiting">
       {notes.map(note => <li key={note} className="rounded-sm border-hairline border-zinc-200 p-2 text-ui-caption">{note}</li>)}
     </ul>

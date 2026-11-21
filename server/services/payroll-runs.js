@@ -508,10 +508,11 @@ async function workedDatesByTechnician(conn, ids, start, end) {
     .whereIn('technician_id', ids).where('work_date', '>=', start).where('work_date', '<=', end)
     .whereRaw(DAILY_WORK_SQL)
     .select('technician_id', conn.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"));
+  // DISTINCT: a day holds many entries (the shift, every job, every drive), and a span of a year would return them all
   const entries = await conn('time_entries')
     .whereIn('technician_id', ids).where('status', '!=', 'voided')
     .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
-    .select('technician_id', conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
+    .distinct('technician_id', conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
   for (const row of [...daily, ...entries]) byTech.get(row.technician_id).add(row.work_date);
   return byTech;
 }
