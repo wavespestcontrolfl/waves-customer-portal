@@ -377,6 +377,23 @@ async function getHourlyRainOutlook(lat, lng, { budgetMs = TOTAL_BUDGET_MS, nwsB
   return hours;
 }
 
+// NWS only, never the paid backup (the 07:05 notice's rain note, owner 2026-11-19 D3: "$0"): a fresh cached NWS answer,
+// else one NWS read (joining a read already running for the same grid key); null when NWS fails. A backup answer another
+// reader cached is not used, and no backup read is made. An NWS answer is cached for the other readers.
+async function getNwsHourlyRain(lat, lng) {
+  if (lat == null || lng == null || lat === '' || lng === '') return null;
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
+  const key = cacheKey(latNum, lngNum);
+  const cached = _hourlyCache.get(key);
+  const fromNws = (hours) => Array.isArray(hours) && !hours.some((h) => h.source === 'open-meteo');
+  if (cached && Date.now() - cached.at < HOURLY_CACHE_TTL_MS && fromNws(cached.value)) return cached.value;
+  const nws = await nwsHourlyShared(latNum, lngNum, key, Date.now() + TOTAL_BUDGET_MS, false);
+  if (nws) cachePut(_hourlyCache, key, { at: Date.now(), value: nws }, HOURLY_CACHE_TTL_MS);
+  return nws;
+}
+
 // One uncapped NWS hourly read per grid key at a time. A capped caller (the
 // picker) joins one already running for up to its own NWS deadline instead
 // of starting a second, shorter read that may lose to the backup while the
@@ -447,6 +464,7 @@ module.exports = {
   getDailyRainOutlook,
   getDailyRainOutlookBounded,
   getHourlyRainOutlook,
+  getNwsHourlyRain,
   getOpenMeteoDaytime,
   forecastLinkForZip,
   _test: { cachePut, CACHE_MAX_ENTRIES, dailyFromHours, daytimeFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },

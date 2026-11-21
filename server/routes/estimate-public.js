@@ -6431,7 +6431,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Sub-0.1% effective rates (e.g. a $3 headroom on a floor-priced $603/yr
   // lawn plan) are not a sellable incentive — treat them like the at-floor
   // case and hide the prepay option instead of advertising ~$0 savings.
+  // Only a plan with exactly one recurring unit can prepay: accept and the
+  // converter refuse any other count (prepayUnitCountClosed, the same count the /data bundle uses).
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
+    && !prepayUnitCountClosed(estData, estimate, { frequencyResolves: pricingFrequenciesForView.length > 0 })
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
   // The prepay invoice carries the disclosed bait-station setup as its own
   // line (converter, codex r4) — never waived by prepay — so the displayed
@@ -11507,14 +11510,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // stamped flag or the stored mix. When combos exist, the MATCHED
       // combo's stamped flag is enforced right after combo resolution below
       // (combos are always prepay-ineligible today), and an unmatched map
-      // 400s there.
-      const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
-        ? selectedFrequency.annualPrepayEligible
-        : null;
-      const prepayMixEligible = tierPrepayFlag != null
-        ? tierPrepayFlag
-        : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
-      if (!prepayMixEligible) {
+      // 400s there. The unit count applies on every path (acceptPrepayAvailable).
+      if (!acceptPrepayAvailable({ selectedFrequency, recurringSvcList, oneTimeList, estData, estimate })) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }
     }
@@ -12334,21 +12331,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           ...(serviceCadences ? { serviceCadences } : {}),
           selectedAt: new Date().toISOString(),
         };
-        const persistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData);
-        if (persistPestOnlyRecurringChoice && Array.isArray(nextEstimateData.result?.recurring?.services)) {
-          nextEstimateData.result = {
-            ...nextEstimateData.result,
-            recurring: {
-              ...nextEstimateData.result.recurring,
-              services: nextEstimateData.result.recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)),
-            },
-          };
-        }
-        if (persistPestOnlyRecurringChoice && Array.isArray(nextEstimateData.recurring?.services)) {
-          nextEstimateData.recurring = {
-            ...nextEstimateData.recurring,
-            services: nextEstimateData.recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)),
-          };
+        if (shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData)) {
+          nextEstimateData = withPestOnlyRecurringChoice(nextEstimateData);
         }
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
@@ -12379,7 +12363,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // against a linkage correction. One order everywhere:
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
-        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status', 'customer_id');
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first(
+          'estimate_data', 'status', 'customer_id', 'bill_by_invoice', 'show_one_time_option',
+        );
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
@@ -12461,6 +12447,23 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         if (freshLinkData && await staleCallLinkageReason(trx, freshLinkData, { lockCallRow: true, estimateStatus: freshLinkRow?.status })) {
           const err = new Error('Estimate is no longer active');
           err.status = 409;
+          throw err;
+        }
+        // A customer's own plan quote that staff changed, judged again on the row locked above and ahead of the consumer
+        // notice (codex pre-push P1), the order of the route's first read: a change that landed after that read never
+        // turns into a request to sign for a quote the accept refuses. A verified capture the page drops on this 409 is
+        // retired after the rollback, as the plan re-check below does.
+        const lockedQuoteRefusal = require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal({
+          ...estimate, bill_by_invoice: freshLinkRow?.bill_by_invoice, show_one_time_option: freshLinkRow?.show_one_time_option,
+        });
+        if (lockedQuoteRefusal) {
+          if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+            droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+          }
+          const err = new Error(lockedQuoteRefusal.message);
+          err.status = 409;
+          err.code = lockedQuoteRefusal.code;
+          err.isOperational = true;
           throw err;
         }
         // Florida consumer notice at the commit (GATE_ESTIMATE_CONSUMER_NOTICE): the live gate and the notice are judged
@@ -28477,6 +28480,119 @@ function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
   return next;
 }
 
+// A plan with more than one recurring service cannot prepay the year: accept
+// refuses a bundle choice ("annual prepay is not available for this estimate")
+// and the converter fails the rest closed (ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED).
+// The page offered it anyway, because the estimate-level flag only reads the
+// service mix and only the mosquito-axis combos were stamped, so a customer on a
+// lawn + pest plan picked "pay the year" (it waives the setup fee) and was
+// refused at Approve (estimate EST-7df56f0f, 2026-11-06; 28 of 30 multi-service
+// estimates since Aug 28 carried the false flag). Stamp every combo FALSE and
+// drop the estimate-level flag for a multi-unit plan, so the page never offers
+// it and its setup-fee waiver line (tierAwareFee) follows. Counts units the way
+// accept does (supplemented rows); a count that cannot be read leaves the flag
+// alone. Changes what the page offers only, never an amount. The per-frequency
+// flags close too, and the /data pass runs AFTER the mosquito tier stamp: a
+// legacy estimate can keep its mosquito ladder in result.recurring and a second
+// service in the root recurring block, and the page prefers a frequency's flag
+// over the estimate-level one. The server-rendered page applies the same count
+// (renderPage showAnnualPrepayOption).
+// A recurring choice on an estimate that also offers a one-time pest visit keeps only the pest rows
+// (shouldPersistPestOnlyRecurringChoice): accept persists exactly this, so conversion sees solo pest and bills its
+// setup fee. Shared by accept and recurringDataAsAccepted.
+function withPestOnlyRecurringChoice(estData) {
+  const keepPest = (services) => services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
+  let next = estData;
+  if (Array.isArray(next?.result?.recurring?.services)) {
+    next = { ...next, result: { ...next.result, recurring: { ...next.result.recurring, services: keepPest(next.result.recurring.services) } } };
+  }
+  if (Array.isArray(next?.recurring?.services)) {
+    next = { ...next, recurring: { ...next.recurring, services: keepPest(next.recurring.services) } };
+  }
+  return next;
+}
+
+// The plan's data as accept persists it for a recurring choice: the supplemented rows, and on an estimate with a
+// one-time pest choice only the pest rows (withPestOnlyRecurringChoice). Accept applies that filter only when a priced
+// frequency resolves (it persists the filtered rows inside its `if (selectedFrequency)` step), so `frequencyResolves:
+// false` counts the rows unfiltered, as conversion will receive them.
+function recurringDataAsAccepted(estData, estimate, { frequencyResolves = true } = {}) {
+  const supplemented = withSupplementedRecurringServices(estData || {}) || estData || {};
+  return frequencyResolves && shouldPersistPestOnlyRecurringChoice(estimate || {}, supplemented)
+    ? withPestOnlyRecurringChoice(supplemented)
+    : supplemented;
+}
+
+// True when the plan cannot prepay: the data accept persists does not hold exactly one recurring unit
+// (annualPrepayRecurringUnitCount; the manual accept and optOutPrepayOffered use the same `=== 1` rule). More than
+// one unit is a multi-service plan the converter refuses. A termite annual plan is no exception: accept parks it for the
+// annual agreement's signature, but activation runs the same conversion and refuses two units, so a termite annual plan
+// bundled with another service gets no prepay and never parks for a signature it could not activate (a solo plan is one
+// unit and keeps its offer). Zero units is no plan: a priced one-time pest choice keeps
+// only the pest rows (withPestOnlyRecurringChoice), so lawn-only rows leave nothing to prepay. A count that fails is
+// unknown, not one unit, so prepay closes too: the page never offers a prepay, or its setup-fee waiver, that accept
+// may refuse.
+function prepayUnitCountClosed(estData, estimate, { frequencyResolves = true } = {}) {
+  try {
+    const converter = require('../services/estimate-converter');
+    // A termite annual plan prepays only its own termite unit. When the estimate names the plan (the converter's
+    // selectedTermiteAnnualPlanRows test, mapped tmBait included), its rows before any pest-only filter must fold to
+    // exactly one unit, the termite row. Bundled with another service, activation refuses two units; with only a pest
+    // row, or once the pest-only filter drops the termite row, the agreement would park for coverage that is not termite.
+    if (require('../services/estimate-termite-program-rows').selectedTermiteAnnualPlanRows(estData || {}).length > 0) {
+      const asStored = recurringDataAsAccepted(estData, estimate, { frequencyResolves: false });
+      const rows = converter.foldTermiteRentalIntoBait(converter.recurringServicesFromEstimateData(asStored));
+      if (converter.annualPrepayRecurringUnitCount(asStored) !== 1 || rows.length !== 1
+        || converter.recurringServiceKey(rows[0]) !== 'termite_bait') return true;
+    }
+    return converter.annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate, { frequencyResolves })) !== 1;
+  } catch (err) {
+    logger.warn(`[estimate-public] prepay unit count failed (${err?.name || 'Error'}); prepay closed`);
+    return true;
+  }
+}
+
+// Accept's annual-prepay check: the selected tier's stamped flag when a tier resolves, else the stored service mix, and
+// on every path the unit count (prepayUnitCountClosed). The flags finalizePricingBundle stamps already carry the count,
+// but a bundle with no priced frequency (an engine replay that failed) has no flag to read, and the mix alone admits a
+// multi-service plan the converter refuses: a termite annual plan bundled with pest would park for a signature its
+// activation refuses. With no priced frequency, accept persists the rows unfiltered, so they are counted unfiltered.
+function acceptPrepayAvailable({ selectedFrequency, recurringSvcList, oneTimeList, estData, estimate }) {
+  const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
+    ? selectedFrequency.annualPrepayEligible
+    : null;
+  const prepayMixEligible = tierPrepayFlag != null
+    ? tierPrepayFlag
+    : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+  return prepayMixEligible && !prepayUnitCountClosed(estData, estimate, { frequencyResolves: Boolean(selectedFrequency) });
+}
+
+// Prepay only. The fee lines are left as each builder made them: on a legacy plan split across the two recurring
+// blocks, the page's fee readers see one block and can show a $99 WaveGuard setup fee that accept, reading both, never
+// bills. Which reader is right is a separate ruling for the owner (CLAUDE.md rule 22); with prepay closed, that fee
+// just no longer says it is waived when you pay the year.
+function withMultiServicePrepayClosed(payload, estData, estimate) {
+  const combos = Array.isArray(payload.serviceCadenceCombos) ? payload.serviceCadenceCombos : [];
+  // A bundle with no priced frequency gives accept no selected tier, so accept counts its rows unfiltered too.
+  const frequencyResolves = [payload.frequencies, payload.hiddenLawnFrequencies].some((list) => Array.isArray(list) && list.length > 0);
+  const multi = prepayUnitCountClosed(estData, estimate, { frequencyResolves });
+  if (!combos.length && !multi) return payload;
+  const closed = (entry) => ({ ...entry, annualPrepayEligible: false });
+  // With no prepay there is no "waived when you pay the year": Ask Waves reads the fee flags as stated.
+  const noWaiver = (fee) => (fee && fee.waivedWithPrepay === true ? { ...fee, waivedWithPrepay: false } : fee);
+  return {
+    ...payload,
+    ...(multi && payload.annualPrepayEligible === true ? { annualPrepayEligible: false } : {}),
+    ...(multi && Array.isArray(payload.frequencies) ? { frequencies: payload.frequencies.map(closed) } : {}),
+    // A cached or frozen bundle can carry tiers moved off the page; accept still resolves a submitted key from them.
+    ...(multi && Array.isArray(payload.hiddenLawnFrequencies)
+      ? { hiddenLawnFrequencies: payload.hiddenLawnFrequencies.map(closed) } : {}),
+    ...(multi && Array.isArray(payload.firstVisitFees) ? { firstVisitFees: payload.firstVisitFees.map(noWaiver) } : {}),
+    ...(multi && payload.setupFee ? { setupFee: noWaiver(payload.setupFee) } : {}),
+    ...(combos.length ? { serviceCadenceCombos: combos.map(closed) } : {}),
+  };
+}
+
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts = {}) {
   // Engine-invocation path: the displayed frequencies were priced from a
   // freshly generated anchorEngineResult, NOT the stored estData (codex
@@ -28493,7 +28609,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
     payload.measuredBasisAnchor = Object.keys(anchorBasis).length ? anchorBasis : null;
   }
   const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
-  const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
+  let withQuoteState = attachQuoteRequirement(alignedPayload, estData);
   // Floor-capped prepay has no sellable incentive — mirror the SSR
   // showAnnualPrepayOption gate here so the React /data flow hides the
   // annual-prepay option too (it renders off annualPrepayEligible alone).
@@ -28542,6 +28658,8 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
           : combo));
     }
   }
+  // Last word on prepay for a multi-service plan: after the tier stamps above.
+  withQuoteState = withMultiServicePrepayClosed(withQuoteState, estData, estimate);
   // After the contract attaches sections, hide floor-clamped lawn cadences on
   // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
   // top-level entries move to hiddenLawnFrequencies for accept resolution.
@@ -32909,6 +33027,9 @@ module.exports.stripInternalMarginFieldsDeep = stripInternalMarginFieldsDeep;
 module.exports.sanitizePublicOneTimeBreakdown = sanitizePublicOneTimeBreakdown;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
+module.exports.withPestOnlyRecurringChoice = withPestOnlyRecurringChoice;
+module.exports.withMultiServicePrepayClosed = withMultiServicePrepayClosed;
+module.exports.acceptPrepayAvailable = acceptPrepayAvailable;
 module.exports.isPestServiceName = isPestServiceName;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;

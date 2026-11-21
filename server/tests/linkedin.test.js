@@ -201,6 +201,21 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(linkedin._isTrustedImageUrl('https://evil.example.com/x.jpg')).toBe(false);
     expect(linkedin._isTrustedImageUrl('https://notwavespestcontrol.com/x.jpg')).toBe(false);
     expect(linkedin._isTrustedImageUrl('not a url')).toBe(false);
+    // userinfo: Node's fetch would quote the whole URL, password included, in its error.
+    expect(linkedin._isTrustedImageUrl('https://user:pw@cdn.example.com/x.jpg')).toBe(false);
+    expect(linkedin._isTrustedImageUrl('https://user@www.wavespestcontrol.com/x.jpg')).toBe(false);
+  });
+
+  test('a credential-bearing URL on a trusted host is refused, and the warning omits it', async () => {
+    const calls = mockRoutes();
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
+
+    await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: 'https://user:pw-s3cret@cdn.example.com/x.jpg' });
+
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('[linkedin] image upload failed'));
+    expect(line).toContain('untrusted thumbnail URL host');
+    expect(line).not.toContain('s3cret');
+    expect(calls.some((c) => c.url.includes('user:pw'))).toBe(false);
   });
 
   test('linkedinEngagementReady: requires connection AND the r_organization_social_feed grant', async () => {
@@ -272,6 +287,56 @@ describe('createPost article thumbnail (Images API)', () => {
     const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
     expect(postBody.content.article.source).toBe(LINK);
     expect(postBody.content.article.thumbnail).toBeUndefined();
+  });
+
+  // The studio's daily campaign card has no link: 25 of 25 such posts reached
+  // LinkedIn as bare text (Oct-Nov 2026) while GBP carried the same picture.
+  test('no link + imageUrl → a single-image post (content.media), and the result reports the picture', async () => {
+    const calls = mockRoutes();
+
+    const res = await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: IMG });
+
+    expect(res).toMatchObject({ platform: 'linkedin', success: true, imageUrl: IMG });
+    expect(calls.some((c) => c.url === 'https://upload.example.com/u1' && c.method === 'PUT')).toBe(true);
+    const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
+    expect(postBody.content).toEqual({ media: { id: 'urn:li:image:abc' } });
+  });
+
+  test('no link + a failed picture upload → the text still posts, with no content and no imageUrl; the warning omits the URL', async () => {
+    const calls = mockRoutes();
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
+
+    // An untrusted, scheme-relative URL is refused before any fetch.
+    const res = await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: '//evil.example.org/x.jpg?token=s3cret' });
+
+    expect(res).toMatchObject({ platform: 'linkedin', success: true });
+    expect(res.imageUrl).toBeUndefined();
+    const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
+    expect(postBody.content).toBeUndefined();
+    expect(postBody.commentary).toBe('T');
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('[linkedin] image upload failed'));
+    expect(line).toBeTruthy();
+    expect(line).toContain('untrusted thumbnail URL host');
+    expect(line).not.toContain('evil.example.org');
+    expect(line).not.toContain('s3cret');
+  });
+
+  test('a mixed-case scheme (HTTPS://) on a failed fetch is still kept out of the warning', async () => {
+    const calls = mockRoutes();
+    const shouted = 'HTTPS://cdn.example.com/social-media/x.jpg?sig=s3cret';
+    const realFetch = global.fetch;
+    global.fetch = jest.fn(async (url, opts) => (String(url) === shouted
+      ? { ok: false, status: 403, headers: { get: () => null }, text: async () => '' }
+      : realFetch(url, opts)));
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
+
+    await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: shouted });
+
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('[linkedin] image upload failed'));
+    expect(line).toContain('thumbnail image fetch 403');
+    expect(line).not.toContain('s3cret');
+    expect(line).not.toMatch(/cdn\.example\.com/i);
+    expect(calls.some((c) => c.url.startsWith('https://api.linkedin.com/rest/posts'))).toBe(true);
   });
 
   test('no imageUrl → no Images API traffic at all (unchanged text+article post)', async () => {

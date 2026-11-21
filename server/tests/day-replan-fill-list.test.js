@@ -45,6 +45,16 @@ jest.mock('../services/scheduling/gap-candidates', () => {
 // The Leads screen's service list (its Schedule button), and the 24-hour reminder lock (owner 2026-11-07).
 jest.mock('../services/service-library', () => ({ getServices: jest.fn() }));
 jest.mock('../services/auto-dispatch/reminder-off', () => ({ loadReminderOffIds: jest.fn(async () => new Set()) }));
+// The estimate page's catalog lookup for a quote line without a key (customer-rain-rank.js catalogKeyForRow): none here
+// unless a test says.
+jest.mock('../services/slot-reservation', () => ({ ...jest.requireActual('../services/slot-reservation'), catalogLinkForProfile: jest.fn(async () => null) }));
+// The catalog identity the booking screens' rain rule reads (rain-fit.js withCatalogKeys, the completion-profile
+// resolver): a stored key settles it; a name the catalog has gives its key (one here); else none.
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForScheduledService: jest.fn(async (row) => ({ findingsType: null,
+    serviceKey: row.service_key_snapshot || { 'mosquito misting system refill': 'mosquito_misting_refill' }[String(row.service_type).toLowerCase()] || null })),
+}));
 
 const logger = require('../services/logger');
 const page = require('../routes/estimate-slots-public')._internals;
@@ -54,11 +64,20 @@ const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const { loadTechStartPoints } = require('../services/scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../services/scheduling/departure-time');
 const { HQ } = require('../services/route-optimizer');
-const { analyzeGapCandidate, loadGapCandidate } = require('../services/scheduling/gap-candidates');
+const { analyzeGapCandidate, loadGapCandidate, planFamilies } = require('../services/scheduling/gap-candidates');
 const { getServices } = require('../services/service-library');
 const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
 const { loadReminderOffIds } = require('../services/auto-dispatch/reminder-off');
+const { catalogLinkForProfile } = require('../services/slot-reservation');
+const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { fillList, MAX_PER_BLOCK, MOVE_UP_DAYS, _internals } = require('../services/day-replan/fill-list');
+const { ZONE_COORDS } = require('../services/scheduling/forecast-zones');
+
+const { rainArea, rainVerdict } = _internals;
+// An NWS hourly answer for `day`: every hour at 10%, `all` sets every hour, and an hour key sets that hour (null = no
+// reading).
+const rainHours = (day, { all = 10, ...byHour } = {}) => Array.from({ length: 24 }, (_, h) => ({
+  startTime: `${day}T${String(h).padStart(2, '0')}:00:00-04:00`, rainChance: h in byHour ? byHour[h] : all }));
 
 const NOW = new Date('2040-09-09T12:00:00Z');
 const DAY = '2040-09-10';
@@ -98,6 +117,8 @@ const BOOKED_OR_LIVE_HOLD = (() => {
   return recorded;
 })();
 const ZERO_VISITS = { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unread: 0 };
+// No rain note given: the rain rule does not run.
+const NO_RAIN = { checked: false, leftOut: 0 };
 
 // A fake knex: each table's chain records its calls; a where(fn) runs fn on a recorder of its own. `inactive` maps a
 // capability category to the technicians set to off for it; `scheduleBlocks` are the tech_schedule_blocks rows; `leads`
@@ -106,7 +127,7 @@ const ZERO_VISITS = { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unre
 // `addOns` are the plan visits' add-on services (scheduled_service_addons), and `planHolds` the plan_holds rows (read by
 // customer and family).
 function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = [], leads = [], leadEstimates = [], customerVisits = [],
-  plan = [], sameDay = null, addOns = [], planHolds = [] } = {}) {
+  plan = [], sameDay = null, addOns = [], planHolds = [], services = CATALOG, catalog = [] } = {}) {
   const calls = [];
   // The plan visits' own read (the one joined to customers), apart: other reads use some of the same clauses.
   const planCalls = [];
@@ -133,7 +154,17 @@ function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = 
       if (typeof args[0] === 'function') args[0](q);
       else record('where', args);
       if (args[0] && typeof args[0] === 'object') Object.assign(q.match, args[0]);
+      if (typeof args[0] === 'string' && args.length === 2) q.match[args[0]] = args[1];
       return q;
+    };
+    // A services row by id, as stored (apart from getServices' answer): `catalog` first ({ id, service_key }, or
+    // { id, error } for a read that fails: the rain class key), then `services` (the Leads screen's list: a lead's length).
+    q.first = async (column) => {
+      record('first', [column]);
+      if (table !== 'services') return null;
+      const row = catalog.find((r) => r.id === q.match.id) || services.find((r) => r.id === q.match.id);
+      if (row && row.error) throw row.error;
+      return row || null;
     };
     q.select = async (first) => {
       if (table === 'estimates') return first === '*' ? estimates : leadEstimates;
@@ -190,6 +221,8 @@ beforeEach(() => {
   getServices.mockResolvedValue({ services: CATALOG });
   loadReminderOffIds.mockResolvedValue(new Set());
   loadGapCandidate.mockReset();
+  catalogLinkForProfile.mockReset();
+  catalogLinkForProfile.mockResolvedValue(null);
 });
 
 describe('open estimates', () => {
@@ -257,7 +290,7 @@ describe('open estimates', () => {
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate down unread (lookup timeout)'));
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate refusal-down unread (park lookup failed)'));
       // The notice's count: the estimates were checked, and could not be read.
-      expect(await fillList(conn, [], NOW)).toEqual({ checked: 3, fitted: 0, noLocation: 0, unread: 2, leads: ZERO_LEADS, visits: ZERO_VISITS, byBlock: [] });
+      expect(await fillList(conn, [], NOW)).toEqual({ checked: 3, fitted: 0, noLocation: 0, unread: 2, leads: ZERO_LEADS, visits: ZERO_VISITS, rain: NO_RAIN, byBlock: [] });
     } finally {
       page.slotBrowseRefusal.mockImplementation(async () => null);
       page.pageSlotPicker.mockImplementation(async () => PICKER);
@@ -269,7 +302,7 @@ describe('open estimates', () => {
     expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [], unread: 0 });
     expect(calls.some(([table]) => table === 'scheduled_services')).toBe(false);
     const open = fakeConn({ estimates: [estimate('e1')] });
-    expect(await fillList(open.conn, [], NOW)).toEqual({ checked: 1, fitted: 0, noLocation: 0, unread: 0, leads: ZERO_LEADS, visits: ZERO_VISITS, byBlock: [] });
+    expect(await fillList(open.conn, [], NOW)).toEqual({ checked: 1, fitted: 0, noLocation: 0, unread: 0, leads: ZERO_LEADS, visits: ZERO_VISITS, rain: NO_RAIN, byBlock: [] });
     expect(slots.resolveEstimateCoords).not.toHaveBeenCalled();
     expect(dayStopsQuery).not.toHaveBeenCalled();
     // With no block, no lead and no plan visit is read either.
@@ -520,6 +553,15 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
     expect(['2040-09-28', '2040-10-01'].map(byId.rounds.dayOpen)).toEqual([false, true]);
     expect(['2040-09-28', '2040-10-01'].map(byId.excepted.dayOpen)).toEqual([false, false]);
     expect(['2040-09-28', '2040-10-01'].map(byId.pest.dayOpen)).toEqual([true, true]);
+  });
+
+  test('a booked row\'s plan family follows the catalog key of its service id ahead of its key snapshot', async () => {
+    const { conn } = fakeConn({ catalog: [{ id: 'svc-mosquito', service_key: 'mosquito_monthly' }] });
+    const row = { service_type: 'Pest Control Service', service_key_snapshot: 'pest_control' };
+    expect(await planFamilies(conn, { ...row, service_id: 'svc-mosquito' })).toEqual(['mosquito']);
+    // No catalog row for the id, or no id: the snapshot.
+    expect(await planFamilies(conn, { ...row, service_id: 'svc-gone' })).toEqual(['pest_control']);
+    expect(await planFamilies(conn, row)).toEqual(['pest_control']);
   });
 
   test('its add-on services count: the capability for each, the plan holds of their families, and the mowing-day rule', async () => {
@@ -895,12 +937,206 @@ describe('fillList', () => {
     }
   });
 
-  test('a lead\'s look is sized by the catalog (1 hour when it names none) and needs the technician\'s capability for it', async () => {
+  test('rain: an outdoor job whose best fit runs in rain takes its next fit in the block; with none it is left out and counted; a rain-safe job stays, marked', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const row = planVisit('v1', '2040-09-12', { window_start: '14:00:00' });
+    loadGapCandidate.mockResolvedValue(loaded(row, { lat: HQ.lat + 0.05 }));
+    // The open estimate (pest control) and the plan visit are outdoor work; the lead's Waves Assessment is rain-safe.
+    const run = (outlooks) => fillList(fakeConn({ estimates: [estimate('near')], leads: [lead('l1', { latitude: HQ.lat + 0.03 })], plan: [row] }).conn,
+      [morning], NOW, outlooks === undefined ? undefined : { outlooks });
+    const area = rainArea({ lat: HQ.lat + 0.03, lng: HQ.lng });
+    const listed = (out) => out.byBlock[0].map((l) => [l.kind, l.id, l.windowStart, !!l.inRain]);
+    // Dry, each job's best fit is its 9:00 row.
+    const dry = [['estimate', 'near', '09:00', false], ['lead', 'l1', '09:00', false], ['visit', 'v1', '09:00', false]];
+    expect(listed(await run())).toEqual(dry);
+    // Rain at 9 AM: a 9:00 row reads 9:00 to noon, so the outdoor jobs take their 10:00 row (10:00 to 1 PM is dry). The
+    // rain-safe lead keeps 9:00, marked.
+    let out = await run({ [area]: rainHours(DAY, { 9: 80 }) });
+    expect(listed(out)).toEqual([['estimate', 'near', '10:00', false], ['lead', 'l1', '09:00', true], ['visit', 'v1', '10:00', false]]);
+    expect(out.rain).toEqual({ checked: true, leftOut: 0 });
+    // Rain in every hour: no row in the block is dry, so both outdoor jobs are left out of it, and counted.
+    out = await run({ [area]: rainHours(DAY, { all: 70 }) });
+    expect(listed(out)).toEqual([['lead', 'l1', '09:00', true]]);
+    expect(out.rain).toEqual({ checked: true, leftOut: 2 });
+    expect([out.fitted, out.leads.fitted, out.visits.fitted]).toEqual([0, 1, 0]);
+    // A job that fits no row of a block is not counted for it: a 20-minute block holds none.
+    out = await fillList(fakeConn({ estimates: [estimate('near')], leads: [lead('l1', { latitude: HQ.lat + 0.03 })], plan: [row] }).conn,
+      [{ ...morning, start: 600, min: 20 }], NOW, { outlooks: { [area]: rainHours(DAY, { all: 70 }) } });
+    expect([out.byBlock, out.rain]).toEqual([[[]], { checked: true, leftOut: 0 }]);
+    // Rain at 4 PM, after every 9:00 row's 2 dry hours: nothing changes.
+    out = await run({ [area]: rainHours(DAY, { 16: 80 }) });
+    expect(listed(out)).toEqual(dry);
+    expect(out.rain).toEqual({ checked: true, leftOut: 0 });
+    // Unknown is kept: rain in another area only, or a dry day with an hour that has no reading (a wet hour still
+    // counts as rain, as the booking rule reads it).
+    const other = Object.keys(ZONE_COORDS).find((zone) => zone !== area);
+    for (const outlooks of [{ [other]: rainHours(DAY, { all: 90 }) }, { [area]: rainHours(DAY, { 10: null }) }]) {
+      expect(listed(await run(outlooks))).toEqual(dry);
+    }
+    // No rain note: the rule does not run.
+    expect((await run()).rain).toEqual(NO_RAIN);
+  });
+
+  test('rain: every service counts, named as the screen that books or moves the job names it; one outdoor service makes it outdoor work', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const wet = { [rainArea({ lat: HQ.lat + 0.01, lng: HQ.lng })]: rainHours(DAY, { all: 70 }) };
+    const verdict = (out) => (out.byBlock[0].length ? (out.byBlock[0][0].inRain ? 'in' : 'dry') : 'out');
+    // An estimate's visit, as the estimate page's rain ranking names it (customer-rain-rank.js estimateServiceIdentities).
+    const estimateRain = async (services) => {
+      slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, serviceLabel: services.map((svc) => svc.label).join(' + '), services });
+      return verdict(await fillList(fakeConn({ estimates: [estimate('near')] }).conn, [morning], NOW, { outlooks: wet }));
+    };
+    const assessment = { service: 'waves_assessment', label: 'Waves Assessment' };
+    // The assessment alone is rain-safe; with pest control on the same visit it is outdoor work.
+    expect(await estimateRain([assessment])).toBe('in');
+    expect(await estimateRain([assessment, { service: 'pest_control', label: 'Pest Control' }])).toBe('out');
+    // A quote line's catalog key settles it ahead of its category (cockroach control is inside work): the verified key,
+    // the key the catalog lookup resolved, else the page's own catalog lookup; with none, the label's words.
+    const roach = { service: 'pest_control', label: 'Cockroach Control' };
+    expect(await estimateRain([{ ...roach, catalogServiceKey: 'cockroach_control' }])).toBe('in');
+    expect(await estimateRain([{ ...roach, resolvedServiceKey: 'cockroach_control' }])).toBe('in');
+    catalogLinkForProfile.mockResolvedValueOnce({ service_key: 'cockroach_control' });
+    expect(await estimateRain([roach])).toBe('in');
+    expect(await estimateRain([roach])).toBe('out');
+    // Then the screens' own catalog read (withCatalogKeys): a line without a key whose label is a catalog name takes
+    // that row's key (a misting refill is rain-safe).
+    expect(await estimateRain([{ service: 'mosquito', label: 'Mosquito Misting System Refill' }])).toBe('in');
+    // A failed catalog lookup for a line without a key never reads its label alone: the job stays out of rain hours.
+    catalogLinkForProfile.mockRejectedValueOnce(new Error('link timeout'));
+    expect(await estimateRain([assessment])).toBe('out');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('rain class unread (link timeout)'));
+    // A plan visit as the rain pass reads a booked row: its key snapshot (a bait station check is rain-safe, whatever
+    // its name says), else the catalog key of its service id, else its name. An outdoor add-on makes it outdoor work.
+    const visitRain = async (row, { key = 'rodent_bait_quarterly', addOns = [], catalog = [] } = {}) => {
+      loadGapCandidate.mockResolvedValue(loaded(row, { lat: HQ.lat + 0.01, service_key_snapshot: key, service_id: row.service_id || null }));
+      return verdict(await fillList(fakeConn({ plan: [row], addOns, catalog }).conn, [morning], NOW, { outlooks: wet }));
+    };
+    const row = planVisit('v1', '2040-09-12', { service_type: 'Rodent Bait Station Service' });
+    expect(await visitRain(row)).toBe('in');
+    const pestAddOn = { scheduled_service_id: 'v1', service_id: null, service_name: 'Pest Control Service', service_key_snapshot: 'pest_control' };
+    expect(await visitRain(row, { addOns: [pestAddOn] })).toBe('out');
+    const unkeyed = { ...row, service_id: 'svc-bait' };
+    expect(await visitRain(unkeyed, { key: null, catalog: [{ id: 'svc-bait', service_key: 'rodent_bait_quarterly' }] })).toBe('in');
+    expect(await visitRain(unkeyed, { key: null })).toBe('out');
+    // Counted as the move screens count them: at most 12 services; one more counts as outdoor work.
+    const baitChecks = (n) => Array.from({ length: n }, (_, i) => ({ scheduled_service_id: 'v1', service_id: null, service_name: `Bait Check ${i}`, service_key_snapshot: 'rodent_bait_quarterly' }));
+    expect(await visitRain(row, { addOns: baitChecks(11) })).toBe('in');
+    expect(await visitRain(row, { addOns: baitChecks(12) })).toBe('out');
+    // Work of no known class (a general appointment) is not rain-safe work: it stays out of rain hours too.
+    expect(await visitRain({ ...row, service_type: 'General Appointment' }, { key: 'general_appointment' })).toBe('out');
+    // A lead's visit by its catalog key: an inspection whose name reads as outside work is still rain-safe.
+    getServices.mockResolvedValue({ services: [...CATALOG,
+      { id: 'svc-spot', service_key: 'termite_inspection', name: 'Termite Spot Check', category: 'inspection', default_duration_minutes: 60 }] });
+    expect(verdict(await fillList(fakeConn({ leads: [lead('spot', { service_interest: 'Termite Spot Check' })] }).conn, [morning], NOW,
+      { outlooks: wet }))).toBe('in');
+  });
+
+  test('rain: a job\'s services are read only when its area has rain', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const row = planVisit('v1', '2040-09-12', { service_id: 'svc-1' });
+    loadGapCandidate.mockResolvedValue(loaded(row, { lat: HQ.lat + 0.01, service_key_snapshot: null, service_id: 'svc-1' }));
+    const area = rainArea({ lat: HQ.lat + 0.01, lng: HQ.lng });
+    // Catalog reads: the plan visit's row (no key snapshot) and the estimate's quote line (no key).
+    const reads = async (hours) => {
+      catalogLinkForProfile.mockClear();
+      resolveCompletionProfileForScheduledService.mockClear();
+      const { conn, calls } = fakeConn({ estimates: [estimate('near')], plan: [row], catalog: [{ id: 'svc-1', service_key: 'pest_quarterly' }] });
+      const out = await fillList(conn, [morning], NOW, { outlooks: { [area]: hours } });
+      expect(out.byBlock[0].map((l) => l.kind)).toEqual(['estimate', 'visit']);
+      return [calls.filter(([table, m]) => table === 'services' && m === 'first').length, catalogLinkForProfile.mock.calls.length,
+        resolveCompletionProfileForScheduledService.mock.calls.length];
+    };
+    expect(await reads(rainHours(DAY, { 15: 59 }))).toEqual([0, 0, 0]);
+    // A 60% hour at 3 PM is rain: both jobs are read, once each, and their 9:00 rows stay dry.
+    expect(await reads(rainHours(DAY, { 15: 60 }))).toEqual([1, 1, 2]);
+  });
+
+  test('rain: a job whose class cannot be read stays out of rain hours only; the other jobs and the list go on', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const row = planVisit('v1', '2040-09-12', { service_id: 'svc-down' });
+    loadGapCandidate.mockResolvedValue(loaded(row, { lat: HQ.lat + 0.01, service_key_snapshot: null, service_id: 'svc-down' }));
+    const area = rainArea({ lat: HQ.lat + 0.01, lng: HQ.lng });
+    const run = (hours) => fillList(fakeConn({ leads: [lead('l1')], plan: [row], catalog: [{ id: 'svc-down', error: new Error('catalog timeout') }] }).conn,
+      [morning], NOW, { outlooks: { [area]: hours } });
+    // Rain all day: the plan visit is left out and counted; the lead (rain-safe) is listed.
+    let out = await run(rainHours(DAY, { all: 70 }));
+    expect([out.byBlock[0].map((l) => [l.kind, !!l.inRain]), out.rain]).toEqual([[['lead', true]], { checked: true, leftOut: 1 }]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('visit v1: rain class unread (catalog timeout)'));
+    // Rain at 3 PM only: its 9:00 row is dry, so it is listed.
+    out = await run(rainHours(DAY, { 15: 70 }));
+    expect(out.byBlock[0].map((l) => [l.kind, !!l.inRain])).toEqual([['lead', false], ['visit', false]]);
+  });
+
+  test('rain: a failed catalog-profile read keeps the job out of rain hours; its name alone never makes it rain-safe', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    // Outdoor work by its key, under a name the word rules read as rain-safe.
+    const row = planVisit('v1', '2040-09-12', { service_type: 'Waves Assessment' });
+    loadGapCandidate.mockResolvedValue(loaded(row, { lat: HQ.lat + 0.01, service_key_snapshot: 'pest_quarterly' }));
+    const area = rainArea({ lat: HQ.lat + 0.01, lng: HQ.lng });
+    const run = (hours) => fillList(fakeConn({ plan: [row] }).conn, [morning], NOW, { outlooks: { [area]: hours } });
+    const resolve = resolveCompletionProfileForScheduledService.getMockImplementation();
+    resolveCompletionProfileForScheduledService.mockImplementation(async () => { throw new Error('profile timeout'); });
+    try {
+      // Rain all day: left out and counted, never listed as rain-safe work.
+      let out = await run(rainHours(DAY, { all: 70 }));
+      expect([out.byBlock[0], out.rain]).toEqual([[], { checked: true, leftOut: 1 }]);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('visit v1: rain class unread (profile timeout)'));
+      // Rain at 3 PM only: its 9:00 row is dry, so it is listed.
+      out = await run(rainHours(DAY, { 15: 70 }));
+      expect(out.byBlock[0].map((l) => [l.kind, !!l.inRain])).toEqual([['visit', false]]);
+    } finally {
+      resolveCompletionProfileForScheduledService.mockImplementation(resolve);
+    }
+  });
+
+  test('rain: the area is the forecast point nearest the job; the hours are the booked row\'s, to the modeled departure when later', () => {
+    for (const [zone, point] of Object.entries(ZONE_COORDS)) {
+      expect(rainArea({ lat: point.lat + 0.01, lng: point.lng - 0.01 })).toBe(zone);
+    }
+    expect(rainArea({ lat: null, lng: -82.5 })).toBeNull();
+    expect(rainArea({})).toBeNull();
+    const today = '2040-09-09';
+    // A 9:00 row of 1 hour; the van arrives at 9:30 and leaves at 10:00.
+    const row9 = { windowStart: '09:00', length: 60, startMin: 570, endMin: 600 };
+    const wet = rainHours(DAY, { all: 70 });
+    expect(rainVerdict({ fit: 'avoid', hours: wet }, DAY, row9, today)).toBe('out');
+    expect(rainVerdict({ fit: 'prefer', hours: wet }, DAY, row9, today)).toBe('in');
+    // Work of no known class, or a class that could not be read: not rain-safe.
+    expect(rainVerdict({ fit: 'neutral', hours: wet }, DAY, row9, today)).toBe('out');
+    expect(rainVerdict({ fit: null, hours: wet }, DAY, row9, today)).toBe('out');
+    expect(rainVerdict(undefined, DAY, row9, today)).toBeNull();
+    // Past the horizon (3 days from today): unknown.
+    expect(rainVerdict({ fit: 'avoid', hours: wet }, DAY, row9, '2040-09-01')).toBeNull();
+    const only = (h) => ({ fit: 'avoid', hours: rainHours(DAY, { [h]: 80 }) });
+    // The row's hours and 2 more: 9:00 to noon. Rain at 11 AM counts; rain at noon does not (the 2 dry hours after the
+    // row are done), nor rain at 8 AM, before the row.
+    expect(rainVerdict(only(11), DAY, row9, today)).toBe('out');
+    expect(rainVerdict(only(12), DAY, row9, today)).toBeNull();
+    expect(rainVerdict(only(8), DAY, row9, today)).toBeNull();
+    // Work that runs past the row's end (a late arrival: 9:45 to 10:15) keeps its 2 dry hours after: rain at noon counts.
+    expect(rainVerdict(only(12), DAY, { ...row9, startMin: 585, endMin: 615 }, today)).toBe('out');
+    // A 30-minute row reads as the booking rule reads one: at least an hour, then 2 more.
+    const row30 = { windowStart: '09:00', length: 30, startMin: 540, endMin: 570 };
+    expect([rainVerdict(only(11), DAY, row30, today), rainVerdict(only(12), DAY, row30, today)]).toEqual(['out', null]);
+    // A 2-hour row (a catalog length) with a 45-minute modeled visit reads its whole row: 9:00 to 11:00, then 2 more.
+    expect(rainVerdict(only(12), DAY, { windowStart: '09:00', length: 120, startMin: 540, endMin: 585 }, today)).toBe('out');
+  });
+
+  test('a lead\'s look is sized as the Leads screen books it (the stored catalog row, 1 hour when it names none) and needs the technician\'s capability for it', async () => {
     dayStops({ [DAY]: [stop('first', '08:00')] });
-    getServices.mockResolvedValue({ services: CATALOG.map((row) => (row.id === 'svc-wdo' ? { ...row, default_duration_minutes: null } : row)) });
+    // getServices gives a scheduling policy's length in capacity mode (30 here); the booking reads the row's own length.
+    getServices.mockResolvedValue({ services: CATALOG.map((row) => (row.id === 'svc-wdo' ? { ...row, default_duration_minutes: 30 } : row)) });
+    const stored = (minutes) => CATALOG.map((row) => (row.id === 'svc-wdo' ? { ...row, default_duration_minutes: minutes } : row));
     const wdo = () => [lead('wdo', { service_interest: 'WDO Inspection' })];
-    const { conn } = fakeConn({ leads: wdo() });
+    const { conn } = fakeConn({ leads: wdo(), services: stored(null) });
     expect((await fillList(conn, [morning], NOW)).byBlock).toEqual([[expect.objectContaining({ kind: 'lead', id: 'wdo', label: 'WDO Inspection Service', length: 60 })]]);
+    expect((await fillList(fakeConn({ leads: wdo(), services: stored(45) }).conn, [morning], NOW)).byBlock)
+      .toEqual([[expect.objectContaining({ kind: 'lead', id: 'wdo', length: 45 })]]);
     // The customer's rules for the service the lead asked for.
     expect(getCustomerSchedulingPreferences).toHaveBeenCalledWith('c-wdo', 'WDO Inspection Service', conn, { serviceId: 'svc-wdo', serviceKey: 'wdo_inspection' });
     // A technician set off for the inspection's category (termite) gets no line.

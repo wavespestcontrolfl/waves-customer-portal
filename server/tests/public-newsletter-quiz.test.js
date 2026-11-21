@@ -46,9 +46,11 @@ describe('public newsletter quiz landing copy (per-quiz)', () => {
       const r = await fetch(`${baseUrl}/api/public/newsletter/quiz/${TOKEN}/pest-pressure-v1/ants`);
       const html = await r.text();
       expect(r.status).toBe(200);
-      expect(html).toContain('You picked');
-      expect(html).toContain('Ants');
+      expect(html).toContain("<p>You picked <strong>Ants</strong>. Tap confirm and we'll take it from here.</p>");
       expect(html).not.toMatch(/lawn check/i);
+      // An answer the quiz does not have: no label, the same next-step line.
+      const unknown = await (await fetch(`${baseUrl}/api/public/newsletter/quiz/${TOKEN}/pest-pressure-v1/nope`)).text();
+      expect(unknown).toContain("<p>Tap confirm and we'll take it from here.</p>");
     });
   });
 
@@ -91,6 +93,33 @@ describe('public newsletter quiz landing copy (per-quiz)', () => {
       const html = await r.text();
       expect(html).toContain('Book a mosquito visit');
       expect(html).not.toMatch(/lawn check/i);
+    });
+  });
+
+  test.each([
+    ['Waves Newsletter', 'nl-poll-weekend-v1', 'out-to-eat', 'Out to eat'],
+    ['Waves Pest Insider', 'pi-poll-lizards-v1', 'what-lizards', 'What lizards?'],
+  ])('a %s poll vote confirms the answer, promises no next step and thanks the reader with no booking pitch', async (newsletter, quizId, answer, label) => {
+    await withServer(async (baseUrl) => {
+      const url = `${baseUrl}/api/public/newsletter/quiz/${TOKEN}/${quizId}/${answer}`;
+      const confirm = await (await fetch(url)).text();
+      // Nothing follows a poll vote, so the page does not say "we'll take it from here".
+      expect(confirm).toContain(`<p>You picked <strong>${label}</strong>.</p>`);
+      expect(confirm).toContain(`>Confirm — ${label}</button>`);
+      expect(confirm).not.toMatch(/take it from here/);
+      // An answer the poll does not have: the button alone, still no promise.
+      const unknown = await (await fetch(`${baseUrl}/api/public/newsletter/quiz/${TOKEN}/${quizId}/nope`)).text();
+      expect(unknown).toContain('>Confirm</button>');
+      expect(unknown).not.toMatch(/You picked|take it from here/);
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: '',
+      });
+      const html = await r.text();
+      expect(r.status).toBe(200);
+      expect(html).toContain(`Your vote is in. See you in the next ${newsletter}.`);
+      expect(html).not.toMatch(/\/book\b|Book a|free check/);
     });
   });
 

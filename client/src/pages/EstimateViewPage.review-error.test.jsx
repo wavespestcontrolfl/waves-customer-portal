@@ -19,7 +19,7 @@
 //    the estimate lands underneath the request.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage from './EstimateViewPage';
 
@@ -131,9 +131,10 @@ function stubLocalStorage(store = {}) {
 }
 
 // jsdom implements neither — the review/success phases scroll the active step
-// into view.
+// into view. `scrolledTo` lists the elements a test scrolled to.
+const scrolledTo = [];
 beforeAll(() => {
-  window.HTMLElement.prototype.scrollIntoView = vi.fn();
+  window.HTMLElement.prototype.scrollIntoView = vi.fn(function scrollIntoView() { scrolledTo.push(this); });
   window.scrollTo = vi.fn();
 });
 
@@ -150,6 +151,7 @@ async function bookThroughToReview() {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  scrolledTo.length = 0;
 });
 
 describe('EstimateViewPage review-phase accept failure', () => {
@@ -176,6 +178,32 @@ describe('EstimateViewPage review-phase accept failure', () => {
     await waitFor(() => {
       expect(screen.queryByText(/Something went wrong/)).not.toBeInTheDocument();
     });
+  });
+
+  it('says an expired hold booked nothing, right above the time list, and scrolls there', async () => {
+    // Owner 2026-11-20 (D2 B): a customer whose hold ran out at Confirm read
+    // the page as done (Sep 11). The banner sat at the page top, far above
+    // the confirm card, and did not say that nothing was booked.
+    stubLocalStorage();
+    vi.stubGlobal('fetch', makeFetchMock(() => jsonResponse(
+      { code: 'RESERVATION_EXPIRED', error: 'Your time-slot hold expired — pick a time again to finish signing up' },
+      { ok: false, status: 409 },
+    )));
+
+    render(<EstimateViewPage />);
+    fireEvent.click(await bookThroughToReview());
+
+    const message = await screen.findByText('Your held time ran out and nothing was booked. Pick a time below to finish.');
+    expect(screen.getAllByText(/nothing was booked/)).toHaveLength(1);
+    const notice = document.getElementById('estimate-slot-issue');
+    expect(notice).toContainElement(message);
+    // The time list comes right after the notice, and the page scrolls to it.
+    const booking = notice.nextElementSibling;
+    expect(booking).toHaveAttribute('id', 'estimate-booking-section');
+    await waitFor(() => {
+      expect(within(booking).getAllByRole('button', { name: /^Choose / }).length).toBeGreaterThan(0);
+    });
+    expect(scrolledTo).toContain(notice);
   });
 
   it('freezes the one-time toggle and slot picker while the accept is in flight', async () => {

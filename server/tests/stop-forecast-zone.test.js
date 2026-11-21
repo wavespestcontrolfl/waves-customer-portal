@@ -4,7 +4,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
-const { stopForecastZone } = require('../routes/admin-schedule');
+const { stopForecastZone } = require('../services/scheduling/forecast-zones');
 
 const row = (zone, city, zip) => ({ zone, city, zip });
 

@@ -29,6 +29,8 @@ const { _internals: replan } = require('./index');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+const { ZONE_LABELS } = require('../scheduling/forecast-zones');
+const { RAIN_PCT } = require('../scheduling/rain-fit');
 
 const KEY_PREFIX = 'open-blocks:';
 const DAYS = 7;
@@ -232,7 +234,7 @@ const leavesText = (f) => (f.from ? `; leaves ${dayLabel(f.from.day)}${f.from.st
  */
 function fillLines(fill, i) {
   if (!fill || fill.error) return [];
-  return fill.byBlock[i].map((f) => `  - ${LINE_HEADS[f.kind]}, ${f.name || 'no name on file'} (${f.label}, ${visitText(f)}): +${f.addedDriveMin} min drive, finishes ${clock(f.endMin)}${leavesText(f)}`);
+  return fill.byBlock[i].map((f) => `  - ${LINE_HEADS[f.kind]}, ${f.name || 'no name on file'} (${f.label}, ${visitText(f)}): +${f.addedDriveMin} min drive, finishes ${clock(f.endMin)}${leavesText(f)}${f.inRain ? '; runs in rain hours (rain-safe work)' : ''}`);
 }
 
 const leftOut = (items) => items.filter(Boolean).join(', ');
@@ -260,10 +262,32 @@ function fillSummary(fill, blocks = []) {
     + ' Each fit is the staff finder\'s check of a new visit on the day as booked.'
     + (shortFit ? ` A block short of ${SLOT_MIN} minutes can still hold a job when the stops around it have room for the drive.` : '')
     + ` A plan visit moves up at most ${MOVE_UP_DAYS} days, and its customer was told a day: call before moving it.`
+    + (fill.rain?.leftOut ? ` Rain: ${count(fill.rain.leftOut, 'job', 'jobs')} left out of an opening in rain hours (the rain rules: only rain-safe work runs in rain).` : '')
     + ' Nothing is held, booked or moved; staff decide whether to call.';
 }
 
-function detailText(sum, fill = null) {
+const areaName = (zone) => ZONE_LABELS[zone] || zone;
+
+/**
+ * The rain note (rain-note.js, owner 2026-11-19 D3): each day's rain hours by area and the areas with an hour NWS gave
+ * no reading for, the areas NWS did not answer, or why the note was not read.
+ */
+function rainLines(rain) {
+  if (rain.error) return [`Rain hours: not read this morning (${rain.error}).`];
+  if (rain.unread.length && rain.unread.length === Object.keys(rain.outlooks).length) {
+    return ['Rain hours: the NWS forecast did not answer this morning.'];
+  }
+  const spanText = (s) => `${clock(s.start)} to ${clock(s.end)} (up to ${s.max}%)`;
+  const areasText = (areas) => (areas.length ? areas.map((a) => `${areaName(a.zone)} ${a.spans.map(spanText).join(', ')}`).join('; ') : 'none');
+  const gapsText = (gaps) => (gaps.length ? `; no NWS reading for some hours in ${gaps.map(areaName).join(', ')}` : '');
+  return [
+    `Rain hours by area (NWS chance of rain ${RAIN_PCT}% or more, ${clock(DAY_OPEN)} to ${clock(DAY_CLOSE)}):`,
+    ...rain.days.map(({ day, areas, gaps }) => `- ${dayLabel(day)}: ${areasText(areas)}${gapsText(gaps)}`),
+    ...(rain.unread.length ? [`The NWS forecast did not answer for ${rain.unread.map(areaName).join(', ')}.`] : []),
+  ];
+}
+
+function detailText(sum, fill = null, rain = null) {
   const lines = [
     `Room for ${sum.slots} new job${sum.slots === 1 ? '' : 's'}: each needs ${SLOT_MIN} free minutes (a 1-hour job and its drive).`,
     'Open blocks a new job could fill (an hour or more with no job, inside 8:00 AM to 5:00 PM; blackout days and days off left out, and Sundays unless stops are already booked):',
@@ -271,6 +295,7 @@ function detailText(sum, fill = null) {
   ];
   if (sum.blocks.length > MAX_DETAIL_BLOCKS) lines.push(`- and ${sum.blocks.length - MAX_DETAIL_BLOCKS} more.`);
   if (fill) lines.push('', fillSummary(fill, sum.blocks.slice(0, MAX_DETAIL_BLOCKS)));
+  if (rain) lines.push('', ...rainLines(rain));
   lines.push(
     '',
     'Measuring only (no visit changes): re-timing booked jobs to the front of the day under the new rules would free'
@@ -310,10 +335,26 @@ async function latestRows(conn, now) {
  * The fill list for the listed blocks, or { error } when it could not be built (the notice still goes out). Only on
  * the day rules' own blocks: with the rules unread, a block may sit on a day off or with a technician who is out.
  */
-async function fillFor(conn, blocks, now, rulesRead) {
+// The rain note never holds the notice: a failed read is named in the detail.
+async function rainFor(now) {
+  try {
+    return await require('./rain-note').rainNote(now);
+  } catch (err) {
+    logger.warn(`[open-blocks] rain note not read (${err.message})`);
+    return { error: 'a read failed' };
+  }
+}
+
+/** The rain note as the row keeps it: each day's wet spans by area, and the unread areas. */
+function rainMetadata(rain) {
+  return rain.error ? { error: rain.error } : { days: rain.days, unread: rain.unread };
+}
+
+// The rain note's NWS hours give the fill list its rain rule; a note that was not read gives none.
+async function fillFor(conn, blocks, now, rulesRead, rain) {
   if (!rulesRead) return { error: 'the day rules were unread' };
   try {
-    return await require('./fill-list').fillList(conn, blocks, now);
+    return await require('./fill-list').fillList(conn, blocks, now, { outlooks: rain && !rain.error ? rain.outlooks : null });
   } catch (err) {
     logger.warn(`[open-blocks] fill list not built (${err.message})`);
     return { error: 'a read failed' };
@@ -330,10 +371,11 @@ function fillMetadata(fill, blocks) {
   // fromDay and fromStart: where a plan visit is booked now.
   const lines = fill.byBlock.flatMap((list, i) => list.map((f) => ({ kind: f.kind, [ID_KEYS[f.kind]]: f.id, day: blocks[i].day,
     techId: blocks[i].techId, window: f.windowStart, start: f.startMin, addedDriveMin: f.addedDriveMin,
-    ...(f.from ? { fromDay: f.from.day, fromStart: f.from.start } : {}) })));
+    ...(f.from ? { fromDay: f.from.day, fromStart: f.from.start } : {}), ...(f.inRain ? { inRain: true } : {}) })));
   const { leads, visits } = fill;
   return { checked: fill.checked, fitted: fill.fitted, leads: { checked: leads.checked, fitted: leads.fitted },
-    visits: { checked: visits.checked, fitted: visits.fitted, remindersOff: visits.remindersOff, sharedDay: visits.sharedDay }, lines };
+    visits: { checked: visits.checked, fitted: visits.fitted, remindersOff: visits.remindersOff, sharedDay: visits.sharedDay },
+    ...(fill.rain ? { rain: { checked: fill.rain.checked, leftOut: fill.rain.leftOut } } : {}), lines };
 }
 
 async function closeEarlier(conn, keepKey) {
@@ -370,13 +412,14 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
     return { status: 'no_open_hours', closed, ...(fresh ? {} : { noRun: true }) };
   }
   const listed = sum.blocks.slice(0, MAX_DETAIL_BLOCKS);
-  const fill = await fillFor(conn, listed, now, rulesRead);
-  const detail = detailText(sum, fill);
+  const rain = await rainFor(now);
+  const fill = await fillFor(conn, listed, now, rulesRead, rain);
+  const detail = detailText(sum, fill, rain);
   const posted = await raiseAdminAlert('schedule', alertSpec(sum, fill), {
     bell: true,
     dedupeKey: key,
     detail: fresh ? detail : `${detail}\nThe night re-plan left no numbers this morning, so days with two or more stops are not listed.`,
-    metadata: { openMin: sum.totalMin, slots: sum.slots, freedMin: sum.freedMin, blocks: sum.blocks.length, replayed: sum.replayed, pickDiffers: sum.pickDiffers, fill: fillMetadata(fill, listed) },
+    metadata: { openMin: sum.totalMin, slots: sum.slots, freedMin: sum.freedMin, blocks: sum.blocks.length, replayed: sum.replayed, pickDiffers: sum.pickDiffers, fill: fillMetadata(fill, listed), rain: rainMetadata(rain) },
   });
   // notifyAdmin answers null when its write fails. Then no morning row exists: keep the earlier rows open and fail
   // the tick, so job health shows it (pre-push audit, tune PR). A dedupe hit answers the open row, with its id.
@@ -387,5 +430,5 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
 
 module.exports = {
   runOpenBlocksAlert,
-  _internals: { summarize, alertSpec, detailText, fillSummary, fillMetadata, dayLabel, clock, span, freedMin, standing, hourGridBlocks, unplannedDays, eligibility, workable, KEY_PREFIX },
+  _internals: { summarize, alertSpec, detailText, fillSummary, fillMetadata, rainLines, rainMetadata, dayLabel, clock, span, freedMin, standing, hourGridBlocks, unplannedDays, eligibility, workable, KEY_PREFIX },
 };

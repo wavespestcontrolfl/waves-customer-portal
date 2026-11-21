@@ -3,8 +3,8 @@
  * dates (1st and 3rd Thursday), build-day detection at ET edges, runIssuePlanner's recording
  * of a built or refused issue, and, with GATE_PEST_INSIDER_AUTO_SEND on, the draft for its
  * readers, the proof step and the last tick's notice. The database, the builder, the
- * live-post check, the audience query, the spam-report counts, the proof step and the notification
- * are mocked: no network, nothing sent. The table's CHECKs are in pest-insider-issues-migration-postgres.test.js (CI).
+ * live-post check, the audience query, the spam-report counts, the poll history, the proof step and
+ * the notification are mocked: no network, nothing sent. The table's CHECKs are in pest-insider-issues-migration-postgres.test.js (CI).
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/pest-insider/index', () => ({ buildIssue: jest.fn() }));
@@ -15,12 +15,18 @@ jest.mock('../services/pest-insider/audience', () => ({
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true })) }));
 jest.mock('../services/newsletter-sender', () => ({ spamReportCounts: jest.fn() }));
+// No Pest Insider issue reached readers yet, unless a case says otherwise: the first poll is due.
+jest.mock('../services/newsletter-quiz', () => {
+  const actual = jest.requireActual('../services/newsletter-quiz');
+  return { ...actual, newsletterIssuePolls: jest.fn(async () => ({ ids: actual.PEST_INSIDER_POLL_IDS, recent: [], used: [] })) };
+});
 
 const { buildIssue } = require('../services/pest-insider/index');
 const { checkLivePosts } = require('../services/pest-insider/posts');
 const { selectIssueAudience } = require('../services/pest-insider/audience');
 const { triggerNotification } = require('../services/notification-triggers');
 const { spamReportCounts } = require('../services/newsletter-sender');
+const { newsletterIssuePolls, PEST_INSIDER_POLL_IDS } = require('../services/newsletter-quiz');
 const logger = require('../services/logger');
 const {
   issueDatesInMonth, isIssueDate, nextIssueDate, todayET, nextDay, recentHistory, runIssuePlanner, USED_STATUSES,
@@ -242,7 +248,10 @@ describe('runIssuePlanner', () => {
       recheckedFactIds: [],
       livePostFactIds: ['fact-live-1', 'fact-live-2'],
       liveToolUrls: [],
+      pollQuizId: PEST_INSIDER_POLL_IDS[0],
     });
+    // The poll history is this newsletter's, read through the planner's database.
+    expect(newsletterIssuePolls).toHaveBeenCalledWith({ newsletterType: 'pest-insider-monthly', knex: database });
     expect(database.calls.inserts).toHaveLength(1);
     const row = database.calls.inserts[0];
     expect(row).toMatchObject({
@@ -254,6 +263,18 @@ describe('runIssuePlanner', () => {
     expect(row).not.toHaveProperty('html_body');
     expect(database.calls.onConflict).toBe('issue_date');
     expect(logger.info).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['one of the two newest issues readers got had a poll', async () => ({ ids: PEST_INSIDER_POLL_IDS, recent: [null, PEST_INSIDER_POLL_IDS[0]], used: [PEST_INSIDER_POLL_IDS[0]] }), null],
+    ['the poll history cannot be read', async () => { throw new Error('relation does not exist'); }, 'poll choice failed (relation does not exist); this issue has no poll'],
+  ])('no poll when %s; the issue still builds', async (_name, history, warning) => {
+    newsletterIssuePolls.mockImplementationOnce(history);
+    buildIssue.mockReturnValue({ ok: false, reason: 'x', issue: null, diagnostics: {} });
+    await runIssuePlanner({ now: WED_BUILD_DAY, database: fakeDb() });
+    expect(buildIssue).toHaveBeenCalledTimes(1);
+    expect(buildIssue.mock.calls[0][0].pollQuizId).toBeNull();
+    if (warning) expect(logger.warn).toHaveBeenCalledWith(`[pest-insider] ${warning}`);
   });
 
   test('a refused build is recorded as skipped with the reason and no subject', async () => {
@@ -466,6 +487,7 @@ describe('runIssuePlanner with GATE_PEST_INSIDER_AUTO_SEND on', () => {
       expect(result).toMatchObject({ status: 'skipped', reason, sendId: null });
       expect(spamReportCounts).toHaveBeenCalledWith(database, 'send-prev');
       expect(checkLivePosts).not.toHaveBeenCalled();
+      expect(newsletterIssuePolls).not.toHaveBeenCalled();
       expect(buildIssue).not.toHaveBeenCalled();
       expect(selectIssueAudience).not.toHaveBeenCalled();
       expect(database.calls.sends).toHaveLength(0);
