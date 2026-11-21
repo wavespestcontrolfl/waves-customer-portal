@@ -49,7 +49,7 @@ import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import PromoCodeSection from '../components/estimate/PromoCodeSection';
 import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, monthlyText, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
-import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
+import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, selectedPlanCreditDeclared, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
 import { approveSlotLabel, firstVisitDayAndWindow } from '../lib/estimate-glass-slots';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
@@ -5445,7 +5445,9 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
 // payload's `promoCode` block. The page owns the endpoint; a staff preview
 // never posts, and the request it would make carries the same marker so the
 // route refuses it too.
-export function EstimatePromoCode({ promoCode, token, staffView = false }) {
+// `onApplied` tells the page a code went on in this session: the section keeps its own
+// state, so without it the page would still read the served `promoCode` until a reload.
+export function EstimatePromoCode({ promoCode, token, staffView = false, onApplied = null }) {
   if (!promoCode) return null;
   const submitCode = async (code) => {
     const url = `${API_BASE}/estimates/${token}/promo-code${staffView ? '?adminPreview=1' : ''}`;
@@ -5455,6 +5457,7 @@ export function EstimatePromoCode({ promoCode, token, staffView = false }) {
       body: JSON.stringify({ code }),
     });
     const result = await response.json().catch(() => ({}));
+    if (response.ok && result.promoCode?.applied && onApplied) onApplied();
     return response.ok ? { ok: true, promoCode: result.promoCode } : { ok: false, error: result.error };
   };
   // Keyed on the served state so a /data reload that changes it (the accept,
@@ -6271,6 +6274,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // payload flags measurementReviewEnabled.
   const [measurementReviewBasis, setMeasurementReviewBasis] = useState(null);
   const [softExitOpen, setSoftExitOpen] = useState(false);
+  // A promo or referral code applied in this session (the served promoCode block is older).
+  const [codeAppliedHere, setCodeAppliedHere] = useState(false);
   // Mirrors ctaPhase SYNCHRONOUSLY. ctaPhase is React state, so async work
   // started before a phase change — e.g. a SlotPicker AI slot search —
   // captures the OLD phase in its closure: when it resolved mid-submission
@@ -9711,16 +9716,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // add up to the plan's own monthly, and a plan credit shows as `credit`.
   const averageModel = monthlyAverage?.model || null;
   // Credits the accept takes off the first invoice, which the box does not show: the booking
-  // deposit, a promo or referral code entered on this estimate, and a declared plan credit
-  // (checked on every place the payload can carry one, not through the average: its rounding
-  // band would let a very small credit pass).
+  // deposit, a promo or referral code on this estimate (served, or entered in this session),
+  // and a plan credit on the selected cadence (read directly, not through the average: its
+  // rounding band would let a very small credit pass).
   const firstBillCreditApplies = data?.depositPolicy?.required === true
     || !!data?.promoCode?.applied
-    || [
-      selectedCombo?.manualDiscount, combinedFrequency?.manualDiscount,
-      pricing?.combinedRecurring?.manualDiscount, pricing?.manualDiscount,
-      ...services.filter((s) => s?.isRecurring).flatMap((s) => (s.frequencies || []).map((f) => f?.manualDiscount)),
-    ].some((credit) => Number(credit?.amount) > 0 || manualDiscountMonthlyAmount(credit) > 0);
+    || codeAppliedHere
+    || selectedPlanCreditDeclared({ services, selected, selectedCombo, combinedFrequency, pricing });
   const firstVisitLine = invoiceOnlyAccept ? null : firstVisitTotalPreview({
     serviceMode,
     paymentPreference,
@@ -11103,7 +11105,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
           {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
-          <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} />
+          <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} onApplied={() => setCodeAppliedHere(true)} />
 
           {slotIssueInBooking ? (
             <div id={SLOT_ISSUE_SECTION_ID} style={{ scrollMarginTop: 76 }}>{slotIssueBanner}</div>

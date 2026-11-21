@@ -216,6 +216,24 @@ describe('estimate page: first-visit line and Ask Waves link under the price', (
     expect(firstVisitLine(container)).toBeNull();
   });
 
+  it('a code applied while the line shows: the line goes at once, with no reload', async () => {
+    const applied = { canEnter: false, applied: { code: 'NEIGHBOR', credited: false } };
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        if (String(url).includes('/promo-code')) return { success: true, promoCode: applied };
+        if (String(url).includes('/available-slots')) return { primary: [], expander: [] };
+        return { ...single(), promoCode: { canEnter: true, acceptsReferral: true } };
+      },
+    })));
+    const { container } = render(<EstimateViewPage />);
+    await waitFor(() => expect(firstVisitLine(container)).not.toBeNull());
+    fireEvent.change(screen.getByLabelText('Promo or referral code'), { target: { value: 'NEIGHBOR' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => expect(firstVisitLine(container)).toBeNull());
+  });
+
   it('a bundle whose plan rows price only one of its services: no line (pest + setup is not the whole bill)', async () => {
     const payload = multi();
     const { container } = await renderPage({
