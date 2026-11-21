@@ -1267,207 +1267,140 @@ describe('mintRestartEstimate', () => {
 // proves the cap on a real pool; this pins its rules.
 describe('mintTransaction', () => {
   const { mintTransaction } = actualRestart;
+  const { holdLockSlot } = require('../utils/cron-lock');
   const tick = () => new Promise((resolve) => setImmediate(resolve));
   // A handle whose transaction runs the work, as knex does. Its pool has `max` connections, or is unknown.
   const handle = (max) => ({
     ...(max === undefined ? {} : { client: { pool: { max } } }),
     transaction: (work) => work('trx'),
   });
-  // Starts `count` mints that each wait for their own release. Returns what has started, and the releases.
+  // Starts `count` mints at once. Each one that gets a slot waits for its own release.
   function start(dbh, count) {
     const started = [];
-    const ended = [];
     const releases = [];
     const settled = Array.from({ length: count }, (_unused, i) => mintTransaction(dbh, async (trx) => {
       started.push(i);
       await new Promise((resolve) => { releases[i] = resolve; });
-      ended.push(i);
       return `${trx}-${i}`;
     }));
-    return { started, ended, releases, settled };
+    // A refusal that a failed assertion never reads must fail that test, not end the test process.
+    settled.forEach((mint) => mint.catch(() => {}));
+    return { started, releases, settled };
   }
-  async function drain(run) {
-    for (let i = 0; i < run.settled.length; i += 1) {
-      while (!run.releases[i]) await tick();
-      run.releases[i]();
-      await run.settled[i];
-    }
-  }
+  const outcomes = (run) => Promise.all(run.settled.map((mint) => mint.then((value) => value, (err) => err)));
+  // The route answers a restartUnavailable error with 409 { error, code }. Both cards show the message, and
+  // neither files a request for this code.
+  const BUSY = { restartUnavailable: true, code: 'busy', message: 'We could not verify your services just now. Please try again in a moment.' };
 
-  test('one mint for every four pool connections runs at once; the rest wait in line, first come first served', async () => {
-    const run = start(handle(8), 5);
-    await tick();
+  // #8256 pre-push r1, r3: a tap beyond the cap does not wait in a line. A mint that started long after its
+  // tap would archive a quote, and free its slot hold, for a customer whose page already gave up.
+  test('one mint for every four pool connections runs at once; a tap beyond that is refused at once and never runs', async () => {
+    const run = start(handle(8), 4);
+    // The refusals come while both mints still run.
+    await expect(run.settled[2]).rejects.toMatchObject(BUSY);
+    await expect(run.settled[3]).rejects.toMatchObject(BUSY);
     expect(run.started).toEqual([0, 1]);
-    // A finished mint hands its slot to the first one in line: never to a later one, never two at once.
+    // A finished mint frees one slot: one more tap runs, the tap after it is refused.
     run.releases[1]();
-    await run.settled[1];
-    await tick();
-    expect(run.started).toEqual([0, 1, 2]);
-    run.releases[0]();
-    await tick();
-    expect(run.started).toEqual([0, 1, 2, 3]);
-    await drain(run);
-    expect(run.started).toEqual([0, 1, 2, 3, 4]);
+    await expect(run.settled[1]).resolves.toBe('trx-1');
+    const next = start(handle(8), 2);
+    await expect(next.settled[1]).rejects.toMatchObject(BUSY);
+    expect(next.started).toEqual([0]);
     // Each mint gets its own transaction's answer.
-    expect(await Promise.all(run.settled)).toEqual(['trx-0', 'trx-1', 'trx-2', 'trx-3', 'trx-4']);
+    run.releases[0]();
+    next.releases[0]();
+    await expect(run.settled[0]).resolves.toBe('trx-0');
+    await expect(next.settled[0]).resolves.toBe('trx-0');
   });
 
   test.each([
     [20, 5], [10, 2], [7, 1], [4, 1], [0, 5], [undefined, 5], ['not a number', 5],
   ])('a pool of %s connections runs %s mints at once', async (max, limit) => {
     const run = start(handle(max), 7);
-    await tick();
     expect(run.started).toHaveLength(limit);
-    await drain(run);
-    expect(run.ended).toHaveLength(7);
+    run.releases.forEach((release) => release());
+    const all = await outcomes(run);
+    expect(all.filter((outcome) => typeof outcome === 'string')).toHaveLength(limit);
+    expect(all.filter((outcome) => outcome?.code === 'busy')).toHaveLength(7 - limit);
+    // Every slot came back: the same number runs again.
+    const again = start(handle(max), limit + 1);
+    expect(again.started).toHaveLength(limit);
+    again.releases.forEach((release) => release());
+    await outcomes(again);
   });
 
-  test('a mint that fails frees its slot, and its error reaches its own caller', async () => {
+  test('a mint that fails or cannot open its transaction frees its slot, and its error reaches its own caller', async () => {
     const dbh = handle(4);
-    const failed = mintTransaction(dbh, async () => { throw new Error('mint boom'); });
-    const cannotOpen = mintTransaction({ ...dbh, transaction: () => { throw new Error('pool gone'); } }, async () => 'never');
-    const after = mintTransaction(dbh, async () => 'ran');
-    await expect(failed).rejects.toThrow('mint boom');
-    await expect(cannotOpen).rejects.toThrow('pool gone');
-    await expect(after).resolves.toBe('ran');
-    // Nothing is left held: the next mints start at once, up to the limit.
-    const run = start(handle(8), 3);
-    await tick();
-    expect(run.started).toEqual([0, 1]);
-    await drain(run);
-  });
-
-  // #8256 pre-push r1: the wait in line has an end. A mint that started long after its tap would archive
-  // a quote, and free its slot hold, for a customer whose page already gave up.
-  describe('a mint that waits in line longer than 10 seconds', () => {
-    beforeEach(() => jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] }));
-    afterEach(() => jest.useRealTimers());
-
-    test('leaves the line with the coded "try again" refusal, never runs, and takes no slot from the mints behind it', async () => {
-      const run = start(handle(4), 1);
-      await tick();
-      const ran = [];
-      const waited = (name) => mintTransaction(handle(4), async () => { ran.push(name); return name; });
-      const first = waited('first');
-      const outcome = first.then(() => 'ran', (err) => err);
-      jest.advanceTimersByTime(4000);
-      const second = waited('second');
-      jest.advanceTimersByTime(5999);
-      await tick();
-      expect(ran).toEqual([]);
-      // 10 s after ITS tap, the first in line gives up. The route answers a restartUnavailable error
-      // with 409 { error, code }; both cards show the message, and neither files a request for this code.
-      jest.advanceTimersByTime(1);
-      const refusal = await outcome;
-      expect(refusal).toMatchObject({
-        restartUnavailable: true, code: 'busy', message: 'We could not verify your services just now. Please try again in a moment.',
-      });
-      // The slot that frees next goes to the mint still in line, not to the one that left.
-      run.releases[0]();
-      await run.settled[0];
-      await expect(second).resolves.toBe('second');
-      expect(ran).toEqual(['second']);
-      // Nothing is left held or waiting: a new mint starts at once, and no timer is pending.
-      await expect(waited('third')).resolves.toBe('third');
-      expect(jest.getTimerCount()).toBe(0);
-    });
-
-    test('a mint that gets its slot in time is not refused later', async () => {
-      const run = start(handle(4), 1);
-      await tick();
-      let release;
-      const slow = mintTransaction(handle(4), () => new Promise((resolve) => { release = resolve; }));
-      jest.advanceTimersByTime(9999);
-      run.releases[0]();
-      await run.settled[0];
-      await tick();
-      // It runs now, and its wait has no timer left. A long mint is not cut off: the limit is on the
-      // wait in line only.
-      expect(jest.getTimerCount()).toBe(0);
-      jest.advanceTimersByTime(60000);
-      release('minted');
-      await expect(slow).resolves.toBe('minted');
-    });
+    await expect(mintTransaction(dbh, async () => { throw new Error('mint boom'); })).rejects.toThrow('mint boom');
+    await expect(mintTransaction({ ...dbh, transaction: () => { throw new Error('pool gone'); } }, async () => 'never')).rejects.toThrow('pool gone');
+    await expect(mintTransaction(dbh, async () => 'ran')).resolves.toBe('ran');
   });
 
   // #8256 pre-push r2: a pool under four connections has no quarter of its own. A mint beside one cron lock
   // holder would pin both connections of a pool of two (the knexfile floor), and each would wait for a third.
   // There the mint takes one of the lock holders' slots (utils/cron-lock.js): one holder of either kind at a time.
   describe('on a pool under four connections the mint takes a cron lock holder\'s slot', () => {
-    const { holdLockSlot } = require('../utils/cron-lock');
     // The app's own pool, which the cron locks count, is the pool the mint runs on.
     const smallPool = (max) => { db.client = { pool: { max } }; return handle(max); };
-    afterEach(() => { delete db.client; jest.useRealTimers(); });
+    afterEach(() => { delete db.client; });
 
-    test.each([[3], [2]])('a pool of %s runs one mint at a time, first come first served', async (max) => {
-      const run = start(smallPool(max), 3);
-      await tick();
+    test.each([[3], [2]])('a pool of %s runs one mint at a time; a tap beside it is refused at once', async (max) => {
+      const dbh = smallPool(max);
+      const run = start(dbh, 2);
+      await expect(run.settled[1]).rejects.toMatchObject(BUSY);
       expect(run.started).toEqual([0]);
-      await drain(run);
-      expect(run.ended).toEqual([0, 1, 2]);
+      run.releases[0]();
+      await expect(run.settled[0]).resolves.toBe('trx-0');
+      await expect(mintTransaction(dbh, async () => 'ran')).resolves.toBe('ran');
     });
 
-    test('a mint waits while a lock holder has the slot, and a lock holder gets none while a mint runs', async () => {
+    test('a mint is refused while a lock holder has the slot, and a lock holder gets none while a mint runs', async () => {
       const dbh = smallPool(2);
-      const giveBack = await holdLockSlot('a-cron-job', 1000);
-      const run = start(dbh, 1);
-      await tick();
-      expect(run.started).toEqual([]);
+      const giveBack = holdLockSlot();
+      expect(giveBack).toEqual(expect.any(Function));
+      const work = jest.fn(async () => 'never');
+      await expect(mintTransaction(dbh, work)).rejects.toMatchObject(BUSY);
+      expect(work).not.toHaveBeenCalled();
       giveBack();
-      await tick();
+
+      const run = start(dbh, 1);
       expect(run.started).toEqual([0]);
-      // The running mint holds the only slot: a lock holder that asks now gets none in its 20 ms.
-      await expect(holdLockSlot('another-cron-job', 20)).resolves.toBeNull();
-      await drain(run);
-      // The mint gave it back: the next holder has it at once.
-      const after = await holdLockSlot('a-later-cron-job', 1000);
+      expect(holdLockSlot()).toBeNull();
+      run.releases[0]();
+      await run.settled[0];
+      // The mint gives the slot back, also when it fails or cannot open its transaction.
+      await expect(mintTransaction(dbh, async () => { throw new Error('mint boom'); })).rejects.toThrow('mint boom');
+      await expect(mintTransaction({ ...dbh, transaction: () => { throw new Error('pool gone'); } }, async () => 'never')).rejects.toThrow('pool gone');
+      const after = holdLockSlot();
       expect(after).toEqual(expect.any(Function));
       after();
     });
-
-    test('the wait there ends after 10 seconds with the same refusal, and a failed mint gives the slot back', async () => {
-      jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
-      const dbh = smallPool(2);
-      const giveBack = await holdLockSlot('a-long-cron-job', 1000);
-      const work = jest.fn(async () => 'never');
-      let settled = false;
-      const outcome = mintTransaction(dbh, work).then(() => 'ran', (err) => err).finally(() => { settled = true; });
-      jest.advanceTimersByTime(9999);
-      await tick();
-      expect(settled).toBe(false);
-      jest.advanceTimersByTime(1);
-      expect(await outcome).toMatchObject({
-        restartUnavailable: true, code: 'busy', message: 'We could not verify your services just now. Please try again in a moment.',
-      });
-      expect(work).not.toHaveBeenCalled();
-      giveBack();
-      // The place that gave up took nothing, and a mint that fails or cannot open gives the slot back.
-      await expect(mintTransaction(dbh, async () => { throw new Error('mint boom'); })).rejects.toThrow('mint boom');
-      await expect(mintTransaction({ ...dbh, transaction: () => { throw new Error('pool gone'); } }, async () => 'never')).rejects.toThrow('pool gone');
-      await expect(mintTransaction(dbh, async () => 'ran')).resolves.toBe('ran');
-      expect(jest.getTimerCount()).toBe(0);
-    });
   });
 
-  test('the restart mint runs in it: on a pool of four, three taps hold one transaction at a time', async () => {
+  test('the restart mint runs in it: on a pool of four, a tap beside a running mint is refused and opens no transaction', async () => {
     tables.customers = [{ ...CUSTOMER }];
     tables.cancellation_cases = [{ id: 'case-1', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-22' }];
     tables.estimates = [];
     recompute.mockResolvedValue({ recomputed: true, result: { engineVersion: 'v9.9' }, monthlyTotal: 45, annualTotal: 540, onetimeTotal: 0, serverTier: 'Bronze' });
-    let open = 0;
-    let peak = 0;
+    let opened = 0;
     const pooled = {
       client: { pool: { max: 4 } },
       transaction: async (fn) => {
-        open += 1;
-        peak = Math.max(peak, open);
-        try { await tick(); return await fn(fakeTrx()); } finally { open -= 1; }
+        opened += 1;
+        await tick();
+        return fn(fakeTrx());
       },
     };
-    const taps = await Promise.allSettled([1, 2, 3].map(() => actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ db: pooled }) })));
-    // The first tap mints; the next two find its live quote.
-    expect(taps.map((tap) => [tap.status, tap.value?.reused])).toEqual([['fulfilled', false], ['fulfilled', true], ['fulfilled', true]]);
-    expect(peak).toBe(1);
+    const tap = () => actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ db: pooled }) });
+    const taps = await Promise.allSettled([tap(), tap(), tap()]);
+    expect(taps.map((outcome) => [outcome.status, outcome.value?.reused, outcome.reason?.code])).toEqual([
+      ['fulfilled', false, undefined], ['rejected', undefined, 'busy'], ['rejected', undefined, 'busy'],
+    ]);
+    expect(taps[1].reason).toMatchObject(BUSY);
+    expect(opened).toBe(1);
+    // The slot is free again: the next tap gets the quote the first one made.
+    await expect(tap()).resolves.toMatchObject({ reused: true });
+    expect(opened).toBe(2);
   });
 });
 

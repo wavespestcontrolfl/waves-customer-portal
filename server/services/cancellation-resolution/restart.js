@@ -1373,65 +1373,46 @@ async function publishMintedEstimate(mint, { offer, estimateData }) {
 // no cap, as many mints as the pool has connections can each hold one and
 // wait for a second that no one can give. Every one of them fails when the
 // pool's wait ends, and until then no other request gets a connection.
-// A mint that waits here holds no connection. One mint for every
-// MINT_POOL_SHARE pool connections runs at once (5 on the default 20), so
-// the mints together use at most half of the pool. First come, first served.
-// The wait in line has an end (#8256 pre-push r1): a mint that started long
-// after its tap would archive a quote, and free its slot hold, for a customer
-// whose page already gave up. After MINT_WAIT_MS it leaves the line and
-// refuses with a coded answer, which both cards show and neither turns into
-// a request: nothing was read, minted or archived. The words are the ones
-// this module's failed-read refusals already use.
+// One mint for every MINT_POOL_SHARE pool connections runs at once (5 on
+// the default 20), so the mints together use at most half of the pool.
+// A tap beyond that does not wait (#8256 pre-push r1, r3). It is refused at
+// once with a coded answer, which both cards show and neither turns into a
+// request: nothing was read, minted or archived, and the customer taps
+// again. cron-lock.js has the same rule for every request-scoped lock: a
+// request parked in a line does its work after its client gave up, and here
+// that work archives a quote and frees its slot hold. The words are the
+// ones this module's failed-read refusals already use.
 // A pool under four connections has no quarter to give (#8256 pre-push r2).
 // The cron locks (utils/cron-lock.js) may pin half of any pool, and at least
 // one connection: a mint beside one lock holder would pin both connections
 // of a pool of two, the floor in knexfile.js. There the mint takes one of
-// the lock holders' slots, in their line, so one holder of either kind runs
-// at a time. On four connections or more the two caps together leave a
-// quarter of the pool free, and a mint never waits behind the cron jobs,
-// which do reach their cap in production.
+// the lock holders' slots, so one holder of either kind runs at a time. On
+// four connections or more the two caps together leave a quarter of the
+// pool free, and the cron jobs, which do reach their cap in production,
+// never cost a mint its slot.
 const MINT_POOL_SHARE = 4;
 const MINT_SLOTS_UNKNOWN_POOL = 5;
-const MINT_WAIT_MS = 10000;
 const MINT_BUSY_MESSAGE = 'We could not verify your services just now. Please try again in a moment.';
-const mintSlots = { running: 0, waiting: [] };
+let mintsRunning = 0;
 function mintSlotLimit(dbh) {
   const poolMax = Number(dbh?.client?.pool?.max);
   if (!Number.isFinite(poolMax) || poolMax <= 0) return MINT_SLOTS_UNKNOWN_POOL;
   return Math.floor(poolMax / MINT_POOL_SHARE);
 }
-// One place in line. A finished mint hands its slot to the first place; a
-// place whose wait ends first leaves the line, so no slot is handed to it.
-function waitForMintSlot() {
-  return new Promise((resolve, reject) => {
-    const place = { take: null };
-    const timer = setTimeout(() => {
-      mintSlots.waiting.splice(mintSlots.waiting.indexOf(place), 1);
-      reject(new RestartUnavailableError('busy', MINT_BUSY_MESSAGE));
-    }, MINT_WAIT_MS);
-    place.take = () => { clearTimeout(timer); resolve(); };
-    mintSlots.waiting.push(place);
-  });
-}
 function giveBackMintSlot() {
-  const next = mintSlots.waiting.shift();
-  if (next) next.take();
-  else mintSlots.running -= 1;
+  mintsRunning -= 1;
 }
-// Resolves the function that gives the slot back.
-async function takeMintSlot(dbh) {
+// Answers the function that gives the slot back, or null when none is free.
+function takeMintSlot(dbh) {
   const limit = mintSlotLimit(dbh);
-  if (limit === 0) {
-    const giveBack = await holdLockSlot('plan-mint', MINT_WAIT_MS);
-    if (!giveBack) throw new RestartUnavailableError('busy', MINT_BUSY_MESSAGE);
-    return giveBack;
-  }
-  if (mintSlots.running < limit) mintSlots.running += 1;
-  else await waitForMintSlot();
+  if (limit === 0) return holdLockSlot();
+  if (mintsRunning >= limit) return null;
+  mintsRunning += 1;
   return giveBackMintSlot;
 }
 async function mintTransaction(dbh, work) {
-  const giveBack = await takeMintSlot(dbh);
+  const giveBack = takeMintSlot(dbh);
+  if (!giveBack) throw new RestartUnavailableError('busy', MINT_BUSY_MESSAGE);
   try {
     return await dbh.transaction(work);
   } finally {

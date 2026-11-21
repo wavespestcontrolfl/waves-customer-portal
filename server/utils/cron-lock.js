@@ -308,14 +308,13 @@ function releaseLockSlot() {
 
 // A slot for a holder that is not a job lock (#8256): a caller that pins one
 // pool connection for a whole transaction and reads through the pool beside
-// it, as a job does. Its slot comes from the same cap and the same line, so
-// lock holders and such callers never pin every connection between them. It
-// waits at most waitMs (more than 0; a waiter holds no connection), then
-// resolves null: an HTTP caller must not start its work after its client
-// gave up. Otherwise it resolves the function that gives the slot back,
-// to call exactly once.
-async function holdLockSlot(label, waitMs) {
-  return (await acquireLockSlot(label, Date.now() + waitMs)) ? releaseLockSlot : null;
+// it, as a job does. Its slot comes from the same cap, so lock holders and
+// such callers never pin every connection between them. It never waits, as
+// no request-scoped lock does (see runExclusive below). Answers the function
+// that gives the slot back, to call exactly once, or null when no slot is
+// free.
+function holdLockSlot() {
+  return tryAcquireLockSlot() ? releaseLockSlot : null;
 }
 
 // waitForSlot defaults to "running inside a scheduled tick" (see
