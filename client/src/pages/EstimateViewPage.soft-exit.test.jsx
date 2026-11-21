@@ -1,15 +1,25 @@
 // @vitest-environment jsdom
-// Customer soft exit — the "Not what you expected?" sheet. Three exits: a
-// change request (note required), a still-deciding signal (one tap), and a
-// reason-tagged decline (chip required; "Other" needs a note; competitor
-// gets name + price fields). Every exit talks to the server exactly once.
+// Customer soft exit — the "Not ready yet?" sheet. Three exits: a change
+// request (note required), a still-deciding signal, and a reason-tagged
+// decline (chip required; "Other" needs a note; competitor gets name + price
+// fields). The tap on "I'm still deciding" is the signal (one POST); the
+// step after it asks what would help, and only Send talks to the server
+// again. The words are owner-approved (2026-11-21, estimate page changes).
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SoftExitSheet, SOFT_EXIT_REASONS } from './EstimateViewPage';
+import EstimateViewPage, { SoftExitSheet, SOFT_EXIT_REASONS, SOFT_EXIT_DECIDING_REASONS } from './EstimateViewPage';
+import { setGlassDefault } from '../lib/estimate-glass-copy';
 
-afterEach(() => cleanup());
+vi.mock('react-router-dom', () => ({ useParams: () => ({ token: 'not-ready-token' }) }));
+vi.mock('../lib/stripeLoader', () => ({ loadStripeSdk: vi.fn(async () => null) }));
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  setGlassDefault(false);
+});
 
 let fetchMock;
 beforeEach(() => {
@@ -23,26 +33,141 @@ function lastCall() {
 }
 
 describe('SoftExitSheet', () => {
-  it('opens on the chooser with the three exits and no server call', () => {
+  it('opens on the chooser with the approved words, the three exits and no server call', () => {
     render(<SoftExitSheet token="tok" onClose={vi.fn()} onDeclined={vi.fn()} />);
-    expect(screen.getByRole('dialog', { name: 'Not what you expected?' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Not ready yet?' })).toBeInTheDocument();
+    expect(screen.getByText('Tell us where you are. Nothing here sends you a message.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /change something/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /still deciding/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /isn’t for me/i })).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('still deciding is one tap → one POST, and a Done that never declines', async () => {
+  const openDecidingStep = async (props = {}) => {
     const onDeclined = vi.fn();
     const onClose = vi.fn();
-    render(<SoftExitSheet token="tok" expiresAt="2026-09-15T04:00:00.000Z" onClose={onClose} onDeclined={onDeclined} />);
+    render(<SoftExitSheet token="tok" expiresAt="2026-09-15T04:00:00.000Z" onClose={onClose} onDeclined={onDeclined} {...props} />);
     fireEvent.click(screen.getByRole('button', { name: /still deciding/i }));
-    await waitFor(() => expect(screen.getByText(/stays open through September 1[45]/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'What would help you decide?' })).toBeInTheDocument());
+    return { onClose, onDeclined };
+  };
+
+  it('the tap on "still deciding" is the signal: one POST with no reason, then the five reasons, Send and Skip', async () => {
+    await openDecidingStep();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(lastCall()).toMatchObject({ url: expect.stringMatching(/\/estimates\/tok\/change-request$/), method: 'POST', body: { kind: 'still_deciding' } });
+    expect(lastCall()).toEqual({ url: expect.stringMatching(/\/estimates\/tok\/change-request$/), method: 'POST', body: { kind: 'still_deciding' } });
+    expect(SOFT_EXIT_DECIDING_REASONS.map((r) => r.label)).toEqual([
+      'A lower price', 'Talking to a person first', 'Comparing other quotes', 'Not the right time yet', 'Something else',
+    ]);
+    for (const { label } of SOFT_EXIT_DECIDING_REASONS) expect(screen.getByRole('button', { name: label })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeEnabled();
+  });
+
+  it('Skip sends nothing more and closes with the unchanged words; Done never declines', async () => {
+    const { onClose, onDeclined } = await openDecidingStep();
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+    expect(screen.getByRole('dialog', { name: 'No rush' })).toBeInTheDocument();
+    expect(screen.getByText(/^Take your time — this estimate stays open through September 1[45]\. Questions\? Call \(941\) 297-5749\.$/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onDeclined).not.toHaveBeenCalled();
+  });
+
+  it('Send posts the picked reason once and closes with the same words as Skip', async () => {
+    await openDecidingStep();
+    fireEvent.click(screen.getByRole('button', { name: 'Comparing other quotes' }));
+    fireEvent.click(screen.getByRole('button', { name: 'A lower price' }));
+    expect(screen.getByRole('button', { name: 'A lower price' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Comparing other quotes' })).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'No rush' })).toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(lastCall()).toEqual({ url: expect.stringMatching(/\/estimates\/tok\/change-request$/), method: 'POST', body: { kind: 'still_deciding', reason: 'price' } });
+    expect(screen.getByText(/^Take your time — this estimate stays open through September 1[45]\. Questions\? Call \(941\) 297-5749\.$/)).toBeInTheDocument();
+  });
+
+  // The server reads the phone as it saves the reason and answers callPromised; the sheet says only what it answered.
+  const promisedCall = { ok: true, json: async () => ({ success: true, deduped: true, callPromised: true }) };
+
+  it('"Talking to a person first", and the server promises the call: "We will call you" and the open-through date', async () => {
+    await openDecidingStep();
+    fetchMock.mockResolvedValueOnce(promisedCall);
+    fireEvent.click(screen.getByRole('button', { name: 'Talking to a person first' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'We will call you' })).toBeInTheDocument());
+    expect(lastCall().body).toEqual({ kind: 'still_deciding', reason: 'person' });
+    expect(screen.getByText(/^This estimate stays open through September 1[45]\.$/)).toBeInTheDocument();
+    expect(screen.queryByText(/Take your time/)).not.toBeInTheDocument();
+  });
+
+  it('"Talking to a person first", and the server promises no call (no phone on the estimate): our number instead', async () => {
+    await openDecidingStep();
+    fireEvent.click(screen.getByRole('button', { name: 'Talking to a person first' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'No rush' })).toBeInTheDocument());
+    expect(lastCall().body).toEqual({ kind: 'still_deciding', reason: 'person' });
+    expect(screen.getByText(/Questions\? Call \(941\) 297-5749\./)).toBeInTheDocument();
+    expect(screen.queryByText(/We will call you/)).not.toBeInTheDocument();
+  });
+
+  it('a reason that fails to send shows the error and stays on the step, with no call promised', async () => {
+    await openDecidingStep();
+    fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({ error: 'Too many requests. Please call our office and we’ll get you sorted.' }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Talking to a person first' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/Too many requests/));
+    expect(screen.getByRole('dialog', { name: 'What would help you decide?' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+  });
+
+  it('while the still-deciding tap is in flight the other two choices are locked', async () => {
+    let answer;
+    fetchMock.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    render(<SoftExitSheet token="tok" expiresAt="2026-09-15T04:00:00.000Z" onClose={vi.fn()} onDeclined={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /still deciding/i }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'One moment…' })).toBeDisabled());
+    expect(screen.getByRole('button', { name: /change something/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /This isn.t for me/ })).toBeDisabled();
+    answer({ ok: true, json: async () => ({ success: true }) });
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'What would help you decide?' })).toBeInTheDocument());
+  });
+
+  it('while Send is in flight the picked reason is locked; a failed Send unlocks it', async () => {
+    await openDecidingStep();
+    let answer;
+    fetchMock.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'A lower price' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Sending…' })).toBeDisabled());
+    for (const { label } of SOFT_EXIT_DECIDING_REASONS) expect(screen.getByRole('button', { name: label })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeDisabled();
+    answer({ ok: false, json: async () => ({}) });
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    for (const { label } of SOFT_EXIT_DECIDING_REASONS) expect(screen.getByRole('button', { name: label })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'A lower price' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('Skip after a reason that failed to send closes with the general words and no error', async () => {
+    await openDecidingStep();
+    fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({}) });
+    fireEvent.click(screen.getByRole('button', { name: 'A lower price' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+    expect(screen.getByRole('dialog', { name: 'No rush' })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed tap stays on the chooser: no reasons step without the signal', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({}) });
+    render(<SoftExitSheet token="tok" onClose={vi.fn()} onDeclined={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /still deciding/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByRole('dialog', { name: 'Not ready yet?' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
   });
 
   it('a change request needs a note and sends topics + note', async () => {
@@ -123,9 +248,87 @@ describe('SoftExitSheet', () => {
   it('moves focus into the sheet and closes on Escape through the shared focus manager', () => {
     const onClose = vi.fn();
     render(<SoftExitSheet token="tok" onClose={onClose} onDeclined={vi.fn()} />);
-    const dialog = screen.getByRole('dialog', { name: 'Not what you expected?' });
+    const dialog = screen.getByRole('dialog', { name: 'Not ready yet?' });
     expect(dialog.contains(document.activeElement)).toBe(true);
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('estimate page: the "Not ready yet?" link', () => {
+  const LINK = 'Not ready yet? Tell us why';
+  const frequency = {
+    key: 'quarterly', label: 'Quarterly', monthly: 39, annual: 468, perVisit: 117, perTreatment: 117, visitsPerYear: 4,
+    perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', displayPrice: 117, perTreatment: 117, visitsPerYear: 4, monthly: 39 }],
+    included: [{ key: 'pest_control', label: 'Pest Control', detail: null }], addOns: [],
+  };
+  const payload = (extra = {}) => ({
+    glassDefault: true,
+    estimate: {
+      customerFirstName: 'Casey', address: '1 Plan Way, Sarasota, FL 34236', serviceCategory: 'pest_control',
+      acceptance: { mode: 'standard_slot_pick' }, defaultServiceMode: 'recurring', isOneTimeOnly: false,
+      showOneTimeOption: false, billByInvoice: false, membership: null, intelligence: null, askToken: 'ask-token',
+      expiresAt: '2026-09-15T04:00:00.000Z',
+    },
+    cta: { canAccept: true, terminalState: null, quoteRequired: false, reviewBeforeBooking: false },
+    pricing: {
+      services: [{
+        key: 'pest_control', label: 'Pest Control', isRecurring: true, isPest: true, waveGuardTierEligible: true,
+        defaultFrequencyKey: 'quarterly', copy: { priceWording: {} }, frequencies: [frequency],
+      }],
+      waveGuardTier: 'Bronze', askChips: [], defaultServiceMode: 'recurring', frequencies: [frequency],
+      renderFlags: {}, oneTimeBreakdown: { total: 0, items: [] },
+    },
+    ...extra,
+  });
+  const renderPage = async (body) => {
+    const answerFor = (url, init) => {
+      if (String(url).includes('/available-slots')) return { primary: [], expander: [] };
+      if (String(url).includes('/change-request')) return { success: true, deduped: true, ...(/"reason":"person"/.test(init?.body || '') ? { callPromised: true } : {}) };
+      return body;
+    };
+    const pageFetch = vi.fn(async (url, init) => ({ ok: true, status: 200, json: async () => answerFor(url, init) }));
+    vi.stubGlobal('fetch', pageFetch);
+    const view = render(<EstimateViewPage />);
+    await waitFor(() => expect(view.container.querySelector('#estimate-price-section')).not.toBeNull());
+    return { ...view, pageFetch };
+  };
+
+  // The whole page is in the document: text and selector lookups, and role lookups only inside the
+  // sheet, keep these tests quick (a role lookup walks every element of the page).
+  const sheet = () => within(document.querySelector('[role="dialog"]'));
+  const sheetTitle = () => document.querySelector('[role="dialog"]')?.getAttribute('aria-label');
+
+  it('shows twice, beside the approve area and at the page bottom, and opens the sheet', async () => {
+    const { container } = await renderPage(payload({ softExit: true, softExitChange: true }));
+    const links = await screen.findAllByText(LINK);
+    expect(links).toHaveLength(2);
+    // The first one comes before the Ask Waves box; the second one after it.
+    const ask = container.querySelector('#estimate-ask-section');
+    expect(links[0].compareDocumentPosition(ask) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(links[1].compareDocumentPosition(ask) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    fireEvent.click(links[0]);
+    expect(sheetTitle()).toBe('Not ready yet?');
+  }, 20000);
+
+  it('the page\'s sheet posts the signal, then the reason, and shows the call the server promised', async () => {
+    const { pageFetch } = await renderPage(payload({ softExit: true }));
+    fireEvent.click((await screen.findAllByText(LINK))[0]);
+    fireEvent.click(sheet().getByRole('button', { name: /still deciding/i }));
+    await waitFor(() => expect(sheetTitle()).toBe('What would help you decide?'));
+    fireEvent.click(sheet().getByRole('button', { name: 'Talking to a person first' }));
+    fireEvent.click(sheet().getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(sheetTitle()).toBe('We will call you'));
+    const posts = pageFetch.mock.calls.filter(([, init]) => init?.method === 'POST').map(([url, init]) => [String(url), JSON.parse(init.body)]);
+    expect(posts).toEqual([
+      [expect.stringMatching(/\/estimates\/not-ready-token\/change-request$/), { kind: 'still_deciding' }],
+      [expect.stringMatching(/\/estimates\/not-ready-token\/change-request$/), { kind: 'still_deciding', reason: 'person' }],
+    ]);
+  }, 20000);
+
+  it('no link when the server did not offer the sheet', async () => {
+    await renderPage(payload());
+    await screen.findByText('Questions about this estimate? Ask Waves');
+    expect(screen.queryByText(LINK)).toBeNull();
+  }, 20000);
 });
