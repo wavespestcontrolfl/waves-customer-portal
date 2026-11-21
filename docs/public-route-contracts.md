@@ -1437,9 +1437,16 @@ zone-day technician or answers `SLOT_TAKEN`. Its booking transaction checks the
 technician again under the date lock (`truckMayTakeDate`), so two commits that
 rebuilt the same new day before either booked never send two technicians south:
 the second answers `SLOT_TAKEN`. The estimate page's holds and accepts book the
-offered slot's own technician and do not check the rule again (follow-up): two
-offers held before either is written can send a second technician south that
-day, bounded by the offer-token TTL. The stop read counts a hold by the real
+offered slot's own technician and check it under the same date lock: `/reserve`
+for a new hold in the zone it stamps, and a re-tap, `/extend` and the accept in
+the hold's own zone stamp, the zone its list funneled (`slot-reservation.js`
+`holdKeepsSouthDay`), because another technician may have taken the day while
+the hold was lapsed. A refusal is the existing slot-taken answer (the 409 on
+`/reserve` and `/extend`, the accept's slot recovery), and a refused re-tap or
+`/extend` also releases the hold. A stamp whose zone row was renamed or removed
+since is checked in the same funneled pool (`zoneOfHoldStamp`), as the stop read
+counts it. A hold with no zone stamp (its estimate was in
+no zone when held) is not checked, as its list did not funnel it. The stop read counts a hold by the real
 clock, so a hold that ran out while its writer waited on the date lock no
 longer holds the day. Under that lock it also counts a visit staff booked that
 keeps its old hold time (`bookedVisitOrLiveHold`), and so do the lists when that
