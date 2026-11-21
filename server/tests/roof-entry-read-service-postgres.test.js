@@ -265,6 +265,68 @@ jest.setTimeout(60000);
     expect((await hidden())[b.id]).toBe(false);
   });
 
+  // Settles to 'waiting' when the promise is still pending after `ms` (it is blocked on a row lock).
+  const stateAfter = (promise, ms) => Promise.race([
+    promise.then(() => 'done', () => 'failed'),
+    new Promise((resolve) => { setTimeout(() => resolve('waiting'), ms); }),
+  ]);
+
+  test('a new read waits for a hide-or-show save in flight on its estimate, then starts with the saved choice', async () => {
+    const est = await insertId('estimates');
+    const a = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+    await svc.saveTechCount(a.id, { hideOnEstimate: true });
+    // A "show" save in flight: it holds the estimate row and has written every read, but has not committed.
+    const save = await database.transaction();
+    try {
+      await save('estimates').where({ id: est }).forUpdate().first('id');
+      await save('roof_entry_reads').where({ estimate_id: est }).update({ hide_on_estimate: false });
+      const fresh = svc.runRoofEntryRead(home({ lat: 27.49, estimateId: est }));
+      expect(await stateAfter(fresh, 400)).toBe('waiting');
+      await save.commit();
+      // Without the lock it would have read the old "hidden" and stayed hidden after staff chose Show.
+      expect((await fresh).read.hide_on_estimate).toBe(false);
+    } finally {
+      if (!save.isCompleted()) await save.rollback();
+    }
+    expect((await rows()).map((r) => r.hide_on_estimate)).toEqual([false, false]);
+  });
+
+  test('a hide-or-show save waits for a read being created for its estimate, then writes that read too', async () => {
+    const est = await insertId('estimates');
+    const a = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+    await svc.saveTechCount(a.id, { hideOnEstimate: true });
+    // A read in creation: it holds the estimate row FOR SHARE and has inserted its row (hidden, as inherited), uncommitted.
+    const creating = await database.transaction();
+    let show;
+    try {
+      await creating('estimates').where({ id: est }).forShare().first('id');
+      await creating('roof_entry_reads').insert({
+        estimate_id: est, context_key: `e:${est}`, lookup_key: 'f'.repeat(64), county: 'manatee', image_source: 'manatee_2025_rgb',
+        image_year: 2025, model: 'm', ai_tier: 'med', hide_on_estimate: true,
+      });
+      show = svc.saveTechCount(a.id, { hideOnEstimate: false });
+      expect(await stateAfter(show, 400)).toBe('waiting');
+      await creating.commit();
+      expect((await show).hide_on_estimate).toBe(false);
+    } finally {
+      if (!creating.isCompleted()) await creating.rollback();
+    }
+    // Without the lock the save would have missed the uncommitted row and left it hidden.
+    expect((await rows()).map((r) => r.hide_on_estimate)).toEqual([false, false]);
+  });
+
+  test('two hide-or-show saves on two reads of one estimate both land, and every read ends with one choice', async () => {
+    const est = await insertId('estimates');
+    const a = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+    const b = (await svc.runRoofEntryRead(home({ lat: 27.47, estimateId: est }))).read;
+    for (let round = 0; round < 5; round += 1) {
+      const [x, y] = await Promise.all([svc.saveTechCount(a.id, { hideOnEstimate: true }), svc.saveTechCount(b.id, { hideOnEstimate: false })]);
+      expect(typeof x.hide_on_estimate).toBe('boolean');
+      expect(typeof y.hide_on_estimate).toBe('boolean');
+      expect(new Set((await rows()).map((r) => r.hide_on_estimate)).size).toBe(1);
+    }
+  });
+
   test('a customer retired by a duplicate merge (deleted_at + merged- phone) is refused; an archived one is not', async () => {
     const [survivor, loser, archived] = [await insertId('customers'), await insertId('customers'), await insertId('customers')];
     await svc.runRoofEntryRead(home());

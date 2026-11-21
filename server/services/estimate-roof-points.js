@@ -79,7 +79,9 @@ async function freezeRoofPointsForEstimate(estimate, { deliveredAt, knex = db } 
     const record = {
       estimate_id: estimate.id,
       read_id: row.id,
-      address: String(estimate.address),
+      // Both name the same home here. The copy keeps the one that carries a ZIP: the page then sees a later ZIP change
+      // on the estimate even when the estimate had no ZIP at this send.
+      address: String(addressZip(row.points_address) ? row.points_address : estimate.address),
       snapshot: JSON.stringify(points),
       delivered_at: new Date(deliveredAt).toISOString(),
       frozen_at: knex.fn.now(),

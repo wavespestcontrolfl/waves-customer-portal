@@ -335,6 +335,34 @@ describe('sendEstimateNow: roof points frozen at send', () => {
     expect(store['est-1']).toBeDefined();
   });
 
+  test('the copy keeps the ZIP that either address names, so a later ZIP change on the estimate takes the roof off', async () => {
+    const stamp = () => ({ deliveryState: { lastDeliveredAt: stampedHandoff() } });
+    const send = async (estimateAddress, pointsAddress) => {
+      const row = estimateRow({ address: estimateAddress });
+      db.mockImplementation((table) => {
+        if (table === 'roof_entry_reads') return readsBuilder();
+        if (table === 'estimate_roof_points') return pointsBuilder();
+        return makeBuilder(row);
+      });
+      reads = [read({ points_address: pointsAddress })];
+      await router.sendEstimateNow(row, 'email');
+    };
+    const page = (address) => roofPointsDocBlock(estimateRow({ address, estimate_data: stamp() }), { knex: db });
+
+    // The points name ZIP 34203; the estimate has no ZIP at the send.
+    await send('12 Synthetic Way, Bradenton, FL', '12 Synthetic Way, Bradenton, FL 34203');
+    expect(store['est-1'].address).toBe('12 Synthetic Way, Bradenton, FL 34203');
+    expect((await page('12 Synthetic Way, Bradenton, FL')).roofPoints).toBeDefined();
+    expect((await page('12 Synthetic Way, Bradenton, FL 34203')).roofPoints).toBeDefined();
+    // Staff then correct the estimate to the same street in another ZIP: another home.
+    expect(await page('12 Synthetic Way, Bradenton, FL 34208')).toEqual({});
+
+    // The other way round: only the estimate named the ZIP at the send.
+    await send('12 Synthetic Way, Bradenton, FL 34203', '12 Synthetic Way, Bradenton, FL');
+    expect(store['est-1'].address).toBe('12 Synthetic Way, Bradenton, FL 34203');
+    expect(await page('12 Synthetic Way, Bradenton, FL 34208')).toEqual({});
+  });
+
   test('an estimate whose address is blank or only punctuation gets no copy, whatever the points name', async () => {
     for (const [estimateAddress, pointsAddress] of [['   ', '12 Synthetic Way, Bradenton, FL 34203'], [' - ', ' - '], ['.', '   ']]) {
       const blank = estimateRow({ address: estimateAddress });

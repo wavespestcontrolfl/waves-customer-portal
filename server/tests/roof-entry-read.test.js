@@ -62,6 +62,7 @@ jest.mock('../models/db', () => {
       },
       orderBy() { return b; },
       forShare() { mockForShare(); return b; },
+      forUpdate() { mockEvents.push(`for-update:${name}`); return b; },
       async first() { return match()[0]; },
       async select() {
         if (mockSelectError && name === 'roof_entry_reads') { const err = mockSelectError; mockSelectError = null; throw err; }
@@ -957,11 +958,16 @@ describe('ownership check atomic with the insert', () => {
     expect(mockRows).toHaveLength(1);
   });
 
-  it('does not open a transaction when only one id (or none) is given', async () => {
-    await post(home({ estimate_id: EST }));
+  it('opens no transaction for a read with no estimate; an estimate alone takes the share lock for its insert', async () => {
+    const { transaction } = require('../models/db');
     await post(home({ customer_id: CUST }));
     await post(home());
-    expect(require('../models/db').transaction).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+    expect(mockForShare).not.toHaveBeenCalled();
+    // The estimate's hide-or-show choice must not change beside the insert (saveEstimateChoice locks the same row).
+    await post(home({ estimate_id: EST }));
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(mockForShare).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1573,12 +1579,13 @@ describe('hide or show is one choice for the estimate', () => {
       row({ id: THIRD, estimate_id: EST, lookup_key: 'c'.repeat(64), status: 'pending' }),
       row({ id: ELSEWHERE, estimate_id: EST2, lookup_key: 'd'.repeat(64) }),
     );
+    mockRefs.estimates = [{ id: EST, customer_id: null }, { id: EST2, customer_id: null }];
     mockEvents.length = 0;
     const hidden = await svc.saveTechCount(OTHER, { hideOnEstimate: true });
     expect(hidden.hide_on_estimate).toBe(true);
     expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([true, true, true, false]);
-    expect(mockEvents[0]).toBe('tx');
-    expect(mockEvents[mockEvents.length - 1]).toBe('tx-end');
+    // The estimate row is locked before either write, inside the one transaction.
+    expect(mockEvents).toEqual(['tx', 'for-update:estimates', 'update:', 'update:', 'tx-end']);
     // Showing again from another read clears it on every read of the estimate.
     await svc.saveTechCount(READ_A, { hideOnEstimate: false });
     expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([false, false, false, false]);
@@ -1586,12 +1593,22 @@ describe('hide or show is one choice for the estimate', () => {
 
   it('a hide on a read with no estimate stays on that read; a save without the hide flag writes no other read', async () => {
     mockRows.push(row(), row({ id: OTHER, lookup_key: 'b'.repeat(64) }), row({ id: THIRD, estimate_id: EST }), row({ id: ELSEWHERE, estimate_id: EST, hide_on_estimate: true }));
+    mockEvents.length = 0;
     await svc.saveTechCount(READ_A, { hideOnEstimate: true });
     expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([true, false, false, true]);
+    expect(mockEvents).toEqual(['tx', 'update:', 'tx-end']);
     mockEvents.length = 0;
     await svc.saveTechCount(THIRD, { count: 4 });
     expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([true, false, false, true]);
     expect(mockEvents).not.toContain('tx');
+  });
+
+  it('a read for an estimate alone is claimed under a share lock on the estimate row, with no lock across the slow steps', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: null }];
+    const res = await post(home({ estimate_id: EST }));
+    expect(res.status).toBe(200);
+    expect(mockEvents).toEqual(['prices', 'tx', 'claim', 'tx-end', 'image', 'renew', 'model', 'update:done']);
+    expect(mockForShare).toHaveBeenCalledTimes(1);
   });
 
   it('a new read of an estimate whose points are hidden starts hidden (a paid read and a reused copy alike)', async () => {

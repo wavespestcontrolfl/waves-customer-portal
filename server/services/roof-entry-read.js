@@ -377,7 +377,8 @@ async function reuseCandidates(key) {
 /**
  * Staff hide or show an estimate's roof points as ONE choice for the estimate: saveTechCount writes it to every read of
  * the estimate, and each new read of the estimate starts with it (true when any read of the estimate is hidden). A fresh
- * read can therefore never bring back points staff hid.
+ * read can therefore never bring back points staff hid. `conn` is writeOwned's transaction, which holds the estimate
+ * row's lock, so the choice cannot change between this read and the insert.
  */
 async function pointsHiddenFor(conn, estimateId) {
   if (!estimateId) return false;
@@ -437,16 +438,20 @@ async function assertReferencesExist({ estimateId, customerId }) {
 }
 
 /**
- * Runs `write(conn, contextKey)` that inserts a row for this context. When the context names both an estimate and a customer, the
- * write runs in a SHORT transaction that first locks the estimate row (FOR SHARE: a customer merge cannot change it
- * until we commit), rechecks that its customer is still the one supplied, writes, and commits. The check and the insert
- * are therefore atomic. This is the only transaction in the flow, and it holds no lock during any network I/O.
+ * Runs `write(conn, contextKey)` that inserts a row for this context. When the context names an estimate, the write
+ * runs in a SHORT transaction that first locks the estimate row FOR SHARE, writes, and commits. The lock does two jobs:
+ *   - a hide-or-show save for the estimate (FOR UPDATE on the same row, saveEstimateChoice) never overlaps the insert,
+ *     so the new read starts with the estimate's choice as it stands and the save's write to every read never misses it;
+ *   - with a customer supplied too, a customer merge cannot change the estimate until we commit: its customer is
+ *     rechecked under the lock, so the check and the insert are atomic.
+ * These are the only transactions in the read flow, and they hold no lock during any network I/O.
  */
 async function writeOwned(ctx, write) {
-  if (!(ctx.estimateId && ctx.customerId)) return write(db, contextKey(ctx));
+  if (!ctx.estimateId) return write(db, contextKey(ctx));
   return db.transaction(async (trx) => {
     const estimate = await trx('estimates').where({ id: ctx.estimateId }).forShare().first('customer_id');
     if (!estimate) throw referenceError('unknown_reference', 'unknown estimates reference');
+    if (!ctx.customerId) return write(trx, contextKey(ctx));
     if (ownerMismatch(estimate.customer_id, ctx)) throw referenceError('reference_mismatch', 'the estimate belongs to another customer');
     // The key is derived from the estimate as locked here, so it can never disagree with who owns it at write time.
     return write(trx, contextKey({ ...ctx, estimateOwned: !!estimate.customer_id }));
@@ -721,9 +726,26 @@ const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && 
   && Math.abs(c.lat) <= 90 && Math.abs(c.lng) <= 180;
 
 /**
+ * A save that carries the hide-or-show choice. The choice is the estimate's, not one photo's, so in ONE transaction:
+ * lock the read's estimate row (FOR UPDATE), run the save, then write the choice to every other read of the estimate.
+ * The lock comes first, so two saves on two reads of one estimate run one after the other (no deadlock on each other's
+ * rows), and a read being created for the estimate (FOR SHARE in writeOwned) is either committed before the write to
+ * every read or starts after it with the new choice. A read with no estimate keeps the choice to itself.
+ */
+function saveEstimateChoice(id, save, hidden) {
+  return db.transaction(async (trx) => {
+    const target = await trx(TABLE).where({ id }).first('estimate_id');
+    if (target?.estimate_id) await trx('estimates').where({ id: target.estimate_id }).forUpdate().first('id');
+    const saved = await save(trx);
+    if (saved?.estimate_id) await trx(TABLE).where({ estimate_id: saved.estimate_id }).whereNot({ id: saved.id }).update({ hide_on_estimate: hidden });
+    return saved;
+  });
+}
+
+/**
  * Save the technician's answer. count / flags as before (flags merged in SQL, so two tabs keep both). hideOnEstimate:
  * staff hid the points from this estimate's customer page (the choice is the estimate's: it is written to every read
- * of the estimate, see pointsHiddenFor). pins: the confirmed points (validateTechPins output), saved
+ * of the estimate, see saveEstimateChoice). pins: the confirmed points (validateTechPins output), saved
  * whole (null clears them). Pins are drawn on the read's crop, so the caller also names the crop centre it drew on
  * ({ lat, lng }, the panel's map point): it must hash to this row's lookup_key, so no other roof's photo can carry these
  * pins, and the rounded centre is stored so the estimate can rebuild the same county crop. A centre that does not match
@@ -770,14 +792,9 @@ async function saveTechCount(id, { count, flags, pins, crop, address, expectedPi
     let query = conn(TABLE).where(where);
     if (checked) query = query.whereRaw('tech_pins IS NOT DISTINCT FROM ?::jsonb', [expectedPins === null ? null : JSON.stringify(expectedPins)]);
     const [saved] = await query.update(patch).returning('*');
-    // Hide or show is the estimate's choice, not one photo's: every other read of the estimate takes it in the same
-    // transaction, so a later read, or the read a sent copy came from, never shows points staff hid.
-    if (saved?.estimate_id && hideOnEstimate !== undefined) {
-      await conn(TABLE).where({ estimate_id: saved.estimate_id }).whereNot({ id: saved.id }).update({ hide_on_estimate: patch.hide_on_estimate });
-    }
     return saved;
   };
-  const row = hideOnEstimate === undefined ? await save(db) : await db.transaction(save);
+  const row = hideOnEstimate === undefined ? await save(db) : await saveEstimateChoice(id, save, patch.hide_on_estimate);
   if (row) return publicRead(row);
   if (checked && await db(TABLE).where({ id }).first('id')) {
     throw Object.assign(new Error('The points changed since they were loaded'), { code: 'points_changed' });
