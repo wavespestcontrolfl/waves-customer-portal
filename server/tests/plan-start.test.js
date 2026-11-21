@@ -1069,6 +1069,37 @@ describe('mintPlanStartEstimate', () => {
   });
 });
 
+// The plan-start mint shares the restart mint's capped transaction (plan-restart.test.js pins the cap's rules).
+describe('mintPlanStartEstimate and the mint cap', () => {
+  test('on a pool of four, a tap beside a running mint is refused and opens no transaction', async () => {
+    tables.customers = [{ ...LEAD }];
+    tables.cancellation_cases = [];
+    recompute.mockResolvedValue(pricedAs(PEST_LINE));
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    let opened = 0;
+    const pooled = {
+      client: { pool: { max: 4 } },
+      transaction: async (fn) => {
+        opened += 1;
+        await tick();
+        return fn(fakeTrx());
+      },
+    };
+    const tap = () => mint({}, { db: pooled });
+    const taps = await Promise.allSettled([tap(), tap(), tap()]);
+    expect(taps.map((outcome) => [outcome.status, outcome.value?.reused, outcome.reason?.code])).toEqual([
+      ['fulfilled', false, undefined], ['rejected', undefined, 'busy'], ['rejected', undefined, 'busy'],
+    ]);
+    expect(taps[1].reason).toMatchObject({
+      restartUnavailable: true, message: 'We could not verify your services just now. Please try again in a moment.',
+    });
+    expect(opened).toBe(1);
+    // The slot is free again: the next tap gets the quote the first one made.
+    await expect(tap()).resolves.toMatchObject({ reused: true });
+    expect(opened).toBe(2);
+  });
+});
+
 describe('assertPlanStartAcceptEligible', () => {
   // Reads return only the columns they name, as Postgres does, so a column the check needs and
   // does not select reads as missing here too.
