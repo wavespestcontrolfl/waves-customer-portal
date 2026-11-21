@@ -279,15 +279,19 @@ function comparableEmail(value) {
 // The legacy billing form persists what it shows: every save carries its receipt
 // channel (PortalPage, while GATE_BILLING_NOTIFICATION_CHANNELS is off). A page
 // loaded before 2026-11-20 showed App for an untouched Text default, so its echo is
-// 'push' and nothing here can tell that echo from a pick. App over an untouched Text
-// default is therefore never stored from this legacy key: the customer would get
-// receipts in the app without having chosen it (owner 2026-11-20: text unless the
-// customer sets the app up). The billing channels list (paymentConfirmationChannels)
-// and every other channel key send only what the customer changed.
+// 'push': the customer would get receipts in the app without having chosen it (owner
+// 2026-11-20: text unless the customer sets the app up). The current form marks a save
+// where the customer changed the receipt selector (paymentConfirmationChannelEdited).
+// So App over an untouched Text default is stored only with that mark; an unmarked one
+// is an echo and is dropped. The mark is transport only and never reaches the write.
+// The billing channels list (paymentConfirmationChannels) and every other channel key
+// send only what the customer changed.
 function dropLegacyReceiptAppEcho(updates, existing = {}) {
-  if (updates.paymentConfirmationChannel === 'push'
-    && channelValue(existing.payment_receipt_channel, true) === 'sms'
-    && existing.payment_receipt_channel_explicit !== true) {
+  const edited = updates.paymentConfirmationChannelEdited === true;
+  delete updates.paymentConfirmationChannelEdited;
+  if (!edited && updates.paymentConfirmationChannel === 'push'
+    && channelValue(existing?.payment_receipt_channel, true) === 'sms'
+    && existing?.payment_receipt_channel_explicit !== true) {
     delete updates.paymentConfirmationChannel;
   }
   return updates;
@@ -1083,6 +1087,7 @@ router.put('/preferences', async (req, res, next) => {
       requestChannel: Joi.string().valid('email', 'push'),
       billingReminderChannel: Joi.string().valid(...CHANNEL_VALUES),
       paymentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES, 'push'),
+      paymentConfirmationChannelEdited: Joi.boolean(),
       invoiceChannels: Joi.array().items(Joi.string().valid('email', 'sms', 'push')).min(1).max(3).unique(),
       paymentIssueChannels: Joi.array().items(Joi.string().valid('email', 'sms', 'push')).min(1).max(3).unique(),
       billingReminderChannels: Joi.array().items(Joi.string().valid('email', 'sms', 'push')).min(1).max(3).unique(),

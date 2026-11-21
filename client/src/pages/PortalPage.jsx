@@ -6517,6 +6517,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const [paymentSmsOff, setPaymentSmsOff] = useState(false);
   const [paymentSmsReenabled, setPaymentSmsReenabled] = useState(false);
   const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
+  // The legacy form sends the receipt channel on every save; this marks a save where the customer changed it,
+  // so the server can tell a pick from an echo (routes/notifications.js dropLegacyReceiptAppEcho).
+  const [receiptChannelEdited, setReceiptChannelEdited] = useState(false);
   const [smsPrefEnabled, setSmsPrefEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
@@ -6660,6 +6663,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           setPaymentSmsOff(prefsData.paymentConfirmationSms === false);
           setPaymentSmsReenabled(false);
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
+          setReceiptChannelEdited(false);
           const nextBillingChannels = Object.fromEntries(BILLING_CHANNEL_FIELDS.map((field) => [
             field.key,
             normalizeBillingChannels(prefsData[field.key], prefsData[field.legacyKey] || 'sms'),
@@ -7386,6 +7390,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         ...(appPreferencesAvailable && invoiceChannel !== savedInvoiceChannel ? { invoiceChannel } : {}),
         ...(appPreferencesAvailable && paymentIssueChannel !== savedPaymentIssueChannel ? { paymentIssueChannel } : {}),
         paymentConfirmationChannel: paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms',
+        ...(receiptChannelEdited ? { paymentConfirmationChannelEdited: true } : {}),
       } : {}),
     })
       .then((result) => {
@@ -7402,6 +7407,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           setSavedPaymentIssueChannel(paymentIssueChannel);
         }
         setSavedBillingEmail(billingEmail);
+        setReceiptChannelEdited(false);
         // Keep local state in step with the coerced save — otherwise
         // re-adding an email (or re-enabling email messages) in the same
         // session resurrects a stale Email/Both selection the server was
@@ -8232,7 +8238,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
                 return (
                   <CustomerSelect
                     value={paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms'}
-                    onChange={(e) => setPaymentConfirmationChannel(e.target.value)}
+                    onChange={(e) => { setPaymentConfirmationChannel(e.target.value); setReceiptChannelEdited(true); }}
                     disabled={opts.length <= 1}
                     aria-label="Delivery method for payment confirmations"
                   >

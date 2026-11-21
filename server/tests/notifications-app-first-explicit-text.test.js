@@ -132,6 +132,21 @@ describe('save route: an App pick is the customer\'s own choice and is stored (o
     }
   });
 
+  test('App over an untouched Text default is stored when the form marks it as the customer\'s change; the mark never reaches the write', () => {
+    for (const existing of [{ payment_receipt_channel: 'sms', payment_receipt_channel_explicit: false }, {}, undefined]) {
+      const updates = dropLegacyReceiptAppEcho(
+        { paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: true, billingEmail: 'a@example.com' }, existing);
+      expect(updates).toEqual({ paymentConfirmationChannel: 'push', billingEmail: 'a@example.com' });
+      expect(notificationPrefsDbUpdates(updates, existing || {}))
+        .toMatchObject({ payment_receipt_channel: 'push', payment_receipt_channel_explicit: true });
+    }
+    // A false mark is no mark, and the mark is removed whatever the channel value.
+    expect(dropLegacyReceiptAppEcho({ paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: false, billingEmail: '' }, {}))
+      .toEqual({ billingEmail: '' });
+    expect(dropLegacyReceiptAppEcho({ paymentConfirmationChannel: 'email', paymentConfirmationChannelEdited: true }, {}))
+      .toEqual({ paymentConfirmationChannel: 'email' });
+  });
+
   test('the echo guard touches only an App value on the legacy receipt key', () => {
     const untouched = { payment_receipt_channel: 'sms', payment_receipt_channel_explicit: false };
     for (const updates of [

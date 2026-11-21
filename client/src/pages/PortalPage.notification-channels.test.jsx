@@ -173,6 +173,29 @@ it('keeps the scalar delivery controls for an older server without the array cap
   expect(screen.getByRole('button', { name: 'Save billing preferences' })).toBeInTheDocument();
 });
 
+// The scalar form sends its receipt channel on every save. The server stores App over an untouched
+// Text default only when the customer changed the selector (routes/notifications.js dropLegacyReceiptAppEcho).
+it('marks a scalar receipt choice only on a save where the customer changed the selector', async () => {
+  prefs.billingChannelsAvailable = false;
+  prefs.paymentConfirmationChannel = 'sms';
+  render(<BillingTab customer={customer} />);
+  const select = await screen.findByRole('combobox', { name: 'Delivery method for payment confirmations' });
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(1));
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).toMatchObject({ paymentConfirmationChannel: 'sms' });
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('paymentConfirmationChannelEdited');
+  await waitFor(() => expect(within(select).getByRole('option', { name: 'App', exact: true })).not.toBeDisabled());
+  fireEvent.change(select, { target: { value: 'push' } });
+  fireEvent.click(await screen.findByRole('button', { name: /^(Save billing preferences|Saved)$/ }));
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(2));
+  expect(api.updateNotificationPrefs.mock.calls[1][0]).toMatchObject({ paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: true });
+  // The mark covers one save: the next untouched save sends the channel without it.
+  fireEvent.click(await screen.findByRole('button', { name: /^(Save billing preferences|Saved)$/ }));
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(3));
+  expect(api.updateNotificationPrefs.mock.calls[2][0]).toMatchObject({ paymentConfirmationChannel: 'push' });
+  expect(api.updateNotificationPrefs.mock.calls[2][0]).not.toHaveProperty('paymentConfirmationChannelEdited');
+});
+
 it('opens the payment methods section after loading an App action destination', async () => {
   const scroll = vi.fn();
   const previous = HTMLElement.prototype.scrollIntoView;
