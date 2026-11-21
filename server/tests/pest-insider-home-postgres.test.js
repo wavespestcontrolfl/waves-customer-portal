@@ -269,6 +269,16 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     await db('service_records').insert({ id: randomUUID(), customer_id: customerId, service_date: date, service_type: 'Quarterly Pest Control', status: 'completed', scheduled_service_id: visitId });
   }
 
+  test('a customer staff marked multi-home, or one with no street on file, has no entry', async () => {
+    // has_multi_home: a second premises that never got a customer_properties row.
+    const { s: flagged } = await eligible({ has_multi_home: true });
+    const { s: unflagged } = await eligible({ has_multi_home: false });
+    const { s: noStreet } = await eligible({ address_line1: null });
+    const { s: blankStreet } = await eligible({ address_line1: '  ' });
+    const facts = await loadHomeFacts(db, [flagged, unflagged, noStreet, blankStreet], NOW);
+    expect([...facts.keys()]).toEqual([unflagged]);
+  });
+
   // An estimate of the customer with the address it quoted; returns its id.
   async function estimate(customerId, address) {
     const [inserted] = await db('estimates').insert({ id: randomUUID(), customer_id: customerId, address, estimate_data: JSON.stringify({}) }).returning('id');

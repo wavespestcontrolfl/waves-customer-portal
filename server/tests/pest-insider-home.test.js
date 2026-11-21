@@ -86,6 +86,19 @@ describe('loadHomeFacts', () => {
     expect([...facts.keys()]).toEqual([4, 5]);
   });
 
+  test('a stamped address is the home only when both streets can be keyed: a home with no usable street confirms nothing', async () => {
+    const stamp = (over = {}) => ({ property_id: null, address_line1: null, address_line2: null, city: null, zip: null, estimate_property_id: null, estimate_address: null, ...over });
+    const noStreet = { home_line1: null, home_line2: null, home_city: 'Bradenton', home_zip: '34202', home_property_id: '' };
+    const home = { ...noStreet, home_line1: '100 Palm Drive' };
+    const { conn } = fakeConn([[
+      row({ subscriber_id: 1, ...noStreet, last_stamps: [stamp({ address_line1: '9 Other Road', address_line2: 'Apt 4', zip: '34202' })] }),
+      row({ subscriber_id: 2, ...noStreet, home_line1: '   ', last_stamps: [stamp({ estimate_address: '9 Other Road, Bradenton, FL 34202' })] }),
+      row({ subscriber_id: 3, ...home, last_stamps: [stamp({ address_line1: '100 Palm Drive', zip: '34202' })] }),
+    ]]);
+    const facts = await loadHomeFacts(conn, [1, 2, 3], NOW);
+    expect([...facts.keys()]).toEqual([3]);
+  });
+
   test('an appointment with no location of its own takes its source estimate\'s: another property or address there has no entry', async () => {
     const stamp = (over = {}) => ({ property_id: null, address_line1: null, address_line2: null, city: null, zip: null, estimate_property_id: null, estimate_address: null, ...over });
     const home = { home_line1: '100 Palm Drive', home_line2: null, home_city: 'Bradenton', home_zip: '34202', home_property_id: 'p1' };
@@ -145,6 +158,8 @@ describe('loadHomeFacts', () => {
     expect(calls[0].sql).not.toMatch(/FROM scheduled_services/);
     expect(calls[0].sql).toContain('LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id');
     expect(calls[0].sql).toContain('LEFT JOIN estimates e ON e.id = ss.source_estimate_id');
+    expect(calls[0].sql).toContain('c.has_multi_home IS NOT TRUE');
+    expect(calls[0].sql).toContain("TRIM(COALESCE(c.address_line1, '')) <> ''");
     expect(calls[0].sql).toMatch(/LOWER\(TRIM\(ns\.email\)\) = LOWER\(TRIM\(c\.email\)\)/);
     expect(calls[0].sql).toMatch(/COALESCE\(o\.account_id, o\.id\) = COALESCE\(c\.account_id, c\.id\)/);
     expect(calls[0].sql).toContain('customer_properties');

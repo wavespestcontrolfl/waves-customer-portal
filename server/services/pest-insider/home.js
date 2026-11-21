@@ -71,6 +71,12 @@ const dayNumber = (ymd) => {
 // Watch). A unit on one side only is another premise; an address with no street is the home.
 function addressIsHome(address, home) {
   const { visitAtCustomerHome } = require('../stamped-address');
+  // visitAtCustomerHome reads a street it cannot key as "unknown, so no conflict". Here an
+  // address that names a street must be matched: with no usable street on either side
+  // nothing confirms it is the home.
+  const { streetKey } = require('../customer-properties');
+  const named = String(address.address_line1 ?? '').trim();
+  if (named && !(streetKey(named) && streetKey(home.address_line1))) return false;
   return visitAtCustomerHome({
     service_address_line1: address.address_line1, service_address_line2: address.address_line2,
     service_address_city: address.city, service_address_zip: address.zip,
@@ -129,6 +135,8 @@ function homeFromRow(row, today) {
 // on file; no other live customer has it; no sibling profile shares the account
 // (COALESCE(account_id, id) is account-properties.js accountPropertyIds' key); the
 // customer is the owner, not a property manager or a tenant (customers.contact_role);
+// staff have not marked the customer multi-home (customers.has_multi_home: a second
+// premises that never got a customer_properties row); the customer has a street on file;
 // and there is at most one saved property EVER, active, lived-in and the customer's
 // own (relationship NULL or own_home: not a client's or a family member's home).
 // One property ever, not one active: the last visit is read over the customer's whole
@@ -165,6 +173,8 @@ WHERE ns.id IN (${idList})
   AND NOT EXISTS (SELECT 1 FROM customers o WHERE o.id <> c.id AND o.deleted_at IS NULL AND o.active IS DISTINCT FROM false
                   AND COALESCE(o.account_id, o.id) = COALESCE(c.account_id, c.id))
   AND COALESCE(c.contact_role, 'owner') = 'owner'
+  AND c.has_multi_home IS NOT TRUE
+  AND TRIM(COALESCE(c.address_line1, '')) <> ''
   AND (SELECT COUNT(*) FROM customer_properties p WHERE p.customer_id = c.id) <= 1
   AND NOT EXISTS (SELECT 1 FROM customer_properties p WHERE p.customer_id = c.id
                   AND (p.active IS NOT TRUE
