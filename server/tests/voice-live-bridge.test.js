@@ -48,7 +48,11 @@ const waitFor = async (cond, ms = 10000) => {
 const b64 = (bytes) => Buffer.alloc(bytes, 0x00).toString('base64');
 const silence = (bytes) => Buffer.alloc(bytes, 0xff).toString('base64');
 
-function setup({ closeReply = true, deps = {} } = {}) {
+// speech: when the caller speaks, as [from, to] in ms after session.started.
+// With it, every clock advance after session.started also delivers the
+// caller's audio for that time, as Twilio does: voiced inside a span, silent
+// outside it. The bridge reads the reply delay from that audio.
+function setup({ closeReply = true, deps = {}, speech = [] } = {}) {
   let clock = 1_000_000;
   const twilio = new FakeSocket();
   const openai = new FakeSocket({
@@ -78,7 +82,23 @@ function setup({ closeReply = true, deps = {} } = {}) {
   });
   return {
     twilio, openai, bridge, update, where, ledgerUpdate, ledgerWhere, db, openaiFactory, admit,
-    advance: (ms) => { clock += ms; },
+    advance: (ms) => {
+      if (!(speech.length && ms > 0 && bridge.ready && !bridge._finalizing)) {
+        clock += ms;
+        return;
+      }
+      // One frame for each span of the same kind: a voiced span ends exactly when the caller stops.
+      let from = clock - bridge.sessionStartWall;
+      const to = from + ms;
+      const cuts = [...new Set(speech.flat())].filter((cut) => cut > from && cut < to).sort((a, b) => a - b);
+      for (const cut of [...cuts, to]) {
+        clock += cut - from;
+        const middle = (from + cut) / 2;
+        const voiced = speech.some(([a, b]) => middle >= a && middle < b);
+        twilio.emit('message', JSON.stringify({ event: 'media', media: { track: 'inbound', payload: (voiced ? b64 : silence)((cut - from) * 8) } }));
+        from = cut;
+      }
+    },
     tick: () => clock,
     // OpenAI opens after the reservation is admitted (async), so wait it out.
     twilioStart: async (callSid = CALL_SID) => {
@@ -359,7 +379,7 @@ describe('model audio, barge-in and latency', () => {
   };
 
   test('after a barge-in, the cut-off reply\'s tail never reaches Twilio; the next reply inside the tail window plays and is timed apart', async () => {
-    const t = setup();
+    const t = setup({ speech: [[1300, 1500]] });
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
@@ -384,7 +404,7 @@ describe('model audio, barge-in and latency', () => {
   });
 
   test('a reply right after a barge-in (the old one already streamed) is played, not dropped as tail, and timed apart', async () => {
-    const t = setup();
+    const t = setup({ speech: [[1300, 1500]] });
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
@@ -400,8 +420,8 @@ describe('model audio, barge-in and latency', () => {
     expect(summaryOf(t)).toMatchObject({ turns: [], after_barge_in_ambiguous_ms: [300] }); // +1800 minus +1500
   });
 
-  test('a final transcript fragment that lands after an ambiguous reply began refines that sample, never turns', async () => {
-    const t = setup();
+  test('the caller speaks on after the barge-in fragment: an ambiguous reply is timed from their last speech, never into turns', async () => {
+    const t = setup({ speech: [[1300, 1900]] });
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
@@ -410,18 +430,18 @@ describe('model audio, barge-in and latency', () => {
     t.advance(100);
     t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 }); // barge-in at +1600
     t.advance(600);
-    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // ambiguous reply at +2200: 700 provisional
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // ambiguous reply at +2200
     t.advance(100);
-    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hold on', start_ms: 1500, end_ms: 1900 }); // the final fragment
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hold on', start_ms: 1500, end_ms: 1900 }); // the final fragment, late: it changes nothing
     t.twilioStop();
     await flush();
     const s = summaryOf(t);
-    expect(s.after_barge_in_ambiguous_ms).toEqual([300]); // +2200 minus the real speech end +1900
+    expect(s.after_barge_in_ambiguous_ms).toEqual([300]); // +2200 minus +1900, where the caller stopped
     expect(s.turns).toEqual([]);
   });
 
   test('two gaps inside one barge-in window, with a transcript fragment between them, are both kept apart from turns', async () => {
-    const t = setup();
+    const t = setup({ speech: [[1300, 1500], [2050, 2150]] });
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
@@ -443,7 +463,7 @@ describe('model audio, barge-in and latency', () => {
   });
 
   test('a tail chunk delayed past the gap by a network stall is never timed into turns; a later reply outside the window is', async () => {
-    const t = setup();
+    const t = setup({ speech: [[1300, 1500], [2600, 2800]] });
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
@@ -465,7 +485,7 @@ describe('model audio, barge-in and latency', () => {
   });
 
   test('a fast reply that starts right as the last one finishes playing is timed', async () => {
-    const t = setup();
+    const t = setup({ speech: [[1700, 1950]] });
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
@@ -475,7 +495,7 @@ describe('model audio, barge-in and latency', () => {
     // the caller's short answer over the end of it: ends at +1950, too late to cut anything
     t.openai.receive({ type: 'session.input_transcript.delta', delta: 'yes', start_ms: 1700, end_ms: 1950 });
     t.advance(140);
-    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // next reply at +2100
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // next reply at +2100, 150 ms after the caller stopped
     t.twilioStop();
     await flush();
     expect(t.twilio.sent.filter((m) => m.event === 'clear')).toHaveLength(0);
@@ -545,13 +565,13 @@ describe('model audio, barge-in and latency', () => {
   });
 
   test('reply delay is the first output delta minus the end of the caller speech; the greeting records none', async () => {
-    const t = setup();
+    const t = setup({ speech: [[5000, 6200]] });
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting: no turn yet
     t.advance(5000);
     t.twilioMedia();
     t.advance(1500);
-    // session time counts from session.started (t0): speech ended at t0 + 6200
+    // the caller spoke t0 + 5000..6200; the delay is read from that audio, not from end_ms
     t.openai.receive({ type: 'session.input_transcript.delta', delta: 'when can you come', start_ms: 5000, end_ms: 6200 });
     t.advance(900); // now t0 + 7400: 1200 ms
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) });
@@ -564,8 +584,8 @@ describe('model audio, barge-in and latency', () => {
     expect(s.latency_max_ms).toBe(1200);
   });
 
-  test('a transcript that arrives after the reply began times that reply, and never the next one', async () => {
-    const t = setup();
+  test('a reply is timed when it begins, whenever the transcript arrives; the model\'s next reply, by itself, is not timed', async () => {
+    const t = setup({ speech: [[1500, 1900]] });
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
@@ -581,15 +601,15 @@ describe('model audio, barge-in and latency', () => {
     expect(summaryOf(t).turns).toEqual([100]);
   });
 
-  test('a later fragment of the same speech moves the sample to the true end of speech', async () => {
-    const t = setup();
+  test('the delay runs from the caller\'s last speech, not from the last fragment that came before the reply', async () => {
+    const t = setup({ speech: [[1000, 1900]] });
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
     t.advance(1600);
     t.openai.receive({ type: 'session.input_transcript.delta', delta: 'I need', start_ms: 1000, end_ms: 1500 }); // before the reply
     t.advance(400);
-    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // reply at t0 + 2000: 500 so far
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // reply at t0 + 2000; the caller spoke on to t0 + 1900
     t.advance(100);
     t.openai.receive({ type: 'session.input_transcript.delta', delta: ' pest control', start_ms: 1500, end_ms: 1900 }); // late
     t.twilioStop();
@@ -598,7 +618,7 @@ describe('model audio, barge-in and latency', () => {
   });
 
   test('caller speaks first: the first reply (greeting or answer) is kept apart as first_reply_ambiguous_ms, never in turns', async () => {
-    const t = setup();
+    const t = setup({ speech: [[300, 1500]] });
     await t.ready();
     t.advance(2000);
     t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hi, do you do termites', start_ms: 300, end_ms: 1500 });
@@ -612,7 +632,7 @@ describe('model audio, barge-in and latency', () => {
   });
 
   test('caller speaks first but the transcript lands after the first reply began: first_reply_ambiguous_ms still records it', async () => {
-    const t = setup();
+    const t = setup({ speech: [[300, 1500]] });
     await t.ready();
     t.advance(2400);
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // first reply at t0 + 2400
@@ -649,23 +669,24 @@ describe('model audio, barge-in and latency', () => {
     expect(summaryOf(t).turns).toEqual([]);
   });
 
-  test('a late first caller packet does not shift speech timing: it counts from session.started', async () => {
-    const t = setup();
-    await t.ready(); // session time 0 = t0
-    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting
-    t.advance(3000);
-    t.twilioMedia(); // the first packet arrives 3 s late
-    t.advance(1000);
-    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hi', start_ms: 3500, end_ms: 3900 });
-    t.advance(500); // now t0 + 4500; speech ended at t0 + 3900
-    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) });
-    t.twilioStop();
-    await flush();
-    expect(summaryOf(t).turns).toEqual([600]);
+  test("the delay is read from the caller's own audio: it does not move with a transcript's end_ms, and needs no transcript", async () => {
+    // Measured on the live API: end_ms ran 1.3 to 2.5 s after the caller's last sound.
+    for (const endMs of [200, 3900, 5500, 600000, null]) {
+      const t = setup({ speech: [[3500, 3900]] });
+      await t.ready();
+      t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting
+      t.advance(4000);
+      if (endMs !== null) t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hi', start_ms: endMs - 200, end_ms: endMs });
+      t.advance(500); // now t0 + 4500; the caller stopped at t0 + 3900
+      t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) });
+      t.twilioStop();
+      await flush();
+      expect(summaryOf(t).turns).toEqual([600]);
+    }
   });
 
   test('a caller transcript that lands while the model is already talking times the reply from the speech end, never near zero', async () => {
-    const t = setup();
+    const t = setup({ speech: [[1500, 1900]] });
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
@@ -695,8 +716,8 @@ describe('reply start on the continuous GPT-Live stream', () => {
   const mediaPayloads = (t) => t.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
   const silenceThenVoice = (silentMs, voiceBytes = 800) => Buffer.concat([Buffer.alloc(silentMs * 8, 0xff), Buffer.alloc(voiceBytes, 0x00)]).toString('base64');
   const voiceThenSilence = (silentMs) => Buffer.concat([Buffer.alloc(800, 0x00), Buffer.alloc(silentMs * 8, 0xff)]).toString('base64');
-  const start = async () => {
-    const t = setup();
+  const start = async (speech) => {
+    const t = setup({ speech });
     await t.ready();
     t.twilioMedia();
     return t;
@@ -708,7 +729,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
   };
 
   test('a continuous stream of silent chunks with voice in it: the greeting is no turn, the reply after the caller is timed from its first voiced chunk', async () => {
-    const t = await start();
+    const t = await start([[2300, 2900]]);
     run(t, 7, silence(800)); // +0..+700 silence from session.started
     run(t, 15, b64(800)); // greeting voice +700..+2200
     run(t, 8, silence(800)); // +2200..+3000
@@ -723,14 +744,14 @@ describe('reply start on the continuous GPT-Live stream', () => {
   });
 
   test('a pause under 600 ms of silent audio inside an utterance is no new reply; 600 ms or more is', async () => {
-    const t = await start();
+    const t = await start([[100, 400], [1500, 1600]]);
     delta(t, b64(160)); // greeting
     run(t, 10, silence(800));
     said(t, 'first question', 100, 400);
     run(t, 5, silence(800)); // +1000..+1500
     delta(t, b64(800)); // reply 1 begins at +1500
     t.advance(100);
-    said(t, 'and', 1520, 1580); // at +1600: arms the next measure
+    said(t, 'and', 1520, 1580); // the caller spoke again +1500..+1600, after reply 1 began
     run(t, 5, silence(800)); // 500 ms pause inside the reply
     delta(t, b64(800)); // voice resumes: the same reply
     t.advance(100);
@@ -741,7 +762,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
   });
 
   test('silence at the end of one voiced chunk and at the start of the next counts toward the 600 ms', async () => {
-    const t = await start();
+    const t = await start([[0, 100]]);
     delta(t, b64(160)); // greeting
     t.advance(100);
     said(t, 'first question', 20, 60);
@@ -754,24 +775,24 @@ describe('reply start on the continuous GPT-Live stream', () => {
     delta(t, voiceThenSilence(300));
     t.advance(100);
     delta(t, silenceThenVoice(300)); // at +400, 600 ms of silence in all: a new reply, voiced 300 ms into its chunk
-    expect((await end(t)).turns).toEqual([640]); // its voice at +700; speech ended +60
+    expect((await end(t)).turns).toEqual([600]); // its voice at +700; the caller stopped at +100
   });
 
   test('one chunk that holds the end of a reply, 600 ms of silence and the next reply: the next reply is timed from its own first voiced sample', async () => {
     const mixed = Buffer.concat([Buffer.alloc(800, 0x00), Buffer.alloc(4800, 0xff), Buffer.alloc(800, 0x00)]).toString('base64');
-    const t = await start();
+    const t = await start([[0, 100]]);
     delta(t, b64(160)); // greeting
     t.advance(100);
     said(t, 'hello', 10, 60);
     delta(t, mixed); // at +100: 100 ms more greeting, 600 ms silent, the reply's voice at +800
-    expect((await end(t)).turns).toEqual([740]);
+    expect((await end(t)).turns).toEqual([700]);
     expect(mediaPayloads(t)).toContain(mixed);
   });
 
   describe('a chunk that holds the cut-off tail, 600 ms of silence and then the next reply, after a barge-in', () => {
     const mixed = Buffer.concat([Buffer.alloc(800, 0x00), Buffer.alloc(4800, 0xff), Buffer.alloc(800, 0x00)]).toString('base64');
     const bargeIn = async () => {
-      const t = await start();
+      const t = await start([[1100, 1300]]);
       delta(t, b64(160)); // greeting
       t.advance(1000);
       delta(t, b64(8000)); // a reply...
@@ -790,7 +811,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
       expect(mediaPayloads(t)).toContain(b64(800)); // the reply alone: it plays at once, until +1550
       expect(t.bridge.playbackEndsAt - t.bridge.sessionStartWall).toBe(1550);
       expect(t.bridge.voiceEndsAt - t.bridge.sessionStartWall).toBe(1550);
-      expect((await end(t)).after_barge_in_ambiguous_ms).toEqual([150]); // its voice at +1450, speech ended +1300
+      expect((await end(t)).after_barge_in_ambiguous_ms).toEqual([150]); // its voice at +1450, the caller stopped at +1300
     });
 
     test('past the 1.5 s nothing is trimmed: the chunk plays whole', async () => {
@@ -805,18 +826,18 @@ describe('reply start on the continuous GPT-Live stream', () => {
 
   test('one chunk with two reply starts marks one reply, at the first of them', async () => {
     const two = Buffer.concat([Buffer.alloc(800, 0xff), Buffer.alloc(800, 0x00), Buffer.alloc(4800, 0xff), Buffer.alloc(800, 0x00)]).toString('base64');
-    const t = await start();
+    const t = await start([[0, 100]]);
     t.advance(100);
     said(t, 'hello', 10, 50);
     t.advance(200);
     delta(t, two); // at +300: the first voice of the call 100 ms in, 600 ms of silence, voice again
     const s = await end(t);
-    expect(s.first_reply_ambiguous_ms).toBe(350); // its voice at +400, speech ended +50
+    expect(s.first_reply_ambiguous_ms).toBe(300); // its voice at +400, the caller stopped at +100
     expect(s.turns).toEqual([]);
   });
 
   test('an arrival gap still starts a new reply when no silent audio came between', async () => {
-    const t = await start();
+    const t = await start([[100, 500]]);
     delta(t, b64(160)); // greeting
     t.advance(500);
     said(t, 'hello', 100, 500);
@@ -827,7 +848,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
 
   describe('the delay runs to the first voiced sample of the reply: its chunk arrival plus its offset in the chunk', () => {
     test('a voiced chunk with leading silence: the delay includes the offset of the voice inside the chunk', async () => {
-      const t = await start();
+      const t = await start([[100, 500]]);
       delta(t, b64(160)); // greeting
       t.advance(500);
       said(t, 'hello there', 100, 500);
@@ -837,7 +858,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
     });
 
     test('audio still queued at Twilio ahead of the reply is not added to the delay', async () => {
-      const t = await start();
+      const t = await start([[300, 700]]);
       delta(t, b64(160)); // greeting
       run(t, 10, silence(800)); // paced silence, +0..+1000
       said(t, 'hello', 300, 700);
@@ -849,7 +870,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
     });
 
     test('a late transcript times the reply to its first voiced sample', async () => {
-      const t = await start();
+      const t = await start([[500, 900]]);
       delta(t, b64(160)); // greeting
       t.advance(1000);
       delta(t, silenceThenVoice(200)); // at +1000: a reply whose voice is 200 ms into its chunk
@@ -859,7 +880,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
     });
 
     test('a reply right after a barge-in plays from its first voiced sample and is timed apart from there', async () => {
-      const t = await start();
+      const t = await start([[1100, 1300]]);
       delta(t, b64(160)); // greeting
       t.advance(1000);
       delta(t, b64(8000)); // a reply: 1000 ms queued
@@ -872,7 +893,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
     });
 
     test('a second reply inside the 1.5 s after a barge-in is timed apart to its first voiced sample', async () => {
-      const t = await start();
+      const t = await start([[1100, 1300], [1400, 1500]]);
       delta(t, b64(160)); // greeting
       t.advance(1000);
       delta(t, b64(8000)); // a reply: 1000 ms queued
@@ -881,7 +902,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
       t.advance(100);
       delta(t, b64(160)); // at +1400, after a gap: a short reply
       t.advance(100);
-      said(t, ' so', 1450, 1500); // more speech, after that reply's audio has played: no barge-in
+      said(t, ' so', 1450, 1500); // more speech (+1400..+1500), after that reply's audio has played: no barge-in
       t.advance(200);
       delta(t, silenceThenVoice(200)); // at +1700, after a gap: a reply whose voice is 200 ms into its chunk
       const s = await end(t);
@@ -891,19 +912,19 @@ describe('reply start on the continuous GPT-Live stream', () => {
     });
 
     test('the caller speaks first: first_reply_ambiguous_ms runs to the first voiced sample', async () => {
-      const t = await start();
+      const t = await start([[0, 100]]);
       t.advance(100);
       said(t, 'hello', 10, 50);
       t.advance(200);
       delta(t, silenceThenVoice(200, 160)); // at +300: the first voice of the call, 200 ms into its chunk
       const s = await end(t);
-      expect(s.first_reply_ambiguous_ms).toBe(450);
+      expect(s.first_reply_ambiguous_ms).toBe(400);
       expect(s.turns).toEqual([]);
     });
   });
 
   test('speech that ended after a chunk arrived is not answered by the voice inside that chunk: it times the next reply', async () => {
-    const t = await start();
+    const t = await start([[800, 1100]]);
     delta(t, b64(160)); // greeting
     t.advance(1000);
     delta(t, silenceThenVoice(200)); // at +1000: a reply whose voice plays from +1200
@@ -918,7 +939,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
     const clears = (t) => t.twilio.sent.filter((m) => m.event === 'clear').length;
 
     test('a caller question over queued silence flushes nothing: the answer is a turn', async () => {
-      const t = await start();
+      const t = await start([[600, 1000]]);
       delta(t, b64(160)); // greeting
       t.advance(1000);
       delta(t, silence(4000)); // one burst after a stall: 500 ms of silence queued until +1500
@@ -980,6 +1001,340 @@ describe('reply start on the continuous GPT-Live stream', () => {
     expect(t.twilio.sent.some((m) => m.event === 'clear')).toBe(false);
     expect(mediaPayloads(t).filter((p) => p === b64(800))).toHaveLength(13);
     expect((await end(t)).interruptions).toBe(0);
+  });
+});
+
+describe("the reply delay is read from the caller's own audio", () => {
+  const delta = (t, payload) => t.openai.receive({ type: 'session.output_audio.delta', delta: payload });
+  const said = (t, text, startMs, endMs) => t.openai.receive({ type: 'session.input_transcript.delta', delta: text, start_ms: startMs, end_ms: endMs });
+  const frameOf = (byte) => Buffer.alloc(160, byte).toString('base64');
+  const end = async (t) => {
+    t.twilioStop();
+    await flush();
+    return summaryOf(t);
+  };
+  // The greeting comes at once, the caller speaks as `speech` says, and the
+  // model's next voice arrives at +4100.
+  const call = async (speech) => {
+    const t = setup({ speech });
+    await t.ready();
+    delta(t, b64(160)); // greeting
+    t.advance(4100);
+    delta(t, b64(800)); // the reply at +4100
+    t.advance(100); // the caller's audio goes on after the reply began
+    return end(t);
+  };
+
+  test('a caller frame holds voice from RMS 300 (292 does not, 308 does), and voice is speech once it runs 100 ms', async () => {
+    const t = setup();
+    await t.ready();
+    for (let i = 0; i < 5; i++) t.twilioMedia(frameOf(0xe5)); // every sample 292
+    expect(t.bridge.callerVoicedMs).toBe(0);
+    expect(t.bridge.callerSpokeAt).toBe(null);
+    for (let i = 0; i < 4; i++) t.twilioMedia(frameOf(0xe4)); // every sample 308
+    expect(t.bridge.callerVoicedMs).toBe(80);
+    expect(t.bridge.callerSpokeAt).toBe(null); // 80 ms in a row: not yet speech
+    t.twilioMedia(frameOf(0xe4));
+    expect(t.bridge.callerVoicedMs).toBe(100);
+    expect(t.bridge.callerSpokeAt).toBe(t.tick());
+    t.twilioMedia(silence(160)); // a silent frame ends the run
+    for (let i = 0; i < 4; i++) {
+      t.advance(20);
+      t.twilioMedia(frameOf(0xe4));
+    }
+    expect(t.bridge.callerSpokeAt).toBe(t.tick() - 80); // 80 ms again: no new speech
+    t.twilioMedia(''); // a frame with no audio holds no voice: it ends the run as well
+    t.advance(20);
+    t.twilioMedia(frameOf(0xe4));
+    expect(t.bridge.callerSpokeAt).toBe(t.tick() - 100);
+  });
+
+  test('one stray sample at speech level in a silent frame is not voice', async () => {
+    const t = setup();
+    await t.ready();
+    const click = Buffer.alloc(160, 0xff);
+    click[80] = 0xbf; // one sample of 1980: the frame's RMS is 157, under the voice level of 300
+    t.twilioMedia(click.toString('base64'));
+    expect(t.bridge.callerVoicedMs).toBe(0);
+    t.twilio.emit('message', JSON.stringify({ event: 'media', media: { track: 'outbound', payload: b64(800) } })); // not the caller's track
+    expect(t.bridge.callerMs).toBe(20); // the click frame only
+  });
+
+  test('a sound under 100 ms (a click, a knock) is not caller speech and moves no delay; 100 ms of voice is speech', async () => {
+    expect((await call([[2000, 3000], [3600, 3620]])).turns).toEqual([1100]);
+    expect((await call([[2000, 3000], [3600, 3680]])).turns).toEqual([1100]);
+    expect((await call([[2000, 3000], [3600, 3700]])).turns).toEqual([400]); // +4100 minus +3700
+  });
+
+  test('a fast reply is a delay too: its voice comes 150 ms after the caller stopped, and the caller stays silent', async () => {
+    expect((await call([[2000, 3950]])).turns).toEqual([150]);
+  });
+
+  test('a delay is a whole number of ms, though a voiced sample can sit between two ms', async () => {
+    const t = setup({ speech: [[2000, 3000]] });
+    await t.ready();
+    delta(t, b64(160)); // greeting
+    t.advance(4100);
+    delta(t, Buffer.concat([Buffer.alloc(12, 0xff), Buffer.alloc(800, 0x00)]).toString('base64')); // its voice 1.5 ms into the chunk
+    expect((await end(t)).turns).toEqual([1102]); // 1101.5, rounded
+  });
+
+  test("the server's clock steps back between the caller's last speech and the reply: the delay is 0, never negative", async () => {
+    const t = setup();
+    await t.ready();
+    for (let i = 0; i < 10; i++) {
+      t.advance(20);
+      t.twilioMedia(b64(160)); // the caller speaks
+    }
+    t.advance(-500); // the clock is set back
+    delta(t, b64(800)); // the first reply of the call, 500 ms "before" the caller's last frame by that clock
+    expect((await end(t)).first_reply_ambiguous_ms).toBe(0);
+  });
+
+  test("the caller starts again 60 ms before a reply's first voice and speaks on: that reply has no delay, though the sound is known as speech only after the voice began", async () => {
+    const reply = async (again) => {
+      const t = setup({ speech: [[2000, 3000], [again, again + 200]] });
+      await t.ready();
+      delta(t, b64(160)); // greeting
+      t.advance(4000);
+      for (let i = 0; i < 5; i++) t.advance(20); // caller frames of 20 ms, as Twilio sends them
+      delta(t, b64(800)); // the reply's voice at +4100
+      for (let i = 0; i < 12; i++) t.advance(20);
+      return (await end(t)).turns;
+    };
+    expect(await reply(4040)).toEqual([]); // not 1100: 60 ms of voice before the reply's voice, 100 ms in a row at +4140
+    expect(await reply(4080)).toEqual([]); // one frame before the reply's voice: the run began at +4080, not when that frame arrived
+    expect(await reply(4100)).toEqual([1100]); // the caller starts with the reply's voice: the reply had waited
+  });
+
+  test('the reply after one that did not wait is timed from where the caller stopped', async () => {
+    const t = setup({ speech: [[2000, 4300]] });
+    await t.ready();
+    delta(t, b64(160)); // greeting
+    t.advance(4100);
+    delta(t, b64(800)); // a reply at +4100, while the caller speaks
+    t.advance(1300);
+    delta(t, b64(800)); // the answer at +5400
+    expect((await end(t)).turns).toEqual([1100]); // +5400 minus +4300
+  });
+
+  test("the caller starts between the arrival of a reply's chunk and its first voiced sample, and speaks on: that reply has no delay", async () => {
+    const reply = async (again) => {
+      const t = setup({ speech: [[2000, 3000], [again, again + 200]] });
+      await t.ready();
+      delta(t, b64(160)); // greeting
+      t.advance(4100);
+      delta(t, Buffer.concat([Buffer.alloc(1600, 0xff), Buffer.alloc(800, 0x00)]).toString('base64')); // arrives at +4100, its voice at +4300
+      t.advance(600);
+      return (await end(t)).turns;
+    };
+    expect(await reply(4200)).toEqual([]);
+    expect(await reply(4300)).toEqual([1300]); // +4300 minus +3000
+  });
+
+  test('speech that arrived with the chunk of the reply before, or earlier, is not answered by the next reply; 20 ms later it is', async () => {
+    const next = async (stops) => {
+      const t = setup({ speech: [[2000, stops]] });
+      await t.ready();
+      t.advance(4100);
+      delta(t, b64(800)); // the first reply of the call, at +4100 (its delay is kept apart, never in turns)
+      t.advance(1300);
+      delta(t, b64(800)); // the model's next reply at +5400
+      return (await end(t)).turns;
+    };
+    expect(await next(4100)).toEqual([]); // the caller's last frame arrived with the chunk at +4100
+    expect(await next(4120)).toEqual([1280]); // +5400 minus +4120
+  });
+
+  test("the caller's last voiced frame and a reply's chunk in the same millisecond: the order the bridge handles them in decides which reply answers that speech", async () => {
+    const order = async (frameFirst) => {
+      const t = setup();
+      await t.ready();
+      for (let i = 0; i < 10; i++) {
+        t.advance(20);
+        t.twilioMedia(b64(160)); // the caller speaks, +0..+200
+      }
+      t.advance(20); // +220: one more voiced frame and the first reply's chunk
+      if (frameFirst) t.twilioMedia(b64(160));
+      delta(t, b64(800)); // the first reply of the call (its delay is kept apart)
+      if (!frameFirst) t.twilioMedia(b64(160));
+      t.advance(20);
+      t.twilioMedia(silence(160)); // the caller is silent from here
+      t.advance(1280);
+      delta(t, b64(800)); // the model's next reply, at +1520
+      const s = await end(t);
+      return [s.first_reply_ambiguous_ms, s.turns];
+    };
+    expect(await order(true)).toEqual([0, []]); // the frame came first: the first reply answers it, the next reply answers nothing
+    expect(await order(false)).toEqual([null, [1300]]); // the chunk came first: the caller spoke on into that reply, and the next reply answers them
+  });
+
+  test('taking a delay back removes that reply\'s delay only: an earlier turn stays, and a kept-apart first delay is taken back as well', async () => {
+    const t = setup({ speech: [[2000, 3000], [6000, 7000], [8250, 8550]] });
+    await t.ready();
+    delta(t, b64(160)); // greeting
+    t.advance(4100);
+    delta(t, b64(800)); // answer 1 at +4100: 1100
+    t.advance(4200);
+    delta(t, Buffer.concat([Buffer.alloc(800, 0xff), Buffer.alloc(800, 0x00)]).toString('base64')); // answer 2 arrives at +8300, its voice at +8400: 1400...
+    expect(t.bridge.latencies).toEqual([1100, 1400]);
+    for (let i = 0; i < 6; i++) t.advance(50); // ...but the caller, who began again at +8250, speaks on, frame after frame
+    expect((await end(t)).turns).toEqual([1100]);
+
+    // A reply with no delay of its own has none to take back: the turn before it stays.
+    const next = setup({ speech: [[2000, 3000], [5350, 5650]] });
+    await next.ready();
+    delta(next, b64(160)); // greeting
+    next.advance(4100);
+    delta(next, b64(800)); // the answer at +4100: 1100
+    next.advance(1300);
+    delta(next, b64(800)); // the model's next reply by itself, at +5400: no delay
+    next.advance(300); // the caller, who began at +5350, speaks on
+    expect((await end(next)).turns).toEqual([1100]);
+
+    const first = setup({ speech: [[300, 1500], [1950, 2250]] });
+    await first.ready();
+    first.advance(2000);
+    delta(first, b64(800)); // the first reply of the call at +2000, 500 ms after the caller stopped...
+    expect(first.bridge.firstReplyAmbiguousMs).toBe(500);
+    first.advance(300); // ...but the caller began again at +1950 and speaks on
+    const s = await end(first);
+    expect(s.first_reply_ambiguous_ms).toBe(null);
+    expect(s.turns).toEqual([]);
+  });
+
+  test('a noisy line, every caller frame voiced: the bridge cannot hear the caller stop and records no delay; caller_voiced_pct tells', async () => {
+    const noisy = await call([[0, 60000]]);
+    expect(noisy.turns).toEqual([]);
+    expect(noisy.caller_voiced_pct).toBe(100);
+    const silent = await call([[60000, 60001]]); // a span this call never reaches: every caller frame is silent
+    expect(silent.turns).toEqual([]);
+    expect(silent.caller_voiced_pct).toBe(0);
+  });
+
+  test('caller_voiced_pct is the voiced share of the caller audio by time; with no caller audio it is null', async () => {
+    expect((await call([[2000, 3000]])).caller_voiced_pct).toBe(24); // 1000 ms of 4100
+    const t = setup();
+    await t.ready();
+    expect((await end(t)).caller_voiced_pct).toBe(null);
+  });
+
+  test('speech from before session.started starts no delay; a run of voice that goes on after session.started is speech from then on', async () => {
+    const t = setup();
+    await t.twilioStart();
+    t.openai.emit('open');
+    for (let i = 0; i < 10; i++) {
+      t.advance(20);
+      t.twilioMedia(b64(160)); // 200 ms of speech, held until the session is up
+    }
+    t.advance(800);
+    t.openai.receive({ type: 'session.started', session: { id: 's1' } });
+    await flush();
+    expect(t.bridge.callerVoicedMs).toBe(200); // its voiced time counts all the same
+    t.advance(1500);
+    delta(t, b64(160)); // the first reply
+    const s = await end(t);
+    expect(s.first_reply_ambiguous_ms).toBe(null); // the model heard that speech only at session.started
+    expect(s.turns).toEqual([]);
+
+    const on = setup();
+    await on.twilioStart();
+    on.openai.emit('open');
+    for (let i = 0; i < 3; i++) {
+      on.advance(20);
+      on.twilioMedia(b64(160)); // 60 ms of voice before the session is up...
+    }
+    on.openai.receive({ type: 'session.started', session: { id: 's1' } });
+    await flush();
+    for (let i = 0; i < 2; i++) {
+      on.advance(20);
+      on.twilioMedia(b64(160)); // ...and 40 ms after: 100 ms in a row
+    }
+    on.advance(1500);
+    delta(on, b64(160)); // the first reply, 1500 ms after the caller stopped
+    expect((await end(on)).first_reply_ambiguous_ms).toBe(1500);
+  });
+
+  test("audio missing between two frames (a jump in Twilio's media timestamps) ends a run of voice; a stamp under one frame late does not", async () => {
+    // Each frame: its timestamp, or [timestamp, length in ms]; 20 ms when not given.
+    const speechAfter = async (frames) => {
+      const t = setup();
+      await t.ready();
+      for (const [stamp, ms = 20] of frames.map((frame) => [].concat(frame))) {
+        t.advance(ms);
+        t.twilio.emit('message', JSON.stringify({ event: 'media', media: { track: 'inbound', timestamp: String(stamp), payload: b64(ms * 8) } }));
+      }
+      return t.bridge.callerSpokeAt !== null;
+    };
+    expect(await speechAfter([20, 40, 60, 80, 100])).toBe(true); // 100 ms in a row
+    expect(await speechAfter([20, 40, 60, 80, 120])).toBe(false); // one frame is missing before the fifth: 80 ms, then 20 ms
+    expect(await speechAfter([20, 40, 60, 80, 119])).toBe(true);
+    expect(await speechAfter([20, 40, 60, 80, 2000])).toBe(false); // 80 ms of voice, 1.9 s missing, a click
+    expect(await speechAfter([20, 40, 60, 80, 2000, 2020, 2040, 2060, 2080])).toBe(true); // a new run of 100 ms after the gap
+    expect(await speechAfter([20, 40, 60, [80, 40]])).toBe(true); // 60 ms, then a 40 ms frame right after it
+    expect(await speechAfter([20, 40, 60, [100, 40]])).toBe(false); // 20 ms is missing before a longer frame: its length does not hide the gap
+  });
+
+  // Two end-to-end runs on the live API: the real bridge, a synthetic caller,
+  // 24 s each. A replay drives the bridge with what was measured, on a 20 ms
+  // grid: when the caller spoke, when each transcript fragment arrived and the
+  // end_ms it carried, and where the model's voice sits in its audio.
+  const voicedAt = (ranges, ms) => ranges.some(([from, to]) => ms >= from && ms < to);
+  const replay = async ({ speech, fragments, voice, arrives }) => {
+    const t = setup();
+    await t.ready();
+    const chunk = (position) => {
+      const audio = Buffer.alloc(800, 0xff);
+      for (let i = 0; i < 800; i++) if (voicedAt(voice, position + i / 8)) audio[i] = 0x00;
+      return audio.toString('base64');
+    };
+    for (let ms = 20; ms <= 21000; ms += 20) {
+      t.advance(20);
+      t.twilioMedia(voicedAt(speech, ms - 10) ? b64(160) : silence(160)); // the caller's frame for (ms - 20, ms]
+      for (let position = 0; position < ms; position += 100) if (arrives(position) === ms) delta(t, chunk(position));
+      for (const [arrival, endMs] of fragments) if (arrival > ms - 20 && arrival <= ms) said(t, 'words', endMs - 200, endMs);
+    }
+    const s = await end(t);
+    expect(s.interruptions).toBe(0);
+    expect(s.after_barge_in_ambiguous_ms).toEqual([]);
+    return s;
+  };
+
+  // 2026-11-20. The caller's questions ended 8083 and 17097 ms after
+  // session.started; the model's voice began 1097 and 1107 ms later. The
+  // bridge of that day recorded 0 ms for both: every end_ms lay after the
+  // reply. The greeting was never spoken, so the first answer is the first
+  // reply of the call. One reply held a 593 ms pause.
+  test('the live session of 2026-11-20, replayed: both delays read as measured', async () => {
+    const s = await replay({
+      speech: [[6047, 8083], [15045, 17097]],
+      fragments: [ // [arrival, end_ms]
+        [7510, 8600], [7690, 8800], [7872, 9000], [8066, 9200], [8330, 9400], [8496, 9600], [8786, 9800], [9169, 10200],
+        [16456, 17800], [16909, 18200], [17098, 18400], [17313, 18600], [17502, 18800], [17875, 19000], [18276, 19400],
+      ],
+      voice: [[9080, 11000], [11593, 14500], [18107, 20820]],
+      arrives: (position) => position + 100, // audio position p arrived about p + 100
+    });
+    expect(s.first_reply_ambiguous_ms).toBe(1100); // measured 1097
+    expect(s.turns).toEqual([1107]); // measured 1107
+  });
+
+  // 2026-11-21, Sandy's full prompt: the greeting was spoken 2.0 s after
+  // session.started, the questions ended at 8089 and 17101 ms, and the
+  // model's voice began 1670 and 1690 ms later. Every end_ms was later than
+  // the moment its fragment arrived.
+  test('the live session of 2026-11-21, replayed: the greeting is no turn and both delays read as measured', async () => {
+    const s = await replay({
+      speech: [[6053, 8089], [15049, 17101]],
+      fragments: [
+        [7262, 7400], [8107, 8200], [8107, 8400], [8478, 8800], [8631, 9000], [8940, 9400],
+        [16268, 17800], [16875, 18400], [17021, 18600], [17265, 18800], [17365, 19000], [17555, 19200], [17853, 19600],
+      ],
+      voice: [[1980, 4140], [9700, 14320], [18720, 20860]],
+      arrives: (position) => position + 60, // audio position p arrived about p + 60
+    });
+    expect(s.first_reply_ambiguous_ms).toBe(null);
+    expect(s.turns).toEqual([1680, 1680]); // measured 1670 and 1690
   });
 });
 
@@ -1057,6 +1412,7 @@ describe('finish', () => {
       first_reply_ambiguous_ms: null,
       after_barge_in_ambiguous_ms: [],
       interruptions: 0,
+      caller_voiced_pct: 100, // the one caller frame of this call holds voice
       delegations: 0,
       errors: [],
     }); // no call words: the owner hears the calls himself
