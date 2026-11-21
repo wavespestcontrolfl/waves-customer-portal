@@ -1240,19 +1240,31 @@ function retiresWithLineage(estimate) {
     && estimate.status !== 'accepted';
 }
 
-// newerLineageQuoteExists: does the customer hold a newer quote of the same
-// lineage (customer + source), in any status, archived or not. The order is
-// the stored (created_at, id), compared inside the database so no timestamp
-// loses its microseconds in JavaScript.
-async function newerLineageQuoteExists(dbh, estimateId) {
-  const newer = await dbh('estimates as newer')
+// lineageUnarchiveBlock: why this quote must stay archived, or null. Called
+// under the customer-comms lock of the quote's pre-read owner.
+//   'moved'    - the row no longer has that owner and source (a customer
+//                merge moved it), so the lock held is not its lineage's.
+//   'replaced' - the customer holds another quote of the lineage (customer +
+//                source) that is newer, in any status, archived or not; or
+//                one that is still open (not archived, not accepted).
+// "Newer" is the stored (created_at, id), compared inside the database so no
+// timestamp loses its microseconds in JavaScript. It is not enough alone: a
+// mint leaves created_at to the database, which stamps the transaction's
+// start, so of two mints that took the lock in the other order the live
+// quote is the OLDER row. That quote is open, which the second test reads.
+const LINEAGE_REPLACES_SQL = `((other.created_at, other.id) > (old.created_at, old.id)
+  OR (other.archived_at IS NULL AND other.status <> 'accepted'))`;
+async function lineageUnarchiveBlock(dbh, estimate) {
+  const current = await dbh('estimates').where({ id: estimate.id }).first('customer_id', 'source');
+  if (!current || current.customer_id !== estimate.customer_id || current.source !== estimate.source) return 'moved';
+  const other = await dbh('estimates as other')
     .join('estimates as old', function sameLineage() {
-      this.on('old.customer_id', 'newer.customer_id').andOn('old.source', 'newer.source');
+      this.on('old.customer_id', 'other.customer_id').andOn('old.source', 'other.source').andOn('old.id', '<>', 'other.id');
     })
-    .where('old.id', estimateId)
-    .whereRaw('(newer.created_at, newer.id) > (old.created_at, old.id)')
-    .first('newer.id');
-  return !!newer;
+    .where('old.id', estimate.id)
+    .whereRaw(LINEAGE_REPLACES_SQL)
+    .first('other.id');
+  return other ? 'replaced' : null;
 }
 
 // Publish the priced quote: insert the row, freeze its send snapshot, write the
@@ -1786,6 +1798,6 @@ module.exports = {
   assertPlanStartAcceptEligible,
   staffChangedQuoteRefusal,
   retiresWithLineage,
-  newerLineageQuoteExists,
+  lineageUnarchiveBlock,
   _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },
 };
