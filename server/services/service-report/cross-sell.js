@@ -332,6 +332,11 @@ function positiveOrNull(value) {
 // read a LOW turf confidence only, so a heuristic turf BASIS at MEDIUM
 // (plausibleMaxTurfCap), a measurement request, a list of manual-review
 // reasons or a guessed footprint read as clean (#8132 pre-push r31).
+// One engine note is a marker too (ENGINE_REVIEW_NOTE_TYPE): the engine
+// writes LAWN_CUSTOM_QUOTE into the result's notes exactly when a row carries
+// customQuoteFlag, and the mapped result keeps the note but drops that flag
+// from a one-time lawn row (pre-push r12 on this branch). No other note type
+// states a review requirement.
 //
 // WHERE it looks: every object of the stored blob. The blob has kept its
 // rows in many places (raw lineItems, the mapped recurring.services and
@@ -392,8 +397,9 @@ function positiveOrNull(value) {
 // `engineResult` (pre-push r8 to r11 on this branch). A staff save stores the
 // mapped result and its raw twin from the same pricing run
 // (admin-estimate-persistence.js: "the RAW server engine result rides along
-// with its mapped twin"), and the mapped one does not carry every marker: an
-// oversize one-time lawn row keeps its customQuoteFlag on the raw row only.
+// with its mapped twin"), and the mapped one does not carry every row marker:
+// an oversize one-time lawn row keeps its customQuoteFlag on the raw row only
+// (the mapped result keeps the engine's note for it, read above).
 // So the check does not pick one of the two as the estimate's price. Two
 // narrower readings were built and dropped: reading only the result that
 // estimate-result-container.js calls current lost that flag, and reading
@@ -404,6 +410,7 @@ function positiveOrNull(value) {
 // and a slim `engineResult` beside a full `result` counts. On 2026-11-21
 // no production seed's verdict depended on which of the two is read.
 const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
+const ENGINE_REVIEW_NOTE_TYPE = 'LAWN_CUSTOM_QUOTE';
 
 function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } = {}) {
   if (!estData || typeof estData !== 'object') return false;
@@ -427,7 +434,7 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } =
     ? { ...c, service: 'tree_shrub', palmReserveActive: pricedTreeShrubPalmCount(c) != null }
     : c);
   const markedForReview = (c, turfCounts) => listsCodes(c.fieldVerify) || listsCodes(c.fieldVerifyFlags)
-    || (turfCounts && listsCodes(c.turfFlags))
+    || (turfCounts && listsCodes(c.turfFlags)) || c.type === ENGINE_REVIEW_NOTE_TYPE
     || lineNeedsReviewBeforeExactPrice(asRow(c), { turfGrade: turfCounts });
   const turfSummaryCounts = (result) => replaysLawnSize || !Array.isArray(result.fieldVerify);
   const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';

@@ -857,6 +857,26 @@ describe('buildReportCrossSell', () => {
       const oversizeSave = { engineInputs: oversizeRequest, result: mapV1ToLegacyShape(oversize), engineResult: oversize };
       expect(check(oversizeSave)).toBe(true);
       expect(check({ ...oversizeSave, pricingAuthorityAtLock: 'SERVER' })).toBe(true);
+      // The mapped result alone (pre-push r12). The engine writes its
+      // LAWN_CUSTOM_QUOTE note exactly when a row carries the flag, and the
+      // mapped result keeps the note: it is the marker there. Without the
+      // note nothing else in the mapped result says so.
+      const oversizeMapped = mapV1ToLegacyShape(oversize);
+      expect(oversize.notes.map((note) => note.type)).toContain('LAWN_CUSTOM_QUOTE');
+      expect(oversizeMapped.notes.map((note) => note.type)).toContain('LAWN_CUSTOM_QUOTE');
+      expect(check({ engineInputs: oversizeRequest, result: oversizeMapped })).toBe(true);
+      expect(check({ engineInputs: oversizeRequest, result: { ...oversizeMapped, notes: oversizeMapped.notes.filter((note) => note.type !== 'LAWN_CUSTOM_QUOTE') } })).toBe(false);
+      // The engine writes no such note for a lawn under the limit, and a
+      // note of another type is not a marker. A note in the stored request
+      // is not one of the result.
+      const regularRequest = { ...oversizeRequest, lotSqFt: 9000, lawnSqFt: 4000 };
+      const regular = generateEstimate(regularRequest);
+      expect((regular.notes || []).map((note) => note.type)).not.toContain('LAWN_CUSTOM_QUOTE');
+      expect(check({ engineInputs: regularRequest, result: mapV1ToLegacyShape(regular) })).toBe(engineResultNeedsReview(regular));
+      const cleanNoted = (notes) => ({ fieldVerify: [], notes, lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 45, annual: 540 }] });
+      expect(check({ inputs, result: cleanNoted([{ type: 'STRUCTURE', priority: 'HIGH', text: 'Two-story home' }]) })).toBe(false);
+      expect(check({ inputs, result: cleanNoted([{ type: 'LAWN_CUSTOM_QUOTE', priority: 'HIGH', text: 'Turf area exceeds 20,000 sq ft.' }]) })).toBe(true);
+      expect(check({ inputs: { ...inputs, notes: [{ type: 'LAWN_CUSTOM_QUOTE' }] }, result: cleanNoted([]) })).toBe(false);
       // So a marker in either result counts, whichever is the newer one. A
       // marked row left behind by a revision keeps the quote button, as it
       // does on main; the reverse case must count.
