@@ -8390,11 +8390,6 @@ function initScheduledJobs() {
         if (result && result.recordFailed) {
           throw new Error('ad budget adjustment: the gap-rule record was not saved');
         }
-        // Route fill record (services/ads/route-fill.js): a marked campaign failed a check or the run was not saved
-        // (the log names it). No budget depends on the record.
-        if (result && result.routeFailed) {
-          throw new Error('ad budget adjustment: the route fill record did not finish for every campaign');
-        }
         return result;
       });
     } catch (err) {
@@ -8407,6 +8402,15 @@ function initScheduledJobs() {
       await runExclusive('ads-route-areas', () => require('./ads/route-areas').recordRouteAreas());
     } catch (err) {
       logger.error(`Ad route-areas record failed: ${err.message}`);
+    }
+    // Ads follow the route, step 2 (record only, $0): for each campaign marked with a route line, what the route rule
+    // would do (base or stop, and the change to its location list). Its own try and its own job_health row, after
+    // the budget run, so it can never delay or fail a budget change. It reads Google Ads and changes nothing. With
+    // no marked campaign it is one read of ad_campaigns. See ads/route-fill.js.
+    try {
+      await runExclusive('ads-route-fill', () => require('./ads/route-fill').recordRouteFill());
+    } catch (err) {
+      logger.error(`Ad route-fill record failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

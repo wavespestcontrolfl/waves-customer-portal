@@ -37,11 +37,6 @@ const MAX_REASON_LEN = 255;
 // to one of those would be spend the owner never approved (owner 2026-11-04, PPC gap page option A). A missing type
 // is not Search either. The owner's own actions (mode, hold, advisor Apply via setMode/setBudget) are not filtered.
 const SEARCH_CAMPAIGN_TYPES = new Set(['2', 'SEARCH', 'google_search']);
-const isSearchCampaign = (c) => SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? ''));
-
-// Lazy: the route fill record loads the route-areas reads, which only a budget run needs.
-let _routeFill;
-function getRouteFill() { return _routeFill || (_routeFill = require('./route-fill')); }
 
 // Physical stops per day for the gap window (see getGapWindow): a visit_id group
 // is one stop; with no visit_id, the same customer + same window_start (time,
@@ -196,7 +191,7 @@ class BudgetManager {
    */
   async listCapacityCampaigns() {
     const rows = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
-    const skipped = rows.filter((c) => !isSearchCampaign(c));
+    const skipped = rows.filter((c) => !SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? '')));
     if (skipped.length) {
       const names = skipped.map((c) => `${c.campaign_name} (type ${c.campaign_type ?? 'none'})`).join(', ');
       logger.info(`Budget adjust: left ${skipped.length} non-Search campaign(s) alone: ${names}`);
@@ -258,9 +253,6 @@ class BudgetManager {
     };
 
     const summary = { evaluated: 0, changed: 0, failed: 0 };
-    // Route fill record: what a route-following fill ad would do this run. It reads and records only, and it runs
-    // first, so a failed gap window below cannot skip it.
-    await this.recordRouteFill(now, summary);
     const todayEt = etDateString(now);
     // Live: the 7-day window and its totals are computed ONCE here and shared
     // by every campaign. Shadow: the old rule acts below and the gap rule is
@@ -274,7 +266,7 @@ class BudgetManager {
         // No window, no decision: leave every budget as it is (the old rule is
         // not a fallback) and let the cron record the failed tick.
         logger.error(`[ads-gap-rule live] window failed, no budget changed: ${err.message}`);
-        return { ...summary, evaluated: campaigns.length, failed: campaigns.length };
+        return { evaluated: campaigns.length, changed: 0, failed: campaigns.length };
       }
       checkDate = gap.window_start;
       logger.info(`[ads-gap-rule live] open ${gap.total_open} in ${gap.window_start}..${gap.window_end} -> ${gap.decision}`);
@@ -488,23 +480,6 @@ class BudgetManager {
     }
 
     return summary;
-  }
-
-  /**
-   * Route fill record (services/ads/route-fill.js): for each Google Search campaign marked with a route line
-   * (ad_campaigns.metadata.route_line), what the route rule would do this run. It records only: no budget and
-   * nothing in Google changes. With no marked campaign it is one read of ad_campaigns.
-   * A run with a problem sets summary.routeFailed, so the cron reports the tick; each problem is logged.
-   */
-  async recordRouteFill(now, summary) {
-    try {
-      const run = await getRouteFill().recordRun({ now, campaignOk: isSearchCampaign });
-      if (run.problems.length) summary.routeFailed = true;
-      for (const problem of run.problems) logger.error(`[ads-route-fill] tick ${run.tick}: ${problem}`);
-    } catch (err) {
-      summary.routeFailed = true;
-      logger.error(`[ads-route-fill] no record this run: ${err.message}`);
-    }
   }
 
   /**

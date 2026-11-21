@@ -33,6 +33,8 @@ jest.mock('../utils/cron-lock', () => ({
 }));
 const mockAdjustBudgets = jest.fn();
 jest.mock('../services/ads/budget-manager', () => ({ adjustBudgets: mockAdjustBudgets }));
+const mockRecordRouteFill = jest.fn();
+jest.mock('../services/ads/route-fill', () => ({ recordRouteFill: mockRecordRouteFill }));
 const mockRunAdsHealthAlerts = jest.fn();
 jest.mock('../services/ads/ads-health-alerts', () => ({ runAdsHealthAlerts: mockRunAdsHealthAlerts }));
 
@@ -88,13 +90,6 @@ function alertsTick() {
   return regs[0][1];
 }
 
-test('a run whose route fill record did not finish fails the job_health tick', async () => {
-  mockAdjustBudgets.mockResolvedValue({ evaluated: 2, changed: 1, failed: 0, routeFailed: true });
-  await expect(budgetTick()()).resolves.toBeUndefined();
-  expect(mockJobOutcomes['ads-budget-adjust']).toBe('failed: ad budget adjustment: the route fill record did not finish for every campaign');
-  expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('the route fill record did not finish'));
-});
-
 test('the ads health alerts run every 2 hours at :20 ET under runExclusive("ads-health-alerts")', async () => {
   mockRunAdsHealthAlerts.mockResolvedValue({ skipped: 'off' });
   await alertsTick()();
@@ -108,4 +103,33 @@ test('an ads health alert run that fails fails the job_health tick and is logged
   await expect(alertsTick()()).resolves.toBeUndefined();
   expect(mockJobOutcomes['ads-health-alerts']).toBe('failed: ads health alerts: Google Ads read: synthetic');
   expect(logger.error).toHaveBeenCalledWith('Ads health alerts failed: ads health alerts: Google Ads read: synthetic');
+});
+
+// The route fill record (services/ads/route-fill.js) is its own step of the same beat, after the budget run.
+describe('route fill record step', () => {
+  test('runs once per beat under its own job_health row, after the budget run', async () => {
+    mockAdjustBudgets.mockResolvedValue({ evaluated: 1, changed: 1, failed: 0 });
+    mockRecordRouteFill.mockResolvedValue({ tick: '2026-11-23T10', campaigns: [], problems: [] });
+    await budgetTick()();
+    expect(mockRecordRouteFill).toHaveBeenCalledTimes(1);
+    expect(mockJobOutcomes['ads-route-fill']).toBe('success');
+    expect(mockAdjustBudgets.mock.invocationCallOrder[0]).toBeLessThan(mockRecordRouteFill.mock.invocationCallOrder[0]);
+  });
+
+  test('a failed record fails its own tick and not the budget tick', async () => {
+    mockAdjustBudgets.mockResolvedValue({ evaluated: 1, changed: 1, failed: 0 });
+    mockRecordRouteFill.mockRejectedValue(new Error('route fill record: 1 problem(s) in tick 2026-11-23T10, first: the run was not saved: write refused'));
+    await expect(budgetTick()()).resolves.toBeUndefined();
+    expect(mockJobOutcomes['ads-budget-adjust']).toBe('success');
+    expect(mockJobOutcomes['ads-route-fill']).toMatch(/^failed: route fill record: 1 problem/);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Ad route-fill record failed'));
+  });
+
+  test('a failed budget run does not skip the record', async () => {
+    mockAdjustBudgets.mockRejectedValue(new Error('budget run crashed'));
+    mockRecordRouteFill.mockResolvedValue({ tick: null, campaigns: [], problems: [] });
+    await budgetTick()();
+    expect(mockJobOutcomes['ads-budget-adjust']).toBe('failed: budget run crashed');
+    expect(mockJobOutcomes['ads-route-fill']).toBe('success');
+  });
 });

@@ -1,4 +1,5 @@
-// Route fill record (services/ads/route-fill.js): the pure decision and list diff, and recordRun(). The record says
+// Route fill record (services/ads/route-fill.js): the pure decision and list diff, recordRun(), and the cron's step
+// recordRouteFill(). The record says
 // what a route-following fill ad would do. What it must never do: change anything in Google (the Google mock below
 // has the two READ functions only, so any write would throw), say "base" for a campaign that fails a check, or
 // count a change that would empty a campaign's location list.
@@ -177,17 +178,17 @@ describe('recordRun', () => {
     expect(store).toEqual({});
   });
 
-  test('only a marked campaign that is active or paused, and that the caller takes, is in the record', async () => {
+  test('only a marked campaign that is active or paused is in the record', async () => {
     mockBuild.mockReturnValue(record({ pest: ['34202'], lawn: ['34211'] }));
     const { conn } = fakeConn({
       campaigns: [
         campaign(),
         campaign({ ...LAWN, status: 'paused' }),
         campaign({ id: 'c-ended', status: 'ended' }),
-        campaign({ id: 'c-pmax', campaign_type: '10' }),
+        campaign({ id: 'c-plain', metadata: null }),
       ],
     });
-    const out = await routeFill.recordRun({ now: NOW, conn, campaignOk: (c) => c.campaign_type === '2' });
+    const out = await routeFill.recordRun({ now: NOW, conn });
     expect(out.campaigns.map((c) => [c.campaign_id, c.status, c.line])).toEqual([['c-pest', 'active', 'pest'], ['c-lawn', 'paused', 'lawn']]);
   });
 
@@ -390,5 +391,30 @@ describe('recordRun: the saved rows', () => {
     expect(store[routeFill.HISTORY_KEY]).toBeUndefined();
     expect(out.problems).toEqual(['the run was not saved: write refused']);
     expect(entryOf(out, 'c-pest')).toMatchObject({ budget_mode: 'base' });
+  });
+});
+
+describe('recordRouteFill (the cron step)', () => {
+  test('a clean run returns the run and logs no error', async () => {
+    const { conn } = fakeConn();
+    const out = await routeFill.recordRouteFill({ now: NOW, conn });
+    expect(out.tick).toBe('2026-11-23T10');
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  test('a run with no marked campaign is a clean tick', async () => {
+    const { conn } = fakeConn({ campaigns: [campaign({ metadata: null })] });
+    await expect(routeFill.recordRouteFill({ now: NOW, conn })).resolves.toEqual({ tick: null, campaigns: [], problems: [] });
+  });
+
+  test('a run with a problem logs each problem with its tick and throws, so job_health shows the failed tick', async () => {
+    mockGoogle.readCampaignGeoTargets.mockResolvedValue(null);
+    const { conn, store } = fakeConn({ failKey: routeFill.HISTORY_KEY });
+    await expect(routeFill.recordRouteFill({ now: NOW, conn })).rejects.toThrow(
+      'route fill record: 2 problem(s) in tick 2026-11-23T10, first: Waves Fill - Pest (route): Google did not answer the location read',
+    );
+    expect(logger.error).toHaveBeenCalledWith('[ads-route-fill] tick 2026-11-23T10: Waves Fill - Pest (route): Google did not answer the location read');
+    expect(logger.error).toHaveBeenCalledWith('[ads-route-fill] tick 2026-11-23T10: the run was not saved: write refused');
+    expect(store).toEqual({});
   });
 });

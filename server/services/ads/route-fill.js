@@ -7,7 +7,8 @@
  *
  * A Google campaign is in the record when its ad_campaigns.metadata.route_line names a line of the route-areas
  * record ('pest' or 'lawn'). The mark is the switch: with no marked campaign a run reads ad_campaigns once and stops.
- * For each marked campaign, active or paused, one run (recordRun):
+ * The 2-hour ad cron runs it as its own step (recordRouteFill, job_health 'ads-route-fill'), after the budget run:
+ * it never delays or fails a budget change. For each marked campaign, active or paused, one run (recordRun):
  *   1. builds the route-areas record of this moment (the reads and rules of services/ads/route-areas.js),
  *   2. decides: the line has ZIPs -> base budget and that ZIP list; no ZIPs -> the 1% floor, the list left as it is,
  *   3. reads where the campaign shows in Google and counts the change that would make it the ZIP list: every other
@@ -186,8 +187,7 @@ async function saveRun(conn, run, now) {
 }
 
 /**
- * One run of the record. campaignOk(row) = the caller's own campaign filter (the budget job passes "Search campaigns
- * only", by the local campaign_type).
+ * One run of the record.
  *
  * Returns { tick, campaigns, problems }:
  *   campaigns: one entry per marked campaign: { campaign_id, platform_campaign_id, campaign_name, status, line,
@@ -196,11 +196,11 @@ async function saveRun(conn, run, now) {
  * With no marked campaign it reads nothing more and returns tick null.
  * Throws when the route record cannot be built; nothing is recorded then.
  */
-async function recordRun({ now = new Date(), campaignOk = () => true, conn = db } = {}) {
+async function recordRun({ now = new Date(), conn = db } = {}) {
   const problems = [];
   // One plain read; the table holds a handful of rows.
   const rows = await conn('ad_campaigns').where('platform', 'google_ads');
-  const campaigns = rows.filter((c) => ['active', 'paused'].includes(c.status) && routeLineOf(c) && campaignOk(c));
+  const campaigns = rows.filter((c) => ['active', 'paused'].includes(c.status) && routeLineOf(c));
   if (!campaigns.length) return { tick: null, campaigns: [], problems };
 
   const record = routeAreas.buildRouteAreas(await routeAreas.loadRouteAreasInput(conn, now));
@@ -238,6 +238,19 @@ async function recordRun({ now = new Date(), campaignOk = () => true, conn = db 
   return { tick: record.tick, campaigns: run.campaigns, problems };
 }
 
+/**
+ * The cron's step. Logs each problem with its tick, and throws when the run had one, so job_health shows a failed
+ * 'ads-route-fill' tick with its cause. A run with no marked campaign is a clean tick.
+ */
+async function recordRouteFill(opts) {
+  const run = await recordRun(opts);
+  for (const problem of run.problems) logger.error(`[ads-route-fill] tick ${run.tick}: ${problem}`);
+  if (run.problems.length) {
+    throw new Error(`route fill record: ${run.problems.length} problem(s) in tick ${run.tick}, first: ${run.problems[0]}`);
+  }
+  return run;
+}
+
 module.exports = {
   LAST_KEY,
   HISTORY_KEY,
@@ -247,4 +260,5 @@ module.exports = {
   decideLine,
   diffLocations,
   recordRun,
+  recordRouteFill,
 };
