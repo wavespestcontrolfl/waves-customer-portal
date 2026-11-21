@@ -44,7 +44,9 @@ const waitFor = async (cond, ms = 10000) => {
   while (!cond() && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
   await flush();
 };
-const b64 = (bytes) => Buffer.alloc(bytes, 0x7f).toString('base64');
+// mu-law 0x00 decodes to about -32124: voiced. 0xFF is digital silence.
+const b64 = (bytes) => Buffer.alloc(bytes, 0x00).toString('base64');
+const silence = (bytes) => Buffer.alloc(bytes, 0xff).toString('base64');
 
 function setup({ closeReply = true, deps = {} } = {}) {
   let clock = 1_000_000;
@@ -600,6 +602,179 @@ describe('model audio, barge-in and latency', () => {
     t.twilioStop();
     await flush();
     expect(summaryOf(t).turns).toEqual([100]); // t0 + 2000 minus t0 + 1900, not the 20 ms to the mid-reply delta
+  });
+});
+
+describe('reply start on the continuous GPT-Live stream', () => {
+  const delta = (t, payload) => t.openai.receive({ type: 'session.output_audio.delta', delta: payload });
+  // The live API's pacing: one 100 ms chunk (800 bytes) every 100 ms.
+  const run = (t, chunks, payload) => {
+    for (let i = 0; i < chunks; i++) {
+      delta(t, payload);
+      t.advance(100);
+    }
+  };
+  const mediaPayloads = (t) => t.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
+
+  test('a continuous stream of silent chunks with voice in it: the greeting is no turn, the reply after the caller is timed from its first voiced chunk', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    run(t, 7, silence(800)); // +0..+700 silence from session.started
+    run(t, 15, b64(800)); // greeting voice +700..+2200
+    run(t, 8, silence(800)); // +2200..+3000
+    // the caller spoke +2300..+2900 (end_ms counts from session.started)
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'when can you come', start_ms: 2300, end_ms: 2900 });
+    run(t, 12, silence(800)); // +3000..+4200
+    delta(t, b64(800)); // the reply's voice begins at +4200
+    t.twilioStop();
+    await flush();
+    const s = summaryOf(t);
+    expect(s.turns).toEqual([1300]);
+    expect(s.interruptions).toBe(0);
+    expect(s.first_reply_ambiguous_ms == null).toBe(true);
+  });
+
+  test('a voiced chunk with leading silence: the onset, and so the delay, includes the offset inside the chunk', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    delta(t, b64(160)); // greeting
+    t.advance(500);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hello there', start_ms: 100, end_ms: 500 });
+    t.advance(1500); // +2000
+    delta(t, Buffer.concat([Buffer.alloc(1600, 0xff), Buffer.alloc(800, 0x00)]).toString('base64')); // 200 ms silent, then voice
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toEqual([1700]); // voice at +2200, speech ended +500
+  });
+
+  test('a pause under 600 ms of silent audio inside an utterance is no new reply; 600 ms or more is', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    delta(t, b64(160)); // greeting
+    run(t, 10, silence(800));
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'first question', start_ms: 100, end_ms: 400 });
+    run(t, 5, silence(800)); // +1000..+1500
+    delta(t, b64(800)); // reply 1 begins at +1500
+    t.advance(100);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'and', start_ms: 1700, end_ms: 1900 }); // arms the next measure
+    run(t, 5, silence(800)); // 500 ms pause inside the reply
+    delta(t, b64(800)); // voice resumes: the same reply
+    t.advance(100);
+    expect(t.bridge.latencies).toHaveLength(1); // the pause did not start a reply
+    run(t, 6, silence(800)); // 600 ms of silent audio
+    delta(t, b64(800)); // a new reply
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toHaveLength(2);
+  });
+
+  test('silent chunks reach Twilio, also inside the tail-drop window, while the cut-off voiced tail is dropped', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    delta(t, b64(160)); // greeting
+    t.advance(1000);
+    delta(t, b64(8000)); // a reply: 1000 ms queued
+    t.advance(100);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1100, end_ms: 1300 }); // barge-in at +1100
+    expect(t.twilio.sent.some((m) => m.event === 'clear')).toBe(true);
+    t.advance(50);
+    delta(t, silence(800));
+    t.advance(50);
+    delta(t, b64(320)); // the old reply's voiced tail, no gap
+    t.advance(50);
+    delta(t, silence(800));
+    const payloads = mediaPayloads(t);
+    expect(payloads.filter((p) => p === silence(800))).toHaveLength(2);
+    expect(payloads).not.toContain(b64(320));
+  });
+
+  test('caller speech over model silence sends no clear and counts no interruption, though silence is still queued at Twilio', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    delta(t, b64(8000)); // 1000 ms of greeting voice arrives at once: it plays until +1000
+    t.advance(100);
+    run(t, 14, silence(800)); // +100..+1500: silence queues behind the voice, until +2400
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hello', start_ms: 1100, end_ms: 1400 }); // at +1500
+    expect(t.twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).interruptions).toBe(0);
+  });
+
+  test('voice queued at Twilio behind silence is still playback: caller speech over it flushes Twilio', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    // One burst: Twilio plays voice until +1000, silence until +1500, voice until +2000.
+    delta(t, b64(8000));
+    delta(t, silence(4000));
+    delta(t, b64(4000));
+    t.advance(1600);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1600 });
+    expect(t.twilio.sent.filter((m) => m.event === 'clear')).toHaveLength(1);
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).interruptions).toBe(1);
+  });
+
+  test('a barge-in flush empties the whole queue: the next reply plays from its own arrival', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    delta(t, b64(160)); // greeting
+    t.advance(1000);
+    delta(t, b64(16000)); // a reply: 2000 ms queued, until +3000
+    t.advance(100);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1100, end_ms: 1300 }); // barge-in at +1100
+    t.advance(500);
+    delta(t, b64(800)); // the next reply at +1600: it plays at once, until +1700
+    t.advance(400);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'ok', start_ms: 1800, end_ms: 2000 }); // at +2000: nothing is playing
+    expect(t.twilio.sent.filter((m) => m.event === 'clear')).toHaveLength(1);
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).interruptions).toBe(1);
+  });
+
+  test('silence at the end of one voiced chunk and at the start of the next counts toward the 600 ms', async () => {
+    const voiceThenSilence = (silentMs) => Buffer.concat([Buffer.alloc(800, 0x00), Buffer.alloc(silentMs * 8, 0xff)]).toString('base64');
+    const silenceThenVoice = (silentMs) => Buffer.concat([Buffer.alloc(silentMs * 8, 0xff), Buffer.alloc(800, 0x00)]).toString('base64');
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    delta(t, b64(160)); // greeting
+    t.advance(100);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'first question', start_ms: 20, end_ms: 60 });
+    delta(t, voiceThenSilence(290)); // 100 ms into the greeting: the same reply, then 290 ms silent
+    t.advance(100);
+    delta(t, silenceThenVoice(300)); // 590 ms of silence in all: still the same reply
+    expect(t.bridge.latencies).toHaveLength(0);
+    t.advance(100);
+    delta(t, voiceThenSilence(300));
+    t.advance(100);
+    delta(t, silenceThenVoice(300)); // 600 ms of silence in all: a new reply, voiced 300 ms into its chunk
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toEqual([640]); // voice at +700, speech ended +60
+  });
+
+  test('an arrival gap still starts a new reply when no silent audio came between', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    delta(t, b64(160)); // greeting
+    t.advance(500);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hello', start_ms: 100, end_ms: 500 });
+    t.advance(500);
+    delta(t, b64(160)); // 1000 ms after the greeting chunk: a gap, so a new reply
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toEqual([500]);
   });
 });
 
