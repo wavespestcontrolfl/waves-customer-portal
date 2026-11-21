@@ -1486,18 +1486,43 @@ describe('saveTechCount pins', () => {
     mockRefs.estimates = [{ id: EST, customer_id: null }];
     await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
     expect(mockRows[0].customer_id).toBeUndefined();
-    // A count save or a clear is not a confirmation of points: it writes no customer, even on an owned estimate.
+    // A count save or a hide save says nothing about the points: it writes no customer, even on an owned estimate.
     mockRefs.estimates = [{ id: EST, customer_id: CUST }];
     await svc.saveTechCount(READ_A, { count: 2 });
-    await svc.saveTechCount(READ_A, { pins: null });
     await svc.saveTechCount(READ_A, { hideOnEstimate: true });
     expect(mockRows[0].customer_id).toBeUndefined();
+    // A clear is the technician's word on the points ("none") for the customer who holds the estimate, so it names that
+    // customer as a list does: the send then sees the clear as this customer's and brings no older list back.
+    await svc.saveTechCount(READ_A, { pins: null });
+    expect(mockRows[0].customer_id).toBe(CUST);
+    delete mockRows[0].customer_id;
     // No estimate on the read: nothing to lock and no customer to take.
     mockRows[0].estimate_id = null;
     mockEvents.length = 0;
     await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
     expect(mockRows[0].customer_id).toBeUndefined();
     expect(mockEvents).toEqual(['tx', 'update:', 'tx-end']);
+  });
+
+  it('a note goes on the customer estimate, so it passes the customer-copy screen where it is stored and where it is shown', async () => {
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    // An access code, or wording no customer surface may carry, is refused and nothing is written.
+    for (const note of ['gate code 1234', 'lockbox 4421', 'safe to enter', 'poison bait here']) {
+      await expect(svc.saveTechCount(READ_A, { pins: [{ ...PINS[0], note }], crop: CROP, address: ADDRESS })).rejects.toMatchObject({ code: 'note_not_allowed' });
+    }
+    expect(mockRows[0].tech_pins ?? null).toBeNull();
+    // Where a point is on the roof is fine.
+    for (const note of ['front left', 'above the garage door', 'rear, 2nd story', 'left of chimney']) {
+      await svc.saveTechCount(READ_A, { pins: [{ ...PINS[0], note }], crop: CROP, address: ADDRESS });
+      expect(JSON.parse(mockRows[0].tech_pins)[0].note).toBe(note);
+    }
+    // A note stored before this check is left out of the customer's label; the point keeps its standard label.
+    const stored = { ...mockRows[0], status: 'done', ai_tier: 'high', hide_on_estimate: false };
+    const labelOf = (note) => svc.customerPointsFromRow({ ...stored, tech_pins: JSON.stringify([{ ...PINS[0], note }]) }).pins[0].label;
+    expect(labelOf('front left')).toBe(`${labelOf(null)}, front left`);
+    expect(labelOf('gate code 1234')).toBe(labelOf(null));
+    expect(labelOf('safe to enter')).toBe(labelOf(null));
   });
 
   it('stores the address the panel sent with the points, never the address on the estimate row', async () => {
@@ -1831,6 +1856,14 @@ describe('PATCH /:id/tech-count with points', () => {
     const res = await patch({ pins: PINS, crop: { lat: 28.1, lng: -82.1 }, address: ADDRESS, expected_pins: null, hide_on_estimate: true });
     expect(res.status).toBe(400);
     expect(res.json).toEqual({ error: 'These points were not drawn on this roof photo' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].hide_on_estimate).toBe(false);
+  });
+
+  it('answers 400 with the note message for a note that cannot go on the customer estimate, and writes nothing', async () => {
+    const res = await patch({ pins: [{ ...PINS[0], note: 'gate code 1234' }], crop: CROP, address: ADDRESS, expected_pins: null, hide_on_estimate: true });
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'A note has words that cannot go on the customer estimate (a code, or words like safe, toxic, poison or infestation). Change the note, then save.' });
     expect(mockRows[0].tech_pins).toBeNull();
     expect(mockRows[0].hide_on_estimate).toBe(false);
   });

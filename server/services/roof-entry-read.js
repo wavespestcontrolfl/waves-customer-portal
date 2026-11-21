@@ -31,6 +31,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const llmCost = require('./llm-cost');
 const { isMergeRetiredRow } = require('./merge-retired');
+const { customerCopyViolations } = require('./service-report/technician-report-copy');
 
 const TABLE = 'roof_entry_reads';
 const REUSE_DAYS = 90;
@@ -725,16 +726,22 @@ function pointsAddressFrom(address) {
   return text;
 }
 
+// A technician's note is free text that the customer estimate prints. It passes the complete customer-copy screen
+// (AGENTS.md: access codes, "safe", "toxic", "poison", "infestation" and the other banned wording) where it is stored
+// and again where it is shown.
+const noteAllowed = (note) => !note || customerCopyViolations(note).length === 0;
+
 const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && Number.isFinite(c.lng)
   && Math.abs(c.lat) <= 90 && Math.abs(c.lng) <= 180;
 
 /**
- * A save that needs the read's estimate: a points list, or the hide-or-show choice. In ONE transaction it locks the read's
- * estimate row (FOR UPDATE) first, then saves.
+ * A save that needs the read's estimate: a points list or clear, or the hide-or-show choice. In ONE transaction it locks
+ * the read's estimate row (FOR UPDATE) first, then saves.
  *  - Points are confirmed for the customer who holds the estimate now. A read made with the estimate alone names no
- *    customer, so the list save writes the estimate's customer on it (only when the read names none: a read made for
- *    another customer is never taken over). A send then never gives these points to a later, different customer
- *    (estimate-roof-points.js ownRead). An estimate with no customer leaves the read as it is.
+ *    customer, so a points save (a list or a clear) writes the estimate's customer on it (only when the read names
+ *    none: a read made for another customer is never taken over). The customer estimate shows a read's points only
+ *    while the estimate has that same customer (estimate-roof-points.js ownRead). An estimate with no customer leaves
+ *    the read as it is.
  *  - Hide or show is the estimate's choice, not one photo's: it is written to every other read of the estimate.
  * The lock comes first, so two saves on two reads of one estimate run one after the other (no deadlock on each other's
  * rows), and a read being created for the estimate (FOR SHARE in writeOwned) is either committed before the write to
@@ -778,6 +785,8 @@ async function saveTechCount(id, { count, flags, pins, crop, address, expectedPi
   if (pins === null) patch.tech_pins = null;
   else if (pins !== undefined) {
     const pointsAddress = pointsAddressFrom(address);
+    // The notes go on the customer estimate, so each passes the complete customer-copy screen before it is stored.
+    if (pins.some((p) => !noteAllowed(p.note))) throw Object.assign(new Error('A point note cannot go on the customer estimate'), { code: 'note_not_allowed' });
     const row = await db(TABLE).where({ id }).first('id', 'image_source', 'lookup_key', 'status', 'ai_tier');
     if (!row) return null;
     // Only a finished, readable read can carry points: the customer estimate shows points from those rows only, and a
@@ -807,7 +816,7 @@ async function saveTechCount(id, { count, flags, pins, crop, address, expectedPi
     const [saved] = await query.update({ ...patch, ...more }).returning('*');
     return saved;
   };
-  const points = Array.isArray(pins);
+  const points = pins !== undefined;
   const row = points || hideOnEstimate !== undefined ? await saveUnderEstimate(id, save, { points, hidden: patch.hide_on_estimate }) : await save(db);
   if (row) return publicRead(row);
   if (checked && await db(TABLE).where({ id }).first('id')) {
@@ -829,8 +838,9 @@ function cropImageUrl(row) {
 /**
  * What the customer estimate may show from one read row (choice 4A), or null: only a finished read with at least one
  * confirmed point, a stored crop centre, and not hidden by staff. Points are numbered in the order the technician saved
- * them; each carries its customer-facing label (PIN_LABELS, plus ", <note>" when the technician typed one) and its
- * action ('seal', or 'trim back' for a branch).
+ * them; each carries its customer-facing label (PIN_LABELS, plus ", <note>" when the technician typed one and the note
+ * passes the customer-copy screen: a stored note that fails it is left out, and the point keeps its standard label) and
+ * its action ('seal', or 'trim back' for a branch).
  */
 function customerPointsFromRow(row) {
   if (!row || row.status !== STATUS_DONE || row.ai_tier === TIER_UNKNOWN || row.hide_on_estimate) return null;
@@ -846,7 +856,7 @@ function customerPointsFromRow(row) {
       x: p.x,
       y: p.y,
       type: p.type,
-      label: p.note ? `${PIN_LABELS[p.type] || PIN_LABELS.other}, ${p.note}` : (PIN_LABELS[p.type] || PIN_LABELS.other),
+      label: p.note && noteAllowed(p.note) ? `${PIN_LABELS[p.type] || PIN_LABELS.other}, ${p.note}` : (PIN_LABELS[p.type] || PIN_LABELS.other),
       action: pinAction(p.type),
     })),
   };

@@ -120,7 +120,8 @@ const read = (over = {}) => ({
   id: 'read-1',
   estimate_id: 'est-1',
   context_key: `e:${over.estimate_id || 'est-1'}`,
-  customer_id: null,
+  // The read names the customer who held the estimate when its points were saved (estimateRow's customer).
+  customer_id: 'cust-1',
   status: 'done',
   tech_pins: [
     { x: 0.25, y: 0.4, type: 'roof_returns_and_valleys', note: 'front left' },
@@ -299,10 +300,23 @@ describe('sendEstimateNow: roof points frozen at send', () => {
     // No customer on the estimate: neither customer's read can be shown to whoever holds the link.
     await send(estimateRow({ customer_id: null }));
     expect(store['est-1']).toBeUndefined();
-    // The estimate's own plain read is taken with or without a customer.
-    reads = [forA, forB, read({ id: 'read-plain', created_at: new Date('2026-11-20T14:00:00Z') })];
+    // Points saved for a lead (the plain read names no customer) are taken while the estimate has no customer.
+    const forLead = read({ id: 'read-plain', customer_id: null, created_at: new Date('2026-11-20T18:00:00Z') });
+    reads = [forA, forB, forLead];
     await send(estimateRow({ customer_id: null }));
     expect(store['est-1'].read_id).toBe('read-plain');
+    // Once the estimate has a customer, the lead's read is not taken, though it is the newest: the customer's own is.
+    await send(estimateRow());
+    expect(store['est-1'].read_id).toBe('read-a');
+    // Lead, then customer A, then customer B: B gets nothing, and the page shows B nothing from the lead's copy.
+    reads = [forLead];
+    await send(estimateRow({ customer_id: null }));
+    expect(store['est-1'].read_id).toBe('read-plain');
+    const lead = { deliveryState: { lastDeliveredAt: stampedHandoff() } };
+    expect(await roofPointsDocBlock(estimateRow({ estimate_data: lead }), { knex: db })).toEqual({});
+    expect(await roofPointsDocBlock(estimateRow({ customer_id: 'cust-2', estimate_data: lead }), { knex: db })).toEqual({});
+    await send(estimateRow({ customer_id: 'cust-2' }));
+    expect(store['est-1']).toBeUndefined();
   });
 
   test('a plain read taken while customer A held the estimate is not sent to customer B after the estimate is reassigned', async () => {

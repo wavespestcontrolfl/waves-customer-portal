@@ -263,13 +263,28 @@ function SaveNote({ state, statusTestId, errorTestId }) {
   );
 }
 
-// What the server holds for the points, the checkbox and the address the points were saved for.
-const savedFrom = (read) => ({ pins: read.tech_pins ?? null, hidden: !!read.hide_on_estimate, address: read.points_address ?? null });
+// What the server holds for the points, the checkbox, and the address and the customer the points were saved for.
+const savedFrom = (read) => ({
+  pins: read.tech_pins ?? null, hidden: !!read.hide_on_estimate, address: read.points_address ?? null, owner: read.customer_id ?? null,
+});
+
+// A saved list the customer estimate does not show yet (`unconfirmed`): it was saved before the server recorded the
+// home's address with it, or before the estimate had this customer (the read names none). Save points sends the list
+// again as it stands; the server then records the address of this lookup and the customer who holds the estimate.
+// Staff confirm such a list against the photo, so it is sent only once the photo has loaded (`confirmReady`).
+function confirmStateOf(saved, customerId, imageState) {
+  const unconfirmed = Boolean(saved.pins?.length) && (!saved.address || Boolean(customerId && !saved.owner));
+  const confirmReady = unconfirmed && imageState === "loaded";
+  const nothingToSave = unconfirmed && !confirmReady
+    ? "The roof photo has not loaded. Wait for it, then press Save points."
+    : "Change a point or the checkbox first.";
+  return { unconfirmed, confirmReady, nothingToSave };
+}
 
 // The photo and the technician's confirmed points. It mounts with each loaded read (the panel hides it while a read
 // runs), so its state starts from what the server holds. `saved` is the server's last answer for the points and the
 // checkbox: the baseline a save is checked against, set at load and by each points save. A count save never touches it.
-function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, onReadAgain }) {
+function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, customerId = null, onReadAgain }) {
   const pointId = useRef(0);
   const nextId = () => { pointId.current += 1; return `pt${pointId.current}`; };
   const frameRef = useRef(null);
@@ -294,9 +309,7 @@ function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, onReadAga
   const atMax = points.length >= MAX_POINTS;
   // A suggestion stays hidden while any point, saved or not, names it as its source, even after the point moved or changed type.
   const suggestions = suggestionsFrom(read).filter((sg) => !points.some((p) => p.source === sg.key));
-  // A list saved before the server recorded the home's address with it. The customer estimate shows points only with
-  // their address, so Save points sends this list again as it stands, with the address of this lookup.
-  const unconfirmed = Boolean(saved.pins?.length) && !saved.address;
+  const { unconfirmed, confirmReady, nothingToSave } = confirmStateOf(saved, customerId, imageState);
   // Whether the checkbox differs from what the server holds: only then is hide_on_estimate sent.
   const hideChanged = hideEdited && !showOnEstimate !== saved.hidden;
   const selected = points.find((p) => p.id === selectedId) || null;
@@ -332,9 +345,9 @@ function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, onReadAga
 
   async function savePoints() {
     if (locked) return;
-    const sendPoints = pointsEdited || unconfirmed;
+    const sendPoints = pointsEdited || confirmReady;
     if (!sendPoints && !hideChanged) {
-      setPointsState({ ...IDLE, err: "Change a point or the checkbox first." });
+      setPointsState({ ...IDLE, err: nothingToSave });
       return;
     }
     if (sendPoints && (!spot || !String(address || "").trim())) {
@@ -460,8 +473,8 @@ function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, onReadAga
         />
         {unconfirmed && (
           <p className="text-14 text-zinc-600" data-testid="roof-read-points-unconfirmed">
-            These points were saved before the home's address was recorded, so the customer estimate does not show them. Check them
-            against the photo, then press Save points to confirm them for this address.
+            The customer estimate does not show these points yet. They were saved before this address or this customer was on
+            the record. Check them against the photo, then press Save points to confirm them.
           </p>
         )}
         <div className="flex items-center gap-3 flex-wrap">
@@ -655,7 +668,7 @@ export default function RoofReadPanel({ spot, address, addressDoubt = false, est
       )}
       {read && (
         <div className="space-y-4" data-testid="roof-read-result">
-          <RoofPointsEditor read={read} imageUrl={result.image_url} spot={spot} address={address} estimateId={estimateId} onReadAgain={readRoof} />
+          <RoofPointsEditor read={read} imageUrl={result.image_url} spot={spot} address={address} estimateId={estimateId} customerId={customerId} onReadAgain={readRoof} />
           <p className="text-14 text-zinc-600">
             {String(read.county).replace(/^./, (c) => c.toUpperCase())} County aerial, {read.image_year}.
             {result.cached ? " Reused from an earlier read." : ""}

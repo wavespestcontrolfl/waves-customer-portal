@@ -44,20 +44,20 @@ const estimateContext = (estimate) => ({
 
 /**
  * Is this read the estimate's own, so its points and notes may go to whoever holds the estimate now?
- *  - The roof read's own context rule (matchesContext): the estimate's plain row, or the two-part row of the customer the
- *    estimate belongs to now.
- *  - And a read that names a customer is that customer's alone. A plain row carries the id of the customer who held the
- *    estimate when its points were confirmed (saveTechCount writes it on a read that names none): it is not B's once
- *    the estimate goes to B, and it is no one's once the estimate has no customer. A duplicate merge repoints the read
- *    and the estimate together, so the merged customer keeps it.
- *  - A read that names no customer had its points confirmed while the estimate had none (a lead): they go to the first
- *    customer the estimate gets. (An estimate gets its first customer at acceptance, a lead link or an add-service
- *    request; no route moves it from one customer to another.)
+ * One rule: points reach a customer only when a person saved them while that customer held the estimate.
+ *  - The read and the estimate must name the SAME customer, or both name none. A points save writes the customer who
+ *    holds the estimate on a read that names none (saveTechCount), so the read's customer is the one the points were
+ *    confirmed for. A read that names A is not B's once the estimate goes to B. A read that names no customer (points
+ *    confirmed for a lead) is not shown once the estimate has a customer: nothing here guesses who the first customer
+ *    was. Staff save the points once more and that save names the customer. A duplicate merge repoints the read and
+ *    the estimate together, so the merged customer keeps it.
+ *  - And the roof read's own context rule (matchesContext): the estimate's plain row, or the two-part row of the
+ *    customer the estimate belongs to now.
  */
 function ownRead(row, estimate) {
   const ctx = estimateContext(estimate);
-  if (row.customer_id && String(row.customer_id).toLowerCase() !== ctx.customerId) return false;
-  return matchesContext(row, ctx);
+  const named = row.customer_id ? String(row.customer_id).toLowerCase() : null;
+  return named === ctx.customerId && matchesContext(row, ctx);
 }
 
 /**

@@ -54,7 +54,7 @@ function fakeKnex({ point, reads = [], throwOn = null }) {
 }
 const point = (over = {}) => ({ estimate_id: 'est-1', read_id: 'read-1', address: ADDRESS, snapshot: SNAPSHOT, delivered_at: new Date(SENT), ...over });
 const frozenRead = (over = {}) => ({
-  id: 'read-1', estimate_id: 'est-1', context_key: 'e:est-1', customer_id: null, status: 'done', tech_pins: [{}], crop_lat: '27.46000',
+  id: 'read-1', estimate_id: 'est-1', context_key: 'e:est-1', customer_id: 'cust-a', status: 'done', tech_pins: [{}], crop_lat: '27.46000',
   hide_on_estimate: false, created_at: new Date('2026-11-20T15:00:00Z'), ...over,
 });
 const est = (over = {}) => ({ id: 'est-1', customer_id: 'cust-a', address: ADDRESS, estimate_data: { deliveryState: { lastDeliveredAt: SENT } }, ...over });
@@ -154,7 +154,7 @@ describe('roofPointsDocBlock', () => {
     expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
   });
 
-  test("the copy shows only while its read is one of the estimate's own: the plain read, or the two-part read of its customer now", async () => {
+  test("the copy shows only while its read names the customer who holds the estimate now, or both name none", async () => {
     const show = async (estimateRow, read) => (await roofPointsDocBlock(estimateRow, { knex: fakeKnex({ point: point(), reads: read ? [read] : [] }) })).roofPoints;
     const forA = frozenRead({ context_key: 'e:est-1|c:cust-a', customer_id: 'cust-a' });
     const forB = frozenRead({ context_key: 'e:est-1|c:cust-b', customer_id: 'cust-b' });
@@ -165,10 +165,13 @@ describe('roofPointsDocBlock', () => {
     expect(await show(estimate, forB)).toBeUndefined();
     // After a duplicate merge the read's customer is the estimate's customer: it answers again (the roof read's own rule).
     expect(await show(estimate, { ...forB, customer_id: 'cust-a' })).toEqual(SNAPSHOT);
-    // A plain read that names no customer is the estimate's, whoever holds it.
-    expect(await show(est({ customer_id: 'cust-b' }), frozenRead())).toEqual(SNAPSHOT);
-    expect(await show(est({ customer_id: null }), frozenRead())).toEqual(SNAPSHOT);
-    // A plain read taken while customer A held the estimate names A: it is A's alone (ids compare without case).
+    // Points saved for a lead: the read names no customer. They show while the estimate has no customer. Once it has
+    // one they are hidden until a person saves them again, so lead -> A -> B never reaches B (and nothing guesses A).
+    const forLead = frozenRead({ customer_id: null });
+    expect(await show(est({ customer_id: null }), forLead)).toEqual(SNAPSHOT);
+    expect(await show(estimate, forLead)).toBeUndefined();
+    expect(await show(est({ customer_id: 'cust-b' }), forLead)).toBeUndefined();
+    // A plain read names the customer who held the estimate when its points were saved: A's alone (ids compare without case).
     const plainForA = frozenRead({ customer_id: 'CUST-A' });
     expect(await show(estimate, plainForA)).toEqual(SNAPSHOT);
     expect(await show(est({ customer_id: 'cust-b' }), plainForA)).toBeUndefined();

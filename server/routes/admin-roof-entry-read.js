@@ -141,6 +141,7 @@ router.patch('/:id/tech-count', async (req, res, next) => {
   } catch (err) {
     if (err.code === 'crop_mismatch') return res.status(400).json({ error: 'These points were not drawn on this roof photo' });
     if (err.code === 'address_missing') return res.status(400).json({ error: 'The address is missing. Look up the address again before adding points.' });
+    if (err.code === 'note_not_allowed') return res.status(400).json({ error: 'A note has words that cannot go on the customer estimate (a code, or words like safe, toxic, poison or infestation). Change the note, then save.' });
     if (err.code === 'read_not_usable') return res.status(400).json({ error: 'This roof read did not work. Read the roof again before adding points.' });
     if (err.code === 'points_changed') return res.status(409).json({ error: 'These points were changed in another window. Read the roof again to load them.' });
     // A database error can carry the bound values (the technician's notes, the crop centre): log and forward only the

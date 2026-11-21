@@ -562,7 +562,7 @@ describe("confirmed points", () => {
 
   it("a list saved before the address was recorded: the panel says so, and Save points sends it unchanged with the crop, the address and the list it loaded", async () => {
     await opened({}, READ({ tech_pins: SAVED, points_address: null }));
-    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/the customer estimate does not show them.*press Save points to confirm them for this address/);
+    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/The customer estimate does not show these points yet.*press Save points to confirm them/);
     fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED }) }));
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     await screen.findByText("Points saved.");
@@ -578,6 +578,48 @@ describe("confirmed points", () => {
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/Change a point or the checkbox first/);
     expect(patches()).toHaveLength(1);
+  });
+
+  it("a list saved before the estimate had this customer: the panel says so, and Save points sends it unchanged", async () => {
+    // The read names no customer and the estimate has one now: the customer estimate does not show the list.
+    await opened({ customerId: CUST }, READ({ tech_pins: SAVED }));
+    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/The customer estimate does not show these points yet/);
+    // The server's answer names the customer the save recorded.
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED, customer_id: CUST }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    expect(lastBody()).toEqual({ pins: SAVED, crop: { lat: SPOT.lat, lng: SPOT.lng }, address: ADDR, expected_pins: SAVED });
+    expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
+    cleanup();
+    // A read that names a customer, and an estimate with no customer, ask for nothing.
+    await opened({ customerId: CUST }, READ({ tech_pins: SAVED, customer_id: CUST }));
+    expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
+    cleanup();
+    await opened({}, READ({ tech_pins: SAVED }));
+    expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
+  });
+
+  it("an unconfirmed list is not sent before the roof photo has loaded; the checkbox alone still saves", async () => {
+    fetchMock.mockImplementationOnce(() => reply({ status: "ok", cached: false, read: READ({ tech_pins: SAVED, points_address: null }), image_url: IMAGE }));
+    render(<RoofReadPanel spot={SPOT} address={ADDR} estimateId={EST} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    // The photo is still loading: staff cannot check the points against it, so Save points confirms nothing.
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/The roof photo has not loaded/);
+    expect(patches()).toHaveLength(0);
+    // The checkbox is its own choice and needs no photo.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show these points on the customer estimate" }));
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED, points_address: null, hide_on_estimate: true }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    expect(lastBody()).toEqual({ hide_on_estimate: true });
+    // Once the photo is on screen, Save points confirms the list.
+    loadPhoto();
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED, hide_on_estimate: true }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    expect(lastBody()).toEqual({ pins: SAVED, crop: { lat: SPOT.lat, lng: SPOT.lng }, address: ADDR, expected_pins: SAVED });
   });
 
   it("asks for no confirmation when the list has its address, when no list is saved, or when the saved list is empty", async () => {

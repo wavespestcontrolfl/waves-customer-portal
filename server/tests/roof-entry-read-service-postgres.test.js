@@ -285,11 +285,12 @@ jest.setTimeout(60000);
       expect(await chosen(custA)).toBe(forA.id);
       expect(await chosen(custB)).toBe(forB.id);
       expect(await chosen(null)).toBeUndefined();
-      // The estimate's own plain read answers every holder, and the newest read that answers wins.
+      // The estimate's own plain read, saved while it had no customer, names none: it answers only while the estimate
+      // has none. For customer A the newest read that names A still wins.
       const plain = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
       await savePoints(plain, 27.46, 'plain');
       expect(await chosen(null)).toBe(plain.id);
-      expect(await chosen(custA)).toBe(plain.id);
+      expect(await chosen(custA)).toBe(forA.id);
     });
 
     test('a plain-key read taken while customer A held the estimate is not chosen once the estimate is B\'s or no one\'s', async () => {
@@ -325,12 +326,46 @@ jest.setTimeout(60000);
       expect(await chosen(custB)).toBeUndefined();
     });
 
-    test("points confirmed while the estimate has no customer go to the first customer it gets", async () => {
+    test('points saved for a lead are hidden once the estimate has a customer, until a person saves them again; a second customer never gets them', async () => {
+      const [custA, custB] = [await insertId('customers'), await insertId('customers')];
       const est = await insertId('estimates');
       const read = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
       expect((await savePoints(read, 27.46, 'lead')).customer_id).toBeNull();
+      const holder = (customerId) => database('estimates').where({ id: est }).update({ customer_id: customerId });
+      const chosen = async () => (await newestPointsRead(await database('estimates').where({ id: est }).first('id', 'customer_id'), database))?.id;
+      expect(await chosen()).toBe(read.id);
+      // The estimate gets its first customer. Nothing recorded that a person confirmed these points for A.
+      await holder(custA);
+      expect(await chosen()).toBeUndefined();
+      // Lead, then A, then B, with no save in between: B gets nothing.
+      await holder(custB);
+      expect(await chosen()).toBeUndefined();
+      // Back with A, staff save the same list again. The save names A, and the points are A's alone.
+      await holder(custA);
+      const again = await svc.saveTechCount(read.id, { pins: pinsFor('lead'), crop: { lat: 27.46, lng: -82.57 }, address: ADDRESS, expectedPins: pinsFor('lead') });
+      expect(again.customer_id).toBe(custA);
+      expect(await chosen()).toBe(read.id);
+      await holder(custB);
+      expect(await chosen()).toBeUndefined();
+    });
+
+    test("a clear names the estimate's customer as a list does, so the clear counts for that customer", async () => {
       const cust = await insertId('customers');
-      expect((await newestPointsRead({ id: est, customer_id: cust }, database)).id).toBe(read.id);
+      const est = await insertId('estimates');
+      const older = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+      const newer = (await svc.runRoofEntryRead(home({ lat: 27.47, estimateId: est }))).read;
+      await savePoints(newer, 27.47, 'newer, saved for the lead');
+      await database('estimates').where({ id: est }).update({ customer_id: cust });
+      await savePoints(older, 27.46, 'older, saved for the customer');
+      const chosen = () => newestPointsRead({ id: est, customer_id: cust }, database);
+      // The newer read still names no customer, so the customer's list is the older one.
+      expect((await chosen()).id).toBe(older.id);
+      // Staff clear the newer read: the clear is this customer's, and the older list does not come back.
+      await svc.saveTechCount(newer.id, { pins: null, expectedPins: pinsFor('newer, saved for the lead') });
+      const row = await chosen();
+      expect(row.id).toBe(newer.id);
+      expect(row.customer_id).toBe(cust);
+      expect(row.tech_pins).toBeNull();
     });
 
     test('a cleared read stays the newest read set, so an older list does not come back; a read never set does not count', async () => {
