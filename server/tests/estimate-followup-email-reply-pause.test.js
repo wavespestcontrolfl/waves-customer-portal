@@ -64,7 +64,7 @@ jest.mock('../services/email/gmail-client', () => ({}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { hasRepliedRecently } = require('../services/estimate-follow-up')._private;
+const { hasRepliedRecently, hasRepliedSince } = require('../services/estimate-follow-up')._private;
 
 const CUSTOMER_EST = {
   id: 'est-1',
@@ -222,5 +222,43 @@ describe('hasRepliedRecently email arm', () => {
     // fails closed, and the thrown message carries no bindings (the replay caller logs it)
     expect(err.message).toBe('reply-pause check failed: Error');
     expect(err.message).not.toContain('pat@example.com');
+  });
+});
+
+// hasRepliedSince: the same two arms from an explicit instant (the 2-hour estimate_sent stop, automation-runner.js);
+// hasRepliedRecently is its "last N days" wrapper.
+describe('hasRepliedSince', () => {
+  const CUTOFF = new Date('2026-11-20T12:00:00Z');
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db._calls.length = 0;
+    db._rows = null;
+  });
+
+  test('text arm: an inbound text since the cutoff = true, and the query reads from that instant', async () => {
+    setRows({ messages: { id: 'm1' } });
+    expect(await hasRepliedSince(CUSTOMER_EST, CUTOFF)).toBe(true);
+    const [c] = db._calls.filter((call) => call.table === 'messages');
+    expect(c.wheres).toContainEqual(['messages.created_at', '>=', CUTOFF]);
+    expect(emailCalls()).toHaveLength(0);
+  });
+
+  test('email arm: an authenticated email since the cutoff = true, and the query reads from that instant', async () => {
+    setRows({ customers: { email: 'pat@example.com' }, emails: [CUSTOMER_REPLY] });
+    expect(await hasRepliedSince(CUSTOMER_EST, CUTOFF)).toBe(true);
+    const [c] = emailCalls();
+    expect(c.wheres[0]).toEqual(['emails.received_at', '>=', CUTOFF]);
+  });
+
+  test('no reply since the cutoff = false', async () => {
+    setRows({ customers: { email: 'pat@example.com' }, emails: [] });
+    expect(await hasRepliedSince(CUSTOMER_EST, CUTOFF)).toBe(false);
+  });
+
+  test('a failed read fails open and logs only the error code', async () => {
+    setRows({ messages: Object.assign(new Error('select ... +19415550123'), { code: '57P01' }) });
+    expect(await hasRepliedSince(CUSTOMER_EST, CUTOFF)).toBe(false);
+    expect(JSON.stringify(logger.warn.mock.calls)).toContain('57P01');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('19415550123');
   });
 });

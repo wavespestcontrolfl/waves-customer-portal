@@ -215,38 +215,44 @@ async function estimateAcceptedForFollowUp(enrollment) {
   return !!accepted;
 }
 
-// GATE_ESTIMATE_TWO_HOUR_EMAIL (owner 2026-11-21): the 2-hour estimate_sent email reads its estimate at delivery.
-// Only an enrollment that carries metadata.estimate_id, a real estimate row, gate on, and not a test send. Anything else
-// returns null and the email goes exactly as before.
+// GATE_ESTIMATE_TWO_HOUR_EMAIL_STOPS (owner 2026-11-21): the 2-hour estimate_sent email (step 0) reads its estimate at delivery and
+// is not sent, and its enrollment ends, when the estimate is final, opted out, or the customer replied. It sends no new message
+// and changes no words. Only an enrollment that carries metadata.estimate_id, a real estimate row, gate on, and not a test send
+// (automationDeliveryBlock returns early for a test); anything else is exactly as before.
 async function twoHourEstimateFor(enrollment) {
-  if (require('../config/feature-gates').estimateTwoHourEmailLive?.() !== true) return null;
+  if (require('../config/feature-gates').estimateTwoHourEmailStopsLive?.() !== true) return null;
   const estimateId = enrollmentMetadata(enrollment).estimate_id;
   if (!estimateId) return null;
   return (await db('estimates').where({ id: estimateId }).first()) || null;
 }
 
-// The customer replied by text or email since the estimate went out (the engine's two reply arms). A failed read fails
-// OPEN, as the engine's cron path does: the email goes. Only the error code or name is logged (a knex message carries
-// phone numbers and addresses).
+// The customer replied by text or email since the send that enrolled them (the engine's two reply arms). The cutoff is the
+// EARLIER of enrollment.enrolled_at and estimate.sent_at that can be read as times: a resend overwrites estimates.sent_at while
+// the enrollment stays active, so sent_at alone would miss a reply made before the resend. Neither readable: no check. A failed
+// read fails OPEN, as the engine's cron path does: the email goes. Only the error code or name is logged (a knex message
+// carries phone numbers and addresses).
 async function customerRepliedSinceEstimate(estimate, enrollment) {
-  const since = estimate.sent_at || enrollment.enrolled_at;
-  if (!since) return false;
+  const times = [enrollment.enrolled_at, estimate.sent_at]
+    .filter(Boolean)
+    .map((value) => new Date(value).getTime())
+    .filter(Number.isFinite);
+  if (!times.length) return false;
   try {
-    return await require('./estimate-follow-up').hasRepliedSince(estimate, new Date(since));
+    return await require('./estimate-follow-up').hasRepliedSince(estimate, new Date(Math.min(...times)));
   } catch (e) {
     logger.warn(`[automation-runner] estimate reply check skipped for estimate ${estimate.id}: ${(e && (e.code || e.name)) || 'error'}`);
     return false;
   }
 }
 
-// The seeded 2-hour step of the estimate_sent sequence (migration 20260424000009). The gate's stops and its body belong to this
-// step alone; any other step of the template keeps its own body and only the accept stop.
+// The seeded 2-hour step of the estimate_sent sequence (migration 20260424000009). The gate's stops belong to this step alone;
+// any other step of the template keeps only the accept stop.
 const ESTIMATE_SENT_INITIAL_STEP_ORDER = 0;
 const isTwoHourStep = (step) => Number(step?.step_order) === ESTIMATE_SENT_INITIAL_STEP_ORDER;
 
-// The estimate_sent stops, read at delivery; each ends the enrollment the same way. The accept stop is on for every step, as
-// before the gate. The others (GATE_ESTIMATE_TWO_HOUR_EMAIL, step 0 only) are for an estimate in a final state (archived, a
-// terminal status, past its expiry), one that opted out of automated follow-up, or a customer who replied since it went out.
+// The estimate_sent stops, read at delivery; each ends the enrollment the same way. The accept stop is on for every step, exactly
+// as before the gate. The others (step 0 only, gate on), in order: a final state, an opt-out, a reply. A status that is neither
+// final nor sent or viewed (draft, scheduled, sending, send_failed) may be transient: it is never a stop by itself.
 async function estimateSentStop(enrollment, step) {
   if (await estimateAcceptedForFollowUp(enrollment)) {
     return { reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' };
@@ -254,87 +260,27 @@ async function estimateSentStop(enrollment, step) {
   return isTwoHourStep(step) ? estimateSentTwoHourStop(enrollment) : null;
 }
 
-// The estimate row each estimate_sent send evaluated its stops on, keyed by the enrollment object of that send. The body is
-// built from THIS row (withEstimateSentBody), never from a second read, so a row that changed after the stops were judged
-// cannot still get the email built for the old row.
-const stopEvaluatedEstimates = new WeakMap();
-
 async function estimateSentTwoHourStop(enrollment) {
   const estimate = await twoHourEstimateFor(enrollment);
   if (!estimate) return null;
-  const closed = estimateInFinalState(estimate);
-  if (closed) return closed;
-  // Any other status that is not sent or viewed (draft, scheduled, sending, send_failed) may be transient: a failed resend
-  // returns the estimate to sent. It is no stop and gets no new body: the step's own body goes, as with the gate off.
-  if (!['sent', 'viewed'].includes(estimate.status)) return null;
-  stopEvaluatedEstimates.set(enrollment, estimate);
+  const ended = estimateEndedStop(estimate);
+  if (ended) return ended;
   if (await customerRepliedSinceEstimate(estimate, enrollment)) {
     return { reason: 'The customer replied since the estimate went out', cancelReason: 'estimate_replied' };
   }
   return null;
 }
 
-// A FINAL state ends the enrollment: archived, a terminal status (the engine's TERMINAL_STATUSES), or an expires_at already past
-// (the status can still read sent or viewed). An estimate that opted out of automated follow-up keeps its own reason.
-function estimateInFinalState(estimate) {
+// A FINAL state (archived, a status in the engine's TERMINAL_STATUSES, or an expires_at already past; the status can still
+// read sent or viewed) ends the enrollment as estimate_closed; an estimate that opted out of automated follow-up as estimate_opted_out.
+function estimateEndedStop(estimate) {
   const closed = { reason: 'The estimate is no longer open', cancelReason: 'estimate_closed' };
   if (estimate.archived_at || require('./estimate-follow-up')._private.TERMINAL_STATUSES.has(estimate.status)) return closed;
+  if (estimate.expires_at && new Date(estimate.expires_at).getTime() < Date.now()) return closed;
   if (require('./estimate-comms-eligibility').estimateOptedOutOfEngagement(estimate)) {
     return { reason: 'The estimate opted out of follow-ups', cancelReason: 'estimate_opted_out' };
   }
-  if (estimate.expires_at && new Date(estimate.expires_at).getTime() < Date.now()) return closed;
   return null;
-}
-
-// The estimate delivery email templates: the proposal's, the updated one, and the standard one (admin-estimates.js).
-const ESTIMATE_DELIVERY_TEMPLATE_KEYS = () => [
-  'estimate.delivery', 'estimate.proposal_delivery', require('./estimate-updated-wording').UPDATED_EMAIL_TEMPLATE_KEY,
-];
-const lowerTrim = (value) => String(value || '').trim().toLowerCase();
-
-// The time of the EARLIEST accepted estimate delivery email for THIS estimate to this address, or null. Read from email_messages
-// (estimate_id, the delivery template keys, the same accepted-status set the signup email uses, the address matched the indexed
-// way: LOWER(TRIM(recipient_email_snapshot)), index email_messages_recipient_email_lower_idx). The time is sent_at, else queued_at.
-// An SMS-only send enrolls too and has no such row; a failed read, a row with no usable time, or no row is no proof.
-async function estimateEmailedAt(estimate, address) {
-  try {
-    const { QUERY_STATUSES, acceptedForSending } = require('./signup-single-email');
-    const rows = await db('email_messages')
-      .where({ estimate_id: estimate.id })
-      .whereIn('template_key', ESTIMATE_DELIVERY_TEMPLATE_KEYS())
-      .whereIn('status', QUERY_STATUSES)
-      .whereRaw('LOWER(TRIM(recipient_email_snapshot)) = ?', [address])
-      .limit(20)
-      .select('status', 'sent_at', 'queued_at');
-    const times = (rows || []).filter(acceptedForSending)
-      .map((row) => new Date(row.sent_at || row.queued_at).getTime())
-      .filter((ms) => Number.isFinite(ms));
-    return times.length ? new Date(Math.min(...times)) : null;
-  } catch (e) {
-    logger.warn(`[automation-runner] estimate delivery proof not read for estimate ${estimate.id}: ${(e && (e.code || e.name)) || 'error'}`);
-    return null;
-  }
-}
-
-// The rendered content to send: for the 2-hour estimate_sent email (step 0), a fixed thank-you body when the step goes to the
-// estimate's current address, the estimate was emailed to that address, and it was opened AFTER that delivery; else the content
-// passed in (today's step body: gate off, no estimate id, no estimate row, a test send, another template or another step, an
-// unopened estimate, another recipient, no proof of the delivery, or a view that predates it). The estimate is the row the stops
-// judged (one read for both). No provider-boundary recheck is needed: the body carries no link, price or service name; its one
-// estimate fact is that the estimate was opened, and it goes only to the address that got the estimate.
-async function withEstimateSentBody({ html, text }, { template, step, enrollment, recipient, testRecipient, personal, asmGroupId }) {
-  if (template.key !== 'estimate_sent' || testRecipient || !isTwoHourStep(step)) return { html, text };
-  const estimate = stopEvaluatedEstimates.get(enrollment);
-  if (!estimate) return { html, text };
-  stopEvaluatedEstimates.delete(enrollment);
-  const { buildEstimateOpenedEmail, estimateOpenedAfter, latestViewTime } = require('./estimate-sent-opened-email');
-  const address = lowerTrim(recipient);
-  // Cheap checks first: no view timestamp, or another address, never reads the email log.
-  if (!address || address !== lowerTrim(estimate.customer_email) || latestViewTime(estimate) === null) return { html, text };
-  const emailedAt = await estimateEmailedAt(estimate, address);
-  if (!emailedAt || !estimateOpenedAfter(estimate, emailedAt)) return { html, text };
-  const body = buildEstimateOpenedEmail();
-  return renderAutomationStepContent({ template, htmlBody: body.html_body, textBody: body.text_body, customer: personal, asmGroupId });
 }
 
 async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null, step = null }) {
@@ -1236,7 +1182,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   if (routed.blocked) return routed.blocked;
   const { recipient } = routed;
   const consultationBlock = await resolveConsultationBlock(step, enrollment, recipient);
-  let { html, text } = renderAutomationStepContent({
+  const { html, text } = renderAutomationStepContent({
     template,
     htmlBody: step.html_body,
     textBody: step.text_body,
@@ -1264,10 +1210,6 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     sendId: sendRow.id, testRecipient, billingSend, retryNotBound: sendRow.retryNotBound,
     handedOffStep: sendRow.retryHandedOff ? step : null, step });
   if (deliveryBlock) return deliveryBlock;
-
-  // GATE_ESTIMATE_TWO_HOUR_EMAIL: the 2-hour estimate email, built for this estimate. Subject, sender and the
-  // wrapper stay the step's; a null body (gate off, no estimate) leaves today's content.
-  ({ html, text } = await withEstimateSentBody({ html, text }, { template, step, enrollment, recipient, testRecipient, personal, asmGroupId }));
 
   const handoff = { started: false, accepted: null };
   const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({

@@ -234,7 +234,7 @@ async function hasRepliedRecently(est, days = 14, opts = {}) {
 }
 
 // The two reply arms (text, then email) since an instant: the reply-pause window above is "the last N days", the 2-hour
-// estimate_sent email asks "since the estimate went out".
+// estimate_sent email asks "since the send that enrolled them".
 async function hasRepliedSince(est, cutoff, { throwOnError = false } = {}) {
   try {
     if (await hasInboundSmsSince(est, cutoff)) return true;
@@ -1925,7 +1925,7 @@ module.exports = EstimateFollowUp;
 module.exports.deferredFollowupStillEligible = deferredFollowupStillEligible;
 // The replay's provider-boundary check (deferred-replay-registry).
 module.exports.followupTextProviderCheck = followupTextProviderCheck;
-// The reply check since an instant (the 2-hour estimate_sent email's stop, automation-runner.js).
+// The reply check since an instant (the 2-hour estimate_sent stop, automation-runner.js).
 module.exports.hasRepliedSince = hasRepliedSince;
 module.exports._private = {
   sendDualChannel,

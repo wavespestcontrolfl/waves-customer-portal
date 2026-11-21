@@ -360,11 +360,7 @@ function followupSmsHook(estimate) {
   return packForEstimate(estimate).smsHook;
 }
 
-// The two answers the 2-hour estimate_sent email gives an opened estimate (estimate-sent-opened-email.js), whatever the service.
-const ESTIMATE_SENT_FAQ = Object.freeze({ start: FAQ_START, price: FAQ_PRICE });
-
 module.exports = {
-  ESTIMATE_SENT_FAQ,
   RECURRING_TERMS_LANES: Object.freeze(Object.keys(PACKS)
     .filter((key) => PACKS[key].benefit === RECURRING_TERMS_BENEFIT)),
   TERMITE_LANES,
