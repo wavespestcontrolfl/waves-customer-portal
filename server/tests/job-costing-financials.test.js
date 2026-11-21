@@ -680,10 +680,24 @@ describe('calcProductsCost — an application amount is priced per unit, never p
     expect((await calcProductsCost(db, 'rec-1')).productsCost).toBe(2.62);
   });
 
+  // A 13.5 g packet (0.48 oz by weight) at $12, on a product with no stock unit.
+  const PACKET = { inventory_unit: null, container_size: '13.5 g', unit_size_oz: 0.48, best_price: 12, cost_per_unit: null };
+
+  test('a weight amount costs its share of a weight package', async () => {
+    const db = fakeProductsDb({
+      applications: [{ product_id: 'p-packet', quantity_applied: 0.9, quantity_unit: 'g' }],
+      products: { 'p-packet': PACKET },
+    });
+    expect((await calcProductsCost(db, 'rec-1')).productsCost).toBe(0.79);
+  });
+
   test.each([
     ['a product with no catalog price', { quantity_applied: 6, quantity_unit: 'fl_oz' }, { inventory_unit: 'fl_oz', unit_size_oz: null, best_price: null, cost_per_unit: null }],
     ['an amount with no unit', { quantity_applied: 6, quantity_unit: null }, JUG],
     ['a count amount on a measured product', { quantity_applied: 2, quantity_unit: 'each' }, JUG],
+    // Half a gallon (a spray mix) logged against the 13.5 g packet once booked 133 packets for one visit.
+    ['a volume amount on a weight package', { quantity_applied: 0.5, quantity_unit: 'gal' }, PACKET],
+    ['a weight amount on a volume package', { quantity_applied: 2, quantity_unit: 'lb' }, { ...JUG, container_size: '2.5 gal' }],
   ])('%s stays uncosted instead of fabricated', async (_label, application, product) => {
     const db = fakeProductsDb({
       applications: [{ product_id: 'p-1', ...application }],

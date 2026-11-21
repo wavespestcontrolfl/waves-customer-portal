@@ -852,6 +852,26 @@ function slotTaken(slotId) {
   return err;
 }
 
+// Owner rule B per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19; zone-day-funnel.js truckMayTakeDate): may a write
+// that keeps an estimate hold (a re-tap, an extend, an accept) keep technician `techId` on `date`? Another truck may
+// have taken this far-south day while the hold was lapsed, or after it ran out while its writer waited on the date
+// lock. The zone is the hold's own stamp: the zone reserveSlot resolved for the estimate (resolveEstimateZone, the zone
+// the estimate page's list funnels by) and stamped (only reserveSlot writes holds). zone-day-funnel.js zoneOfHoldStamp
+// names the zone from it: a far-south stamp is always checked, also after its zone row was renamed or removed. So the
+// check covers exactly the holds that list funneled, and a refused write's next list no longer offers that truck that
+// day. A hold with no stamp (its estimate in no zone when held) is not checked: its list did not funnel it, and a
+// check would refuse a time that list offers again. true when the rule does not apply, with no read: a hold with no
+// stamp or a stamp outside the far south never reads the zone table (isFunnelZone of the stamp's slug: the lists' and
+// the new hold's own test, funnel gate included).
+async function holdKeepsSouthDay(conn, { stamp, date, techId }) {
+  const funnel = require('./scheduling/zone-day-funnel');
+  const slug = String(stamp || '').trim().toLowerCase();
+  if (techId == null || !funnel.perTruckLive() || !funnel.isFunnelZone({ zone_name: slug })) return true;
+  const zones = await conn('service_zones').select('id', 'cities', 'zone_name');
+  const estimateZone = funnel.zoneOfHoldStamp(zones, slug);
+  return funnel.truckMayTakeDate(conn, { estimateZone, date, technicianId: techId });
+}
+
 // A fresh gate read right before a write. A make-room hold whose gate went off while the locks were waited on is the
 // ordinary slot-taken answer and writes nothing. Returns the live mode for the destination probe.
 function requireMakeRoomStillOn(makeRoom, slotId) {
@@ -1702,7 +1722,9 @@ async function reserveSlot({
         });
         // Mode on: this hold's hour may have become another customer's make-room destination while it lapsed.
         const refreshDestinationHit = await destinationHitUnderGate(trx, makeRoom, slotId, { date, techId, windowStart, windowEnd, excludeId: sameSlotHold.id });
-        if (refreshClash.length || refreshDestinationHit) {
+        // Owner rule B per truck: another truck may have taken this far-south day while the hold was lapsed.
+        const refreshSouthDayTaken = !(await holdKeepsSouthDay(trx, { stamp: sameSlotHold.zone, date, techId }));
+        if (refreshClash.length || refreshDestinationHit || refreshSouthDayTaken) {
           // Do NOT refresh a doomed hold — supersede it (same narrow
           // still-uncommitted predicate releaseReservation uses) so the
           // window frees beyond the committed visit's own footprint. The
@@ -1716,6 +1738,7 @@ async function reserveSlot({
             slotId,
             scheduledServiceId: sameSlotHold.id,
             conflictIds: refreshClash.map((r) => r.id),
+            southDayTaken: refreshSouthDayTaken,
           });
           return { staleHoldSuperseded: true };
         }
@@ -1769,6 +1792,15 @@ async function reserveSlot({
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
         throw err;
+      }
+      // Owner rule B per truck (zone-day-funnel.js truckMayTakeDate): a new hold never sends a second truck south on a
+      // day another truck already drives there, in the zone it stamps. Two offers for two trucks on one new far-south day
+      // are serialized by the date lock taken first, so the second reads the first one's hold. Read BEFORE the
+      // estimate's other holds are dropped, as the list read the day: a customer changing the hour keeps the truck's
+      // day that the hold being replaced holds (pre-push P1 on 69000b1ef3: read after the delete, a day two trucks
+      // drive refused every other hour the list offered that truck).
+      if (!(await require('./scheduling/zone-day-funnel').truckMayTakeDate(trx, { estimateZone: reserveZone, date, technicianId: techId }))) {
+        throw slotTaken(slotId);
       }
       if ((liveHolds || []).length) {
         await trx('scheduled_services').whereIn('id', liveHolds.map((hold) => hold.id)).del();
@@ -2232,6 +2264,12 @@ async function commitReservation({
         err.code = 'RESERVATION_EXPIRED';
         throw err;
       }
+    }
+
+    // Owner rule B per truck (holdKeepsSouthDay), on every accept: another truck may have taken this hold's far-south
+    // day while it was lapsed. Same slot-unavailable recovery as the technician check below (the customer re-picks).
+    if (!(await holdKeepsSouthDay(client, { stamp: row.zone, date: lockedDate, techId: row.technician_id }))) {
+      throw slotTaken(`${lockedDate}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id}`);
     }
 
     // Technician eligibility re-check at COMMIT (FOR SHARE on this txn): the
@@ -3061,10 +3099,14 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
         expectedMinutes: await candidateExpectedMinutesFromRow(trx, row, extendWindowMinutes),
       },
     });
+    // Owner rule B per truck (holdKeepsSouthDay): another truck may have taken this far-south day while the hold was
+    // lapsed. A refused hold can only lose at accept, so it is superseded like a clashing one. Read BEFORE the gate
+    // read below, which must stay the last read ahead of the writes.
+    const southDayTaken = !(await holdKeepsSouthDay(trx, { stamp: row.zone, date: scheduledDate, techId: row.technician_id }));
     // The gate read again right before the writes (Codex pre-push P1): a make-room hold whose gate went off while its
     // proof ran is superseded like one that no longer proves (its probes above skipped the stops it would move).
     const makeRoomGateOff = !!makeRoom && !makeRoomHoldsOn();
-    if (clash.length || makeRoomRefused || makeRoomGateOff) {
+    if (clash.length || makeRoomRefused || makeRoomGateOff || southDayTaken) {
       // Supersede — same narrow still-uncommitted predicate releaseReservation
       // uses — rather than leave a hold extending is guaranteed to lose at
       // commit occupying the window until it eventually expires.
@@ -3161,6 +3203,7 @@ module.exports = {
     catalogLinkForProfile,
     candidateExpectedMinutesFromRow,
     refuseGracedOfferOnRivalHoldConflict,
+    holdKeepsSouthDay,
     makeRoomDestinationClash,
     makeRoomChainClash,
     acceptedWindowOnMakeRoomDestination,

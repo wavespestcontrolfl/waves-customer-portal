@@ -132,6 +132,8 @@ const PAY_LINE_COLUMNS = {
   commission_cents: 'commissionCents',
   health_allowance_cents: 'healthAllowanceCents',
   hsa_employer_cents: 'hsaEmployerCents',
+  // Season bonus, stay bonus and December gift lines (Tech Rewards Plan); null on a check with none of them.
+  tech_rewards_cents: 'techRewardsCents',
   line_overtime_premium_cents: 'lineOvertimePremiumCents',
   qualified_overtime_cents: 'qualifiedOvertimeCents',
   simple_compensation_cents: 'simpleCompensationCents',
@@ -140,6 +142,8 @@ const PAY_LINE_KEYS = Object.keys(PAY_LINE_COLUMNS);
 // A check drafted with the gate on stored its pay line figures (qualified_overtime_cents is
 // never null then). It keeps showing them after the gate is turned off, so a paid stub, run
 // and CSV still add up; a check drafted with the gate off stored none and shows none.
+// A pay line figure the calculator left out (tech_rewards_cents on a check with none) is stored as null.
+const nullWhenMissing = (value) => (value === undefined ? null : value);
 const storedLines = (row) => row.qualified_overtime_cents != null;
 
 // GATE_PAYROLL_FAMILY_EMPLOYEE: payroll_checks columns, null on a check drafted with the gate off;
@@ -290,7 +294,7 @@ function buildCheck({
     ...simpleColumns(simple, pay),
   };
   for (const [column, key] of Object.entries(MONEY_COLUMNS)) check[column] = pay[key];
-  if (withLines) for (const [column, key] of Object.entries(PAY_LINE_COLUMNS)) check[column] = pay[key];
+  if (withLines) for (const [column, key] of Object.entries(PAY_LINE_COLUMNS)) check[column] = nullWhenMissing(pay[key]);
   if (unemploymentExempt !== undefined) {
     check.unemployment_exempt = pay.unemploymentExempt;
     check.unemployment_wages_cents = pay.taxableWages.futaCents;
@@ -436,6 +440,7 @@ function serializeCheck(row) {
       commissionCents: Number(row.commission_cents || 0),
       healthAllowanceCents: Number(row.health_allowance_cents || 0),
       hsaEmployerCents: Number(row.hsa_employer_cents || 0),
+      ...(row.tech_rewards_cents != null ? { techRewardsCents: Number(row.tech_rewards_cents) } : {}),
       lineOvertimePremiumCents: Number(row.line_overtime_premium_cents || 0),
       payLines: Array.isArray(row.pay_lines) ? row.pay_lines : [],
     } : {}),
@@ -1067,6 +1072,7 @@ async function getStub(checkId, conn = db) {
         reviewBonusCents: c.reviewBonusCents,
         commissionCents: c.commissionCents,
         healthAllowanceCents: c.healthAllowanceCents,
+        ...(c.techRewardsCents === undefined ? {} : { techRewardsCents: c.techRewardsCents }),
         lineOvertimePremiumCents: c.lineOvertimePremiumCents,
       } : {}),
       grossCents: c.grossCents,
@@ -1160,6 +1166,8 @@ const CSV_HEADERS = [
 const CSV_TIME_OFF_HEADERS = ['PTO Hours', 'PTO Pay', 'Holiday Hours', 'Holiday Pay'];
 // After those, gate GATE_PAYROLL_PAY_LINES on only. HSA From Waves is not in Gross Pay.
 const CSV_PAY_LINE_HEADERS = ['Review Bonus', 'Commission', 'Health Allowance', 'Overtime On Bonus And Allowance', 'HSA From Waves'];
+// Only when a check in the run holds a season bonus, stay bonus or December gift. It is in Gross Pay.
+const CSV_TECH_REWARDS_HEADERS = ['Tech Rewards Bonus'];
 // Last, only when a check in the run has SIMPLE IRA savings. It is in Gross Pay and comes out of Net Pay.
 const CSV_SIMPLE_HEADERS = ['SIMPLE IRA Savings'];
 
@@ -1168,7 +1176,8 @@ function checksToCsv(rows) {
   // Gate on, or a check in the run that stored pay line figures (drafted while it was on).
   const withLines = payLinesOn() || rows.some(storedLines);
   const withSimple = rows.some(storedSimple);
-  const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? CSV_PAY_LINE_HEADERS : []), ...(withSimple ? CSV_SIMPLE_HEADERS : [])])];
+  const withTechRewards = withLines && rows.some((row) => row.tech_rewards_cents != null);
+  const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? CSV_PAY_LINE_HEADERS : []), ...(withTechRewards ? CSV_TECH_REWARDS_HEADERS : []), ...(withSimple ? CSV_SIMPLE_HEADERS : [])])];
   for (const row of rows) {
     const c = serializeCheck(row);
     lines.push(csvRow([
@@ -1182,6 +1191,7 @@ function checksToCsv(rows) {
         centsText(c.reviewBonusCents), centsText(c.commissionCents), centsText(c.healthAllowanceCents),
         centsText(c.lineOvertimePremiumCents), centsText(c.hsaEmployerCents),
       ] : []),
+      ...(withTechRewards ? [centsText(c.techRewardsCents || 0)] : []),
       ...(withSimple ? [centsText(c.simpleDeferralCents || 0)] : []),
     ]));
   }

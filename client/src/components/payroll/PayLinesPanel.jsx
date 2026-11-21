@@ -20,7 +20,9 @@ const KINDS = [
   { value: 'health_allowance', label: 'Health allowance' },
   { value: 'hsa_employer', label: 'HSA from Waves' },
 ];
-const kindWord = kind => (KINDS.find(k => k.value === kind) || { label: kind }).label;
+// The pay run works these three out itself (Tech Rewards Plan): they show in the list and cannot be added or removed here.
+const SYNCED_LABELS = { season_bonus: 'Season bonus', stay_bonus: 'Stay bonus', december_gift: 'December gift' };
+const kindWord = kind => SYNCED_LABELS[kind] || (KINDS.find(k => k.value === kind) || { label: kind }).label;
 const WEEK_CHOICES = 12;
 
 // '46.15' -> 4615. Anything that is not dollars with at most 2 decimals -> null.
@@ -51,7 +53,7 @@ function LinesTable({ title, lines, onRemove, busy }) {
         <TD>{spanWord(line)}</TD>
         <TD>{line.note || ''}</TD>
         {onRemove && <TD>
-          <Button variant="secondary" disabled={busy} onClick={() => onRemove(line)} aria-label={`Remove ${kindWord(line.kind)} for ${line.name}`}>Remove</Button>
+          {!SYNCED_LABELS[line.kind] && <Button variant="secondary" disabled={busy} onClick={() => onRemove(line)} aria-label={`Remove ${kindWord(line.kind)} for ${line.name}`}>Remove</Button>}
         </TD>}
       </TR>)}
     </TBody>
