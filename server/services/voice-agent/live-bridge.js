@@ -215,6 +215,7 @@ class LiveBridge {
     this.callerRunSince = null; // ...and when the audio of that run began
     this.callerStampEnd = null; // Twilio's media timestamp at the end of the caller's last frame (ms from the stream start)
     this.callerSpokeAt = null; // arrival of the caller's latest frame of speech (noteCallerFrame)
+    this.callerSpokeSinceReply = false; // ...and whether one came since the current reply began to arrive, in the order the bridge handled them
     this.callerMs = 0; // caller audio received, and the part of it in voiced frames (caller_voiced_pct)
     this.callerVoicedMs = 0;
     this.playbackEndsAt = 0;
@@ -375,6 +376,7 @@ class LiveBridge {
       this.callerRunMs += ms;
       if (this.ready && this.callerRunMs >= CALLER_SPEECH_MIN_MS) {
         this.callerSpokeAt = now;
+        this.callerSpokeSinceReply = true;
         // This speech began before the current reply's first voiced sample and
         // goes on now that the reply's chunk has arrived: that reply did not
         // wait for the caller. The run's begin decides, not this frame's
@@ -552,21 +554,24 @@ class LiveBridge {
   // "approximate fragment timing rather than exact word boundaries"). With it
   // every delay read 0.
   // A reply answers the caller's last speech when that speech came after the
-  // reply before it began to arrive. With no such speech (the model goes on by
-  // itself) the reply has no delay. The first reply is normally the greeting.
+  // reply before it began to arrive. "After" is the order in which the bridge
+  // handled the frame and the chunk, not their clock times: the two can share
+  // a millisecond. With no such speech (the model goes on by itself) the reply
+  // has no delay. The first reply is normally the greeting.
   // When the caller spoke first (after session.started) it may instead be the
   // answer: that delay is kept apart, never in turns. A reply inside the 1.5 s
   // after a barge-in is kept apart as well (onOutputAudio).
   onReplyStart(t, ambiguous, voiceAt) {
-    const prev = this.replyStartWall;
-    const spoke = this.callerSpokeAt;
+    const first = this.replyStartWall === null;
+    const spoke = this.callerSpokeSinceReply;
     this.replyStartWall = t;
     this.replyVoiceWall = voiceAt;
     this.replyDelayIn = null;
-    if (spoke === null || (prev !== null && spoke <= prev)) return; // no caller speech since the reply before this one began
-    const delay = Math.round(voiceAt - spoke);
+    this.callerSpokeSinceReply = false;
+    if (!spoke) return; // no caller speech since the reply before this one began
+    const delay = Math.round(voiceAt - this.callerSpokeAt);
     if (ambiguous) this.replyDelayIn = this.ambiguousReplies;
-    else this.replyDelayIn = prev === null ? 'first' : this.latencies;
+    else this.replyDelayIn = first ? 'first' : this.latencies;
     if (this.replyDelayIn === 'first') this.firstReplyAmbiguousMs = delay;
     else this.replyDelayIn.push(delay);
   }

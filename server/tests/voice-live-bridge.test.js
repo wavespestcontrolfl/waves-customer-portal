@@ -1134,6 +1134,29 @@ describe("the reply delay is read from the caller's own audio", () => {
     expect(await next(4120)).toEqual([1280]); // +5400 minus +4120
   });
 
+  test("the caller's last voiced frame and a reply's chunk in the same millisecond: the order the bridge handles them in decides which reply answers that speech", async () => {
+    const order = async (frameFirst) => {
+      const t = setup();
+      await t.ready();
+      for (let i = 0; i < 10; i++) {
+        t.advance(20);
+        t.twilioMedia(b64(160)); // the caller speaks, +0..+200
+      }
+      t.advance(20); // +220: one more voiced frame and the first reply's chunk
+      if (frameFirst) t.twilioMedia(b64(160));
+      delta(t, b64(800)); // the first reply of the call (its delay is kept apart)
+      if (!frameFirst) t.twilioMedia(b64(160));
+      t.advance(20);
+      t.twilioMedia(silence(160)); // the caller is silent from here
+      t.advance(1280);
+      delta(t, b64(800)); // the model's next reply, at +1520
+      const s = await end(t);
+      return [s.first_reply_ambiguous_ms, s.turns];
+    };
+    expect(await order(true)).toEqual([0, []]); // the frame came first: the first reply answers it, the next reply answers nothing
+    expect(await order(false)).toEqual([null, [1300]]); // the chunk came first: the caller spoke on into that reply, and the next reply answers them
+  });
+
   test('taking a delay back removes that reply\'s delay only: an earlier turn stays, and a kept-apart first delay is taken back as well', async () => {
     const t = setup({ speech: [[2000, 3000], [6000, 7000], [8250, 8550]] });
     await t.ready();
