@@ -192,7 +192,7 @@ class LiveBridge {
     this.awaitingReply = false;
     this.playbackEndsAt = 0;
     this.replyStartWall = null; // wall time the model's current reply began (its audio arrived)
-    this.replyHeardWall = null; // ...and when Twilio plays its first voiced sample, after any audio queued ahead (delays run to it)
+    this.replyVoiceWall = null; // ...and when its first voiced sample reached the bridge (delays run to it)
     this.prevReplyStartWall = null; // ...and the reply before it
     this.replySample = null; // { index, speechEnd } of the delay sample the current reply has
     this.lastAudioAt = null; // arrival time of the last model audio chunk
@@ -429,8 +429,6 @@ class LiveBridge {
       if (dropping) from = start;
       this.tailDropSince = null;
     }
-    // Twilio plays this chunk after whatever is still queued.
-    const playsAt = Math.max(t, this.playbackEndsAt);
     if (start >= 0) {
       // GPT-Live audio carries no reply id or timing (OpenAI's guide), so a
       // reply start inside the 1.5 s after a barge-in is ambiguous: a fast
@@ -440,10 +438,13 @@ class LiveBridge {
       const ambiguous = this.ambiguousUntil !== null && t < this.ambiguousUntil;
       // Which reply answers which speech is decided on the chunk's arrival
       // (t): the model had sent all of it by then. The delay runs to the
-      // moment the caller hears the reply's first voiced sample.
-      this.onReplyStart(t, ambiguous, playsAt + (start - from) / MULAW_BYTES_PER_MS);
+      // reply's first voiced sample: the chunk's arrival plus the sample's
+      // offset in the audio forwarded. Audio still queued at Twilio ahead of
+      // it is not added (as before): the delay measures the model, and a
+      // sample must not depend on a later flush.
+      this.onReplyStart(t, ambiguous, t + (start - from) / MULAW_BYTES_PER_MS);
     }
-    this.playbackEndsAt = playsAt + (audio.length - from) / MULAW_BYTES_PER_MS;
+    this.playbackEndsAt = Math.max(t, this.playbackEndsAt) + (audio.length - from) / MULAW_BYTES_PER_MS;
     const payload = from ? audio.subarray(from).toString('base64') : msg.delta;
     this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload } });
   }
@@ -451,16 +452,16 @@ class LiveBridge {
   // The pending measure is consumed only here, by a reply start. The first
   // reply start is the greeting (sent at session.started): it is never timed,
   // even when the caller spoke before it.
-  onReplyStart(t, ambiguous, heardAt) {
+  onReplyStart(t, ambiguous, voiceAt) {
     const greeting = this.replyStartWall === null;
     this.prevReplyStartWall = this.replyStartWall;
     this.replyStartWall = t;
-    this.replyHeardWall = heardAt;
+    this.replyVoiceWall = voiceAt;
     this.replySample = null;
     this.replyAmbiguous = ambiguous;
     if (ambiguous) {
       if (this.awaitingReply && this.speechEndWall !== null) {
-        this.ambiguousReplies.push(Math.max(0, Math.round(heardAt - this.speechEndWall)));
+        this.ambiguousReplies.push(Math.max(0, Math.round(voiceAt - this.speechEndWall)));
         this.replySample = { index: this.ambiguousReplies.length - 1, speechEnd: this.speechEndWall };
       }
       this.awaitingReply = false;
@@ -470,10 +471,10 @@ class LiveBridge {
     // it may instead be the answer: that delay is kept apart, never mixed into
     // the per-turn delays and never lost.
     if (greeting && this.awaitingReply && this.speechEndWall !== null) {
-      this.firstReplyAmbiguousMs = Math.max(0, Math.round(heardAt - this.speechEndWall));
+      this.firstReplyAmbiguousMs = Math.max(0, Math.round(voiceAt - this.speechEndWall));
     }
     if (!greeting && this.awaitingReply && this.speechEndWall !== null) {
-      this.latencies.push(Math.max(0, Math.round(heardAt - this.speechEndWall)));
+      this.latencies.push(Math.max(0, Math.round(voiceAt - this.speechEndWall)));
       this.replySample = { index: this.latencies.length - 1, speechEnd: this.speechEndWall };
     }
     this.awaitingReply = false;
@@ -506,7 +507,7 @@ class LiveBridge {
       this.awaitingReply = true;
       return;
     }
-    const delay = Math.max(0, Math.round(this.replyHeardWall - speechEnd));
+    const delay = Math.max(0, Math.round(this.replyVoiceWall - speechEnd));
     if (this.prevReplyStartWall === null) {
       // A late transcript of speech that ended before the FIRST reply: that
       // reply may be the greeting or an answer, so the delay refines the

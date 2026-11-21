@@ -668,16 +668,16 @@ describe('reply start on the continuous GPT-Live stream', () => {
     delta(t, b64(160)); // greeting
     t.advance(100);
     said(t, 'first question', 20, 60);
-    // Four chunks of about 400 ms, 100 ms apart (no arrival gap): Twilio plays them back to back from +100.
-    delta(t, voiceThenSilence(290)); // the same reply, then 290 ms silent: queued until +490
+    // Four chunks of about 400 ms, 100 ms apart (no arrival gap).
+    delta(t, voiceThenSilence(290)); // the same reply, then 290 ms silent
     t.advance(100);
-    delta(t, silenceThenVoice(300)); // 590 ms of silence in all: still the same reply; queued until +890
+    delta(t, silenceThenVoice(300)); // 590 ms of silence in all: still the same reply
     expect(t.bridge.latencies).toHaveLength(0);
     t.advance(100);
-    delta(t, voiceThenSilence(300)); // queued until +1290
+    delta(t, voiceThenSilence(300));
     t.advance(100);
-    delta(t, silenceThenVoice(300)); // 600 ms of silence in all: a new reply, voiced 300 ms into its chunk
-    expect((await end(t)).turns).toEqual([1530]); // the caller hears it at +1590; speech ended +60
+    delta(t, silenceThenVoice(300)); // at +400, 600 ms of silence in all: a new reply, voiced 300 ms into its chunk
+    expect((await end(t)).turns).toEqual([640]); // its voice at +700; speech ended +60
   });
 
   test('one chunk that holds the end of a reply, 600 ms of silence and the next reply: the next reply is timed from its own first voiced sample', async () => {
@@ -712,7 +712,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
       expect(mediaPayloads(t)).not.toContain(mixed);
       expect(mediaPayloads(t)).toContain(b64(800)); // the reply alone: it plays at once, until +1550
       expect(t.bridge.playbackEndsAt - t.bridge.sessionStartWall).toBe(1550);
-      expect((await end(t)).after_barge_in_ambiguous_ms).toEqual([150]); // heard at +1450, speech ended +1300
+      expect((await end(t)).after_barge_in_ambiguous_ms).toEqual([150]); // its voice at +1450, speech ended +1300
     });
 
     test('past the 1.5 s nothing is trimmed: the chunk plays whole', async () => {
@@ -733,7 +733,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
     t.advance(200);
     delta(t, two); // at +300: the first voice of the call 100 ms in, 600 ms of silence, voice again
     const s = await end(t);
-    expect(s.first_reply_ambiguous_ms).toBe(350); // heard at +400, speech ended +50
+    expect(s.first_reply_ambiguous_ms).toBe(350); // its voice at +400, speech ended +50
     expect(s.turns).toEqual([]);
   });
 
@@ -747,7 +747,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
     expect((await end(t)).turns).toEqual([500]);
   });
 
-  describe('the delay runs to when the caller hears the reply', () => {
+  describe('the delay runs to the first voiced sample of the reply: its chunk arrival plus its offset in the chunk', () => {
     test('a voiced chunk with leading silence: the delay includes the offset of the voice inside the chunk', async () => {
       const t = await start();
       delta(t, b64(160)); // greeting
@@ -758,7 +758,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
       expect((await end(t)).turns).toEqual([1700]); // voice at +2200, speech ended +500
     });
 
-    test('a reply that arrives in a burst behind queued silence is timed to when the caller hears it', async () => {
+    test('audio still queued at Twilio ahead of the reply is not added to the delay', async () => {
       const t = await start();
       delta(t, b64(160)); // greeting
       run(t, 10, silence(800)); // paced silence, +0..+1000
@@ -766,16 +766,15 @@ describe('reply start on the continuous GPT-Live stream', () => {
       t.advance(400); // a 400 ms network stall, then three chunks at once at +1400
       delta(t, silence(800));
       delta(t, silence(800));
-      delta(t, b64(800)); // the reply: it arrives at +1400 and plays after the 200 ms of silence ahead of it
-      expect((await end(t)).turns).toEqual([900]); // heard at +1600, speech ended +700
+      delta(t, b64(800)); // the reply reaches the bridge at +1400, behind 200 ms of queued silence
+      expect((await end(t)).turns).toEqual([700]); // speech ended +700
     });
 
-    test('a late transcript times a reply queued behind silence to when the caller heard it', async () => {
+    test('a late transcript times the reply to its first voiced sample', async () => {
       const t = await start();
       delta(t, b64(160)); // greeting
       t.advance(1000);
-      delta(t, silence(1600)); // one burst at +1000: 200 ms of silence...
-      delta(t, b64(800)); // ...then a reply, heard from +1200
+      delta(t, silenceThenVoice(200)); // at +1000: a reply whose voice is 200 ms into its chunk
       t.advance(300);
       said(t, 'hello', 500, 900); // the speech ended before the reply arrived
       expect((await end(t)).turns).toEqual([300]);
@@ -789,12 +788,12 @@ describe('reply start on the continuous GPT-Live stream', () => {
       t.advance(100);
       said(t, 'wait', 1100, 1300); // barge-in at +1100
       t.advance(500);
-      delta(t, silenceThenVoice(200)); // at +1600, after a gap: forwarded from its voice on, so heard at +1600
+      delta(t, silenceThenVoice(200)); // at +1600, after a gap: forwarded from its voice on
       expect(mediaPayloads(t)).toContain(b64(800));
       expect((await end(t)).after_barge_in_ambiguous_ms).toEqual([300]);
     });
 
-    test('a second reply inside the 1.5 s after a barge-in, queued behind silence, is timed apart to when the caller hears it', async () => {
+    test('a second reply inside the 1.5 s after a barge-in is timed apart to its first voiced sample', async () => {
       const t = await start();
       delta(t, b64(160)); // greeting
       t.advance(1000);
@@ -806,21 +805,19 @@ describe('reply start on the continuous GPT-Live stream', () => {
       t.advance(100);
       said(t, ' so', 1450, 1500); // more speech, after that reply's audio has played: no barge-in
       t.advance(200);
-      delta(t, silence(1600)); // one burst at +1700, after a gap: 200 ms of silence...
-      delta(t, b64(800)); // ...then a reply the caller hears from +1900
+      delta(t, silenceThenVoice(200)); // at +1700, after a gap: a reply whose voice is 200 ms into its chunk
       const s = await end(t);
       expect(s.after_barge_in_ambiguous_ms).toEqual([100, 400]);
       expect(s.interruptions).toBe(1);
       expect(s.turns).toEqual([]);
     });
 
-    test('the caller speaks first and the first reply is queued behind silence: first_reply_ambiguous_ms runs to when the caller hears it', async () => {
+    test('the caller speaks first: first_reply_ambiguous_ms runs to the first voiced sample', async () => {
       const t = await start();
       t.advance(100);
       said(t, 'hello', 10, 50);
       t.advance(200);
-      delta(t, silence(1600)); // one burst at +300: 200 ms of silence...
-      delta(t, b64(160)); // ...then the first voice, heard from +500
+      delta(t, silenceThenVoice(200, 160)); // at +300: the first voice of the call, 200 ms into its chunk
       const s = await end(t);
       expect(s.first_reply_ambiguous_ms).toBe(450);
       expect(s.turns).toEqual([]);
