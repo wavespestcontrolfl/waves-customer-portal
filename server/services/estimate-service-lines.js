@@ -474,6 +474,13 @@ function closedServiceKeys(estimate = {}) {
   return selectedServiceKeysFromInputs(data?.inputs || data?.engineInputs || {});
 }
 
+// The keys of the estimate's STORED recurring rows only; [] when it has none. Ticked boxes never count here: they fold
+// one-time and recurring services into one family (svcOnetimePest and svcPest both read `pest`), so they prove no recurring plan.
+function recurringRowServiceKeys(estimate = {}) {
+  const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
+  return unique(recurringServicesFromData(data).map((line) => line.key).filter((key) => key && key !== 'unknown'));
+}
+
 function inferEstimateServiceInterest(estimate = {}) {
   const explicit = String(estimate.serviceInterest || estimate.service_interest || '').trim();
   if (explicit) return explicit;
@@ -487,6 +494,7 @@ function inferEstimateServiceInterest(estimate = {}) {
 module.exports = {
   SERVICE_LINE_LABELS,
   closedServiceKeys,
+  recurringRowServiceKeys,
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
   oneTimeServicesFromData,

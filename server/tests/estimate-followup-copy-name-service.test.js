@@ -13,11 +13,12 @@ jest.mock('../routes/estimate-public', () => ({
 
 const {
   quotedServiceName,
+  neutralFollowupEmailVars,
   followupEmailVars,
   RECURRING_TERMS_LANES,
   _private: { PACKS, LAWN_PEST_PACK, RECURRING_TERMS_BENEFIT, NO_GUARANTEE_BENEFIT },
 } = require('../services/estimate-followup-copy');
-const { closedServiceKeys } = require('../services/estimate-service-lines');
+const { closedServiceKeys, recurringRowServiceKeys } = require('../services/estimate-service-lines');
 
 function recurring(...services) {
   return {
@@ -61,6 +62,24 @@ describe('closedServiceKeys', () => {
   test('a commercial manual line names a commercial lane', () => {
     const est = { id: 'e-com', estimate_data: { manualQuoteLines: [{ service: 'commercial_pest', quoteRequired: true }] } };
     expect(closedServiceKeys(est)).toEqual(['commercial_pest']);
+  });
+});
+
+describe('recurringRowServiceKeys', () => {
+  test('names only the stored recurring rows', () => {
+    expect(recurringRowServiceKeys(recurring('Pest Control', 'Lawn Care'))).toEqual(['pest', 'lawn']);
+    expect(recurringRowServiceKeys(boxes({ svcPest: true, svcLawn: true }))).toEqual([]);
+    expect(recurringRowServiceKeys({ id: 'x' })).toEqual([]);
+  });
+});
+
+describe('neutralFollowupEmailVars', () => {
+  test('is the property-generic pack with no recurring promises', () => {
+    const vars = neutralFollowupEmailVars();
+    expect(vars.service_label).toBe(PACKS.unknown.label);
+    expect(vars.category_included).toBe(PACKS.unknown.included);
+    expect(vars.faq_terms).toBe('');
+    expect(vars.category_benefit).toBe(NO_GUARANTEE_BENEFIT);
   });
 });
 
@@ -176,7 +195,7 @@ describe('followupEmailVars', () => {
     expect(vars.faq_between_visits).toBe('');
   });
 
-  test('gate on: lawn + pest ticked boxes with a termite word in free text keep the neutral bundle terms', () => {
+  test('gate on: lawn + pest ticked boxes with a termite word in free text name both but keep the neutral bundle terms', () => {
     gateOn();
     const est = boxes({ svcPest: true, svcLawn: true }, { monthly_total: 90, notes: 'termite damage seen' });
     const vars = followupEmailVars(est);
@@ -184,6 +203,18 @@ describe('followupEmailVars', () => {
     expect(vars.category_headline).toBe(PACKS.bundle.headline);
     expect(vars.category_benefit).toBe(NO_GUARANTEE_BENEFIT);
     expect(vars.faq_terms).toBe('');
+  });
+
+  test('gate on: a recurring pest + one-time lawn with no stored recurring rows gets bundle terms, no plan promises', () => {
+    gateOn();
+    // the ticked boxes fold the one-time lawn and the recurring pest into the same two lanes
+    const est = boxes({ svcPest: true, svcOnetimeLawn: true }, { monthly_total: 40, onetime_total: 120 });
+    const vars = followupEmailVars(est);
+    expect(vars.category_headline).toBe(PACKS.bundle.headline);
+    expect(vars.category_benefit).toBe(PACKS.bundle.benefit);
+    expect(vars.faq_terms).toBe('');
+    expect(vars.faq_between_visits).toBe('');
+    expect(vars.category_included).not.toContain('free callbacks');
   });
 
   test('gate on: a termite estimate keeps no guarantee and gets no contract claim', () => {

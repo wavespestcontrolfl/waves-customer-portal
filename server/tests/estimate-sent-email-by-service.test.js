@@ -113,6 +113,21 @@ describe('buildEstimateSentEmail', () => {
     expect(html).toContain('A few things folks usually ask');
   });
 
+  test('an estimate that names no service through a closed source is neutral: your Waves estimate, generic answers', () => {
+    const est = {
+      id: 'n', status: 'sent', monthly_total: 40, notes: 'want a quote', description: 'pest and lawn', service_interest: 'Pest Control',
+      estimate_data: { inputs: {} },
+    };
+    const { html_body: html, text_body: text, service } = buildEstimateSentEmail({ estimate: est, estimateUrl: link });
+    expect(service).toBe('Waves');
+    expect(html).toContain('<p>Your Waves estimate is ready whenever you are.</p>');
+    expect(text).toContain('Your Waves estimate is ready whenever you are.');
+    expect(html).toContain('A plan priced from your actual property');
+    expect(html).not.toMatch(/pest control estimate|lawn care|callbacks|free re-service|Am I locked in|between visits/i);
+    const opened = buildEstimateSentEmail({ estimate: { ...est, viewed_at: new Date() }, estimateUrl: null });
+    expect(opened.html_body).toContain('Thanks for taking a look at your Waves estimate.');
+  });
+
   test('a one-time job drops the contract and between-visits rows', () => {
     const est = {
       id: 'one', status: 'sent', monthly_total: 0, annual_total: 0, onetime_total: 150,
@@ -181,6 +196,7 @@ function chain({ result = [], first, returning } = {}) {
   const q = {};
   ['where', 'whereRaw', 'whereIn', 'whereNot', 'join', 'whereNotNull', 'whereNull', 'orWhereNotNull', 'orWhereRaw', 'orderBy', 'orderByRaw', 'limit']
     .forEach((m) => { q[m] = jest.fn(() => q); });
+  q.select = jest.fn(() => q);
   q.insert = jest.fn(() => q);
   q.update = jest.fn(() => Promise.resolve(1));
   q.del = jest.fn(() => Promise.resolve(1));
@@ -208,8 +224,25 @@ function setDbQueues(queues) {
 const ENROLLED_AT = new Date('2026-11-20T17:00:00Z');
 const STEP_HTML = '<p>Old body: just making sure it landed.</p>';
 
+// The email log read behind the View my estimate button: rows by the lower-cased address the query asks for.
+function emailLog(rowsByAddress, { fail = false } = {}) {
+  const q = chain();
+  q.asked = {};
+  q.whereRaw = jest.fn((_sql, [address]) => { q.asked.address = address; return q; });
+  q.where = jest.fn((clause) => { q.asked.where = clause; return q; });
+  q.whereIn = jest.fn((column, values) => { q.asked[column] = values; return q; });
+  q.then = (resolve, reject) => (fail
+    ? Promise.reject(Object.assign(new Error('select 941-555-0100'), { code: '57P01' }))
+    : Promise.resolve(rowsByAddress[q.asked.address] || [])).then(resolve, reject);
+  return q;
+}
+const SENT_TO_PAT = { 'pat@example.com': [{ status: 'delivered' }] };
+
+const STEP_ZERO = { id: 'step-1', step_order: 0, subject: 'A quick note on your Waves estimate, {{first_name}}',
+  html_body: STEP_HTML, text_body: 'Old text: making sure it landed.', from_email: 'automations@wavespestcontrol.com', enabled: true };
+
 // estimateRows: the answers to each read of `estimates`, in order. The accepted-stop read is first.
-function queues({ estimateRows, enrollment: overrides = {} }) {
+function queues({ estimateRows, enrollment: overrides = {}, log = emailLog(SENT_TO_PAT), steps = [STEP_ZERO] }) {
   const enrollment = {
     id: 'enrollment-n', template_key: 'estimate_sent', customer_id: 'cust-n', status: 'active', current_step: 0,
     email: 'pat@example.com', first_name: 'Pat', last_name: 'Synthetic', enrolled_at: ENROLLED_AT,
@@ -220,13 +253,13 @@ function queues({ estimateRows, enrollment: overrides = {} }) {
   setDbQueues({
     automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
     automation_templates: [chain({ first: { key: 'estimate_sent', name: 'Estimate Sent', asm_group: 'service' } })],
-    automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'A quick note on your Waves estimate, {{first_name}}',
-      html_body: STEP_HTML, text_body: 'Old text: making sure it landed.', from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
+    automation_steps: [chain({ result: steps })],
     automation_step_sends: [chain({ returning: [{ id: 'send-n' }] }), sendUpdate],
     email_suppressions: [chain({ result: [] })],
     estimates: estimateRows.map((row) => chain({ first: row })),
+    email_messages: [log],
   });
-  return { enrollmentUpdate, sendUpdate };
+  return { enrollmentUpdate, sendUpdate, log };
 }
 
 function cancelledWith(enrollmentUpdate, reason) {
@@ -288,6 +321,75 @@ describe('estimate_sent at delivery', () => {
     await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
     expect(sendgrid.sendOne.mock.calls[0][0].html).not.toContain('View my estimate');
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('941-555-0100');
+  });
+
+  test('gate on: the button needs an accepted delivery email for this estimate to this address', async () => {
+    const { log } = queues({ estimateRows: [undefined, recurring('Pest Control'), recurring('Pest Control')] });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-b1' });
+
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+    expect(sendgrid.sendOne.mock.calls[0][0].html).toContain('View my estimate');
+    expect(log.asked.where).toEqual({ estimate_id: 'est-1' });
+    expect(log.asked.template_key).toEqual(['estimate.delivery', 'estimate.proposal_delivery', 'estimate.updated_delivery']);
+    expect(log.asked.status).toEqual(expect.arrayContaining(['sent', 'delivered']));
+    expect(log.asked.address).toBe('pat@example.com');
+  });
+
+  test.each([
+    ['an SMS-only send (no delivery email row)', emailLog({})],
+    ['a delivery email row for another address', emailLog({ 'other@example.com': [{ status: 'sent' }] })],
+    ['a delivery email that was only queued or failed', emailLog({ 'pat@example.com': [{ status: 'failed' }, { status: 'queued' }] })],
+    ['a failed read of the email log', emailLog({}, { fail: true })],
+  ])('gate on: %s means no button; the rest of the email goes', async (_name, log) => {
+    queues({ estimateRows: [undefined, recurring('Pest Control'), recurring('Pest Control')], log });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-b2' });
+
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+    const sent = sendgrid.sendOne.mock.calls[0][0];
+    expect(sent.html).not.toContain('View my estimate');
+    expect(sent.text).not.toContain('View my estimate');
+    expect(sent.html).toContain('A few things folks usually ask');
+    expect(followUp._private.mintStageLinks).not.toHaveBeenCalled();
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('941-555-0100');
+  });
+
+  test('gate on: a step that goes to another address than the estimate\'s (the account holder) gets no button and no log read', async () => {
+    queues({ estimateRows: [undefined, recurring('Pest Control'), recurring('Pest Control')], enrollment: { email: 'holder@example.com' } });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-b3' });
+
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+    expect(sendgrid.sendOne.mock.calls[0][0].to).toBe('holder@example.com');
+    expect(sendgrid.sendOne.mock.calls[0][0].html).not.toContain('View my estimate');
+    expect(db).not.toHaveBeenCalledWith('email_messages');
+    expect(followUp._private.mintStageLinks).not.toHaveBeenCalled();
+  });
+
+  test('gate on: only the seeded 2-hour step is rebuilt; a later step of the template keeps its own body', async () => {
+    const second = { ...STEP_ZERO, id: 'step-2', step_order: 1, html_body: '<p>Second step body.</p>', text_body: 'Second step text.' };
+    queues({ estimateRows: [undefined, recurring('Pest Control')], steps: [STEP_ZERO, second], enrollment: { current_step: 1 } });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-b4' });
+
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+    const sent = sendgrid.sendOne.mock.calls[0][0];
+    expect(sent.html).toContain('Second step body.');
+    expect(sent.html).not.toContain('The Waves app keeps everything in one place');
+    expect(sent.text).toContain('Second step text.');
+  });
+
+  test('gate on: an archived estimate cancels as estimate_closed', async () => {
+    const { enrollmentUpdate } = queues({ estimateRows: [undefined, { ...recurring('Pest Control'), archived_at: new Date('2026-11-20T20:00:00Z') }] });
+
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ blocked: true, reason: 'The estimate is no longer open' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    cancelledWith(enrollmentUpdate, 'estimate_closed');
+  });
+
+  test('gate on: an estimate past its expires_at cancels as estimate_closed though its status still reads sent', async () => {
+    const { enrollmentUpdate } = queues({ estimateRows: [undefined, { ...recurring('Pest Control'), status: 'viewed', expires_at: new Date(Date.now() - 3600000) }] });
+
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ blocked: true, reason: 'The estimate is no longer open' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    cancelledWith(enrollmentUpdate, 'estimate_closed');
   });
 
   test.each([['accepted'], ['declined'], ['expired'], ['void'], ['draft']])('gate on: status %s cancels as estimate_closed', async (status) => {

@@ -29,7 +29,7 @@
  * may use typographic dashes; they render as HTML.
  */
 
-const { inferEstimateServiceLines, closedServiceKeys } = require('./estimate-service-lines');
+const { inferEstimateServiceLines, closedServiceKeys, recurringRowServiceKeys } = require('./estimate-service-lines');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 
@@ -366,14 +366,15 @@ function quotedServiceName(estimate) {
   return PACKS.bundle.label;
 }
 
-// The lawn + pest pack applies only to exactly those two closed lanes on a recurring estimate, when both lanes are
-// recurring-terms lanes. The legacy (text-inclusive) lane keys must agree, so a lane found only in free text keeps the
-// neutral bundle terms instead of the recurring promises.
+// The lawn + pest pack applies only to exactly those two lanes on a recurring estimate, when both are recurring-terms
+// lanes, and only on affirmative RECURRING evidence: the stored recurring rows name exactly lawn + pest. Ticked boxes
+// alone never qualify (they fold one-time and recurring services into one family), and the legacy (text-inclusive) lane
+// keys must agree, so a lane found only in free text keeps the neutral bundle terms instead of the recurring promises.
 function usesLawnPestPack(estimate, legacyKeys) {
   const terms = (key) => PACKS[key].benefit === RECURRING_TERMS_BENEFIT;
   const sameTwo = (keys) => keys.length === 2 && keys.includes('lawn') && keys.includes('pest');
   try {
-    return sameTwo(closedServiceKeys(estimate || {})) && sameTwo(legacyKeys || [])
+    return sameTwo(recurringRowServiceKeys(estimate || {})) && sameTwo(legacyKeys || [])
       && terms('lawn') && terms('pest') && !estimateIsOneTimeOnly(estimate);
   } catch { return false; }
 }
@@ -382,25 +383,10 @@ function packForEstimate(estimate) {
   return PACKS[copyCategoryForEstimate(estimate)];
 }
 
-/**
- * Email payload variables for the estimate templates. Every key is always
- * present (the unknown pack backstops), so template blocks that reference
- * them never render with holes.
- */
-function followupEmailVars(estimate) {
-  const keys = laneKeysFor(estimate);
-  const nameService = featureGates.estimateEmailsNameServiceLive?.() === true;
-  const pack = nameService && usesLawnPestPack(estimate, keys)
-    ? LAWN_PEST_PACK
-    : PACKS[copyCategoryForEstimate(estimate, keys)];
-  // A termite lane drops the guarantee under ANY pack: one-time trenching /
-  // pre-slab / Bora-Care quotes fold to `one_time`, termite + pest to
-  // `bundle`, bait monitoring to `commercial`, and all three carry
-  // "satisfaction guaranteed".
-  const hasTermite = (keys || []).some((k) => TERMITE_LANES.has(k));
+function emailVarsFor(pack, serviceLabel, hasTermite) {
   const video = REPORT_TOUR_VIDEOS_LIVE ? pack.video : null;
   return {
-    service_label: nameService ? quotedServiceName(estimate) : pack.label,
+    service_label: serviceLabel,
     category_headline: pack.headline,
     category_hook: pack.hook,
     category_benefit: hasTermite ? NO_GUARANTEE_BENEFIT : pack.benefit,
@@ -421,6 +407,33 @@ function followupEmailVars(estimate) {
 }
 
 /**
+ * Email payload variables for the estimate templates. Every key is always
+ * present (the unknown pack backstops), so template blocks that reference
+ * them never render with holes.
+ */
+function followupEmailVars(estimate) {
+  const keys = laneKeysFor(estimate);
+  const nameService = featureGates.estimateEmailsNameServiceLive?.() === true;
+  const pack = nameService && usesLawnPestPack(estimate, keys)
+    ? LAWN_PEST_PACK
+    : PACKS[copyCategoryForEstimate(estimate, keys)];
+  // A termite lane drops the guarantee under ANY pack: one-time trenching /
+  // pre-slab / Bora-Care quotes fold to `one_time`, termite + pest to
+  // `bundle`, bait monitoring to `commercial`, and all three carry
+  // "satisfaction guaranteed".
+  const hasTermite = (keys || []).some((k) => TERMITE_LANES.has(k));
+  return emailVarsFor(pack, nameService ? quotedServiceName(estimate) : pack.label, hasTermite);
+}
+
+/**
+ * The vars of the property-generic `unknown` pack, read from no estimate at all (no notes, description or
+ * service_interest). The 2-hour estimate_sent email uses them when the estimate names no service through a closed source.
+ */
+function neutralFollowupEmailVars() {
+  return emailVarsFor(PACKS.unknown, PACKS.unknown.label, false);
+}
+
+/**
  * The `{service_hook}` variable for the drip SMS templates — completes
  * "your Waves {service_hook}". Always non-empty.
  */
@@ -435,6 +448,7 @@ module.exports = {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
+  neutralFollowupEmailVars,
   quotedServiceName,
   _private: { PACKS, LAWN_PEST_PACK, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, NO_GUARANTEE_BENEFIT, REPORT_TOUR_VIDEOS_LIVE },
 };

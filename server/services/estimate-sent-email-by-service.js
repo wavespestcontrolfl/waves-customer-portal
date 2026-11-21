@@ -12,10 +12,12 @@
  * termite estimate gets no guarantee line.
  */
 
-const { followupEmailVars, quotedServiceName } = require('./estimate-followup-copy');
+const { followupEmailVars, neutralFollowupEmailVars, quotedServiceName } = require('./estimate-followup-copy');
+const { closedServiceKeys } = require('./estimate-service-lines');
 const { ctaButton } = require('./email-template');
 
 const BUTTON_LABEL = 'View my estimate';
+const NEUTRAL_SERVICE = 'Waves';
 const GREETING = 'Hi {{first_name}} — thanks for considering Waves';
 const FAQ_HEADING = 'A few things folks usually ask';
 const CLOSING = "If you've got a question that's not on that list, just reply to this email. It goes straight to our local team — no call center, no ticket queue.";
@@ -73,14 +75,23 @@ function questionRows(vars) {
     .filter(([, answer]) => answer);
 }
 
+// An estimate that names no service through a closed source gets a neutral email: "your Waves estimate" and the
+// property-generic pack's answers. Nothing here reads notes, description or service_interest (the free-text match).
+function hasClosedService(estimate) {
+  try { return closedServiceKeys(estimate || {}).length > 0; } catch { return false; }
+}
+function serviceAndVars(estimate) {
+  if (!hasClosedService(estimate)) return { service: NEUTRAL_SERVICE, vars: neutralFollowupEmailVars() };
+  return { service: quotedServiceName(estimate), vars: followupEmailVars(estimate) };
+}
+
 /**
  * @param {{ estimate: object, estimateUrl?: string|null }} args  `estimateUrl` is the minted email link, or
  *   null/empty when the guard refused or the mint failed: the email then goes without the button.
  * @returns {{ html_body: string, text_body: string, service: string }}
  */
 function buildEstimateSentEmail({ estimate, estimateUrl = null }) {
-  const service = quotedServiceName(estimate);
-  const vars = followupEmailVars(estimate);
+  const { service, vars } = serviceAndVars(estimate);
   const paragraph = firstParagraph(estimate, service);
   const rows = questionRows(vars);
   const url = String(estimateUrl || '').trim();
