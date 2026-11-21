@@ -326,6 +326,18 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(checkOf(next, tech).techRewardsCents).toBe(GIFT);
     });
 
+    it('writes no gift for 2025: a run for an old week, dated in the 60 days after the 2025 gift date, examines none', async () => {
+      const tech = await readyTech('Sample Alpha'); // hired 2024, so a 2025 gift would have had a recipient
+      await approvedWeek(tech, '2025-12-29');
+      const run = await draft('2025-12-29'); // dated Fri Jan 9, 2026: 21 days after Fri Dec 19, 2025
+      expect(run.payDate).toBe('2026-01-09');
+      expect(run.checks).toHaveLength(1);
+      expect(checkOf(run, tech)).not.toHaveProperty('techRewardsCents');
+      expect(await linesOf(tech)).toHaveLength(0);
+      expect(await notesOf(run.id)).toEqual([]);
+      expect(await syncEvents()).toEqual([]);
+    });
+
     it('takes an open line off when its technician has left before it was paid', async () => {
       const alpha = await readyTech('Sample Alpha');
       const bravo = await readyTech('Sample Bravo');

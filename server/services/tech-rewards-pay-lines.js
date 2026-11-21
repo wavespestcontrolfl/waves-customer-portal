@@ -14,7 +14,8 @@
  * syncTechRewardLines runs where syncCommissionLines does (payroll-runs.js: draft, recompute and finalize, under the payroll
  * lock), after a due pay rate step is applied and before the run is worked out. The lines are derived data.
  *
- * WHICH RUN. By the run's PAY DATE (the date on its checks). The gift is due the last Friday on or before Dec 20. The FIRST run
+ * WHICH RUN. By the run's PAY DATE (the date on its checks). The gift is due the last Friday on or before Dec 20, from the
+ * 2026 gift on (FIRST_GIFT_YEAR: the plan was approved in November 2026, so no run writes a gift for 2025). The FIRST run
  * dated on or after that day, up to 60 days after it, that is ready for a technician writes their line; a run that is not ready
  * writes nothing for them and the next run tries again. The line is $300 (owner 2026-11-20), source_type 'tech_rewards', source
  * key 'december_gift:<technician id>:<year>' (the table's unique key stops a repeat in any status).
@@ -76,6 +77,9 @@ const GIFT = 'december_gift';
 // A constant, not a tech_reward_settings value: that table is versioned score weights and cut lines only.
 const DECEMBER_GIFT_CENTS = 30000;
 const DECEMBER_GIFT_DAY = 20;
+// The first year that has a gift: the plan was approved in November 2026. A pay run for an old week, dated early in 2026,
+// never writes a gift for 2025.
+const FIRST_GIFT_YEAR = 2026;
 const FRIDAY = 5;
 // A line is looked for in a run dated up to this many days after its due date: the first ready run writes it, and a gate turned
 // on later does not reach back further.
@@ -127,12 +131,15 @@ function spanOf(key, weekStart, hireDate = null) {
 
 /**
  * The lines a run dated `payDate` may write for a technician: [{ kind, key }]. Pure. The gift is due from its date (the last
- * Friday on or before Dec 20) to LOOKBACK_DAYS after it, so a run early in January can still carry last year's.
+ * Friday on or before Dec 20) to LOOKBACK_DAYS after it, so a run early in January can still carry last year's. No year
+ * before FIRST_GIFT_YEAR has a gift.
  */
 function dueInRun(payDate) {
   const due = [];
   for (const year of [yearOf(payDate) - 1, yearOf(payDate)]) {
-    if (decemberGiftDate(year) <= payDate && payDate <= lastPayDate(year)) due.push({ kind: GIFT, key: String(year) });
+    if (year >= FIRST_GIFT_YEAR && decemberGiftDate(year) <= payDate && payDate <= lastPayDate(year)) {
+      due.push({ kind: GIFT, key: String(year) });
+    }
   }
   return due;
 }

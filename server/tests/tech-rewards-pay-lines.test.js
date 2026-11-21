@@ -34,8 +34,18 @@ describe('dueInRun: which lines a run dated that day may write (from the due dat
     expect(kinds('2026-12-25')).toEqual(['december_gift:2026']); // a later run may write it when the first was not ready
     expect(kinds('2027-02-16')).toEqual(['december_gift:2026']); // 60 days
     expect(kinds('2027-02-17')).toEqual([]);
-    expect(kinds('2024-12-20')).toEqual(['december_gift:2024']);
     expect(kinds('2026-06-05')).toEqual([]);
+    expect(kinds('2027-12-17')).toEqual(['december_gift:2027']);
+    expect(kinds('2028-01-07')).toEqual(['december_gift:2027']);
+  });
+
+  test('no year before 2026 has a gift: the plan was approved in November 2026', () => {
+    // inside the 60 days after the 2025 gift date (Fri Dec 19, 2025), and on the 2024 and 2025 gift dates themselves
+    for (const payDate of ['2025-12-19', '2025-12-26', '2026-01-09', '2026-02-13', '2024-12-20', '2025-01-10']) {
+      expect([payDate, kinds(payDate)]).toEqual([payDate, []]);
+    }
+    // the 2026 gift keeps its January catch-up
+    expect(kinds('2027-01-08')).toEqual(['december_gift:2026']);
   });
 
   test('the last pay date is 60 days after the gift date, the day the waiting note shows', () => {
