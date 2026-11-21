@@ -960,6 +960,88 @@ describe('planStartBlocker', () => {
         expect(await blocker(withEstimates([managedHome, DRAFT(null)]))).toBeNull();
       });
 
+      // The use of the building, in the unit scope a draft keeps. The estimator reads it from the type of the
+      // record AND from the land use of the parcel, so it can be the only mark of a business on a draft: the type
+      // beside it is generic and the scope stays a residential one. The fixture is the estimator's own model.
+      const SCOPED = (unitScope) => ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO' }, estimatorEngine: { version: 1, lane: 'yellow', propertyFacts: { unitScope, categoryConflict: null } } } });
+      test.each([
+        ['an office', 'Other', 'OFFICE BUILDING ONE STORY', 'office'],
+        ['a retail building', 'Unknown', 'STORES ONE STORY RETAIL', 'retail'],
+        ['an industrial or flex building', null, 'WAREHOUSE STORAGE', 'industrial_flex'],
+      ])('the land use of a parcel that says %s, beside a generic type, is the only mark of the draft: commercial', async (_what, propertyType, landUseDescription, propertyUse) => {
+        const { resolveUnitScopeModel } = require('../services/estimator-engine/unit-scope-model');
+        const unitScope = resolveUnitScopeModel({ propertyRecord: { propertyType, _parcel: { landUseDescription } }, extraction: null, intent: { is_commercial: false }, propertyFacts: {}, address: '12 Example Test Way' });
+        expect(unitScope).toMatchObject({ propertyUse, serviceScope: 'entire_residential_structure', customerRelationship: 'unknown' });
+        expect(await blocker(withEstimates([ESTIMATE(), SCOPED(unitScope), ESTIMATE()]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE(), SCOPED({ ...unitScope, propertyUse: 'unknown' }), ESTIMATE()]))).toBeNull();
+      });
+
+      // Every word of the estimator's vocabulary for the use, by the estimator's own rule for a typed premises:
+      // a business building alone, a building of units with a manager (the tenant of one unit is a home), a
+      // house never. The engine's rule for a type is not asked of a use: it reads any multifamily building as a
+      // business. The lookup keeps its model's answer under the same name, in four words of its own.
+      test.each([
+        ['office', true, true], ['retail', true, true], ['industrial_flex', true, true],
+        ['multifamily_rental', false, true], ['condominium', false, true],
+        ['single_family', false, false], ['unknown', false, false], [null, false, false], [undefined, false, false], ['', false, false],
+        ['COMMERCIAL', true, true], ['RESIDENTIAL', false, false], ['MIXED', false, false], ['UNKNOWN', false, false],
+      ])('the building use %j of a unit scope: commercial alone %j, with a manager %j', async (propertyUse, alone, withManager) => {
+        const draft = (customerRelationship) => SCOPED({ propertyUse, serviceScope: 'entire_residential_structure', customerRelationship });
+        expect(await blocker(withEstimates([ESTIMATE(), draft('unknown')]))).toBe(alone ? 'commercial' : null);
+        expect(await blocker(withEstimates([ESTIMATE(), draft('tenant')]))).toBe(alone ? 'commercial' : null);
+        expect(await blocker(withEstimates([ESTIMATE(), draft('property_manager')]))).toBe(withManager ? 'commercial' : null);
+        expect(await blocker(withEstimates([ESTIMATE(), draft('unknown')], MANAGER_ACCOUNT))).toBe(withManager ? 'commercial' : null);
+      });
+
+      test('a building use is read on any object of the payload, at any depth', async () => {
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data: farDown({ propertyUse: 'office' }) })]))).toBe('commercial');
+      });
+
+      // The converter's two rules are rules for a SERVICE LINE: they read the word in a line's name, label or
+      // display name. A payload keeps other objects with a name (a contact, a product, a summary), and none of
+      // those is a line. A service line is an item of a list of service lines, or an object that names a service.
+      const LINE_LISTS = ['services', 'lineItems', 'items', 'specItems', 'manualQuoteLines', 'commercialManualQuoteLines', 'quoteRequiredItems'];
+      const SERVICE_FIELDS = ['service', 'serviceKey', 'service_key', 'key', 'serviceName', 'service_name'];
+      const WORD_FIELDS = ['name', 'label', 'displayName'];
+      test.each(WORD_FIELDS)('the word in the %s of an object that is no service line is no mark: not commercial', async (field) => {
+        const estimate_data = {
+          inputs: { isCommercial: 'NO', propertyType: 'Single Family' },
+          customer: { [field]: 'Commercial Realty', email: 'accounts@example.test' },
+          products: [{ [field]: 'Commercial Grade Granules', category: 'lawn_care' }],
+          result: { summary: { [field]: 'Commercial Realty' } },
+          // An object under the name of a list of lines is no item of a list. Nor is an object in it.
+          services: { [field]: 'Commercial Realty', picked: { [field]: 'Commercial Realty' } },
+          // A blank service field names no service.
+          contact: { service: '', serviceKey: null, service_key: '  ', key: false, serviceName: undefined, service_name: 0, [field]: 'Commercial Realty' },
+        };
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data }), ESTIMATE()]))).toBeNull();
+      });
+
+      test.each(LINE_LISTS)('the same word on an item of the list %s is on a service line: commercial', async (list) => {
+        for (const field of WORD_FIELDS) {
+          const estimate_data = { inputs: { isCommercial: 'NO' }, breakdown: { [list]: [{ price: 150 }, { [field]: 'Commercial Realty', price: 150 }] } };
+          expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data })]))).toBe('commercial');
+        }
+      });
+
+      test('a list in a list of lines keeps the place, and an object under a name of a line starts again', async () => {
+        const nested = { breakdown: { services: [[{ name: 'Commercial Realty' }]] } };
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data: nested })]))).toBe('commercial');
+        const contactOfALine = { breakdown: { services: [{ price: 150, soldTo: { name: 'Commercial Realty' }, notes: [{ label: 'Commercial Realty' }] }] } };
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: contactOfALine }), ESTIMATE()]))).toBeNull();
+      });
+
+      test.each(SERVICE_FIELDS)('an object that names a service under %s is a service line wherever it sits', async (field) => {
+        // The service it names is a home service: the word in its label is the mark, and only a line's label is read.
+        const labelled = { inputs: { isCommercial: 'NO' }, picked: { [field]: 'pest_control', label: 'Commercial Realty' } };
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data: labelled })]))).toBe('commercial');
+        // The service it names is commercial itself.
+        const named = { inputs: { isCommercial: 'NO' }, picked: { [field]: 'Commercial Pest Control' } };
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data: named })]))).toBe('commercial');
+        const home = { inputs: { isCommercial: 'NO' }, picked: { [field]: 'pest_control', label: 'Quarterly Pest Control' } };
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: home }), ESTIMATE()]))).toBeNull();
+      });
+
       // Each of these rules belongs to another module, and most real marks are read by two or three of them at
       // once. So each is proved with a mark that ONLY that rule reads: the proof must ask every one of them.
       test.each([
@@ -967,16 +1049,17 @@ describe('planStartBlocker', () => {
         ['the payload scan of the save', '../services/estimate-delivery-options', 'isCommercialEstimateData', (given) => given],
         ['the classifier of the accept routes', '../services/estimate-commercial-identity', 'isCommercialAutoAcceptEstimate', (given) => given?.estimate_data],
         ["the pricing engine's rule for a profile", '../services/pricing-engine/commercial-helpers', 'isCommercialProperty', (given) => given],
-        ["the converter's rule for the names of a service line", '../services/estimate-converter', 'isCommercialRecurringLine', (given) => given],
+        // The converter's two rules are asked of a service line, so their mark sits on an item of a list of lines.
+        ["the converter's rule for the names of a service line", '../services/estimate-converter', 'isCommercialRecurringLine', (given) => given, true, { services: [{ depot: true }] }],
         // This rule answers a key, not a yes.
-        ["the converter's key for a service line", '../services/estimate-converter', 'recurringServiceKey', (given) => given, 'commercial_pest'],
+        ["the converter's key for a service line", '../services/estimate-converter', 'recurringServiceKey', (given) => given, 'commercial_pest', { services: [{ depot: true }] }],
         // This one answers the estimate's service lines.
         ["the pipeline's reader of service lines", '../services/estimate-service-lines', 'inferEstimateServiceLines', (given) => given?.estimate_data, [{ key: 'commercial_pest' }]],
-      ])('a mark only %s reads counts', async (_label, modulePath, rule, payloadOf, hit = true) => {
+      ])('a mark only %s reads counts', async (_label, modulePath, rule, payloadOf, hit = true, estimate_data = { depot: true }) => {
         const owner = require(modulePath);
         const real = owner[rule];
         const spy = jest.spyOn(owner, rule).mockImplementation((given, ...rest) => (payloadOf(given)?.depot === true ? hit : real(given, ...rest)));
-        const estimates = [ESTIMATE(), ESTIMATE({ estimate_data: { depot: true } })];
+        const estimates = [ESTIMATE(), ESTIMATE({ estimate_data })];
         try {
           expect(await blocker(withEstimates(estimates))).toBe('commercial');
         } finally {
@@ -1154,6 +1237,15 @@ describe('planStartBlocker', () => {
         expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, selectedServices: [AD.campaign] } })]))).toBe('commercial');
         expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, picked: { key: AD.campaign } } })]))).toBe('commercial');
         expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, isCommercial: 'YES' } })]))).toBe('commercial');
+      });
+
+      // A call saves the second contact of a lead with a name, and a name can carry the word. The converter's rule
+      // for the names of a service line is not asked of a contact. The same name on a service line is a mark.
+      test('the name of a second contact with the word is no service line, and the same name on a service line is', async () => {
+        const contact = { stage: 'call_processed', secondary_contact: { name: 'Commercial Realty', email: 'accounts@example.test', relationship: 'billing' } };
+        expect(await blocker(withLeads([LEAD({ extracted_data: contact }), LEAD()]))).toBeNull();
+        const line = { stage: 'call_processed', secondary_contact: { name: 'Synthetic Contact' }, services: [{ name: 'Commercial Realty' }] };
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: line })]))).toBe('commercial');
       });
 
       // The text rule reads a KEY: one word of letters, digits and '_', with ':'. A lead payload also keeps contact

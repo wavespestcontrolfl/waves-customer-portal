@@ -215,13 +215,16 @@ const MANAGER_WORD = 'property_manager';
 const MANAGED_PROPERTY = 'managed_for_client';
 const MANAGER_CALLER = Object.freeze({ relationship_to_property: MANAGER_WORD });
 const isManagerWord = (value) => String(value ?? '').trim().toLowerCase() === MANAGER_WORD;
+function estimatorReadsCommercial(propertyType, managed) {
+  const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
+  const extraction = { property: { property_type: propertyType }, caller: managed ? MANAGER_CALLER : null };
+  return Boolean(commercialCategoryConflict({ extraction, intent: null }));
+}
 function isCommercialPropertyType(propertyType, managed) {
   const { isCommercialAccount } = require('./self-booking-plan-sync');
   const { isCommercialProperty } = require('./pricing-engine/commercial-helpers');
-  const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
-  const extraction = { property: { property_type: propertyType }, caller: managed ? MANAGER_CALLER : null };
   return isCommercialAccount({ property_type: propertyType }) || isCommercialProperty({ propertyType })
-    || Boolean(commercialCategoryConflict({ extraction, intent: null }));
+    || estimatorReadsCommercial(propertyType, managed);
 }
 // One object of a JSON record that names the client as a manager. The app
 // writes the role's word under two names: the relationship the estimator
@@ -312,7 +315,13 @@ const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && N
 //   rules for a line and neither holds the other: the word in any of the
 //   line's names (isCommercialRecurringLine), and the key it gives the line
 //   (recurringServiceKey, which also reads a line's `key`: the rule behind
-//   hasCommercialRecurringLine, the bait check and the accept's own check);
+//   hasCommercialRecurringLine, the bait check and the accept's own check).
+//   The converter asks them of a service line, and so does the proof: of an
+//   item of a list of service lines (LINE_LIST_NAMES below), and of an object
+//   that names a service itself (one of SERVICE_NAMES is set). The three
+//   other names the rules read (name, label, displayName) name anything: a
+//   contact, a listed business and a product have a name too, and none of
+//   those is a service line;
 // - the property answer of a quiz page, where the object keeps a quiz
 //   ('business': quizIsCommercial in lead-quiz.js). A lead keeps the quiz in
 //   its payload, and the intake marks the lead by the same rule;
@@ -372,8 +381,8 @@ const factsSayCommercial = (node) => node.occupancyClass === 'commercial' || COM
 // The listing itself (businessIdentity, serviceScopeSuggestion) is not read.
 // A listing only suggests (the owner ruling that module carries): a home
 // business at the number of a house is still a house. So a payload is read
-// without the listing (LISTING_NAME below): the name of the listed business
-// can carry the word, and a name is what the rule for a service line reads.
+// without the listing (LISTING_NAME below): what it keeps (the name of the
+// listed business, its kind) says nothing of the customer.
 // (The suggestion is one of two plain words, 'suite' or 'building', and no
 // rule reads those.)
 function lookupSaysBusiness(node) {
@@ -425,7 +434,7 @@ const SERVICE_LABEL_NAMES = Object.freeze([
   'serviceType', 'service_type',
 ]);
 const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.map((name) => node[name]));
-// The kind of premises one object of a payload names. Four marks:
+// The kind of premises one object of a payload names. Five marks:
 // - a property type, under either spelling of the name (property_type,
 //   propertyType), by the rule for a saved type and with the manager of the
 //   record (isCommercialPropertyType);
@@ -444,6 +453,21 @@ const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.m
 //   the occupancy a call gives its main address (service_address_occupancy)
 //   is read under its own name too. A property's own vocabulary has one
 //   value that is not a home: 'commercial';
+// - the use of the building, in the unit scope the estimator keeps with a
+//   draft (unitScope.propertyUse: resolvePropertyUse in
+//   estimator-engine/unit-scope-model.js). The estimator reads it from the
+//   record's type AND from the land use of the parcel, so it can say 'office',
+//   'retail' or 'industrial_flex' where the type beside it is generic, and no
+//   other field of the draft keeps the land use. It is asked by the
+//   estimator's own rule for a typed premises (estimatorReadsCommercial
+//   above), with the manager of the record: an office, a retail building and
+//   an industrial or flex building are commercial alone, a multifamily
+//   building and a condominium with a manager. Not by the other two rules for
+//   a type: the engine's reads any multifamily building as a business, and
+//   the tenant of one unit is a home for the estimator (the owner ruling that
+//   module carries). The lookup keeps its model's answer under the same name
+//   (RESIDENTIAL, COMMERCIAL, MIXED, UNKNOWN), and the rule reads its
+//   COMMERCIAL as the lookup's own verdict does (detectCategory);
 // - the flag a call sets when the service is for the common areas of an
 //   association (hoa_common_area_service). The call system routes such a job
 //   commercial by definition: commercialCategoryConflict reads the flag
@@ -463,12 +487,27 @@ const COMMERCIAL_OCCUPANCIES = Object.freeze(['apartment', 'hotel', 'studenthous
 const isCommercialOccupancy = (value) => COMMERCIAL_OCCUPANCIES.includes(String(value ?? '').trim().toLowerCase());
 function namesCommercialPremises(node, managed) {
   return [node.property_type, node.propertyType].some((type) => isCommercialPropertyType(type, managed))
+    || estimatorReadsCommercial(node.propertyUse, managed)
     || OCCUPANCY_NAMES.some((name) => isCommercialOccupancy(node[name]))
     || node.hoa_common_area_service === true
     || isSet(node.categoryConflict);
 }
-function nodeSaysCommercial(node, managed) {
+// The lists a payload keeps service lines in, by the names the app's readers
+// of lines take them from: the recurring services (services), the engine's
+// priced lines (lineItems), the one-time lines (items, specItems), the manual
+// commercial quote lines (manualQuoteLines, commercialManualQuoteLines) and
+// the lines of a breakdown that need a quote (quoteRequiredItems).
+const LINE_LIST_NAMES = Object.freeze(['services', 'lineItems', 'items', 'specItems', 'manualQuoteLines', 'commercialManualQuoteLines', 'quoteRequiredItems']);
+// The fields of the converter's two rules that name a SERVICE. An object
+// with one of them set is a service line wherever it sits.
+const SERVICE_NAMES = Object.freeze(['service', 'serviceKey', 'service_key', 'key', 'serviceName', 'service_name']);
+const namesAService = (node) => SERVICE_NAMES.some((name) => isSet(node[name]));
+function isCommercialServiceLine(node, inLineList) {
+  if (!inLineList && !namesAService(node)) return false;
   const converter = require('./estimate-converter');
+  return converter.isCommercialRecurringLine(node) || String(converter.recurringServiceKey(node) || '').startsWith('commercial_');
+}
+function nodeSaysCommercial(node, managed, inLineList) {
   return saysYes(node.isCommercial) || saysYes(node.is_commercial) || saysYes(node.commercialEstimatedPricing)
     || require('./pricing-engine/commercial-helpers').isCommercialProperty(node)
     || namesCommercialPremises(node, managed)
@@ -478,8 +517,7 @@ function nodeSaysCommercial(node, managed) {
     || saysYes(node.commercialProposal)
     || namesCommercialService(node)
     || isSet(node.commercialRiskType) || isSet(node.commercial_risk_type)
-    || converter.isCommercialRecurringLine(node)
-    || String(converter.recurringServiceKey(node) || '').startsWith('commercial_')
+    || isCommercialServiceLine(node, inLineList)
     || require('./lead-quiz').quizIsCommercial(node.quiz);
 }
 
@@ -504,11 +542,15 @@ function nodeSaysCommercial(node, managed) {
 // price card keeps for any lawn quote (measuredBasisAnchor.commercial_lawn).
 const COMMERCIAL_KEY_PREFIX = 'commercial_';
 const COMMERCIAL_KEY = /^commercial_[a-z0-9_:]*$/;
-function payloadSaysCommercial(value, managed) {
+// An object is an item of a list of service lines where the list sits under
+// one of LINE_LIST_NAMES (inLineList). A list in such a list keeps the place;
+// an object under a name of an item starts again.
+function payloadSaysCommercial(value, managed, inLineList = false) {
   if (typeof value === 'string') return COMMERCIAL_KEY.test(value.trim().toLowerCase());
   if (!value || typeof value !== 'object') return false;
-  if (Array.isArray(value)) return value.some((item) => payloadSaysCommercial(item, managed));
-  return nodeSaysCommercial(value, managed) || Object.values(value).some((item) => payloadSaysCommercial(item, managed));
+  if (Array.isArray(value)) return value.some((item) => payloadSaysCommercial(item, managed, inLineList));
+  return nodeSaysCommercial(value, managed, inLineList)
+    || Object.entries(value).some(([name, item]) => payloadSaysCommercial(item, managed, Array.isArray(item) && LINE_LIST_NAMES.includes(name)));
 }
 
 // The part of a payload that NO rule reads, under seven names, at any depth:

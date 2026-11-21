@@ -547,6 +547,24 @@ postgres('planStartBlocker (live Postgres)', () => {
       })).toBeNull();
     });
 
+    // The estimator keeps the use of the building in the unit scope of a draft, and reads it from the land use of
+    // the parcel too. A business use can be the only mark of the draft. A building of units needs a manager.
+    test.each([
+      ['office', 'unknown', 'commercial'], ['retail', 'tenant', 'commercial'], ['industrial_flex', 'owner', 'commercial'],
+      ['multifamily_rental', 'property_manager', 'commercial'], ['multifamily_rental', 'tenant', null], ['single_family', 'unknown', null],
+    ])('a draft whose unit scope keeps the building use %s for a client %s: %j', async (propertyUse, customerRelationship, expected) => {
+      const estimate_data = { inputs: { isCommercial: 'NO' }, estimatorEngine: { version: 1, propertyFacts: { unitScope: { propertyUse, serviceScope: 'entire_residential_structure', customerRelationship }, categoryConflict: null } } };
+      expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data }))).toBe(expected);
+    });
+
+    // The converter's rule for the names of a service line is asked of a service line, not of a contact.
+    test('the word in the name of a contact of an estimate is no mark, and the same name on a service line is', async () => {
+      const contact = { inputs: { isCommercial: 'NO' }, customer: { name: 'Commercial Realty', email: 'accounts@example.test' } };
+      expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: contact }))).toBeNull();
+      const line = { inputs: { isCommercial: 'NO' }, breakdown: { lineItems: [{ name: 'Commercial Realty', price: 150 }] } };
+      expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: line }))).toBe('commercial');
+    });
+
     // The notes of an estimate for a one-time job are free text. The reader of service lines would sort them
     // (it looks for a recurring line), so the proof does not hand them over where the estimate has a one-time line.
     test('notes with the word on an estimate that has a one-time line are not commercial, and the reader gets no notes', async () => {
@@ -859,6 +877,9 @@ postgres('planStartBlocker (live Postgres)', () => {
           referrer: 'commercial_pest',
           landing_url: 'commercial_pest',
         }),
+      }],
+      ['a lead that keeps a second contact whose name carries the word', {
+        extracted_data: JSON.stringify({ stage: 'call_processed', secondary_contact: { name: 'Commercial Realty', email: 'accounts@example.test', relationship: 'billing' } }),
       }],
       ["a lead that keeps the email of a second contact, and the email starts with the prefix", {
         extracted_data: JSON.stringify({ stage: 'call_processed', secondary_contact: { name: 'Synthetic Contact', email: 'commercial_accounts@example.test', relationship: 'billing' } }),
