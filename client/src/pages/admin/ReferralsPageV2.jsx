@@ -382,18 +382,46 @@ function inboundEvidenceLine(evidence) {
 function inboundConfirmedMessage(result) {
   if (result.error === "convert_failed")
     return "Error: referral saved, but the conversion failed. Use Convert on it in the queue below.";
+  // result.step2: the amount varies (the yearly limit), so the words come from what posted.
   if (result.error === "credit_failed")
-    return "Referral confirmed, but the $25 credits did not post. They post at the next plan visit.";
+    return result.step2
+      ? "Referral confirmed, but the credits did not post. They post at the next plan visit."
+      : "Referral confirmed, but the $25 credits did not post. They post at the next plan visit.";
+  if (result.credited && result.step2) {
+    const { referrerDollars, refereeDollars, referrerReason } = result.credited;
+    const limit = referrerReason === "cap_reached" ? " The member is at the yearly limit." : "";
+    const cents = (n) => (Number.isInteger(Number(n)) ? `$${Number(n)}` : `$${Number(n).toFixed(2)}`);
+    return `Referral confirmed. ${cents(referrerDollars)} credited to the member and ${cents(refereeDollars)} to the friend.${limit}`;
+  }
   if (result.credited) return "Referral confirmed. $25 credited to both accounts.";
   if (!result.creditsNow)
-    return "Referral confirmed. The $25 credits post at the next completed plan visit.";
+    return result.step2
+      ? "Referral confirmed. The credits post at the next completed plan visit."
+      : "Referral confirmed. The $25 credits post at the next completed plan visit.";
   return "Referral confirmed. The credit step posted nothing; check the referral in the queue below.";
+}
+
+// The line under the Queue's inbound heading: the flat $25 words with Step 2 off, no amount with it on.
+const inboundIntro = (step2) => `Plan customers who came in through a referral link or named a referrer. Confirm the referrer to pay the ${step2 ? "" : "$25 "}rewards.`;
+
+// What a confirm does, in words. Gate off: the flat $25 words. Under Step 2 the rule comes from the card's terms, which
+// were computed for the suggested member: when staff picked someone else the standing is not known, so the line says the
+// limit may apply; a member at the yearly limit gets no credit, so no thank-you email follows.
+function inboundConfirmWords(item, step2, chosen, firstName) {
+  const when = item.creditsNow ? "now" : `at ${firstName}'s next completed plan visit`;
+  const mail = " The referrer gets one thank-you email at the next 9:00 AM ET, and no text.";
+  if (!step2) {
+    return `Both accounts get the $25 credit ${when}. The referrer ${item.creditsNow ? "" : "then "}gets one thank-you email at the next 9:00 AM ET, and no text.`;
+  }
+  const own = chosen && item.terms && String(item.terms.forCustomerId) === String(chosen.customerId);
+  const rule = own ? item.terms.text : item.terms?.conditional || "Credits follow the program settings";
+  return `${rule} ${when}.${own && item.terms.atCap ? "" : mail}`;
 }
 
 // One plan customer who came in through a
 // referral link or named a referrer. The office picks the referrer (a
 // suggestion or a search result), then confirms; or marks "not a referral".
-function InboundReferralCard({ item, onDone, flash }) {
+function InboundReferralCard({ item, step2, onDone, flash }) {
   const isMobile = useIsMobile();
   const [chosen, setChosen] = useState(null);
   const [search, setSearch] = useState(item.evidence.spokenName || "");
@@ -529,9 +557,7 @@ function InboundReferralCard({ item, onDone, flash }) {
         >
           <div style={{ fontSize: 14, color: D.heading }}>
             Confirm {chosen.name || "this customer"} as the referrer.{" "}
-            {item.creditsNow
-              ? "Both accounts get the $25 credit now. The referrer gets one thank-you email at the next 9:00 AM ET, and no text."
-              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer then gets one thank-you email at the next 9:00 AM ET, and no text.`}{" "}
+            {inboundConfirmWords(item, step2, chosen, firstName)}{" "}
             A referrer's 3rd, 5th or 10th referral also sends the usual milestone text.
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -776,7 +802,7 @@ export default function ReferralsPageV2() {
       searchSeen.current = "";
       setQueue(q === FAILED ? [] : q.referrals || []);
       setPayouts(pay === FAILED ? [] : pay.payouts || []);
-      setInbound({ items: inb === FAILED ? [] : inb.items || [] });
+      setInbound({ items: inb === FAILED ? [] : inb.items || [], step2: inb.step2 === true });
       setLoading(false);
     });
   }, []);
@@ -827,10 +853,14 @@ export default function ReferralsPageV2() {
 
   const [settingsError, setSettingsError] = useState(false);
   const [analyticsError, setAnalyticsError] = useState(false);
+  const [settingsStep2, setSettingsStep2] = useState(false);
   const loadSettings = useCallback(() => {
     setSettingsError(false);
     af("/admin/referrals/settings")
-      .then((r) => setSettings(r.settings))
+      .then((r) => {
+        setSettings(r.settings);
+        setSettingsStep2(r.step2 === true);
+      })
       .catch(() => setSettingsError(true));
   }, []);
   const loadAnalytics = useCallback(() => {
@@ -1307,14 +1337,14 @@ export default function ReferralsPageV2() {
                   Needs confirmation ({inbound.items.length})
                 </div>
                 <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
-                  Plan customers who came in through a referral link or named
-                  a referrer. Confirm the referrer to pay the $25 rewards.
+                  {inboundIntro(inbound.step2)}
                 </div>
               </div>
               {inbound.items.map((item) => (
                 <InboundReferralCard
                   key={item.customerId}
                   item={item}
+                  step2={inbound.step2}
                   onDone={load}
                   flash={flash}
                 />
@@ -1834,7 +1864,9 @@ export default function ReferralsPageV2() {
               items: [
                 {
                   key: "referrer_reward_cents",
-                  label: "Referrer Reward (cents)",
+                  label: settingsStep2
+                    ? "Referrer Reward (cents), used only while Step 2 is off"
+                    : "Referrer Reward (cents)",
                   type: "number",
                 },
                 {
@@ -1844,6 +1876,17 @@ export default function ReferralsPageV2() {
                 },
               ],
             },
+            ...(settingsStep2
+              ? [
+                  {
+                    section: "Step 2 member credit",
+                    items: [
+                      { key: "step2_referrer_reward_cents", label: "Member credit (cents)", type: "number" },
+                      { key: "step2_annual_credit_cap", label: "Member credits per year", type: "number" },
+                    ],
+                  },
+                ]
+              : []),
             {
               section: "Tier Bonuses",
               items: [

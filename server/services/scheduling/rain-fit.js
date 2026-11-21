@@ -145,24 +145,36 @@ const OVERFLOW_SERVICE = Object.freeze({ name: 'More services', serviceKey: 'boo
 // visit. `items` are names or { name, serviceKey }; a key the screen sent
 // (the selected catalog row) settles the identity ahead of the name, which
 // is not unique in the catalog. Only while the caller's gate is on (the
-// picker's by default); read one at a
+// picker's by default; `gate: null` always reads, for a rule with no gate of
+// its own: the 07:05 fill list, day-replan/fill-list.js); read one at a
 // time; an entry that cannot be resolved (or a failed read) keeps its name
-// and takes the word rules.
-async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK' } = {}) {
+// and takes the word rules. With `strict`, a failed read throws instead, the
+// resolver's own included (its strict mode), for a caller that keeps a job it
+// cannot read out of rain (the fill list): a name alone can read as rain-safe
+// work when the key says otherwise.
+async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK', strict = false } = {}) {
   const list = (Array.isArray(items) ? items : [])
     .map((item) => ({ name: String((item && item.name) ?? item ?? '').trim(), serviceKey: (item && item.serviceKey) || null }))
     .filter((item) => item.name);
   const { gateEnvValue } = require('../../config/feature-gates');
-  if (!list.length || !gateEnvValue(gate)) return list.map((item) => item.name);
+  if (!list.length || (gate !== null && !gateEnvValue(gate))) return list.map((item) => item.name);
   const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
   const out = [];
   for (const { name, serviceKey } of list) {
     try {
-      const profile = await resolveCompletionProfileForScheduledService(
-        { service_type: name, service_key_snapshot: serviceKey || undefined }, db,
-      );
-      out.push({ name, serviceKey: profile?.serviceKey || null, findingsType: profile?.findingsType || null });
+      const row = { service_type: name, service_key_snapshot: serviceKey || undefined };
+      // A strict caller runs the resolver strict too; the others keep its default call.
+      const profile = await (strict
+        ? resolveCompletionProfileForScheduledService(row, db, { strict: true })
+        : resolveCompletionProfileForScheduledService(row, db));
+      const resolvedKey = profile?.serviceKey || null;
+      // A strict caller keeps the key it gave when the resolver names another or
+      // none (a key gone from the catalog falls back to the name, which can read
+      // as rain-safe work): that key decides, with no findings type.
+      if (strict && serviceKey && resolvedKey !== serviceKey) out.push({ name, serviceKey, findingsType: null });
+      else out.push({ name, serviceKey: resolvedKey, findingsType: profile?.findingsType || null });
     } catch (err) {
+      if (strict) throw err;
       logger.warn(`[rain-fit] service identity lookup failed (word rules used): ${err.message}`);
       out.push(name);
     }
@@ -289,6 +301,32 @@ function widenToSpan(chip, span) {
   return { ...chip, start_time: hhmm(clamp(start + span.startOffset)), end_time: hhmm(clamp(Math.max(end, start + span.endOffset))) };
 }
 
+// The services a booking holds, for the rain rule: { name, key } pairs (the
+// catalog key a screen sent or a row stored), trimmed, deduplicated by key and
+// name, and capped at MAX_BOOKING_SERVICES. `primary` (the request's own
+// service) is added unless a listed service has its name. Returns
+// { services: [{ name, serviceKey }], overflow }: `overflow` when a service
+// past the cap was dropped, which the caller counts as OVERFLOW_SERVICE
+// (outdoor). The move screens (bookingRainPlan) and the fill list's plan
+// visits (day-replan/fill-list.js) share it.
+function bookingServiceList(pairs, primary = null) {
+  const seen = new Map();
+  let overflow = false;
+  const add = (name, key) => {
+    if (typeof name !== 'string' || !name.trim()) return;
+    const serviceKey = typeof key === 'string' && KEY_SHAPE.test(key) ? key : null;
+    const id = `${serviceKey || ''}|${name.trim().toLowerCase()}`;
+    if (seen.has(id)) return;
+    if (seen.size >= MAX_BOOKING_SERVICES) { overflow = true; return; }
+    seen.set(id, { name: name.trim(), serviceKey });
+  };
+  (Array.isArray(pairs) ? pairs : []).forEach((pair) => add(pair && pair.name, pair && pair.key));
+  // The primary service, unless the list already names it (with its key).
+  const own = typeof primary === 'string' ? primary.trim().toLowerCase() : '';
+  if (own && ![...seen.values()].some((item) => item.name.toLowerCase() === own)) add(primary, null);
+  return { services: [...seen.values()], overflow };
+}
+
 // The find-time request's services for the ranking: the primary service and
 // the rest of the booking, each with the catalog key the screen sent
 // (`serviceKeys`, parallel to `serviceTypes`). Deduplicated and capped.
@@ -315,24 +353,11 @@ async function bookingRainPlan({ bestRows, serviceType, serviceTypes, serviceKey
     names = list.map((item) => item.name);
     keys = list.map((item) => item.key || '');
   }
-  const seen = new Map();
-  let overflow = false;
-  const add = (name, key) => {
-    if (typeof name !== 'string' || !name.trim()) return;
-    const serviceKey = typeof key === 'string' && KEY_SHAPE.test(key) ? key : null;
-    const id = `${serviceKey || ''}|${name.trim().toLowerCase()}`;
-    if (seen.has(id)) return;
-    if (seen.size >= MAX_BOOKING_SERVICES) { overflow = true; return; }
-    seen.set(id, { name: name.trim(), serviceKey });
-  };
-  names.forEach((name, i) => add(name, keys[i]));
-  // The primary service, unless the list already names it (with its key).
-  const primary = typeof serviceType === 'string' ? serviceType.trim().toLowerCase() : '';
-  if (primary && ![...seen.values()].some((item) => item.name.toLowerCase() === primary)) add(serviceType, null);
+  const { services: listed, overflow } = bookingServiceList(names.map((name, i) => ({ name, key: keys[i] })), serviceType);
   // Services past the cap are not looked up, so they cannot be called
   // rain-OK: one unclassified entry makes the whole booking outdoor rather
   // than letting the classified ones speak for it (Codex #6120 r4).
-  const services = await withCatalogKeys([...seen.values()], db);
+  const services = await withCatalogKeys(listed, db);
   return { services: overflow ? [...services, OVERFLOW_SERVICE] : services, rainSpan: stored?.span || null };
 }
 
@@ -428,4 +453,4 @@ function rainTierOf(fit, hourly, today, span = null) {
   return (chip) => rainTier(fit, isWetWindow(hourly, widenToSpan(chip, span), today), inRainHorizon(chip.date, today));
 }
 
-module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, bookingRainPlan, storedVisitServices, widenToSpan, outdoorStopRows, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, bookingRainFit, withCatalogKeys, bookingServiceList, OVERFLOW_SERVICE, bookingServices, bookingRainPlan, storedVisitServices, widenToSpan, outdoorStopRows, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };

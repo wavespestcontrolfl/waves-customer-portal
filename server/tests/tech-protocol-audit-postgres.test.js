@@ -384,7 +384,7 @@ describe('pickSample (pure)', () => {
   test('a mark stores the record and the evidence the owner reviewed; a missing fingerprint is refused', async () => {
     const { svc, record } = await visit(tech);
     const shown = (await board())[0].visits[0];
-    expect(shown.evidenceFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(shown.evidenceFingerprint).toMatch(/^v2:[0-9a-f]{64}$/);
     const base = { scheduledServiceId: svc.id, technicianId: tech, month: MONTH, recordId: record.id, result: 'match', auditedBy: tech };
     await expect(audit.saveMark({ ...base, evidenceFingerprint: undefined })).rejects.toMatchObject({ status: 400, code: 'INVALID_EVIDENCE' });
     await audit.saveMark({ ...base, evidenceFingerprint: shown.evidenceFingerprint });
@@ -407,6 +407,125 @@ describe('pickSample (pure)', () => {
     expect(reloaded.evidenceFingerprint).not.toBe(shown.evidenceFingerprint);
     await send(reloaded.evidenceFingerprint);
     expect(await scores.readAudit(tech, window)).toBe(100); // counted again on the new evidence
+  });
+
+  test('a mark that needs a re-check keeps its place in the board sample and can be marked again; only its score drops', async () => {
+    const rank = (visitId) => require('crypto').createHash('sha256').update(`${tech}:${MONTH_START}:${visitId}`).digest('hex');
+    const window = { from: '2026-04-01', to: '2026-04-30' };
+    await lawnVisits(tech, 6);
+    const sampled = (await board())[0].visits;
+    expect(sampled).toHaveLength(5);
+    // the marked visit that ranks LAST gets the mismatch; the other four match
+    const target = [...sampled].sort((x, y) => (rank(x.scheduledServiceId) < rank(y.scheduledServiceId) ? 1 : -1))[0];
+    for (const v of sampled) {
+      await save(v === target ? { scheduledServiceId: v.scheduledServiceId, result: 'mismatch', note: 'rate off', auditedBy: tech } : { scheduledServiceId: v.scheduledServiceId, result: 'match', auditedBy: tech });
+    }
+    expect(await scores.readAudit(tech, window)).toBe(80);
+    // a visit that ranks LOWER than the target completes: it would take the slot the target frees if the target lost its place
+    let newer = null;
+    for (let i = 0; i < 400 && !newer; i += 1) {
+      const candidate = await visit(tech);
+      if (rank(candidate.svc.id) < rank(target.scheduledServiceId)) newer = candidate;
+    }
+    expect(newer).toBeTruthy();
+    expect(ids((await board())[0])).not.toContain(newer.svc.id); // all five slots are marked: no free slot yet
+    await db('service_photos').insert({ service_record_id: target.recordId, photo_type: 'after', s3_key: 'k/late.jpg' }); // the evidence changes after the mark
+    const after = (await board())[0];
+    expect(after.visits).toHaveLength(5);
+    expect(ids(after)).toContain(target.scheduledServiceId); // the stale visit keeps its slot ...
+    expect(ids(after)).not.toContain(newer.svc.id); // ... the lower-ranked newcomer does not take it
+    const shown = after.visits.find((v) => v.scheduledServiceId === target.scheduledServiceId);
+    expect(shown).toMatchObject({ audit: null, needsRecheck: true });
+    expect(after.markedCount).toBe(4);
+    expect(await scores.readAudit(tech, window)).toBe(100); // its old mismatch no longer scores: 4 of 4
+    await audit.saveMark({ scheduledServiceId: shown.scheduledServiceId, technicianId: tech, month: MONTH, recordId: shown.recordId, evidenceFingerprint: shown.evidenceFingerprint, result: 'match', auditedBy: tech }); // not NOT_IN_SAMPLE
+    expect((await board())[0].markedCount).toBe(5);
+    expect(await scores.readAudit(tech, window)).toBe(100);
+  });
+
+  test('the fingerprint covers the photos the board shows (the first 12, in order): moving a 13th photo into view changes it', async () => {
+    const { svc, record } = await visit(tech);
+    const photoIds = [];
+    for (let i = 0; i < 13; i += 1) {
+      const [p] = await db('service_photos').insert({ service_record_id: record.id, photo_type: 'progress', s3_key: `k/${i}.jpg`, sort_order: i }).returning('id');
+      photoIds.push(p.id);
+    }
+    const fingerprint = async () => (await board())[0].visits[0].evidenceFingerprint;
+    const before = await fingerprint();
+    expect((await board())[0].visits[0].photos).toHaveLength(12);
+    await db('service_photos').where({ id: photoIds[12] }).update({ sort_order: -1 }); // the 13th now shows first, the 12th drops out of view; the set of 13 is unchanged
+    const moved = await fingerprint();
+    expect(moved).not.toBe(before);
+    await db('service_photos').where({ id: photoIds[12] }).update({ sort_order: 12 });
+    expect(await fingerprint()).toBe(before); // back to the same display: the same fingerprint
+    // and a mark made on the old display no longer saves
+    await db('service_photos').where({ id: photoIds[12] }).update({ sort_order: -1 });
+    await expect(audit.saveMark({ scheduledServiceId: svc.id, technicianId: tech, month: MONTH, recordId: record.id, evidenceFingerprint: before, result: 'match', auditedBy: tech }))
+      .rejects.toMatchObject({ status: 409, code: 'STALE_EVIDENCE' });
+  });
+
+  test('the protocol assignments of a whole board are read in one ledger query and one pin query, and agree with the report reader', async () => {
+    const a = await visit(tech);
+    const b = await visit(tech);
+    const c = await visit(tech);
+    await db('lawn_protocol_service_completions').insert({ service_record_id: a.record.id, protocol_version: null, window_key: 'w' }); // a ledger row with no version wins over the pin
+    await db('scheduled_services').where({ id: a.svc.id }).update({ lawn_protocol_version: 'pin-a' });
+    await db('scheduled_services').where({ id: b.svc.id }).update({ lawn_protocol_version: 'pin-b', lawn_protocol_window_key: 'wb' });
+    const seen = [];
+    const listener = (q) => seen.push(q.sql);
+    db.on('query', listener);
+    const shown = new Map((await board())[0].visits.map((v) => [v.scheduledServiceId, v.protocol]));
+    db.removeListener('query', listener);
+    expect(seen.filter((sql) => sql.includes('lawn_protocol_service_completions'))).toHaveLength(1);
+    expect(seen.filter((sql) => sql.includes('lawn_protocol_window_key'))).toHaveLength(1);
+    const { resolveRecordedProtocolVersion } = require('../services/service-report/report-data');
+    for (const v of [a, b, c]) {
+      const reader = await resolveRecordedProtocolVersion(db, { id: v.record.id, scheduled_service_id: v.svc.id });
+      expect(shown.get(v.svc.id)?.version ?? null).toBe(reader);
+    }
+    expect(shown.get(a.svc.id)).toEqual({ version: null, windowKey: 'w', windowTitle: null });
+    expect(shown.get(b.svc.id)).toEqual({ version: 'pin-b', windowKey: 'wb', windowTitle: null });
+    expect(shown.get(c.svc.id)).toBeNull();
+  });
+
+  test('a mark stored with the v1 digest (no prefix) keeps counting on unchanged evidence, reads re-check once the evidence changed, and new marks store v2', async () => {
+    const { svc, record } = await visit(tech);
+    const window = { from: '2026-04-01', to: '2026-04-30' };
+    const [current] = await audit.eligibleVisits({ scheduledServiceId: svc.id });
+    const v1 = audit._private.evidenceFingerprintV1((await audit._private.loadEvidence([current])).get(svc.id));
+    expect(v1).toMatch(/^[0-9a-f]{64}$/);
+    await db('tech_protocol_audits').insert({ technician_id: tech, scheduled_service_id: svc.id, audit_month: MONTH_START, result: 'match',
+      reviewed_record_id: record.id, evidence_fingerprint: v1 }); // a mark saved before the v2 format
+    const shown = (await board())[0].visits[0];
+    expect(shown.evidenceFingerprint).toMatch(/^v2:/); // the board shows v2
+    expect(shown).toMatchObject({ audit: { result: 'match' }, needsRecheck: false });
+    expect(await scores.readAudit(tech, window)).toBe(100);
+    // a board loaded before the change still submits a v1 digest: accepted on unchanged evidence, stored as v2
+    await audit.saveMark({ scheduledServiceId: svc.id, technicianId: tech, month: MONTH, recordId: record.id, evidenceFingerprint: v1, result: 'mismatch', note: 'x', auditedBy: tech });
+    expect((await db('tech_protocol_audits').first()).evidence_fingerprint).toMatch(/^v2:[0-9a-f]{64}$/);
+    // a v1 mark whose evidence changed reads re-check
+    await db('tech_protocol_audits').update({ result: 'match', evidence_fingerprint: v1 });
+    expect(await scores.readAudit(tech, window)).toBe(100);
+    await db('service_photos').insert({ service_record_id: record.id, photo_type: 'after', s3_key: 'k/changed.jpg' });
+    expect((await board())[0].visits[0]).toMatchObject({ audit: null, needsRecheck: true });
+    expect(await scores.readAudit(tech, window)).toBeNull();
+    await expect(audit.saveMark({ scheduledServiceId: svc.id, technicianId: tech, month: MONTH, recordId: record.id, evidenceFingerprint: v1, result: 'match', auditedBy: tech }))
+      .rejects.toMatchObject({ status: 409, code: 'STALE_EVIDENCE' });
+  });
+
+  test('a v1 digest submitted for a visit with several photos is refused: it cannot show which photos the owner saw', async () => {
+    const { svc, record } = await visit(tech);
+    const ids13 = [];
+    for (let i = 0; i < 13; i += 1) {
+      const [p] = await db('service_photos').insert({ service_record_id: record.id, photo_type: 'progress', s3_key: `k/${i}.jpg`, sort_order: i }).returning('id');
+      ids13.push(p.id);
+    }
+    const [current] = await audit.eligibleVisits({ scheduledServiceId: svc.id });
+    const v1 = audit._private.evidenceFingerprintV1((await audit._private.loadEvidence([current])).get(svc.id));
+    await db('service_photos').where({ id: ids13[12] }).update({ sort_order: -1 }); // photo 13 moves into view after a v1 board loaded
+    await expect(audit.saveMark({ scheduledServiceId: svc.id, technicianId: tech, month: MONTH, recordId: record.id, evidenceFingerprint: v1, result: 'match', auditedBy: tech }))
+      .rejects.toMatchObject({ status: 409, code: 'STALE_EVIDENCE' });
+    expect(await db('tech_protocol_audits')).toHaveLength(0);
   });
 
   test('correcting the service line (same service type) changes the evidence and the mark stops counting', async () => {

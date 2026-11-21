@@ -11,12 +11,17 @@
  * (admin-estimate-persistence#serverRecomputeFromEstimateData).
  *
  *  - a priced add-on row carries `pricingKnobs` (stamped by the pricer): they replay verbatim;
- *  - a priced add-on row with NO stamp predates the stamp, so it was priced with the in-code defaults: they replay
- *    (the labor rate and the drive minutes were never in the defaults: they replay as current at replay);
+ *  - a priced add-on row with NO stamp predates the stamp, so it was priced with the in-code table of that time, which
+ *    the seed migration 20261010110000 froze: that table replays, so a later change to a code default (the Arena spot
+ *    material 1.45 -> 1.09 on 2026-11-20) never re-prices such a row (the labor rate and the drive minutes were never
+ *    in the table: they replay as current at replay);
  *  - an estimate with no priced add-on row returns null (inject nothing), so fresh quotes resolve the live config.
  * Only the keys the estimate actually sold are in the signal: an add-on added later prices off the live row.
  */
 const DEFAULTS = require('./pricing-engine/constants').areaAddOnPricingDefaults();
+// What a row with no stamp was priced with (see above). A key added after the seed was stamped from the start; the code
+// default is its fallback.
+const UNSTAMPED = require('../models/migrations/20261010110000_area_addon_pricing_config').SEED;
 const { areaAddOnKnobsFor } = require('./pricing-engine/area-addon-config');
 const { storedAreaAddOnRows } = require('./estimate-result-container');
 
@@ -33,12 +38,12 @@ function areaAddOnKnobSignalForReplay(estDataRaw) {
   const rows = pricedAddOnRows(estDataRaw);
   if (!rows.length) return null;
   const stampedRow = rows.find((row) => row.pricingKnobs && typeof row.pricingKnobs === 'object');
-  const group = stampedRow ? stampedRow.pricingKnobs : DEFAULTS;
+  const group = stampedRow ? stampedRow.pricingKnobs : UNSTAMPED;
   const items = {};
   for (const row of rows) {
     const stamp = row.pricingKnobs && typeof row.pricingKnobs === 'object' ? row.pricingKnobs : null;
     if (items[row.addOnKey] && !stamp) continue;
-    const knobs = stamp ? areaAddOnKnobsFor(row.addOnKey, { ...stamp, items: { [row.addOnKey]: stamp } }) : DEFAULTS.items[row.addOnKey];
+    const knobs = stamp ? areaAddOnKnobsFor(row.addOnKey, { ...stamp, items: { [row.addOnKey]: stamp } }) : (UNSTAMPED.items[row.addOnKey] || DEFAULTS.items[row.addOnKey]);
     items[row.addOnKey] = { materialPer1000: knobs.materialPer1000, setupMin: knobs.setupMin, minPer1000: knobs.minPer1000, tiers: knobs.tiers ? [...knobs.tiers] : null };
   }
   // laborRate and driveMinutes are the labor cost's two global inputs. A stamped row freezes them; a row with no stamp

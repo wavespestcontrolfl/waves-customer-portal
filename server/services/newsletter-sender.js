@@ -2160,6 +2160,29 @@ async function ledgerProgress(trx, send) {
   return { got, left, refused: refusedCount };
 }
 
+/**
+ * A send's spam reports and the copies it delivered, for the Waves Pest Insider spam-report stop
+ * (pest-insider/schedule.js). A report is a reader's own (complained_at with no drop reason).
+ * SendGrid's drop for an address on its spam-report list also writes complained_at, with
+ * SPAM_REPORT_DROP_REASON, so it is never a report, also on a row an earlier attempt delivered.
+ * A delivered copy has a delivery signal: delivered, opened or clicked, or the reader's own spam
+ * report or unsubscribe, which only a delivered message gets. An accepted copy with no later event
+ * is not counted yet. A refused row (refusedDelivery) is neither. One statement reads both counts,
+ * so a webhook update between two reads cannot pair a count with a stale other count.
+ */
+async function spamReportCounts(db, sendId) {
+  const counts = await db('newsletter_send_deliveries')
+    .where({ send_id: sendId })
+    .whereNot(refusedDelivery)
+    .select(
+      db.raw('count(*) filter (where complained_at is not null and bounce_reason is distinct from ?) as reports', [SPAM_REPORT_DROP_REASON]),
+      db.raw('count(*) filter (where delivered_at is not null or opened_at is not null or clicked_at is not null'
+        + ' or complained_at is not null or unsubscribed_at is not null) as delivered'),
+    )
+    .first();
+  return { reports: Number(counts?.reports) || 0, delivered: Number(counts?.delivered) || 0 };
+}
+
 // Why a planned issue did not go out: its 'failed' outcome, with the 'outcome' alert.
 const notOut = (why, more = {}) => ({ status: 'failed', reason: `did not go out: ${why}`, alert: 'outcome', ...more });
 const SEND_ENDED = Object.freeze({ sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' });
@@ -2507,4 +2530,4 @@ async function markEventsFeatured(send) {
 module.exports = {
   applyRetryableDeliveryFilter,
   outstandingEligibleDeliveries,
-  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, ledgerProgress, reachedDelivery, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, ledgerProgress, reachedDelivery, spamReportCounts, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };

@@ -29,6 +29,8 @@ const { _internals: replan } = require('./index');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+const { ZONE_LABELS } = require('../scheduling/forecast-zones');
+const { RAIN_PCT } = require('../scheduling/rain-fit');
 
 const KEY_PREFIX = 'open-blocks:';
 const DAYS = 7;
@@ -182,17 +184,30 @@ const jobsNote = (b) => {
 };
 const blockText = (b) => `${dayLabel(b.day)}${b.tech ? `, ${b.tech}` : ''}: ${clock(b.start)} to ${clock(b.start + b.min)} (${span(b.min)}${jobsNote(b)}${gridNote(b)})`;
 
-/** How many open estimates fit an opening this morning (0 without a fill list). */
-const fitCount = (fill) => (fill && !fill.error ? fill.fitted : 0);
+const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The fill list's headline (fill-list.js), or null: the new work that fits an opening (open estimates and leads), else
+ * the plan visits that could move up into one.
+ */
+function fitsText(fill) {
+  if (!fill || fill.error) return null;
+  const fresh = [[fill.fitted, 'open estimate', 'open estimates'], [fill.leads.fitted, 'lead', 'leads']].filter(([n]) => n);
+  if (fresh.length) {
+    const one = fresh.length === 1 && fresh[0][0] === 1;
+    return `${fresh.map(([n, a, b]) => count(n, a, b)).join(' and ')} ${one ? 'fits' : 'fit'} an opening.`;
+  }
+  return fill.visits.fitted ? `${count(fill.visits.fitted, 'plan visit', 'plan visits')} could move up into an opening.` : null;
+}
 
 function alertSpec(sum, fill = null) {
   const hours = Math.round(sum.totalMin / 60);
   const b = sum.biggest;
   const where = `Biggest block: ${dayLabel(b.day)}, ${clock(b.start)} to ${clock(b.start + b.min)}`;
-  const fits = fitCount(fill);
+  const fits = fitsText(fill);
   // The fill list's count is the actionable line; the measured re-timing gain stays in the detail.
   let why = `${where}.`;
-  if (fits) why = `${where}. ${fits} open estimate${fits === 1 ? ' fits' : 's fit'} an opening.`;
+  if (fits) why = `${where}. ${fits}`;
   else if (sum.freedMin >= SELLABLE_MIN) why = `${where}; re-timing booked jobs could free ${span(sum.freedMin)} more.`;
   return {
     area: 'Schedule',
@@ -206,15 +221,23 @@ function alertSpec(sum, fill = null) {
   };
 }
 
-/** A listed block's fill lines (fill-list.js): an open estimate's visit, its length, the drive it adds, its finish. */
 // The visit as booked, and the route plan's minutes on site when they differ (owner 2026-11-19: the visit row is 1 hour,
 // the plan keeps its own minutes).
 const visitText = (f) => (f.onSiteMin && f.onSiteMin !== f.length ? `${span(f.length)} visit, ${span(f.onSiteMin)} on site` : span(f.length));
+const LINE_HEADS = { estimate: 'Open estimate', lead: 'Lead', visit: 'Plan visit moved up' };
+// Where a plan visit is booked now: the day and hour the move would leave open.
+const leavesText = (f) => (f.from ? `; leaves ${dayLabel(f.from.day)}${f.from.start == null ? '' : ` ${clock(f.from.start)}`} open` : '');
 
+/**
+ * A listed block's fill lines (fill-list.js): an open estimate's or a lead's visit, or a plan visit moved up; its
+ * length, the drive it adds and its finish.
+ */
 function fillLines(fill, i) {
   if (!fill || fill.error) return [];
-  return fill.byBlock[i].map((f) => `  - Open estimate, ${f.name || 'no name on file'} (${f.label}, ${visitText(f)}): +${f.addedDriveMin} min drive, finishes ${clock(f.endMin)}`);
+  return fill.byBlock[i].map((f) => `  - ${LINE_HEADS[f.kind]}, ${f.name || 'no name on file'} (${f.label}, ${visitText(f)}): +${f.addedDriveMin} min drive, finishes ${clock(f.endMin)}${leavesText(f)}${f.inRain ? '; runs in rain hours (rain-safe work)' : ''}`);
 }
+
+const leftOut = (items) => items.filter(Boolean).join(', ');
 
 /**
  * The fill list's own line: what it checked and found, or why it was not built. `blocks` are the listed blocks: a fit
@@ -222,16 +245,49 @@ function fillLines(fill, i) {
  */
 function fillSummary(fill, blocks = []) {
   if (fill.error) return `Fill list: not built this morning (${fill.error}).`;
-  const left = [fill.noLocation ? `${fill.noLocation} without a stored location` : null, fill.unread ? `${fill.unread} unread` : null].filter(Boolean);
+  const { MAX_PER_BLOCK, MOVE_UP_DAYS } = require('./fill-list');
+  const { leads, visits } = fill;
+  const without = (part) => [part.noLocation ? `${part.noLocation} without a stored location` : null, part.unread ? `${part.unread} unread` : null];
+  const estimatesLeft = leftOut(without(fill));
+  const leadsLeft = leftOut(without(leads));
+  const visitsLeft = leftOut([visits.remindersOff ? `${visits.remindersOff} with the 24-hour reminder off` : null,
+    visits.sharedDay ? `${visits.sharedDay} sharing the day with another visit of the customer` : null]);
   const shortFit = fill.byBlock.some((lines, i) => lines.length > 0 && blocks[i] && blocks[i].min < SLOT_MIN);
-  return `Fill list: ${fill.checked} open estimate${fill.checked === 1 ? '' : 's'} checked, ${fill.fitted} fit an opening${left.length ? ` (${left.join(', ')})` : ''}.`
-    + ` Each block lists up to ${require('./fill-list').MAX_PER_BLOCK}, least added drive first.`
+  return `Fill list: ${count(fill.checked, 'open estimate', 'open estimates')} checked, ${fill.fitted} fit an opening${estimatesLeft ? ` (${estimatesLeft})` : ''}.`
+    + ` ${count(leads.checked, 'lead', 'leads')} that asked for an assessment or an inspection checked, ${leads.fitted} fit${leadsLeft ? ` (${leadsLeft})` : ''}.`
+    + ` ${count(visits.checked, 'plan visit', 'plan visits')} checked, ${visits.fitted} could move up${visits.unread ? ` (${visits.unread} unread)` : ''}`
+    + `${visitsLeft ? `; left out: ${visitsLeft}` : ''}.`
+    + ` Each block lists up to ${MAX_PER_BLOCK}, least added drive first: the best open estimate, lead and plan visit that fit it,`
+    + ' then the next best fits.'
     + ' Each fit is the staff finder\'s check of a new visit on the day as booked.'
     + (shortFit ? ` A block short of ${SLOT_MIN} minutes can still hold a job when the stops around it have room for the drive.` : '')
-    + ' Nothing is held or booked; staff decide whether to call.';
+    + ` A plan visit moves up at most ${MOVE_UP_DAYS} days, and its customer was told a day: call before moving it.`
+    + (fill.rain?.leftOut ? ` Rain: ${count(fill.rain.leftOut, 'job', 'jobs')} left out of an opening in rain hours (the rain rules: only rain-safe work runs in rain).` : '')
+    + ' Nothing is held, booked or moved; staff decide whether to call.';
 }
 
-function detailText(sum, fill = null) {
+const areaName = (zone) => ZONE_LABELS[zone] || zone;
+
+/**
+ * The rain note (rain-note.js, owner 2026-11-19 D3): each day's rain hours by area and the areas with an hour NWS gave
+ * no reading for, the areas NWS did not answer, or why the note was not read.
+ */
+function rainLines(rain) {
+  if (rain.error) return [`Rain hours: not read this morning (${rain.error}).`];
+  if (rain.unread.length && rain.unread.length === Object.keys(rain.outlooks).length) {
+    return ['Rain hours: the NWS forecast did not answer this morning.'];
+  }
+  const spanText = (s) => `${clock(s.start)} to ${clock(s.end)} (up to ${s.max}%)`;
+  const areasText = (areas) => (areas.length ? areas.map((a) => `${areaName(a.zone)} ${a.spans.map(spanText).join(', ')}`).join('; ') : 'none');
+  const gapsText = (gaps) => (gaps.length ? `; no NWS reading for some hours in ${gaps.map(areaName).join(', ')}` : '');
+  return [
+    `Rain hours by area (NWS chance of rain ${RAIN_PCT}% or more, ${clock(DAY_OPEN)} to ${clock(DAY_CLOSE)}):`,
+    ...rain.days.map(({ day, areas, gaps }) => `- ${dayLabel(day)}: ${areasText(areas)}${gapsText(gaps)}`),
+    ...(rain.unread.length ? [`The NWS forecast did not answer for ${rain.unread.map(areaName).join(', ')}.`] : []),
+  ];
+}
+
+function detailText(sum, fill = null, rain = null) {
   const lines = [
     `Room for ${sum.slots} new job${sum.slots === 1 ? '' : 's'}: each needs ${SLOT_MIN} free minutes (a 1-hour job and its drive).`,
     'Open blocks a new job could fill (an hour or more with no job, inside 8:00 AM to 5:00 PM; blackout days and days off left out, and Sundays unless stops are already booked):',
@@ -239,6 +295,7 @@ function detailText(sum, fill = null) {
   ];
   if (sum.blocks.length > MAX_DETAIL_BLOCKS) lines.push(`- and ${sum.blocks.length - MAX_DETAIL_BLOCKS} more.`);
   if (fill) lines.push('', fillSummary(fill, sum.blocks.slice(0, MAX_DETAIL_BLOCKS)));
+  if (rain) lines.push('', ...rainLines(rain));
   lines.push(
     '',
     'Measuring only (no visit changes): re-timing booked jobs to the front of the day under the new rules would free'
@@ -278,23 +335,47 @@ async function latestRows(conn, now) {
  * The fill list for the listed blocks, or { error } when it could not be built (the notice still goes out). Only on
  * the day rules' own blocks: with the rules unread, a block may sit on a day off or with a technician who is out.
  */
-async function fillFor(conn, blocks, now, rulesRead) {
+// The rain note never holds the notice: a failed read is named in the detail.
+async function rainFor(now) {
+  try {
+    return await require('./rain-note').rainNote(now);
+  } catch (err) {
+    logger.warn(`[open-blocks] rain note not read (${err.message})`);
+    return { error: 'a read failed' };
+  }
+}
+
+/** The rain note as the row keeps it: each day's wet spans by area, and the unread areas. */
+function rainMetadata(rain) {
+  return rain.error ? { error: rain.error } : { days: rain.days, unread: rain.unread };
+}
+
+// The rain note's NWS hours give the fill list its rain rule; a note that was not read gives none.
+async function fillFor(conn, blocks, now, rulesRead, rain) {
   if (!rulesRead) return { error: 'the day rules were unread' };
   try {
-    return await require('./fill-list').fillList(conn, blocks, now);
+    return await require('./fill-list').fillList(conn, blocks, now, { outlooks: rain && !rain.error ? rain.outlooks : null });
   } catch (err) {
     logger.warn(`[open-blocks] fill list not built (${err.message})`);
     return { error: 'a read failed' };
   }
 }
 
+// Each line's record id: the estimate, the lead, or the plan visit (scheduled_services) that would move.
+const ID_KEYS = { estimate: 'estimateId', lead: 'leadId', visit: 'serviceId' };
+
 /** The fill lines as the row keeps them, for the opening-to-booking count (page D2, step E). */
 function fillMetadata(fill, blocks) {
   if (fill.error) return { error: fill.error };
-  // window: the offered hour staff would book ('HH:MM'); start: when the visit would begin (the van may come later).
-  const lines = fill.byBlock.flatMap((list, i) => list.map((f) => ({ estimateId: f.estimateId, day: blocks[i].day, techId: blocks[i].techId,
-    window: f.windowStart, start: f.startMin, addedDriveMin: f.addedDriveMin })));
-  return { checked: fill.checked, fitted: fill.fitted, lines };
+  // window: the offered hour staff would book ('HH:MM'); start: when the visit would begin (the van may come later);
+  // fromDay and fromStart: where a plan visit is booked now.
+  const lines = fill.byBlock.flatMap((list, i) => list.map((f) => ({ kind: f.kind, [ID_KEYS[f.kind]]: f.id, day: blocks[i].day,
+    techId: blocks[i].techId, window: f.windowStart, start: f.startMin, addedDriveMin: f.addedDriveMin,
+    ...(f.from ? { fromDay: f.from.day, fromStart: f.from.start } : {}), ...(f.inRain ? { inRain: true } : {}) })));
+  const { leads, visits } = fill;
+  return { checked: fill.checked, fitted: fill.fitted, leads: { checked: leads.checked, fitted: leads.fitted },
+    visits: { checked: visits.checked, fitted: visits.fitted, remindersOff: visits.remindersOff, sharedDay: visits.sharedDay },
+    ...(fill.rain ? { rain: { checked: fill.rain.checked, leftOut: fill.rain.leftOut } } : {}), lines };
 }
 
 async function closeEarlier(conn, keepKey) {
@@ -331,13 +412,14 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
     return { status: 'no_open_hours', closed, ...(fresh ? {} : { noRun: true }) };
   }
   const listed = sum.blocks.slice(0, MAX_DETAIL_BLOCKS);
-  const fill = await fillFor(conn, listed, now, rulesRead);
-  const detail = detailText(sum, fill);
+  const rain = await rainFor(now);
+  const fill = await fillFor(conn, listed, now, rulesRead, rain);
+  const detail = detailText(sum, fill, rain);
   const posted = await raiseAdminAlert('schedule', alertSpec(sum, fill), {
     bell: true,
     dedupeKey: key,
     detail: fresh ? detail : `${detail}\nThe night re-plan left no numbers this morning, so days with two or more stops are not listed.`,
-    metadata: { openMin: sum.totalMin, slots: sum.slots, freedMin: sum.freedMin, blocks: sum.blocks.length, replayed: sum.replayed, pickDiffers: sum.pickDiffers, fill: fillMetadata(fill, listed) },
+    metadata: { openMin: sum.totalMin, slots: sum.slots, freedMin: sum.freedMin, blocks: sum.blocks.length, replayed: sum.replayed, pickDiffers: sum.pickDiffers, fill: fillMetadata(fill, listed), rain: rainMetadata(rain) },
   });
   // notifyAdmin answers null when its write fails. Then no morning row exists: keep the earlier rows open and fail
   // the tick, so job health shows it (pre-push audit, tune PR). A dedupe hit answers the open row, with its id.
@@ -348,5 +430,5 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
 
 module.exports = {
   runOpenBlocksAlert,
-  _internals: { summarize, alertSpec, detailText, fillSummary, fillMetadata, dayLabel, clock, span, freedMin, standing, hourGridBlocks, unplannedDays, eligibility, workable, KEY_PREFIX },
+  _internals: { summarize, alertSpec, detailText, fillSummary, fillMetadata, rainLines, rainMetadata, dayLabel, clock, span, freedMin, standing, hourGridBlocks, unplannedDays, eligibility, workable, KEY_PREFIX },
 };

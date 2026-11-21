@@ -3047,7 +3047,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
         // the Refer tab. No $25 fallback: a missing or zero reward means the
         // program currently grants nothing we can promise.
         totalEarned: d.totalEarned != null ? Number(d.totalEarned) / 100 : 0, // dollars
-        rewardPerReferral: Number(d.rewardPerReferral) || 0,
+        // A member at the yearly limit (Step 2) is promised nothing on the dashboard either.
+        rewardPerReferral: d.capReached === true ? 0 : Number(d.rewardPerReferral) || 0,
       });
       setReferralStatsStatus('ready');
     }).catch(err => {
@@ -3161,7 +3162,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Text us', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
-    { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${referralReward} credit` : 'View details', action: () => onSwitchTab?.('refer') },
+    { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${Number.isInteger(referralReward) ? referralReward : referralReward.toFixed(2)} credit` : 'View details', action: () => onSwitchTab?.('refer') },
   ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -14183,7 +14184,8 @@ function ReferTab({ customer, onSwitchTab }) {
     padding: '10px 14px',
     fontSize: 14, minHeight: 44,
   };
-  const money = (n, digits = 0) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  // Whole dollars stay whole ($25); an amount with cents shows them ($25.50), never rounded to $26.
+  const money = (n, digits = Number.isInteger(Number(n || 0)) ? 0 : 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const cents = (n, digits = 0) => money(Number(n || 0) / 100, digits);
 
   if (loading) {
@@ -14241,6 +14243,10 @@ function ReferTab({ customer, onSwitchTab }) {
   // Server-authoritative only — 0 (paused/changed promotion) must not be
   // papered over with a default figure the program won't pay.
   const rewardPerReferral = Number(data?.rewardPerReferral) || 0;
+  // Step 2: a member at the yearly limit is told so instead of being promised another credit (the server sends
+  // capReached and annualCap only while the program is on Step 2).
+  const atYearlyLimit = data?.capReached === true;
+  const earnsCredit = rewardPerReferral > 0 && !atYearlyLimit;
   const lifetimeEarned = data?.totalEarned != null
     ? Number(data.totalEarned || 0) / 100
     : Number(stats.totalEarned || 0);
@@ -14344,12 +14350,14 @@ function ReferTab({ customer, onSwitchTab }) {
               lineHeight: 1.1,
               letterSpacing: 0,
             }}>
-              {rewardPerReferral > 0 ? 'Refer and Earn' : 'Refer a Neighbor'}
+              {earnsCredit ? 'Refer and Earn' : 'Refer a Neighbor'}
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {rewardPerReferral > 0
-                ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
-                : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.'}
+              {atYearlyLimit && Number(data.creditsThisYear) > 0
+                ? `You earned ${Number(data.creditsThisYear)} credits this year, the most we give. Thank you! Credits start again January 1.`
+                : earnsCredit
+                  ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
+                  : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.'}
             </div>
           </div>
           <div style={{
@@ -14715,11 +14723,11 @@ function ReferTab({ customer, onSwitchTab }) {
         <div data-glass="chip" style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />How It Works</div>
         <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Share, they start, you earn</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Three steps from share to credit.</div>
-        <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : `repeat(${rewardPerReferral > 0 ? 3 : 2}, 1fr)`, gap: 10 }}>
+        <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : `repeat(${earnsCredit ? 3 : 2}, 1fr)`, gap: 10 }}>
           {[
             { icon: 'share', title: 'Share', text: 'Send your code or referral link to a neighbor.' },
             { icon: 'checkCircle', title: 'They start', text: 'We track the referral when they become a Waves customer.' },
-            rewardPerReferral > 0 && { icon: 'coins', title: 'You earn', text: `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
+            earnsCredit && { icon: 'coins', title: 'You earn', text: `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
           ].filter(Boolean).map(item => (
             <div key={item.title} style={{
               padding: 14,
@@ -18965,4 +18973,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ReferTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

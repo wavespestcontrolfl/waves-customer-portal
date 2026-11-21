@@ -2,6 +2,7 @@
 // for a visit booked by address. The service is mocked; these pin the route's own contract: the
 // link first, then reminders and the confirmation (unless the office unticked it), and a link that
 // committed is never reported as a failure when a text or reminder step fails after it.
+// POST /api/admin/schedule/new-caller books the visit in the zone the office create route stamps.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => { req.technicianId = 'admin-1'; next(); },
@@ -26,26 +27,37 @@ const VISIT_ID = '0f8b9d1e-2c3a-4b5d-8e6f-7a8b9c0d1e2f';
 const CUSTOMER_ID = '1a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d';
 const linkedVisit = { id: VISIT_ID, customer_id: CUSTOMER_ID, scheduled_date: '2031-03-07', window_start: '13:00:00' };
 
-async function put(body) {
+async function send(method, path, body) {
   const app = express();
   app.use(express.json());
   app.use('/new-caller', require('../routes/admin-schedule-new-caller'));
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/new-caller/${VISIT_ID}/link`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/new-caller${path}`, {
+      method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
     return { status: res.status, json: await res.json() };
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 }
+const put = (body) => send('PUT', `/${VISIT_ID}/link`, body);
 
 beforeEach(() => {
   jest.clearAllMocks();
   service.linkNewCallerVisit.mockResolvedValue({ visit: linkedVisit, addedProperty: true });
   service.armLinkedVisitComms.mockResolvedValue({ remindersArmed: true, confirmationSent: true });
+});
+
+test('POST books the visit in the zone of its address (the forecast areas\' getZone), with no address the default zone', async () => {
+  service.bookNewCallerVisit.mockResolvedValue({ visit: { id: VISIT_ID }, warnings: [] });
+  const { status, json } = await send('POST', '', { scheduledDate: '2031-03-07', address: { city: 'Sarasota', zip: '34236' } });
+  expect(status).toBe(201);
+  expect(json).toEqual({ ok: true, id: VISIT_ID, scheduledDate: '2031-03-07', warnings: [] });
+  expect(service.bookNewCallerVisit).toHaveBeenCalledWith(expect.objectContaining({ zone: 'sarasota', adminUserId: 'admin-1' }));
+  await send('POST', '', { scheduledDate: '2031-03-07' });
+  expect(service.bookNewCallerVisit).toHaveBeenLastCalledWith(expect.objectContaining({ zone: 'lakewood_ranch' }));
 });
 
 test('links the visit, then arms reminders and sends the confirmation by default', async () => {

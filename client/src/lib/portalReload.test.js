@@ -52,6 +52,10 @@ describe('reloadDueAtMove', () => {
     expect(reloadDueAtMove('/admin', NOW, '/admin/pipeline')).toBe(false);
     expect(reloadDueAtMove('/admin/', NOW, '/admin/pipeline')).toBe(false);
     expect(reloadDueAtMove('/Admin', NOW, '/admin/pipeline')).toBe(false);
+    expect(reloadDueAtMove('/%61dmin', NOW, '/admin/pipeline')).toBe(false);
+    // The router matches it with any number of trailing slashes too.
+    expect(reloadDueAtMove('/admin///', NOW, '/admin/pipeline')).toBe(false);
+    expect(reloadDueAtMove('/%61dmin///', NOW, '/admin/pipeline')).toBe(false);
     // The dashboard landing reloads. Today, for a technician or with Field
     // view on, does not.
     expect(reloadDueAtMove('/admin/dashboard', NOW, '/admin')).toBe(true);
@@ -63,10 +67,14 @@ describe('reloadDueAtMove', () => {
     expect(reloadDueAtMove('/billing', NOW)).toBe(false);
     expect(reloadDueAtMove('/admin/today', NOW)).toBe(false);
     expect(reloadDueAtMove('/admin/today/visit/1', NOW)).toBe(false);
+    // Read as the routes match it: an encoded segment still opens Today.
+    expect(reloadDueAtMove('/admin/%74oday', NOW)).toBe(false);
+    expect(reloadDueAtMove('/%61dmin/dashboard', NOW)).toBe(true);
     // Nor at a move away from a field page: a time-clock punch there can
     // still be waiting for the location.
     expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/today')).toBe(false);
     expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/today/truck-check')).toBe(false);
+    expect(reloadDueAtMove('/admin/pipeline', NOW, '/%61dmin/today')).toBe(false);
     expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/dashboard')).toBe(true);
     platform.wavesAdmin = true;
     expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
@@ -139,11 +147,14 @@ describe('reloadBlockers', () => {
 });
 
 describe('reloadForNewBuild', () => {
-  test('reloads and counts the try; a reload that came back on the old page tries again, three times at most', async () => {
+  test('reloads and counts the try, in the same turn when no work is open; a reload that came back on the old page tries again, three times at most', async () => {
     liveBuild('bbb222bbb222', Date.now());
     const reload = vi.fn();
-    await expect(reloadForNewBuild({ reload })).resolves.toBeNull();
+    const first = reloadForNewBuild({ reload });
+    // No work is open, so there is no wait (waitForWork): the reload runs in
+    // the gate's own effect, as before the stale-chunk reload shared the wait.
     expect(reload).toHaveBeenCalledTimes(1);
+    await expect(first).resolves.toBeNull();
     expect(JSON.parse(sessionStorage.getItem('portal-reloaded-for'))).toEqual({ build: 'bbb222bbb222', tries: 1 });
     await expect(reloadForNewBuild({ reload })).resolves.toBeNull();
     await expect(reloadForNewBuild({ reload })).resolves.toBeNull();

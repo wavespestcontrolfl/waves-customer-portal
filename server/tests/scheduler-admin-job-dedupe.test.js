@@ -140,6 +140,24 @@ describe('morning email digest', () => {
     await tick();
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
+
+  test('counts only real Gmail drafts: a claim, a settled thread or a draft refused for a blank is not one', async () => {
+    const tick = tickFor('30 7 * * *', 'email-digest-daily');
+    const rows = ['r-123', 'pending', 'reconciled_existing_draft', 'reconciled_replied', 'refused_blank', null]
+      .map((draftId, i) => ({ id: `e${i}`, draft_gmail_id: draftId }));
+    db.mockImplementation(() => {
+      const q = {
+        where: () => q,
+        count: () => q,
+        first: async () => ({ c: '0' }),
+        then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+      };
+      return q;
+    });
+    await tick();
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls[0][2]).toContain('1 reply drafted');
+  });
 });
 
 describe('the weekly SEO Advisor report runs under a lock', () => {

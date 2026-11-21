@@ -1,4 +1,5 @@
-import { Fragment, useState, useEffect, useRef, lazy, Suspense } from "react";
+import { Fragment, useState, useEffect, useRef, Suspense } from "react";
+import { lazyPanel } from "../../components/LazyPanel";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { formatETDate, formatETDateTime } from "../../lib/timezone";
 import {
@@ -35,10 +36,10 @@ import {
   Textarea,
   UiSurface,
 } from "../../components/ui";
-const SEODashboardPage = lazy(() => import("./SEODashboardPage"));
+const SEODashboardPage = lazyPanel(() => import("./SEODashboardPage"));
 // Pillar 3 V2 — real Google-map heat map overlay. Lazy so the Maps SDK only
 // loads when a user opens the Geo-Grid tab's Map view (not on every SEO page).
-const GeoGridMap = lazy(() => import("../../components/admin/GeoGridMap"));
+const GeoGridMap = lazyPanel(() => import("../../components/admin/GeoGridMap"));
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` folded to zinc-900, `purple` folded to zinc-900.
 // Semantic green/amber/red preserved for status/change accents.

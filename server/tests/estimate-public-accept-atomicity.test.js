@@ -125,7 +125,9 @@ jest.mock('../models/db', () => {
     // (commitReservation's FOR UPDATE read, applyWindowOverlapFilter,
     // findConflictingVisits' hold filter). Lock/OR semantics are inert here —
     // fixtures keep the tables small enough that the eq/null filters decide.
-    b.forUpdate = () => b;
+    // forUpdate also records the table it locked in the open transaction (state.txLocks), so a test can assert what a
+    // step ran under.
+    b.forUpdate = () => { if (state.txDepth > 0) state.txLocks.push(table); return b; };
     b.andWhereRaw = () => b;
     b.orWhereNull = () => b;
     b.orWhereNot = () => b;
@@ -224,13 +226,19 @@ jest.mock('../models/db', () => {
     return { __raw: sql, bindings };
   };
   dbFn.schema = { hasColumn: async () => false };
+  // state.txDepth counts the open transactions; state.txLocks lists the tables FOR UPDATE reads locked since the
+  // outermost one began.
   dbFn.transaction = async (cb) => {
     const snapshot = structuredClone(state.tables);
+    state.txDepth = (state.txDepth || 0) + 1;
+    if (state.txDepth === 1) state.txLocks = [];
     try {
       return await cb(dbFn);
     } catch (err) {
       state.tables = snapshot; // rollback
       throw err;
+    } finally {
+      state.txDepth -= 1;
     }
   };
   dbFn.__state = state;
@@ -421,6 +429,8 @@ function resetStore(estimateRow) {
   db.__state.ops = [];
   db.__state.tryDepositLedgerBusy = false;
   db.__state.onTable = null;
+  db.__state.txDepth = 0;
+  db.__state.txLocks = [];
 }
 
 function storedEstimate() {
@@ -2345,6 +2355,278 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     const res = await putAccept('tok-restart-2-x0123456789');
     expect(res.status).toBe(409);
     expect(storedEstimate().status).toBe('sent');
+  });
+
+  test.each(['bill_by_invoice', 'show_one_time_option'])('an old link to a quote staff changed (%s on) refuses the accept (409) and rolls back: no invoice without a card (codex pre-push P0)', async (column) => {
+    // Everything else passes: a still-churned account in the quoted attempt.
+    resetStore(restartEstimate({ id: 'est-restart-7', token: 'tok-restart-7-x0123456789', [column]: true }));
+    db.__state.tables.customers = [churnedCustomer()];
+    db.__state.tables.cancellation_cases = [{
+      id: 'case-9', customer_id: 'cust-9', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-29T00:00:00Z',
+    }];
+    const res = await putAccept('tok-restart-7-x0123456789');
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+    expect(res.data.error).toMatch(/restart quote changed since it was created/);
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('a one-time request on a restart quote with the option on gets the changed refusal, not restart_quote_frozen (codex pre-push P1)', async () => {
+    resetStore(restartEstimate({ id: 'est-restart-8', token: 'tok-restart-8-x0123456789', show_one_time_option: true }));
+    db.__state.tables.customers = [churnedCustomer()];
+    const res = await putAccept('tok-restart-8-x0123456789', { serviceMode: 'one_time' });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+    expect(res.data.error).toMatch(/restart quote changed since it was created/);
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  // The page drops a card the tab captured on either refusal and sends the customer back to the portal, so the
+  // capture is retired: before the early 409, or after the locked re-check's rollback (codex pre-push P0).
+  describe('a card the tab captured is retired when the quote is refused (codex pre-push P0)', () => {
+    const RecurringCards = require('../services/recurring-card-on-file');
+    const spies = [];
+    let retire;
+    beforeEach(() => {
+      retire = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true });
+      spies.push(retire);
+    });
+    afterEach(() => { while (spies.length) spies.pop().mockRestore(); });
+
+    test('an old link to a staff-changed quote retires the submitted intent before the 409', async () => {
+      resetStore(restartEstimate({ id: 'est-restart-9', token: 'tok-restart-9-x0123456789', bill_by_invoice: true }));
+      db.__state.tables.customers = [churnedCustomer()];
+      const res = await putAccept('tok-restart-9-x0123456789', { recurringCardSetupIntentId: ' seti_stale ' });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+      expect(retire).toHaveBeenCalledTimes(1);
+      expect(retire).toHaveBeenCalledWith({ estimate: expect.objectContaining({ id: 'est-restart-9' }), setupIntentId: 'seti_stale' });
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('Stripe cannot confirm that retirement: the existing 503, nothing written, and the tab keeps its intent', async () => {
+      retire.mockResolvedValue({ ok: false, reason: 'verification_failed' });
+      resetStore(restartEstimate({ id: 'est-restart-10', token: 'tok-restart-10-x012345678', show_one_time_option: true }));
+      db.__state.tables.customers = [churnedCustomer()];
+      const before = JSON.stringify(db.__state.tables);
+      const res = await putAccept('tok-restart-10-x012345678', { recurringCardSetupIntentId: 'seti_stale' });
+      expect(res.status).toBe(503);
+      expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+      expect(JSON.stringify(db.__state.tables)).toBe(before);
+    });
+
+    test('no submitted intent means no Stripe call', async () => {
+      resetStore(restartEstimate({ id: 'est-restart-12', token: 'tok-restart-12-x012345678', bill_by_invoice: true }));
+      db.__state.tables.customers = [churnedCustomer()];
+      const res = await putAccept('tok-restart-12-x012345678', { recurringCardSetupIntentId: '   ' });
+      expect(res.status).toBe(409);
+      expect(retire).not.toHaveBeenCalled();
+    });
+
+    // A recurring card the accept has verified (Auto Pay required), sent with the consent version the page rendered.
+    const verifiedCapture = () => {
+      spies.push(
+        jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue({ enforced: true, required: true, exemptReason: null }),
+        jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({ ok: true, setupIntentId: 'si_cof_9', paymentMethodId: 'pm_cof_9', methodType: 'card' }),
+        jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true),
+        jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true),
+      );
+      return { recurringCardSetupIntentId: 'si_cof_9', consentTextVersion: require('../services/payment-method-consent-text').CONSENT_VERSION };
+    };
+
+    test('a verified capture the locked re-check refuses is retired after the rollback', async () => {
+      const body = verifiedCapture();
+      // The account was reactivated after the mint, so the locked re-check refuses.
+      resetStore(restartEstimate({ id: 'est-restart-11', token: 'tok-restart-11-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      const res = await putAccept('tok-restart-11-x012345678', body);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+      expect(retire).toHaveBeenCalledWith({ estimate: expect.objectContaining({ id: 'est-restart-11' }), setupIntentId: 'si_cof_9' });
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('a re-check that asks for a retry keeps the card: the page reuses it on that retry', async () => {
+      const body = verifiedCapture();
+      // The shape the re-check throws when it cannot read its state (restart.js).
+      spies.push(jest.spyOn(require('../services/cancellation-resolution/restart'), 'assertRestartAcceptEligible').mockRejectedValue(
+        Object.assign(new Error('We could not re-verify this restart just now — please try again in a moment.'), { status: 409, code: 'RESTART_RECHECK_RETRY' }),
+      ));
+      resetStore(restartEstimate({ id: 'est-restart-13', token: 'tok-restart-13-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer()];
+      const res = await putAccept('tok-restart-13-x012345678', body);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_RECHECK_RETRY');
+      expect(retire).not.toHaveBeenCalled();
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('two accepts sharing one card overlap on the row lock: the later one replays the success and retires nothing (codex pre-push P1)', async () => {
+      const body = verifiedCapture();
+      // The earlier accept converted the customer, so this one's locked re-check reads an active account and refuses.
+      // That accept's commit shows once this one's transaction has rolled back.
+      resetStore(restartEstimate({ id: 'est-restart-14', token: 'tok-restart-14-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      const restart = require('../services/cancellation-resolution/restart');
+      const realCheck = restart.assertRestartAcceptEligible;
+      let refusedUnderLock = false;
+      spies.push(jest.spyOn(restart, 'assertRestartAcceptEligible').mockImplementation(async (...args) => {
+        try {
+          return await realCheck(...args);
+        } catch (checkErr) {
+          refusedUnderLock = true;
+          throw checkErr;
+        }
+      }));
+      db.__state.onTable = (table) => {
+        if (table !== 'estimates' || !refusedUnderLock) return;
+        refusedUnderLock = false;
+        Object.assign(storedEstimate(), {
+          status: 'accepted', accepted_at: '2026-11-20T12:00:00.000Z', price_locked_at: '2026-11-20T12:00:00.000Z',
+        });
+      };
+      const res = await putAccept('tok-restart-14-x012345678', body);
+      expect(res.status).toBe(200);
+      expect(res.data).toEqual(expect.objectContaining({ success: true }));
+      expect(retire).not.toHaveBeenCalled();
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('a merge or undo moved the estimate to another customer, whose accept then committed: no replay, the 409 stays, and nothing is retired (codex pre-push P0)', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-16', token: 'tok-restart-16-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      const firstOwner = storedEstimate().customer_id;
+      expect(firstOwner).toBeTruthy();
+      const restart = require('../services/cancellation-resolution/restart');
+      const realCheck = restart.assertRestartAcceptEligible;
+      let refusedUnderLock = false;
+      spies.push(jest.spyOn(restart, 'assertRestartAcceptEligible').mockImplementation(async (...args) => {
+        try {
+          return await realCheck(...args);
+        } catch (checkErr) {
+          refusedUnderLock = true;
+          throw checkErr;
+        }
+      }));
+      db.__state.onTable = (table) => {
+        if (table !== 'estimates' || !refusedUnderLock) return;
+        refusedUnderLock = false;
+        Object.assign(storedEstimate(), {
+          customer_id: 'cust-moved-to', status: 'accepted',
+          accepted_at: '2026-11-20T12:00:00.000Z', price_locked_at: '2026-11-20T12:00:00.000Z',
+        });
+      };
+      const res = await putAccept('tok-restart-16-x012345678', body);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+      expect(res.data.success).toBeUndefined();
+      expect(JSON.stringify(res.data)).not.toMatch(/\/pay\//);
+      expect(retire).not.toHaveBeenCalled();
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('a merge moved the estimate to another customer whose accept is still in flight: the 409 stays and nothing is retired (codex pre-push P1)', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-17', token: 'tok-restart-17-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      const restart = require('../services/cancellation-resolution/restart');
+      const realCheck = restart.assertRestartAcceptEligible;
+      let refusedUnderLock = false;
+      spies.push(jest.spyOn(restart, 'assertRestartAcceptEligible').mockImplementation(async (...args) => {
+        try {
+          return await realCheck(...args);
+        } catch (checkErr) {
+          refusedUnderLock = true;
+          throw checkErr;
+        }
+      }));
+      // The new owner's accept has not committed when this request reads the row: still sent, but owned by them.
+      db.__state.onTable = (table) => {
+        if (table !== 'estimates' || !refusedUnderLock) return;
+        refusedUnderLock = false;
+        Object.assign(storedEstimate(), { customer_id: 'cust-moved-to' });
+      };
+      const res = await putAccept('tok-restart-17-x012345678', body);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+      expect(retire).not.toHaveBeenCalled();
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('control: the same refusal on an estimate still not accepted keeps the 409 and retires the card', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-15', token: 'tok-restart-15-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      const res = await putAccept('tok-restart-15-x012345678', body);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+      expect(retire).toHaveBeenCalledWith({ estimate: expect.objectContaining({ id: 'est-restart-15' }), setupIntentId: 'si_cof_9' });
+    });
+
+    test('the owner read and the retirement share one transaction on the estimate row lock (codex pre-push P1)', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-18', token: 'tok-restart-18-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      // An accept takes this lock before it re-reads its card live: one that commits first reads as accepted here, and
+      // one that commits after finds the card retired.
+      let atRetire = null;
+      retire.mockImplementation(async () => {
+        atRetire = { inTransaction: db.__state.txDepth > 0, estimateRowLocked: db.__state.txLocks.includes('estimates') };
+        return { ok: true, retired: true };
+      });
+      const res = await putAccept('tok-restart-18-x012345678', body);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+      expect(retire).toHaveBeenCalledTimes(1);
+      expect(atRetire).toEqual({ inTransaction: true, estimateRowLocked: true });
+    });
+
+    test('a staff change that lands after the first read is refused on the locked row, ahead of the consumer notice (codex pre-push P1)', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-20', token: 'tok-restart-20-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer()];
+      const consumerNotice = require('../services/estimate-consumer-notice');
+      // The route's first check passes; the locked one would ask for a signature.
+      const blocks = jest.spyOn(consumerNotice, 'consumerNoticeBlocksAccept').mockResolvedValueOnce(false).mockResolvedValue(true);
+      spies.push(blocks);
+      // Staff turned invoice billing on after the route's first read: the row the accept locks carries it.
+      db.__state.onTable = (table) => {
+        if (table !== 'estimates' || db.__state.txDepth === 0 || storedEstimate().bill_by_invoice) return;
+        storedEstimate().bill_by_invoice = true;
+      };
+      const priorGate = process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
+      process.env.GATE_ESTIMATE_CONSUMER_NOTICE = 'true';
+      try {
+        const res = await putAccept('tok-restart-20-x012345678', body);
+        expect(res.status).toBe(409);
+        expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+        expect(blocks).toHaveBeenCalledTimes(1);
+        // The verified capture the page drops is retired, as on the plan re-check.
+        expect(retire).toHaveBeenCalledWith({ estimate: expect.objectContaining({ id: 'est-restart-20' }), setupIntentId: 'si_cof_9' });
+        expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
+        else process.env.GATE_ESTIMATE_CONSUMER_NOTICE = priorGate;
+      }
+    });
+
+    test('a retirement Stripe cannot confirm under that lock answers 503 and accepts nothing (codex pre-push P1)', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-19', token: 'tok-restart-19-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      retire.mockResolvedValue({ ok: false, reason: 'retire_failed' });
+      const res = await putAccept('tok-restart-19-x012345678', body);
+      expect(res.status).toBe(503);
+      expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+      expect(retire).toHaveBeenCalledTimes(1);
+      expect(storedEstimate().status).toBe('sent');
+    });
   });
 
   test('a still-churned customer passes the revalidation and the accept commits', async () => {
@@ -4793,6 +5075,101 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
     expect(storedEstimate().status).toBe('sent');
     expect(storedEstimate().price_locked_at == null).toBe(true);
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test.each(['bill_by_invoice', 'show_one_time_option'])('an old link to a quote staff changed (%s on) refuses the accept (409) and rolls back (codex pre-push P0)', async (column) => {
+    // Everything else passes: a still-plain account and the slot the page holds.
+    resetStore(planStartEstimate({ id: 'est-plan-start-7', token: 'tok-plan-start-7-x012345', [column]: true }));
+    db.__state.tables.customers = [leadCustomer()];
+    const res = await putAccept('tok-plan-start-7-x012345', heldSlot('est-plan-start-7'));
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('PLAN_START_STATE_CHANGED');
+    expect(res.data.error).toMatch(/This estimate changed since it was created/);
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('an invoice-mode old link sends no slot (invoice mode skips the pick) and still gets the changed refusal, never the slot prompt (codex pre-push P1)', async () => {
+    resetStore(planStartEstimate({ id: 'est-plan-start-8', token: 'tok-plan-start-8-x012345', bill_by_invoice: true }));
+    db.__state.tables.customers = [leadCustomer()];
+    const res = await putAccept('tok-plan-start-8-x012345');
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('PLAN_START_STATE_CHANGED');
+    expect(res.data.error).toMatch(/This estimate changed since it was created/);
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('a verified capture the locked re-check refuses is retired after the rollback (codex pre-push P0)', async () => {
+    const RecurringCards = require('../services/recurring-card-on-file');
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    const spies = [
+      jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true }),
+      jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue({ enforced: true, required: true, exemptReason: null }),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({ ok: true, setupIntentId: 'si_cof_9', paymentMethodId: 'pm_cof_9', methodType: 'card' }),
+      jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true),
+    ];
+    try {
+      // The account was cancelled after the mint, so the locked re-check refuses.
+      resetStore(planStartEstimate({ id: 'est-plan-start-9', token: 'tok-plan-start-9-x012345' }));
+      db.__state.tables.customers = [leadCustomer({ active: false, pipeline_stage: 'churned' })];
+      const res = await putAccept('tok-plan-start-9-x012345', { ...heldSlot('est-plan-start-9'), recurringCardSetupIntentId: 'si_cof_9', consentTextVersion: CONSENT_VERSION });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PLAN_START_STATE_CHANGED');
+      expect(RecurringCards.retireOrphanedCaptureIntent).toHaveBeenCalledWith({ estimate: expect.objectContaining({ id: 'est-plan-start-9' }), setupIntentId: 'si_cof_9' });
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    } finally {
+      while (spies.length) spies.pop().mockRestore();
+    }
+  });
+
+  test('two accepts sharing one card overlap on the row lock: the later one replays the success and retires nothing (codex pre-push P1)', async () => {
+    const RecurringCards = require('../services/recurring-card-on-file');
+    const restart = require('../services/cancellation-resolution/restart');
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    const realCheck = restart.assertPlanStartAcceptEligible;
+    let refusedUnderLock = false;
+    const spies = [
+      jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true }),
+      jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue({ enforced: true, required: true, exemptReason: null }),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({ ok: true, setupIntentId: 'si_cof_9', paymentMethodId: 'pm_cof_9', methodType: 'card' }),
+      jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true),
+      jest.spyOn(restart, 'assertPlanStartAcceptEligible').mockImplementation(async (...args) => {
+        try {
+          return await realCheck(...args);
+        } catch (checkErr) {
+          refusedUnderLock = true;
+          throw checkErr;
+        }
+      }),
+    ];
+    try {
+      // This one's locked re-check refuses (the account no longer reads as plain), and the earlier accept's commit
+      // shows once this one's transaction has rolled back.
+      resetStore(planStartEstimate({ id: 'est-plan-start-10', token: 'tok-plan-start-10-x01234' }));
+      db.__state.tables.customers = [leadCustomer({ active: false, pipeline_stage: 'churned' })];
+      db.__state.onTable = (table) => {
+        if (table !== 'estimates' || !refusedUnderLock) return;
+        refusedUnderLock = false;
+        Object.assign(storedEstimate(), {
+          status: 'accepted', accepted_at: '2026-11-20T12:00:00.000Z', price_locked_at: '2026-11-20T12:00:00.000Z',
+        });
+      };
+      const res = await putAccept('tok-plan-start-10-x01234', { ...heldSlot('est-plan-start-10'), recurringCardSetupIntentId: 'si_cof_9', consentTextVersion: CONSENT_VERSION });
+      expect(res.status).toBe(200);
+      expect(res.data).toEqual(expect.objectContaining({ success: true }));
+      expect(RecurringCards.retireOrphanedCaptureIntent).not.toHaveBeenCalled();
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    } finally {
+      while (spies.length) spies.pop().mockRestore();
+    }
   });
 
   test('a still-plain account passes the revalidation and the accept commits', async () => {

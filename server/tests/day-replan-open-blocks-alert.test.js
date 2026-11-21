@@ -20,11 +20,19 @@ jest.mock('../services/admin-alert-episodes', () => ({
 }));
 // The fill list's own reads and check are its suite's (day-replan-fill-list.test.js): here, none fits unless a test says so.
 jest.mock('../services/day-replan/fill-list', () => ({
-  fillList: jest.fn(async (_c, blocks) => ({ checked: 0, fitted: 0, noLocation: 0, unread: 0, byBlock: blocks.map(() => []) })),
-  MAX_PER_BLOCK: 3,
+  fillList: jest.fn(async (_c, blocks) => ({ checked: 0, fitted: 0, noLocation: 0, unread: 0,
+    leads: { checked: 0, fitted: 0, noLocation: 0, unread: 0 }, visits: { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unread: 0 },
+    byBlock: blocks.map(() => []) })),
+  MAX_PER_BLOCK: 3, MOVE_UP_DAYS: 7,
+}));
+
+// The rain note's own reads are its suite's (day-replan-rain-note.test.js): here, a dry forecast unless a test says so.
+jest.mock('../services/day-replan/rain-note', () => ({
+  rainNote: jest.fn(async () => ({ days: [{ day: '2026-11-18', areas: [], gaps: [] }], unread: [], outlooks: { sarasota: [] } })),
 }));
 
 const { composeAdminAlert, raiseAdminAlert } = require('../services/admin-alert-compose');
+const { rainNote } = require('../services/day-replan/rain-note');
 const { openAdminAlertKeys, closeAdminAlertKeys } = require('../services/admin-alert-episodes');
 const { absentTechDays } = require('../services/technician-eligibility');
 const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
@@ -147,13 +155,21 @@ describe('the copy', () => {
   });
 });
 
-describe('the fill list (fill-list.js): open estimates that fit a listed block', () => {
+describe('the fill list (fill-list.js): open estimates, leads and plan visits that fit a listed block', () => {
   const sum = _internals.summarize([{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([wait(545, 75), tail(695, 325)]) }], new Map([[TECH, 'Pat']]));
   const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
   // The offered window is the hour the visit starts in: the van may come after it.
-  const line = (estimateId, startMin, addedDriveMin, extra = {}) => ({ estimateId, name: `Pat ${estimateId}`, label: 'Pest Control', length: 60,
+  const line = (id, startMin, addedDriveMin, extra = {}) => ({ kind: 'estimate', id, name: `Pat ${id}`, label: 'Pest Control', length: 60,
     onSiteMin: 60, windowStart: hhmm(Math.floor(startMin / 60) * 60), startMin, endMin: startMin + 60, addedDriveMin, ...extra });
-  const fill = { checked: 4, fitted: 2, noLocation: 1, unread: 1, byBlock: [[line('e1', 560, 4)], [line('e2', 720, 9), line('e1', 780, 12, { name: null })]] };
+  const noLeads = { checked: 0, fitted: 0, noLocation: 0, unread: 0 };
+  const noVisits = { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unread: 0 };
+  const fill = { checked: 4, fitted: 2, noLocation: 1, unread: 1, leads: noLeads, visits: noVisits,
+    byBlock: [[line('e1', 560, 4)], [line('e2', 720, 9), line('e1', 780, 12, { name: null })]] };
+  // Under the second block: an open estimate, a lead's look and a plan visit moved up (booked Tue Nov 24 at 2:00 PM).
+  const mixed = { ...fill, leads: { checked: 2, fitted: 1, noLocation: 1, unread: 0 }, visits: { checked: 5, fitted: 2, remindersOff: 1, sharedDay: 2, unread: 1 },
+    byBlock: [[], [line('e2', 720, 9),
+      line('l1', 800, 6, { kind: 'lead', name: 'Dana K', label: 'Waves Assessment', length: 30, onSiteMin: 30, endMin: 830 }),
+      line('v1', 900, 5, { kind: 'visit', name: 'Sam R', label: 'Quarterly Pest Control Service', onSiteMin: 35, endMin: 935, from: { day: '2026-11-24', start: 840 } })]] };
 
   test('each block carries its technician id, planned or by the hour grid', () => {
     expect(sum.blocks.map((b) => b.techId)).toEqual([TECH, TECH]);
@@ -177,15 +193,43 @@ describe('the fill list (fill-list.js): open estimates that fit a listed block',
     ].join('\n'));
     // The 9:05 block is 75 minutes, short of a job and its drive, and holds a fit: the line says why.
     expect(text).toContain('Fill list: 4 open estimates checked, 2 fit an opening (1 without a stored location, 1 unread).'
-      + ' Each block lists up to 3, least added drive first. Each fit is the staff finder\'s check of a new visit on the day as booked.'
+      + ' 0 leads that asked for an assessment or an inspection checked, 0 fit. 0 plan visits checked, 0 could move up.'
+      + ' Each block lists up to 3, least added drive first: the best open estimate, lead and plan visit that fit it,'
+      + ' then the next best fits.'
+      + ' Each fit is the staff finder\'s check of a new visit on the day as booked.'
       + ' A block short of 80 minutes can still hold a job when the stops around it have room for the drive.'
-      + ' Nothing is held or booked; staff decide whether to call.');
+      + ' A plan visit moves up at most 7 days, and its customer was told a day: call before moving it.'
+      + ' Nothing is held, booked or moved; staff decide whether to call.');
     expect(_internals.detailText(sum, { ...fill, byBlock: [[], fill.byBlock[1]] })).not.toContain('A block short of');
-    expect(_internals.fillSummary({ checked: 1, fitted: 0, noLocation: 0, unread: 0, byBlock: [] }))
-      .toBe('Fill list: 1 open estimate checked, 0 fit an opening. Each block lists up to 3, least added drive first.'
-        + ' Each fit is the staff finder\'s check of a new visit on the day as booked. Nothing is held or booked; staff decide whether to call.');
+    expect(_internals.fillSummary({ checked: 1, fitted: 0, noLocation: 0, unread: 0, leads: { ...noLeads, checked: 1 }, visits: { ...noVisits, checked: 1 }, byBlock: [] }))
+      .toBe('Fill list: 1 open estimate checked, 0 fit an opening. 1 lead that asked for an assessment or an inspection checked, 0 fit.'
+        + ' 1 plan visit checked, 0 could move up.'
+        + ' Each block lists up to 3, least added drive first: the best open estimate, lead and plan visit that fit it,'
+      + ' then the next best fits.'
+        + ' Each fit is the staff finder\'s check of a new visit on the day as booked.'
+        + ' A plan visit moves up at most 7 days, and its customer was told a day: call before moving it.'
+        + ' Nothing is held, booked or moved; staff decide whether to call.');
     // No fill list asked (an older caller): no fill line at all.
     expect(_internals.detailText(sum)).not.toContain('Fill list');
+  });
+
+  test('a lead and a plan visit have their own heads; a plan visit names the day and hour the move leaves open', () => {
+    const text = _internals.detailText(sum, mixed);
+    expect(text).toContain([
+      '- Sat Nov 21, Pat: 11:35 AM to 5:00 PM (5 h 25 min, room for 4 jobs)',
+      '  - Open estimate, Pat e2 (Pest Control, 1 h): +9 min drive, finishes 1:00 PM',
+      '  - Lead, Dana K (Waves Assessment, 30 min): +6 min drive, finishes 1:50 PM',
+      '  - Plan visit moved up, Sam R (Quarterly Pest Control Service, 1 h visit, 35 min on site): +5 min drive, finishes 3:35 PM;'
+        + ' leaves Tue Nov 24 2:00 PM open',
+    ].join('\n'));
+    // Each kind's count and what it left out.
+    expect(text).toContain('Fill list: 4 open estimates checked, 2 fit an opening (1 without a stored location, 1 unread).'
+      + ' 2 leads that asked for an assessment or an inspection checked, 1 fit (1 without a stored location).'
+      + ' 5 plan visits checked, 2 could move up (1 unread); left out: 1 with the 24-hour reminder off,'
+      + ' 2 sharing the day with another visit of the customer.');
+    // A plan visit with no booked hour names its day only.
+    const untimed = { ...mixed.byBlock[1][2], from: { day: '2026-11-24', start: null } };
+    expect(_internals.detailText(sum, { ...mixed, byBlock: [[], [untimed]] })).toContain('finishes 3:35 PM; leaves Tue Nov 24 open');
   });
 
   test('not built: the detail says why and lists no line', () => {
@@ -202,14 +246,30 @@ describe('the fill list (fill-list.js): open estimates that fit a listed block',
     for (const none of [{ ...fill, fitted: 0 }, { error: 'a read failed' }, null]) {
       expect(_internals.alertSpec(withGain, none).why).toBe('Biggest block: Sat Nov 21, 11:35 AM to 5:00 PM; re-timing booked jobs could free 1 h 35 min more.');
     }
+    // Leads count with the open estimates; plan visits only when no new work fits.
+    const why = (f) => _internals.alertSpec(withGain, f).why.replace('Biggest block: Sat Nov 21, 11:35 AM to 5:00 PM. ', '');
+    expect(why(mixed)).toBe('2 open estimates and 1 lead fit an opening.');
+    expect(why({ ...mixed, fitted: 0 })).toBe('1 lead fits an opening.');
+    expect(why({ ...mixed, fitted: 0, leads: { ...mixed.leads, fitted: 3 } })).toBe('3 leads fit an opening.');
+    const noNewWork = { ...mixed, fitted: 0, leads: noLeads };
+    expect(why(noNewWork)).toBe('2 plan visits could move up into an opening.');
+    expect(why({ ...noNewWork, visits: { ...noVisits, fitted: 1 } })).toBe('1 plan visit could move up into an opening.');
   });
 
   test('the row keeps each line with its block, or why the list was not built', () => {
-    expect(_internals.fillMetadata(fill, sum.blocks)).toEqual({ checked: 4, fitted: 2, lines: [
-      { estimateId: 'e1', day: '2026-11-21', techId: TECH, window: '09:00', start: 560, addedDriveMin: 4 },
-      { estimateId: 'e2', day: '2026-11-21', techId: TECH, window: '12:00', start: 720, addedDriveMin: 9 },
-      { estimateId: 'e1', day: '2026-11-21', techId: TECH, window: '13:00', start: 780, addedDriveMin: 12 },
+    const counts = { leads: { checked: 0, fitted: 0 }, visits: { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0 } };
+    expect(_internals.fillMetadata(fill, sum.blocks)).toEqual({ checked: 4, fitted: 2, ...counts, lines: [
+      { kind: 'estimate', estimateId: 'e1', day: '2026-11-21', techId: TECH, window: '09:00', start: 560, addedDriveMin: 4 },
+      { kind: 'estimate', estimateId: 'e2', day: '2026-11-21', techId: TECH, window: '12:00', start: 720, addedDriveMin: 9 },
+      { kind: 'estimate', estimateId: 'e1', day: '2026-11-21', techId: TECH, window: '13:00', start: 780, addedDriveMin: 12 },
     ] });
+    // A lead's line keeps the lead; a plan visit's keeps the visit and where it is booked now.
+    expect(_internals.fillMetadata(mixed, sum.blocks)).toEqual({ checked: 4, fitted: 2, leads: { checked: 2, fitted: 1 },
+      visits: { checked: 5, fitted: 2, remindersOff: 1, sharedDay: 2 }, lines: [
+        { kind: 'estimate', estimateId: 'e2', day: '2026-11-21', techId: TECH, window: '12:00', start: 720, addedDriveMin: 9 },
+        { kind: 'lead', leadId: 'l1', day: '2026-11-21', techId: TECH, window: '13:00', start: 800, addedDriveMin: 6 },
+        { kind: 'visit', serviceId: 'v1', day: '2026-11-21', techId: TECH, window: '15:00', start: 900, addedDriveMin: 5, fromDay: '2026-11-24', fromStart: 840 },
+      ] });
     expect(_internals.fillMetadata({ error: 'a read failed' }, sum.blocks)).toEqual({ error: 'a read failed' });
   });
 });
@@ -219,15 +279,81 @@ describe('runOpenBlocksAlert', () => {
 
   test('the fill list gets the listed blocks and this morning; its lines, count and metadata reach the row', async () => {
     fillList.mockImplementationOnce(async (_c, blocks) => ({ checked: 1, fitted: 1, noLocation: 0, unread: 0,
-      byBlock: blocks.map((_b, i) => (i ? [] : [{ estimateId: 'e1', name: 'Pat e1', label: 'Pest Control', length: 60, windowStart: '11:00', startMin: 720, endMin: 780, addedDriveMin: 7 }])) }));
+      leads: { checked: 0, fitted: 0, noLocation: 0, unread: 0 }, visits: { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unread: 0 },
+      byBlock: blocks.map((_b, i) => (i ? [] : [{ kind: 'estimate', id: 'e1', name: 'Pat e1', label: 'Pest Control', length: 60, windowStart: '11:00', startMin: 720, endMin: 780, addedDriveMin: 7 }])) }));
     const { conn } = saturday();
     await runOpenBlocksAlert({ conn, now: NOW });
-    expect(fillList).toHaveBeenCalledWith(conn, [expect.objectContaining({ day: '2026-11-21', techId: TECH, start: 695, min: 325 })], NOW);
+    // The rain note's NWS hours give the list its rain rule (the default mock: a dry Sarasota answer).
+    expect(fillList).toHaveBeenCalledWith(conn, [expect.objectContaining({ day: '2026-11-21', techId: TECH, start: 695, min: 325 })], NOW, { outlooks: { sarasota: [] } });
     const [, spec, opts] = raiseAdminAlert.mock.calls[0];
     expect(spec.why).toBe('Biggest block: Sat Nov 21, 11:35 AM to 5:00 PM. 1 open estimate fits an opening.');
     expect(opts.detail).toContain('- Sat Nov 21, Pat: 11:35 AM to 5:00 PM (5 h 25 min, room for 4 jobs)\n  - Open estimate, Pat e1 (Pest Control, 1 h): +7 min drive, finishes 1:00 PM');
     // The 11:00 window with the van there at noon: the row keeps both, so a booking at 11:00 matches the line.
-    expect(opts.metadata.fill).toEqual({ checked: 1, fitted: 1, lines: [{ estimateId: 'e1', day: '2026-11-21', techId: TECH, window: '11:00', start: 720, addedDriveMin: 7 }] });
+    expect(opts.metadata.fill).toEqual({ checked: 1, fitted: 1, leads: { checked: 0, fitted: 0 }, visits: { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0 },
+      lines: [{ kind: 'estimate', estimateId: 'e1', day: '2026-11-21', techId: TECH, window: '11:00', start: 720, addedDriveMin: 7 }] });
+  });
+
+  test('the rain note: each day\'s rain hours by area reach the detail and the row; a failed read never holds the notice', async () => {
+    const days = [
+      { day: '2026-11-18', areas: [{ zone: 'sarasota', spans: [{ start: 780, end: 1020, max: 80 }] },
+        { zone: 'venice_north_port', spans: [{ start: 480, end: 540, max: 60 }, { start: 840, end: 960, max: 70 }] }], gaps: [] },
+      { day: '2026-11-19', areas: [], gaps: ['palmetto', 'sarasota'] },
+      { day: '2026-11-20', areas: [{ zone: 'sarasota', spans: [{ start: 600, end: 660, max: 65 }] }], gaps: ['palmetto'] },
+    ];
+    rainNote.mockResolvedValueOnce({
+      days,
+      unread: ['parrish'],
+      outlooks: { parrish: null, sarasota: [], venice_north_port: [] },
+    });
+    await runOpenBlocksAlert({ conn: saturday().conn, now: NOW });
+    expect(rainNote).toHaveBeenCalledWith(NOW);
+    let [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain([
+      'Rain hours by area (NWS chance of rain 60% or more, 8:00 AM to 5:00 PM):',
+      '- Wed Nov 18: Sarasota 1:00 PM to 5:00 PM (up to 80%); Venice/N.Port 8:00 AM to 9:00 AM (up to 60%), 2:00 PM to 4:00 PM (up to 70%)',
+      '- Thu Nov 19: none; no NWS reading for some hours in Palmetto, Sarasota',
+      '- Fri Nov 20: Sarasota 10:00 AM to 11:00 AM (up to 65%); no NWS reading for some hours in Palmetto',
+      'The NWS forecast did not answer for Parrish.',
+    ].join('\n'));
+    expect(opts.metadata.rain).toEqual({ days, unread: ['parrish'] });
+
+    // No area answered: one line says so.
+    raiseAdminAlert.mockClear();
+    rainNote.mockResolvedValueOnce({ days: [{ day: '2026-11-18', areas: [], gaps: [] }], unread: ['parrish', 'sarasota'], outlooks: { parrish: null, sarasota: null } });
+    await runOpenBlocksAlert({ conn: saturday().conn, now: NOW });
+    [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain('Rain hours: the NWS forecast did not answer this morning.');
+    expect(opts.detail).not.toContain('Rain hours by area');
+
+    // A read that throws: the notice still goes out and says why.
+    raiseAdminAlert.mockClear();
+    rainNote.mockRejectedValueOnce(new Error('nws down'));
+    await expect(runOpenBlocksAlert({ conn: saturday().conn, now: NOW })).resolves.toMatchObject({ status: 'raised', openMin: 325 });
+    [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain('Rain hours: not read this morning (a read failed).');
+    expect(opts.metadata.rain).toEqual({ error: 'a read failed' });
+  });
+
+  test('rain: a rain-safe line says it runs in rain hours, the jobs left out are counted, and the row keeps both', async () => {
+    fillList.mockImplementationOnce(async (_c, blocks) => ({ checked: 2, fitted: 0, noLocation: 0, unread: 0,
+      leads: { checked: 1, fitted: 1, noLocation: 0, unread: 0 }, visits: { checked: 1, fitted: 0, remindersOff: 0, sharedDay: 0, unread: 0 },
+      rain: { checked: true, leftOut: 3 },
+      byBlock: blocks.map((_b, i) => (i ? [] : [{ kind: 'lead', id: 'l1', name: 'Dana l1', label: 'Waves Assessment', length: 30, windowStart: '12:00', startMin: 720, endMin: 750, addedDriveMin: 9, inRain: true }])) }));
+    await runOpenBlocksAlert({ conn: saturday().conn, now: NOW });
+    const [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain('  - Lead, Dana l1 (Waves Assessment, 30 min): +9 min drive, finishes 12:30 PM; runs in rain hours (rain-safe work)');
+    expect(opts.detail).toContain(' Rain: 3 jobs left out of an opening in rain hours (the rain rules: only rain-safe work runs in rain).');
+    expect(opts.metadata.fill.rain).toEqual({ checked: true, leftOut: 3 });
+    expect(opts.metadata.fill.lines).toEqual([expect.objectContaining({ kind: 'lead', inRain: true })]);
+  });
+
+  test('rain: a rain note that was not read gives the fill list no rain rule', async () => {
+    rainNote.mockRejectedValueOnce(new Error('nws down'));
+    const { conn } = saturday();
+    await runOpenBlocksAlert({ conn, now: NOW });
+    expect(fillList).toHaveBeenCalledWith(conn, expect.any(Array), NOW, { outlooks: null });
+    const [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).not.toContain(' Rain: ');
   });
 
   test('a fill list that fails leaves the notice as it was, with the reason', async () => {

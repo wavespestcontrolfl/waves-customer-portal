@@ -9,6 +9,7 @@ const m1 = require('../models/migrations/20261119140000_roof_entry_reads');
 const m2 = require('../models/migrations/20261119150000_roof_entry_read_claims');
 const m3 = require('../models/migrations/20261119160000_roof_entry_read_ctx_key');
 const m4 = require('../models/migrations/20261119170000_roof_entry_read_rollback_guard');
+const m5 = require('../models/migrations/20261120200000_roof_entry_read_tech_pins');
 
 jest.setTimeout(60000);
 (SKIP ? describe.skip : describe)('roof_entry_reads migrations on PostgreSQL', () => {
@@ -21,7 +22,7 @@ jest.setTimeout(60000);
     await database.raw('CREATE SCHEMA ??', [schema]);
     await database.raw('CREATE TABLE ??.estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid)', [schema]);
     await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid())', [schema]);
-    for (const m of [m1, m2, m3, m4]) await m.up(database);
+    for (const m of [m1, m2, m3, m4, m5]) await m.up(database);
   });
   afterEach(async () => {
     await database.raw('DROP SCHEMA ?? CASCADE', [schema]);
@@ -139,5 +140,28 @@ jest.setTimeout(60000);
     await m4.up(database);
     // The column is dropped by the down and rebuilt by the up from the keys as they stand (the back-fill).
     expect((await database('roof_entry_reads').where({ id: c.id }).first()).context_key).toBe(ctxKey(null, cust));
+  });
+
+  test('the tech pins migration adds the columns with safe defaults, is idempotent, and its down drops them without losing the rest', async () => {
+    const row = await read({ tech_final_count: 4 });
+    expect(row.tech_pins).toBeNull();
+    expect(row.hide_on_estimate).toBe(false);
+    expect(row.crop_lat).toBeNull();
+    expect(row.crop_lng).toBeNull();
+    const saved = await database('roof_entry_reads').where({ id: row.id }).update({
+      tech_pins: JSON.stringify([{ x: 0.5, y: 0.5, type: 'other', note: null }]), hide_on_estimate: true, crop_lat: 27.46, crop_lng: -82.57,
+    }).returning('*').then(([r]) => r);
+    expect(saved.tech_pins).toEqual([{ x: 0.5, y: 0.5, type: 'other', note: null }]);
+    expect(Number(saved.crop_lat)).toBe(27.46);
+    expect(Number(saved.crop_lng)).toBe(-82.57);
+    await m5.up(database);
+    await m5.down(database);
+    for (const c of ['tech_pins', 'hide_on_estimate', 'crop_lat', 'crop_lng']) expect(await database.schema.hasColumn('roof_entry_reads', c)).toBe(false);
+    expect((await database('roof_entry_reads').where({ id: row.id }).first()).tech_final_count).toBe(4);
+    await m5.down(database);
+    await m5.up(database);
+    const again = await database('roof_entry_reads').where({ id: row.id }).first();
+    expect(again.tech_pins).toBeNull();
+    expect(again.hide_on_estimate).toBe(false);
   });
 });
