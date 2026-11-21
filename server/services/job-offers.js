@@ -1706,8 +1706,9 @@ async function makeDueStaffRecords() {
 // hire's contract: the newest signed offer of the application. An item is done when ANY signed offer of the
 // application holds its mark, so a second signature of a reopened application keeps what was done; a write moves the
 // marks to the newest signed offer.
-// job_offers.checklist.first_days_bell: the Eastern day the bell is settled for (the morning pass handled the offer,
-// or a mark closed the bell that day), or 'closed' (the pass closed the bell of an application no longer Hired).
+// job_offers.checklist.first_days_bell: the Eastern day the hire's bell is settled for: the pass handled the hire from
+// 7:00 AM, a bell stood, or a mark closed the bell. No NEW bell rings on a settled day. It is read across the hire's
+// signed offers and written on the newest.
 const FIRST_DAYS_ITEMS = [
   { key: 'driving_record', label: 'Driving record copy', inBell: 'the driving record copy' },
   { key: 'license', label: "Driver's license check", inBell: "the driver's license check" },
@@ -1829,47 +1830,42 @@ async function setChecklistItem(applicationId, offerId, key, done, actor, clock 
   });
 }
 
-// The morning bell of one offer. Locks, in this order: the application row, its signed offers. The clock is read
-// after them. Returns 'rung' (a new bell) | 'closed' (the bell of an application no longer Hired, or of a hire with
-// no item due that day) | null.
-async function ringChecklist(offerId, clock) {
+// The open bell of a hire's checklist, if one stands.
+const standingChecklistBell = (conn, applicationId) => conn('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+  .whereRaw("metadata->>'dedupeKey' = ?", [checklistBellKey(applicationId)]).first('id');
+
+// Makes the bell of one hire true to the checklist. Locks, in this order: the application row, its signed offers. The
+// clock is read after them. Returns 'rung' (a new bell) | 'closed' (a standing bell with nothing left to ask for) | null.
+async function ringChecklist(applicationId, clock) {
   return db.transaction(async (trx) => {
     await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(STAFF_LOCK_WAIT_MS)]);
-    const found = await trx('job_offers').where({ id: offerId }).first('application_id');
-    const application = found && await trx('job_applications').where({ id: found.application_id }).forUpdate().skipLocked().first();
+    // A locked row is a write in progress: the next tick takes the hire.
+    const application = await trx('job_applications').where({ id: applicationId }).forUpdate().skipLocked().first();
     if (!application) return null;
     const held = await loadFirstDays(trx, application);
     const now = clock();
     const today = etDateString(now);
-    if (!held) {
-      const offer = await trx('job_offers').where({ id: offerId }).forUpdate().first();
-      await trx('job_offers').where({ id: offerId }).update({
-        checklist: JSON.stringify({ ...asObject(offer.checklist), [FIRST_DAYS_BELL_KEY]: 'closed' }),
-      });
-      const closed = await require('./admin-alert-episodes').closeAdminAlertKeys(trx, [checklistBellKey(application.id)], 'checklist_done', {
-        now, resolution: 'The application is no longer Hired',
-      });
-      return closed ? 'closed' : null;
-    }
+    const standing = Boolean(await standingChecklistBell(trx, application.id));
+    const close = async (resolution) => {
+      await require('./admin-alert-episodes').closeAdminAlertKeys(trx, [checklistBellKey(application.id)], 'checklist_done', { now, resolution });
+      return standing ? 'closed' : null;
+    };
+    if (!held) return close('The application is no longer Hired');
     const [offer] = held.signed;
-    // The time is read again here: a pass that started before midnight must not ring a hire just after it and settle
-    // the new day before its morning.
-    if (offer.id !== offerId || minuteOfDayEt(now) < FIRST_DAYS_BELL_FROM_ET) return null;
-    // The day is settled for the hire, not for one offer: a second signature after a mark or a bell does not ring
-    // the same day again.
-    const settled = held.signed.some((row) => asObject(row.checklist)[FIRST_DAYS_BELL_KEY] === today);
-    // Once a day for a hire, with or without a bell: the day's mark keeps the offer out of the later ticks.
-    await storeFirstDaysMarks(trx, held.signed, held.marks, { [FIRST_DAYS_BELL_KEY]: today });
-    if (settled) return null;
+    const stampOf = (row) => asObject(row.checklist)[FIRST_DAYS_BELL_KEY];
+    const settled = held.signed.some((row) => stampOf(row) === today);
+    const fromSeven = minuteOfDayEt(now) >= FIRST_DAYS_BELL_FROM_ET;
     const open = firstDaysItems(offer, held.marks, held.firstDay).filter((item) => !item.doneAt);
     const due = open.filter((item) => item.ringFrom <= today);
-    if (!due.length) {
-      // Nothing is due today (the owner moved the first day later): an open bell would keep an old due day.
-      const closed = await require('./admin-alert-episodes').closeAdminAlertKeys(trx, [checklistBellKey(application.id)], 'checklist_done', {
-        now, resolution: 'No first-days item is due today',
-      });
-      return closed ? 'closed' : null;
+    // The day is settled when the pass handles the hire from 7:00 AM, and while a bell stands: a bell that the owner
+    // then closes by hand stays closed until the next morning. The newest signed offer carries the day.
+    if (stampOf(offer) !== today && (settled || fromSeven || (standing && due.length))) {
+      await storeFirstDaysMarks(trx, held.signed, held.marks, { [FIRST_DAYS_BELL_KEY]: today });
     }
+    // Nothing to ask for today (every item is done, or the owner moved the first day later): no bell stands.
+    if (!due.length) return close(open.length ? 'No first-days item is due today' : 'Every first-days item is marked done');
+    // A NEW bell rings from 7:00 AM Eastern, once an Eastern day for a hire. A standing bell is only updated.
+    if (!standing && (settled || !fromSeven)) return null;
     const next = due.reduce((first, item) => (item.dueOn < first.dueOn ? item : first));
     const raised = await raiseBell('checklist', offer, { open: open.length, next, today }, trx);
     return raised && !raised.deduped ? 'rung' : null;
@@ -1877,45 +1873,46 @@ async function ringChecklist(offerId, clock) {
 }
 
 /**
- * The morning bell of the first-days checklist (scheduler.js, the 15-minute job offer tick; GATE_JOB_OFFERS). From
- * 7:00 AM Eastern to midnight, once a day for each hire: while an item is due, the owner has ONE open bell that says how many
- * items are open and which is next. An open bell is updated with no ring. A bell that the owner closed, or that a mark
- * closed, is raised again the next morning while an item is still due. A catch-up pass within the day: each run takes
- * every hire the day's pass has not handled, so a dropped tick loses nothing. It also closes the bell of an
- * application that is no longer Hired, and an open bell of a hire with no item due that day (a first day moved
- * later). It sends no one anything.
- * Returns { rung, closed, failed }; the caller fails the job when failed > 0.
+ * The bell of the first-days checklist (scheduler.js, the 15-minute job offer tick; GATE_JOB_OFFERS). Each run makes
+ * the bell of a hire true to the checklist:
+ *  - From 7:00 AM Eastern, once an Eastern day for a hire: while an item is due, the owner gets ONE bell that says how
+ *    many items are open and which is next. A bell that the owner closed, or that a mark closed, rings again the next
+ *    morning while an item is still due. Each run takes every hire the day has not settled, so a dropped tick loses
+ *    nothing.
+ *  - In every run, also at night: a standing bell is updated with no ring (its words, its offer), and closed when it
+ *    has nothing left to ask for (the application is no longer Hired, or no item is due that day).
+ * It sends no one anything. Returns { rung, closed, failed }; the caller fails the job when failed > 0.
  * clock: the time source, for tests. The scheduler passes none.
  */
 async function ringDueChecklists(clock = () => new Date()) {
   const result = { rung: 0, closed: 0, failed: 0 };
   const now = clock();
-  // Bells wait for 7:00 AM Eastern. The cleanup for an application that left Hired runs in every tick, also at night.
-  const ringing = minuteOfDayEt(now) >= FIRST_DAYS_BELL_FROM_ET;
   const handled = `o.checklist ->> '${FIRST_DAYS_BELL_KEY}'`;
   const allDone = FIRST_DAYS_ITEMS.map((item) => `o.checklist -> '${item.key}' IS NOT NULL`).join(' AND ');
-  // A Hired application's newest signed offer with an item not marked on it, once a day. Or an offer the pass handled
-  // before whose application is no longer Hired: its bell closes once, in the next tick (also on the day it rang).
-  const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
-    .where('o.status', 'accepted')
-    .whereRaw(`((?::boolean AND a.status = 'hired' AND ${handled} IS DISTINCT FROM ? AND NOT (${allDone}) AND NOT EXISTS (
+  // From 7:00 AM: a Hired application whose newest signed offer has an item not marked on it and is not settled today.
+  const unsettled = minuteOfDayEt(now) < FIRST_DAYS_BELL_FROM_ET ? [] : await db('job_offers as o')
+    .join('job_applications as a', 'a.id', 'o.application_id')
+    .where({ 'o.status': 'accepted', 'a.status': 'hired' }).whereRaw(`${handled} IS DISTINCT FROM ?`, [etDateString(now)])
+    .whereRaw(`NOT (${allDone}) AND NOT EXISTS (
         SELECT 1 FROM job_offers n WHERE n.application_id = o.application_id AND n.status = 'accepted'
-          AND (n.signed_at, n.id) > (o.signed_at, o.id)))
-      OR (a.status <> 'hired' AND ${handled} IS NOT NULL AND ${handled} <> 'closed'))`, [ringing, etDateString(now)])
-    .orderBy('o.signed_at').pluck('o.id');
-  for (const id of due) {
+          AND (n.signed_at, n.id) > (o.signed_at, o.id))`)
+    .orderBy('o.signed_at').pluck('o.application_id');
+  // In every run: an application with a standing bell.
+  const prefix = checklistBellKey('');
+  const standing = (await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+    .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [prefix]).orderBy('created_at')
+    .select(db.raw("metadata->>'dedupeKey' as bell_key"))).map((row) => row.bell_key.slice(prefix.length));
+  for (const id of new Set([...unsettled, ...standing])) {
     try {
       const outcome = await ringChecklist(id, clock);
       if (outcome) result[outcome] += 1;
     } catch (err) {
       result.failed += 1;
-      logger.error(`[job-offers] checklist bell failed (offer ${id}): ${errTag(err)}`);
+      logger.error(`[job-offers] checklist bell failed (application ${id}): ${errTag(err)}`);
     }
   }
   return result;
 }
-
-// ------------------------------------------------------------------ bells
 
 const BELLS = {
   signed: {

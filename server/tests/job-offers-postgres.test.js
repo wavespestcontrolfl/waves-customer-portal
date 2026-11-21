@@ -1946,11 +1946,14 @@ jest.setTimeout(120000);
         }
 
         beforeEach(async () => {
-          // The suite keeps its rows (one root transaction): the hires of earlier tests are not this test's.
+          // The suite keeps its rows (one root transaction): the hires of earlier tests are not this test's. Their
+          // items are done and their bells are closed.
           const mark = { at: '2026-01-01T00:00:00.000Z' };
           await root('job_offers').where({ status: 'accepted' }).update({
-            checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: mark, license: mark, workers_comp: mark, i9: mark, first_days_bell: 'closed' })]),
+            checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: mark, license: mark, workers_comp: mark, i9: mark })]),
           });
+          await root('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'job-offer-checklist:%'").whereNull('done_at')
+            .update({ done_at: new Date(), done_by: 'an earlier test' });
           // The bell rows are real: the alert writer's own rules decide a ring, an update and a close.
           const { raiseAdminAlert } = jest.requireActual('../services/admin-alert-compose');
           mockRaise.mockImplementation((...args) => raiseAdminAlert(...args));
@@ -2053,10 +2056,9 @@ jest.setTimeout(120000);
             link: `/admin/recruiting?application=${made.app.id}`, done_at: null,
           });
           expect(bells[0].metadata).toMatchObject({ doneWhen: 'checklist_done', applicationId: made.app.id, offerId: made.offer.id });
-          // The later ticks of the day do nothing.
-          mockRaise.mockClear();
+          // The later ticks of the day keep that one bell as it is: no ring, no second row, the same words.
           expect(await JobOffers.ringDueChecklists(morning(1, '07:15'))).toEqual(NONE);
-          expect(mockRaise).not.toHaveBeenCalled();
+          expect(await bellsOf(made.app.id)).toEqual(bells);
 
           // A mark closes the bell, in the write.
           await mark(made, 'driving_record', true, morning(1, '08:00')());
@@ -2192,12 +2194,18 @@ jest.setTimeout(120000);
           expect(await root('notifications').where({ id: open.id }).first()).toMatchObject({ done_by: 'episodes', resolution: 'The application is no longer Hired' });
           // The row the owner closed keeps his own words.
           expect(await bellsOf(made.app.id).where({ resolution: 'Closed by hand' })).toHaveLength(1);
-          expect((await offerRow(made.offer.id)).checklist.first_days_bell).toBe('closed');
+          // The close keeps the settled day: Hired again that afternoon does not ring a second time that day.
+          expect((await offerRow(made.offer.id)).checklist.first_days_bell).toBe(shiftDay(signedDay(), 2));
+          await root('job_applications').where({ id: made.app.id }).update({ status: 'hired' });
+          mockRaise.mockClear();
+          expect(await JobOffers.ringDueChecklists(morning(2, '15:00'))).toEqual(NONE);
+          expect(mockRaise).not.toHaveBeenCalled();
+          await root('job_applications').where({ id: made.app.id }).update({ status: 'rejected' });
           expect(await JobOffers.ringDueChecklists(morning(4))).toEqual(NONE);
-          // Hired again: the items are due again.
+          // Hired again on a later day: the items are due again.
           await root('job_applications').where({ id: made.app.id }).update({ status: 'hired' });
           expect(await JobOffers.ringDueChecklists(morning(5))).toEqual({ ...NONE, rung: 1 });
-          // Out of Hired at night: the cleanup does not wait for 7:00 AM.
+          // Out of Hired at night: the close does not wait for 7:00 AM.
           await root('job_applications').where({ id: made.app.id }).update({ status: 'rejected' });
           expect(await JobOffers.ringDueChecklists(morning(6, '01:00'))).toEqual({ ...NONE, closed: 1 });
           expect(await openBellsOf(made.app.id)).toHaveLength(0);
@@ -2209,8 +2217,9 @@ jest.setTimeout(120000);
           const [open] = await openBellsOf(made.app.id);
           expect(open.metadata).toMatchObject({ offerId: made.offer.id });
           await root('notifications').where({ id: open.id }).update({ read_at: new Date() });
+          // The applicant signs a replacement offer the same day: the next tick moves the standing bell to it.
           const second = await signAgain(made, { hourlyRate: 24 });
-          expect(await JobOffers.ringDueChecklists(morning(2))).toEqual(NONE);
+          expect(await JobOffers.ringDueChecklists(morning(1, '09:00'))).toEqual(NONE);
           const same = await openBellsOf(made.app.id);
           expect(same).toHaveLength(1);
           expect(same[0]).toMatchObject({ id: open.id, title: open.title, body: open.body });
@@ -2254,7 +2263,7 @@ jest.setTimeout(120000);
           const made = await hire();
           mockRaise.mockRejectedValueOnce(new Error('alert store down'));
           expect(await JobOffers.ringDueChecklists(morning(1))).toEqual({ ...NONE, failed: 1 });
-          expect(logger.error).toHaveBeenCalledWith(expect.stringContaining(`checklist bell failed (offer ${made.offer.id})`));
+          expect(logger.error).toHaveBeenCalledWith(expect.stringContaining(`checklist bell failed (application ${made.app.id})`));
           expect((await offerRow(made.offer.id)).checklist.first_days_bell).toBeUndefined();
 
           const clock = jest.fn(morning(1, '07:15'));
@@ -2269,8 +2278,7 @@ jest.setTimeout(120000);
           const where = (text) => seen.findIndex((sql) => sql.includes(text));
           expect(seen[where('lock_timeout')]).toContain('["3000"]');
           // The limit is the transaction's first statement; the application row is locked before its signed offers.
-          expect(where('select "application_id" from "job_offers"')).toBe(where('lock_timeout') + 1);
-          expect(where('skip locked')).toBeGreaterThan(where('lock_timeout'));
+          expect(where('skip locked')).toBe(where('lock_timeout') + 1);
           expect(where('order by "signed_at" desc, "id" desc for update')).toBeGreaterThan(where('skip locked'));
           // One read of the clock chose the offers; the offer's own read came after its locks.
           expect(clockReadsAtLock).toBe(1);
