@@ -2321,6 +2321,10 @@ router.put('/:productId/pricing', async (req, res, next) => {
     // multipack forms ("4 x 32 oz"), leaving normalized/landed unit costs
     // null and the recalculation blind to entered shipping/tax.
     const sizeOz = quantityToOz(quantity);
+    // A numeric 0 is an ENTERED free-shipping quote, not a blank field: it is
+    // stored as 0 so the delivered ranking keeps it instead of adding the
+    // vendor's shipping rule to a quote that said shipping is free.
+    const enteredShipping = shippingCost === 0 ? 0 : shippingCost || null;
     const landed = calcLandedCost(price, shippingCost, taxRate);
     const perOz = sizeOz ? Math.round(parseFloat(price) / sizeOz * 10000) / 10000 : null;
     const landedPerOz = sizeOz && landed != null ? Math.round(landed / sizeOz * 10000) / 10000 : perOz;
@@ -2338,7 +2342,7 @@ router.put('/:productId/pricing', async (req, res, next) => {
       is_active: true,
       availability_status: availabilityStatus || 'unknown',
       branch_name: branchLocation || null,
-      shipping_estimate: shippingCost || null,
+      shipping_estimate: enteredShipping,
       landed_unit_price: landedPerOz,
     };
 
@@ -2348,7 +2352,7 @@ router.put('/:productId/pricing', async (req, res, next) => {
     // those columns).
     const priceColumns = {
       ...skuColumn,
-      shipping_cost: shippingCost || null,
+      shipping_cost: enteredShipping,
       tax_rate: taxRate || null,
       landed_cost: landed,
       unit_normalized: sizeOz ? 'oz' : null,
@@ -2415,7 +2419,7 @@ router.put('/:productId/pricing', async (req, res, next) => {
         availability_status: availabilityStatus || 'unknown',
         branch_location: branchLocation || null,
         branch_name: branchLocation || null,
-        shipping_estimate: shippingCost || null,
+        shipping_estimate: enteredShipping,
         landed_unit_price: landedPerOz,
         fetched_at: db.fn.now(),
         captured_at: db.fn.now(),
@@ -3300,21 +3304,20 @@ function cogsResetFor(product, unitSizeOz) {
 // compare_vendor_pricing / find_cheapest_vendor (Codex #3974 r1 P1: the IB
 // fell back to raw pack price where this writer ranked per unit, so the two
 // could name different winners). Three modes, chosen for the product:
-//   'oz'    — any row has a per-oz basis: rank by DELIVERED per-oz — the
-//             row's own landed per-oz when it states one, else the sticker
-//             per-oz with the vendor's shipping rule added (see
-//             vendorRuleShipping; the r22 unit contract is unchanged);
+//   'oz'    — any row has a per-oz basis: rank by DELIVERED per-oz (see
+//             deliveredUnitPrice: the row's own shipping / tax or delivered
+//             figure, else the vendor's shipping rule; the r22 unit contract
+//             is unchanged);
 //   'count' — no measured row, the catalog container reads as a count, and a
-//             row's count noun is compatible with it: rank by landed per-UNIT
-//             (landed total rebuilt from shipping/tax on the current price,
-//             the shipping being the row's own or else the vendor's rule,
-//             / pack count — a $10/10 pack with $20 shipping must not beat a
-//             delivered $20/10 pack), persist the sticker per-unit;
+//             row's count noun is compatible with it: rank by DELIVERED
+//             per-UNIT on the same rules (a $10/10 pack with $20 shipping
+//             must not beat a delivered $20/10 pack), persist the sticker
+//             per-unit;
 //   'raw'   — nothing scalable: rank by raw price (the r19 guard decides).
 // `ranked` = the pool first, then the unrankable rows by raw price; each entry
 // carries `rank` on the mode's basis (null when unrankable) for callers that
 // report spreads.
-// ── Delivered basis: the vendor's shipping rule for a row that states no shipping ──
+// ── Delivered basis: what a row is ranked on once shipping is counted ──
 // Owner 2026-11-21: compare "the lower price per oz, lb, g, etc, and we always
 // should include shipping". A vendor_pricing row almost never says what
 // shipping costs: the manual route stores null for a blank field, and on
@@ -3338,55 +3341,51 @@ function vendorRuleShipping(row, price) {
   return Number.isFinite(amount) && amount >= 0 ? { amount, basis: shipping.basis, note: shipping.note || '' } : null;
 }
 
-// Stored unit costs keep four decimals, and the approval and manual paths
-// store landed = sticker for a row with no shipping entered. A stored landed
-// figure within that storage step of the sticker repeats the sticker: it is
-// silence about shipping, not a statement that shipping is free.
-const LANDED_STORAGE_STEP = 0.00005;
-const repeatsSticker = (landed, sticker) => landed != null && sticker != null && Math.abs(landed - sticker) <= LANDED_STORAGE_STEP;
-
-// The rule shipping for a row that is SILENT about shipping: it has no
-// shipping_cost and no delivered figure of its own (`own`). A row that says
-// anything about its delivered price keeps what it says, so a real figure is
-// never replaced by an estimate.
-function silentRowShipping(row, price, own) {
-  return row.shipping_cost == null && own == null ? vendorRuleShipping(row, price) : null;
+// Does a stored landed unit price say MORE than the sticker? The approval,
+// manual and import paths store landed = sticker for a row with nothing to
+// add, kept to four decimals in the ROW's unit (unit_normalized: oz, g, lb,
+// each). Every argument is in that stored unit, and a sticker is rounded the
+// way it was stored before the two are compared: $2.40 / 128 oz is 0.01875
+// and stores as 0.0188, and a per-gram figure rounds per gram, not per ounce.
+// One stored step of slack covers a writer that rounded the half the other
+// way. The stickers are the row's CURRENT price per stored unit and the
+// sticker unit price stored beside the landed one (normalized_unit_price,
+// written with it): a landed figure within a step of either only repeats the
+// sticker. That is silence about shipping, not a statement that it is free.
+const STORED_UNIT_STEP = 0.0001;
+function landedSaysMore(landedStored, ...stickersStored) {
+  const stickers = stickersStored.filter((sticker) => sticker > 0);
+  if (!(landedStored > 0) || !stickers.length) return false;
+  return stickers.every((sticker) => Math.abs(landedStored - Math.round(sticker * 10000) / 10000) > STORED_UNIT_STEP + 1e-9);
 }
 
-// Delivered per-oz of a measured row, in order: the row's own stored landed
-// figure; the shipping the row states, rebuilt on the CURRENT price (as the
-// count rows do); the vendor's rule. A free rule adds nothing.
-function deliveredPerOz(row, perOz, price, landedPerOz) {
-  const own = landedPerOz != null && !repeatsSticker(landedPerOz, perOz) ? landedPerOz : null;
-  const shipping = silentRowShipping(row, price, own);
-  // What the row ranked on before any shipping is added.
-  const stored = landedPerOz ?? perOz;
-  if (own != null || !(price > 0)) return { rank: stored, shipping };
-  if (row.shipping_cost != null) {
-    const total = calcLandedCost(price, row.shipping_cost, row.tax_rate);
-    return { rank: total > 0 ? perOz * (total / price) : stored, shipping: null };
-  }
-  const ruleUsd = shipping ? shipping.amount : 0;
-  return { rank: ruleUsd > 0 ? perOz * ((price + ruleUsd) / price) : stored, shipping };
-}
-
-// Delivered per-unit of a count row. The landed total is REBUILT from the
-// row's shipping / tax components against the CURRENT price (Codex #3974 r2
-// P1): the stored landed_cost can outlive the price it was computed from
-// (approvals and imports replace price + pack without it), and a stale total
-// would rank the wrong vendor and persist the wrong best_price /
-// cost_per_unit. A row that states no shipping takes the vendor's rule as
-// its shipping component; the worker's per-item landed figure is honored
-// when it is a real delivered figure (r5 P1).
-function deliveredPerUnit(row, perUnit, price, packCount, perItemLanded) {
-  const own = perItemLanded != null && !repeatsSticker(perItemLanded, perUnit) ? perItemLanded : null;
-  const shipping = silentRowShipping(row, price, own);
-  const ruleUsd = shipping ? shipping.amount : 0;
-  const hasLandedParts = row.shipping_cost != null || row.tax_rate != null;
-  const landedTotal = hasLandedParts || ruleUsd > 0
-    ? calcLandedCost(price, row.shipping_cost != null ? row.shipping_cost : ruleUsd, row.tax_rate)
-    : null;
-  return { rank: landedTotal > 0 ? landedTotal / packCount : perItemLanded ?? perUnit, shipping };
+// The delivered price of one unit of a row: an ounce for a measured row, an
+// item for a count row. `sticker` is the row's CURRENT price per unit and
+// `landed` its stored landed price per unit (null when it has none);
+// `landedIsOwn` is landedSaysMore for the pair. In order:
+//   1. The row carries shipping / tax INPUTS (the manual route): the landed
+//      total is REBUILT from them against the CURRENT price (Codex #3974 r2
+//      P1: a stored landed figure can outlive the price it was computed
+//      from). Tax recorded with no shipping is not a statement about
+//      shipping, so the shipping is then found as in step 3.
+//   2. No inputs, and the stored landed figure says more than the sticker:
+//      it is the price-sync worker's own delivered figure (it carries landed
+//      cost per unit, not as shipping / tax columns — r5 P1). Kept.
+//   3. Otherwise the shipping is the row's own shipping_estimate (a price
+//      snapshot's figure for this listing; an explicit 0 is free shipping),
+//      else the vendor's rule. A real figure is never replaced by the rule.
+// With nothing to add (free shipping, no tax) the row ranks as it is stored.
+function deliveredUnitPrice(row, price, sticker, landed, landedIsOwn) {
+  const asStored = landed ?? sticker;
+  if (!(price > 0)) return { rank: asStored, shipping: null };
+  const hasInputs = row.shipping_cost != null || row.tax_rate != null;
+  if (!hasInputs && landedIsOwn) return { rank: landed, shipping: null };
+  const stated = numberOrNull(row.shipping_cost) ?? numberOrNull(row.shipping_estimate);
+  const shipping = stated == null ? vendorRuleShipping(row, price) : null;
+  const shippingUsd = stated ?? (shipping ? shipping.amount : 0);
+  if (!(shippingUsd > 0) && row.tax_rate == null) return { rank: hasInputs ? sticker : asStored, shipping };
+  const total = calcLandedCost(price, shippingUsd, row.tax_rate);
+  return { rank: total > 0 ? sticker * (total / price) : asStored, shipping };
 }
 
 function scoreVendorRows(rows, product) {
@@ -3406,8 +3405,13 @@ function scoreVendorRows(rows, product) {
     const rowUnitIsCount = !!row.unit_normalized && parsePackCount(`1 ${row.unit_normalized}`) != null;
     const perItemLanded = countable && rowUnitIsCount && numberOrNull(row.landed_unit_price) > 0 ? numberOrNull(row.landed_unit_price) : null;
     const perUnit = countable ? price / pack.count : null;
-    const byOz = perOz != null ? deliveredPerOz(row, perOz, price, landedPerOz) : null;
-    const byUnit = countable ? deliveredPerUnit(row, perUnit, price, pack.count, perItemLanded) : null;
+    // landedPerOz = the stored landed figure / the ounces in its unit, so the
+    // sticker goes back into that stored unit by the same factor.
+    const landedStored = numberOrNull(row.landed_unit_price);
+    const stickerStored = numberOrNull(row.normalized_unit_price);
+    const ozLandedIsOwn = landedPerOz != null && perOz != null && landedSaysMore(landedStored, perOz * (landedStored / landedPerOz), stickerStored);
+    const byOz = perOz != null ? deliveredUnitPrice(row, price, perOz, landedPerOz, ozLandedIsOwn) : null;
+    const byUnit = countable ? deliveredUnitPrice(row, price, perUnit, perItemLanded, landedSaysMore(perItemLanded, perUnit, stickerStored)) : null;
     return {
       row,
       perOz,
