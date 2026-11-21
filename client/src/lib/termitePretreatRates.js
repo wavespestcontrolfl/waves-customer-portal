@@ -105,6 +105,14 @@ function parseDepthFt(value) {
   return /\d[\s-]*(?:"|in\b|inch)/i.test(String(value)) ? n / 12 : n;
 }
 
+// "0.12" / "0.120" / "0.12%" / ".12" → 0.12. Anything else → null: a
+// Volume Adjustment Chart dilution matches only a bare percentage, so
+// "0.12 fl oz/gal" or a range never takes the chart's reduced volume.
+function parsePercent(value) {
+  const match = String(value ?? '').trim().match(/^(\d*\.?\d+)\s*%?$/);
+  return match ? Number(match[1]) : null;
+}
+
 function roundGallons(value) {
   return Math.round(value * 10) / 10;
 }
@@ -148,7 +156,7 @@ export function computePretreatChemistry({ productName, squareFootage, linearFee
   const assumedDepth = Boolean(lf && !depth);
   const effectiveDepth = depth || DEFAULT_TRENCH_DEPTH_FT;
   const adjustment = product.volumeAdjustment;
-  const volumeAdjusted = adjustment?.concentrationPct === parseMeasure(concentrationPct);
+  const volumeAdjusted = adjustment?.concentrationPct === parsePercent(concentrationPct);
   const volumeFactor = volumeAdjusted ? adjustment.volumeFactor : 1;
   const chartNote = volumeAdjusted ? `, the label's ${adjustment.label} volume adjustment` : '';
 
