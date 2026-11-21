@@ -77,8 +77,9 @@ postgres('technician shift hours (real Postgres)', () => {
     await clockIn(dayTech.id, '2031-03-04T14:30:00Z', 'active');
     await clockIn(dayTech.id, '2031-03-04T11:00:00Z', 'voided');
     await clockIn(dayTech.id, '2031-03-04T01:00:00Z', 'completed');
-    // lateTech: only last evening's clock-in, which is not today's.
+    // lateTech: last evening's clock-in, which is not today's, and one at 4:00 PM EST today, after NOW (10:00 AM).
     await clockIn(lateTech.id, '2031-03-04T01:30:00Z', 'completed');
+    await clockIn(lateTech.id, '2031-03-04T21:00:00Z', 'active');
   });
 
   afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
@@ -141,7 +142,8 @@ postgres('technician shift hours (real Postgres)', () => {
       // last evening's entry.
       expect(shiftOf(dayTech.id, TODAY)).toEqual({ startMin: 472, endMin: 1072, source: 'clock_in' });
       expect(shiftOf(dayTech.id, TOMORROW)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
-      // Last evening's clock-in falls on yesterday's work date even though its UTC date is today.
+      // Last evening's clock-in falls on yesterday's work date even though its UTC date is today, and at 10:00 AM
+      // the 4:00 PM entry has not happened yet.
       expect(shiftOf(lateTech.id, TODAY)).toEqual({ startMin: 600, endMin: 1200, source: 'roster' });
       expect(shiftOf(noHours.id, TODAY)).toBeNull();
     });
@@ -151,6 +153,8 @@ postgres('technician shift hours (real Postgres)', () => {
       // 03:00Z on 2031-03-05 is still 10:00 PM EST on 2031-03-04: today is the 4th.
       const shiftOf = await eligibility.loadTechShifts(db, { technicianIds: ids(), now: new Date('2031-03-05T03:00:00Z') });
       expect(shiftOf(dayTech.id, TODAY)).toEqual({ startMin: 472, endMin: 1072, source: 'clock_in' });
+      // By 10:00 PM the 4:00 PM clock-in has happened; ten hours from it would pass midnight.
+      expect(shiftOf(lateTech.id, TODAY)).toEqual({ startMin: 960, endMin: 1440, source: 'clock_in' });
     });
   });
 });

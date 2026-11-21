@@ -372,7 +372,8 @@ function storedShift(tech) {
  *   - a date after today, or today before a clock-in: the set hours
  *     (source 'roster');
  *   - today, once the technician has clocked in (the first shift clock-in that
- *     is not voided, on today's Staff work date): the same length of day from
+ *     is not voided, on today's Staff work date, and not after `now`: an entry
+ *     typed in ahead of time has not happened yet): the same length of day from
  *     that clock-in (source 'clock_in'). An earlier clock-in ends the day
  *     earlier, a later one ends it later; never past midnight.
  *   - null: the gate is off (no read at all), the technician has no set hours,
@@ -402,6 +403,7 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
       .whereNot({ status: 'voided' })
       .whereIn('technician_id', [...shifts.keys()])
       .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [today])
+      .where('clock_in', '<=', now)
       .groupBy('technician_id')
       .select('technician_id')
       .min({ clock_in: 'clock_in' });

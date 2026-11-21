@@ -504,21 +504,23 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
     const shiftOf = await loadTechShifts(conn, { now: NOW });
     expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 472, endMin: 1072, source: 'clock_in' });
     expect(shiftOf('tech-1', TOMORROW)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
-    // The read: shift entries that are not voided, for the technicians with hours, on today's Staff work date.
+    // The read: shift entries that are not voided, for the technicians with hours, on today's Staff work date, and
+    // not after now (an entry typed in ahead of time has not happened yet).
     expect(calls.time_entries).toEqual(expect.arrayContaining([
       ['where', { entry_type: 'shift' }],
       ['whereNot', { status: 'voided' }],
       ['whereIn', 'technician_id', ['tech-1']],
       ['whereRaw', "(clock_in::timestamptz AT TIME ZONE 'America/New_York')::date = ?::date", [TODAY]],
+      ['where', 'clock_in', '<=', NOW],
       ['min', { clock_in: 'clock_in' }],
     ]));
   });
 
   test('a late clock-in never runs the day past midnight', async () => {
     gateOn();
-    // 21:00Z = 4:00 PM EST; ten hours later would be 2:00 AM.
+    // 21:00Z = 4:00 PM EST, read at 5:00 PM; ten hours later would be 2:00 AM.
     const { conn } = shiftConn({ techRows: [DAY_TECH], clockRows: [{ technician_id: 'tech-1', clock_in: '2031-03-04T21:00:00.000Z' }] });
-    const shiftOf = await loadTechShifts(conn, { now: NOW });
+    const shiftOf = await loadTechShifts(conn, { now: new Date('2031-03-04T22:00:00Z') });
     expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 960, endMin: 1440, source: 'clock_in' });
   });
 
