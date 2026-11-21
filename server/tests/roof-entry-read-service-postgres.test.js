@@ -270,7 +270,10 @@ jest.setTimeout(60000);
     const { newestPointsRead } = require('../services/estimate-roof-points');
     const ADDRESS = '12 Synthetic Way, Bradenton, FL 34203';
     const pinsFor = (note) => [{ x: 0.2, y: 0.3, type: 'gable_vents', note }];
-    const savePoints = (read, lat, note) => svc.saveTechCount(read.id, { pins: pinsFor(note), crop: { lat, lng: -82.57 }, address: ADDRESS, expectedPins: null });
+    // `holder` is the customer the panel loaded as the estimate's holder (null for an estimate with no customer).
+    const savePoints = (read, lat, note, holder = null) => svc.saveTechCount(read.id, {
+      pins: pinsFor(note), crop: { lat, lng: -82.57 }, address: ADDRESS, expectedPins: null, expectedHolder: holder,
+    });
 
     test("an estimate takes only its own customer's read, never the newer read another customer had on it", async () => {
       const [custA, custB] = [await insertId('customers'), await insertId('customers')];
@@ -297,7 +300,7 @@ jest.setTimeout(60000);
       const [custA, custB] = [await insertId('customers'), await insertId('customers')];
       const est = await insertId('estimates', { customer_id: custA });
       const read = (await svc.runRoofEntryRead(home({ estimateId: est, customerId: custA }))).read;
-      await savePoints(read, 27.46, 'for A');
+      await savePoints(read, 27.46, 'for A', custA);
       expect(await database('roof_entry_reads').where({ id: read.id }).first('context_key', 'customer_id')).toEqual({ context_key: `e:${est}`, customer_id: custA });
       const chosen = async (customerId) => (await newestPointsRead({ id: est, customer_id: customerId }, database))?.id;
       expect(await chosen(custA)).toBe(read.id);
@@ -314,15 +317,22 @@ jest.setTimeout(60000);
       expect(await stored()).toEqual({ context_key: `e:${est}`, customer_id: null });
       const chosen = async (customerId) => (await newestPointsRead({ id: est, customer_id: customerId }, database))?.id;
       // Confirming the points writes the customer who holds the estimate now.
-      expect((await savePoints(read, 27.46, 'for A')).customer_id).toBe(custA);
+      // A save from a panel that loaded no holder is refused: the estimate has a customer.
+      await expect(savePoints(read, 27.46, 'for A')).rejects.toMatchObject({ code: 'holder_changed' });
+      expect((await savePoints(read, 27.46, 'for A', custA)).customer_id).toBe(custA);
       expect(await stored()).toEqual({ context_key: `e:${est}`, customer_id: custA });
       expect(await chosen(custA)).toBe(read.id);
       expect(await chosen(custB)).toBeUndefined();
       expect(await chosen(null)).toBeUndefined();
-      // The estimate goes to customer B. A later points save does not take the read over.
+      // The estimate goes to customer B. No later points save rewrites the read or takes it over: not from a panel
+      // still open from A's time, and not from one loaded for B.
       await database('estimates').where({ id: est }).update({ customer_id: custB });
-      await svc.saveTechCount(read.id, { pins: pinsFor('edited for B'), crop: { lat: 27.46, lng: -82.57 }, address: ADDRESS, expectedPins: pinsFor('for A') });
-      expect((await stored()).customer_id).toBe(custA);
+      const edit = { pins: pinsFor('edited for B'), crop: { lat: 27.46, lng: -82.57 }, address: ADDRESS, expectedPins: pinsFor('for A') };
+      await expect(svc.saveTechCount(read.id, { ...edit, expectedHolder: custA })).rejects.toMatchObject({ code: 'holder_changed' });
+      await expect(svc.saveTechCount(read.id, { ...edit, expectedHolder: custB })).rejects.toMatchObject({ code: 'read_other_customer' });
+      await expect(svc.saveTechCount(read.id, { pins: null, expectedPins: pinsFor('for A'), expectedHolder: custB })).rejects.toMatchObject({ code: 'read_other_customer' });
+      const row = await database('roof_entry_reads').where({ id: read.id }).first('customer_id', 'tech_pins');
+      expect(row).toEqual({ customer_id: custA, tech_pins: pinsFor('for A') });
       expect(await chosen(custB)).toBeUndefined();
     });
 
@@ -342,7 +352,7 @@ jest.setTimeout(60000);
       expect(await chosen()).toBeUndefined();
       // Back with A, staff save the same list again. The save names A, and the points are A's alone.
       await holder(custA);
-      const again = await svc.saveTechCount(read.id, { pins: pinsFor('lead'), crop: { lat: 27.46, lng: -82.57 }, address: ADDRESS, expectedPins: pinsFor('lead') });
+      const again = await svc.saveTechCount(read.id, { pins: pinsFor('lead'), crop: { lat: 27.46, lng: -82.57 }, address: ADDRESS, expectedPins: pinsFor('lead'), expectedHolder: custA });
       expect(again.customer_id).toBe(custA);
       expect(await chosen()).toBe(read.id);
       await holder(custB);
@@ -356,12 +366,12 @@ jest.setTimeout(60000);
       const newer = (await svc.runRoofEntryRead(home({ lat: 27.47, estimateId: est }))).read;
       await savePoints(newer, 27.47, 'newer, saved for the lead');
       await database('estimates').where({ id: est }).update({ customer_id: cust });
-      await savePoints(older, 27.46, 'older, saved for the customer');
+      await savePoints(older, 27.46, 'older, saved for the customer', cust);
       const chosen = () => newestPointsRead({ id: est, customer_id: cust }, database);
       // The newer read still names no customer, so the customer's list is the older one.
       expect((await chosen()).id).toBe(older.id);
       // Staff clear the newer read: the clear is this customer's, and the older list does not come back.
-      await svc.saveTechCount(newer.id, { pins: null, expectedPins: pinsFor('newer, saved for the lead') });
+      await svc.saveTechCount(newer.id, { pins: null, expectedPins: pinsFor('newer, saved for the lead'), expectedHolder: cust });
       const row = await chosen();
       expect(row.id).toBe(newer.id);
       expect(row.customer_id).toBe(cust);

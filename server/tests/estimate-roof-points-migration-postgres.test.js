@@ -6,6 +6,7 @@ const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const migration = require('../models/migrations/20261120210000_estimate_roof_points');
+const customerMigration = require('../models/migrations/20261121010000_estimate_roof_points_customer');
 
 const schema = `estimate_roof_points_${randomUUID().replaceAll('-', '')}`;
 const TABLE = 'estimate_roof_points';
@@ -45,9 +46,11 @@ jest.setTimeout(60000);
     await app.raw('CREATE SCHEMA ??', [schema]);
     await app.schema.createTable('estimates', (t) => { t.uuid('id').primary(); });
     await app.schema.createTable('roof_entry_reads', (t) => { t.uuid('id').primary(); });
+    await app.schema.createTable('customers', (t) => { t.uuid('id').primary(); });
     await app('estimates').insert([{ id: estimateA }, { id: estimateB }]);
     await app('roof_entry_reads').insert({ id: readA });
     await migration.up(app);
+    await customerMigration.up(app);
   });
 
   afterAll(async () => {
@@ -90,6 +93,37 @@ jest.setTimeout(60000);
     expect(kept.read_id).toBeNull();
     await app('estimates').where({ id: estimateB }).del();
     expect(await app(TABLE).where({ estimate_id: estimateB })).toHaveLength(0);
+  });
+
+  test('the copy names the customer it was frozen for: null for none, a real customer otherwise, and it goes with a deleted customer', async () => {
+    const [estimateC, estimateD, customer] = [randomUUID(), randomUUID(), randomUUID()];
+    await app('estimates').insert([{ id: estimateC }, { id: estimateD }]);
+    await app('customers').insert({ id: customer });
+    const copy = (over) => ({ snapshot: JSON.stringify(SNAPSHOT), delivered_at: SENT, ...over });
+    // Frozen for an estimate with no customer: the column is null.
+    await app(TABLE).insert(copy({ estimate_id: estimateC }));
+    expect((await app(TABLE).where({ estimate_id: estimateC }).first()).customer_id).toBeNull();
+    // Frozen for a customer: it must be a real one, and a re-send replaces it.
+    await expect(app(TABLE).insert(copy({ estimate_id: estimateD, customer_id: randomUUID() }))).rejects.toMatchObject({ code: '23503' });
+    await app(TABLE).insert(copy({ estimate_id: estimateC, customer_id: customer })).onConflict('estimate_id').merge();
+    expect((await app(TABLE).where({ estimate_id: estimateC }).first()).customer_id).toBe(customer);
+    // A deleted customer's copy goes with the customer, so null never comes to mean "the customer is gone".
+    await app('customers').where({ id: customer }).del();
+    expect(await app(TABLE).where({ estimate_id: estimateC })).toHaveLength(0);
+  });
+
+  test('the customer column: up() twice is a no-op, down() drops only the column and keeps the rows, up() brings it back empty', async () => {
+    const estimateE = randomUUID();
+    await app('estimates').insert({ id: estimateE });
+    await app(TABLE).insert({ estimate_id: estimateE, snapshot: JSON.stringify(SNAPSHOT), delivered_at: SENT });
+    await customerMigration.up(app);
+    expect(await app.schema.hasColumn(TABLE, 'customer_id')).toBe(true);
+    await customerMigration.down(app);
+    expect(await app.schema.hasColumn(TABLE, 'customer_id')).toBe(false);
+    expect(await app(TABLE).where({ estimate_id: estimateE })).toHaveLength(1);
+    await customerMigration.down(app);
+    await customerMigration.up(app);
+    expect((await app(TABLE).where({ estimate_id: estimateE }).first()).customer_id).toBeNull();
   });
 
   test('up() twice is a no-op, down() drops the table, down() twice is a no-op, and up() brings it back', async () => {

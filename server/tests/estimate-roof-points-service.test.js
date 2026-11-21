@@ -52,7 +52,8 @@ function fakeKnex({ point, reads = [], throwOn = null }) {
   knex.fn = { now: () => 'NOW' };
   return knex;
 }
-const point = (over = {}) => ({ estimate_id: 'est-1', read_id: 'read-1', address: ADDRESS, snapshot: SNAPSHOT, delivered_at: new Date(SENT), ...over });
+// The copy names the customer it was frozen for (the estimate's holder at that send).
+const point = (over = {}) => ({ estimate_id: 'est-1', read_id: 'read-1', customer_id: 'cust-a', address: ADDRESS, snapshot: SNAPSHOT, delivered_at: new Date(SENT), ...over });
 const frozenRead = (over = {}) => ({
   id: 'read-1', estimate_id: 'est-1', context_key: 'e:est-1', customer_id: 'cust-a', status: 'done', tech_pins: [{}], crop_lat: '27.46000',
   hide_on_estimate: false, created_at: new Date('2026-11-20T15:00:00Z'), ...over,
@@ -155,7 +156,10 @@ describe('roofPointsDocBlock', () => {
   });
 
   test("the copy shows only while its read names the customer who holds the estimate now, or both name none", async () => {
-    const show = async (estimateRow, read) => (await roofPointsDocBlock(estimateRow, { knex: fakeKnex({ point: point(), reads: read ? [read] : [] }) })).roofPoints;
+    // The copy is frozen for the estimate's holder in each case, so only the read's side is judged here.
+    const show = async (estimateRow, read) => (await roofPointsDocBlock(estimateRow, {
+      knex: fakeKnex({ point: point({ customer_id: estimateRow.customer_id }), reads: read ? [read] : [] }),
+    })).roofPoints;
     const forA = frozenRead({ context_key: 'e:est-1|c:cust-a', customer_id: 'cust-a' });
     const forB = frozenRead({ context_key: 'e:est-1|c:cust-b', customer_id: 'cust-b' });
     expect(await show(estimate, forA)).toEqual(SNAPSHOT);
@@ -180,6 +184,35 @@ describe('roofPointsDocBlock', () => {
     expect(await show(estimate, frozenRead({ context_key: 'e:est-2' }))).toBeUndefined();
     expect(await show(estimate, null)).toBeUndefined();
     expect((await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point({ read_id: null }), reads: [frozenRead()] }) })).roofPoints).toBeUndefined();
+  });
+
+  test('the copy is shown only to the customer it was frozen for, whatever its read says now', async () => {
+    const show = async (estimateRow, copy, read = frozenRead({ customer_id: estimateRow.customer_id })) => (
+      await roofPointsDocBlock(estimateRow, { knex: fakeKnex({ point: point(copy), reads: [read] }) })).roofPoints;
+    // Frozen for a lead (no customer). The estimate then got customer A and staff saved points on the read, so the
+    // read names A now: the lead's copy is still not A's. The next send freezes a copy for A.
+    expect(await show(est({ customer_id: null }), { customer_id: null })).toEqual(SNAPSHOT);
+    expect(await show(estimate, { customer_id: null })).toBeUndefined();
+    // Frozen for A: shown to A (ids compare without case), never to B or on an estimate with no customer.
+    expect(await show(estimate, { customer_id: 'CUST-A' })).toEqual(SNAPSHOT);
+    expect(await show(est({ customer_id: 'cust-b' }), { customer_id: 'cust-a' })).toBeUndefined();
+    expect(await show(est({ customer_id: null }), { customer_id: 'cust-a' })).toBeUndefined();
+    // A copy from before the column existed carries no customer: it reads as frozen for no one.
+    expect(await show(estimate, { customer_id: undefined })).toBeUndefined();
+  });
+
+  test('a stored label is screened again where it is shown: one that fails keeps the standard label of its point', async () => {
+    const pins = [
+      { n: 1, x: 0.2, y: 0.3, type: 'gable_vents', label: 'Gable vent, front left', action: 'seal' },
+      { n: 2, x: 0.4, y: 0.5, type: 'gable_vents', label: 'Gable vent, gate code 1234', action: 'seal' },
+      { n: 3, x: 0.6, y: 0.7, type: 'no_such_type', label: 'Entry point, safe to enter', action: 'seal' },
+    ];
+    const knex = fakeKnex({ point: point({ snapshot: { ...SNAPSHOT, pins } }), reads: [frozenRead()] });
+    const shown = (await roofPointsDocBlock(estimate, { knex })).roofPoints.pins.map((p) => p.label);
+    expect(shown[0]).toBe('Gable vent, front left');
+    expect(shown[1]).not.toMatch(/1234|gate/i);
+    expect(shown[1]).toBe(shown[0].split(',')[0]);
+    expect(shown[2]).toBe('Entry point');
   });
 
   test('the estimate moved to another address since the send: {}; so does a missing or blank address on either side', async () => {

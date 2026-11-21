@@ -20,7 +20,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { customerPointsFromRow, matchesContext } = require('./roof-entry-read');
+const { customerPointsFromRow, matchesContext, shownPinLabel } = require('./roof-entry-read');
 const { addressKey, addressZip } = require('./misting-layout-validate');
 
 const TABLE = 'estimate_roof_points';
@@ -114,6 +114,9 @@ async function freezeRoofPointsForEstimate(estimate, { deliveredAt, knex = db } 
       // on the estimate even when the estimate had no ZIP at this send.
       address: String(addressZip(row.points_address) ? row.points_address : estimate.address),
       snapshot: JSON.stringify(points),
+      // Who this copy is for: the customer who holds the estimate at this send (null = none). The page shows the copy
+      // only to that holder (copyForHolder).
+      customer_id: estimate.customer_id || null,
       delivered_at: new Date(deliveredAt).toISOString(),
       frozen_at: knex.fn.now(),
     };
@@ -154,6 +157,16 @@ async function readsAllowCopy(estimate, readId, knex) {
   return ownRead(frozen, estimate);
 }
 
+/**
+ * True when the copy was frozen for the customer who holds the estimate now (both none counts). A copy frozen for a
+ * lead is not shown once the estimate has a customer, whatever is saved on its read since: the next send freezes a
+ * copy for that customer. A deleted customer's copies go with the customer (the foreign key cascades).
+ */
+function copyForHolder(row, estimate) {
+  const lower = (v) => (v ? String(v).toLowerCase() : null);
+  return lower(row.customer_id) === lower(estimate.customer_id);
+}
+
 function cleanSnapshot(snapshot) {
   const s = parsed(snapshot);
   if (!s || typeof s.imageUrl !== 'string' || !s.imageUrl || !Array.isArray(s.pins) || !s.pins.length) return null;
@@ -165,7 +178,8 @@ function cleanSnapshot(snapshot) {
       x: Number(p.x),
       y: Number(p.y),
       type: p.type,
-      label: String(p.label || ''),
+      // The label was screened when its note was saved; it is screened again here, where it is shown.
+      label: shownPinLabel(p.type, p.label),
       action: String(p.action || ''),
     })),
   };
@@ -176,7 +190,7 @@ async function roofPointsDocBlock(estimate, { knex = db } = {}) {
   if (!estimate?.id) return {};
   try {
     const row = await knex(TABLE).where({ estimate_id: estimate.id }).first();
-    if (!row || !copyIsCurrent(row, estimate)) return {};
+    if (!row || !copyIsCurrent(row, estimate) || !copyForHolder(row, estimate)) return {};
     if (!sameHome(row.address, estimate.address)) return {};
     const snapshot = cleanSnapshot(row.snapshot);
     if (!snapshot) return {};

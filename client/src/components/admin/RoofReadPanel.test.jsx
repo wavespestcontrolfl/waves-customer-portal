@@ -536,6 +536,7 @@ describe("confirmed points", () => {
       crop: { lat: 27.46, lng: -82.57 },
       address: ADDR,
       expected_pins: null,
+      expected_holder: null,
       hide_on_estimate: true,
     });
     // The count and flags are not part of a points save.
@@ -572,6 +573,7 @@ describe("confirmed points", () => {
       crop: { lat: SPOT.lat, lng: SPOT.lng },
       address: ADDR,
       expected_pins: SAVED,
+      expected_holder: null,
     });
     // The server now holds the address: the note goes, and an unchanged list is not sent again.
     expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
@@ -582,21 +584,44 @@ describe("confirmed points", () => {
 
   it("a list saved before the estimate had this customer: the panel says so, and Save points sends it unchanged", async () => {
     // The read names no customer and the estimate has one now: the customer estimate does not show the list.
-    await opened({ customerId: CUST }, READ({ tech_pins: SAVED }));
+    await opened({}, READ({ tech_pins: SAVED, estimate_customer_id: CUST }));
     expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/The customer estimate does not show these points yet/);
     // The server's answer names the customer the save recorded.
-    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED, customer_id: CUST }) }));
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED, customer_id: CUST, estimate_customer_id: CUST }) }));
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     await screen.findByText("Points saved.");
-    expect(lastBody()).toEqual({ pins: SAVED, crop: { lat: SPOT.lat, lng: SPOT.lng }, address: ADDR, expected_pins: SAVED });
+    // The save names the holder the panel loaded, so the server can refuse it if the estimate changed hands since.
+    expect(lastBody()).toEqual({ pins: SAVED, crop: { lat: SPOT.lat, lng: SPOT.lng }, address: ADDR, expected_pins: SAVED, expected_holder: CUST });
     expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
     cleanup();
-    // A read that names a customer, and an estimate with no customer, ask for nothing.
-    await opened({ customerId: CUST }, READ({ tech_pins: SAVED, customer_id: CUST }));
+    // A read that names its customer, and an estimate with no customer, ask for nothing.
+    await opened({}, READ({ tech_pins: SAVED, customer_id: CUST, estimate_customer_id: CUST }));
     expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
     cleanup();
-    await opened({}, READ({ tech_pins: SAVED }));
+    await opened({}, READ({ tech_pins: SAVED, estimate_customer_id: null }));
     expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
+  });
+
+  it("a save the server refuses because the estimate changed hands keeps the edits and offers Read the roof again", async () => {
+    await opened({}, READ({ tech_pins: SAVED, customer_id: CUST, estimate_customer_id: CUST }));
+    fireEvent.click(frame(), { clientX: 100, clientY: 50 });
+    fetchMock.mockImplementationOnce(() => reply({ error: "The customer on this estimate changed. Read the roof again, then save the points." }, 409));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/The customer on this estimate changed/);
+    expect(lastBody().expected_holder).toBe(CUST);
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(3);
+    // "Read the roof again" loads the read with the estimate's holder as it is now; the next save names that holder.
+    const OTHER = "44444444-4444-4444-8444-444444444444";
+    fetchMock.mockImplementationOnce(() => reply({ status: "ok", cached: true, read: READ({ tech_pins: SAVED, customer_id: CUST, estimate_customer_id: OTHER }), image_url: IMAGE }));
+    fireEvent.click(screen.getByTestId("roof-read-again"));
+    await waitFor(() => expect(screen.queryByTestId("roof-read-points-error")).toBeNull());
+    sizeFrame();
+    loadPhoto();
+    fireEvent.click(frame(), { clientX: 100, clientY: 50 });
+    fetchMock.mockImplementationOnce(() => reply({ error: "This roof read was saved for another customer." }, 409));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/saved for another customer/);
+    expect(lastBody().expected_holder).toBe(OTHER);
   });
 
   it("an unconfirmed list is not sent before the roof photo has loaded; the checkbox alone still saves", async () => {
@@ -619,7 +644,7 @@ describe("confirmed points", () => {
     fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED, hide_on_estimate: true }) }));
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     await screen.findByText("Points saved.");
-    expect(lastBody()).toEqual({ pins: SAVED, crop: { lat: SPOT.lat, lng: SPOT.lng }, address: ADDR, expected_pins: SAVED });
+    expect(lastBody()).toEqual({ pins: SAVED, crop: { lat: SPOT.lat, lng: SPOT.lng }, address: ADDR, expected_pins: SAVED, expected_holder: null });
   });
 
   it("asks for no confirmation when the list has its address, when no list is saved, or when the saved list is empty", async () => {
@@ -732,7 +757,7 @@ describe("saving only what changed", () => {
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     await screen.findByText("Points saved.");
     const body = lastBody();
-    expect(Object.keys(body).sort()).toEqual(["address", "crop", "expected_pins", "pins"]);
+    expect(Object.keys(body).sort()).toEqual(["address", "crop", "expected_holder", "expected_pins", "pins"]);
     expect(body.pins).toHaveLength(2);
   });
 
@@ -865,7 +890,7 @@ describe("saving only what changed", () => {
     fetchMock.mockImplementationOnce(() => reply({ read: READ({ hide_on_estimate: true, tech_pins: [...SAVED, { x: 0.5, y: 0.5, type: "other", note: null }] }) }));
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     await screen.findByText("Points saved.");
-    expect(Object.keys(lastBody()).sort()).toEqual(["address", "crop", "expected_pins", "pins"]);
+    expect(Object.keys(lastBody()).sort()).toEqual(["address", "crop", "expected_holder", "expected_pins", "pins"]);
   });
 
   it("needs the map point to save edited points", async () => {

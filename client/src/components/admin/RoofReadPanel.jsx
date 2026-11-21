@@ -263,17 +263,23 @@ function SaveNote({ state, statusTestId, errorTestId }) {
   );
 }
 
-// What the server holds for the points, the checkbox, and the address and the customer the points were saved for.
+// What the server holds for the points and the checkbox: the address and the customer the points were saved for
+// (`owner`), and the customer who holds the estimate now (`holder`, null for none).
 const savedFrom = (read) => ({
-  pins: read.tech_pins ?? null, hidden: !!read.hide_on_estimate, address: read.points_address ?? null, owner: read.customer_id ?? null,
+  pins: read.tech_pins ?? null,
+  hidden: !!read.hide_on_estimate,
+  address: read.points_address ?? null,
+  owner: read.customer_id ?? null,
+  holder: read.estimate_customer_id ?? null,
 });
 
 // A saved list the customer estimate does not show yet (`unconfirmed`): it was saved before the server recorded the
-// home's address with it, or before the estimate had this customer (the read names none). Save points sends the list
-// again as it stands; the server then records the address of this lookup and the customer who holds the estimate.
-// Staff confirm such a list against the photo, so it is sent only once the photo has loaded (`confirmReady`).
-function confirmStateOf(saved, customerId, imageState) {
-  const unconfirmed = Boolean(saved.pins?.length) && (!saved.address || Boolean(customerId && !saved.owner));
+// home's address with it, or before the estimate had its customer (the estimate has a holder and the read names none).
+// Save points sends the list again as it stands; the server then records the address of this lookup and the customer
+// who holds the estimate. Staff confirm such a list against the photo, so it is sent only once the photo has loaded
+// (`confirmReady`).
+function confirmStateOf(saved, imageState) {
+  const unconfirmed = Boolean(saved.pins?.length) && (!saved.address || Boolean(saved.holder && !saved.owner));
   const confirmReady = unconfirmed && imageState === "loaded";
   const nothingToSave = unconfirmed && !confirmReady
     ? "The roof photo has not loaded. Wait for it, then press Save points."
@@ -284,7 +290,7 @@ function confirmStateOf(saved, customerId, imageState) {
 // The photo and the technician's confirmed points. It mounts with each loaded read (the panel hides it while a read
 // runs), so its state starts from what the server holds. `saved` is the server's last answer for the points and the
 // checkbox: the baseline a save is checked against, set at load and by each points save. A count save never touches it.
-function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, customerId = null, onReadAgain }) {
+function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, onReadAgain }) {
   const pointId = useRef(0);
   const nextId = () => { pointId.current += 1; return `pt${pointId.current}`; };
   const frameRef = useRef(null);
@@ -309,7 +315,7 @@ function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, customerI
   const atMax = points.length >= MAX_POINTS;
   // A suggestion stays hidden while any point, saved or not, names it as its source, even after the point moved or changed type.
   const suggestions = suggestionsFrom(read).filter((sg) => !points.some((p) => p.source === sg.key));
-  const { unconfirmed, confirmReady, nothingToSave } = confirmStateOf(saved, customerId, imageState);
+  const { unconfirmed, confirmReady, nothingToSave } = confirmStateOf(saved, imageState);
   // Whether the checkbox differs from what the server holds: only then is hide_on_estimate sent.
   const hideChanged = hideEdited && !showOnEstimate !== saved.hidden;
   const selected = points.find((p) => p.id === selectedId) || null;
@@ -370,6 +376,9 @@ function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, customerI
             address: String(address).trim(),
             // The list these edits started from: the server refuses the save (409) if another window changed it since.
             expected_pins: saved.pins,
+            // The customer who held the estimate when this read loaded: the server refuses the save (409) if the
+            // estimate has another holder now, so points edited for one customer are never saved for the next.
+            expected_holder: saved.holder,
           } : {}),
           ...(hideChanged ? { hide_on_estimate: !showOnEstimate } : {}),
         }),
@@ -474,7 +483,7 @@ function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, customerI
         {unconfirmed && (
           <p className="text-14 text-zinc-600" data-testid="roof-read-points-unconfirmed">
             The customer estimate does not show these points yet. They were saved before this address or this customer was on
-            the record. Check them against the photo, then press Save points to confirm them.
+            the record. Check them against the photo, then press Save points to confirm them. They show from the next send.
           </p>
         )}
         <div className="flex items-center gap-3 flex-wrap">
@@ -668,7 +677,7 @@ export default function RoofReadPanel({ spot, address, addressDoubt = false, est
       )}
       {read && (
         <div className="space-y-4" data-testid="roof-read-result">
-          <RoofPointsEditor read={read} imageUrl={result.image_url} spot={spot} address={address} estimateId={estimateId} customerId={customerId} onReadAgain={readRoof} />
+          <RoofPointsEditor read={read} imageUrl={result.image_url} spot={spot} address={address} estimateId={estimateId} onReadAgain={readRoof} />
           <p className="text-14 text-zinc-600">
             {String(read.county).replace(/^./, (c) => c.toUpperCase())} County aerial, {read.image_year}.
             {result.cached ? " Reused from an earlier read." : ""}

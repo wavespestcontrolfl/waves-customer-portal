@@ -480,6 +480,14 @@ describe('references and county text', () => {
     expect(res.json.read).toEqual(expect.objectContaining({ estimate_id: EST, customer_id: CUST }));
   });
 
+  it("names the customer who holds the read's estimate (estimate_customer_id), null for none, absent with no estimate", async () => {
+    // The panel sends this value back with a points save, so a save edited under another holder is refused.
+    expect((await post(home({ estimate_id: EST }))).json.read.estimate_customer_id).toBeNull();
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }, { id: EST2 }];
+    expect((await post(home({ estimate_id: EST }))).json.read.estimate_customer_id).toBe(CUST);
+    expect((await post(home({ lat: 27.47 }))).json.read).not.toHaveProperty('estimate_customer_id');
+  });
+
   it('logs only the allowlisted county key, or the word unsupported, never the typed text', async () => {
     await post(home({ county: '555 Example Rd Unit 4' }));
     await post(home({ county: 'Sarasota County' }));
@@ -1468,15 +1476,43 @@ describe('saveTechCount pins', () => {
     mockRows[0].estimate_id = EST;
     mockRefs.estimates = [{ id: EST, customer_id: CUST }];
     mockEvents.length = 0;
-    const saved = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
+    const saved = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, expectedHolder: CUST });
     expect(saved.customer_id).toBe(CUST);
     expect(mockRows[0].customer_id).toBe(CUST);
     // One transaction: the estimate row is locked before the write.
     expect(mockEvents).toEqual(['tx', 'for-update:estimates', 'update:', 'tx-end']);
-    // The estimate then goes to another customer. A later save never takes the read over: it stays the first customer's.
+  });
+
+  it('a points save is refused, and writes nothing, unless the editor, the estimate and the read agree on the customer', async () => {
     const LATER_OWNER = '99999999-9999-4999-8999-999999999999';
+    const edit = { pins: [PINS[0]], crop: CROP, address: ADDRESS };
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    // The panel loaded this read while the estimate had no customer (or it is a tab from before this field): the
+    // points on screen were edited for a lead, and the estimate has a customer now.
+    await expect(svc.saveTechCount(READ_A, { ...edit, expectedHolder: null })).rejects.toMatchObject({ code: 'holder_changed' });
+    await expect(svc.saveTechCount(READ_A, edit)).rejects.toMatchObject({ code: 'holder_changed' });
+    expect(mockRows[0].customer_id).toBeUndefined();
+    expect(mockRows[0].tech_pins ?? null).toBeNull();
+    // Loaded for the estimate's customer (ids compare without case): saved, and the read names that customer.
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, expectedHolder: CUST.toUpperCase() });
+    expect(mockRows[0].customer_id).toBe(CUST);
+    // The estimate then goes to another customer. An editor still open from before is refused...
     mockRefs.estimates = [{ id: EST, customer_id: LATER_OWNER }];
-    await svc.saveTechCount(READ_A, { pins: [PINS[0]], crop: CROP, address: ADDRESS });
+    await expect(svc.saveTechCount(READ_A, { ...edit, expectedHolder: CUST })).rejects.toMatchObject({ code: 'holder_changed' });
+    // ...and so is one loaded for the new customer: the read is the first customer's, and it is never taken over or
+    // rewritten for another. A clear is a points save too.
+    await expect(svc.saveTechCount(READ_A, { ...edit, expectedHolder: LATER_OWNER })).rejects.toMatchObject({ code: 'read_other_customer' });
+    await expect(svc.saveTechCount(READ_A, { pins: null, expectedHolder: LATER_OWNER })).rejects.toMatchObject({ code: 'read_other_customer' });
+    expect(mockRows[0].customer_id).toBe(CUST);
+    expect(mockRows[0].tech_pins).toBe(JSON.stringify(PINS));
+    // A count or a hide save says nothing about the points and needs no agreement.
+    await svc.saveTechCount(READ_A, { count: 2 });
+    await svc.saveTechCount(READ_A, { hideOnEstimate: true });
+    expect(mockRows[0].tech_final_count).toBe(2);
+    // A read made for a customer on an estimate that has no customer yet (the two-part read) is saved as before.
+    mockRefs.estimates = [{ id: EST, customer_id: null }];
+    await svc.saveTechCount(READ_A, { ...edit, expectedHolder: null });
     expect(mockRows[0].customer_id).toBe(CUST);
     expect(mockRows[0].tech_pins).toBe(JSON.stringify([PINS[0]]));
   });
@@ -1493,7 +1529,7 @@ describe('saveTechCount pins', () => {
     expect(mockRows[0].customer_id).toBeUndefined();
     // A clear is the technician's word on the points ("none") for the customer who holds the estimate, so it names that
     // customer as a list does: the send then sees the clear as this customer's and brings no older list back.
-    await svc.saveTechCount(READ_A, { pins: null });
+    await svc.saveTechCount(READ_A, { pins: null, expectedHolder: CUST });
     expect(mockRows[0].customer_id).toBe(CUST);
     delete mockRows[0].customer_id;
     // No estimate on the read: nothing to lock and no customer to take.
@@ -1509,12 +1545,12 @@ describe('saveTechCount pins', () => {
     mockRefs.estimates = [{ id: EST, customer_id: CUST }];
     // An access code, or wording no customer surface may carry, is refused and nothing is written.
     for (const note of ['gate code 1234', 'lockbox 4421', 'safe to enter', 'poison bait here']) {
-      await expect(svc.saveTechCount(READ_A, { pins: [{ ...PINS[0], note }], crop: CROP, address: ADDRESS })).rejects.toMatchObject({ code: 'note_not_allowed' });
+      await expect(svc.saveTechCount(READ_A, { pins: [{ ...PINS[0], note }], crop: CROP, address: ADDRESS, expectedHolder: CUST })).rejects.toMatchObject({ code: 'note_not_allowed' });
     }
     expect(mockRows[0].tech_pins ?? null).toBeNull();
     // Where a point is on the roof is fine.
     for (const note of ['front left', 'above the garage door', 'rear, 2nd story', 'left of chimney']) {
-      await svc.saveTechCount(READ_A, { pins: [{ ...PINS[0], note }], crop: CROP, address: ADDRESS });
+      await svc.saveTechCount(READ_A, { pins: [{ ...PINS[0], note }], crop: CROP, address: ADDRESS, expectedHolder: CUST });
       expect(JSON.parse(mockRows[0].tech_pins)[0].note).toBe(note);
     }
     // A note stored before this check is left out of the customer's label; the point keeps its standard label.
@@ -1858,6 +1894,39 @@ describe('PATCH /:id/tech-count with points', () => {
     expect(res.json).toEqual({ error: 'These points were not drawn on this roof photo' });
     expect(mockRows[0].tech_pins).toBeNull();
     expect(mockRows[0].hide_on_estimate).toBe(false);
+  });
+
+  it("the answers name the estimate's holder, and a points save sends it back: a save for another holder answers 409 and writes nothing", async () => {
+    const OTHER = '99999999-9999-4999-8999-999999999999';
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    const body = (over = {}) => ({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null, ...over });
+    // The panel never loaded a holder (null), or names another customer: the estimate's holder is CUST.
+    for (const expected of [null, OTHER]) {
+      const res = await patch(body({ expected_holder: expected }));
+      expect(res.status).toBe(409);
+      expect(res.json).toEqual({ error: 'The customer on this estimate changed. Read the roof again, then save the points.' });
+    }
+    expect(mockRows[0].tech_pins).toBeNull();
+    // A value that is not an id is a bad request.
+    expect((await patch(body({ expected_holder: 'someone' }))).status).toBe(400);
+    // The holder the panel loaded: saved, and the answer carries the holder again (estimate_customer_id).
+    const saved = await patch(body({ expected_holder: CUST.toUpperCase() }));
+    expect(saved.status).toBe(200);
+    expect(saved.json.read).toEqual(expect.objectContaining({ customer_id: CUST, estimate_customer_id: CUST }));
+    // The estimate goes to another customer: the read stays the first customer's, and its points cannot be rewritten.
+    mockRefs.estimates = [{ id: EST, customer_id: OTHER }];
+    const taken = await patch(body({ expected_pins: PINS, expected_holder: OTHER }));
+    expect(taken.status).toBe(409);
+    expect(taken.json).toEqual({ error: 'This roof read was saved for another customer. Its points cannot be changed for the customer on this estimate.' });
+    expect(mockRows[0].customer_id).toBe(CUST);
+    // A save with no points (count, checkbox) carries no holder and still answers with it.
+    const count = await patch({ count: 3 });
+    expect(count.status).toBe(200);
+    expect(count.json.read.estimate_customer_id).toBe(OTHER);
+    // A read with no estimate has no holder: the field is absent.
+    mockRows[0].estimate_id = null;
+    expect((await patch({ count: 4 })).json.read).not.toHaveProperty('estimate_customer_id');
   });
 
   it('answers 400 with the note message for a note that cannot go on the customer estimate, and writes nothing', async () => {

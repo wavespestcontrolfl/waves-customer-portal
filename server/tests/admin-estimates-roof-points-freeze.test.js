@@ -319,6 +319,33 @@ describe('sendEstimateNow: roof points frozen at send', () => {
     expect(store['est-1']).toBeUndefined();
   });
 
+  test('the copy names the customer it was frozen for: a lead copy is not shown to the first customer until the next send', async () => {
+    const send = async (row) => {
+      db.mockImplementation((table) => {
+        if (table === 'roof_entry_reads') return readsBuilder();
+        if (table === 'estimate_roof_points') return pointsBuilder();
+        return makeBuilder(row);
+      });
+      await router.sendEstimateNow(row, 'email');
+    };
+    // Sent while the estimate had no customer: the copy is frozen for no customer and shows on the lead's link.
+    const forLead = read({ customer_id: null, tech_pins: [{ x: 0.2, y: 0.2, type: 'gable_vents', note: 'lead note' }] });
+    reads = [forLead];
+    await send(estimateRow({ customer_id: null }));
+    expect(store['est-1'].customer_id).toBeNull();
+    const stamp = { deliveryState: { lastDeliveredAt: stampedHandoff() } };
+    expect((await roofPointsDocBlock(estimateRow({ customer_id: null, estimate_data: stamp }), { knex: db })).roofPoints).toBeDefined();
+    // The estimate gets customer A and staff save points on the same read, so the read names A now. The lead's frozen
+    // copy still holds the lead's notes: it is not shown to A before a send freezes a copy for A.
+    reads = [{ ...forLead, customer_id: 'cust-1', tech_pins: [{ x: 0.2, y: 0.2, type: 'gable_vents', note: 'note for A' }] }];
+    expect(await roofPointsDocBlock(estimateRow({ estimate_data: stamp }), { knex: db })).toEqual({});
+    await send(estimateRow());
+    expect(store['est-1'].customer_id).toBe('cust-1');
+    const shown = (await roofPointsDocBlock(estimateRow({ estimate_data: { deliveryState: { lastDeliveredAt: stampedHandoff() } } }), { knex: db })).roofPoints;
+    expect(JSON.stringify(shown)).toContain('note for A');
+    expect(JSON.stringify(shown)).not.toContain('lead note');
+  });
+
   test('a plain read taken while customer A held the estimate is not sent to customer B after the estimate is reassigned', async () => {
     // Read with the estimate and its customer: the key is the plain one, and the row names customer A (cust-1).
     reads = [read({ customer_id: 'cust-1', tech_pins: [{ x: 0.2, y: 0.2, type: 'gable_vents', note: 'note for A' }] })];

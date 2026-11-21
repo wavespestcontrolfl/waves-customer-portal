@@ -730,6 +730,20 @@ function pointsAddressFrom(address) {
 // (AGENTS.md: access codes, "safe", "toxic", "poison", "infestation" and the other banned wording) where it is stored
 // and again where it is shown.
 const noteAllowed = (note) => !note || customerCopyViolations(note).length === 0;
+const standardLabel = (type) => PIN_LABELS[type] || PIN_LABELS.other;
+/** A stored customer label as it may be shown now: itself while it passes the screen, else the point's standard label. */
+const shownPinLabel = (type, label) => (label && customerCopyViolations(label).length === 0 ? String(label) : standardLabel(type));
+
+/**
+ * The staff answer for a read, plus `estimate_customer_id`: the customer who holds the read's estimate now (null for
+ * none; absent when the read has no estimate). The panel sends it back with a points save (expected_holder), so a save
+ * edited while another customer held the estimate is refused (pointsCustomer).
+ */
+async function withHolder(read) {
+  if (!read?.estimate_id) return read;
+  const estimate = await db('estimates').where({ id: read.estimate_id }).first('customer_id');
+  return { ...read, estimate_customer_id: estimate?.customer_id || null };
+}
 
 const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && Number.isFinite(c.lng)
   && Math.abs(c.lat) <= 90 && Math.abs(c.lng) <= 180;
@@ -737,22 +751,43 @@ const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && 
 /**
  * A save that needs the read's estimate: a points list or clear, or the hide-or-show choice. In ONE transaction it locks
  * the read's estimate row (FOR UPDATE) first, then saves.
- *  - Points are confirmed for the customer who holds the estimate now. A read made with the estimate alone names no
- *    customer, so a points save (a list or a clear) writes the estimate's customer on it (only when the read names
- *    none: a read made for another customer is never taken over). The customer estimate shows a read's points only
- *    while the estimate has that same customer (estimate-roof-points.js ownRead). An estimate with no customer leaves
- *    the read as it is.
+ *  - Points are confirmed for the customer who holds the estimate now (pointsCustomer, checked under the lock): the
+ *    editor, the estimate and the read must agree on that customer, or the save is refused and writes nothing. A read
+ *    made with the estimate alone names no customer, so a points save (a list or a clear) writes the estimate's
+ *    customer on it. The customer estimate shows a read's points only while the estimate has that same customer
+ *    (estimate-roof-points.js ownRead). An estimate with no customer leaves the read as it is.
  *  - Hide or show is the estimate's choice, not one photo's: it is written to every other read of the estimate.
  * The lock comes first, so two saves on two reads of one estimate run one after the other (no deadlock on each other's
  * rows), and a read being created for the estimate (FOR SHARE in writeOwned) is either committed before the write to
  * every read or starts after it with the new choice. A read with no estimate is saved as it is.
  */
-function saveUnderEstimate(id, save, { points, hidden }) {
+const idOf = (v) => (v ? String(v).toLowerCase() : null);
+
+/**
+ * What a points save writes about the customer, decided while the estimate row is locked. Three parties must agree:
+ *  - the editor: `expectedHolder` is the customer the server named as the estimate's holder when the panel loaded the
+ *    read (withHolder). If the estimate has another holder now, the points on screen were edited for someone else:
+ *    code 'holder_changed', and staff load the read again.
+ *  - the read: one that names another customer than the estimate's holder is that customer's. Its points are not
+ *    changed for this holder: code 'read_other_customer'.
+ *  - the estimate: its holder is written on a read that names none.
+ * Both codes write nothing.
+ */
+function pointsCustomer(read, estimate, expectedHolder) {
+  const named = idOf(read.customer_id);
+  const holder = idOf(estimate.customer_id);
+  if (idOf(expectedHolder) !== holder) throw Object.assign(new Error("The estimate's customer changed since the points were loaded"), { code: 'holder_changed' });
+  if (named && holder && named !== holder) throw Object.assign(new Error('This roof read was saved for another customer'), { code: 'read_other_customer' });
+  return named || !holder ? {} : { customer_id: estimate.customer_id };
+}
+
+function saveUnderEstimate(id, save, { points, hidden, expectedHolder }) {
   return db.transaction(async (trx) => {
     const target = await trx(TABLE).where({ id }).first('estimate_id');
     const estimate = target?.estimate_id ? await trx('estimates').where({ id: target.estimate_id }).forUpdate().first('id', 'customer_id') : null;
-    const own = points && estimate?.customer_id ? await trx(TABLE).where({ id }).first('customer_id') : null;
-    const saved = await save(trx, own && !own.customer_id ? { customer_id: estimate.customer_id } : {});
+    // Read after the lock: another points save may have named the read's customer while this one waited for it.
+    const own = points && estimate ? await trx(TABLE).where({ id }).first('customer_id') : null;
+    const saved = await save(trx, own ? pointsCustomer(own, estimate, expectedHolder) : {});
     if (hidden !== undefined && saved?.estimate_id) {
       await trx(TABLE).where({ estimate_id: saved.estimate_id }).whereNot({ id: saved.id }).update({ hide_on_estimate: hidden });
     }
@@ -773,7 +808,7 @@ function saveUnderEstimate(id, save, { points, hidden }) {
  * have moved to another home while this photo was open. No address throws code 'address_missing' and writes nothing.
  * Returns the public read, or null for an unknown id.
  */
-async function saveTechCount(id, { count, flags, pins, crop, address, expectedPins, hideOnEstimate } = {}) {
+async function saveTechCount(id, { count, flags, pins, crop, address, expectedPins, expectedHolder, hideOnEstimate } = {}) {
   const patch = {};
   if (count !== undefined) patch.tech_final_count = count;
   // Merged in SQL in one statement, so two saves of different types (or two tabs) keep both; a type sent again is replaced.
@@ -817,7 +852,7 @@ async function saveTechCount(id, { count, flags, pins, crop, address, expectedPi
     return saved;
   };
   const points = pins !== undefined;
-  const row = points || hideOnEstimate !== undefined ? await saveUnderEstimate(id, save, { points, hidden: patch.hide_on_estimate }) : await save(db);
+  const row = points || hideOnEstimate !== undefined ? await saveUnderEstimate(id, save, { points, hidden: patch.hide_on_estimate, expectedHolder }) : await save(db);
   if (row) return publicRead(row);
   if (checked && await db(TABLE).where({ id }).first('id')) {
     throw Object.assign(new Error('The points changed since they were loaded'), { code: 'points_changed' });
@@ -856,7 +891,7 @@ function customerPointsFromRow(row) {
       x: p.x,
       y: p.y,
       type: p.type,
-      label: p.note && noteAllowed(p.note) ? `${PIN_LABELS[p.type] || PIN_LABELS.other}, ${p.note}` : (PIN_LABELS[p.type] || PIN_LABELS.other),
+      label: p.note && noteAllowed(p.note) ? `${standardLabel(p.type)}, ${p.note}` : standardLabel(p.type),
       action: pinAction(p.type),
     })),
   };
@@ -886,4 +921,6 @@ module.exports = {
   isPlainObject,
   cropImageUrl,
   customerPointsFromRow,
+  shownPinLabel,
+  withHolder,
 };
