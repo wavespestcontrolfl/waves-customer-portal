@@ -1833,12 +1833,79 @@ jest.setTimeout(120000);
         expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 0, refused: 0, failed: 0 });
       });
 
+      test('only the newest signature of a reopened application makes the record, whatever order the pass reads them in', async () => {
+        // Two signed offers wait for their record: the owner reopened the application, and the applicant signed a
+        // second offer at another rate. The pass reads the older one first.
+        const first = await signedWithoutRecord();
+        await root('job_applications').where({ id: first.app.id }).update({ status: 'reviewed' });
+        const saved = await JobOffers.saveDraft(first.app.id, { hourlyRate: 24 }, actor());
+        const { offer: second } = await sendAsPage(first.app.id, saved.id, saved.draftHash);
+        await root('job_offers').where({ id: first.offer.id }).update({ signed_at: new Date(Date.now() - 86400000) });
+        await root('job_offers').where({ id: second.id }).update({ status: 'accepted', signed_at: new Date(), signed_name: 'Jordan Rivera' });
+        await root('job_applications').where({ id: first.app.id }).update({ status: 'hired' });
+        mockRaise.mockClear();
+
+        expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 1, refused: 0, failed: 0 });
+        const older = await offerRow(first.offer.id);
+        expect(older.technician_id).toBeNull();
+        expect(older.checklist.staff_record).toEqual({ at: expect.any(String), made: false, reason: 'newer_offer' });
+        expect(JobOffers.timelineOf(older).map((t) => t.kind)).not.toContain('staff_record');
+        const newer = await offerRow(second.id);
+        expect(newer.checklist.staff_record).toMatchObject({ made: true, pay_step: 'made' });
+        expect(Number((await staffRow(newer.technician_id)).pay_rate)).toBe(24);
+        expect(await stepsOf(newer.technician_id)).toHaveLength(1);
+        expect(mockRaise).not.toHaveBeenCalled();
+        // The older signature is final too: a direct call and the next pass make nothing.
+        expect(await JobOffers.makeStaffRecord(first.offer.id)).toBeNull();
+        expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 0, refused: 0, failed: 0 });
+      });
+
+      test('a second signature after the staff record exists changes nothing on the row and rings one bell', async () => {
+        const { app, offer: first, token } = await openOffer();
+        await sign(token);
+        const staffId = (await offerRow(first.id)).technician_id;
+        expect(staffId).toBeTruthy();
+        // The owner reopens the application and sends a new offer at another rate; the applicant signs it.
+        await root('job_applications').where({ id: app.id }).update({ status: 'interview' });
+        const saved = await JobOffers.saveDraft(app.id, { hourlyRate: 24 }, actor());
+        const { offer: second } = await sendAsPage(app.id, saved.id, saved.draftHash);
+        const staffCount = async () => Number((await root('technicians').count('* as n').first()).n);
+        const before = await staffCount();
+        mockRaise.mockClear();
+        expect((await sign((await offerRow(second.id)).token)).body).toMatchObject({ state: 'signed' });
+
+        const row = await offerRow(second.id);
+        expect(row.technician_id).toBeNull();
+        expect(row.checklist.staff_record).toEqual({ at: expect.any(String), made: false, reason: 'earlier_record' });
+        // The portal does not rewrite a staff row's pay by itself: the row and its step are the first offer's.
+        expect(await staffCount()).toBe(before);
+        expect(Number((await staffRow(staffId)).pay_rate)).toBe(23);
+        expect(await stepsOf(staffId)).toEqual([expect.objectContaining({ hourly_rate: '25.00', effective_on: first.stepEffectiveOn })]);
+        const bells = mockRaise.mock.calls.filter(([, , opts]) => opts.dedupeKey === `job-offer-staff_terms:${second.id}`);
+        expect(bells).toHaveLength(1);
+        expect(bells[0][1]).toMatchObject({
+          action: "Jordan Rivera's staff record needs the new terms",
+          why: 'An earlier signed offer made the staff record; set its first day, pay and pay step to the new offer by hand.',
+          link: `/admin/recruiting?application=${app.id}`,
+        });
+        expect(typeof bells[0][2].trx).toBe('function');
+        expect(jest.requireActual('../services/admin-alert-compose').composeAdminAlert(bells[0][1]).headline)
+          .toBe("Leads — Jordan Rivera's staff record needs the new terms");
+        expect(JobOffers.timelineOf(row).map((t) => t.label)).toContain('Staff record kept from an earlier offer: set its first day and pay by hand');
+        mockRaise.mockClear();
+        expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 0, refused: 0, failed: 0 });
+        expect(mockRaise).not.toHaveBeenCalled();
+      });
+
       test('the step waits at most 3 seconds for a lock, and takes the payroll lock before the staff table lock', async () => {
         const { token } = await openOffer();
         const statements = await statementsOf(() => sign(token));
         const at = (text) => statements.findIndex((sql) => sql.includes(text));
         expect(at('lock_timeout')).toBeGreaterThan(-1);
         expect(statements[at('lock_timeout')]).toContain('["3000"]');
+        // The limit is set before the step's first read, so no statement of it waits longer.
+        expect(at('select "application_id" from "job_offers"')).toBe(at('lock_timeout') + 1);
+        expect(at('skip locked')).toBeGreaterThan(at('lock_timeout'));
         expect(at(PAYROLL_LOCK)).toBeGreaterThan(at('lock_timeout'));
         expect(at('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE')).toBeGreaterThan(at(PAYROLL_LOCK));
         // The staff row is written only under both locks.

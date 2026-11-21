@@ -407,7 +407,7 @@ function timelineOf(row, { sentByName = null } = {}) {
   if (row.status === 'superseded') add(row.updated_at, 'superseded', 'Replaced by an updated offer');
   if (row.status === 'expired') add(row.expires_at, 'expired', 'Closed unsigned');
   const staff = asObject(row.checklist)[STAFF_RECORD_KEY];
-  if (staff) add(staff.at, 'staff_record', staffRecordLabel(staff));
+  if (staff && staffRecordLabel(staff)) add(staff.at, 'staff_record', staffRecordLabel(staff));
   add(row.activated_at, 'activated', 'Login turned on');
   return items.sort((a, b) => a.at.localeCompare(b.at));
 }
@@ -1523,6 +1523,9 @@ async function remindClaimed(claimed, result, clock) {
 // this offer, and it never runs a second time.
 //   { at, made: true, pay_step: 'made' | 'refused' | 'none' }   the prospective staff row exists (technician_id)
 //   { at, made: false, reason: 'email_in_use' }                 no row: the owner adds the hire on the Team tab
+//   { at, made: false, reason: 'earlier_record' }               an earlier signed offer of this application made the
+//                                                               row: the owner sets it to this offer's terms
+//   { at, made: false, reason: 'newer_offer' }                  a newer signature is the hire's contract: nothing to do
 const STAFF_RECORD_KEY = 'staff_record';
 // The longest this step waits for a lock (the staff table, the payroll lock). Past it the step fails with nothing
 // written, and the 15-minute pass tries the offer again.
@@ -1531,7 +1534,10 @@ const STAFF_LOCK_WAIT_MS = 3000;
 const STAFF_NAME_CHARS = 100;
 const STAFF_PHONE_CHARS = 20;
 
+// The timeline row of the step, or null for a signature a newer one replaced (the newer offer shows the record).
 function staffRecordLabel(staff) {
+  if (staff.reason === 'newer_offer') return null;
+  if (staff.reason === 'earlier_record') return 'Staff record kept from an earlier offer: set its first day and pay by hand';
   if (!staff.made) return 'Staff record not made: the email is already a staff login';
   if (staff.pay_step === 'refused') return 'Staff record made, without the pay step';
   return staff.pay_step === 'made' ? 'Staff record made, with the pay step' : 'Staff record made';
@@ -1562,36 +1568,54 @@ async function addOfferPayStep(trx, technicianId, offer) {
  * the offer has one, the pay rate step. A prospective row signs in nowhere, takes no visit and is on no customer
  * surface (technician-eligibility.js); the Team tab makes it active. Nothing here sends a message to anyone.
  *
- * One transaction, after the signature's own commit, so it never undoes a signature. Locks, in this order: the
- * application row, the offer row, the payroll lock (only for an offer with a step, and BEFORE the staff table lock:
- * a pay run holds the payroll lock while it writes a staff row), then the staff table lock every staff identity
- * writer takes. checklist.staff_record is written in the same transaction as what the step made, so a second call
- * does nothing, and an error leaves no mark: the 15-minute pass (makeDueStaffRecords) tries that offer again.
+ * One transaction, after the signature's own commit, so it never undoes a signature. Its first statement limits
+ * every lock wait in it to 3 seconds. Locks, in this order: the application row, the offer row, the payroll lock (only
+ * for an offer with a step, and BEFORE the staff table lock: a pay run holds the payroll lock while it writes a staff
+ * row), then the staff table lock every staff identity writer takes. checklist.staff_record is written in the same
+ * transaction as what the step made, so a second call does nothing, and an error leaves no mark: the 15-minute pass
+ * (makeDueStaffRecords) tries that offer again.
+ *
+ * Only the NEWEST signature of an application is the hire's contract. An application the owner reopened can hold two
+ * signed offers: the older one makes nothing (marked, no bell), whatever order the pass reads them in. And when an
+ * earlier signed offer already made the staff row, the newer one changes nothing on it: a bell asks the owner to set
+ * that row's first day, pay and pay step to the new offer. The portal never rewrites a staff row's pay by itself.
  *
  * No row is made when the application's email is already a staff login's (the staff email or the linked Google
  * address of another staff row, of any status, or an owner login address): a bell asks the owner to add the hire by hand. A pay step the payroll rules refuse leaves the
  * row made, with a bell. Both bells are written in this transaction.
  *
- * Returns 'made' | 'refused' | null (nothing to do: not signed, the application is no longer Hired, the step already
- * ran, or another call holds the rows).
+ * Returns 'made' | 'refused' (a bell rang) | null (nothing to do: not signed, the application is no longer Hired, the
+ * step already ran, a newer signature replaced this one, or another call holds the rows).
  */
 async function makeStaffRecord(offerId) {
   return db.transaction(async (trx) => {
+    await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(STAFF_LOCK_WAIT_MS)]);
     const found = await trx('job_offers').where({ id: offerId }).first('application_id');
     const application = found && await trx('job_applications').where({ id: found.application_id }).forUpdate().skipLocked().first();
     const offer = application && await trx('job_offers').where({ id: offerId }).forUpdate().skipLocked().first();
     if (!offer || !staffRecordDue(application, offer)) return null;
 
-    const { canonicalStaffEmail, findStaffByLoginEmail, lockStaffIdentityWrites } = require('../utils/staff-identity');
-    const hasStep = offer.step_rate != null && Boolean(offer.step_effective_on);
-    await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(STAFF_LOCK_WAIT_MS)]);
-    if (hasStep) await require('./payroll-lock').lockPayrollMutations(trx);
-    await lockStaffIdentityWrites(trx);
-
     const at = new Date().toISOString();
     const store = (staff, more = {}) => trx('job_offers').where({ id: offer.id }).update({
       ...more, checklist: JSON.stringify({ ...asObject(offer.checklist), [STAFF_RECORD_KEY]: { at, ...staff } }),
     });
+    // The application's signed offers, newest first (the application row is locked, so the set cannot change).
+    const signed = await trx('job_offers').where({ application_id: application.id, status: 'accepted' })
+      .orderBy([{ column: 'signed_at', order: 'desc' }, { column: 'id', order: 'desc' }]).select('id', 'technician_id');
+    if (signed[0].id !== offer.id) {
+      await store({ made: false, reason: 'newer_offer' });
+      return null;
+    }
+    if (signed.some((row) => row.technician_id)) {
+      await store({ made: false, reason: 'earlier_record' });
+      await raiseBell('staff_terms', offer, null, trx);
+      return 'refused';
+    }
+
+    const { canonicalStaffEmail, findStaffByLoginEmail, lockStaffIdentityWrites } = require('../utils/staff-identity');
+    const hasStep = offer.step_rate != null && Boolean(offer.step_effective_on);
+    if (hasStep) await require('./payroll-lock').lockPayrollMutations(trx);
+    await lockStaffIdentityWrites(trx);
     const contact = contactOf(application);
     const email = canonicalStaffEmail(contact.email);
     const emailTaken = Boolean(email) && (require('./intelligence-bar/ib-access').isFullAccessEmail(email)
@@ -1692,6 +1716,11 @@ const BELLS = {
   staff_record: {
     actions: [(n) => `${n}'s staff record was not made`],
     why: () => 'The email on the application is already a staff login, so add this hire on the Team tab by hand.',
+    doneWhen: 'offer_reviewed',
+  },
+  staff_terms: {
+    actions: [(n) => `${n}'s staff record needs the new terms`, (n) => `${n}'s staff record needs new terms`],
+    why: () => 'An earlier signed offer made the staff record; set its first day, pay and pay step to the new offer by hand.',
     doneWhen: 'offer_reviewed',
   },
   pay_step: {
