@@ -2868,6 +2868,13 @@ function EstimatePipelineViewV2({
                         {e.address || "—"}
                         {e.serviceInterest ? ` · ${e.serviceInterest}` : ""}
                       </div>{" "}
+                      {/* What the customer said would help them decide. It sits with the name, in the column that can
+                       wrap: in the right-hand timeline its length pushed the row's actions to a second line. */}
+                      {stillDecidingLine(e.stillDeciding) && (
+                        <div className="text-ui-body text-ink-secondary mt-0.5">
+                          {stillDecidingLine(e.stillDeciding)}
+                        </div>
+                      )}
                       <EstimateSoldByRow estimate={e} onChanged={refreshEstimates} />
                     </div>
                     {/* Call + text + send-estimate trailing buttons — matches the
@@ -3064,9 +3071,6 @@ function EstimatePipelineViewV2({
                       )}
                       {e.lastCallOutcome && (
                         <div>{callOutcomeLine(e.lastCallOutcome)}</div>
-                      )}
-                      {stillDecidingLine(e.stillDeciding) && (
-                        <div>{stillDecidingLine(e.stillDeciding)}</div>
                       )}
                     </div>
                     {/* Actions — flag toggle + primary status action(s) +
