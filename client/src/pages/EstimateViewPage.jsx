@@ -195,6 +195,7 @@ const PRICE_SECTION_ID = 'estimate-price-section';
 const PAYMENT_SECTION_ID = 'estimate-payment-section';
 const ASK_SECTION_ID = 'estimate-ask-section';
 const REVIEW_SECTION_ID = 'estimate-review-section';
+const SLOT_ISSUE_SECTION_ID = 'estimate-slot-issue';
 
 function scrollToPriceSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(PRICE_SECTION_ID) : null;
@@ -4832,7 +4833,7 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
         ) : staleHold
           ? "We couldn't release your earlier time hold, so your options may be out of date. Tap refresh to try again."
           : expired
-            ? 'Your time-slot hold expired — pick a time again to finish signing up.'
+            ? 'Your held time ran out and nothing was booked. Pick a time below to finish.'
             : note || "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
       {staleQuote ? (
@@ -9057,6 +9058,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // slot_conflict handling.
   }, []);
 
+  // An expired hold's banner renders right above the time list, and the page
+  // scrolls to it (owner 2026-11-20, D2 B). At the page top it sat far above
+  // the confirm card, and a customer whose hold ran out at Confirm read the
+  // page as done (Sep 11). A refused quote keeps its place. The website flow
+  // already shows the banner above its time list and scrolls to its own top.
+  const slotIssueInBooking = !websiteMode && ctaPhase === 'reservation_expired' && !staleQuoteNote;
+
   // Entering review (and success) swaps the tall configure page for a much
   // shorter layout, but the browser keeps the old scroll offset — the
   // customer who tapped a payment option ~2000px down was left staring at
@@ -9070,8 +9078,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
     } else if (ctaPhase === 'success') {
       window.scrollTo({ top: 0, behavior: scrollBehavior() });
+    } else if (slotIssueInBooking) {
+      const el = document.getElementById(SLOT_ISSUE_SECTION_ID);
+      if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
     }
-  }, [ctaPhase, reservation]);
+  }, [ctaPhase, reservation, slotIssueInBooking]);
 
   // Seamless single-screen booking (owner 2026-07-12). All UX below is gated
   // on the RECURRING_CARD_ON_FILE flag (recurringCardPolicy.enforced) so the
@@ -10932,7 +10943,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
       {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
 
-      {slotIssueBanner}
+      {slotIssueInBooking ? null : slotIssueBanner}
 
       {measurementReviewBasis ? (
         <MeasurementReviewSheet
@@ -11027,6 +11038,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
           <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} />
 
+          {slotIssueInBooking ? (
+            <div id={SLOT_ISSUE_SECTION_ID} style={{ scrollMarginTop: 76 }}>{slotIssueBanner}</div>
+          ) : null}
           {bookingContent}
 
           {/* Pest visit-preference toggles ("Skip parts you don't need")

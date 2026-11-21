@@ -6,6 +6,7 @@ const {
   bundleSectionLadderForService,
   applySelectedMosquitoTierToEstimateData,
   buildPricingBundle,
+  renderPage,
 } = require('../routes/estimate-public');
 const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
 const { setEstimatePricingCache } = require('../services/estimate-pricing-cache');
@@ -630,6 +631,20 @@ describe('bundle split survives 1-cent per-service rounding drift (buildPricingB
     );
     expect(defaultCombo.monthly).toBe(84.08);
   });
+
+  // EST-7df56f0f (2026-11-06): the page offered "pay the year" on a bundle, because
+  // only mosquito-axis combos were stamped and the estimate-level flag read the
+  // service mix alone; accept then refused it ("annual prepay is not available
+  // for this estimate"). A plan with more than one recurring service cannot
+  // prepay (the converter fails it closed too), so /data must not offer it.
+  test('a multi-service plan never offers annual prepay: the flag and every combo say false', async () => {
+    const bundle = await buildPricingBundle(driftEstimate());
+    expect(bundle.annualPrepayEligible).toBe(false);
+    expect(bundle.serviceCadenceCombos.length).toBeGreaterThan(0);
+    for (const combo of bundle.serviceCadenceCombos) {
+      expect(combo.annualPrepayEligible).toBe(false);
+    }
+  });
 });
 
 describe('palm-care bullet survives the fast-path split (Codex round 5 P0 on #4789)', () => {
@@ -1162,5 +1177,376 @@ describe('pre-ladder lawn send snapshots recompute instead of fast-pathing (prod
     const bundle = await buildPricingBundle(estimate);
     expect(bundle.snapshotHit).toBe(true);
     expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+  });
+});
+
+describe('annual prepay on a multi-service plan: every page path agrees with accept (EST-7df56f0f)', () => {
+  // A synthetic new lead (no membership snapshot). The server-rendered page computes its own offer flag, so it needs
+  // the same unit count as /data: one service offers "pay the year", two must not.
+  const lead = () => ({
+    id: 'estimate-prepay-ssr-test',
+    status: 'sent',
+    customerName: 'Test Lead',
+    address: '100 Example St, Bradenton, FL 34201',
+    monthlyTotal: 62.78,
+    annualTotal: 753.36,
+    onetimeTotal: 0,
+    tier: 'Silver',
+  });
+  const data = (services) => ({
+    result: {
+      results: { lawn: [{ v: 9, recommended: true }] },
+      recurring: { discount: 0.10, annualBeforeDiscount: 837, annualAfterDiscount: 753.30, services },
+      oneTime: { items: [], membershipFee: 99 },
+    },
+  });
+  const LAWN = { name: 'Lawn Care', mo: 69.75 };
+  const PEST = { name: 'Pest Control', mo: 45 };
+
+  // A legacy plan split across the two recurring blocks: accept counts two units and refuses prepay, so the page offers
+  // none. The page's fee reader sees one block and still shows the $99 setup fee accept never bills; which reader is
+  // right is a separate ruling for the owner (CLAUDE.md rule 22), so the fee line stays as built.
+  // The unit count is the converter's; when it fails the answer is unknown, never "one unit": no prepay, no waiver.
+  test('the server-rendered page: a unit count that fails closes prepay', () => {
+    const control = renderPage('prepay-ssr-count', lead(), data([{ name: 'Pest Control', mo: 45 }]), null);
+    expect(control).toContain('data-payment-setup="prepay_annual"');
+    const spy = jest.spyOn(require('../services/estimate-converter'), 'annualPrepayRecurringUnitCount')
+      .mockImplementation(() => { throw new TypeError('unreadable row'); });
+    try {
+      const failed = renderPage('prepay-ssr-count', lead(), data([{ name: 'Pest Control', mo: 45 }]), null);
+      expect(failed).not.toContain('data-payment-setup="prepay_annual"');
+      expect(failed).not.toContain('data-pay-pref="prepay_annual"');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('the server-rendered page: a second service in the root block closes prepay; the fee line stays as built', () => {
+    const control = renderPage('prepay-ssr-fee', lead(), data([{ name: 'Pest Control', mo: 45 }]), null);
+    const split = renderPage('prepay-ssr-fee', lead(), {
+      ...data([{ name: 'Pest Control', mo: 45 }]),
+      recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 69.75 }] },
+    }, null);
+    expect(control).toContain('data-payment-setup="prepay_annual"');
+    expect(split).not.toContain('data-payment-setup="prepay_annual"');
+    expect(split).not.toContain('data-pay-pref="prepay_annual"');
+    expect(split).toContain('<span>WaveGuard Membership Setup</span>');
+  });
+
+  test('the server-rendered page offers it for one service and not for two', () => {
+    expect(renderPage('prepay-ssr-one', lead(), data([LAWN]), null)).toContain('data-payment-setup="prepay_annual"');
+    const html = renderPage('prepay-ssr-two', lead(), data([LAWN, PEST]), null);
+    expect(html).not.toContain('data-payment-setup="prepay_annual"');
+    expect(html).not.toContain('data-pay-pref="prepay_annual"');
+  });
+
+  // A priced one-time pest choice makes a recurring choice keep only the pest rows (withPestOnlyRecurringChoice). With
+  // lawn as the only recurring row, accept then persists no recurring unit: zero units is no plan to prepay.
+  const PEST_ONE_TIME = { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }], membershipFee: 99 };
+  // The page's handler always passes the bundle's priced tiers; accept filters to the pest rows only when a tier resolves.
+  const LAWN_TIER = { key: 'lawn_9', label: '9 visits', serviceCategory: 'lawn', monthly: 69.75, annual: 837, visitsPerYear: 9, billingFrequencyKey: 'monthly', annualPrepayEligible: true };
+  test('the server-rendered page: a one-time pest choice beside lawn-only recurring rows offers no prepay', () => {
+    const lawnOnly = { result: { ...data([LAWN]).result, oneTime: PEST_ONE_TIME } };
+    const priced = { ...lead(), pricingFrequencies: [LAWN_TIER] };
+    // Control: without the one-time choice, accept keeps the lawn row (one unit) and the page offers prepay.
+    expect(renderPage('prepay-ssr-zero', priced, lawnOnly, null)).toContain('data-payment-setup="prepay_annual"');
+    const html = renderPage('prepay-ssr-zero', { ...priced, showOneTimeOption: true }, lawnOnly, null);
+    expect(html).not.toContain('data-payment-setup="prepay_annual"');
+    expect(html).not.toContain('data-pay-pref="prepay_annual"');
+  });
+
+  // With no priced tier, accept persists the rows unfiltered (its pest-only step runs only for a selected tier), so the
+  // lawn row stays: one unit, and the page keeps the offer.
+  test('the server-rendered page with no priced tier counts the rows unfiltered, as accept persists them', () => {
+    const lawnOnly = { result: { ...data([LAWN]).result, oneTime: PEST_ONE_TIME } };
+    expect(renderPage('prepay-ssr-zero-tierless', { ...lead(), showOneTimeOption: true }, lawnOnly, null))
+      .toContain('data-payment-setup="prepay_annual"');
+  });
+
+  // A legacy estimate keeps its mosquito ladder in result.recurring and a second service in the root recurring
+  // block. The mosquito tier stamp runs after the estimate-level check, and the page prefers a frequency's flag, so
+  // the multi-service veto must close the tier flags too.
+  const mosquitoEstimate = (tag, extra = {}, row = {}) => ({
+    id: `estimate-prepay-legacy-mosquito-${tag}`,
+    estimate_data: {
+      result: {
+        results: {
+          mq: [
+            { n: 'Seasonal Mosquito Program (9 visits)', v: 9, pv: 110, recommended: true },
+            { n: 'Monthly Mosquito Program (12 visits)', v: 12, pv: 95 },
+          ],
+          mqMeta: { pr: 1.2, ri: 0, treatableSqFt: 8250 },
+        },
+        recurring: {
+          monthlyTotal: 82.5,
+          annualAfterDiscount: 990,
+          services: [
+            { service: 'mosquito', name: 'Mosquito (Seasonal Mosquito Program)', mo: 82.5, perTreatment: 110, visitsPerYear: 9 },
+          ],
+        },
+        oneTime: {
+          total: 275,
+          items: [{ service: 'one_time_mosquito', name: 'One-Time Mosquito Treatment', price: 275, detail: 'Rain re-spray guarantee' }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+      ...extra,
+    },
+    monthly_total: 82.5,
+    annual_total: 990,
+    onetime_total: 275,
+    waveguard_tier: 'Bronze',
+    show_one_time_option: true,
+    ...row,
+  });
+  const offersPrepay = (bundle) => JSON.stringify(bundle).includes('"annualPrepayEligible":true');
+  const ROOT_PEST = { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 45, perTreatment: 135, visitsPerYear: 4 }] } };
+  // With a one-time option and a priced pest row, accept keeps only pest (the pest-choice test below), so the
+  // two-service cases here offer no one-time choice.
+  const NO_ONE_TIME_CHOICE = { show_one_time_option: false };
+
+  test('a mosquito ladder with a second service in the root recurring block offers no tier prepay', async () => {
+    // Control: solo mosquito reaches the tier stamp, its monthly tier can prepay, and it carries the setup fee.
+    const solo = await buildPricingBundle(mosquitoEstimate('solo'));
+    expect(offersPrepay(solo)).toBe(true);
+    expect(JSON.stringify(solo)).toContain('"waveguard_setup"');
+    const legacy = await buildPricingBundle(mosquitoEstimate('with-root-pest', ROOT_PEST, NO_ONE_TIME_CHOICE));
+    // Accept counts two units, so no frequency or tier lets the customer pick prepay, and nothing promises "waived
+    // when you pay the year". The fee line itself stays as built (the separate rule-22 question).
+    expect(offersPrepay(legacy)).toBe(false);
+    expect(JSON.stringify(legacy)).not.toContain('"waivedWithPrepay":true');
+    expect(JSON.stringify(legacy)).toContain('"waveguard_setup"');
+  });
+
+  test('a priced engine line beside the stored rows counts as a second service, as the converter reads it', async () => {
+    const withEngineLawn = await buildPricingBundle(mosquitoEstimate('with-engine-lawn', {
+      engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 900, monthly: 75 }] },
+    }));
+    expect(offersPrepay(withEngineLawn)).toBe(false);
+    expect(JSON.stringify(withEngineLawn)).not.toContain('"waivedWithPrepay":true');
+  });
+
+  // An estimate that also offers a one-time pest visit: a recurring choice keeps only the pest rows (accept persists
+  // withPestOnlyRecurringChoice), so the unit count reads one service and prepay stays as accept allows it. A second
+  // service in the root recurring block changes neither the fee nor prepay on the page.
+  const pestChoiceEstimate = (tag, root = {}) => ({
+    id: `estimate-prepay-pest-choice-${tag}`,
+    show_one_time_option: true,
+    estimate_data: {
+      result: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 45, perTreatment: 135, visitsPerYear: 4 }] },
+        oneTime: { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }], membershipFee: 99 },
+      },
+      ...root,
+    },
+    monthly_total: 45,
+    annual_total: 540,
+    onetime_total: 250,
+    waveguard_tier: 'Bronze',
+  });
+  const ROOT_LAWN = { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 69.75, visitsPerYear: 9 }] } };
+
+  test('a one-time pest choice with lawn in the root block: the page keeps the fee and prepay accept keeps', async () => {
+    const { shouldPersistPestOnlyRecurringChoice, withPestOnlyRecurringChoice } = require('../routes/estimate-public');
+    const converter = require('../services/estimate-converter');
+    const split = pestChoiceEstimate('split', ROOT_LAWN);
+    expect(shouldPersistPestOnlyRecurringChoice(split, split.estimate_data)).toBe(true);
+    // Accept persists pest alone, and conversion bills its setup fee.
+    const accepted = withPestOnlyRecurringChoice(split.estimate_data);
+    const acceptedRows = converter.recurringServicesFromEstimateData(accepted);
+    expect(acceptedRows.map((row) => row.service)).toEqual(['pest_control']);
+    expect(converter.shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: acceptedRows, estimateData: accepted }))
+      .toBe(true);
+    // Both page paths agree with the same estimate without the root lawn row.
+    const control = await buildPricingBundle(pestChoiceEstimate('control'));
+    const bundle = await buildPricingBundle(split);
+    expect(JSON.stringify(control)).toContain('"waveguard_setup"');
+    expect(JSON.stringify(bundle)).toContain('"waveguard_setup"');
+    expect(offersPrepay(bundle)).toBe(offersPrepay(control));
+    const html = renderPage('prepay-pest-choice-ssr', { ...lead(), showOneTimeOption: true }, split.estimate_data, null);
+    expect(html).toContain('<span>WaveGuard Membership Setup</span>');
+  });
+
+  describe('withMultiServicePrepayClosed', () => {
+    const { withMultiServicePrepayClosed } = require('../routes/estimate-public');
+    const NO_CHOICE = { show_one_time_option: false };
+    const pestRow = { service: 'pest_control', name: 'Pest Control', mo: 45, perTreatment: 135, visitsPerYear: 4 };
+    const lawnRow = { service: 'lawn_care', name: 'Lawn Care', mo: 69.75, visitsPerYear: 9 };
+    const bundle = (extra = {}) => ({
+      annualPrepayEligible: true,
+      frequencies: [{ key: 'quarterly', annualPrepayEligible: true }],
+      ...extra,
+    });
+
+    test('a frozen bundle\'s hidden lawn tiers close with the visible ones: accept resolves a submitted key from both', () => {
+      const out = withMultiServicePrepayClosed(
+        bundle({ hiddenLawnFrequencies: [{ key: 'lawn_6', annualPrepayEligible: true }] }),
+        { result: { recurring: { services: [lawnRow, pestRow] } } },
+        NO_CHOICE,
+      );
+      expect(out.annualPrepayEligible).toBe(false);
+      expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
+      expect(out.hiddenLawnFrequencies).toEqual([{ key: 'lawn_6', annualPrepayEligible: false }]);
+    });
+
+    test('a unit count that fails closes prepay and its waiver, as two units would', () => {
+      const spy = jest.spyOn(require('../services/estimate-converter'), 'annualPrepayRecurringUnitCount')
+        .mockImplementation(() => { throw new TypeError('unreadable row'); });
+      try {
+        const out = withMultiServicePrepayClosed(bundle({
+          firstVisitFees: [{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: true }],
+        }), { result: { recurring: { services: [pestRow] } } }, NO_CHOICE);
+        expect(out.annualPrepayEligible).toBe(false);
+        expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
+        expect(out.firstVisitFees).toEqual([{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: false }]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('a one-time pest choice beside lawn-only rows leaves accept no recurring unit: prepay and its waiver close', () => {
+      const lawnOnly = {
+        result: {
+          recurring: { services: [lawnRow] },
+          oneTime: { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }] },
+        },
+      };
+      const shown = bundle({ firstVisitFees: [{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: true }] });
+      // Control: with no one-time choice the lawn row is one unit, and the bundle is left as built.
+      expect(withMultiServicePrepayClosed(shown, lawnOnly, NO_CHOICE)).toBe(shown);
+      const out = withMultiServicePrepayClosed(shown, lawnOnly, { show_one_time_option: true });
+      expect(out.annualPrepayEligible).toBe(false);
+      expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
+      expect(out.firstVisitFees).toEqual([{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: false }]);
+    });
+
+    // A termite annual plan parks for the annual agreement's signature, but activation runs the same conversion and
+    // refuses a multi-service prepay. So a plan bundled with pest gets no prepay (it must never park for a signature it
+    // cannot activate), and a solo plan, one unit, keeps its offer.
+    test('a termite annual plan bundled with pest closes prepay; a solo termite annual plan keeps it', () => {
+      const termiteRow = { service: 'termite_bait', name: 'Termite Bait Stations', annual: 250 };
+      const plan = (services) => ({
+        result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 250 }], recurring: { services } },
+      });
+      const shown = bundle();
+      expect(withMultiServicePrepayClosed(shown, plan([termiteRow]), NO_CHOICE)).toBe(shown);
+      const out = withMultiServicePrepayClosed(shown, plan([termiteRow, pestRow]), NO_CHOICE);
+      expect(out.annualPrepayEligible).toBe(false);
+      expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
+    });
+
+    // The same rule on /data: a bundle with no priced tier gives accept no selected tier, so its rows count unfiltered.
+    test('a one-time pest choice beside pest and lawn: kept with a priced tier, closed with none', () => {
+      const both = {
+        result: {
+          recurring: { services: [pestRow, lawnRow] },
+          oneTime: { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }] },
+        },
+      };
+      const choice = { show_one_time_option: true };
+      const priced = bundle();
+      expect(withMultiServicePrepayClosed(priced, both, choice)).toBe(priced);
+      const out = withMultiServicePrepayClosed({ annualPrepayEligible: true, frequencies: [] }, both, choice);
+      expect(out.annualPrepayEligible).toBe(false);
+    });
+
+    test('a split plan showing a setup fee: prepay closes everywhere, the fee row stays, its waiver line goes', () => {
+      const shown = bundle({
+        firstVisitFees: [{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: true }],
+        hiddenLawnFrequencies: [{ key: 'lawn_6', annualPrepayEligible: true }],
+      });
+      const split = { result: { recurring: { services: [pestRow] } }, recurring: { services: [lawnRow] } };
+      const out = withMultiServicePrepayClosed(shown, split, NO_CHOICE);
+      expect(out.annualPrepayEligible).toBe(false);
+      expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
+      expect(out.hiddenLawnFrequencies).toEqual([{ key: 'lawn_6', annualPrepayEligible: false }]);
+      expect(out.firstVisitFees).toEqual([{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: false }]);
+    });
+  });
+
+  // Accept's own check. With no priced frequency (an engine replay that failed) there is no tier flag to read, and the
+  // service mix alone admits any recurring mix: the unit count must still refuse a plan the converter refuses.
+  describe('acceptPrepayAvailable', () => {
+    const { acceptPrepayAvailable } = require('../routes/estimate-public');
+    const pestRow = { service: 'pest_control', name: 'Pest Control', mo: 45, perTreatment: 135, visitsPerYear: 4 };
+    const lawnRow = { service: 'lawn_care', name: 'Lawn Care', mo: 69.75, visitsPerYear: 9 };
+    const termiteRow = { service: 'termite_bait', name: 'Termite Bait Stations', annual: 250 };
+    const NO_CHOICE = { show_one_time_option: false };
+    const termitePlan = (services) => ({
+      result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 250 }], recurring: { services } },
+    });
+    const check = (services, estData, selectedFrequency = null) => acceptPrepayAvailable({
+      selectedFrequency, recurringSvcList: services, oneTimeList: [], estData, estimate: NO_CHOICE,
+    });
+
+    test('no priced frequency: a termite annual plan bundled with pest is refused, a solo plan is not', () => {
+      expect(check([termiteRow], termitePlan([termiteRow]))).toBe(true);
+      expect(check([termiteRow, pestRow], termitePlan([termiteRow, pestRow]))).toBe(false);
+    });
+
+    test('no priced frequency: two ordinary services are refused, one is not', () => {
+      expect(check([pestRow], { result: { recurring: { services: [pestRow] } } })).toBe(true);
+      expect(check([lawnRow, pestRow], { result: { recurring: { services: [lawnRow, pestRow] } } })).toBe(false);
+    });
+
+    // Accept persists the pest-only rows only inside its selected-tier step: with no priced tier, conversion receives every
+    // recurring row, so pest plus lawn is two units even beside a one-time pest choice.
+    test('a one-time pest choice: with a tier, pest plus lawn counts the pest row; with none, both rows', () => {
+      const pestOneTime = { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }] };
+      const both = { result: { recurring: { services: [pestRow, lawnRow] }, oneTime: pestOneTime } };
+      const choice = { show_one_time_option: true };
+      const run = (selectedFrequency) => acceptPrepayAvailable({
+        selectedFrequency, recurringSvcList: [pestRow], oneTimeList: [], estData: both, estimate: choice,
+      });
+      expect(run({ key: 'quarterly', annualPrepayEligible: true })).toBe(true);
+      expect(run(null)).toBe(false);
+    });
+
+    // The mapped result (result.results.tmBait) still names the annual plan after the pest-only filter drops the termite
+    // row: termite plus pest must count as two units first, or one pest unit would park a termite agreement.
+    test('a mapped termite annual plan with pest and a one-time pest choice is refused, with a tier or without', () => {
+      const mapped = {
+        result: {
+          results: { tmBait: { plan: 'annual_protection', annual: 250 } },
+          recurring: { services: [termiteRow, pestRow] },
+          oneTime: { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }] },
+        },
+      };
+      const choice = { show_one_time_option: true };
+      const run = (selectedFrequency) => acceptPrepayAvailable({
+        selectedFrequency, recurringSvcList: [pestRow], oneTimeList: [], estData: mapped, estimate: choice,
+      });
+      expect(run({ key: 'quarterly', annualPrepayEligible: true })).toBe(false);
+      expect(run(null)).toBe(false);
+      // Control: the same rows on a quarterly termite program keep the pest-only count (one pest unit).
+      const quarterly = { result: { ...mapped.result, results: { tmBait: { plan: 'quarterly_monitoring' } } } };
+      expect(acceptPrepayAvailable({
+        selectedFrequency: { key: 'quarterly', annualPrepayEligible: true }, recurringSvcList: [pestRow], oneTimeList: [], estData: quarterly, estimate: choice,
+      })).toBe(true);
+    });
+
+    // The plan's one unit must be the termite row: a mapped plan whose only recurring row is pest would park a termite
+    // agreement for pest coverage.
+    test('a mapped termite annual plan whose only recurring row is pest is refused; its termite row alone keeps prepay', () => {
+      const mappedWith = (services) => ({
+        result: { results: { tmBait: { plan: 'annual_protection', annual: 250 } }, recurring: { services } },
+      });
+      const run = (estData, recurringSvcList, selectedFrequency) => acceptPrepayAvailable({
+        selectedFrequency, recurringSvcList, oneTimeList: [], estData, estimate: {},
+      });
+      const tier = { key: 'quarterly', annualPrepayEligible: true };
+      expect(run(mappedWith([pestRow]), [pestRow], tier)).toBe(false);
+      expect(run(mappedWith([pestRow]), [pestRow], null)).toBe(false);
+      expect(run(mappedWith([termiteRow]), [termiteRow], tier)).toBe(true);
+    });
+
+    test('a tier flag still decides for one unit, and never re-opens two', () => {
+      const one = { result: { recurring: { services: [pestRow] } } };
+      expect(check([pestRow], one, { key: 'quarterly', annualPrepayEligible: false })).toBe(false);
+      expect(check([pestRow], one, { key: 'quarterly', annualPrepayEligible: true })).toBe(true);
+      const two = { result: { recurring: { services: [lawnRow, pestRow] } } };
+      expect(check([lawnRow, pestRow], two, { key: 'quarterly', annualPrepayEligible: true })).toBe(false);
+    });
   });
 });
