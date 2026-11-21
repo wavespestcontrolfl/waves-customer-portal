@@ -1014,11 +1014,38 @@ the route would run it (an arrival late in the hour counts), and it must not
 push another stop to end after the shift end. On today's date the shift runs
 from that technician's clock-in, for the same length of day. A technician
 without set hours is offered as before, and the shift never adds an hour a
-surface would not offer. Offers only: no field is added or removed, and the
-reserve and confirm routes do not check the shift yet (an offer signed before
-the gate was set stays redeemable until it expires). The one exception is the
-estimate page's make-room hour, which `/reserve` and `/extend` prove again
-with the same filter. Gate off: byte-identical.
+surface would not offer. No field is added or removed. The booking commits
+check the shift too (D4 part 3a), on the visit's own block (its start, and its
+start plus its length). A visit the technician's shift does not hold gets the
+409 that route already gives for a time that is gone, so an offer signed
+before the gate was set, or before the office changed the hours, is refused
+and the customer picks another time. No route gets a new status, field or
+code. Each route's 409 body, unchanged:
+- `POST /api/public/estimates/:token/reserve`: `{ error: 'slot no longer
+  available', slotId, nextBest, availableSlots }`. This body carries no
+  `code`.
+- `POST /api/public/estimates/:token/reserve/:scheduledServiceId/extend`:
+  `{ error, code: 'SLOT_UNAVAILABLE', slotId }`.
+- `PUT /api/estimates/:token/accept` with a held time (checked on the final
+  window): `{ error, code: 'SLOT_UNAVAILABLE' }`.
+- The portal's one-tap purchase, which holds and confirms through the same
+  two functions (`POST /api/one-tap/:purchaseId/reserve` and
+  `POST /api/one-tap/:purchaseId/confirm`): `{ error, code:
+  'SLOT_UNAVAILABLE' }`.
+- `POST /api/booking/confirm`: `{ error, code: 'SLOT_TAKEN' }`.
+- The re-service link (`POST /api/public/reservice/:token`), inspection
+  booking (`POST /api/public/inspection/:token`) and the assessment booked
+  from an estimate (`POST /api/public/estimate-assessment/:token`):
+  `{ error, code: 'SLOT_TAKEN', availability }`, each page's slot-race answer
+  (`availability` holds fresh times, or null when the page reloads its own).
+- A signed proposal's first visit (`POST /api/estimates/:token/first-visit`):
+  `{ error, code: 'slot_taken' }`.
+
+A self-booked plan's first visit is lengthened to the program's length only
+when the longer block fits the shift too; otherwise it keeps its signed end,
+as when the next time is taken. Not yet checked at a commit: public
+reschedule moves, and the day as the route would run it (capacity mode). Gate
+off: byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
 browse horizon answers `400 { error: 'date is beyond the booking horizon',
 lastBookableDate, horizonDays }` (owner 2026-11-06, new-customer walk E2):

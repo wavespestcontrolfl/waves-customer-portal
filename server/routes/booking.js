@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const { startCustomerRainRank, withDisplayTier, rainTierDiff } = require('../services/scheduling/customer-rain-rank');
 const db = require('../models/db');
-const { isAssignable, assertAssignableTechnician, loadTechShifts, shiftBounds } = require('../services/technician-eligibility');
+const { isAssignable, assertAssignableTechnician, loadTechShifts, shiftBounds, shiftExcluding } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
@@ -4647,7 +4647,10 @@ async function createSelfBooking(payload = {}) {
       // miss here is a "pick another slot" outcome, so it rides the SLOT_TAKEN
       // recovery below (just-created profile rolled back, generic message).
       try {
-        await assertAssignableTechnician(technician_id || null, { conn: trx, date: String(slotDateStr).slice(0, 10), workDays: true });
+        // `hours` (GATE_TECH_SHIFT_HOURS): the visit's own block against the technician's shift, the rule
+        // the offer was held to (buildBookingAvailability addCandidate).
+        await assertAssignableTechnician(technician_id || null, { conn: trx, date: String(slotDateStr).slice(0, 10), workDays: true,
+          hours: { startMin: endMin - duration, endMin } });
       } catch (eligErr) {
         if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
         const err = new Error('That time slot is no longer available. Please pick another.');
@@ -5821,7 +5824,14 @@ async function createSelfBooking(payload = {}) {
               // route plus unassigned rows; gate off or unassigned = tech-blind, as before).
               technicianId: seriesParentRow.technician_id || null,
             });
-            if (extensionClashes.length === 0) {
+            // Shift hours (GATE_TECH_SHIFT_HOURS): the commit checked the signed block against the
+            // technician's shift. The longer block must fit it too. When it does not, the signed slot
+            // stays and the office is told, as for adjacent work. A point-in-time read with no row
+            // lock (see shiftExcluding): an hours change that lands after it is the same as one that
+            // lands after this commit. Gate off: no read.
+            const pastShift = extensionClashes.length === 0 && Boolean(await shiftExcluding(trx, seriesParentRow.technician_id,
+              parentDateStr, { startMin: timeToMin(slot_start), endMin: parentEndMin }));
+            if (extensionClashes.length === 0 && !pastShift) {
               await trx('scheduled_services')
                 .where({ id: seriesParentRow.id })
                 .update({ estimated_duration_minutes: seededChildDuration, window_end: extendedEnd, updated_at: trx.fn.now() });
@@ -5837,7 +5847,9 @@ async function createSelfBooking(payload = {}) {
               await trx('scheduled_services')
                 .where({ id: seriesParentRow.id })
                 .update({
-                  notes: trx.raw("COALESCE(notes, '') || ' — first visit reserved at the funnel duration; the program needs a longer slot but the following time is occupied; office to adjust'"),
+                  notes: trx.raw(pastShift
+                    ? "COALESCE(notes, '') || ' — first visit reserved at the funnel duration; the program needs a longer slot but it does not fit the shift hours; office to adjust'"
+                    : "COALESCE(notes, '') || ' — first visit reserved at the funnel duration; the program needs a longer slot but the following time is occupied; office to adjust'"),
                   updated_at: trx.fn.now(),
                 });
               // The note alone is passive (codex #3504 r14): ring the
@@ -5850,11 +5862,11 @@ async function createSelfBooking(payload = {}) {
               await notifySeriesOfficeBellInTx(trx, {
                 dedupeKey: `wizard-activation-short-slot:${seriesParentRow.id}`,
                 title: 'Self-booked plan: first visit reserved short',
-                body: `A self-booked recurring plan for customer ${custId} activated, but its first visit (${parentDateStr} ${slot_start}) is reserved at the funnel's ${parentDurationNow}-minute slot while the program needs ${seededChildDuration} minutes and the following time is already occupied. Move the neighbouring work or re-place this visit so the technician has the full slot.`,
+                body: `A self-booked recurring plan for customer ${custId} activated, but its first visit (${parentDateStr} ${slot_start}) is reserved at the funnel's ${parentDurationNow}-minute slot while the program needs ${seededChildDuration} minutes and ${pastShift ? "the longer slot does not fit that technician's shift hours. Re-place" : 'the following time is already occupied. Move the neighbouring work or re-place'} this visit so the technician has the full slot.`,
                 metadata: { scheduled_service_id: seriesParentRow.id, reserved_minutes: parentDurationNow, needed_minutes: seededChildDuration },
                 failLabel: 'short-slot',
               });
-              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} could not extend to ${seededChildDuration}min (adjacent work) — signed ${parentDurationNow}min slot kept, office noted + belled`);
+              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} could not extend to ${seededChildDuration}min (${pastShift ? 'shift hours' : 'adjacent work'}) — signed ${parentDurationNow}min slot kept, office noted + belled`);
             }
           }
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow, {
