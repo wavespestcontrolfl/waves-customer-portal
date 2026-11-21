@@ -88,21 +88,42 @@ describe('buildRouteAreas: one technician', () => {
   test('a date the route check measured takes its real openings: free time in pieces is not room', () => {
     // Tomorrow: 3 stops, 360 open minutes in total, but the route check found no opening that holds a job.
     const stops = [stop(), stop({ zip: '34203' }), stop({ zip: '34203' })];
-    const check = (slots, extra = {}) => ({ at: '2026-11-23T13:30:00.000Z', days: [{ date: WEEKDAYS[1], technicianId: T1, slots, skip: null, ...extra }] });
-    const none = buildRouteAreas(input({ stops, routeCheck: check(0) }));
+    const check = (slots, seen) => ({ at: '2026-11-23T13:30:00.000Z', days: [{ date: WEEKDAYS[1], technicianId: T1, slots, stops: seen, skip: null }] });
+    const none = buildRouteAreas(input({ stops, routeCheck: check(0, 3) }));
     expect(dayOf(none, T1, WEEKDAYS[1])).toMatchObject({
-      open_stops: 3, open_min: 360, room_basis: 'route_check', route_slots: 0, room: false, zips: [], zip_reason: 'full',
+      open_stops: 3, open_min: 360, room_basis: 'route_check', route_slots: 0, route_stops: 3, room: false, zips: [], zip_reason: 'full',
     });
     expect(none.rule.route_check_at).toBe('2026-11-23T13:30:00.000Z');
 
     // One real opening is room, even where the minute total alone is under a slot.
     const tight = Array.from({ length: 7 }, () => stop());
-    const one = buildRouteAreas(input({ stops: tight, limits: { ...LIMITS, weekday_limit: 9 }, routeCheck: check(1) }));
+    const one = buildRouteAreas(input({ stops: tight, limits: { ...LIMITS, weekday_limit: 9 }, routeCheck: check(1, 7) }));
     expect(dayOf(one, T1, WEEKDAYS[1])).toMatchObject({ open_min: 40, open_stops: 2, room_basis: 'route_check', route_slots: 1, room: true });
 
     // The stop limit still applies to a measured date.
-    const atLimit = buildRouteAreas(input({ stops: tight, limits: { ...LIMITS, weekday_limit: 7 }, routeCheck: check(3) }));
+    const atLimit = buildRouteAreas(input({ stops: tight, limits: { ...LIMITS, weekday_limit: 7 }, routeCheck: check(3, 7) }));
     expect(dayOf(atLimit, T1, WEEKDAYS[1])).toMatchObject({ open_stops: 0, route_slots: 3, room: false });
+  });
+
+  test('a booking made after the route check puts the day back on the minute total', () => {
+    const at = '2026-11-23T13:30:00.000Z';
+    const seenTwo = { at, days: [{ date: WEEKDAYS[1], technicianId: T1, slots: 2, stops: 2, skip: null }] };
+    // The route check saw 2 stops; a third landed since. Its openings are stale.
+    const more = buildRouteAreas(input({ stops: [stop(), stop(), stop()], routeCheck: seenTwo }));
+    expect(dayOf(more, T1, WEEKDAYS[1])).toMatchObject({ stops: 3, route_stops: 2, route_slots: 2, room_basis: 'minutes', room: true });
+    // Work with no technician landed since: the route check itself skips such a day. A long job then takes the room.
+    const seven = Array.from({ length: 7 }, () => stop({ minutes: 45 }));
+    const routeCheck = { at, days: [{ date: WEEKDAYS[1], technicianId: T1, slots: 2, stops: 7, skip: null }] };
+    const before = buildRouteAreas(input({ stops: seven, limits: { ...LIMITS, weekday_limit: 9 }, routeCheck }));
+    expect(dayOf(before, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'route_check', room: true });
+    const after = buildRouteAreas(input({
+      stops: [...seven, stop({ technicianId: null, minutes: 120 })], limits: { ...LIMITS, weekday_limit: 9 }, routeCheck,
+    }));
+    // 600 - (7 * 45 + 120) - 20 * 8 = 5 open minutes.
+    expect(dayOf(after, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'minutes', route_slots: 2, open_min: 5, room: false, zip_reason: 'full' });
+    // An entry with no stop count is not used.
+    const noCount = buildRouteAreas(input({ stops: [stop()], routeCheck: { at, days: [{ date: WEEKDAYS[1], technicianId: T1, slots: 0, skip: null }] } }));
+    expect(dayOf(noCount, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'minutes', room: true });
   });
 
   test('today, a skipped day and a day with no route check use the minute total', () => {
@@ -328,6 +349,40 @@ describe('buildRouteAreas: service lines', () => {
     expect(open.rule.line_off).toEqual([`${T2}:lawn`]);
   });
 
+  test('territory routing live: a pest ZIP follows its territory technician, the card technician covers', () => {
+    // T1 is the card's pest home and works in a-north and b-mid; T2 owns the b-mid ZIP and works there too.
+    const card = { general: { homeId: T1, gapId: null }, lawn: { homeId: T1, gapId: null } };
+    const territory = TERRITORY.map((t) => (t.zip === '34203' ? { ...t, technicianId: T2 } : t));
+    const stops = [stop(), stop({ zip: '34203' }), stop({ technicianId: T2, zip: '34203' })];
+    const live = buildRouteAreas(input({ techIds: [T1, T2], lineCard: card, territory, stops, territoryLive: true }));
+    expect(live.rule.territory_live).toBe(true);
+    // Both have room. The b-mid ZIP is T2's (its territory technician); the a-north ZIPs stay with T1.
+    expect(live.lines.pest.days[1]).toMatchObject({ technician_ids: [T1, T2], zips: ['34201', '34202', '34203'] });
+    expect(live.lines.pest.days[1].open_min).toBe(dayOf(live, T1, WEEKDAYS[1]).open_min + dayOf(live, T2, WEEKDAYS[1]).open_min);
+    // Lawn is not a territory line: it keeps the card.
+    expect(live.lines.lawn.days[1]).toMatchObject({ technician_ids: [T1], zips: ['34201', '34202', '34203'] });
+
+    // The territory technician has room but works elsewhere that day: his ZIP is not on his day, so pest leaves it out.
+    const elsewhere = buildRouteAreas(input({
+      techIds: [T1, T2], lineCard: card, territory, territoryLive: true, stops: [stop(), stop({ zip: '34203' }), stop({ technicianId: T2, zip: '34204' })],
+    }));
+    expect(elsewhere.lines.pest.days[1]).toMatchObject({ technician_ids: [T1], zips: ['34201', '34202'] });
+
+    // The territory technician is full: the card technician covers the ZIP.
+    const full = Array.from({ length: 6 }, () => stop({ technicianId: T2, zip: '34203', minutes: 30 }));
+    const covered = buildRouteAreas(input({ techIds: [T1, T2], lineCard: card, territory, territoryLive: true, stops: [stop(), stop({ zip: '34203' }), ...full] }));
+    expect(dayOf(covered, T2, WEEKDAYS[1]).room).toBe(false);
+    expect(covered.lines.pest.days[1]).toMatchObject({ technician_ids: [T1], zips: ['34201', '34202', '34203'] });
+
+    // Gate off: the card alone decides.
+    const off = buildRouteAreas(input({ techIds: [T1, T2], lineCard: card, territory, stops }));
+    expect(off.rule.territory_live).toBe(false);
+    expect(off.lines.pest.days[1]).toMatchObject({ technician_ids: [T1], zips: ['34201', '34202', '34203'] });
+    // A territory line with no card row has no cover: the territory adds no rule.
+    const noCard = buildRouteAreas(input({ techIds: [T1, T2], territory, stops, territoryLive: true }));
+    expect(noCard.lines.pest.days[1]).toMatchObject({ technician_ids: [T1, T2], zips: ['34201', '34202', '34203'] });
+  });
+
   test('lawn follows its own card entry, apart from pest', () => {
     const rec = buildRouteAreas(twoTechs({ lineCard: { general: { homeId: T1, gapId: null }, lawn: { homeId: T2, gapId: T1 } } }));
     expect(rec.lines.pest.days[0].technician_ids).toEqual([T1]);
@@ -448,6 +503,9 @@ describe('recordRouteAreas', () => {
     expect(sql).toMatch(/COALESCE\(ss\.customer_id::text, 'hold:' \|\| ss\.id::text\)/);
     // The minutes left skip a completed service of a part-done visit.
     expect(sql).toMatch(/FILTER \(WHERE ss\.status <> 'completed'\), 0\)::int AS minutes_left/);
+    // The ZIP: the visit's own, else its linked property's (the same customer's), else the customer's.
+    expect(sql).toMatch(/LEFT JOIN customer_properties cp ON cp\.id = ss\.property_id AND cp\.customer_id = ss\.customer_id/);
+    expect(sql).toMatch(/COALESCE\(MIN\(NULLIF\(TRIM\(ss\.service_address_zip\), ''\)\), MIN\(NULLIF\(TRIM\(cp\.zip\), ''\)\), MIN\(NULLIF\(TRIM\(c\.zip\), ''\)\)\)/);
     // A stored 0 is a missing estimate: the catalog's minutes, else 60.
     expect(sql.match(/COALESCE\(NULLIF\(ss\.estimated_duration_minutes, 0\), NULLIF\(sv\.default_duration_minutes, 0\), 60\)/g)).toHaveLength(2);
     // A booked stop is the route check's: a claimed row that dispatch keeps.
@@ -505,6 +563,19 @@ describe('recordRouteAreas', () => {
     // A run stamped after `now` is not used either.
     const ahead = fakeConn({ stopRows, routeCheckRow: { run_at: new Date('2026-11-23T15:30:00Z'), days } });
     expect((await recordRouteAreas({ now: NOW, conn: ahead.conn })).rule.route_check_at).toBeNull();
+  });
+
+  test('reads the territory routing gate at run time; a missing reader reads as off', async () => {
+    const featureGates = require('../config/feature-gates');
+    expect((await recordRouteAreas({ now: NOW, conn: fakeConn().conn })).rule.territory_live).toBe(false);
+    featureGates.territoryRoutingLive = jest.fn(() => true);
+    try {
+      const { conn, store } = fakeConn();
+      expect((await recordRouteAreas({ now: NOW, conn })).rule.territory_live).toBe(true);
+      expect(JSON.parse(store[HISTORY_KEY])[0].rule.territory_live).toBe(true);
+    } finally {
+      delete featureGates.territoryRoutingLive;
+    }
   });
 
   test('reads which technicians are off for a line', async () => {
@@ -573,7 +644,7 @@ describe('recordRouteAreas', () => {
     expect(entry.at).toBe(NOW.toISOString());
     const weekdayLimit = JSON.parse(store[LAST_KEY]).rule.limits.weekday_limit;
     expect(entry.techs[0].days[1]).toEqual({
-      date: '2026-11-24', staffed: true, reason: null, room: true, room_basis: 'minutes', route_slots: null,
+      date: '2026-11-24', staffed: true, reason: null, room: true, room_basis: 'minutes', route_slots: null, route_stops: null,
       stops: 1, stops_left: 1, limit: weekdayLimit, open_stops: weekdayLimit - 1,
       shift_min: 600, booked_min: 60, drive_min: 20, open_min: 520, areas: { 'a-north': 1 }, zip_source: 'stops',
     });
@@ -581,7 +652,7 @@ describe('recordRouteAreas', () => {
     expect(entry.rule).toEqual({
       now_min: 615, slot_min: 80, shift: { startMinutes: 480, endMinutes: 1080 },
       limits: { weekday_limit: weekdayLimit, saturday_limit: expect.any(Number), sunday_limit: expect.any(Number) },
-      line_off: [], route_check_at: null,
+      line_off: [], territory_live: false, route_check_at: null,
     });
     expect(entry.unassigned).toEqual([
       { date: '2026-11-23', stops_left: 0, minutes_left: 0 },

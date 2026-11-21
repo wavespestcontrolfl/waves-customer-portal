@@ -16,7 +16,9 @@
  * weekday, and a new job fits. "Fits" has two bases, named in `room_basis`:
  *   route_check  a date after today that the hourly route check measured in the last ROUTE_CHECK_MAX_AGE_MIN minutes:
  *                at least one job fits one of its real openings, on the hour, with its drive (route_check_runs
- *                `slots`). Free time in pieces too short for a job does not count.
+ *                `slots`). Free time in pieces too short for a job does not count. The measure is used only while
+ *                the day is as the route check saw it: the same number of stops for the technician, and no
+ *                unassigned work (the route check skips such a day). A booking since then puts the day on `minutes`.
  *   minutes      today, and a date the route check did not measure (no fresh run, or a day it skips): the open
  *                minutes of the day hold one more job with its drive (close-gaps SLOT_MIN). This is a daily total,
  *                so it is a ceiling: the route check does not measure today (its room depends on where the van is).
@@ -31,7 +33,11 @@
  * A line (pest, lawn) follows the service-line card as the booking offer does (scheduling/line-technician.js): the
  * home technician when he works that date, can take the line and has room; else the gap technician by the same test;
  * else the home (or gap) technician who works but is full, with no ZIPs. With no card row, a line follows every
- * technician who works that date and can take the line (technician_capabilities: not `off`).
+ * technician who works that date and can take the line (technician_capabilities: not `off`). With territory routing
+ * live (GATE_TERRITORY_ROUTING), a territory line is decided ZIP by ZIP as booking decides it: the ZIP's territory
+ * technician is the home and the card's other technician covers (line-technician.js withTerritory).
+ *
+ * A stop's ZIP is the visit's own service ZIP, else its linked property's, else the customer's.
  *
  * The staffed rule is the hourly route check's (day-replan/route-check.js staffed): the date is not a blackout date,
  * the technician is assignable and not absent, and a Sunday counts only when he has a booked stop that day (not an
@@ -103,18 +109,20 @@ function unassignedByDate(input) {
   });
 }
 
-/** The territory lookups: zip -> area, and area -> its sorted ZIPs. */
+/** The territory lookups: zip -> area, area -> its sorted ZIPs, and zip -> its territory technician (or null). */
 function territoryMaps(territory) {
   const areaOfZip = new Map();
   const zipsOfArea = new Map();
+  const ownerOfZip = new Map();
   for (const row of territory || []) {
     if (!row || !row.zip || !row.area) continue;
     areaOfZip.set(String(row.zip), row.area);
+    ownerOfZip.set(String(row.zip), idOf(row.technicianId));
     if (!zipsOfArea.has(row.area)) zipsOfArea.set(row.area, []);
     zipsOfArea.get(row.area).push(String(row.zip));
   }
   for (const [area, zips] of zipsOfArea) zipsOfArea.set(area, uniqSorted(zips));
-  return { areaOfZip, zipsOfArea };
+  return { areaOfZip, zipsOfArea, ownerOfZip };
 }
 
 /** A technician's stops on a date counted by area: { areas, unmapped }. Sorted by area key. */
@@ -164,9 +172,11 @@ function techDay(input, ctx, techId, date) {
   // Room needs a stop left under the gap rule's limit for that weekday (the owner's setting, which the live 7-day
   // budget rule already follows) and a job that fits: one of the route check's real openings when it measured this
   // date, else the open minutes of the day. Every count is stored, so each test can be counted again alone.
-  const routeSlots = date === input.dates[0] ? undefined : ctx.routeSlots.get(`${techId}:${date}`);
-  const measured = routeSlots !== undefined;
-  const room = staffed && openStops >= 1 && (measured ? routeSlots >= 1 : openMin >= input.slotMin);
+  // The route check's measure holds only while the day is as it saw it: a booking since then (one more stop for him,
+  // or work with no technician, which the route check itself skips) puts the day back on the minute total.
+  const seen = date === input.dates[0] ? undefined : ctx.routeDays.get(`${techId}:${date}`);
+  const measured = seen !== undefined && seen.stops === mine.length && unassigned.stops_left === 0;
+  const room = staffed && openStops >= 1 && (measured ? seen.slots >= 1 : openMin >= input.slotMin);
   const { areas, unmapped } = areasOfStops(mine, ctx.maps.areaOfZip);
   const zipPart = zipRule({ staffed, room, stopCount: mine.length, areas, techId }, ctx.maps, input.territory);
   return {
@@ -182,7 +192,8 @@ function techDay(input, ctx, techId, date) {
     drive_min: driveMin,
     open_min: openMin,
     room_basis: measured ? 'route_check' : 'minutes',
-    route_slots: measured ? routeSlots : null,
+    route_slots: seen === undefined ? null : seen.slots,
+    route_stops: seen === undefined ? null : seen.stops,
     room,
     areas,
     unmapped_stops: unmapped,
@@ -204,23 +215,48 @@ function lineTechIds(entry, fitDays, techIds) {
   return pick === undefined ? [] : [pick];
 }
 
+/**
+ * The card entry that decides one ZIP. With territory routing live, on a territory line, the ZIP's territory technician
+ * is the home and the card's other technician covers (scheduling/line-technician.js withTerritory). A line with no
+ * cover, another line, or a ZIP with no territory technician keeps the card as it is.
+ */
+function entryForZip(entry, ownerId, cardLine, input) {
+  const { TERRITORY_LINES, coverTechnicianId } = require('../territory');
+  if (input.territoryLive !== true || !ownerId || !TERRITORY_LINES.includes(cardLine)) return entry;
+  const cover = idOf(coverTechnicianId(entry, ownerId));
+  return cover ? { homeId: ownerId, gapId: cover } : entry;
+}
+
+/** One line on one date: the technicians it follows, their open minutes, and the line's ZIPs. */
+function lineDay(input, ctx, cardLine, technicians, date) {
+  const techIds = technicians.map((t) => t.id);
+  const dayOf = (t) => t.days.find((d) => d.date === date);
+  const fitDays = new Map(technicians
+    .filter((t) => !ctx.lineOff.has(`${t.id}:${cardLine}`) && dayOf(t).staffed)
+    .map((t) => [t.id, dayOf(t)]));
+  const card = (input.lineCard || {})[cardLine];
+  // Whom the line follows by the card alone; then ZIP by ZIP, with the ZIP's territory technician laid over the card.
+  // A ZIP is the line's when the technician the line follows for that ZIP has it on his day.
+  const followed = new Set(lineTechIds(card, fitDays, techIds));
+  const zips = [];
+  for (const zip of uniqSorted([...fitDays.values()].flatMap((d) => d.zips))) {
+    const ids = lineTechIds(entryForZip(card, ctx.maps.ownerOfZip.get(zip), cardLine, input), fitDays, techIds)
+      .filter((id) => fitDays.get(id).zips.includes(zip));
+    if (ids.length) zips.push(zip);
+    ids.forEach((id) => followed.add(id));
+  }
+  const ids = techIds.filter((id) => followed.has(id));
+  return {
+    date,
+    technician_ids: ids,
+    open_min: sum(ids.map((id) => fitDays.get(id)).filter((d) => d.room), (d) => d.open_min),
+    zips,
+  };
+}
+
 /** One line's record: a day per date (technicians, open minutes, ZIPs) and the unions over both dates. */
 function lineRecord(input, ctx, cardLine, technicians) {
-  const techIds = technicians.map((t) => t.id);
-  const days = input.dates.map((date) => {
-    const dayOf = (t) => t.days.find((d) => d.date === date);
-    const fitDays = new Map(technicians
-      .filter((t) => !ctx.lineOff.has(`${t.id}:${cardLine}`) && dayOf(t).staffed)
-      .map((t) => [t.id, dayOf(t)]));
-    const ids = lineTechIds((input.lineCard || {})[cardLine], fitDays, techIds);
-    const chosen = ids.map((id) => fitDays.get(id));
-    return {
-      date,
-      technician_ids: ids,
-      open_min: sum(chosen.filter((d) => d.room), (d) => d.open_min),
-      zips: uniqSorted(chosen.flatMap((d) => d.zips)),
-    };
-  });
+  const days = input.dates.map((date) => lineDay(input, ctx, cardLine, technicians, date));
   const zips = uniqSorted(days.flatMap((d) => d.zips));
   return { card_line: cardLine, days, zips, areas: areasOfZips(zips, ctx.maps) };
 }
@@ -240,10 +276,11 @@ function buildRouteAreas(input) {
     unassigned: new Map(unassignedByDate(input).map((u) => [u.date, u])),
     // `<technician>:<card line>` for a technician who is off for that line.
     lineOff: new Set(input.lineOff || []),
-    // `<technician>:<date>` -> the jobs the route check found room for; only the tech-days it measured.
-    routeSlots: new Map((input.routeCheck?.days || [])
+    // `<technician>:<date>` -> what the route check measured (the jobs that fit, the stops it saw); only the
+    // tech-days it measured.
+    routeDays: new Map((input.routeCheck?.days || [])
       .filter((d) => !d.skip && Number.isFinite(d.slots))
-      .map((d) => [`${idOf(d.technicianId)}:${d.date}`, d.slots])),
+      .map((d) => [`${idOf(d.technicianId)}:${d.date}`, { slots: d.slots, stops: Number.isFinite(d.stops) ? d.stops : null }])),
   };
   const technicians = techIds.map((id) => ({ id, days: input.dates.map((date) => techDay(input, ctx, id, date)) }));
   const lines = {};
@@ -264,6 +301,7 @@ function buildRouteAreas(input) {
       limits: input.limits,
       line_card: input.lineCard || {},
       line_off: uniqSorted([...ctx.lineOff]),
+      territory_live: input.territoryLive === true,
       route_check_at: input.routeCheck?.at || null,
     },
     unassigned: [...ctx.unassigned.values()],
@@ -301,13 +339,14 @@ async function readStops(conn, dates) {
   const result = await conn.raw(`
     SELECT ss.technician_id::text AS technician_id,
       ss.scheduled_date::text AS day,
-      LEFT(COALESCE(MIN(NULLIF(TRIM(ss.service_address_zip), '')), MIN(NULLIF(TRIM(c.zip), ''))), 5) AS zip,
+      LEFT(COALESCE(MIN(NULLIF(TRIM(ss.service_address_zip), '')), MIN(NULLIF(TRIM(cp.zip), '')), MIN(NULLIF(TRIM(c.zip), ''))), 5) AS zip,
       SUM(${DURATION_SQL})::int AS minutes,
       COALESCE(SUM(${DURATION_SQL}) FILTER (WHERE ss.status <> 'completed'), 0)::int AS minutes_left,
       bool_and(ss.status = 'completed') AS done,
       bool_or(${BOOKED_STOP_SQL}) AS booked
     FROM scheduled_services ss
     LEFT JOIN customers c ON c.id = ss.customer_id
+    LEFT JOIN customer_properties cp ON cp.id = ss.property_id AND cp.customer_id = ss.customer_id
     LEFT JOIN services sv ON sv.id = ss.service_id
     WHERE ss.scheduled_date BETWEEN ?::date AND ?::date
       AND ss.status NOT IN (${marks})
@@ -353,7 +392,7 @@ async function readLineOff(conn, techIds) {
 
 /**
  * The newest hourly route check of today, when it is at most ROUTE_CHECK_MAX_AGE_MIN old: { at, days: [{ date,
- * technicianId, slots, skip }] }, else null. It measures the dates after today (route-check.js), one entry per
+ * technicianId, slots, stops, skip }] }, else null. It measures the dates after today (route-check.js), one entry per
  * technician-day: `slots` = the jobs that fit its real openings, `skip` = why it could not measure the day.
  */
 async function readRouteCheck(conn, now, today) {
@@ -374,6 +413,7 @@ async function readRouteCheck(conn, now, today) {
       date: String(d.date).slice(0, 10),
       technicianId: String(d.technician_id),
       slots: d.skip ? null : Number(d.slots),
+      stops: Number.isFinite(Number(d.stops)) ? Number(d.stops) : null,
       skip: d.skip || null,
     })),
   };
@@ -390,6 +430,12 @@ async function readEligibility(conn, dates) {
   const techIds = techs.map((t) => String(t.id)).sort();
   const absent = techIds.length ? await absentTechDays(conn, { dateFrom: from, dateTo: to, technicianIds: techIds }) : new Set();
   return { blackout, techIds, absent };
+}
+
+// GATE_TERRITORY_ROUTING, read on the gates module at call time: a missing reader reads as off (line-technician.js).
+function territoryRoutingOn() {
+  const featureGates = require('../../config/feature-gates');
+  return typeof featureGates.territoryRoutingLive === 'function' && featureGates.territoryRoutingLive() === true;
 }
 
 /** The reads of one run: the input of buildRouteAreas. Plain reads, no snapshot. */
@@ -415,6 +461,7 @@ async function loadRouteAreasInput(conn, now) {
     lineCard: await readLineCard(conn),
     lineOff: await readLineOff(conn, elig.techIds),
     routeCheck: await readRouteCheck(conn, now, dates[0]),
+    territoryLive: territoryRoutingOn(),
     limits: normalizeGapSettings(targets?.metadata),
     shift: { startMinutes: SHIFT.startMinutes, endMinutes: SHIFT.endMinutes },
     slotMin: SLOT_MIN,
@@ -435,7 +482,9 @@ const compactLine = (line) => ({
  * result can be counted again after the latest record is overwritten or a limit is edited.
  */
 function compactEntry(record) {
-  const { now_min: nowMin, slot_min: slotMin, shift, limits, line_off: lineOff, route_check_at: routeCheckAt } = record.rule;
+  const {
+    now_min: nowMin, slot_min: slotMin, shift, limits, line_off: lineOff, territory_live: territoryLive, route_check_at: routeCheckAt,
+  } = record.rule;
   return {
     at: record.at,
     tick: record.tick,
@@ -446,6 +495,7 @@ function compactEntry(record) {
       shift,
       limits: { weekday_limit: limits.weekday_limit, saturday_limit: limits.saturday_limit, sunday_limit: limits.sunday_limit },
       line_off: lineOff,
+      territory_live: territoryLive,
       route_check_at: routeCheckAt,
     },
     unassigned: record.unassigned.map((u) => ({ date: u.date, stops_left: u.stops_left, minutes_left: u.minutes_left })),
@@ -459,6 +509,7 @@ function compactEntry(record) {
         room: d.room,
         room_basis: d.room_basis,
         route_slots: d.route_slots,
+        route_stops: d.route_stops,
         stops: d.stops,
         stops_left: d.stops_left,
         limit: d.limit,
