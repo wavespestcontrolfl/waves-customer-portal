@@ -945,6 +945,21 @@ jest.setTimeout(120000);
         expect(mockRaise).not.toHaveBeenCalled();
       });
 
+      test('the pass does not wait on a row another transaction holds: both locked reads are SKIP LOCKED', async () => {
+        const sent = (await sendNew(await newApplication())).offer;
+        await lapse(sent.id);
+        const rowLocks = [];
+        const listen = (query) => { if (/for update/i.test(query.sql) && /"job_(applications|offers)"/.test(query.sql)) rowLocks.push(query.sql); };
+        database.on('query', listen);
+        try {
+          expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 1, failed: 0 });
+        } finally {
+          database.removeListener('query', listen);
+        }
+        expect(rowLocks).toHaveLength(2);
+        for (const sql of rowLocks) expect(sql).toMatch(/for update skip locked$/);
+      });
+
       test('an offer the owner withdrew while the close waited is left withdrawn, with no bell', async () => {
         const app = await newApplication();
         const sent = (await sendNew(app)).offer;

@@ -1303,11 +1303,12 @@ async function declineOffer(token, { reason, version }) {
 // Stores the expiry of one sent offer and writes its bell in the same transaction, so the two commit together: a close
 // whose bell was not written is rolled back, the row stays sent, and the next pass does both again. False when there
 // is nothing to close: the applicant answered, the owner withdrew or replaced the offer, or the application left Offer
-// while this waited for the locks.
+// since the pass listed it. Both rows are read SKIP LOCKED: a row another transaction holds is left for the next pass,
+// so one slow write cannot hold back the offers after it (the whole pass runs under one job lock).
 async function closeIfExpired(applicationId, offerId) {
   return db.transaction(async (trx) => {
-    const application = await trx('job_applications').where({ id: applicationId }).forUpdate().first('status');
-    const offer = await trx('job_offers').where({ id: offerId }).forUpdate().first();
+    const application = await trx('job_applications').where({ id: applicationId }).forUpdate().skipLocked().first('status');
+    const offer = application && await trx('job_offers').where({ id: offerId }).forUpdate().skipLocked().first();
     // The clock is read after both locks, as for the applicant's own writes (lockByToken).
     if (!application || application.status !== 'offer' || !offer || !expiredByClock(offer, new Date())) return false;
     await storeExpiry(trx, offerId);
