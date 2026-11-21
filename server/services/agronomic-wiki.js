@@ -1996,7 +1996,8 @@ function extractSummary(content) {
 // product's id, and never moved from another product. An alias can move (owner 2026-11-18: "Talstar P" named the Talak bottle, then
 // LESCO Crosscheck Plus), and such a name may stand for the other product's history. A move leaves no carrier behind, so its audit
 // event is the evidence: each alias move writes one (resource_type product_aliases, kind 'moved' with the product it left in
-// `from`, or 'removed' with the whole row; 20261119010000). Only these names attribute an outcome by name alone (outcomesForProduct)
+// `from` and the one it joined in `to`, or 'removed' with the whole row; 20261119010000). Only these names attribute an outcome by
+// name alone (outcomesForProduct)
 // and only their leftover pages may fold into this product's page (the merge deletes). The lookup names (variants) stay whole for
 // outcome matching. When the check fails, the list is empty: only the catalog name attributes by name, and nothing merges.
 async function unsharedVariants(variants, productId) {
@@ -2022,7 +2023,9 @@ async function unsharedVariants(variants, productId) {
       .select('metadata');
     for (const { metadata } of moves || []) {
       const move = typeof metadata === 'string' ? JSON.parse(metadata) : metadata || {};
-      if (otherProduct(move.from ?? move.row?.product_id)) shared.add(key(move.alias_name));
+      // Either side of a move names a product that carried the name: after a rollback returns an alias to the product it left,
+      // the product that held it in between still shares it.
+      if ([move.from, move.to, move.row?.product_id].some(otherProduct)) shared.add(key(move.alias_name));
     }
   } catch (err) {
     logger.warn(`[agronomic-wiki] Variant merge skipped: could not check which names other products carry: ${err.message}`);

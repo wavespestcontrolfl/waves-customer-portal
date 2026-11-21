@@ -701,11 +701,11 @@ describe('updateProductPage', () => {
       product_aliases: [{ alias_name: 'Talstar P' }, { alias_name: 'Crosscheck Plus' }, { alias_name: 'Bifen I/T 7.9%' }],
       treatment_outcomes: outcomes,
       service_products: servicePrd,
-      // The alias moves' audit events: one that left Talak, and one that left this product itself, which is no evidence against it.
-      // (pg hands jsonb back parsed; a text copy is read the same way.)
+      // The alias events: one that moved a name off Talak, and one that removed this product's own duplicate row, which names no
+      // other product and is no evidence against the name. (pg hands jsonb back parsed; a text copy is read the same way.)
       audit_log: [
         { metadata: JSON.stringify({ kind: 'moved', alias_name: 'Bifen I/T 7.9%', from: 'pc-talak', to: 'pc-cross' }) },
-        { metadata: { kind: 'moved', alias_name: 'Crosscheck Plus', from: 'pc-cross', to: 'pc-other' } },
+        { metadata: { kind: 'removed', alias_name: 'Crosscheck Plus', row: { id: 'a9', product_id: 'pc-cross', alias_name: 'crosscheck plus' } } },
       ],
       knowledge_entries: [],
     });
@@ -727,6 +727,8 @@ describe('updateProductPage', () => {
     ['the swap moved it from Talak, and no visit stored it', 'Bifen I/T 7.9%', 'product/bifen-i-t-7-9', { audit_log: [{ metadata: { kind: 'moved', alias_name: 'Bifen I/T 7.9%', from: 'pc-talak' } }] }],
     // Where Crosscheck already carried the name, the swap deleted Talak's row whole into its event.
     ['the swap removed Talak\'s copy of it, and no visit stored it', 'Bifen IT', 'product/bifen-it', { audit_log: [{ metadata: { kind: 'removed', alias_name: 'bifen it', row: { id: 'a3', product_id: 'pc-talak', alias_name: 'bifen it' } } }] }],
+    // A rollback returned the name to the product it left: the product that held it in between still shares it.
+    ['a rollback returned it from Talak, and no visit stored it', 'Bifen I/T 7.9%', 'product/bifen-i-t-7-9', { audit_log: [{ metadata: { kind: 'moved', alias_name: 'Bifen I/T 7.9%', from: 'pc-cross', to: 'pc-talak' } }] }],
   ])('a variant page under a name another product carried is kept (%s): the Crosscheck refresh folds only its own names', async (_label, alias, kept, evidence) => {
     const pageOf = (rec) => rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0]?.slug;
     const state = useDb({
