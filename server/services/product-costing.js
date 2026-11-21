@@ -356,6 +356,7 @@ module.exports = {
   normalizeUnit,
   parsePackCount,
   parsePackSize,
+  unitFamily,
   unitPriceBreakdown,
   usageAmountForArea,
 };
