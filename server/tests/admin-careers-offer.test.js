@@ -1,6 +1,6 @@
 /**
  * admin-careers.js — the job-offer endpoints (GATE_JOB_OFFERS): the dark 404 { enabled: false } before any service
- * call, id format gates, owner-only send / withdraw / revise (403 OWNER_ONLY with a code), every service refusal
+ * call, id format gates, owner-only send / withdraw / revise / checklist (403 OWNER_ONLY with a code), every service refusal
  * answered as { error, code, ...detail }, and the Send body carrying the preview hash. The service is mocked; its
  * rules are tested in job-offers.test.js and job-offers-postgres.test.js.
  */
@@ -30,6 +30,7 @@ const mockService = {
   withdrawOffer: jest.fn(async () => ({ id: 'o1', status: 'withdrawn' })),
   reviseOffer: jest.fn(async () => ({ id: 'o2', status: 'draft' })),
   signedCopy: jest.fn(async () => ({ markdown: 'm', signedName: 'Jordan Rivera', signedAt: 't', signedIp: null, signatureHash: 'h' })),
+  setChecklistItem: jest.fn(async () => ({ firstDays: { offerId: 'o1', firstDay: '2027-01-04', items: [] } })),
 };
 jest.mock('../services/job-offers', () => {
   const actual = jest.requireActual('../services/job-offers');
@@ -41,6 +42,7 @@ jest.mock('../services/job-offers', () => {
     withdrawOffer: (...a) => mockService.withdrawOffer(...a),
     reviseOffer: (...a) => mockService.reviseOffer(...a),
     signedCopy: (...a) => mockService.signedCopy(...a),
+    setChecklistItem: (...a) => mockService.setChecklistItem(...a),
   };
 });
 
@@ -76,6 +78,7 @@ async function call(url, method = 'GET', body) {
 describe('the dark gate', () => {
   test.each([
     ['GET', ''], ['POST', ''], ['POST', `/${OFFER}/send`], ['POST', `/${OFFER}/withdraw`], ['POST', `/${OFFER}/revise`], ['GET', `/${OFFER}/signed-copy`],
+    ['POST', `/${OFFER}/checklist/i9`],
   ])('%s %s answers 404 { enabled: false } and never reaches the service', async (method, path) => {
     mockIsEnabled.mockImplementation((gate) => gate !== 'jobOffers');
     const res = await call(base(path), method, method === 'POST' ? {} : undefined);
@@ -95,6 +98,7 @@ describe('id format', () => {
   test('a bad application id or offer id is a 404 with a code', async () => {
     expect(await call(`${baseUrl}/api/admin/careers/nope/offer`)).toMatchObject({ status: 404, body: { code: 'NOT_FOUND' } });
     expect(await call(base('/nope/send'), 'POST', { draftHash: 'x' })).toMatchObject({ status: 404, body: { code: 'NOT_FOUND' } });
+    expect(await call(base('/nope/checklist/i9'), 'POST', { done: true })).toMatchObject({ status: 404, body: { code: 'NOT_FOUND' } });
     expect(mockService.adminPanel).not.toHaveBeenCalled();
     expect(mockService.sendOffer).not.toHaveBeenCalled();
   });
@@ -141,11 +145,11 @@ describe('reads and the draft save (any admin)', () => {
 });
 
 describe('owner-only actions', () => {
-  test.each(['send', 'withdraw', 'revise'])('%s is refused with 403 OWNER_ONLY for another admin and runs for the owner account', async (action) => {
+  test.each(['send', 'withdraw', 'revise', 'checklist/i9'])('%s is refused with 403 OWNER_ONLY for another admin and runs for the owner account', async (action) => {
     mockEmail = 'someone.else@example.test';
     const refused = await call(base(`/${OFFER}/${action}`), 'POST', { draftHash: 'h' });
     expect(refused).toMatchObject({ status: 403, body: { code: 'OWNER_ONLY', error: 'This action is limited to the owner account.' } });
-    for (const fn of [mockService.sendOffer, mockService.withdrawOffer, mockService.reviseOffer]) expect(fn).not.toHaveBeenCalled();
+    for (const fn of [mockService.sendOffer, mockService.withdrawOffer, mockService.reviseOffer, mockService.setChecklistItem]) expect(fn).not.toHaveBeenCalled();
 
     mockEmail = 'contact@wavespestcontrol.com';
     const ok = await call(base(`/${OFFER}/${action}`), 'POST', { draftHash: 'h' });
@@ -163,6 +167,19 @@ describe('owner-only actions', () => {
   test('revise passes the expected status and the optional start date', async () => {
     await call(base(`/${OFFER}/revise`), 'POST', { expectedStatus: 'sent', startDate: '2027-02-01' });
     expect(mockService.reviseOffer).toHaveBeenCalledWith(APP, OFFER, { expectedStatus: 'sent', startDate: '2027-02-01' }, expect.any(Object));
+  });
+
+  test('a checklist write passes the item, the done flag as sent, the mark an undo saw, and the owner; its refusal keeps its code', async () => {
+    const done = await call(base(`/${OFFER}/checklist/driving_record`), 'POST', { done: true });
+    expect(done).toMatchObject({ status: 200, body: { firstDays: { offerId: 'o1' } } });
+    expect(mockService.setChecklistItem).toHaveBeenLastCalledWith(APP, OFFER, 'driving_record', true, expect.objectContaining({ id: 'bbbbbbbb-0000-4000-8000-000000000001', name: 'Test Owner' }), { seenDoneAt: undefined });
+    await call(base(`/${OFFER}/checklist/driving_record`), 'POST', { done: false, seenDoneAt: '2026-12-14T15:00:00.000Z' });
+    expect(mockService.setChecklistItem).toHaveBeenLastCalledWith(APP, OFFER, 'driving_record', false, expect.any(Object), { seenDoneAt: '2026-12-14T15:00:00.000Z' });
+    // A body with no flag is the service's to refuse: the route never reads it as done.
+    await call(base(`/${OFFER}/checklist/driving_record`), 'POST');
+    expect(mockService.setChecklistItem).toHaveBeenLastCalledWith(APP, OFFER, 'driving_record', undefined, expect.any(Object), { seenDoneAt: undefined });
+    mockService.setChecklistItem.mockRejectedValueOnce(new OfferError(409, 'CHECKLIST_CLOSED', 'This checklist is closed.'));
+    expect(await call(base(`/${OFFER}/checklist/i9`), 'POST', { done: true })).toMatchObject({ status: 409, body: { code: 'CHECKLIST_CLOSED', error: 'This checklist is closed.' } });
   });
 
   test('withdraw passes the expected status and the draft hash', async () => {
