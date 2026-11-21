@@ -192,7 +192,7 @@ class LiveBridge {
     this.awaitingReply = false;
     this.playbackEndsAt = 0;
     this.replyStartWall = null; // wall time the model's current reply began (its audio arrived)
-    this.replyHeardWall = null; // ...and when Twilio plays its first voiced sample, after any audio queued ahead
+    this.replyHeardWall = null; // ...and when Twilio plays its first voiced sample, after any audio queued ahead (delays run to it)
     this.prevReplyStartWall = null; // ...and the reply before it
     this.replySample = null; // { index, speechEnd } of the delay sample the current reply has
     this.lastAudioAt = null; // arrival time of the last model audio chunk
@@ -528,15 +528,14 @@ class LiveBridge {
     }
   }
 
-  // A barge-in is caller speech that runs past the moment the caller began to
-  // hear the reply still playing (a reply queued behind other audio is heard
-  // later than it arrived). A late transcript of words the caller finished BEFORE the reply
+  // A barge-in is caller speech that runs past the start of the reply still
+  // playing. A late transcript of words the caller finished BEFORE the reply
   // began is not one: flushing then would cut the answer to their question.
   // No timing, no flush.
   isBargeIn(t, speechEnd) {
     if (t >= this.playbackEndsAt - BARGE_IN_MARGIN_MS) return false; // nothing (much) left to cut
-    if (speechEnd === null || this.replyHeardWall === null) return false;
-    return speechEnd > this.replyHeardWall + BARGE_IN_MARGIN_MS;
+    if (speechEnd === null || this.replyStartWall === null) return false;
+    return speechEnd > this.replyStartWall + BARGE_IN_MARGIN_MS;
   }
 
   // usage.seconds is a running total ("use the latest usage.seconds"): keep

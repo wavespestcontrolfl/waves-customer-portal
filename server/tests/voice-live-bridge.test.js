@@ -839,20 +839,6 @@ describe('reply start on the continuous GPT-Live stream', () => {
     expect((await end(t)).turns).toEqual([900]);
   });
 
-  test('a reply queued behind silence is heard later than it arrives: speech that ended before the caller heard it is no barge-in', async () => {
-    const t = await start();
-    delta(t, b64(160)); // greeting
-    t.advance(1000);
-    delta(t, silence(8000)); // one burst at +1000: 1000 ms of silence, queued until +2000...
-    delta(t, b64(8000)); // ...then a reply the caller hears from +2000
-    t.advance(300);
-    said(t, 'hello', 1100, 1300);
-    expect(t.twilio.sent.some((m) => m.event === 'clear')).toBe(false); // the answer is not cut before it is heard
-    t.advance(1000);
-    said(t, ' are you there', 1300, 2300);
-    expect(t.twilio.sent.filter((m) => m.event === 'clear')).toHaveLength(1); // speech over the reply as heard
-  });
-
   test('caller speech over evenly paced voice: under 200 ms is queued, so nothing is flushed or dropped', async () => {
     const t = await start();
     delta(t, b64(160)); // greeting
