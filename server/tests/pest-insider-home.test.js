@@ -26,7 +26,14 @@ describe('serviceLineOf', () => {
     // specialty and inspection work has no line: it never hides or changes the day's one line
     [['pest_control', 'specialty'], 'pest'],
     [['inspection', 'lawn_care', 'lawn_care'], 'lawn'],
+    // one list per record, as the query returns them
+    [[['pest_control'], ['pest_control', 'specialty']], 'pest'],
   ])('%j -> %s', (categories, line) => expect(serviceLineOf(categories)).toBe(line));
+
+  test('a record with an add-on of another line makes the day two lines: no label', () => {
+    expect(serviceLineOf([['pest_control', 'mosquito']])).toBeNull();
+    expect(serviceLineOf([['pest_control'], ['lawn_care']])).toBeNull();
+  });
 
   test.each([
     [null], [undefined], [[]], [['']], [[null]], [['specialty']], [['inspection']], [['other']],
@@ -267,6 +274,13 @@ describe('loadHomeFacts', () => {
     // The label comes from the catalog: the record's frozen key, or a name that is one catalog name. No service name leaves the query.
     expect(calls[0].sql).toContain("WHERE s.service_key = NULLIF(TRIM(r.service_data->>'completedServiceKey'), '')");
     expect(calls[0].sql).toContain('LOWER(TRIM(s.name)) = LOWER(TRIM(r.service_type))');
+    // Add-on lines frozen at completion count; a visit that performed no work gives no category.
+    expect(calls[0].sql).toContain("JOIN services s ON s.service_key = line->>'serviceKey'");
+    expect(calls[0].sql).toContain("OR (line->>'serviceKey' IS NULL AND s.id::text = line->>'serviceId')");
+    // A record with no frozen list reads its appointment's add-on rows; one with a list never does.
+    expect(calls[0].sql).toContain('JOIN services s ON s.service_key = a.service_key_snapshot OR (a.service_key_snapshot IS NULL AND s.id = a.service_id)');
+    expect(calls[0].sql).toContain("AND jsonb_typeof(r.service_data->'completedAddonLines') IS DISTINCT FROM 'array'");
+    expect(calls[0].sql).toContain(") sv ON COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN ('inspection_only', 'customer_declined')");
     expect(calls[0].sql).not.toMatch(/array_agg\([^)]*service_type/);
     expect(calls[0].sql).toContain(') AS home_property\n');
     expect(calls[0].sql).toContain("e.source = 'quote_wizard' AND e.status = 'draft' AND e.archived_at IS NULL");
