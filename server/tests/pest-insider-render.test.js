@@ -391,7 +391,7 @@ describe('renderIssue', () => {
 
 describe('"Your home": the tokens in the shared body and the per-reader block', () => {
   const NOW = new Date('2026-11-21T15:00:00Z');
-  const HOME = { lastVisit: { date: '2026-11-10', line: 'pest' }, sinceDate: '2024-03-05', visitCount: 7 };
+  const HOME = { lastVisit: { date: '2026-11-10', line: 'pest' }, sinceDate: '2024-03-05' };
   const POLL = PEST_INSIDER_POLL_IDS[0];
   const signoffHtmlOf = (html) => html.slice(html.lastIndexOf('<div class="dm-text">'));
 
@@ -441,7 +441,7 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
     const filledText = r.text_body.split(HOME_TEXT_TOKEN).join(subs[HOME_TEXT_TOKEN]);
     expect(filledHtml.indexOf('Your home')).toBeGreaterThan(filledHtml.indexOf(`{{quiz:${POLL}}}`));
     expect(filledHtml.indexOf('Your home')).toBeLessThan(filledHtml.indexOf('Catch you next time.'));
-    expect(filledText).toContain(`{{quiz-text:${POLL}}}\n\nYOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024, 7 visits so far.\n\n${SIGNOFF_TEXT}`);
+    expect(filledText).toContain(`{{quiz-text:${POLL}}}\n\nYOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024.\n\n${SIGNOFF_TEXT}`);
     expect(filledHtml.split('<h2 class="dm-chip"').length - 1).toBe(4);
     // addReaderBlock / withToolBlock still put their block before the sign-off, and the body still ends with it.
     const gauge = toolById('acurite-glass-rain-gauge');
@@ -462,20 +462,54 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
 
   test('the block prints the fixed words and the dates it formats itself', () => {
     const b = homeBlock(HOME, NOW);
-    expect(b.text).toBe('YOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024, 7 visits so far.\n\n');
+    expect(b.text).toBe('YOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024.\n\n');
     expect(b.html.startsWith(`<div style="text-align:center;margin:28px 0;"><img src="${DIVIDER}"`)).toBe(true);
     expect(b.html.endsWith('</div>\n')).toBe(true);
     expect(b.html).toContain('<strong><em>Your home</em></strong>');
     expect(b.html).toContain('📅 Last visit: November 10 (pest control).<br/>');
-    expect(b.html).toContain('🌊 With Waves since March 2024, 7 visits so far.');
+    expect(b.html).toContain('🌊 With Waves since March 2024.');
   });
 
-  test('one visit reads in the singular; a count that is not a positive integer leaves the count out', () => {
-    expect(homeBlock({ ...HOME, visitCount: 1 }, NOW).text).toContain('With Waves since March 2024, 1 visit so far.\n');
-    expect(homeBlock({ ...HOME, visitCount: 120 }, NOW).text).toContain('120 visits so far.');
-    for (const visitCount of [0, -3, 2.5, NaN, Infinity, '7', null, undefined, {}, [4], 1e21]) {
-      expect(homeBlock({ ...HOME, visitCount }, NOW).text).toContain('\nWith Waves since March 2024.\n');
+  test('no visit count in any form: the records begin in August 2025, so a count would be too low for a long-time customer', () => {
+    for (const home of [HOME, { ...HOME, visitCount: 1 }, { ...HOME, visitCount: 120 }, { ...HOME, visits: 7, count: 7 }]) {
+      const b = homeBlock(home, NOW);
+      for (const part of [b.html, b.text]) {
+        expect(part).not.toMatch(/visits? so far/i);
+        expect(part).not.toMatch(/\b\d+ visits?\b/i);
+        expect(part).not.toMatch(/120|\b7\b/);
+      }
+      expect(b.text).toBe('YOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024.\n\n');
     }
+  });
+
+  test('a visit from an earlier year names its year, and only then', () => {
+    expect(homeBlock({ ...HOME, lastVisit: { date: '2025-12-02', line: 'pest' }, sinceDate: '2024-03-05' }, NOW).text)
+      .toContain('Last visit: December 2, 2025 (pest control).\n');
+    expect(homeBlock({ ...HOME, lastVisit: { date: '2025-12-02', line: null } }, NOW).html).toContain('📅 Last visit: December 2, 2025.<br/>');
+    expect(homeBlock({ ...HOME, lastVisit: { date: '2026-01-02', line: 'pest' } }, NOW).text).toContain('Last visit: January 2 (pest control).');
+    // The year is the Eastern year: late on New Year\'s Eve Eastern it is still the old year.
+    const eve = new Date('2027-01-01T03:00:00Z');
+    expect(homeBlock({ ...HOME, lastVisit: { date: '2026-12-30', line: 'pest' } }, eve).text).toContain('Last visit: December 30 (pest control).');
+    expect(homeBlock({ ...HOME, lastVisit: { date: '2026-12-30', line: 'pest' } }, new Date('2027-01-01T15:00:00Z')).text).toContain('Last visit: December 30, 2026 (pest control).');
+  });
+
+  test('the since line is optional: dropped when missing, not a real day, still to come, or after the last visit', () => {
+    const last = { date: '2026-11-10', line: 'pest' };
+    const only = 'YOUR HOME\nLast visit: November 10 (pest control).\n\n';
+    for (const sinceDate of [null, undefined, '', '2026-02-30', 'March 2024', 20240305, new Date('2024-03-05'), '2027-01-01', '2026-11-11', '2026-11-22']) {
+      expect(homeBlock({ lastVisit: last, sinceDate }, NOW).text).toBe(only);
+    }
+    expect(homeBlock({ lastVisit: last }, NOW).text).toBe(only);
+    // On the last visit's own day it still reads: the two lines do not contradict.
+    expect(homeBlock({ lastVisit: last, sinceDate: '2026-11-10' }, NOW).text).toContain('With Waves since November 2026.');
+  });
+
+  test('no valid last visit means no block, never the since line alone', () => {
+    for (const date of [null, undefined, '', '2026-02-30', '2026-11-22', '2027-01-01', 'x', 20261110]) {
+      expect(homeBlock({ lastVisit: { date, line: 'pest' }, sinceDate: '2024-03-05' }, NOW)).toBeNull();
+    }
+    expect(homeBlock({ sinceDate: '2024-03-05' }, NOW)).toBeNull();
+    expect(homeSubstitutions({ sinceDate: '2024-03-05' }, { now: NOW }).substitutions[HOME_TEXT_TOKEN]).toBe('');
   });
 
   test.each(Object.entries(HOME_LINE_LABELS))('the fixed label for %s prints and the whole block passes the send check', (line, label) => {
@@ -497,28 +531,23 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
     expect(b.html).not.toContain('(');
   });
 
-  test('a date that is not a real calendar day, or a future last visit, drops its line; no line leaves no block', () => {
-    const bad = ['2026-02-30', '2026-13-01', '2026-11-1', 'tomorrow', '', null, undefined, 20261110, new Date('2026-11-10'), '2026-11-10T00:00:00Z', '0000-01-01'];
-    for (const date of bad) {
-      const b = homeBlock({ ...HOME, lastVisit: { date, line: 'pest' } }, NOW);
-      expect(b.text).toBe('YOUR HOME\nWith Waves since March 2024, 7 visits so far.\n\n');
-      expect(homeBlock({ ...HOME, sinceDate: date }, NOW).text).toBe('YOUR HOME\nLast visit: November 10 (pest control).\n\n');
-      expect(homeBlock({ lastVisit: { date, line: 'pest' }, sinceDate: date, visitCount: 3 }, NOW)).toBeNull();
-    }
-    // After today in Eastern time: the late evening of the 21st is still the 21st.
-    expect(homeBlock({ ...HOME, lastVisit: { date: '2026-11-22', line: 'pest' } }, NOW).text).not.toContain('Last visit');
+  test('a last visit in the future, or not a real day, drops the block; after today in Eastern time', () => {
+    // After today in Eastern time: the late evening of the 20th is still the 20th.
+    expect(homeBlock({ ...HOME, lastVisit: { date: '2026-11-22', line: 'pest' } }, NOW)).toBeNull();
     expect(homeBlock({ ...HOME, lastVisit: { date: '2026-11-21', line: 'pest' } }, NOW).text).toContain('Last visit: November 21 (pest control).');
-    expect(homeBlock({ ...HOME, lastVisit: { date: '2026-11-21', line: 'pest' } }, new Date('2026-11-21T03:00:00Z')).text).not.toContain('Last visit');
-    expect(homeBlock({ ...HOME, sinceDate: '2027-01-01' }, NOW).text).not.toContain('With Waves');
+    expect(homeBlock({ ...HOME, lastVisit: { date: '2026-11-21', line: 'pest' } }, new Date('2026-11-21T03:00:00Z'))).toBeNull();
     for (const home of [null, undefined, {}, { lastVisit: null }, 'home', 7]) expect(homeBlock(home, NOW)).toBeNull();
+    for (const date of ['2026-02-30', '2026-13-01', '2026-11-1', 'tomorrow', '', null, undefined, 20261110, new Date('2026-11-10'), '2026-11-10T00:00:00Z', '0000-01-01']) {
+      expect(homeBlock({ ...HOME, lastVisit: { date, line: 'pest' } }, NOW)).toBeNull();
+    }
   });
 
   test('no database text reaches the block: hostile strings in every field print nothing of theirs', () => {
     const hostile = '<script>alert(1)</script> gate code 4821 Mary Johnson 123 Main St {{unsubscribe_url}} {{quiz:x}} resident@example.com';
     const homes = [
-      { lastVisit: { date: '2026-11-10', line: hostile, serviceType: hostile, notes: hostile, name: hostile }, sinceDate: '2024-03-05', visitCount: 7, name: hostile, address: hostile, notes: hostile },
-      { lastVisit: { date: hostile, line: hostile }, sinceDate: hostile, visitCount: hostile },
-      { lastVisit: { date: '2026-11-10', line: 'pest', label: hostile, text: hostile }, sinceDate: '2024-03-05', visitCount: 7, line: hostile },
+      { lastVisit: { date: '2026-11-10', line: hostile, serviceType: hostile, notes: hostile, name: hostile }, sinceDate: '2024-03-05', name: hostile, address: hostile, notes: hostile },
+      { lastVisit: { date: hostile, line: hostile }, sinceDate: hostile },
+      { lastVisit: { date: '2026-11-10', line: 'pest', label: hostile, text: hostile }, sinceDate: '2024-03-05', line: hostile },
     ];
     for (const home of homes) {
       const b = homeBlock(home, NOW);
@@ -527,7 +556,7 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
       if (b) expect(b.html.replace(/<[^>]+>/g, '')).not.toMatch(/[<>"]/);
     }
     // A date string with markup in it is no calendar day: nothing of it can print.
-    expect(homeBlock({ lastVisit: { date: `2026-11-10${hostile}` }, sinceDate: `2024-03-05${hostile}`, visitCount: 3 }, NOW)).toBeNull();
+    expect(homeBlock({ lastVisit: { date: `2026-11-10${hostile}` }, sinceDate: `2024-03-05${hostile}` }, NOW)).toBeNull();
   });
 
   test('homeSubstitutions always has both keys; a block the send check refuses leaves both empty and is reported', () => {

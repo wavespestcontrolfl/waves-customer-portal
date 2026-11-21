@@ -11,9 +11,10 @@
  * touchpoint log, the owner's FYI copy) strips them, so the block never
  * reaches the shared body, the archive or a copy a reader did not get.
  *
- * This file is a leaf: no database layer is loaded until loadHomeFacts runs,
- * so the strip helpers can be required from newsletter-draft.js and
- * newsletter-proof.js without a load-order risk.
+ * This file is a leaf: it loads no database layer (loadHomeFacts is handed its
+ * connection) and requires the classifier modules only when it runs, so the strip
+ * helpers can be required from newsletter-draft.js and newsletter-proof.js
+ * without a load-order risk.
  */
 'use strict';
 
@@ -25,8 +26,8 @@ const HOME_TEXT_TOKEN = '{{pi-home-text}}';
 
 // "Last visit" older than this shows no block: the customer is not a current one.
 const MAX_LAST_VISIT_AGE_DAYS = 365;
-// Customers per query: one ANY-list is a bound parameter each, so a long
-// audience is read in slices (newsletter-sender sends 500 per batch).
+// Readers per query: each id is a bound parameter, so a long audience is read in
+// slices (newsletter-sender sends 500 per batch).
 const CHUNK = 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -37,18 +38,21 @@ const hasHomeToken = (content) => new RegExp(HOME_TOKEN_PATTERN.source, 'i').tes
 // Both tokens removed; what is left is the issue exactly as it reads with no block.
 const neutralizeHomeTokens = (content) => String(content || '').replace(HOME_TOKEN_PATTERN, '');
 
-// The visit's service line, from the platform's one classifier (the estimator's
+// The service line of a visit day, from the platform's one classifier (the estimator's
 // serviceKeysFromText through newsletter-audience-profiles' linesFromScheduledServices,
-// which also folds palm and commercial keys into the six sellable lines). A visit
-// that names no line, or more than one, has none: the block prints no label then.
-// The classifier reads the service name only to pick a line; the name itself
-// is never kept or shown.
-function serviceLineOf(serviceType) {
+// which also folds palm and commercial keys into the six sellable lines). `types` is every
+// service name recorded on that day. Exactly one line across the whole set is that line;
+// none, or more than one, has none: the block prints no label then. The classifier reads
+// a service name only to pick a line; the name itself is never kept or shown.
+function serviceLineOf(types) {
   const { linesFromScheduledServices } = require('../newsletter-audience-profiles');
-  // The helper skips terminal statuses (a finished visit is not live coverage),
-  // so the row is handed over as a live recurring one: only its text is read.
-  const { lines } = linesFromScheduledServices([{ service_type: serviceType, status: 'confirmed', is_recurring: true }]);
-  return lines.length === 1 ? lines[0] : null;
+  const lines = new Set();
+  for (const name of Array.isArray(types) ? types : [types]) {
+    // The helper skips terminal statuses (a finished visit is not live coverage),
+    // so the row is handed over as a live recurring one: only its text is read.
+    for (const line of linesFromScheduledServices([{ service_type: name, status: 'confirmed', is_recurring: true }]).lines) lines.add(line);
+  }
+  return lines.size === 1 ? [...lines][0] : null;
 }
 
 const dayNumber = (ymd) => {
@@ -56,57 +60,80 @@ const dayNumber = (ymd) => {
   return Date.UTC(y, m - 1, d) / DAY_MS;
 };
 
-// One customer's facts from their aggregate row, or null when they are not a
-// current customer with a recent finished visit.
+// One reader's facts from its row, or null when the customer is commercial or the
+// last finished visit is over a year old.
 function homeFromRow(row, today) {
+  // The platform's own commercial test (the residential-only emails read it too).
+  const { isCommercialAccount } = require('../self-booking-plan-sync');
+  if (isCommercialAccount({ property_type: row.property_type, waveguard_tier: row.waveguard_tier })) return null;
   const lastDate = dateOnlyString(row.last_date);
-  const sinceDate = dateOnlyString(row.since_date);
-  if (!lastDate || !sinceDate) return null;
+  if (!lastDate) return null;
   if (dayNumber(today) - dayNumber(lastDate) > MAX_LAST_VISIT_AGE_DAYS) return null;
   return {
-    lastVisit: { date: lastDate, line: serviceLineOf(row.service_type) },
-    sinceDate,
-    visitCount: Number(row.visit_count),
+    customerId: row.customer_id,
+    lastVisit: { date: lastDate, line: serviceLineOf(row.last_types) },
+    // "Member since": the Waves app's own date (customers.member_since), not the first
+    // record, which begins in August 2025 for customers who joined before.
+    sinceDate: dateOnlyString(row.member_since),
   };
 }
 
+// The per-chunk read. A reader gets a row only when its link, address and
+// household are unambiguous: the subscriber's address is the one this customer has
+// on file; no other live customer has it; no sibling profile shares the account
+// (COALESCE(account_id, id) is account-properties.js accountPropertyIds' key); at
+// most one active saved property, and a lived-in one. family_occupied stays out on
+// purpose: that home's payer can be another person.
+const FACTS_SQL = (idList) => `
+SELECT ns.id AS subscriber_id, c.id AS customer_id, c.member_since, c.property_type, c.waveguard_tier,
+       v.last_date, t.last_types
+FROM newsletter_subscribers ns
+JOIN customers c ON c.id = ns.customer_id
+JOIN LATERAL (
+  SELECT MAX(r.service_date) AS last_date
+  FROM service_records r
+  WHERE r.customer_id = c.id AND COALESCE(r.status, 'completed') = 'completed' AND r.service_date <= CAST(? AS date)
+) v ON v.last_date IS NOT NULL
+JOIN LATERAL (
+  SELECT array_agg(DISTINCT r.service_type) AS last_types
+  FROM service_records r
+  WHERE r.customer_id = c.id AND COALESCE(r.status, 'completed') = 'completed' AND r.service_date = v.last_date
+) t ON true
+WHERE ns.id IN (${idList})
+  AND c.deleted_at IS NULL AND c.active IS DISTINCT FROM false
+  AND TRIM(COALESCE(c.email, '')) <> '' AND LOWER(TRIM(ns.email)) = LOWER(TRIM(c.email))
+  AND NOT EXISTS (SELECT 1 FROM customers o WHERE o.id <> c.id AND o.deleted_at IS NULL
+                  AND LOWER(TRIM(o.email)) = LOWER(TRIM(c.email)))
+  AND NOT EXISTS (SELECT 1 FROM customers o WHERE o.id <> c.id AND o.deleted_at IS NULL AND o.active IS DISTINCT FROM false
+                  AND COALESCE(o.account_id, o.id) = COALESCE(c.account_id, c.id))
+  AND (SELECT COUNT(*) FROM customer_properties p WHERE p.customer_id = c.id AND p.active) <= 1
+  AND NOT EXISTS (SELECT 1 FROM customer_properties p WHERE p.customer_id = c.id AND p.active
+                  AND (p.occupancy_type IS NULL OR p.occupancy_type NOT IN ('owner_occupied', 'seasonal')
+                       OR LOWER(COALESCE(p.property_type, '')) IN ('commercial', 'business')))`;
+
 /**
- * One batched read of the customers' finished visits (scheduled_services,
- * status 'completed', visit date on or before today in Eastern time).
- * Returns Map<customerId, { lastVisit: { date, line }, sinceDate, visitCount }>.
- * A customer who is archived (deleted_at) or inactive (active = false, the
- * notion audience profiles use), or whose latest finished visit is over a year
- * old, has no entry. It may throw: the caller fails closed.
+ * One batched read of the readers' current customers' finished visits, from
+ * service_records (what the Waves app shows as the customer's visits: status
+ * 'completed' or NULL, dated on or before today in Eastern time).
+ * Returns Map<subscriberId, { customerId, lastVisit: { date, line }, sinceDate }>.
+ * The link and the address are the database's now. A reader whose customer is
+ * archived or inactive, shares its address or account with another customer, has
+ * several saved properties or a rental, family or commercial one, or whose last
+ * finished visit is over a year old, has no entry. It may throw: the caller fails closed.
  * @param {Function} conn  knex or a transaction
- * @param {string[]} customerIds
+ * @param {(number|string)[]} subscriberIds  newsletter_subscribers ids
  * @param {Date} [now]
  */
-async function loadHomeFacts(conn, customerIds, now = new Date()) {
-  const ids = Array.from(new Set((customerIds || []).filter(Boolean)));
+async function loadHomeFacts(conn, subscriberIds, now = new Date()) {
+  const ids = Array.from(new Set((subscriberIds || []).filter((id) => id !== null && id !== undefined)));
   const facts = new Map();
   const today = etDateString(now);
   for (let i = 0; i < ids.length; i += CHUNK) {
-    // DISTINCT ON keeps each customer's latest visit; the window aggregates
-    // are computed over all of the customer's finished visits first.
-    const rows = await conn('scheduled_services as s')
-      .join('customers as c', 'c.id', 's.customer_id')
-      .whereIn('s.customer_id', ids.slice(i, i + CHUNK))
-      .where('s.status', 'completed')
-      .where('s.scheduled_date', '<=', today)
-      .whereNull('c.deleted_at')
-      .whereRaw('c.active IS DISTINCT FROM false')
-      .distinctOn('s.customer_id')
-      .select(
-        's.customer_id',
-        's.scheduled_date as last_date',
-        's.service_type',
-        conn.raw('MIN(s.scheduled_date) OVER (PARTITION BY s.customer_id) AS since_date'),
-        conn.raw('COUNT(*) OVER (PARTITION BY s.customer_id)::int AS visit_count'),
-      )
-      .orderBy([{ column: 's.customer_id' }, { column: 's.scheduled_date', order: 'desc' }, { column: 's.id', order: 'desc' }]);
-    for (const row of rows) {
+    const slice = ids.slice(i, i + CHUNK);
+    const result = await conn.raw(FACTS_SQL(slice.map(() => '?').join(', ')), [today, ...slice]);
+    for (const row of result?.rows || []) {
       const home = homeFromRow(row, today);
-      if (home) facts.set(row.customer_id, home);
+      if (home) facts.set(row.subscriber_id, home);
     }
   }
   return facts;

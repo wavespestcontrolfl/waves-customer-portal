@@ -1,94 +1,116 @@
 // Pest Insider "Your home" facts (services/pest-insider/home.js): the service line from the platform's one
-// classifier, the 365-day rule, and the shape of the one batched read. The rows themselves are pinned against
-// real Postgres in pest-insider-home-postgres.test.js.
+// classifier over the whole last day, the commercial and 365-day rules, member since, and the shape of the one
+// batched read (the SQL's own rules run against real Postgres in pest-insider-home-postgres.test.js).
 const { serviceLineOf, loadHomeFacts, HOME_TOKEN, HOME_TEXT_TOKEN, hasHomeToken, neutralizeHomeTokens } = require('../services/pest-insider/home');
+
+jest.mock('../models/db', () => jest.fn());
 
 const NOW = new Date('2026-11-21T15:00:00Z');
 
-// A knex-shaped chain that records its calls and resolves to the next batch of rows.
+// A conn whose raw() records its calls and answers with the next batch of rows.
 function fakeConn(batches) {
   const calls = [];
-  const conn = (table) => {
-    const call = { table, ops: [] };
-    calls.push(call);
-    const q = new Proxy({}, {
-      get: (_t, name) => {
-        if (name === 'then') return (resolve, reject) => Promise.resolve(batches.shift() || []).then(resolve, reject);
-        return (...args) => { call.ops.push([name, args]); return q; };
-      },
-    });
-    return q;
-  };
-  conn.raw = (sql) => ({ raw: sql });
+  const conn = { raw: jest.fn(async (sql, bindings) => { calls.push({ sql, bindings }); return { rows: batches.shift() || [] }; }) };
   return { conn, calls };
 }
 
 describe('serviceLineOf', () => {
   test.each([
-    ['Quarterly Pest Control Service', 'pest'],
-    ['Lawn Care Visit', 'lawn'],
-    ['Mosquito Control', 'mosquito'],
-    ['Termite Inspection', 'termite'],
-    ['Rodent Exclusion', 'rodent'],
-    ['Tree & Shrub Care', 'tree_shrub'],
-    ['Palm Injection', 'tree_shrub'],
-    ['Commercial Pest Control', 'pest'],
-  ])('%s -> %s', (name, line) => expect(serviceLineOf(name)).toBe(line));
+    [['Quarterly Pest Control Service'], 'pest'],
+    [['Lawn Care Visit'], 'lawn'],
+    [['Mosquito Control'], 'mosquito'],
+    [['Termite Inspection'], 'termite'],
+    [['Rodent Exclusion'], 'rodent'],
+    [['Tree & Shrub Care'], 'tree_shrub'],
+    [['Palm Injection'], 'tree_shrub'],
+    [['Commercial Pest Control'], 'pest'],
+    [['Quarterly Pest Control', 'Pest Control Follow-up'], 'pest'],
+  ])('%j -> %s', (types, line) => expect(serviceLineOf(types)).toBe(line));
 
-  test.each([null, undefined, '', 'Spring special', 'Lawn and Pest Combo', 7])('no line, or more than one, gives null (%p)', (name) => {
-    expect(serviceLineOf(name)).toBeNull();
+  test.each([
+    [null], [undefined], [[]], [['']], [['Spring special']], [['Lawn and Pest Combo']],
+    // two names on the last day from two lines: no label
+    [['Quarterly Pest Control', 'Lawn Care Visit']],
+    [['Lawn Care Visit', 'Spring special', 'Mosquito Control']],
+  ])('no line, or more than one across the whole day, gives null (%j)', (types) => {
+    expect(serviceLineOf(types)).toBeNull();
   });
 });
 
 describe('loadHomeFacts', () => {
-  const row = (over = {}) => ({ customer_id: 'c1', last_date: new Date('2026-11-10T00:00:00Z'), since_date: new Date('2024-03-05T00:00:00Z'), visit_count: 7, service_type: 'Quarterly Pest Control', ...over });
-
-  test('maps each row to the structured facts: dates as YYYY-MM-DD, the count, and a line key, never the service name', async () => {
-    const { conn } = fakeConn([[row(), row({ customer_id: 'c2', last_date: '2026-10-01', since_date: '2026-10-01', visit_count: 1, service_type: 'Gate code 4821 Mary' })]]);
-    const facts = await loadHomeFacts(conn, ['c1', 'c2'], NOW);
-    expect(facts.get('c1')).toEqual({ lastVisit: { date: '2026-11-10', line: 'pest' }, sinceDate: '2024-03-05', visitCount: 7 });
-    expect(facts.get('c2')).toEqual({ lastVisit: { date: '2026-10-01', line: null }, sinceDate: '2026-10-01', visitCount: 1 });
-    expect(JSON.stringify([...facts])).not.toMatch(/4821|Mary|Quarterly/);
+  const row = (over = {}) => ({
+    subscriber_id: 11, customer_id: 'c1', member_since: new Date('2024-03-05T00:00:00Z'), property_type: 'single_family', waveguard_tier: 'Silver',
+    last_date: new Date('2026-11-10T00:00:00Z'), last_types: ['Quarterly Pest Control'], ...over,
   });
 
-  test('a latest visit more than 365 days before now has no entry; exactly 365 days still does', async () => {
+  test('maps each row by subscriber id: dates as YYYY-MM-DD, member since as the since date, a line key, never a service name', async () => {
     const { conn } = fakeConn([[
-      row({ customer_id: 'old', last_date: '2025-11-20' }),
-      row({ customer_id: 'edge', last_date: '2025-11-21' }),
+      row(),
+      row({ subscriber_id: 12, customer_id: 'c2', last_date: '2026-10-01', member_since: null, last_types: ['Gate code 4821 Mary'] }),
     ]]);
-    const facts = await loadHomeFacts(conn, ['old', 'edge'], NOW);
-    expect([...facts.keys()]).toEqual(['edge']);
+    const facts = await loadHomeFacts(conn, [11, 12], NOW);
+    expect(facts.get(11)).toEqual({ customerId: 'c1', lastVisit: { date: '2026-11-10', line: 'pest' }, sinceDate: '2024-03-05' });
+    expect(facts.get(12)).toEqual({ customerId: 'c2', lastVisit: { date: '2026-10-01', line: null }, sinceDate: null });
+    expect(JSON.stringify([...facts])).not.toMatch(/4821|Mary|Quarterly/);
+    expect(JSON.stringify([...facts])).not.toMatch(/visit_?count|count/i);
   });
 
-  test('a row with an unreadable date has no entry', async () => {
-    const { conn } = fakeConn([[row({ last_date: null }), row({ customer_id: 'c2', since_date: null })]]);
-    expect((await loadHomeFacts(conn, ['c1', 'c2'], NOW)).size).toBe(0);
+  test('the last day\'s service names are classified together: two lines on one day give no label', async () => {
+    const { conn } = fakeConn([[row({ last_types: ['Quarterly Pest Control', 'Lawn Care Visit'] }), row({ subscriber_id: 12, last_types: ['Lawn Care Visit', 'Lawn Care Visit #2'] })]]);
+    const facts = await loadHomeFacts(conn, [11, 12], NOW);
+    expect(facts.get(11).lastVisit.line).toBeNull();
+    expect(facts.get(12).lastVisit.line).toBe('lawn');
   });
 
-  test('one read for a short list: finished visits only, up to today in Eastern time, live customers only', async () => {
+  test('a commercial account (platform helper: property type or the commercial tier) has no entry', async () => {
+    const { conn } = fakeConn([[
+      row({ subscriber_id: 1, property_type: 'commercial' }),
+      row({ subscriber_id: 2, property_type: 'Business' }),
+      row({ subscriber_id: 3, waveguard_tier: 'commercial' }),
+      row({ subscriber_id: 4 }),
+    ]]);
+    expect([...(await loadHomeFacts(conn, [1, 2, 3, 4], NOW)).keys()]).toEqual([4]);
+  });
+
+  test('a last visit more than 365 days before now has no entry; exactly 365 days still does', async () => {
+    const { conn } = fakeConn([[row({ subscriber_id: 1, last_date: '2025-11-20' }), row({ subscriber_id: 2, last_date: '2025-11-21' })]]);
+    expect([...(await loadHomeFacts(conn, [1, 2], NOW)).keys()]).toEqual([2]);
+  });
+
+  test('a row with an unreadable last date has no entry; an unreadable member since is just no since date', async () => {
+    const { conn } = fakeConn([[row({ last_date: null }), row({ subscriber_id: 12, member_since: 'soon' })]]);
+    const facts = await loadHomeFacts(conn, [11, 12], NOW);
+    expect([...facts.keys()]).toEqual([12]);
+    expect(facts.get(12).sinceDate).toBeNull();
+  });
+
+  test('one read per slice, by subscriber id, with today (Eastern) and the ids as the only bindings', async () => {
     const { conn, calls } = fakeConn([[]]);
-    await loadHomeFacts(conn, ['c1', 'c1', null, 'c2'], NOW);
+    await loadHomeFacts(conn, [11, 11, null, undefined, 12], NOW);
     expect(calls).toHaveLength(1);
-    const ops = Object.fromEntries(calls[0].ops.map(([name, args]) => [name, args]));
-    expect(calls[0].table).toBe('scheduled_services as s');
-    expect(ops.whereIn).toEqual(['s.customer_id', ['c1', 'c2']]);
-    expect(calls[0].ops).toContainEqual(['where', ['s.status', 'completed']]);
-    expect(calls[0].ops).toContainEqual(['where', ['s.scheduled_date', '<=', '2026-11-21']]);
-    expect(calls[0].ops).toContainEqual(['whereNull', ['c.deleted_at']]);
-    expect(calls[0].ops).toContainEqual(['whereRaw', ['c.active IS DISTINCT FROM false']]);
+    expect(calls[0].bindings).toEqual(['2026-11-21', 11, 12]);
+    expect(calls[0].sql).toContain('WHERE ns.id IN (?, ?)');
+    expect(calls[0].sql).toContain("COALESCE(r.status, 'completed') = 'completed'");
+    expect(calls[0].sql).toContain('FROM service_records r');
+    expect(calls[0].sql).not.toContain('scheduled_services');
+    expect(calls[0].sql).toMatch(/LOWER\(TRIM\(ns\.email\)\) = LOWER\(TRIM\(c\.email\)\)/);
+    expect(calls[0].sql).toMatch(/COALESCE\(o\.account_id, o\.id\) = COALESCE\(c\.account_id, c\.id\)/);
+    expect(calls[0].sql).toContain('customer_properties');
+    // Every value is a binding: no id or date is written into the SQL.
+    expect(calls[0].sql).not.toMatch(/2026-11-21|\b11, 12\b/);
   });
 
   test('today is the Eastern date: late evening on the 20th Eastern is still the 20th', async () => {
     const { conn, calls } = fakeConn([[]]);
-    await loadHomeFacts(conn, ['c1'], new Date('2026-11-21T03:00:00Z'));
-    expect(calls[0].ops).toContainEqual(['where', ['s.scheduled_date', '<=', '2026-11-20']]);
+    await loadHomeFacts(conn, [1], new Date('2026-11-21T03:00:00Z'));
+    expect(calls[0].bindings[0]).toBe('2026-11-20');
   });
 
   test('a long list is read in slices, and an empty list reads nothing', async () => {
-    const ids = Array.from({ length: 2500 }, (_, i) => `c${i}`);
+    const ids = Array.from({ length: 2500 }, (_, i) => i + 1);
     const { conn, calls } = fakeConn([[], [], []]);
     await loadHomeFacts(conn, ids, NOW);
-    expect(calls.map((c) => c.ops.find(([n]) => n === 'whereIn')[1][1].length)).toEqual([1000, 1000, 500]);
+    expect(calls.map((c) => c.bindings.length - 1)).toEqual([1000, 1000, 500]);
     const none = fakeConn([]);
     expect((await loadHomeFacts(none.conn, [], NOW)).size).toBe(0);
     expect((await loadHomeFacts(none.conn, null, NOW)).size).toBe(0);
@@ -96,9 +118,8 @@ describe('loadHomeFacts', () => {
   });
 
   test('a failed read throws, so the caller fails closed', async () => {
-    const failing = () => new Proxy({}, { get: (_t, name) => (name === 'then' ? (_res, rej) => rej(new Error('db down')) : failing) });
-    failing.raw = () => ({});
-    await expect(loadHomeFacts(failing, ['c1'], NOW)).rejects.toThrow('db down');
+    const conn = { raw: jest.fn(async () => { throw new Error('db down'); }) };
+    await expect(loadHomeFacts(conn, [1], NOW)).rejects.toThrow('db down');
   });
 });
 

@@ -18,7 +18,7 @@
  * opted-in readers only: its Amazon link may reach neither the archive nor
  * a reader who never opted in), and in PR 4 "Active near you" from area
  * counts. A per-reader block goes in before the sign-off (addReaderBlock).
- * "Your home" (a customer's own last visit and time with Waves) is per
+ * "Your home" (a customer's own last visit and member-since month) is per
  * reader too, but it is filled by the sender, not added: the shared body
  * holds two tokens that stand alone just before the sign-off ({{pi-home}},
  * {{pi-home-text}}, home.js), and every surface without a reader strips them.
@@ -354,8 +354,9 @@ function pollBlock(pollQuizId) {
   };
 }
 
-// "Your home" (owner-approved plan): a customer's own last visit and how long
-// they have been with Waves. It is built per reader at send time from
+// "Your home" (owner-approved plan): a customer's own last visit and the month
+// they became a member (no visit count: the Waves app's records begin in August
+// 2025, so a count would be too low for a long-time customer). It is built per reader at send time from
 // structured facts (home.js loadHomeFacts) and never enters the shared body,
 // the archive or the FYI copy. It prints fixed words and values this code
 // formats itself: never a word read from the database (a service name the
@@ -375,19 +376,19 @@ const HOME_LINE_LABELS = Object.freeze({
 const realDay = (value, today) => (validDateOnly(value) && value <= today ? value : null);
 
 function homeLines(home, today) {
-  const lines = [];
   const last = realDay(home?.lastVisit?.date, today);
-  if (last) {
-    const label = own(HOME_LINE_LABELS, home.lastVisit.line);
-    const day = formatDateOnly(last, { month: 'long', day: 'numeric', year: undefined });
-    lines.push({ emoji: '📅', text: `Last visit: ${day}${label ? ` (${label})` : ''}.` });
-  }
-  const since = realDay(home?.sinceDate, today);
-  if (since) {
-    const month = formatDateOnly(since, { month: 'long', year: 'numeric', day: undefined });
-    const count = Number.isSafeInteger(home.visitCount) && home.visitCount > 0 ? home.visitCount : 0;
-    const visits = count ? `, ${count} ${count === 1 ? 'visit' : 'visits'} so far` : '';
-    lines.push({ emoji: '🌊', text: `With Waves since ${month}${visits}.` });
+  // A block never stands on its "since" line alone.
+  if (!last) return [];
+  const label = own(HOME_LINE_LABELS, home.lastVisit.line);
+  // A visit from an earlier year names its year: a December visit read in November
+  // would look like a coming date without it.
+  const day = formatDateOnly(last, { month: 'long', day: 'numeric', year: last.slice(0, 4) === today.slice(0, 4) ? undefined : 'numeric' });
+  const lines = [{ emoji: '📅', text: `Last visit: ${day}${label ? ` (${label})` : ''}.` }];
+  // "Member since" (the Waves app's own date): left out when it is missing, not a real
+  // day, still to come, or after the last visit, where the two lines would contradict.
+  const since = realDay(home.sinceDate, today);
+  if (since && since <= last) {
+    lines.push({ emoji: '🌊', text: `With Waves since ${formatDateOnly(since, { month: 'long', year: 'numeric', day: undefined })}.` });
   }
   return lines;
 }
@@ -398,7 +399,7 @@ function homeLines(home, today) {
  * then the block, and a newline); text is the value of {{pi-home-text}} (it
  * carries its own trailing blank line, so an empty value leaves the issue as
  * it reads without the block).
- * @param {{ lastVisit?: { date: string, line: string|null }, sinceDate?: string, visitCount?: number }} home
+ * @param {{ lastVisit?: { date: string, line: string|null }, sinceDate?: string|null }} home
  * @param {Date} [now]  a visit dated after today (Eastern) drops its line
  */
 function homeBlock(home, now = new Date()) {
