@@ -1849,9 +1849,15 @@ async function ringChecklist(offerId, clock) {
       return closed ? 'closed' : null;
     }
     const [offer] = held.signed;
-    if (offer.id !== offerId || asObject(offer.checklist)[FIRST_DAYS_BELL_KEY] === today) return null;
+    // The time is read again here: a pass that started before midnight must not ring a hire just after it and settle
+    // the new day before its morning.
+    if (offer.id !== offerId || minuteOfDayEt(now) < FIRST_DAYS_BELL_FROM_ET) return null;
+    // The day is settled for the hire, not for one offer: a second signature after a mark or a bell does not ring
+    // the same day again.
+    const settled = held.signed.some((row) => asObject(row.checklist)[FIRST_DAYS_BELL_KEY] === today);
     // Once a day for a hire, with or without a bell: the day's mark keeps the offer out of the later ticks.
     await storeFirstDaysMarks(trx, held.signed, held.marks, { [FIRST_DAYS_BELL_KEY]: today });
+    if (settled) return null;
     const open = firstDaysItems(offer, held.marks, held.firstDay).filter((item) => !item.doneAt);
     const due = open.filter((item) => item.ringFrom <= today);
     if (!due.length) {
@@ -1884,14 +1890,14 @@ async function ringDueChecklists(clock = () => new Date()) {
   if (minuteOfDayEt(now) < FIRST_DAYS_BELL_FROM_ET) return result;
   const handled = `o.checklist ->> '${FIRST_DAYS_BELL_KEY}'`;
   const allDone = FIRST_DAYS_ITEMS.map((item) => `o.checklist -> '${item.key}' IS NOT NULL`).join(' AND ');
-  // A Hired application's newest signed offer with an item not marked on it, or an offer the pass handled before whose
-  // application is no longer Hired (its bell closes once).
+  // A Hired application's newest signed offer with an item not marked on it, once a day. Or an offer the pass handled
+  // before whose application is no longer Hired: its bell closes once, in the next tick (also on the day it rang).
   const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
-    .where('o.status', 'accepted').whereRaw(`${handled} IS DISTINCT FROM ?`, [etDateString(now)])
-    .whereRaw(`((a.status = 'hired' AND NOT (${allDone}) AND NOT EXISTS (
+    .where('o.status', 'accepted')
+    .whereRaw(`((a.status = 'hired' AND ${handled} IS DISTINCT FROM ? AND NOT (${allDone}) AND NOT EXISTS (
         SELECT 1 FROM job_offers n WHERE n.application_id = o.application_id AND n.status = 'accepted'
           AND (n.signed_at, n.id) > (o.signed_at, o.id)))
-      OR (a.status <> 'hired' AND ${handled} IS NOT NULL AND ${handled} <> 'closed'))`)
+      OR (a.status <> 'hired' AND ${handled} IS NOT NULL AND ${handled} <> 'closed'))`, [etDateString(now)])
     .orderBy('o.signed_at').pluck('o.id');
   for (const id of due) {
     try {

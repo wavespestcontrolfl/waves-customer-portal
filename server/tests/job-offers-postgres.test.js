@@ -2093,6 +2093,30 @@ jest.setTimeout(120000);
           expect((await offerRow(made.offer.id)).checklist.first_days_bell).toBe(shiftDay(signedDay(), 3));
         });
 
+        test('a second signature on a settled day does not ring again; a pass that crosses midnight leaves the new day to its morning', async () => {
+          const made = await hire();
+          expect(await JobOffers.ringDueChecklists(morning(1))).toEqual({ ...NONE, rung: 1 });
+          await mark(made, 'license', true, morning(1, '08:00')());
+          // The applicant signs a replacement offer the same day: the newer offer holds no day yet.
+          const second = await signAgain(made, { hourlyRate: 24 });
+          expect((await offerRow(second.id)).checklist.first_days_bell).toBeUndefined();
+          mockRaise.mockClear();
+          expect(await JobOffers.ringDueChecklists(morning(1, '09:00'))).toEqual(NONE);
+          expect(mockRaise).not.toHaveBeenCalled();
+          expect(await openBellsOf(made.app.id)).toHaveLength(0);
+          expect((await offerRow(second.id)).checklist.first_days_bell).toBe(shiftDay(signedDay(), 1));
+
+          // A pass that starts at 11:59 PM the next day and reaches the hire after midnight: no bell, and the new day
+          // stays open for its morning.
+          const times = [morning(2, '23:59')(), morning(3, '00:00')()];
+          expect(await JobOffers.ringDueChecklists(() => times.shift())).toEqual(NONE);
+          expect(times).toHaveLength(0);
+          expect(mockRaise).not.toHaveBeenCalled();
+          expect((await offerRow(second.id)).checklist.first_days_bell).toBe(shiftDay(signedDay(), 1));
+          expect(await JobOffers.ringDueChecklists(morning(3))).toEqual({ ...NONE, rung: 1 });
+          expect((await openBellsOf(made.app.id))[0].metadata).toMatchObject({ offerId: second.id });
+        });
+
         test('a first day moved later closes the bell of an item that is no longer due, and the new first day rings again', async () => {
           const made = await hire();
           for (const key of ['driving_record', 'license', 'workers_comp']) await mark(made, key);
@@ -2149,9 +2173,9 @@ jest.setTimeout(120000);
           const [open] = await openBellsOf(made.app.id);
           expect(await bellsOf(made.app.id)).toHaveLength(2);
 
-          // The owner moves the application out of Hired: the next morning's pass closes the bell, once.
+          // The owner moves the application out of Hired: the next tick closes the bell, once, also on the day it rang.
           await root('job_applications').where({ id: made.app.id }).update({ status: 'rejected' });
-          expect(await JobOffers.ringDueChecklists(morning(3))).toEqual({ ...NONE, closed: 1 });
+          expect(await JobOffers.ringDueChecklists(morning(2, '07:15'))).toEqual({ ...NONE, closed: 1 });
           expect(await openBellsOf(made.app.id)).toHaveLength(0);
           expect(await root('notifications').where({ id: open.id }).first()).toMatchObject({ done_by: 'episodes', resolution: 'The application is no longer Hired' });
           // The row the owner closed keeps his own words.
