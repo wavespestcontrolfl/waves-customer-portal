@@ -1071,7 +1071,9 @@ jest.setTimeout(120000);
         expect(mockRaise).not.toHaveBeenCalled();
       });
 
-      test('the real alert writer stores the bell row in the close, once', async () => {
+      // A sent offer closed by a pass that wrote its bell through the real alert writer.
+      const bellOf = (offerId) => root('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`job-offer-expired:${offerId}`]);
+      async function closedWithItsBell() {
         const app = await newApplication();
         const sent = (await sendNew(app)).offer;
         await lapse(sent.id);
@@ -1082,11 +1084,37 @@ jest.setTimeout(120000);
         } finally {
           mockRaise.mockImplementation(async () => ({ id: 'bell-1' }));
         }
-        const bells = await root('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`job-offer-expired:${sent.id}`]);
+        return { app, sent };
+      }
+
+      test('the real alert writer stores the bell row in the close, once', async () => {
+        const { app, sent } = await closedWithItsBell();
+        const bells = await bellOf(sent.id);
         expect(bells).toHaveLength(1);
         expect(bells[0]).toMatchObject({
           recipient_type: 'admin', category: 'job_application', title: "Leads — Jordan Rivera's job offer closed unsigned",
-          link: `/admin/recruiting?application=${app.id}`,
+          link: `/admin/recruiting?application=${app.id}`, done_at: null,
+        });
+      });
+
+      test('the bell clears when the owner does what it asks: a new offer sent, or the application moved out of Offer', async () => {
+        const resent = await closedWithItsBell();
+        const next = await JobOffers.saveDraft(resent.app.id, {}, actor());
+        // A draft is not the answer yet.
+        expect(await bellOf(resent.sent.id).first()).toMatchObject({ done_at: null });
+        await sendAsPage(resent.app.id, next.id, next.draftHash);
+        expect(await bellOf(resent.sent.id).first()).toMatchObject({
+          done_at: expect.any(Date), done_by: 'episodes', resolution: 'Cleared: a new offer was sent',
+          metadata: expect.objectContaining({ autoCleared: true, autoClearedReason: 'offer_reviewed' }),
+        });
+
+        const moved = await closedWithItsBell();
+        await root.transaction(async (trx) => {
+          await trx('job_applications').where({ id: moved.app.id }).update({ status: 'rejected' });
+          await JobOffers.closeOffersWithApplication(trx, moved.app.id, owner.id);
+        });
+        expect(await bellOf(moved.sent.id).first()).toMatchObject({
+          done_at: expect.any(Date), done_by: 'episodes', resolution: 'Cleared: the application left the offer stage',
         });
       });
 

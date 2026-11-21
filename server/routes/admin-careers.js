@@ -479,9 +479,9 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan, { o
   // anything is written, and the dialog reads the preview again: another session sent, edited or withdrew an offer, or
   // the preview read the application at another stage than this move leaves. A move without a stamp (a page loaded
   // before the stamp) never showed an offer: it goes through only when it withdraws none.
-  // One clock for the three offer reads and writes of this move: an offer is past its expiry for all of them or for none.
-  const offerClock = new Date();
-  const withdrawn = closesOffers ? await JobOffers.liveOffersOf(trx, applicationId, { lock: true, now: offerClock }) : [];
+  // The offer rows are locked first, then one clock is read for the three offer steps of this move: an offer is past
+  // its expiry for all of them or for none (JobOffers.lockLiveOffers).
+  const { now: offerClock, offers: withdrawn } = closesOffers ? await JobOffers.lockLiveOffers(trx, applicationId) : { now: null, offers: [] };
   if (!plan.expectedOffers && withdrawn.length) return { row, offersUnseen: true };
   if (plan.expectedOffers && JobOffers.offerStampOf(withdrawn) !== plan.expectedOffers) return { row, offersChanged: true };
   // An offer the applicant holds is withdrawn only by the owner account, as on POST .../withdraw: any other admin's

@@ -814,10 +814,21 @@ function stageMoveClosesOffers(fromStatus, toStatus) {
 // expiry is left out whether or not the 7-day close has stored that state (closeExpiredOffers): both pages already
 // show it closed, so storing it must not change a stamp the owner read. (A stage move stores such a row's expiry,
 // closeOffersWithApplication; no dialog names it, because the applicant no longer holds it.)
-async function liveOffersOf(knex, applicationId, { lock = false, now = new Date() } = {}) {
-  const query = knex('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES);
-  const rows = await (lock ? query.forUpdate() : query).select('id', 'status', 'expires_at', 'updated_at');
+const liveRowsOf = (knex, applicationId) => knex('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES);
+const STAMP_COLUMNS = ['id', 'status', 'expires_at', 'updated_at'];
+
+async function liveOffersOf(knex, applicationId, now = new Date()) {
+  const rows = await liveRowsOf(knex, applicationId).select(...STAMP_COLUMNS);
   return rows.filter((o) => !expiredByClock(o, now));
+}
+
+// The same offers, locked, and the clock read once they are: for a write that judges an expiry and stores a state at
+// one instant (a Send, a stage move). The applicant's page holds an offer row while it stamps a view, so a clock read
+// before these locks could be older than the closed state the link already showed. fixedNow: a test's clock.
+async function lockLiveOffers(trx, applicationId, fixedNow) {
+  const rows = await liveRowsOf(trx, applicationId).forUpdate().select(...STAMP_COLUMNS);
+  const now = fixedNow || new Date();
+  return { now, offers: rows.filter((o) => !expiredByClock(o, now)) };
 }
 
 // One stamp for the offers a stage move withdraws, from their ids, statuses and versions (updated_at, which every offer
@@ -840,7 +851,7 @@ function nextVersion(row) {
 
 /** What such a move would withdraw, for the stage dialog's preview: a plain read (the move re-checks under its lock). */
 async function liveOfferStake(knex, applicationId, now = new Date()) {
-  const rows = await liveOffersOf(knex, applicationId, { now });
+  const rows = await liveOffersOf(knex, applicationId, now);
   return { held: rows.some((o) => isHeldOffer(o, now)), draft: rows.some((o) => o.status === 'draft'), stamp: offerStampOf(rows) };
 }
 
@@ -849,8 +860,10 @@ async function closeOffersWithApplication(trx, applicationId, actorId, now = new
   // applicant's link reads the same whichever of the two came first.
   await trx('job_offers').where({ application_id: applicationId, status: 'sent' }).where('expires_at', '<', now)
     .update({ status: 'expired', updated_at: new Date() });
-  return trx('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES)
+  const withdrawn = await trx('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES)
     .update({ status: 'withdrawn', withdrawn_at: now, withdrawn_by: actorId || null, updated_at: new Date() });
+  await clearExpiredBells(trx, applicationId, 'Cleared: the application left the offer stage');
+  return withdrawn;
 }
 
 /** GET /:id/offer/:offerId/signed-copy */
@@ -934,15 +947,16 @@ async function commitSend(applicationId, offerId, actor, fixedNow, draftHash, ex
   return db.transaction(async (trx) => {
     const application = await loadApplication(trx, applicationId, { lock: true });
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
-    // Both rows are locked: the clock is read now, as reviseOffer reads it. A Send that waited for a lock while the
-    // offer out passed its expiry is judged at the instant it writes (the stamp, the offer it replaces, the new expiry).
-    const now = fixedNow || new Date();
+    // Every row this Send reads or writes is locked before the clock is read, as in reviseOffer. A Send that waited for
+    // a lock while the offer out passed its expiry is judged at the instant it writes (the stamp, the offer it
+    // replaces, the new expiry).
+    const { now, offers: live } = await lockLiveOffers(trx, applicationId, fixedNow);
     const name = await actorName(trx, actor);
     const { terms, payDayLine } = await assertSendable(trx, application, offer, { now, ownerName: name, draftHash });
     // The owner sends on a read of the offers out now (the offer read's outStamp, which sendOffer requires). An answer, a
     // date request or any other write to them since that read refuses the send, before anything is replaced or sent: the
     // owner sees it first. Every offer writer locks the application row first, so this read holds until the commit.
-    const outNow = (await liveOffersOf(trx, applicationId, { lock: true, now })).filter((o) => OUT_STATUSES.includes(o.status));
+    const outNow = live.filter((o) => OUT_STATUSES.includes(o.status));
     if (offerStampOf(outNow) !== expectedOut) {
       throw new OfferError(409, 'OFFERS_CHANGED', 'The offer you sent before changed after you opened this, so nothing was sent.');
     }
@@ -969,6 +983,7 @@ async function commitSend(applicationId, offerId, actor, fixedNow, draftHash, ex
       status_history: JSON.stringify([...(Array.isArray(application.status_history) ? application.status_history : []), sentHistoryEntry(application, actor)]),
       updated_at: new Date(),
     }).returning('*');
+    await clearExpiredBells(trx, applicationId, 'Cleared: a new offer was sent');
     return { offer: row, application: updatedApplication, ownerName: name, snapshot };
   });
 }
@@ -1356,6 +1371,16 @@ const BELLS = {
   },
 };
 
+const bellKey = (kind, offerId) => `job-offer-${kind}:${offerId}`;
+
+// The "closed unsigned" bell asks the owner to make a new offer or to close the application. Each of the two clears
+// it, in the transaction that does it: a Send, and a stage move that takes the application out of Offer.
+async function clearExpiredBells(trx, applicationId, resolution) {
+  const ids = await trx('job_offers').where({ application_id: applicationId, status: 'expired' }).pluck('id');
+  if (!ids.length) return;
+  await require('./admin-alert-episodes').closeAdminAlertKeys(trx, ids.map((id) => bellKey('expired', id)), 'offer_reviewed', { resolution });
+}
+
 // Raises the bell for one offer event. It names the applicant (the bell is admin-only and rings whatever the category
 // override says: an applicant acting, or an offer closing, is the owner's to see). With `trx` the bell row is written
 // in that transaction and an error propagates to it.
@@ -1377,7 +1402,7 @@ async function raiseBell(kind, offer, extra, trx = null) {
     who: 'person',
   }, {
     bell: true,
-    dedupeKey: `job-offer-${kind}:${offer.id}`,
+    dedupeKey: bellKey(kind, offer.id),
     metadata: { applicationId: offer.application_id, offerId: offer.id },
     ...(trx ? { trx } : {}),
   });
@@ -1404,7 +1429,7 @@ module.exports = {
   snapshotHashOf, signatureHashOf, renderLetterMarkdown, readableTerms, payDayLineFrom,
   publicStateOf, closedMessage, presentOffer, timelineOf, buildSnapshot,
   // admin
-  loadIssuedTerms, draftHashOf, heldOffersOf, stageMoveClosesOffers, liveOffersOf, offerStampOf, liveOfferStake, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
+  loadIssuedTerms, draftHashOf, heldOffersOf, stageMoveClosesOffers, lockLiveOffers, offerStampOf, liveOfferStake, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
   // public
   publicView, setTextConsent, acceptOffer, requestDate, declineOffer,
   // scheduled

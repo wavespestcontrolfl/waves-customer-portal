@@ -257,6 +257,38 @@ describe('the public state', () => {
   });
 });
 
+describe('the locked read of the live offers', () => {
+  // Stands in for a transaction whose row locks are granted `waitMs` after the read was asked for.
+  const lockedAfter = (rows, waitMs) => () => {
+    const query = {
+      where: () => query,
+      whereIn: () => query,
+      forUpdate: () => query,
+      select: () => new Promise((resolve) => { setTimeout(() => resolve(rows), waitMs); }),
+    };
+    return query;
+  };
+
+  test('the clock is read after the rows are locked: an offer that passed its expiry during the wait is left out', async () => {
+    const asked = Date.now();
+    const rows = [
+      { id: 'lapsed', status: 'sent', expires_at: new Date(asked + 5), updated_at: new Date(asked) },
+      { id: 'open', status: 'sent', expires_at: new Date(asked + 60000), updated_at: new Date(asked) },
+      { id: 'asked', status: 'date_requested', expires_at: new Date(asked + 5), updated_at: new Date(asked) },
+      { id: 'draft', status: 'draft', expires_at: null, updated_at: new Date(asked) },
+    ];
+    const { now, offers } = await J.lockLiveOffers(lockedAfter(rows, 25), 'a1');
+    expect(now.getTime()).toBeGreaterThan(asked + 5);
+    expect(offers.map((o) => o.id)).toEqual(['open', 'asked', 'draft']);
+  });
+
+  test('a test clock is used as given', async () => {
+    const fixed = new Date('2026-11-20T00:00:00Z');
+    const rows = [{ id: 'o1', status: 'sent', expires_at: new Date('2026-11-27T04:59:59Z'), updated_at: fixed }];
+    expect(await J.lockLiveOffers(lockedAfter(rows, 0), 'a1', fixed)).toEqual({ now: fixed, offers: rows });
+  });
+});
+
 describe('the admin shape', () => {
   const row = {
     id: 'o1', application_id: 'a1', status: 'sent', job_title: 'Pest Control Technician', start_date: new Date('2027-01-04T00:00:00Z'),

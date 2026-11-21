@@ -87,6 +87,8 @@ function makeDb() {
         forUpdate() { return offers; },
         select: async () => heldOffers.filter((o) => !filter.statuses || filter.statuses.includes(o.status)).map((o) => ({ ...o })),
         update: async (payload) => { (payload.status === 'expired' ? expiryStores : closedOffers).push({ ...filter, payload }); return 1; },
+        // The close then clears the "closed unsigned" bell of each expired offer: none here.
+        pluck: async () => [],
       };
       return offers;
     }
