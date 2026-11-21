@@ -12,8 +12,14 @@
 // Privacy contract (mirrored server-side in routes/admin-usage.js): only
 // normalized route metadata leaves the browser — page key, ID-stripped path
 // pattern, a sanitized tab slug, and a navigation source. Never query
-// strings, search text, customer ids, or tokens.
+// strings, search text, customer ids, or tokens. Four fields describe the
+// tab, not the page: its build tag, the start time and the build of the
+// newest server it has heard from (lib/portalVersion.js), and the code name
+// of what kept its last page move from reloading it (lib/portalReload.js).
 // =============================================================================
+
+import { heardServerBoot, heardServerBuild, loadedBuild } from './portalVersion';
+import { moveBlockerFor } from './portalReload';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -219,7 +225,9 @@ function flushPendingBeacon() {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify(body),
+    // Read as it goes out: an answer from a newer server during the settle
+    // wait counts.
+    body: JSON.stringify({ ...body, boot: heardServerBoot() || undefined, liveBuild: heardServerBuild() || undefined }),
   }).catch(() => {});
 }
 
@@ -394,6 +402,8 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
       path: norm.path,
       tab: tab || undefined,
       source,
+      build: loadedBuild() || undefined,
+      reloadHold: moveBlockerFor(pathname) || undefined,
     },
   };
   pendingTimer = setTimeout(

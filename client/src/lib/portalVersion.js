@@ -26,7 +26,7 @@ let writes = 0;
 let requests = 0;
 const listeners = new Set();
 
-function loadedBuild() {
+export function loadedBuild() {
   if (pageBuild === undefined) {
     pageBuild = typeof document === 'undefined'
       ? null
@@ -50,6 +50,19 @@ export function noteServerAnswer(headers, now = Date.now()) {
 export function newerBuild() {
   const own = loadedBuild();
   return own && live.build && live.build !== own ? live.build : null;
+}
+
+// The start time and the build of the server whose answers the tab counts now
+// (the newest it has heard from, by the rule above): 0 and null before any
+// stamped answer. The usage beacon sends both (lib/adminUsage.js): they tell
+// the server that takes the beacon whether a newer server has answered this
+// tab, and on which build.
+export function heardServerBoot() {
+  return live.boot;
+}
+
+export function heardServerBuild() {
+  return live.build;
 }
 
 export function heardFromServerWithin(ms, now = Date.now()) {
