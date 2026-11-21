@@ -257,11 +257,11 @@ describe('expect — the writer owns the final check, under the claim and ahead 
   test.each([
     ['a card that named a visit', 'visit-1', 'visit-1'],
     ['a card that named no visit', null, 'none'],
-  ])('%s: the closeout may complete that visit only', async (_label, closeoutVisit, approvedTarget) => {
+  ])('%s: the closeout may complete that visit only, and the target binds this run alone', async (_label, closeoutVisit, approvedTarget) => {
     const pinned = { ...approved, closeout_visit: closeoutVisit };
     const out = await sendInvoiceReceipt(ID, { via: 'email', actorTechnicianId: 'admin-1', expect: { approved: pinned, rederive: async () => ({ ...pinned }) } });
     expect(out.status).toBe(200);
-    expect(closeOutVisitForIssuedInvoice.mock.calls).toEqual([[{ invoiceId: ID, trigger: 'paid', actorTechnicianId: 'admin-1', recordHold: false, approvedTarget }]]);
+    expect(closeOutVisitForIssuedInvoice.mock.calls).toEqual([[{ invoiceId: ID, trigger: 'paid', actorTechnicianId: 'admin-1', recordHold: false, approvedTarget, targetBindsRetries: false }]]);
   });
 
   test.each(['email', 'sms', 'both'])('recipients changing during the closeout (via %s): no leg sends, nothing is stamped', async (via) => {

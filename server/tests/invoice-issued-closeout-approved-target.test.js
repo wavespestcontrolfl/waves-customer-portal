@@ -51,16 +51,20 @@ describe('closeOutVisitForIssuedInvoice with an approved target', () => {
     expect(completeScheduledService).toHaveBeenCalledTimes(1);
   });
 
+  // A receipt resend's card (`targetBindsRetries: false`) limits its own run only: its refusal carries a `visit_` code, which
+  // the retry sweeps reconsider. Every other card's refusal is approved_target_mismatch, which they do not.
   test.each([
-    ['another visit was approved', 'visit-other'],
-    ['the card said no visit would close', 'none'],
-  ])('%s: the live visit stays open, the refusal is audited as approved_target_mismatch, nothing is completed', async (_label, approvedTarget) => {
-    const out = await run({ approvedTarget });
-    expect(out).toMatchObject({ closed: false, reason: 'approved_target_mismatch', visitId: 'visit-live', approvedTarget, audited: true });
+    ['another visit was approved', 'visit-other', {}, 'approved_target_mismatch'],
+    ['the card said no visit would close', 'none', {}, 'approved_target_mismatch'],
+    ['a receipt resend\'s card named another visit', 'visit-other', { targetBindsRetries: false }, 'visit_not_on_card'],
+    ['a receipt resend\'s card said no visit would close', 'none', { targetBindsRetries: false }, 'visit_not_on_card'],
+  ])('%s: the live visit stays open, the refusal is audited under its own code, nothing is completed', async (_label, approvedTarget, extra, code) => {
+    const out = await run({ approvedTarget, ...extra });
+    expect(out).toMatchObject({ closed: false, reason: code, visitId: 'visit-live', approvedTarget, audited: true });
     expect(completeScheduledService).not.toHaveBeenCalled();
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       action: 'visit.completion_on_invoice_issued_refused', resource_id: 'visit-live',
-      metadata: expect.objectContaining({ code: 'approved_target_mismatch', invoiceId: 'inv-1' }),
+      metadata: expect.objectContaining({ code, invoiceId: 'inv-1' }),
     }));
   });
 

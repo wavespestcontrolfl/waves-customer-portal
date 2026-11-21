@@ -191,7 +191,7 @@ postgres('resend_receipt on real PostgreSQL: the writer\'s final check and the a
       mockCloseoutTarget.mockResolvedValue(target);
       const card = await preview();
       await confirm(card);
-      expect(mockCloseOut.mock.calls).toEqual([[{ invoiceId, trigger: 'paid', actorTechnicianId: 'admin-1', recordHold: false, approvedTarget }]]);
+      expect(mockCloseOut.mock.calls).toEqual([[{ invoiceId, trigger: 'paid', actorTechnicianId: 'admin-1', recordHold: false, approvedTarget, targetBindsRetries: false }]]);
     });
   });
 

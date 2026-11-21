@@ -28,7 +28,7 @@
  * caller's own claim row. The closeout that follows resolves the linked visit
  * once more, so it is handed the visit that version names
  * (`approved.closeout_visit`), or 'none': a visit that became closable after
- * the check stays open (runCloseout).
+ * the check stays open for this run (runCloseout).
  * Besides `{status, body}` the result carries what the caller must not guess:
  * `lockLost` / `stampWritten` (the send lock's session ended mid-send: which step found it,
  * and whether the stamp was written),
@@ -159,9 +159,9 @@ async function verifyApproved(s, claim) {
 // A card-driven resend (`expect`) closes only the visit its card named (`closeout_visit`), or none. The
 // closeout resolves the visit again, after verifyApproved, and what it finds can differ: a bill added in
 // between ends a hold the card read, a technician arrives. The closeout is handed the card's target and
-// leaves any other visit open, audited `approved_target_mismatch` (pre-push audit round 12 on #8239).
-// That refusal is the card's: the retry sweeps read past it and close the visit by their own rule
-// (invoice-issued-closeout.js SEND_ONLY_REFUSAL_CODES). The Invoices route shows no card and names no target.
+// leaves any other visit open (pre-push audit round 12 on #8239). The target limits this run only
+// (`targetBindsRetries: false`): the refusal is of the moment (`visit_not_on_card`), and every retry sweep
+// decides that visit again by its own rule. The Invoices route shows no card and names no target.
 async function runCloseout(s, stillHeld) {
   if (!stillHeld('before_closeout')) return;
   const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
@@ -170,7 +170,7 @@ async function runCloseout(s, stillHeld) {
     trigger: 'paid',
     actorTechnicianId: s.actorTechnicianId,
     recordHold: false,
-    ...(s.expect ? { approvedTarget: s.expect.approved.closeout_visit || 'none' } : {}),
+    ...(s.expect ? { approvedTarget: s.expect.approved.closeout_visit || 'none', targetBindsRetries: false } : {}),
   });
 }
 

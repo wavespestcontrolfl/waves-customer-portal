@@ -595,7 +595,8 @@ function retryableVisitFilter(q, today, settledSql) {
 //  - every `visit_*` reason of issuedCloseoutVisitRefusal and the resolver
 //    (visit_in_future, visit_en_route, visit_scheduled_today, visit_prepaid,
 //    visit_timer_running, visit_paid_on_other_invoice, and the historical
-//    visit_on_site that every arrived visit got before 2026-10-04);
+//    visit_on_site that every arrived visit got before 2026-10-04), and a
+//    receipt resend card's visit_not_on_card (refuseUnapprovedTarget);
 //  - a race under the completion's row lock (`issued_visit_*`);
 //  - a failure: `error`, or any 5xx the completion RETURNED rather than
 //    threw (a failed profile / prepay read answers 503 with its own code).
@@ -625,11 +626,8 @@ async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null, i
   return { action: last.action, meta: meta || {} };
 }
 
-// A refusal that only a CARD's approval produces (the closeout resolved a visit the card did not name): a bar send's card, a
-// record_payment card's, or a receipt resend's (the name predates the last two). It says what that card approved, not what a
-// settled invoice's own retry may close, so no sweep lets one block a paid retry. A payment's own card still binds its retry,
-// through its pin (pinDecisionFor). A resend writes no pin: the visit its card did not name closes at the next sweep, by the
-// ordinary rule.
+// Refusals that only a bar SEND's approval can produce (the card named a different visit). They say nothing about a settled
+// invoice's closeout, which the pin never covers (pinDecisionFor), so the sweep does not let one block a paid retry.
 const SEND_ONLY_REFUSAL_CODES = ['approved_target_mismatch'];
 
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
@@ -817,8 +815,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       if (prepaidAndNobodyArrived(row)) continue;
       let last;
       try {
-        // A receipt resend's card refusal is audited 'paid' on a settled child: read past it, as the invoice sweep does.
-        last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id, trigger, ...(trigger === 'paid' ? { ignoreCodes: SEND_ONLY_REFUSAL_CODES } : {}) });
+        last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id, trigger });
       } catch (err) {
         logger.error(`[invoice-issued-closeout] statement retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
         continue;
@@ -1061,11 +1058,12 @@ async function resolveCloseoutTarget(run) {
   return { closed: false, reason: resolved.reason, visitId: null };
 }
 
-// An approved target (an Intelligence Bar card: the visit id it said would be closed, or 'none'): the closeout
-// runs only for that visit. A different live visit is left open, audited `approved_target_mismatch`. A send
-// card's and a record_payment card's target bind the retry sweeps too (a person decides). A receipt resend
-// card's does not: the payment is not the resend's, and the sweeps close the visit by their own rule
-// (SEND_ONLY_REFUSAL_CODES). A caller with no approved target is unchanged.
+// An approved target (the Intelligence Bar's send card: the visit id it said would be closed, or 'none'):
+// the closeout runs only for that visit. A different live visit is left open and audited as a refusal that
+// the retry sweeps do not reconsider (a person decides). A send with no approved target is unchanged.
+// A receipt resend's card names a target for its own run only (`targetBindsRetries: false`): the payment is not
+// the resend's. A visit that card did not name is left open with a refusal of the moment (`visit_not_on_card`,
+// a `visit_` code), so every retry sweep decides that visit again by its own rule.
 // The carded visit's facts (a record_payment card pins them): the closeout also runs only for that visit AS THE CARD SHOWED IT, compared
 // here on the resolved row and again by the completion under the visit lock (approvedVisit). A visit edited, rescheduled, reclassified
 // or cancelled since is left open: `approved_visit_changed`, not retried by the sweeps (a person decides; the payment stays recorded).
@@ -1087,9 +1085,10 @@ async function refuseUnapprovedTarget(run) {
     return { closed: false, reason: 'approved_visit_changed', visitId: run.svc.id, audited };
   }
   if (!run.approvedTarget || run.svc.id === run.approvedTarget) return null;
-  logger.warn(`[invoice-issued-closeout] ${run.label} → approved_target_mismatch: approved ${run.approvedTarget}, live visit ${run.svc.id}; left open`);
-  const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code: 'approved_target_mismatch' });
-  return { closed: false, reason: 'approved_target_mismatch', visitId: run.svc.id, approvedTarget: run.approvedTarget, audited };
+  const code = run.targetBindsRetries ? 'approved_target_mismatch' : 'visit_not_on_card';
+  logger.warn(`[invoice-issued-closeout] ${run.label} → ${code}: approved ${run.approvedTarget}, live visit ${run.svc.id}; left open`);
+  const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code });
+  return { closed: false, reason: code, visitId: run.svc.id, approvedTarget: run.approvedTarget, audited };
 }
 
 // Phase 2c — GATE_REPORT_AFTER_PAY: a visit this payment holds (the
@@ -1237,11 +1236,12 @@ async function auditCloseoutFailure(run, err) {
 // closeout. It records no hold, so a visit the payment would hold stays open
 // for its day with none recorded, and the resend card's preview, which reads
 // the same resolver through issuedCloseoutTarget, shows what the run does
-// (pre-push audit round 11).
-async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), approvedTarget = null, approvedVisit = null, recordHold = true } = {}) {
+// (pre-push audit round 11). `targetBindsRetries`: false from that resend's
+// card, whose `approvedTarget` limits its own run only (refuseUnapprovedTarget).
+async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), approvedTarget = null, approvedVisit = null, recordHold = true, targetBindsRetries } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
-  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, approvedTarget: approvedTarget || null, approvedVisit: approvedVisit || null, recordHold: recordHold !== false, invoice: null, paidAtMs: null, linkedVisitId: null, svc: null, resuming: false, deferred: false, label: null, idempotencyKey: null };
+  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, approvedTarget: approvedTarget || null, approvedVisit: approvedVisit || null, recordHold: recordHold !== false, targetBindsRetries: targetBindsRetries !== false, invoice: null, paidAtMs: null, linkedVisitId: null, svc: null, resuming: false, deferred: false, label: null, idempotencyKey: null };
   try {
     if (!(await loadCloseoutInvoice(run))) return { closed: false, reason: 'no_invoice' };
     const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run)) || (await refuseUnapprovedTarget(run)) || (await holdForReport(run));
