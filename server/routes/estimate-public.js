@@ -136,6 +136,7 @@ const {
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
+  planStartSnapshotMatchesTotals,
   resolveStoredPestPricingVersion,
 } = require('../services/estimate-pricing-bundle-utils');
 const {
@@ -9830,6 +9831,13 @@ async function handleEstimateView(req, res, next) {
         logger.warn(`[estimate-view] consumer-notice routing check failed, forcing the React view: ${e.message}`);
       }
     }
+    // A customer's own plan quote (plan_restart / plan_start) can be refused with a state-changed 409 that only the
+    // React page answers: its refused-quote banner sends the customer back to the portal for a current quote. The
+    // legacy page reads that 409 as a slot conflict, so the customer would pick time after time into the same
+    // refusal (codex pre-push P1). An accept-active plan quote therefore always gets the React view, like the forces
+    // above (holdback excluded, the /api/estimates mount redirects). The mint never sets use_v2_view.
+    const planQuoteForcesReactView = isEstimateAcceptActive(estimate)
+      && (estimate.source === 'plan_restart' || estimate.source === 'plan_start');
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
@@ -9838,7 +9846,8 @@ async function handleEstimateView(req, res, next) {
       || acceptanceTermsForcesReactView
       || contactGapsForceReactView
       || parkedForcesReactView
-      || consumerNoticeForcesReactView;
+      || consumerNoticeForcesReactView
+      || planQuoteForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -9865,6 +9874,7 @@ async function handleEstimateView(req, res, next) {
       && !contactGapsForceReactView
       && !parkedForcesReactView
       && !consumerNoticeForcesReactView
+      && !planQuoteForcesReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -9897,7 +9907,7 @@ async function handleEstimateView(req, res, next) {
     // the React URL for the same estimate instead of a dead-end 409. After
     // the expired carve-out: an expired estimate cannot accept, so it keeps
     // its personalized SSR expired page.
-    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView || parkedForcesReactView || consumerNoticeForcesReactView) {
+    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView || parkedForcesReactView || consumerNoticeForcesReactView || planQuoteForcesReactView) {
       const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
@@ -10429,6 +10439,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
   // AFTER the transaction rolls back (never Stripe I/O under the row locks, and
   // never retired by a refusal that did not end the accept).
   let droppedCaptureToRetire = null;
+  // The estimate and owner this request first read: an overlapping accept's success replay answers only for them.
+  let acceptOwner = null;
   // The customer's authorization moment = SERVER RECEIPT of the submit
   // (Codex r17/r24): captured before ANY preflight await, so an Auto Pay
   // opt-out committed in another tab after the click — even during the
@@ -10447,6 +10459,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     res.locals.acceptEstimateId = estimate.id;
+    acceptOwner = { id: estimate.id, customerId: estimate.customer_id || null };
     await reconcileFrozenMembershipSnapshot(estimate);
     // Fresh ACCEPT of a persisted bermuda-suppression estimate requires the
     // gate to still be live — acceptance bills/schedules from stored rows
@@ -10454,58 +10467,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
     // an ALREADY-accepted estimate stay untouched (that acceptance happened).
     // (The Bermuda gate itself now answers AFTER the blocking-state decision below - see "ORDER" after the inactive check.)
-    if (estimate.status === 'accepted') {
-      // An archived accepted estimate is no longer customer-viewable (the
-      // /:token/data gate rejects archived_at outright), so never rebuild
-      // invoice amounts or the bearer /pay link for it — return the same
-      // 409 the active gate below hands every other archived estimate.
-      // Pre-payload-rebuild this token got only the bare
-      // { success, alreadyAccepted } shape; blocking outright is strictly
-      // tighter and consistent with the rest of the route.
-      if (!isEstimateCustomerViewable(estimate)) {
-        const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
-      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
-      }
-      // Retry of an already-accepted estimate (e.g. the first response was
-      // lost in transit): rebuild the FULL success payload from persisted
-      // state so the customer still sees their real next step (pay link /
-      // booking link / site-confirmation copy) instead of generic confirmed
-      // copy that hides it. Read-only — no side effects re-run here (no
-      // conversion, no invoice mint, no sends). Best-effort: a rebuild
-      // failure degrades to the legacy bare payload rather than blocking
-      // the retry.
-      // Fast-redeem on the already-accepted RETRY too (Codex #3178 r38
-      // P2): the first accept can commit bookings + evidence + invoice and
-      // die before its own redemption block, and this retry still hands
-      // back the persisted pay link — so the credit must be in the balance
-      // before the customer can use it. Idempotent and best-effort; the
-      // payload rebuild stays read-only otherwise.
-      if (estimate.customer_id) {
-        try {
-          const acceptedVisits = await db('scheduled_services')
-            .where({ source_estimate_id: estimate.id })
-            .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
-            .whereRaw('COALESCE(is_callback, false) = false')
-            .limit(5)
-            .select('id');
-          for (const visit of acceptedVisits) {
-            await require('../services/inspection-credit').redeemInspectionCreditForBooking({
-              customerId: estimate.customer_id,
-              scheduledServiceId: visit.id,
-              createdBy: 'system:inspection_credit_estimate_accept_replay',
-            });
-          }
-        } catch (replayErr) {
-          logger.warn(`[estimate-accept] replay credit redemption deferred to sweep for estimate ${estimate.id}: ${replayErr.message}`);
-        }
-      }
-      try {
-        return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
-      } catch (e) {
-        logger.error(`[estimate-accept] already-accepted payload rebuild failed for estimate ${estimate.id}: ${e.message}`);
-        return res.json({ success: true, alreadyAccepted: true });
-      }
-    }
+    if (estimate.status === 'accepted') return respondAlreadyAccepted(res, estimate);
     // The documented re-price response first (codex r6 P0 on #3804): a
     // browser opened before the hold landed must see the contract's 409
     // copy, not the generic "no longer active" the accept-active preflight
@@ -10560,6 +10522,32 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
     // an ALREADY-accepted estimate stay untouched (that acceptance happened).
     if (gatedAddOn) return res.status(409).json(gatedAddOn);
+    // A customer's own plan quote that staff changed (the one-time option or invoice billing on)
+    // answers its re-check's 409 here, ahead of every request-body check below (contact fields,
+    // slot, one-time mode, invoice mode, annual prepay): an invoice-mode page sends no slot, and a
+    // one-time restart request would read as restart_quote_frozen, so a later answer would not send
+    // the customer back to the portal (codex pre-push P1 x2). It also answers ahead of the Florida
+    // consumer notice below (codex pre-push P1): a customer is never asked to sign for a quote they
+    // cannot accept. A plan quote always carries its
+    // customer, so the one blocking-state decision above never parks it. The locked re-check
+    // refuses it again.
+    const staffChangedQuote = require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(estimate);
+    if (staffChangedQuote) {
+      // The page drops a recurring card it captured on this 409 and sends the customer to a fresh
+      // quote, so retire the intent this request submits first, as the park above does (codex
+      // pre-push P0): a later accept of this estimate must never enroll the discarded card. Stripe
+      // unable to confirm = the existing 503, and the tab keeps its intent.
+      const droppedSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
+        ? req.body.recurringCardSetupIntentId.trim() : '';
+      if (droppedSetupIntentId) {
+        try {
+          await retireOrDenyDroppedCapture(estimate, droppedSetupIntentId);
+        } catch (retireErr) {
+          return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+        }
+      }
+      return res.status(409).json({ error: staffChangedQuote.message, code: staffChangedQuote.code });
+    }
     // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE, Rule 5E-14.105(1)): an estimate with a termite line is not
     // accepted until the customer has the signed FDACS-13692 on file. It follows the one blocking-state decision above and
     // the Bermuda gate, and stays ahead of everything that validates, writes or charges (contact fills, the accept
@@ -10744,6 +10732,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     }
     if (annualPrepaySelected && !slotId && !existingAppointmentId && !isCommercialAccept) {
       return res.status(400).json({ error: 'annual prepay requires selecting a service appointment first' });
+    }
+    // A plan-start quote (GATE_PORTAL_PLAN_START) is the portal card's booking path: its accept
+    // must carry the visit it books, a held slot or the appointment the page shows, so it never
+    // starts a plan with no visit (codex pre-push r23 P1). The page asks for a slot first
+    // (standard_slot_pick); this refuses a slotless request and leaves the quote open. Both ids
+    // are verified below as on every accept.
+    if (estimate.source === 'plan_start' && !slotId && !existingAppointmentId) {
+      return res.status(400).json({ error: 'Pick a visit time to start your plan.', code: 'plan_start_slot_required' });
     }
     if (billByInvoice && !estimate.customer_id && !estimate.customer_phone) {
       return res.status(400).json({ error: 'invoice-mode estimates require a linked customer or customer phone before online acceptance' });
@@ -12489,9 +12485,30 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // churn-stamp + residual-ownership checks under the estimate row lock
       // taken just above; drifted or unreadable state refuses the accept
       // (fail closed, 409 with a message the portal renders).
-      if (estimate.source === 'plan_restart') {
-        const { assertRestartAcceptEligible } = require('../services/cancellation-resolution/restart');
-        await assertRestartAcceptEligible(trx, estimate);
+      // Plan-start accept revalidation (GATE_PORTAL_PLAN_START): same point, same
+      // lock — the account must still be active, not cancelled, and own no live
+      // recurring service (the mint priced it standalone). Drift refuses with a
+      // 409 the estimate page renders.
+      // The page answers a state-changed refusal by dropping a card the tab
+      // captured and sending the customer back to the portal, so a verified
+      // capture is retired after the rollback, on the existing
+      // droppedCaptureToRetire path (codex pre-push P0). A *_RECHECK_RETRY 409
+      // is not one: the page keeps the time, the payment choice and the card
+      // for that retry.
+      const planAcceptCheck = {
+        plan_restart: 'assertRestartAcceptEligible',
+        plan_start: 'assertPlanStartAcceptEligible',
+      }[estimate.source];
+      if (planAcceptCheck) {
+        try {
+          await require('../services/cancellation-resolution/restart')[planAcceptCheck](trx, estimate);
+        } catch (planErr) {
+          const quoteRefused = planErr?.code === 'RESTART_STATE_CHANGED' || planErr?.code === 'PLAN_START_STATE_CHANGED';
+          if (quoteRefused && recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+            droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+          }
+          throw planErr;
+        }
       }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
@@ -16980,6 +16997,40 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // The transaction has rolled back: retire the capture an in-transaction
     // refusal dropped, now that no row lock is held (fail closed: when Stripe
     // cannot confirm, 503 and the tab keeps its intent).
+    // Two accepts of one plan quote overlapped on its row lock (codex pre-push P1): the later one's locked plan check
+    // read the plan the earlier one had just created as a state change, and refused. That accept succeeded, so this one
+    // answers with the same success replay as any accept of an accepted estimate, and never retires the card that
+    // accept bound. The replay answers only for the estimate and owner this request first read (codex pre-push P0): the
+    // same refusal also answers a merge or undo that moved the estimate to another customer, whose later accept this
+    // request must not be handed (it carries that customer's pay link). Such a request keeps its 409, and an accepted
+    // estimate's card is not its to retire. The owner is read on a row not yet accepted too (codex pre-push P1): the new
+    // owner's accept may still be in flight with this same card, so a request whose estimate moved retires nothing.
+    // The read and the retirement run in one transaction on the estimate row lock (codex pre-push P1), as
+    // replaceRecurringCardIntent does: an accept takes that lock before it re-reads its card live
+    // (verifyRecurringCardIntentUnderLock), so an accept that commits first reads as accepted here, and one that
+    // commits after finds the card retired and asks for a new one (402). A read that fails answers the error path with
+    // nothing retired; a retirement Stripe cannot confirm answers 503, and the tab keeps its intent.
+    if (err && err.status === 409 && (err.code === 'RESTART_STATE_CHANGED' || err.code === 'PLAN_START_STATE_CHANGED')) {
+      try {
+        const replayRow = await db.transaction(async (trx) => {
+          const current = await trx('estimates').where({ token: req.params.token }).forUpdate().first();
+          const sameOwner = !!acceptOwner && current?.id === acceptOwner.id
+            && (current.customer_id || null) === acceptOwner.customerId;
+          if (sameOwner && current.status === 'accepted') return current;
+          if (sameOwner && droppedCaptureToRetire) {
+            await retireOrDenyDroppedCapture(droppedCaptureToRetire.estimate, droppedCaptureToRetire.setupIntentId);
+          }
+          return null;
+        });
+        droppedCaptureToRetire = null;
+        if (replayRow) return await respondAlreadyAccepted(res, replayRow);
+      } catch (replayErr) {
+        if (replayErr?.code === 'RECURRING_CARD_RETIRE_FAILED' && replayErr.status === 503) {
+          return res.status(503).json({ error: replayErr.message, code: replayErr.code });
+        }
+        return next(replayErr);
+      }
+    }
     if (droppedCaptureToRetire && err && err.status === 409) {
       try {
         await retireOrDenyDroppedCapture(droppedCaptureToRetire.estimate, droppedCaptureToRetire.setupIntentId);
@@ -19666,8 +19717,8 @@ function consumerNoticePreGuard(req, res, next) {
 // POST /api/estimates/:token/consumer-notice — the estimate page's "Read and sign the notice" tap. Issues, or re-opens,
 // the FDACS-13692 consumer notice for the estimate's customer and returns its public signing URL. The estimate is never
 // changed. The generic 404 covers a dark gate, an unknown token, an estimate that is not open, a staff preview and an
-// estimate with no termite line; the distinct 409s (no account, no representative, already signed) come only after the
-// token has cleared every check.
+// estimate with no termite line; the distinct 409s (a plan quote staff changed, no account, no representative, already
+// signed) come only after the token has cleared every check.
 router.post('/:token/consumer-notice', consumerNoticeLimiter, async (req, res, next) => {
   stampCommercialAgreementHeaders(res);
   const notFound = () => res.status(404).json({ error: 'Estimate not found' });
@@ -19679,7 +19730,14 @@ router.post('/:token/consumer-notice', consumerNoticeLimiter, async (req, res, n
     if (!isEstimateCustomerViewable(estimate) || !isEstimateAcceptActive(estimate)) return notFound();
     const consumerNotice = require('../services/estimate-consumer-notice');
     if (!consumerNotice.estimateNeedsConsumerNotice(estimate)) return notFound();
-    const result = await consumerNotice.ensureEstimateConsumerNotice({ estimate, req, blockedFor: commercialAgreementBlockedFor });
+    // A customer's own plan quote that staff changed: the accept refuses it, so a tab loaded before the change gets the
+    // accept's 409 here and no form to sign (codex pre-push P1). The service judges it again on the estimate row it locks.
+    const { staffChangedQuoteRefusal } = require('../services/cancellation-resolution/restart');
+    const quoteRefusal = staffChangedQuoteRefusal(estimate);
+    if (quoteRefusal) return res.status(409).json({ error: quoteRefusal.message, code: quoteRefusal.code });
+    const result = await consumerNotice.ensureEstimateConsumerNotice({
+      estimate, req, blockedFor: commercialAgreementBlockedFor, quoteRefusalFor: staffChangedQuoteRefusal,
+    });
     if (!result.ok) {
       return res.status(result.status).json(result.status === 404 ? { error: 'Estimate not found' } : { error: result.error, code: result.code });
     }
@@ -22747,6 +22805,61 @@ function buildAcceptSuccessPayload({
     prepayCoveredByCredit,
     ...(setupFeeAfterFirstVisit ? { setupFeeAfterFirstVisit: true } : {}),
   };
+}
+
+// The answer to an accept of an estimate that is already accepted: a retry the handler reads before its transaction,
+// and a plan quote's accept that overlapped another request's accept of it on the row lock (the accept's catch).
+async function respondAlreadyAccepted(res, estimate) {
+  // An archived accepted estimate is no longer customer-viewable (the
+  // /:token/data gate rejects archived_at outright), so never rebuild
+  // invoice amounts or the bearer /pay link for it — return the same
+  // 409 the accept's active gate hands every other archived estimate.
+  // Pre-payload-rebuild this token got only the bare
+  // { success, alreadyAccepted } shape; blocking outright is strictly
+  // tighter and consistent with the rest of the route.
+  if (!isEstimateCustomerViewable(estimate)) {
+    const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+    return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
+  }
+  // Retry of an already-accepted estimate (e.g. the first response was
+  // lost in transit): rebuild the FULL success payload from persisted
+  // state so the customer still sees their real next step (pay link /
+  // booking link / site-confirmation copy) instead of generic confirmed
+  // copy that hides it. Read-only — no side effects re-run here (no
+  // conversion, no invoice mint, no sends). Best-effort: a rebuild
+  // failure degrades to the legacy bare payload rather than blocking
+  // the retry.
+  // Fast-redeem on the already-accepted RETRY too (Codex #3178 r38
+  // P2): the first accept can commit bookings + evidence + invoice and
+  // die before its own redemption block, and this retry still hands
+  // back the persisted pay link — so the credit must be in the balance
+  // before the customer can use it. Idempotent and best-effort; the
+  // payload rebuild stays read-only otherwise.
+  if (estimate.customer_id) {
+    try {
+      const acceptedVisits = await db('scheduled_services')
+        .where({ source_estimate_id: estimate.id })
+        .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
+        .whereRaw('COALESCE(is_callback, false) = false')
+        .limit(5)
+        .select('id');
+      for (const visit of acceptedVisits) {
+        await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+          customerId: estimate.customer_id,
+          scheduledServiceId: visit.id,
+          createdBy: 'system:inspection_credit_estimate_accept_replay',
+        });
+      }
+    } catch (replayErr) {
+      logger.warn(`[estimate-accept] replay credit redemption deferred to sweep for estimate ${estimate.id}: ${replayErr.message}`);
+    }
+  }
+  try {
+    return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
+  } catch (e) {
+    logger.error(`[estimate-accept] already-accepted payload rebuild failed for estimate ${estimate.id}: ${e.message}`);
+    return res.json({ success: true, alreadyAccepted: true });
+  }
 }
 
 // Rebuilds the full accept success payload for a RETRY of an already-accepted
@@ -29509,10 +29622,15 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
 // buildPricingBundleInner) instead of rebuilding the offer from live pricing.
 // Pure; also read by the admin Pipeline card, which shows an open offer's
 // per-application price only when the page would sell exactly that snapshot.
+// The plan-start mint publishes a quote only when this returns true.
 function sentSnapshotServesAsIs(snapshotBundle, estimate, estData) {
   return Boolean(snapshotBundle)
     && Array.isArray(snapshotBundle.frequencies)
-    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+    && (pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+      // A plan-start quote's opening entry can carry its totals where no
+      // entry is within a cent of both (quarterly pest: monthly x 12 is
+      // not the per-application total); see the helper.
+      || planStartSnapshotMatchesTotals(snapshotBundle, estimate, estData))
     // Snapshots that violate the lawn program policy (retired Quarterly
     // cadence, or an itemized lawn price below the program minimum) must NOT
     // short-circuit — they re-derive through the clamped ladder builders so
@@ -31286,6 +31404,10 @@ async function composeEstimateDataPayload(estimate, {
     // monthly tier row's visit count, and the resolved customer's lane via
     // estimateSetupFeePromiseLaneOk). The accept recomputes it inside its
     // transaction and refuses (409 SETUP_FEE_TERMS_REFRESH) on any difference.
+    // A customer's own plan quote that staff changed (the one-time option or invoice billing on): the accept and both
+    // card steps refuse it, so the page shows its refused-quote banner and offers no booking from the start (codex
+    // pre-push P1). The accept still refuses a change made after the page loaded.
+    const staffChangedQuoteForData = require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(estimate);
     const setupFeePromiseForData = require('../config/feature-gates').pafSetupFeeLive()
       && RecurringCards.payAfterFirstVisitSetupFeeRail(recurringCardPolicyForData)
       && monthlyTierVisitCountsResolvable(pricingBundle?.frequencies)
@@ -31426,9 +31548,11 @@ async function composeEstimateDataPayload(estimate, {
     // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): an open estimate with a termite line asks for the signed
     // FDACS-13692 before it can be accepted. Nothing is read or added with the gate off; never a staff preview, a draft
     // preview or the headless document render.
+    // Nor a refused plan quote (staffChangedQuoteForData): the accept refuses it first, so the page offers no form
+    // to sign for it (codex pre-push P1).
     const consumerNoticeCta = featureGates.estimateConsumerNoticeLive()
       && terminalState === null && !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass
-      && isEstimateAcceptActive(estimate)
+      && isEstimateAcceptActive(estimate) && !staffChangedQuoteForData
       ? await require('../services/estimate-consumer-notice').consumerNoticeCtaFor(estimate)
       : null;
     // Public proposal view — the authored buildings/line items the customer's
@@ -32062,6 +32186,9 @@ async function composeEstimateDataPayload(estimate, {
         // offering controls that can only fail. Present only on restart rows
         // so every other response stays byte-identical.
         ...(String(estimate.source || '') === 'plan_restart' ? { planRestart: true } : {}),
+        // Present only on a plan quote staff changed (staffChangedQuoteForData above): the accept's code and words.
+        ...(staffChangedQuoteForData
+          ? { quoteRefusal: { code: staffChangedQuoteForData.code, error: staffChangedQuoteForData.message } } : {}),
         // What the customer booked (set at accept). Null for legacy accepts +
         // any non-accepted estimate; the accepted recap falls back to the
         // derived mode/frequency when null.

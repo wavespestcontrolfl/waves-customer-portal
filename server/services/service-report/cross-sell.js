@@ -382,25 +382,38 @@ function seedCageEvidence(estData) {
   return null;
 }
 
+// Rows per pricing-JSON read of the seed: main's old cap, so a premises with a
+// dozen accepted quotes or fewer costs one JSON read after the address list.
+const SEED_PAGE_SIZE = 12;
+
 async function loadEstimateSeed(database, customerId, scopeStreet) {
   if (!scopeStreet) return null;
-  const rows = await database('estimates')
-    .where({ customer_id: customerId })
-    .orderBy('created_at', 'desc')
-    .limit(12)
-    .select('id', 'address', 'status', 'estimate_data');
+  // Accepted rows only, and the whole history when needed (codex pre-push,
+  // GATE_PORTAL_PLAN_START r15): a cap on the newest dozen ran BEFORE the
+  // acceptance and premises checks, so a run of newer quotes (open ones here,
+  // or accepted ones at another premises) hid the accepted estimate whose
+  // review markers must demote a seeded price, and the seed read as absent.
+  // One read lists the accepted history's addresses, newest first, the id
+  // breaking created_at ties (r27): offset pages each saw a fresh snapshot,
+  // so a row that left the set between reads pushed the next row past the
+  // next page. The pricing JSON is then read only for rows at this premises,
+  // a dozen at a time, stopping at the first eligible row (r23: one unbounded
+  // read parsed every accepted quote's pricing JSON on each report and
+  // portal-offer answer). The status checks keep the accepted-only rule
+  // independent of the query; a row that left the set before its JSON read
+  // reads as having no inputs.
   const linkage = require('../estimate-property-linkage');
-  const candidates = [];
-  for (const row of rows) {
-    if (row.status !== 'accepted') continue;
-    const estData = parseJsonColumn(row.estimate_data);
-    // engineInputs / inputs (admin + agent saves) or the public quote's
-    // singular engineInput — the normalized request it priced, which is
-    // where its footprint-trust stamp lives (Codex #6398 r20).
-    const inputs = estData?.engineInputs || estData?.inputs || estData?.engineInput;
-    if (!inputs || typeof inputs !== 'object') continue;
-    const street = linkage.normalizedEstimateStreet(row.address);
-    if (!street || !linkage.sameScopeKey(street, scopeStreet)) continue;
+  const listed = await database('estimates')
+    .where({ customer_id: customerId, status: 'accepted' })
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .select('id', 'address', 'status');
+  // The estimate's address keys to the home being priced. Both reads apply it:
+  // the pricing JSON is read with its own address (codex pre-push P1), so an
+  // address corrected between the reads never seeds the former home.
+  const atThisHome = (address) => {
+    const street = linkage.normalizedEstimateStreet(address);
+    if (!street || !linkage.sameScopeKey(street, scopeStreet)) return false;
     // A street-only key (no city, no zip) wildcard-matches EVERY
     // same-street property under sameScopeKey's lenient locality rule
     // (codex #3367 PR r3): a multi-property customer with the same street
@@ -408,19 +421,44 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // machinery marks these ambiguous legacy keys explicitly — no
     // disambiguation, no seed (an older fully-qualified estimate may still
     // seed instead).
-    if (linkage.scopeKeyLacksLocality(street)) continue;
+    if (linkage.scopeKeyLacksLocality(street)) return false;
     // Same shared-locality proof as the visit stamp (PR r6): disjoint
     // locality fields (city-only vs zip-only) must not match across cities.
-    if (!scopeKeysShareLocality(street, scopeStreet)) continue;
-    candidates.push({ row, inputs, estData });
+    return scopeKeysShareLocality(street, scopeStreet);
+  };
+  const candidates = listed.filter((row) => row.status === 'accepted' && atThisHome(row.address));
+  let pick = null;
+  for (let at = 0; !pick && at < candidates.length; at += SEED_PAGE_SIZE) {
+    const batch = candidates.slice(at, at + SEED_PAGE_SIZE);
+    const bodies = await database('estimates')
+      .whereIn('id', batch.map((row) => row.id))
+      .where({ customer_id: customerId, status: 'accepted' })
+      .select('id', 'address', 'estimate_data');
+    const bodyById = new Map(bodies.map((body) => [body.id, body]));
+    // The batch's bodies in the listed order, so the first surviving row is
+    // the most recently accepted same-property estimate; a row that left the
+    // accepted set before this read has none.
+    for (const body of batch.map((row) => bodyById.get(row.id)).filter(Boolean)) {
+      if (!atThisHome(body.address)) continue;
+      const estData = parseJsonColumn(body.estimate_data) || {};
+      // engineInputs / inputs (admin + agent saves) or the public quote's
+      // singular engineInput — the normalized request it priced, which is
+      // where its footprint-trust stamp lives (Codex #6398 r20).
+      const inputs = estData.engineInputs || estData.inputs || estData.engineInput || {};
+      // Inputs with no dimension cannot seed (codex pre-push r29 P1): none, a
+      // value that is not an object, an empty object, or one holding only
+      // service picks must not stop the scan before an older same-premises
+      // estimate with measurements, whose review markers then apply.
+      if (![inputs.homeSqFt, inputs.lotSqFt, inputs.lawnSqFt, inputs.turfSf, inputs.bedArea, inputs.stories].some(positiveOrNull)) continue;
+      pick = { inputs, estData };
+      break;
+    }
   }
-  // Rows arrive newest-first, so the first surviving candidate is the most
-  // recently accepted same-property estimate.
-  const pick = candidates[0];
   if (!pick) return null;
   const inputs = pick.inputs;
   const cleanString = (value) => (typeof value === 'string' && value.trim() ? value.trim() : null);
-  let cleanedFeatures = inputs.features && typeof inputs.features === 'object' && !Array.isArray(inputs.features)
+  // A JSON object (not an array, null or a scalar) is copied.
+  let cleanedFeatures = Object.prototype.toString.call(inputs.features) === '[object Object]'
     ? { ...inputs.features }
     : null;
   // attachedGarage is a TOP-LEVEL estimator input, not a features member
@@ -433,8 +471,8 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   // hasAttachedGarageForPest already looks (property.features.attachedGarage),
   // so it inherits the same fill-only and lookup-rejection safeguards as
   // every other modifier.
-  if (inputs.attachedGarage !== undefined && inputs.attachedGarage !== null) {
-    cleanedFeatures = { ...(cleanedFeatures || {}), attachedGarage: !!inputs.attachedGarage };
+  if (inputs.attachedGarage != null) {
+    cleanedFeatures = { ...cleanedFeatures, attachedGarage: !!inputs.attachedGarage };
   }
   // Water adjacency has the same top-level/feature split, with a twist
   // (codex #3367 PR r18): the V2 adapter persists the real enum
@@ -454,7 +492,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   // by construction. Only ever upgrades to true; a features member that
   // already says true is never contradicted.
   if (hasPresenceValue(inputs.nearWater)) {
-    cleanedFeatures = { ...(cleanedFeatures || {}), nearWater: true };
+    cleanedFeatures = { ...cleanedFeatures, nearWater: true };
   }
   let zeroTreeCountAmbiguous = false;
   if (cleanedFeatures
@@ -503,8 +541,8 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     roofType: cleanString(inputs.roofType),
     cageEvidence: seedCageEvidence(pick.estData),
   };
-  const hasAnyDimension = seed.homeSqFt || seed.lotSqFt || seed.lawnSqFt || seed.bedArea || seed.stories;
-  return hasAnyDimension ? seed : null;
+  // The scan took only a row with a dimension, so the seed carries one.
+  return seed;
 }
 
 // Default property lookup for the offer price: CACHE-ONLY. The live lookup

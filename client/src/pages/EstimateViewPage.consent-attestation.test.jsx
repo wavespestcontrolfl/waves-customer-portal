@@ -105,10 +105,11 @@ describe('EstimateViewPage accept consent attestation', () => {
   it('B18: the replace-payment-method call and the inline pre-mint effect take the park through the transition too (not silently ignored)', () => {
     // replace-payment-method: transitions, then reports "no new intent".
     expect(src).toMatch(/replaceSetupIntentId: setupIntentId \}\),\s*\}\);\s*const body = await r\.json\(\)\.catch\(\(\) => \(\{\}\)\);\s*if \(r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*await enterContactReviewRef\.current\(body\);\s*return false;\s*\}/);
-    // inline pre-mint: transitions BEFORE its resolve-time staleness check (a stale tab still leaves checkout).
-    expect(src).toMatch(/if \(r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*await enterContactReviewRef\.current\(body\);\s*return;\s*\}\s*\/\/ Staleness re-check at RESOLVE time/);
-    // reserve: leaves the booking UI before the generic 409 handling.
-    expect(src).toMatch(/if \(body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{[^}]*await enterContactReviewRef\.current\(body\);\s*return;\s*\}\s*const message = body\.error \|\| 'Unable to reserve this slot\.';/);
+    // inline pre-mint: transitions BEFORE its resolve-time staleness check (a stale tab still leaves checkout). A refused
+    // plan quote's banner is taken there too, before that check (codex pre-push P1).
+    expect(src).toMatch(/if \(r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*await enterContactReviewRef\.current\(body\);\s*return;\s*\}\s*if \(refuseStaleQuoteRef\.current\(r\.status, body\)\) return;\s*\/\/ Staleness re-check at RESOLVE time/);
+    // reserve: leaves the booking UI before the generic 409 handling (a refused plan quote's banner is taken there too).
+    expect(src).toMatch(/if \(body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{[^}]*await enterContactReviewRef\.current\(body\);\s*return;\s*\}\s*\/\/[^\n]*\n\s*if \(refuseStaleQuoteRef\.current\(r\.status, body\)\) return;\s*const message = body\.error \|\| 'Unable to reserve this slot\.';/);
   });
 
   it('B18: a failed hold release in the transition keeps the hold id in the existing pending-recovery ref (after one retry), never drops it', () => {

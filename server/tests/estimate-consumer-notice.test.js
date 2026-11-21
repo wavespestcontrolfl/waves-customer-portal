@@ -275,6 +275,15 @@ describe('ensureEstimateConsumerNotice', () => {
     expect(state.writes).toEqual([]);
   });
 
+  test('the accept\'s refusal, judged on the locked row, answers its 409 and issues nothing (codex pre-push P1)', async () => {
+    const { database, state } = makeDb({ technicians: [TECH], estimateRow: { ...termite, source: 'plan_start', bill_by_invoice: true } });
+    const quoteRefusalFor = jest.fn((row) => (row.bill_by_invoice ? { code: 'PLAN_START_STATE_CHANGED', message: 'This quote changed.' } : null));
+    await expect(ensureEstimateConsumerNotice({ estimate: termite, req, conn: database, quoteRefusalFor }))
+      .resolves.toEqual({ ok: false, status: 409, code: 'PLAN_START_STATE_CHANGED', error: 'This quote changed.' });
+    expect(quoteRefusalFor).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1', bill_by_invoice: true }));
+    expect(state.writes).toEqual([]);
+  });
+
   test('a revision that removed the termite line before the lock issues nothing', async () => {
     const { database, state } = makeDb({ technicians: [TECH], estimateRow: estimate([PEST]) });
     await expect(ensureEstimateConsumerNotice({ estimate: termite, req, conn: database })).resolves.toMatchObject({ ok: false, status: 404 });

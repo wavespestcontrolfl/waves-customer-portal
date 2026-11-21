@@ -22,6 +22,8 @@ jest.mock('../services/lead-first-touch-resume', () => ({
 const mockSubscribe = jest.fn();
 jest.mock('../services/newsletter-subscribers', () => ({
   subscribeOrResubscribe: (...a) => mockSubscribe(...a),
+  // The subscribe route checks the address before its bot check; these posts use valid addresses.
+  signupEmailError: () => null,
   lookupByToken: jest.fn(),
   confirmByToken: jest.fn(),
   EMAIL_RE: /.+@.+/,

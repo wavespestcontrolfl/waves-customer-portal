@@ -206,6 +206,7 @@
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
  *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; also requires GATE_CANCEL_FLOW_V2 for online nonrenewal; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11)
+ *   GATE_PORTAL_PLAN_START=true (owner 2026-11-19, "BUILD": a signed-in customer with no recurring plan who taps "Add ... to my plan" on the portal pricing card gets a server-priced estimate for that option and books a first visit through the normal estimate accept flow (pick a time, save a card, confirm), instead of a request that waits for the office. It has a gate because it shows a bookable price and leads to card capture and booking. Off = the card files the same request as today and the pricing answer carries no planStart hint. Kill = unset)
  *   GATE_SIGNUP_SINGLE_EMAIL=true (ONE email at recurring signup: the accepted-onboarding email also carries the property and the plan (no payment section: the "Auto Pay is set up" email stays its own email, owner 2026-09-30), and the separate membership.started / welcome emails are skipped ONLY when that combined email was accepted for sending — each still sends if it was not; same-day later acceptances get a short per-property email; the welcome TEXT is unchanged; strict === 'true', read at call time; dark in dev AND prod)
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=shadow (runs created + finalized as would_send, nothing dispatched) | true (live sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
@@ -325,6 +326,7 @@
  *   GATE_PAY_PROMO_CODE=true (owner 2026-11-18: a "Have a promo code?" field on the invoice pay page + POST /api/pay/:token/promo-code; a valid fixed-dollar code from admin Discounts is saved on the invoice, and the payment setup that follows posts its one-time account credit, counts one use, applies that amount to the invoice and re-prices the payment; not offered on payer-billed or statement-billed invoices or ones that must save a payment method first; dev-open, prod dark; off = no field, the route answers 404 and no entered code is redeemed)
  *   GATE_PAY_PLAN_CHOICE=true (owner 2026-11-19: the first invoice of an accepted pay-per-application plan shows "pay this visit" or "prepay the year" on its pay page + POST /api/pay/:token/plan-choice; picking the year mints an unpaid annual prepay invoice and a pending term at the Schedule switch's own price, sends nothing and charges nothing; the first invoice stays payable and is closed only when the prepay is paid, with the billed visit counted as visit 1; strict opt-in in every environment; off = the page payload carries no planChoice and the POST 404s, while a prepay already minted still closes its first invoice when paid)
  *   GATE_ESTIMATE_REFERRAL_CODE=true (owner 2026-11-18: the estimate page's code field also takes a referrer's code, saved on the estimate as referral evidence; once the estimate is accepted and the customer is on a plan, the code's owner is confirmed as the referrer through the Queue's deferred-only confirm, so nothing is sent and both rewards wait for the first recurring service as for any referral; a card that confirm refuses waits in Referrals → Queue; dev-open, prod dark; off = the field takes no referral code and no typed code is confirmed)
+ *   GATE_REFERRAL_STEP2=true (owner 2026-11-20, referral Step 2 PR 1a, member side: the member's account credit for a friend's first recurring service is a flat $25, and at most 10 member credits a calendar year (America/New_York). It posts at the same moment as today's credit, the friend's first performed recurring plan visit; the friend's flat credit is unchanged. The numbers are the step2_* columns of referral_program_settings. Under the gate every referral conversion is deferred to the first paid service (the immediate promoter-balance payout is never used). Moves money into customer accounts, so the owner flips it (planned about Feb 1). Read via isEnabled('referralStep2') at boot, strict 'true', dark in every environment; off = the flat referrer_reward_cents credit at the friend's first recurring service, exactly as before. Kill: delete the variable.)
  *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
  *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button is always served.)
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default; off = the rows serve no such button and a tap answers 409.)
@@ -474,6 +476,7 @@
  *   GATE_IB_ANSWER_SEND_TO_CLAUDE=true (owner 2026-11-05: under a bar answer that searched its tools and changed nothing, the owner login sees "Claude has this as gap #N." or a free "Send to Claude" button that sends the owner's own typed question (a pasted one gets no button), never the answer. Read at call time via ibAnswerSendToClaudeLive(); off = the /query reply and the claude-ideas status stay as before)
  *   GATE_CALL_RECORDING_CARD_PAUSE=true (owner 2026-11-16 "ok build all", live-call suite part 9: while card details are spoken on a live-transcribed call, the call recording pauses for 90 seconds. When a stored utterance says "card number", "credit card", "debit card", "card ending", "expiration date", "security code", "CVV", "CVC" or "code on the back", or the live scrub masked a card number, the Dial recording on the caller's call is paused by REST (silence, so it stays aligned with the live text) and resumed at the end; a later trigger only moves the end out. State is call_log.metadata.live_transcription.card_pause. Needs GATE_LIVE_CALL_TRANSCRIPTION on. Read via isEnabled('callRecordingCardPause') at boot, strict 'true', dark by default; off = no recording change and nothing new required. RISK: if a resume fails, the rest of that call's recording is silent and the post-call transcript loses it; the gate is the instant off switch. Sends nothing to a customer; no paid call beyond the Twilio REST update. Kill: delete the variable.)
  *   GATE_REVIEW_YEARLY_ASK=true (owner 2026-11-20, Tech Rewards plan D6-R1: a yearly review ask for long-time recurring customers. A daily job at 10:36 AM ET picks recurring customers with 12 or more months since their first completed recurring visit, no Google review (linked or probable), no review ask in 30 days, no review-link tap in 180 days, texts and review asks on, and no yearly ask in 365 days, and enrolls ONE ask in the 14 days after the service anniversary through the normal review cadence, so every existing review guard still applies. Off: the job still runs but only counts and logs the volume, with no enrollment, no text and no writes. Needs GATE_REVIEW_SEQUENCES on to enroll. Texts a customer, so the flip is the owner's. Strict `=== 'true'`, read at call time via reviewYearlyAskLive(). Kill: unset.)
+ *   GATE_TECH_REWARDS_SCOREBOARD=true (owner 2026-11-20, Tech Rewards plan D5-4: a technician sees their own rewards scoreboard on the Staff page, tab Scoreboard under Time: the live season score and its five parts, review rate, commission year to date, season bonus estimate and next stay bonus date, all labeled estimates where they are. Own numbers only; another technician's id answers 403. Named risk: it shows pay estimates, and a wrong number creates a pay expectation, so the owner checks the numbers first in Staff > Team > Scoreboard preview, which works with this off. Read at call time, strict 'true', dark by default; off = GET /api/tech/rewards-scoreboard answers 404 and the tab is hidden. Pays, sends and files nothing; rollback = unset)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -2548,6 +2551,9 @@ const gates = {
   // env at call time via gateEnvValue('GATE_CANCEL_FLOW_V2'); kill switch =
   // unset. Owner flips with the C1 portal flow.
   cancelFlowV2: gateEnvValue('GATE_CANCEL_FLOW_V2'),
+  // GATE_PORTAL_PLAN_START: read at CALL time via portalPlanStartLive(); this entry is for logGateStatus, so the boot log
+  // shows the flip.
+  portalPlanStart: process.env.GATE_PORTAL_PLAN_START === 'true',
   // Boot diagnostics show the effective conjunction; selection reads it at call time.
   termiteAnnualPlan: termiteAnnualPlanSelectionEnabled(),
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
@@ -3182,6 +3188,10 @@ const gates = {
   // (services/estimate-referral-code.js). Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_REFERRAL_CODE=true.
   estimateReferralCode: isProd ? process.env.GATE_ESTIMATE_REFERRAL_CODE === 'true' : true,
+  // Referral Step 2 member rules (owner 2026-11-20): $25 member credit at the friend's first
+  // performed plan visit, 10 a year (services/referral-step2.js, referral-engine.js). Dark in every environment.
+  // Enable with GATE_REFERRAL_STEP2=true.
+  referralStep2: process.env.GATE_REFERRAL_STEP2 === 'true',
   // Owner-side "reading it now" bell: when the engagement engine's
   // multi_view_high_intent rule matches on a page open (>= minSessions
   // sittings inside windowHours — the DB-tunable rule params), raise ONE
@@ -6837,6 +6847,13 @@ function termiteAnnualPlanSelectionEnabled() {
   return gateEnvValue('GATE_TERMITE_ANNUAL_PLAN') && gateEnvValue('GATE_CANCEL_FLOW_V2');
 }
 
+// GATE_PORTAL_PLAN_START read at CALL time, strict `=== 'true'`, dark (owner 2026-11-19). It has a gate because it shows
+// a bookable price and leads to card capture and booking. Off = POST /api/requests/start-plan answers 404 and the
+// pricing answer carries no planStart hint. Kill = unset.
+function portalPlanStartLive() {
+  return process.env.GATE_PORTAL_PLAN_START === 'true';
+}
+
 // Timestamp-valued gate parsed at CALL time (rollout EPOCHS such as
 // GATE_PEST_STRANDED_RECOVERY). STRICT: a full ISO-8601 timestamp WITH an
 // explicit offset (`2026-08-28T14:00:00Z` / `2026-08-28T10:00:00-04:00`)
@@ -8347,6 +8364,8 @@ module.exports.customerRouteCheckMode = customerRouteCheckMode;
 module.exports.callConferencePathMode = callConferencePathMode;
 // GATE_CALL_WARM_TRANSFER reader, on its own line so gate PRs never conflict.
 module.exports.callWarmTransferLive = callWarmTransferLive;
+// GATE_PORTAL_PLAN_START reader, on its own line so gate PRs never conflict.
+module.exports.portalPlanStartLive = portalPlanStartLive;
 // GATE_MOVING_ESTIMATE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02, moving PR B1). On, the Moving card's new-home estimate, its server-stamped setup-fee waiver and the accept-time move guards
 // work (services/customer-moves.js). Off = no estimate action, no waiver, no guard. Kill = unset.
 function movingEstimateLive() {
@@ -9517,3 +9536,12 @@ function reviewAskResultsVisitLive() {
 }
 // GATE_REVIEW_ASK_RESULTS_VISIT reader, on its own line so gate PRs never conflict.
 module.exports.reviewAskResultsVisitLive = reviewAskResultsVisitLive;
+
+// GATE_TECH_REWARDS_SCOREBOARD read at CALL time, strict `=== 'true'`, dark (owner 2026-11-20, Tech Rewards Plan D5-4). Named risk: a technician
+// sees pay estimates (season bonus, stay bonus). Off = GET /api/tech/rewards-scoreboard answers 404 and the Staff tab is hidden; the admin
+// preview (/api/admin/tech-rewards-scoreboard) is not gated.
+function techRewardsScoreboardLive() {
+  return process.env.GATE_TECH_REWARDS_SCOREBOARD === 'true';
+}
+// GATE_TECH_REWARDS_SCOREBOARD reader, on its own line so gate PRs never conflict.
+module.exports.techRewardsScoreboardLive = techRewardsScoreboardLive;

@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fieldViewAssetsPlugin } from './src/lib/fieldViewAssets.js';
+import { stylesheetRetryPlugin } from './src/lib/stylesheetRetry.js';
 import { createRequire } from 'node:module';
 const devContext = createRequire(import.meta.url)('../scripts/dev/context.js');
 const coverageFloorFiles = createRequire(import.meta.url)('./coverage-floor-files.json');
@@ -27,7 +28,7 @@ const capShimAlias = capShim ? {
 } : {};
 
 export default defineConfig({
-  plugins: [react(), {
+  plugins: [react(), stylesheetRetryPlugin(), {
     // Every production build writes the list of hashed files it emitted. The
     // service worker caches this beside that build's shell, so it can tell
     // which chunks a retained generation actually owns. An /assets/ request

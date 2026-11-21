@@ -12,6 +12,7 @@
 
 const { toE164 } = require('../utils/phone');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { CALL_OUTCOMES } = require('../../shared/estimate-call-today.cjs');
 
 // Only a call the customer ANSWERED counts. call_log.status and bridged_at describe the STAFF
 // leg (bridged_at = staff pressed 1, before the customer leg is dialed; status can read
@@ -63,6 +64,42 @@ async function lastCalledAtByEstimateId(database, estimates, nowMs = Date.now())
     .max({ last_called_at: 'created_at' });
   const lastByPhone = new Map(rows.map((row) => [row.to_phone, row.last_called_at]));
   for (const [id, phone] of phoneByEstimate) out.set(id, lastByPhone.get(phone) || null);
+  return out;
+}
+
+// A call outcome (owner 2026-11-20, D1 A) is an activity_log row on the estimate: estimate_id, admin_user_id (who
+// tapped), created_at (when) and metadata.outcome (a CALL_OUTCOMES key). No new table: the action column is indexed.
+const CALL_OUTCOME_ACTION = 'estimate_call_outcome';
+const CALL_OUTCOME_KEYS = new Set(CALL_OUTCOMES.map((o) => o.key));
+
+// The first word of a staff name, as the row shows it: "No answer · 9:42 AM · Virginia".
+function staffFirstName(name) {
+  return String(name || '').trim().split(/\s+/)[0] || null;
+}
+
+/**
+ * The newest call outcome on each estimate, one batched query for the list route and the 9 AM push (the Call today
+ * rule takes a row off the list once an outcome is newer than the customer's last touch).
+ *
+ * @param {Function} database  knex-like handle
+ * @param {Array<string>} ids  estimate ids
+ * @returns {Promise<Map<string, {outcome: string, at: Date|string, by: string|null}>>} estimate id -> its newest
+ *   outcome; an estimate with none is absent.
+ */
+async function lastCallOutcomeByEstimateId(database, ids) {
+  const out = new Map();
+  if (!Array.isArray(ids) || !ids.length) return out;
+  const rows = await database('activity_log as a')
+    .leftJoin('technicians as t', 't.id', 'a.admin_user_id')
+    .where('a.action', CALL_OUTCOME_ACTION)
+    .whereIn('a.estimate_id', ids)
+    .distinctOn('a.estimate_id')
+    .orderBy([{ column: 'a.estimate_id' }, { column: 'a.created_at', order: 'desc' }, { column: 'a.id', order: 'desc' }])
+    .select('a.estimate_id', 'a.created_at', 'a.metadata', 't.name as by_name');
+  for (const row of rows) {
+    const outcome = row.metadata?.outcome;
+    if (CALL_OUTCOME_KEYS.has(outcome)) out.set(row.estimate_id, { outcome, at: row.created_at, by: staffFirstName(row.by_name) });
+  }
   return out;
 }
 
@@ -127,10 +164,11 @@ function estimateListQuery(database, { status, sentOnly = false, sources = null,
  * stored, as any estimate does.
  *
  * @param {object} row  estimates row (snake_case columns)
- * @param {{lastClickedAt?: *, lastCalledAt?: *, undeliveredSelfServe?: boolean}} [extra]  the two values read in
- *   batches (short_codes, call_log), and the self-serve rule's answer for the row (services/self-serve-estimates.js)
+ * @param {{lastClickedAt?: *, lastCalledAt?: *, lastCallOutcome?: object, undeliveredSelfServe?: boolean}} [extra]  the
+ *   three values read in batches (short_codes, call_log, activity_log), and the self-serve rule's answer for the row
+ *   (services/self-serve-estimates.js)
  */
-function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, undeliveredSelfServe = false } = {}) {
+function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, lastCallOutcome = null, callOutcomeUnknown = false, undeliveredSelfServe = false } = {}) {
   const hasBeenSent = !!row.sent_at;
   return {
     status: row.status,
@@ -142,6 +180,10 @@ function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, undel
     lastClickedAt: lastClickedAt || null,
     lastFollowUpAt: row.last_follow_up_at,
     lastCalledAt: lastCalledAt || null,
+    // The newest outcome tapped on the row, { outcome, at, by }, or null.
+    lastCallOutcome: lastCallOutcome || null,
+    // The outcome read failed, so null above proves nothing: the shared rule withholds the row from Call today.
+    callOutcomeUnknown: Boolean(callOutcomeUnknown),
     // A self-serve quote nobody delivered (plan restart, plan start, report card) never makes the
     // list: the zero-follow-up contract (services/self-serve-estimates.js). The caller passes the
     // rule's answer.
@@ -162,4 +204,8 @@ function staffReasonOnExpiredAllowed(estimate, body = {}) {
   return (estimate.disposition || '') !== 'expired_unsent';
 }
 
-module.exports = { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed, CUSTOMER_ANSWERED_SQL };
+module.exports = {
+  ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId,
+  CALL_OUTCOME_ACTION, staffFirstName, lastCallOutcomeByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed,
+  CUSTOMER_ANSWERED_SQL,
+};

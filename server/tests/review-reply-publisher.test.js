@@ -946,6 +946,20 @@ describe('publishReviewReply — post-publish persistence failure', () => {
     // Every caller gets the row parked out of the auto lane (best effort).
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_claimed_until: null });
   });
+  test('a persistence failure keeps the reply text and the reviewer name out of the log, the row and the answer', async () => {
+    const logger = require('../services/logger');
+    mockLock.mockImplementationOnce(async (id, fn) => { await fn(); return { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() }; });
+    // The mock's error quotes the bound reply text and the reviewer's name, as a Knex error does.
+    mockGbp.replyToReview.mockImplementationOnce(async () => { state.failNextUpdate = true; return {}; });
+    const err = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } }).catch((e) => e);
+    expect(err).toMatchObject({ code: CODES.PERSIST_FAILED });
+    expect(err.message).toMatch(/not recorded locally \(ECONNRESET\)/);
+    expect(err.message).not.toMatch(/Dana W|"google_reviews"/);
+    expect(state.rows[0]).toMatchObject({ auto_reply_reason: 'persist_failed', auto_reply_error: 'ECONNRESET' });
+    const logged = [...logger.warn.mock.calls, ...logger.error.mock.calls].map((c) => c.join(' ')).join('\n');
+    expect(logged).toMatch(/local persistence failed: ECONNRESET/);
+    expect(logged).not.toMatch(/Dana W|"google_reviews"/);
+  });
   test('a zero-row local write after Google accepted (RACE) is a persistence failure too: claim abandoned, row parked', async () => {
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
     mockLock.mockImplementationOnce(async (id, fn) => { await fn(); return out; });
@@ -955,6 +969,8 @@ describe('publishReviewReply — post-publish persistence failure', () => {
     expect(out.abandonClaim).toHaveBeenCalled();
     expect(out.releaseClaim).not.toHaveBeenCalled();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed' });
+    // Our own error's fixed text stays readable on the row.
+    expect(state.rows[0].auto_reply_error).toMatch(/removed from Google while replying/);
   });
 });
 
@@ -1021,10 +1037,15 @@ describe('retractReviewReply', () => {
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
     mockLock.mockImplementationOnce(async (id, fn) => { await fn(); return out; });
     mockGbp.deleteReply.mockImplementationOnce(async () => { state.failNextUpdate = true; return true; });
-    await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.PERSIST_FAILED });
+    const err = await retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } }).catch((e) => e);
+    expect(err).toMatchObject({ code: CODES.PERSIST_FAILED });
     expect(out.abandonClaim).toHaveBeenCalled();
     expect(out.releaseClaim).not.toHaveBeenCalled();
     expect(state.activity).toHaveLength(0);
+    // Only the database error code reaches the log and the answer.
+    const logged = require('../services/logger').error.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toMatch(/local clear failed: ECONNRESET/);
+    expect(`${logged}\n${err.message}`).not.toMatch(/Dana W|"google_reviews"/);
   });
   test('a DELETE that never completes → GOOGLE_UNCERTAIN, claim abandoned (not released), reply left recorded', async () => {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';

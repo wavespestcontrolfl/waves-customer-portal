@@ -594,10 +594,9 @@ describe('get_service_report', () => {
     const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toContain('Ant trail at kitchen slab');
     expect(out).not.toContain('raw note');
-    // The mock ignores LIMIT, so pin the overfetch bound itself: the query must
-    // fetch beyond the spoken cap or the filter has nothing left to keep.
-    const limitArgs = builders.service_findings.limit.mock.calls.map(([n]) => n);
-    expect(Math.max(...limitArgs)).toBeGreaterThan(6);
+    // The mock ignores LIMIT, so pin the read itself: it takes every finding of
+    // the visit, as any bound before the screens could fill with refused rows.
+    expect(builders.service_findings.limit).not.toHaveBeenCalled();
   });
 
   // ⭐ THE CAP RUNS AFTER THE COMPLIANCE SCREEN TOO. Six leading findings whose
@@ -723,6 +722,76 @@ describe('get_service_report', () => {
     await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(generateEstimate).not.toHaveBeenCalled();
+  });
+});
+
+// ⭐ THE TECHNICIAN'S OWN NOTE ON THE PHONE: THE STORED LINE DECIDES, AS ON THE
+// WEB REPORT. The note stands only on a pest report (visitReportCustomerCopy).
+// The web report reads service_records.*, so a visit's stored service_line wins
+// over the line its service type names. The voice queries name their columns,
+// so this double returns only the columns a query names: a query that drops
+// service_line reads no line, and the note is not spoken.
+describe("the technician's own note on the phone: the stored line decides, as on the web report", () => {
+  const noteRecord = (line) => ({
+    id: 'sr-n', service_date: '2026-07-31', status: 'completed', service_data: null,
+    technician_notes: 'fire ants by the back door, gate code 4471',
+    structured_notes: JSON.stringify({
+      reportNote: { v: 1, text: 'I found a fire ant hill near the back of the house and spot-treated it.', source: 'cleaned' },
+    }),
+    ...line,
+  });
+  function primeNamedColumns(record) {
+    primeDb({ service_records: [record] });
+    const b = builders.service_records;
+    const named = (cols) => (cols && cols.length
+      ? Object.fromEntries(cols.flat().filter((c) => c in record).map((c) => [c, record[c]]))
+      : record);
+    let selected = null;
+    b.select = jest.fn((...cols) => { selected = cols; return b; });
+    b.first = jest.fn((...cols) => Promise.resolve(named(cols)));
+    b.then = (resolve, reject) => Promise.resolve([named(selected)]).then(resolve, reject);
+  }
+  const ctx = { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true };
+
+  test('a pest visit whose service type names no line: both tools speak the note', async () => {
+    for (const tool of ['get_service_report', 'get_service_history']) {
+      primeNamedColumns(noteRecord({ service_type: 'General Service', service_line: 'pest' }));
+      const out = await executeTool(tool, {}, ctx);
+      expect(out).toContain('I found a fire ant hill');
+      expect(out).not.toContain('4471');
+      assertNoWrites();
+    }
+  });
+
+  test("a note record's findings are spoken only as the report prints them", async () => {
+    const { STRUCTURED_OBSERVATION_FINDING_DETAIL: STOCK } = require('../../shared/service-completion-observations');
+    const record = noteRecord({ service_type: 'General Service', service_line: 'pest' });
+    record.structured_notes = JSON.stringify({ ...JSON.parse(record.structured_notes), formObservations: ['Yellowjacket'] });
+    primeNamedColumns(record);
+    builders.service_findings = makeBuilder([
+      // A title the screen refuses, with a recommendation the phone would speak on its own.
+      { category: 'observation', severity: 'low', title: 'Safe for pets once dry', detail: null, recommendation: 'Keep pets off the lawn until it dries.' },
+      // The stock detail on a label this record's form does not list.
+      { category: 'observation', severity: 'high', title: 'Fire ant mounds', detail: STOCK, recommendation: null },
+      { category: 'observation', severity: 'high', title: 'Yellowjacket', detail: STOCK, recommendation: null },
+      { category: 'activity', severity: 'low', title: 'Ant trail at the slab', detail: 'A trail along the north wall.', recommendation: null },
+    ]);
+    const out = await executeTool('get_service_report', {}, ctx);
+    expect(out).toContain('Yellowjacket');
+    expect(out).toContain('Ant trail at the slab');
+    expect(out).not.toMatch(/Safe for pets|Keep pets off|Fire ant mounds/);
+    assertNoWrites();
+  });
+
+  test('a visit stored as lawn whose service type reads as pest: neither tool speaks the note', async () => {
+    for (const tool of ['get_service_report', 'get_service_history']) {
+      primeNamedColumns(noteRecord({ service_type: 'Pest Control', service_line: 'lawn' }));
+      const out = await executeTool(tool, {}, ctx);
+      expect(out).toContain('July 31');
+      expect(out).not.toContain('fire ant');
+      expect(out).not.toContain('4471');
+      assertNoWrites();
+    }
   });
 });
 

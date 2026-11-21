@@ -171,12 +171,14 @@ function whatWeDidParts(data, slots) {
   // The Visit Summary paragraph stays (it carries the season, the photo read and the next-visit topics);
   // only an applied sentence the lead's own sentence already says in full is left out of it.
   // The screened four-section technician report (summary.sections) prints as the standard page prints it,
-  // whole: the lead's applied sentence is not a substitute for its sections.
+  // whole: the lead's applied sentence is not a substitute for its sections. The technician's own note
+  // (summaryIsOwnNote) prints whole too: it is their signed words.
   const summary = slots.visitSummary;
   const sectioned = Boolean(summary) && Boolean(reportSectionsForText(summary.sections, summary.text));
+  const whole = sectioned || data.summaryIsOwnNote === true;
   // The "What's next" date line prints only when no earlier printer (the plan area, the status card) printed the same visit.
   const summaryNextLabel = summary && !nextVisitPlacement(data, { summaryPrintsNext: summaryPrintsNextVisit(slots) }).summaryDrops ? summary.nextVisitLabel : null;
-  const summaryText = summary && !sectioned ? withoutRepeatedApplied(summary.text, lead.applied) : (summary && summary.text) || null;
+  const summaryText = summary && !whole ? withoutRepeatedApplied(summary.text, lead.applied) : (summary && summary.text) || null;
   const sinceLastBox = sinceLast.length ? (
     <LeadBox label={sinceLastLabel(lead.sinceLast)} testId="lawn-since-last">
       {sinceLast.map((line, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{line}</div>)}

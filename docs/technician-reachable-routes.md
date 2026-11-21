@@ -324,6 +324,8 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/tech/pay-growth/services/:id/score` | tech-pay-growth |
 | GET | `/api/tech/payroll/checks` | tech-payroll |
 | GET | `/api/tech/payroll/checks/:id/stub` | tech-payroll |
+| GET | `/api/tech/rewards-scoreboard` | tech-rewards-scoreboard |
+| GET | `/api/tech/rewards-scoreboard/availability` | tech-rewards-scoreboard |
 | POST | `/api/tech/services/:id/customer-pick` | tech-track |
 | POST | `/api/tech/services/:id/dictation` | tech-track |
 | GET | `/api/tech/services/:id/dictation/availability` | tech-track |
@@ -456,6 +458,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | PUT | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/:id/acceptance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/archive` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/estimates/:id/call-outcome` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/:id/edit-source` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/extend` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/follow-up` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |

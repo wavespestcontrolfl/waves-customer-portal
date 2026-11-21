@@ -182,17 +182,30 @@ const jobsNote = (b) => {
 };
 const blockText = (b) => `${dayLabel(b.day)}${b.tech ? `, ${b.tech}` : ''}: ${clock(b.start)} to ${clock(b.start + b.min)} (${span(b.min)}${jobsNote(b)}${gridNote(b)})`;
 
-/** How many open estimates fit an opening this morning (0 without a fill list). */
-const fitCount = (fill) => (fill && !fill.error ? fill.fitted : 0);
+const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The fill list's headline (fill-list.js), or null: the new work that fits an opening (open estimates and leads), else
+ * the plan visits that could move up into one.
+ */
+function fitsText(fill) {
+  if (!fill || fill.error) return null;
+  const fresh = [[fill.fitted, 'open estimate', 'open estimates'], [fill.leads.fitted, 'lead', 'leads']].filter(([n]) => n);
+  if (fresh.length) {
+    const one = fresh.length === 1 && fresh[0][0] === 1;
+    return `${fresh.map(([n, a, b]) => count(n, a, b)).join(' and ')} ${one ? 'fits' : 'fit'} an opening.`;
+  }
+  return fill.visits.fitted ? `${count(fill.visits.fitted, 'plan visit', 'plan visits')} could move up into an opening.` : null;
+}
 
 function alertSpec(sum, fill = null) {
   const hours = Math.round(sum.totalMin / 60);
   const b = sum.biggest;
   const where = `Biggest block: ${dayLabel(b.day)}, ${clock(b.start)} to ${clock(b.start + b.min)}`;
-  const fits = fitCount(fill);
+  const fits = fitsText(fill);
   // The fill list's count is the actionable line; the measured re-timing gain stays in the detail.
   let why = `${where}.`;
-  if (fits) why = `${where}. ${fits} open estimate${fits === 1 ? ' fits' : 's fit'} an opening.`;
+  if (fits) why = `${where}. ${fits}`;
   else if (sum.freedMin >= SELLABLE_MIN) why = `${where}; re-timing booked jobs could free ${span(sum.freedMin)} more.`;
   return {
     area: 'Schedule',
@@ -206,15 +219,23 @@ function alertSpec(sum, fill = null) {
   };
 }
 
-/** A listed block's fill lines (fill-list.js): an open estimate's visit, its length, the drive it adds, its finish. */
 // The visit as booked, and the route plan's minutes on site when they differ (owner 2026-11-19: the visit row is 1 hour,
 // the plan keeps its own minutes).
 const visitText = (f) => (f.onSiteMin && f.onSiteMin !== f.length ? `${span(f.length)} visit, ${span(f.onSiteMin)} on site` : span(f.length));
+const LINE_HEADS = { estimate: 'Open estimate', lead: 'Lead', visit: 'Plan visit moved up' };
+// Where a plan visit is booked now: the day and hour the move would leave open.
+const leavesText = (f) => (f.from ? `; leaves ${dayLabel(f.from.day)}${f.from.start == null ? '' : ` ${clock(f.from.start)}`} open` : '');
 
+/**
+ * A listed block's fill lines (fill-list.js): an open estimate's or a lead's visit, or a plan visit moved up; its
+ * length, the drive it adds and its finish.
+ */
 function fillLines(fill, i) {
   if (!fill || fill.error) return [];
-  return fill.byBlock[i].map((f) => `  - Open estimate, ${f.name || 'no name on file'} (${f.label}, ${visitText(f)}): +${f.addedDriveMin} min drive, finishes ${clock(f.endMin)}`);
+  return fill.byBlock[i].map((f) => `  - ${LINE_HEADS[f.kind]}, ${f.name || 'no name on file'} (${f.label}, ${visitText(f)}): +${f.addedDriveMin} min drive, finishes ${clock(f.endMin)}${leavesText(f)}`);
 }
+
+const leftOut = (items) => items.filter(Boolean).join(', ');
 
 /**
  * The fill list's own line: what it checked and found, or why it was not built. `blocks` are the listed blocks: a fit
@@ -222,13 +243,24 @@ function fillLines(fill, i) {
  */
 function fillSummary(fill, blocks = []) {
   if (fill.error) return `Fill list: not built this morning (${fill.error}).`;
-  const left = [fill.noLocation ? `${fill.noLocation} without a stored location` : null, fill.unread ? `${fill.unread} unread` : null].filter(Boolean);
+  const { MAX_PER_BLOCK, MOVE_UP_DAYS } = require('./fill-list');
+  const { leads, visits } = fill;
+  const without = (part) => [part.noLocation ? `${part.noLocation} without a stored location` : null, part.unread ? `${part.unread} unread` : null];
+  const estimatesLeft = leftOut(without(fill));
+  const leadsLeft = leftOut(without(leads));
+  const visitsLeft = leftOut([visits.remindersOff ? `${visits.remindersOff} with the 24-hour reminder off` : null,
+    visits.sharedDay ? `${visits.sharedDay} sharing the day with another visit of the customer` : null]);
   const shortFit = fill.byBlock.some((lines, i) => lines.length > 0 && blocks[i] && blocks[i].min < SLOT_MIN);
-  return `Fill list: ${fill.checked} open estimate${fill.checked === 1 ? '' : 's'} checked, ${fill.fitted} fit an opening${left.length ? ` (${left.join(', ')})` : ''}.`
-    + ` Each block lists up to ${require('./fill-list').MAX_PER_BLOCK}, least added drive first.`
+  return `Fill list: ${count(fill.checked, 'open estimate', 'open estimates')} checked, ${fill.fitted} fit an opening${estimatesLeft ? ` (${estimatesLeft})` : ''}.`
+    + ` ${count(leads.checked, 'lead', 'leads')} that asked for an assessment or an inspection checked, ${leads.fitted} fit${leadsLeft ? ` (${leadsLeft})` : ''}.`
+    + ` ${count(visits.checked, 'plan visit', 'plan visits')} checked, ${visits.fitted} could move up${visits.unread ? ` (${visits.unread} unread)` : ''}`
+    + `${visitsLeft ? `; left out: ${visitsLeft}` : ''}.`
+    + ` Each block lists up to ${MAX_PER_BLOCK}, least added drive first: the best open estimate, lead and plan visit that fit it,`
+    + ' then the next best fits.'
     + ' Each fit is the staff finder\'s check of a new visit on the day as booked.'
     + (shortFit ? ` A block short of ${SLOT_MIN} minutes can still hold a job when the stops around it have room for the drive.` : '')
-    + ' Nothing is held or booked; staff decide whether to call.';
+    + ` A plan visit moves up at most ${MOVE_UP_DAYS} days, and its customer was told a day: call before moving it.`
+    + ' Nothing is held, booked or moved; staff decide whether to call.';
 }
 
 function detailText(sum, fill = null) {
@@ -288,13 +320,20 @@ async function fillFor(conn, blocks, now, rulesRead) {
   }
 }
 
+// Each line's record id: the estimate, the lead, or the plan visit (scheduled_services) that would move.
+const ID_KEYS = { estimate: 'estimateId', lead: 'leadId', visit: 'serviceId' };
+
 /** The fill lines as the row keeps them, for the opening-to-booking count (page D2, step E). */
 function fillMetadata(fill, blocks) {
   if (fill.error) return { error: fill.error };
-  // window: the offered hour staff would book ('HH:MM'); start: when the visit would begin (the van may come later).
-  const lines = fill.byBlock.flatMap((list, i) => list.map((f) => ({ estimateId: f.estimateId, day: blocks[i].day, techId: blocks[i].techId,
-    window: f.windowStart, start: f.startMin, addedDriveMin: f.addedDriveMin })));
-  return { checked: fill.checked, fitted: fill.fitted, lines };
+  // window: the offered hour staff would book ('HH:MM'); start: when the visit would begin (the van may come later);
+  // fromDay and fromStart: where a plan visit is booked now.
+  const lines = fill.byBlock.flatMap((list, i) => list.map((f) => ({ kind: f.kind, [ID_KEYS[f.kind]]: f.id, day: blocks[i].day,
+    techId: blocks[i].techId, window: f.windowStart, start: f.startMin, addedDriveMin: f.addedDriveMin,
+    ...(f.from ? { fromDay: f.from.day, fromStart: f.from.start } : {}) })));
+  const { leads, visits } = fill;
+  return { checked: fill.checked, fitted: fill.fitted, leads: { checked: leads.checked, fitted: leads.fitted },
+    visits: { checked: visits.checked, fitted: visits.fitted, remindersOff: visits.remindersOff, sharedDay: visits.sharedDay }, lines };
 }
 
 async function closeEarlier(conn, keepKey) {

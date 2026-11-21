@@ -7745,11 +7745,12 @@ function initScheduledJobs() {
         if (quarantineIssues > 0) parts.push(`${quarantineIssues} quarantine failure${quarantineIssues > 1 ? 's' : ''} (spam still in inbox)`);
         const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
         if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
-        // Real Gmail draft ids only — 'pending' claims and reconciliation
-        // sentinels (reconciled_replied / reconciled_existing_draft) are not
-        // drafts this agent created.
+        // Real Gmail draft ids only — 'pending' claims, reconciliation
+        // sentinels (reconciled_replied / reconciled_existing_draft) and a
+        // draft refused for a blank (refused_blank) are not drafts this agent
+        // created.
         const drafted = emails.filter(e => e.draft_gmail_id
-          && !['pending', 'reconciled_existing_draft', 'reconciled_replied'].includes(e.draft_gmail_id)).length;
+          && !['pending', 'reconciled_existing_draft', 'reconciled_replied', 'refused_blank'].includes(e.draft_gmail_id)).length;
         if (drafted > 0) parts.push(`${drafted} repl${drafted > 1 ? 'ies' : 'y'} drafted`);
 
         // Follow-up nudges: inbound conversation mail nobody has answered.

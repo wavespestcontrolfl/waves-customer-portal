@@ -352,7 +352,7 @@ async function withTurfProfileFence(dbOrTrx, customerId, write) {
   });
 }
 
-async function loadTurfProfile(db, customerId, { forUpdate = false } = {}) {
+async function loadTurfProfile(db, customerId, { forUpdate = false, strict = false } = {}) {
   // forUpdate (GitHub #3391 round): the click-to-estimate mint re-reads the
   // turf row under its transaction to compare against the composition's
   // pricing-source stamp, but the admin turf-profile PUT updates the row
@@ -360,7 +360,7 @@ async function loadTurfProfile(db, customerId, { forUpdate = false } = {}) {
   // comparison against values that are already being replaced, publishing a
   // stale lawn price. Locking the active row serializes the mint against
   // that writer (the PUT touches only this table, so no lock cycle).
-  const rows = await safeSelect(db, 'customer_turf_profiles', q => {
+  const activeProfile = (q) => {
     let query = q
       .where({ customer_id: customerId })
       .where(function activeScope() {
@@ -368,7 +368,14 @@ async function loadTurfProfile(db, customerId, { forUpdate = false } = {}) {
       });
     if (forUpdate) query = query.forUpdate();
     return query.first();
-  });
+  };
+  // strict (plan start, codex pre-push P0): a failed query throws instead of reading as no
+  // profile. A lawn price reads its area and track from this row, and the forgiving read would
+  // price on older fallback measurements that a stored zero-lawn profile rules out. A missing
+  // row (or no database) is still no profile.
+  const rows = strict && db
+    ? await activeProfile(db('customer_turf_profiles'))
+    : await safeSelect(db, 'customer_turf_profiles', activeProfile);
   return rows || null;
 }
 
@@ -1204,6 +1211,10 @@ async function buildCustomerPricingResponse({
   // context carries raw engine inputs, so no default caller — and no public
   // payload — may ever receive it.
   includeEngineContext = false,
+  // Opt-in ONLY (the portal pricing route, GATE_PORTAL_PLAN_START): compute the plan-start hint.
+  // Its account reads serve the card's book button alone; the report cross-sell and portal-offer
+  // builders would discard it (codex pre-push P1).
+  includePlanStartHint = false,
 }) {
   const text = String(prompt || '').trim();
   const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
@@ -1255,7 +1266,17 @@ async function buildCustomerPricingResponse({
     };
   }
 
-  const turfProfile = await loadTurfProfile(db, customer.id);
+  // The plan-start hint tells a failed profile read from a missing row (codex pre-push P0): the
+  // mint refuses a lawn plan start on an unreadable profile, so the card offers no lawn button
+  // then. Every other caller keeps the forgiving read; the price reads no profile either way.
+  let turfProfile = null;
+  let turfReadFailed = false;
+  try {
+    turfProfile = await loadTurfProfile(db, customer.id, { strict: includePlanStartHint });
+  } catch (err) {
+    turfReadFailed = true;
+    logger.warn(`[customer-pricing-ai] turf profile unreadable for ${customer.id}: ${err.message}`);
+  }
 
   // A service the customer ALREADY has is never re-priced from the property
   // profile — owner ruling 2026-08-06. Their live rate may predate a price
@@ -1339,6 +1360,9 @@ async function buildCustomerPricingResponse({
   const quoteBaselineMonthly = modeledCurrentMonthly || 0;
 
   const options = [];
+  // Each option's raw engine result, kept beside the options (never in the answer): the
+  // plan-start hint runs the mint's own review check on it (codex pre-push P1).
+  const engineResults = new Map();
   const generic = !text;
   // Composed BEFORE the option loop so every priced option carries the owned
   // half of a mixed request into what staff receive (codex #3253 r2).
@@ -1398,7 +1422,10 @@ async function buildCustomerPricingResponse({
           },
         };
       }
-      if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) options.push(quoted);
+      if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) {
+        options.push(quoted);
+        engineResults.set(quoted.id, estimate);
+      }
     }
   }
 
@@ -1425,7 +1452,65 @@ async function buildCustomerPricingResponse({
     property: summarizeProperty(propertyContext),
     currentMonthly: currentMonthly || null,
     options,
+    // Hint only (GATE_PORTAL_PLAN_START, asked for by the portal pricing route): the options
+    // the card may offer as "See my price and book". The start-plan route re-decides under its
+    // locks; absent when not asked for, the gate is off or nothing qualifies, so every other
+    // response stays byte-identical.
+    ...(await planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys, engineResults, {
+      asked: includePlanStartHint, turfReadFailed,
+    })),
   };
+}
+
+// The pricing answer's plan-start fields: { planStart: { optionIds } }, the options the
+// start-plan route can book for this account, or none. It mirrors the mint's bar without
+// its locks: an account with no plan (planStartAccountOpen), no live recurring service
+// of any kind, a stored type that is not commercial, and one provable premises
+// (singlePremisesStreet, strict as the mint runs it: a multi-home account, another profile
+// on the account or a visit whose property link cannot be resolved keeps the request, codex
+// pre-push P1s and r16 P0), and per option an
+// id on today's ladder that the route books
+// (planStartOptionBookable: pest quarterly only), a monthly price, and an engine result the
+// mint's own review check passes (engineResultNeedsReview: review markers, heuristic turf,
+// low confidence, field verification; codex pre-push P1s). A price that reads the turf
+// profile is dropped when that read failed, as the mint refuses it (codex pre-push P0).
+async function planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys, engineResults, { asked, turfReadFailed }) {
+  // Only the portal pricing route asks. Optional call: hundreds of suites mock feature-gates
+  // whole; a bare mock reads as off.
+  if (!asked || require('../config/feature-gates').portalPlanStartLive?.() !== true) return {};
+  const restart = require('./cancellation-resolution/restart');
+  if (!restart.planStartAccountOpen(customer) || currentServiceKeys.length || ownedServiceKeys.length) return {};
+  const bookable = options
+    .filter((option) => restart.PLAN_START_SERVICE_KEYS.includes(option.serviceKey)
+      && Number(option.monthly) > 0
+      && engineResults.has(option.id) && !restart.engineResultNeedsReview(engineResults.get(option.id))
+      && !(turfReadFailed && restart.TURF_PRICED_KEYS.includes(restart.pricingKeyFor(option.serviceKey)))
+      && restart.planStartOptionBookable(option.serviceKey,
+        variantsForService(option.serviceKey, '', false).find((variant) => variant?.id === option.id)));
+  if (!bookable.length) return {};
+  let seed;
+  try {
+    // A stored commercial type: the mint's stored-type guard refuses it (a resolved commercial
+    // type prices commercial lines, which the review check above already drops).
+    if (require('./pricing-engine/commercial-helpers').isCommercialProperty({ propertyType: customer.property_type })) return {};
+    // A live row the pricing loaders skip (a rodent plan, a commercial row) or a prepay
+    // term still covering today owns a plan: no offer.
+    if (await restart.ownsAnyRecurringService(db, customer.id)) return {};
+    const street = await restart.singlePremisesStreet(db, customer, { strict: true });
+    // The mint's own address check (codex pre-push P1): an address that reads back as another
+    // home refuses the mint, so the card offers the request up front, not a button that files it.
+    if (!street || !restart.storedAddressNamesHome(customer, street, addressForCustomer)) return {};
+    // The accepted-estimate seed the mint prices with (codex pre-push P1): its review
+    // markers refuse the mint, so they offer no button. Unreadable fails closed, as the mint does.
+    seed = await require('./service-report/cross-sell').loadEstimateSeed(db, customer.id, street);
+  } catch (err) {
+    logger.warn(`[customer-pricing-ai] plan-start account read failed — no offer: ${err.message}`);
+    return {};
+  }
+  const optionIds = bookable
+    .filter((option) => !restart.seedRefusesPrice(seed, [restart.pricingKeyFor(option.serviceKey)]))
+    .map((option) => option.id);
+  return optionIds.length ? { planStart: { optionIds } } : {};
 }
 
 function summarizeProperty(context) {

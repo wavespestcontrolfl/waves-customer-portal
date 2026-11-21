@@ -1339,6 +1339,22 @@ const KEEP_ON_EDIT_REASONS = new Set(['google_uncertain', 'persist_failed', 'rev
 const RECONCILE_REASONS = new Set(['google_uncertain', 'persist_failed']);
 
 /**
+ * The pipeline's own stored text submitted unchanged: an automatic draft, or
+ * an automatic attempt the publisher kept after a failed or uncertain post
+ * (its text in auto_reply_draft, the reply slot often empty). The editor
+ * guard checks such text against its stored snapshot before the PUT
+ * (pipelineDraftGuard's stored-draft check), so the editor route gives it
+ * the snapshot's account facts and the machine origin, as Use Draft does.
+ * A person's attempt (version human or agent_ops) and an Agent Ops draft
+ * keep their own rules.
+ */
+function isMachineStoredDraft(row, text) {
+  if (!row?.auto_reply_draft || !DRAFT_HOLDING_STATUSES.includes(row.auto_reply_status)) return false;
+  if (MANUAL_VERSIONS.has(row.auto_reply_version || '') || row.auto_reply_reason === AGENT_OPS_DRAFT) return false;
+  return String(text || '').trim() === String(row.auto_reply_draft).trim();
+}
+
+/**
  * Fields the sync applies when the REVIEW itself changed (rating / text /
  * name — the sync just overwrote them). Returns {} when nothing changed.
  *   - A POSTED automatic reply is no longer known to fit: park for a person.
@@ -1957,6 +1973,7 @@ module.exports = {
   dismissCancelFields,
   whereNoReconcilePark,
   RECONCILE_REASONS,
+  isMachineStoredDraft,
   whereNotAutoPosted,
   manualReplyCloseFields,
   whereNoLivePublishClaim,

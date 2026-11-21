@@ -4,7 +4,7 @@
 // in an out-of-date tab loads the live code, the first page never reloads, a
 // tab inside a page is not a move, held work stops it, and the Reload bar
 // shows on staff pages only.
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
@@ -14,7 +14,9 @@ vi.mock('../native/platform', () => ({ isWavesAdminApp: () => false }));
 import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from '../lib/portalVersion';
 import { registerReloadHold } from '../lib/reloadHolds';
 import { countDeviceWrite } from '../lib/deviceWrites';
-import { PortalUpdateBar, PortalUpdateGate } from './PortalUpdate';
+import { PAGE_USE_EVENTS } from '../lib/portalReload';
+import { usedOnPageInView, watchPageUse } from '../lib/staleChunkReload';
+import { PortalReloadPrompt, PortalUpdateBar, PortalUpdateGate } from './PortalUpdate';
 
 let holding = false;
 registerReloadHold('test-hold', () => holding);
@@ -78,6 +80,7 @@ function Home() {
   return (
     <>
       <button type="button" onClick={() => navigate('/admin')}>Home</button>
+      <button type="button" onClick={() => navigate(-1)}>Back</button>
       <button type="button" onClick={() => navigate('/admin/leads')}>Leads</button>
     </>
   );
@@ -87,13 +90,23 @@ function Where() {
   return <output data-testid="where">{useLocation().pathname}</output>;
 }
 
-function renderWithIndex(landing, start = '/admin/pipeline') {
+// Like the staff layout (AdminLayoutV2): it renders no route, the /admin
+// index's redirect included, until its session check ends.
+// verifyStaffSession ends it.
+let verifyStaffSession = null;
+function VerifyingIndex({ landing }) {
+  const [verified, setVerified] = useState(false);
+  useEffect(() => { verifyStaffSession = () => setVerified(true); }, []);
+  return verified ? <Navigate to={landing} replace /> : <p>Verifying staff access…</p>;
+}
+
+function renderWithIndex(landing, start = '/admin/pipeline', entries = [start], index = <Navigate to={landing} replace />) {
   return render(
-    <MemoryRouter initialEntries={[start]}>
+    <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
       <Where />
       <PortalUpdateGate fallback={<p>Loading the new version...</p>}>
         <Routes>
-          <Route path="/admin" element={<Navigate to={landing} replace />} />
+          <Route path="/admin" element={index} />
           <Route path="/admin/pipeline" element={<Home />} />
           <Route path="/admin/dashboard" element={<Page name="Dashboard" />} />
           <Route path="/admin/today" element={<Page name="Today" />} />
@@ -199,10 +212,71 @@ describe('PortalUpdateGate', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('a move from a field page through the /admin index keeps the tab, as field work can still be on its way; the next move reloads', async () => {
-    renderWithIndex('/admin/dashboard', '/admin/today/visit');
+  // The router decodes each segment and allows trailing slashes, so this is
+  // the same index and the same redirect (routerPath, lib/adminBookmarkMeta.js).
+  // An in-app link drops trailing slashes; a history entry keeps the address
+  // as it was opened, so Back reaches it as written.
+  test('Back to the /admin index written another way, encoded and with more slashes, that lands on Today keeps the tab too', async () => {
+    renderWithIndex('/admin/today', '/admin/pipeline', ['/%61dmin///', '/admin/pipeline']);
     goLive('bbb222bbb222');
-    fireEvent.click(screen.getByText('Home'));
+    fireEvent.click(screen.getByText('Back'));
+    expect(await screen.findByText('Today')).toBeTruthy();
+    await act(async () => {});
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  // The index redirects only once the staff session check ends, so a tap can
+  // come first. That tap is a use of the page, and the redirect still
+  // continues the move from the field page.
+  test('a move from a field page through the /admin index keeps the tab, also after a tap while the index waits for the staff session check; the next move reloads', async () => {
+    const stop = watchPageUse();
+    try {
+      renderWithIndex('/admin/dashboard', '/admin/today/visit', undefined, <VerifyingIndex landing="/admin/dashboard" />);
+      goLive('bbb222bbb222');
+      fireEvent.click(screen.getByText('Home'));
+      const verifying = screen.getByText('Verifying staff access…');
+      fireEvent.pointerDown(verifying);
+      fireEvent.click(verifying);
+      expect(usedOnPageInView()).toBe(true);
+      act(() => verifyStaffSession());
+      expect(await screen.findByText('Dashboard')).toBeTruthy();
+      await act(async () => {});
+      expect(reload).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByText('Open Pipeline'));
+      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+    } finally {
+      stop();
+    }
+  });
+
+  // The tab opens /admin, which redirects to Today. The staff session then
+  // ends there: the layout replaces Today with the sign-in page, which
+  // replaces itself with the next page. Each replace after Today leaves Today.
+  test('a field page that a redirect opened keeps the tab through each replace after it, as through a sign-in; the next move reloads', async () => {
+    function SessionEnds() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/admin/login', { replace: true })}>Session ends</button>;
+    }
+    function SignIn() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/admin/dashboard', { replace: true })}>Sign in</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={['/admin']}>
+        <PortalUpdateGate fallback={<p>Loading the new version...</p>}>
+          <Routes>
+            <Route path="/admin" element={<Navigate to="/admin/today" replace />} />
+            <Route path="/admin/today" element={<SessionEnds />} />
+            <Route path="/admin/login" element={<SignIn />} />
+            <Route path="/admin/dashboard" element={<Page name="Dashboard" />} />
+            <Route path="/admin/pipeline" element={<Page name="Pipeline" />} />
+          </Routes>
+        </PortalUpdateGate>
+      </MemoryRouter>,
+    );
+    goLive('bbb222bbb222');
+    fireEvent.click(await screen.findByText('Session ends'));
+    fireEvent.click(await screen.findByText('Sign in'));
     expect(await screen.findByText('Dashboard')).toBeTruthy();
     await act(async () => {});
     expect(reload).not.toHaveBeenCalled();
@@ -374,6 +448,47 @@ describe('PortalUpdateBar', () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  // The tab keeps one record of a use (lib/staleChunkReload.js): the bar,
+  // each prompt and the stale-chunk reload share one set of document
+  // listeners, and each still hears every use while it listens.
+  test('the bar and every prompt share one set of document listeners for a use of the page, and each hears every use', () => {
+    const added = vi.spyOn(document, 'addEventListener');
+    const removed = vi.spyOn(document, 'removeEventListener');
+    const forUse = (spy) => spy.mock.calls.filter(([type, , capture]) => PAGE_USE_EVENTS.includes(type) && capture === true);
+    const stop = watchPageUse();
+    renderAt('/admin/today/truck-check');
+    goLive('bbb222bbb222');
+    const prompts = render(
+      <MemoryRouter initialEntries={['/admin/today/truck-check']}>
+        <PortalReloadPrompt message="Part one did not load." />
+        <PortalReloadPrompt message="Part two did not load." />
+      </MemoryRouter>,
+    );
+    expect(forUse(added)).toHaveLength(PAGE_USE_EVENTS.length);
+    const [barReload, ...promptReloads] = screen.getAllByRole('button', { name: 'Reload' });
+    promptReloads.forEach((button) => fireEvent.click(button));
+    expect(screen.getAllByText('Anything not saved on this page will be lost.')).toHaveLength(2);
+    // A use clears what each prompt named, and the bar asks after it.
+    fireEvent.input(screen.getByLabelText('Note'), { target: { value: 'Cracked hose' } });
+    expect(screen.getByText('Part one did not load.')).toBeTruthy();
+    expect(screen.getByText('Part two did not load.')).toBeTruthy();
+    fireEvent.click(barReload);
+    expect(reload).not.toHaveBeenCalled();
+    expect(screen.getByText('Anything not saved on this page will be lost.')).toBeTruthy();
+    // With the prompts gone, the bar still hears a use.
+    prompts.unmount();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    fireEvent.input(screen.getByLabelText('Note'), { target: { value: 'Cracked hose, left side' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(forUse(removed)).toHaveLength(0);
+    cleanup();
+    stop();
+    expect(forUse(removed)).toHaveLength(PAGE_USE_EVENTS.length);
+    expect(forUse(added)).toHaveLength(PAGE_USE_EVENTS.length);
+  });
+
   test('a page not used since it opened reloads at once, and a page move ends a use', () => {
     renderAt('/admin/today/truck-check');
     goLive('bbb222bbb222');
@@ -398,10 +513,44 @@ describe('PortalUpdateBar', () => {
     expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy();
   });
 
+  // No use of the page here: only the new key clears the named work.
+  test('a newer build clears the named work', () => {
+    renderAt('/admin/dashboard');
+    goLive('bbb222bbb222');
+    holding = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(screen.getByText('Something in this tab is still open.')).toBeTruthy();
+    goLive('ccc333ccc333');
+    expect(screen.getByText('A new version of the portal is ready.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy();
+  });
+
   test('with nothing held, Reload reloads at once', () => {
     renderAt('/admin/dashboard');
     goLive('bbb222bbb222');
     fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PortalReloadPrompt', () => {
+  // A click can reach a Reload prompt before React runs the effects of the
+  // render that showed it, as on a busy device. Here a layout effect clicks it
+  // in that render.
+  test('a click as the prompt appears still names the work', () => {
+    holding = true;
+    function ClickAsItAppears() {
+      useLayoutEffect(() => { screen.getByRole('button', { name: 'Reload' }).click(); }, []);
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/admin/dashboard']}>
+        <PortalReloadPrompt message="The portal has a new version." />
+        <ClickAsItAppears />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Something in this tab is still open. Anything not saved on this page will be lost.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Reload anyway' })).toBeTruthy();
+    expect(reload).not.toHaveBeenCalled();
   });
 });

@@ -38,6 +38,8 @@ import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { useAdminTableViews } from "../../hooks/useAdminTableViews";
 import { useAdminTableScroll } from "../../hooks/useAdminTableScroll";
+import { MissingPanelCode } from "../../components/LazyPanel";
+import { isChunkError, trackStaffImport } from "../../lib/staleChunkReload";
 import {
   Filter,
   MapPinned,
@@ -188,7 +190,9 @@ function LegacyCustomersPanel({ exportName, props = {} }) {
 
   useEffect(() => {
     let cancelled = false;
-    import("./CustomersPage")
+    // Counted while on its way: Back can open a customer page meanwhile
+    // (lib/staleChunkReload.js).
+    trackStaffImport(() => import("./CustomersPage"))
       .then((mod) => {
         if (!cancelled) setComponent(() => mod[exportName] || null);
       })
@@ -201,6 +205,9 @@ function LegacyCustomersPanel({ exportName, props = {} }) {
   }, [exportName]);
 
   if (loadError) {
+    // A deploy removed the V1 code and the tab did not reload: the Reload
+    // prompt of every part of a staff page (components/LazyPanel.jsx).
+    if (isChunkError(loadError)) return <MissingPanelCode />;
     return (
       <div className="p-6 text-ui-body text-alert-fg">
         Could not load this panel: {loadError.message}

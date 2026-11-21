@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, Suspense } from "react";
+import { lazyPanel } from "../../components/LazyPanel";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   BarChart3,
@@ -25,7 +26,7 @@ import {
 } from "../../components/ui";
 import { etDateString, formatETDateTime } from "../../lib/timezone";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
-const PPCDashboardPage = lazy(() => import("./PPCDashboardPage"));
+const PPCDashboardPage = lazyPanel(() => import("./PPCDashboardPage"));
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` folded to zinc-900, `purple`/`orange` fold too.
 // Semantic green/amber/red preserved for status/alert accents.

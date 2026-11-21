@@ -10,6 +10,7 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
+const { isEnabled } = require('../config/feature-gates');
 const { isPromoterPhoneCollision, PHONE_COLLISION_MESSAGE, PHONE_COLLISION_CODE } = require('../services/referral-errors');
 const { sendCustomerMessage, classifyDeliveryCertainty } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
@@ -108,6 +109,8 @@ router.get('/', async (req, res, next) => {
         stats: { totalReferrals: 0, converted: 0, pending: 0, totalClicks: 0 },
         referrals: [],
         rewardPerReferral: settings.referrer_reward_cents / 100,
+        // GATE_REFERRAL_STEP2: the member's real offer (its rewardPerReferral replaces the legacy amount above).
+        ...(isEnabled('referralStep2') ? (await engine.step2OfferStrict(db, req.customerId)) || { rewardPerReferral: 0 } : {}),
       });
     }
 
@@ -172,12 +175,18 @@ router.get('/', async (req, res, next) => {
         name: r.referee_name || `${r.referral_first_name || ''} ${r.referral_last_name || ''}`.trim(),
         phone: maskPhone(r.referee_phone || r.referral_phone),
         status: r.status,
-        rewardAmount: parseFloat(r.referrer_reward_amount || r.credit_amount || 0),
+        // A settled Step 2 referral shows what the member actually earned ($0 at the yearly cap included).
+        rewardAmount: r.referrer_credit_cents != null
+          ? Number(r.referrer_credit_cents) / 100
+          : parseFloat(r.referrer_reward_amount || r.credit_amount || 0),
         rewardStatus: r.referrer_reward_status || (r.referrer_credited ? 'earned' : 'pending'),
         createdAt: r.created_at,
         convertedAt: r.converted_at,
       })),
       rewardPerReferral: settings.referrer_reward_cents / 100,
+      // GATE_REFERRAL_STEP2: the member's real offer (amount, yearly limit, where the member stands).
+      // Server side only here; PR 2 renders it. rewardPerReferral above keeps its meaning as the standard amount.
+      ...(isEnabled('referralStep2') ? (await engine.step2OfferStrict(db, promoter.customer_id || req.customerId)) || { rewardPerReferral: 0 } : {}),
     });
   } catch (err) { next(err); }
 });
