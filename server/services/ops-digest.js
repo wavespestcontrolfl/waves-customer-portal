@@ -525,7 +525,7 @@ function inAppEnabled() {
  *                                    keeps one open row, not one per morning
  * @param {object} [p.supersedeWhereMeta] with supersedePrior: close only the older rows whose metadata contains
  *                                    this object (jsonb containment). The lead-to-cash sweep passes
- *                                    { closeoutClean: true }, so a row that records a failed closeout stays open
+ *                                    { standingOnly: true }, so a row that records a failed closeout stays open
  * @param {boolean} [p.fallOff]       the sender retires this key on its clean run (ops-digest-fall-off.js);
  *                                    stamps metadata.fallOff so the Activity feed pins the row until resolved
  * @param {object} [p.trx]            caller transaction for atomic companion/digest persistence

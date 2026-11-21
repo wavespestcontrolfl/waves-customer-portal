@@ -92,16 +92,16 @@ maybeDescribe('ops digest supersede (live Postgres)', () => {
   });
 
   // The lead-to-cash sweep (owner 2026-11-20): a new alert replaces only the older alerts stamped as standing-state
-  // only. An alert that records a failed closeout, and one written before the stamp existed, stay open.
+  // only. An alert that records a moving-window failure (a failed closeout), and one written before the stamp existed, stay open.
   test('whereMeta closes only the older rows whose metadata contains it', async () => {
-    const replaceable = await add(72, { closeoutClean: true });
-    const closeoutRecord = await add(48, { closeoutClean: false });
+    const replaceable = await add(72, { standingOnly: true });
+    const windowRecord = await add(48, { standingOnly: false });
     const legacy = await add(24);
-    const fresh = await add(0, { closeoutClean: true });
-    expect(await digest.supersedeOlderDigests({ key, row: fresh, conn: trx, enabled: true, whereMeta: { closeoutClean: true } })).toBe(1);
+    const fresh = await add(0, { standingOnly: true });
+    expect(await digest.supersedeOlderDigests({ key, row: fresh, conn: trx, enabled: true, whereMeta: { standingOnly: true } })).toBe(1);
 
     const rows = await state();
-    expect(rows.filter((r) => r.open).map((r) => r.id).sort()).toEqual([closeoutRecord.id, legacy.id, fresh.id].sort());
+    expect(rows.filter((r) => r.open).map((r) => r.id).sort()).toEqual([windowRecord.id, legacy.id, fresh.id].sort());
     expect(rows.find((r) => r.id === replaceable.id)).toMatchObject({ open: false, by: key });
   });
 
@@ -112,15 +112,15 @@ maybeDescribe('ops digest supersede (live Postgres)', () => {
       recipient_type: 'admin', category: 'ops_digest', title: 'Fixture digest', metadata: JSON.stringify({ opsKey: cleanKey, ...metadata }),
     }).returning('*'))[0];
     try {
-      const replaceable = await insert({ closeoutClean: true });
-      const closeoutRecord = await insert({ closeoutClean: false });
+      const replaceable = await insert({ standingOnly: true });
+      const windowRecord = await insert({ standingOnly: false });
       const legacy = await insert({});
-      expect(await digest.resolveOpsDigest({ key: cleanKey, source: null, resolvedBy: `${cleanKey}:clean-run`, whereMeta: { closeoutClean: true } })).toBe(1);
+      expect(await digest.resolveOpsDigest({ key: cleanKey, source: null, resolvedBy: `${cleanKey}:clean-run`, whereMeta: { standingOnly: true } })).toBe(1);
       const after = await db('notifications').whereRaw("metadata->>'opsKey' = ?", [cleanKey]).select('id', 'done_at', 'metadata');
       const byId = new Map(after.map((r) => [r.id, r]));
       expect(byId.get(replaceable.id).done_at).not.toBeNull();
       expect(byId.get(replaceable.id).metadata).toMatchObject({ resolved: true, resolvedBy: `${cleanKey}:clean-run` });
-      expect(byId.get(closeoutRecord.id).done_at).toBeNull();
+      expect(byId.get(windowRecord.id).done_at).toBeNull();
       expect(byId.get(legacy.id).done_at).toBeNull();
     } finally {
       await db('notifications').whereRaw("metadata->>'opsKey' = ?", [cleanKey]).del();

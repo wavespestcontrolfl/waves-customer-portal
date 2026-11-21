@@ -26,11 +26,17 @@
  *   - A NEW ITEM posts an alert: a check that fails or cannot run and was not
  *     failing on the last run. A higher count on a check that was already
  *     failing posts nothing. An unchanged list posts again on the 7th day.
- *   - `closeout_failed_facts` reads ONE day (yesterday's completed visits) and
- *     nothing checks that day again. A failure there always posts, and that
- *     alert is a record: the sweep never closes or replaces it.
- *   - An alert whose closeout check was clean holds only standing state. The
- *     sweep closes it when a newer alert replaces it or when a run is clean.
+ *   - Two checks read a MOVING WINDOW (registry `windowDays`): a finding can
+ *     leave the window with nothing fixed. `closeout_failed_facts` reads one
+ *     day (yesterday's completed visits); `new_plan_without_welcome` reads 14
+ *     days of signups. An alert that lists one of them is a record: the sweep
+ *     never closes or replaces it. And the list posts again before the window
+ *     passes, so each finding is listed at least once: a closeout failure
+ *     posts every day, a missed welcome within the week.
+ *   - An alert with no such check holds only standing state, which every run
+ *     reads again (metadata.standingOnly). The sweep closes it when a newer
+ *     alert replaces it or when a run is clean. It carries the fall-off stamp,
+ *     so the Activity feed keeps it listed until then, read or not.
  *
  * Gate: GATE_LEAD_TO_CASH_SWEEP=true (feature-gates `leadToCashInvariantSweep`;
  * kill = unset). Cron: 6:55 ET daily (scheduler.js), after the 6:00 estimate
@@ -53,16 +59,17 @@ const { scrubSentryText, safeErrorToken } = require('../utils/sentry-scrub');
 
 const SEND_MARKER_KEY = 'lead-to-cash-invariants';
 const DIGEST_KEY = 'lead-to-cash-invariants';
-const CLOSEOUT_KEY = 'closeout_failed_facts';
 const RUN_STATE_KEY = 'lead_to_cash_sweep.run_state';
 const TWENTY_HOURS_MS = 20 * 60 * 60 * 1000;
 // An unchanged list posts again on the 7th daily run after its last alert. The
 // cron fires at 06:55 with a few seconds of jitter, so the limit is 6.5 days:
 // an exact 7 days could miss the 7th run by a second and wait for the 8th.
-const REPEAT_AFTER_MS = 6.5 * 24 * 60 * 60 * 1000;
-// The metadata stamp of an alert the sweep may close by itself: its closeout
-// check was clean, so everything in it is standing state a later run re-reads.
-const REPLACEABLE = Object.freeze({ closeoutClean: true });
+const DAY_MS = 24 * 60 * 60 * 1000;
+const REPEAT_AFTER_MS = 6.5 * DAY_MS;
+// The metadata stamp of an alert the sweep may close by itself: no moving-
+// window check failed in it, so everything in it is standing state a later
+// run reads again.
+const REPLACEABLE = Object.freeze({ standingOnly: true });
 const SAMPLE_IDS = 25;
 const CLOSEOUT_VISIT_CAP = 150;
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
@@ -74,6 +81,9 @@ const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcon
 // number of violated rows, ids a PII-free identifier list (capped at
 // SAMPLE_IDS by the runner), detail an optional small object of counters.
 // `href` is where the owner goes to repair. `provenance` names the incident.
+// `windowDays` marks a check that reads only the last N days: its finding can
+// leave the window with nothing fixed (see the header). Set it on every new
+// detector that filters by a look-back date.
 // ---------------------------------------------------------------------------
 const DETECTORS = Object.freeze([
   {
@@ -203,6 +213,7 @@ const DETECTORS = Object.freeze([
   },
   {
     key: 'closeout_failed_facts',
+    windowDays: 1,
     label: "Yesterday's completed visits with a failed closeout fact or a contradiction",
     href: '/admin/dispatch',
     provenance: 'closeout-status service PR #3647 (ten facts, never one boolean)',
@@ -274,6 +285,7 @@ const DETECTORS = Object.freeze([
   },
   {
     key: 'new_plan_without_welcome',
+    windowDays: 14, // WELCOME_AUDIT_WINDOW_DAYS (new-recurring-welcome-sms.js); the test pins the two together
     label: 'New customers whose first recurring plan started in the last 14 days with no welcome text queued',
     href: '/admin/customers',
     provenance: 'welcome-text traces 2026-11-04 and 2026-11-09 — 27 of 94 first plans (Jul 25 to Oct 24) got no welcome text; 4 had no known cause',
@@ -315,7 +327,7 @@ async function runDetectors({ now = new Date(), detectors = DETECTORS } = {}) {
       const out = await d.run({ now });
       const ids = Array.isArray(out.ids) ? out.ids.map(String) : [];
       results.push({
-        key: d.key, label: d.label, href: d.href, ok: out.count === 0, unavailable: false,
+        key: d.key, label: d.label, href: d.href, windowDays: d.windowDays || null, ok: out.count === 0, unavailable: false,
         // A detector that already capped its sample in SQL reports the cap
         // itself (out.truncated) — the length test alone cannot see it.
         count: Number(out.count) || 0, sample: ids.slice(0, SAMPLE_IDS), truncated: ids.length > SAMPLE_IDS || out.truncated === true,
@@ -328,7 +340,7 @@ async function runDetectors({ now = new Date(), detectors = DETECTORS } = {}) {
       // The log line carries the scrubbed message for triage.
       logger.error(`[l2c-invariants] ${d.key} unavailable: ${scrubSentryText(err?.message || err)}`);
       results.push({
-        key: d.key, label: d.label, href: d.href, ok: false, unavailable: true,
+        key: d.key, label: d.label, href: d.href, windowDays: d.windowDays || null, ok: false, unavailable: true,
         count: 0, sample: [], truncated: false, detail: null,
         error: safeErrorToken(err?.code) || safeErrorToken(err?.name) || 'error', ms: Date.now() - started,
       });
@@ -390,9 +402,24 @@ function failingItems(results) {
   return results.filter((r) => !r.ok).map((r) => (r.unavailable ? `${r.key}:unavailable` : r.key)).sort();
 }
 
-// A closeout check that could not run is not clean: that day was not verified.
-function closeoutIsClean(results) {
-  return !results.some((r) => r.key === CLOSEOUT_KEY && !r.ok);
+// The moving-window checks that failed or could not run. One that could not
+// run counts: its window was not verified.
+function windowedFailures(results) {
+  return results.filter((r) => !r.ok && r.windowDays > 0);
+}
+
+// True when every failing check reads standing state, so a later clean run
+// proves the fix and a newer alert lists the same things again.
+function isStandingOnly(results) {
+  return windowedFailures(results).length === 0;
+}
+
+// How long an unchanged list waits before it posts again: 7 daily runs, or
+// less while a moving-window check fails, so its findings are listed before
+// they leave the window. Half a day short of the mark, for the cron's jitter:
+// a 1-day window posts on every daily run.
+function repeatAfterMs(results) {
+  return Math.min(REPEAT_AFTER_MS, ...windowedFailures(results).map((r) => (r.windowDays - 0.5) * DAY_MS));
 }
 
 // The last run's items and the time of the last alert: { items: string[], alertedAt: ISO|null },
@@ -424,12 +451,12 @@ async function writeRunState(items, alertedAt) {
 }
 
 // True when this run has nothing the last run did not have, and the last alert
-// is younger than REPEAT_AFTER_MS. A closeout failure is always news (see the header).
+// is younger than the repeat limit of this run's failures.
 function nothingNew(state, results, now) {
-  if (!state || !closeoutIsClean(results)) return false;
+  if (!state || !state.alertedAt) return false;
   const known = new Set(state.items);
   if (!failingItems(results).every((item) => known.has(item))) return false;
-  return Boolean(state.alertedAt) && (now.getTime() - Date.parse(state.alertedAt)) < REPEAT_AFTER_MS;
+  return (now.getTime() - Date.parse(state.alertedAt)) < repeatAfterMs(results);
 }
 
 /**
@@ -446,10 +473,9 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
     logger.info(`[l2c-invariants] clean: ${JSON.stringify(summary)}`);
     // closeout_failed_facts checks yesterday only. A clean later window
     // does not prove older failures (including license facts) were fixed,
-    // so a prior alert that records one is never retired here. An alert with
-    // a clean closeout check held only standing state, which this run re-read.
-    // retireIfClean never throws; alerts that record a closeout failure do not
-    // carry the stamp and stay.
+    // so a prior alert that records a moving-window failure is never retired
+    // here: it does not carry the stamp. A standing-only alert held state
+    // this run read again. retireIfClean never throws.
     await retireIfClean(DIGEST_KEY, { whereMeta: REPLACEABLE });
     await writeRunState([], (await readRunState())?.alertedAt);
     return { skipped: 'clean', results: summary };
@@ -468,7 +494,7 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
     await writeRunState(items, state.alertedAt);
     return { skipped: 'no_new_item', results: summary };
   }
-  const closeoutClean = closeoutIsClean(results);
+  const standingOnly = isStandingOnly(results);
   try {
     await deliverOpsDigest({
       key: DIGEST_KEY,
@@ -481,8 +507,12 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
       // unresolved closeout failure (and its IDs) with today's OK line. Each
       // alert stays its own immutable row. This alert lists every standing
       // check again, so it replaces the older alerts that held only standing
-      // state (REPLACEABLE); an older alert with a closeout failure stays open.
-      metadata: { closeoutClean },
+      // state (REPLACEABLE); an older alert with a moving-window failure
+      // stays open. Only a standing-only alert has a resolution path (this
+      // supersede, or the clean run), so only it is pinned in the Activity
+      // feed (fallOff); a record nothing resolves must not be pinned forever.
+      metadata: { standingOnly },
+      fallOff: standingOnly,
       supersedePrior: true,
       supersedeWhereMeta: REPLACEABLE,
       sendEmail: () => mailer.sendOne({
@@ -504,7 +534,7 @@ module.exports = {
   runLeadToCashInvariantSweep,
   DETECTORS,
   _private: {
-    runDetectors, composeReport, sentRecently, stampSendMarker, failingItems, closeoutIsClean, nothingNew, readRunState, writeRunState,
+    runDetectors, composeReport, sentRecently, stampSendMarker, failingItems, isStandingOnly, repeatAfterMs, nothingNew, readRunState, writeRunState,
     SEND_MARKER_KEY, DIGEST_KEY, RUN_STATE_KEY, REPEAT_AFTER_MS, REPLACEABLE, SAMPLE_IDS, CLOSEOUT_VISIT_CAP,
   },
 };

@@ -224,7 +224,7 @@ describe('runLeadToCashInvariantSweep', () => {
       getCloseoutStatus.mockResolvedValue({ found: true, summary: { failed: ['license_current'], contradictions: [] } });
       expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [closeout] })).toMatchObject({ sent: true, violations: 1 });
       expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-      expect(alert.metadata).toMatchObject({ opsKey: 'lead-to-cash-invariants', closeoutClean: false });
+      expect(alert.metadata).toMatchObject({ opsKey: 'lead-to-cash-invariants', standingOnly: false });
       expect(alert.metadata).not.toHaveProperty('fallOff');
 
       mockTables.scheduled_services = mockChain({ select: [] });
@@ -233,9 +233,9 @@ describe('runLeadToCashInvariantSweep', () => {
         skipped: 'clean', results: { closeout_failed_facts: 0 },
       });
       expect(getCloseoutStatus).toHaveBeenCalledTimes(1); // The older visit was not rechecked.
-      // The clean run retires only alerts stamped closeoutClean: true. This one records a closeout failure.
+      // The clean run retires only alerts stamped standingOnly: true. This one records a closeout failure.
       expect(resolve).toHaveBeenCalledTimes(1);
-      expect(resolve).toHaveBeenCalledWith({ key: DIGEST_KEY, source: null, resolvedBy: `${DIGEST_KEY}:clean-run`, whereMeta: { closeoutClean: true } });
+      expect(resolve).toHaveBeenCalledWith({ key: DIGEST_KEY, source: null, resolvedBy: `${DIGEST_KEY}:clean-run`, whereMeta: { standingOnly: true } });
       expect(alert.read_at).toBeNull();
       expect(alert.metadata).not.toHaveProperty('resolved');
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
@@ -303,10 +303,13 @@ describe('runLeadToCashInvariantSweep', () => {
 
 // Owner 2026-11-20 "go" (data-check audit step 4): the sweep posted the same standing list every morning, 45 alerts
 // in 45 days, each closed by hand. A new failing check posts; a higher count alone does not; an unchanged list posts
-// again after 7 days; a closeout failure always posts and its alert is never closed or replaced by the sweep.
+// again after 7 days. A check that reads a moving window (closeout: 1 day; welcome text: 14 days) posts again before its
+// window passes, and an alert that lists one is never closed or replaced by the sweep.
 describe('one alert, not one a day', () => {
   const DAY = 24 * 60 * 60 * 1000;
   const fails = (key, count = 1) => det(key, async () => ({ count, ids: Array.from({ length: count }, (_, i) => `${key}-${i}`) }));
+  // A check that reads only the last `days` days (registry `windowDays`).
+  const windowed = (key, days, count = 1) => ({ ...fails(key, count), windowDays: days });
   const lastRun = (items, alertedAgoMs) => {
     mockTables.ops_email_send_state = mockChain({ first: null });
     mockTables.system_settings = mockChain({
@@ -360,10 +363,34 @@ describe('one alert, not one a day', () => {
     expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
   });
 
-  test('a closeout failure always posts, even when the last run listed one', async () => {
-    lastRun(['closeout_failed_facts'], DAY);
-    const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('closeout_failed_facts')] });
+  test('only the closeout and welcome checks read a moving window, and the welcome window matches its audit', () => {
+    const windows = Object.fromEntries(DETECTORS.filter((d) => d.windowDays).map((d) => [d.key, d.windowDays]));
+    const welcome = fs.readFileSync(path.join(__dirname, '..', 'services', 'new-recurring-welcome-sms.js'), 'utf8');
+    const auditDays = Number(welcome.match(/^const WELCOME_AUDIT_WINDOW_DAYS = (\d+);$/m)[1]);
+    expect(windows).toEqual({ closeout_failed_facts: 1, new_plan_without_welcome: auditDays });
+  });
+
+  test('a 1-day window failure (closeout) posts on every daily run, even when the last run listed it', async () => {
+    lastRun(['closeout_failed_facts'], DAY - 30 * 1000);
+    const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [windowed('closeout_failed_facts', 1)] });
     expect(res).toMatchObject({ sent: true, violations: 1 });
+    // A closeout check that could not run did not verify the day: the same rule.
+    lastRun(['closeout_failed_facts:unavailable'], DAY - 30 * 1000);
+    const down = { ...windowed('closeout_failed_facts', 1), run: async () => { throw new Error('x'); } };
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [down] })).toMatchObject({ sent: true, unavailable: 1 });
+  });
+
+  test('a moving-window failure posts again before its window passes, so each finding is listed once', async () => {
+    // A 3-day window: the 2nd daily run after the alert stays quiet, the 3rd posts.
+    lastRun(['w'], 2 * DAY + 30 * 1000);
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [windowed('w', 3)] })).toMatchObject({ skipped: 'no_new_item' });
+    lastRun(['w'], 3 * DAY - 30 * 1000);
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [windowed('w', 3)] })).toMatchObject({ sent: true });
+    // The 14-day welcome window is longer than the weekly repeat, so the weekly repeat governs.
+    lastRun(['new_plan_without_welcome'], 6 * DAY + 30 * 1000);
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [windowed('new_plan_without_welcome', 14)] })).toMatchObject({ skipped: 'no_new_item' });
+    lastRun(['new_plan_without_welcome'], 7 * DAY - 30 * 1000);
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [windowed('new_plan_without_welcome', 14)] })).toMatchObject({ sent: true });
   });
 
   test('a run state that is missing, unreadable or has no alert time never hides a finding', async () => {
@@ -393,14 +420,14 @@ describe('one alert, not one a day', () => {
     try {
       expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [ok('a'), ok('b')] })).toEqual({ skipped: 'clean', results: { a: 0, b: 0 } });
       expect(resolve).toHaveBeenCalledWith({ key: DIGEST_KEY, source: null, resolvedBy: `${DIGEST_KEY}:clean-run`, whereMeta: REPLACEABLE });
-      expect(REPLACEABLE).toEqual({ closeoutClean: true });
+      expect(REPLACEABLE).toEqual({ standingOnly: true });
       expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: [], alertedAt: new Date(NOW.getTime() - DAY).toISOString() });
     } finally {
       resolve.mockRestore();
     }
   });
 
-  test('in the app: the alert carries its closeout stamp, and it replaces only older alerts that carry the clean stamp', async () => {
+  test('in the app: a standing-only alert is stamped, pinned and replaces only older stamped alerts; a moving-window alert is a record', async () => {
     gateEnvValue.mockReturnValue(true);
     lastRun([], DAY);
     mockTables.notifications = mockChain();
@@ -408,16 +435,22 @@ describe('one alert, not one a day', () => {
     NotificationService.notifyAdmin.mockImplementation(async (_category, _title, _body, options) => ({ id: 'new-alert', metadata: options.metadata }));
     try {
       expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
-      expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ opsKey: DIGEST_KEY, closeoutClean: true });
-      expect(mockTables.notifications.whereRaw).toHaveBeenCalledWith('metadata @> ?::jsonb', [JSON.stringify({ closeoutClean: true })]);
+      // fallOff: the Activity feed keeps the alert listed, read or not, until the sweep resolves it.
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ opsKey: DIGEST_KEY, standingOnly: true, fallOff: true });
+      expect(mockTables.notifications.whereRaw).toHaveBeenCalledWith('metadata @> ?::jsonb', [JSON.stringify({ standingOnly: true })]);
       expect(mockTables.notifications.update).toHaveBeenCalledTimes(1);
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
 
-      // A closeout failure: stamped false, so no later run closes it. It still replaces the older clean-stamped alerts.
-      NotificationService.notifyAdmin.mockClear();
-      lastRun([], DAY);
-      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('closeout_failed_facts')] })).toMatchObject({ sent: true });
-      expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ closeoutClean: false });
+      // A moving-window failure (here the welcome check, with a standing one beside it): stamped false, so no later run
+      // closes it, and not pinned, because nothing would ever resolve it. It still replaces the older stamped alerts.
+      for (const detector of [windowed('closeout_failed_facts', 1), windowed('new_plan_without_welcome', 14)]) {
+        NotificationService.notifyAdmin.mockClear();
+        lastRun([], DAY);
+        expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b'), detector] })).toMatchObject({ sent: true });
+        const { metadata } = NotificationService.notifyAdmin.mock.calls[0][3];
+        expect(metadata).toMatchObject({ standingOnly: false });
+        expect(metadata).not.toHaveProperty('fallOff');
+      }
     } finally {
       delete NotificationService._private;
       NotificationService.notifyAdmin.mockReset();

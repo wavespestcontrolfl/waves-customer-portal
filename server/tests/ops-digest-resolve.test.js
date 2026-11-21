@@ -70,8 +70,8 @@ test('source: null scopes to rows with NO source (the in-process senders)', asyn
 test('whereMeta narrows the retire to rows whose metadata contains it (the lead-to-cash clean run)', async () => {
   const q = chain(1);
   mockDb.mockReturnValue(q);
-  expect(await resolveOpsDigest({ key: 'lead-to-cash-invariants', source: null, whereMeta: { closeoutClean: true } })).toBe(1);
-  expect(q.whereRaw).toHaveBeenCalledWith('metadata @> ?::jsonb', ['{"closeoutClean":true}']);
+  expect(await resolveOpsDigest({ key: 'lead-to-cash-invariants', source: null, whereMeta: { standingOnly: true } })).toBe(1);
+  expect(q.whereRaw).toHaveBeenCalledWith('metadata @> ?::jsonb', ['{"standingOnly":true}']);
   const plain = chain(1);
   mockDb.mockReturnValue(plain);
   await resolveOpsDigest({ key: 'lead-to-cash-invariants', source: null });
