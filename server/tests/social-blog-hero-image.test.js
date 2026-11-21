@@ -239,6 +239,7 @@ describe('blogHeroSocialImageUrl', () => {
       process.env.SOCIAL_AUTOMATION_ENABLED = 'true';
       process.env.SOCIAL_FACEBOOK_ENABLED = 'true';
       process.env.FACEBOOK_ACCESS_TOKEN = 'tok';
+      social._resetFacebookPreviewReads();
     });
     afterEach(() => {
       delete process.env.SOCIAL_AUTOMATION_ENABLED;
@@ -331,6 +332,58 @@ describe('blogHeroSocialImageUrl', () => {
       } finally {
         delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
       }
+    });
+
+    test('a retried post reads the page once, not once per attempt', async () => {
+      const calls = [];
+      let feedAttempts = 0;
+      global.fetch = jest.fn(async (url) => {
+        const u = String(url);
+        calls.push(u);
+        if (u === 'https://graph.facebook.com/v25.0/') {
+          return { ok: true, json: async () => ({ id: PAGE }), text: async () => '' };
+        }
+        feedAttempts += 1;
+        // The first feed attempt fails with a transient error; withRetry tries again after 1 s.
+        if (feedAttempts === 1) return { ok: false, status: 500, text: async () => 'temporary' };
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+
+      const res = await social.publishToAll({
+        title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+        imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+        channels: ['facebook'], customContent: { facebook: 'Caption' },
+        noAiImage: true,
+      });
+
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+      expect(feedAttempts).toBe(2);
+      expect(calls.filter((u) => u === 'https://graph.facebook.com/v25.0/')).toHaveLength(1);
+    });
+
+    test('a failed read is not repeated on the retry', async () => {
+      let reads = 0;
+      let feedAttempts = 0;
+      global.fetch = jest.fn(async (url) => {
+        if (String(url) === 'https://graph.facebook.com/v25.0/') {
+          reads += 1;
+          throw new Error('socket hang up');
+        }
+        feedAttempts += 1;
+        if (feedAttempts === 1) return { ok: false, status: 500, text: async () => 'temporary' };
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+
+      const res = await social.publishToAll({
+        title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+        imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+        channels: ['facebook'], customContent: { facebook: 'Caption' },
+        noAiImage: true,
+      });
+
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+      expect(feedAttempts).toBe(2);
+      expect(reads).toBe(1);
     });
 
     test.each([

@@ -1466,6 +1466,22 @@ const FACEBOOK_PREVIEW_READ_TIMEOUT_MS = 6000;
 const FACEBOOK_PREVIEW_SETTLE_DEFAULT_MS = 3000;
 const FACEBOOK_PREVIEW_SETTLE_MAX_MS = 4000;
 
+// One read per link per 10 minutes. withRetry may call postToFacebook up to
+// three times for one post, and a photo post may fall back to a link post: a
+// read (and its wait) on every attempt would add up to 30 s to one publish.
+// A failed read counts too, so a retry never repeats a slow one.
+const FACEBOOK_PREVIEW_READ_TTL_MS = 10 * 60 * 1000;
+const facebookPreviewReads = new Map(); // link -> time of the last read attempt
+
+function facebookPreviewReadDue(link, now = Date.now()) {
+  for (const [seen, at] of facebookPreviewReads) {
+    if (now - at >= FACEBOOK_PREVIEW_READ_TTL_MS) facebookPreviewReads.delete(seen);
+  }
+  if (facebookPreviewReads.has(link)) return false;
+  facebookPreviewReads.set(link, now);
+  return true;
+}
+
 function facebookPreviewSettleMs() {
   const raw = process.env.FACEBOOK_PREVIEW_SETTLE_MS;
   const ms = raw === undefined || raw === '' ? NaN : Number(raw);
@@ -1474,6 +1490,7 @@ function facebookPreviewSettleMs() {
 }
 
 async function refreshFacebookLinkPreview(link, token) {
+  if (!facebookPreviewReadDue(link)) return;
   try {
     const res = await fetch('https://graph.facebook.com/v25.0/', {
       method: 'POST',
@@ -2980,6 +2997,8 @@ module.exports.isGbpMediaError = isGbpMediaError;
 // besides real photos/blog heroes that GBP posts may use (no AI imagery on
 // GBP, owner rule). Consumed by autonomous-runner's GBP action.
 module.exports.renderBrandCardUrl = renderBrandCardUrl;
+// Tests only: forget which links Facebook was asked to read.
+module.exports._resetFacebookPreviewReads = () => facebookPreviewReads.clear();
 module.exports.normalizePublishChannels = normalizePublishChannels;
 module.exports.normalizeGbpLocationIds = normalizeGbpLocationIds;
 module.exports.checkAndRaiseAlert = checkAndRaiseAlert;
