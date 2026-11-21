@@ -463,7 +463,9 @@ describe('availability excludes the estimate\'s own hold', () => {
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-slot-availability.js'), 'utf8');
-  const fn = src.slice(src.indexOf('async function filterCollidingSlots'), src.indexOf('async function filterCollidingSlots') + 3000);
+  // The whole function, to the next one: a fixed length stopped reaching the hold exclusion when the function grew.
+  const fnStart = src.indexOf('async function filterCollidingSlots');
+  const fn = src.slice(fnStart, src.indexOf('\nasync function ', fnStart + 1));
 
   test('the collision query skips this estimate\'s uncommitted hold only', () => {
     expect(fn).toContain('ownEstimateId = null');

@@ -4,8 +4,8 @@
  * 20261120220000), the time round trip, the two CHECKs, and loadTechShifts reading
  * the hours and today's clock-in from time_entries on the Staff work date. A mocked
  * knex proves none of the CHECKs, the time type or the Eastern work-date SQL.
- * The last block runs the booking offers (the slot finders) over the same rows:
- * each one reads the hours through that reader.
+ * The last block runs the booking offers (the slot finders and the estimate page's
+ * filter) over the same rows: each one reads the hours through that reader.
  *
  * Runs in the DB-gated CI step (DATABASE_URL on the migrated waves_test database) or
  * a local scratch Postgres migrated with `knex migrate:latest`; it skips without one.
@@ -344,6 +344,32 @@ postgres('technician shift hours (real Postgres)', () => {
         await db('scheduled_services').where({ id: stopId }).del();
         await db('customers').where({ id: customerId }).del();
       }
+    });
+
+    test('the estimate page filter inside a transaction: the hours are read there and the transaction stays usable', async () => {
+      const { filterCollidingSlots } = require('../services/estimate-slot-availability')._internals;
+      const windowAt = (start, techId) => ({
+        slotId: `${TOMORROW}_${start}_${techId}`, date: TOMORROW, windowStart: start,
+        windowEnd: `${String(Number(start.slice(0, 2)) + 1).padStart(2, '0')}:00`, durationMinutes: 60, techId,
+      });
+      const slots = [earlyTech.id, lateTech.id, noHours.id]
+        .flatMap((techId) => ['09:00', '12:00', '13:00', '17:00'].map((start) => windowAt(start, techId)));
+      const keptFor = (kept, techId) => kept.filter((slot) => slot.techId === techId).map((slot) => slot.windowStart);
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const marker = new Error('roll back');
+      await expect(db.transaction(async (trx) => {
+        // Hours set inside this transaction only: the filter must read them on the caller's connection.
+        await trx('technicians').where({ id: noHours.id }).update({ shift_start: '09:00', shift_end: '10:00' });
+        const kept = await filterCollidingSlots(slots, { dateFrom: TOMORROW, dateTo: TOMORROW, conn: trx });
+        expect(keptFor(kept, earlyTech.id)).toEqual(['09:00', '12:00']);
+        expect(keptFor(kept, lateTech.id)).toEqual(['12:00', '13:00', '17:00']);
+        expect(keptFor(kept, noHours.id)).toEqual(['09:00']);
+        // The clock-in read ran in a savepoint of this transaction, which still answers.
+        expect((await trx.raw('select 1 as ok')).rows).toEqual([{ ok: 1 }]);
+        throw marker;
+      })).rejects.toBe(marker);
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      expect(await filterCollidingSlots(slots, { dateFrom: TOMORROW, dateTo: TOMORROW })).toHaveLength(12);
     });
   });
 });
