@@ -959,6 +959,18 @@ jest.setTimeout(120000);
         expect(mockRaise).not.toHaveBeenCalled();
       });
 
+      test('a Send that replaces a lapsed offer stores its expiry with no bell, and no later pass rings for it', async () => {
+        const app = await newApplication();
+        const lapsed = (await sendNew(app)).offer;
+        await lapse(lapsed.id);
+        // The owner sends a new offer before a pass runs: that Send is his answer to the closed one.
+        const next = await JobOffers.saveDraft(app.id, {}, actor());
+        await sendAsPage(app.id, next.id, next.draftHash);
+        expect(await statusOf(lapsed.id)).toBe('expired');
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 0, failed: 0 });
+        expect(mockRaise).not.toHaveBeenCalled();
+      });
+
       test('the real alert writer stores the bell row in the close, once', async () => {
         const app = await newApplication();
         const sent = (await sendNew(app)).offer;

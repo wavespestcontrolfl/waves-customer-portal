@@ -883,12 +883,17 @@ function replacedBySend(out, draft) {
   return out && draft && out.id === draft.supersedes_id ? out.id : null;
 }
 
+// Stores the expiry of a sent offer past its date: the one write for the two paths that store it. The 7-day close also
+// rings the owner (closeIfExpired). A Send that replaces a lapsed offer does not ring: the owner made and sent the new
+// offer on the card that showed the old one closed, so that Send is his answer to it and a bell would ask for it again.
+const storeExpiry = (trx, offerId) => trx('job_offers').where({ id: offerId }).update({ status: 'expired', updated_at: new Date() });
+
 async function supersedePrior(trx, applicationId, offer, now) {
   const out = await trx('job_offers').where({ application_id: applicationId }).whereIn('status', OUT_STATUSES).forUpdate().first();
   if (!out) return;
   const replaced = replacedBySend(out, offer);
   if (!replaced && expiredByClock(out, now)) {
-    await trx('job_offers').where({ id: out.id }).update({ status: 'expired', updated_at: new Date() });
+    await storeExpiry(trx, out.id);
     return;
   }
   if (!replaced) {
@@ -1269,7 +1274,7 @@ async function closeIfExpired(applicationId, offerId) {
     const offer = await trx('job_offers').where({ id: offerId }).forUpdate().first();
     // The clock is read after both locks, as for the applicant's own writes (lockByToken).
     if (!application || application.status !== 'offer' || !offer || !expiredByClock(offer, new Date())) return false;
-    await trx('job_offers').where({ id: offerId }).update({ status: 'expired', updated_at: new Date() });
+    await storeExpiry(trx, offerId);
     const written = await raiseBell('expired', offer, fmtDay(instantToEtDay(offer.expires_at)), trx);
     if (!written) throw new Error('the closed-unsigned bell was not written');
     return true;
