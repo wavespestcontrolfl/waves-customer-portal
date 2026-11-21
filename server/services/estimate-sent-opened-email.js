@@ -5,7 +5,7 @@
  * Pure and fixed: no database, no link, and no estimate field in the text (no price, no service name, no address). The
  * result has the same raw `html_body` / `text_body` shape the automation step holds, so renderAutomationStepContent wraps
  * it unchanged (it merges {{first_name}} and the chrome). automation-runner.js uses it only when the estimate was emailed
- * to the address this step goes to AND was opened (estimateWasOpened); everyone else keeps the step's own body.
+ * to the address this step goes to AND was opened after that delivery (estimateOpenedAfter); everyone else keeps the step's own body.
  *
  * Kept from the live step body (20260926120200 audit): the greeting, the "A few things folks usually ask" heading, the
  * closing and the sign-off. Changed: the first paragraph, two question rows (start date, price holds) that are the same
@@ -51,10 +51,22 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-// A customer opened the estimate when either view stamp is set (the public route writes last_viewed_at
-// before viewed_at) or the view counter is above zero.
-function estimateWasOpened(estimate) {
-  return !!(estimate?.viewed_at || estimate?.last_viewed_at || Number(estimate?.view_count) > 0);
+// The latest view TIMESTAMP on the estimate (last_viewed_at or viewed_at), or null when there is none or it cannot be read.
+// view_count alone has no time, so it proves no open after anything.
+function latestViewTime(estimate) {
+  const times = [estimate?.last_viewed_at, estimate?.viewed_at]
+    .filter(Boolean)
+    .map((value) => new Date(value).getTime())
+    .filter((ms) => Number.isFinite(ms));
+  return times.length ? new Date(Math.max(...times)) : null;
+}
+
+// Was the estimate viewed at or after `since` (the delivery to this address)? Views cover the estimate's whole life: a view
+// before the delivery to this address was somebody else's.
+function estimateOpenedAfter(estimate, since) {
+  const viewed = latestViewTime(estimate);
+  const from = since ? new Date(since).getTime() : NaN;
+  return viewed !== null && Number.isFinite(from) && viewed.getTime() >= from;
 }
 
 /**
@@ -82,7 +94,8 @@ function buildEstimateOpenedEmail() {
 
 module.exports = {
   buildEstimateOpenedEmail,
-  estimateWasOpened,
+  estimateOpenedAfter,
+  latestViewTime,
   OPENED_PARAGRAPH,
   APP_PARAGRAPH,
   APP_IMAGE_ALT,

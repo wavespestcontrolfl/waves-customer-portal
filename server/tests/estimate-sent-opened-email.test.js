@@ -22,7 +22,7 @@ jest.mock('../services/contact-notification-prefs', () => ({
 // The engine's reply arms have their own suite. The runner must not mint an estimate link or ask the pricing guard.
 jest.mock('../services/estimate-follow-up', () => ({
   hasRepliedSince: jest.fn(async () => false),
-  _private: { mintStageLinks: jest.fn() },
+  _private: { mintStageLinks: jest.fn(), TERMINAL_STATUSES: new Set(['declined', 'accepted', 'expired', 'void']) },
 }));
 jest.mock('../services/pricing-authority-gate', () => ({
   estimateDeliverableUnderGate: jest.fn(async () => true),
@@ -35,7 +35,7 @@ const followUp = require('../services/estimate-follow-up');
 const authority = require('../services/pricing-authority-gate');
 const { sendStep } = require('../services/automation-runner');
 const {
-  buildEstimateOpenedEmail, estimateWasOpened, OPENED_PARAGRAPH,
+  buildEstimateOpenedEmail, estimateOpenedAfter, latestViewTime, OPENED_PARAGRAPH,
   APP_PARAGRAPH, APP_IMAGE_ALT, APP_CAPTION, APP_TOUR_POSTER_URL, APP_TOUR_VIDEO_URL,
 } = require('../services/estimate-sent-opened-email');
 const { ESTIMATE_SENT_FAQ } = require('../services/estimate-followup-copy');
@@ -63,14 +63,23 @@ afterEach(() => {
   else process.env.GATE_ESTIMATE_TWO_HOUR_EMAIL = savedGate;
 });
 
-describe('estimateWasOpened', () => {
-  test.each([
-    ['viewed_at', { viewed_at: new Date() }, true],
-    ['last_viewed_at', { last_viewed_at: new Date() }, true],
-    ['view_count', { view_count: 2 }, true],
-    ['no view stamp', { view_count: 0 }, false],
-  ])('%s', (_name, extra, expected) => {
-    expect(estimateWasOpened(estimateRow(extra))).toBe(expected);
+describe('latestViewTime and estimateOpenedAfter', () => {
+  const T0 = new Date('2026-11-20T15:00:00Z');
+
+  test('the latest of viewed_at and last_viewed_at; none for view_count alone or an unreadable stamp', () => {
+    expect(latestViewTime(estimateRow({ viewed_at: '2026-11-20T16:00:00Z', last_viewed_at: '2026-11-20T18:00:00Z' }))).toEqual(new Date('2026-11-20T18:00:00Z'));
+    expect(latestViewTime(estimateRow({ viewed_at: '2026-11-20T16:00:00Z' }))).toEqual(new Date('2026-11-20T16:00:00Z'));
+    expect(latestViewTime(estimateRow({ view_count: 4 }))).toBeNull();
+    expect(latestViewTime(estimateRow({ viewed_at: 'not a time' }))).toBeNull();
+  });
+
+  test('a view at or after the delivery counts; one before it, view_count alone, or an unreadable time does not', () => {
+    expect(estimateOpenedAfter(estimateRow({ viewed_at: T0 }), T0)).toBe(true);
+    expect(estimateOpenedAfter(estimateRow({ last_viewed_at: '2026-11-20T15:00:01Z' }), T0)).toBe(true);
+    expect(estimateOpenedAfter(estimateRow({ viewed_at: '2026-11-20T14:59:59Z' }), T0)).toBe(false);
+    expect(estimateOpenedAfter(estimateRow({ view_count: 5 }), T0)).toBe(false);
+    expect(estimateOpenedAfter(estimateRow({ viewed_at: T0 }), 'not a time')).toBe(false);
+    expect(estimateOpenedAfter(estimateRow({ viewed_at: T0 }), null)).toBe(false);
   });
 });
 
@@ -169,7 +178,8 @@ const STEP_HTML = '<p>Old body: just making sure it landed.</p>';
 function emailLog(rowsByAddress, { fail = false } = {}) {
   const q = chain();
   q.asked = {};
-  q.whereRaw = jest.fn((_sql, [address]) => { q.asked.address = address; return q; });
+  q.whereRaw = jest.fn((sql, [address]) => { q.asked.address = address; q.asked.sql = sql; return q; });
+  q.select = jest.fn((...columns) => { q.asked.select = columns; return q; });
   q.where = jest.fn((clause) => { q.asked.where = clause; return q; });
   q.whereIn = jest.fn((column, values) => { q.asked[column] = values; return q; });
   q.then = (resolve, reject) => (fail
@@ -177,7 +187,9 @@ function emailLog(rowsByAddress, { fail = false } = {}) {
     : Promise.resolve(rowsByAddress[q.asked.address] || [])).then(resolve, reject);
   return q;
 }
-const SENT_TO_PAT = { 'pat@example.com': [{ status: 'delivered' }] };
+// The estimate was emailed to Pat at 15:00 (sent_at); a view at 16:00 comes after it.
+const DELIVERED_AT = '2026-11-20T15:00:05Z';
+const SENT_TO_PAT = { 'pat@example.com': [{ status: 'delivered', sent_at: DELIVERED_AT, queued_at: '2026-11-20T15:00:00Z' }] };
 
 const STEP_ZERO = { id: 'step-1', step_order: 0, subject: 'A quick note on your Waves estimate, {{first_name}}',
   html_body: STEP_HTML, text_body: 'Old text: making sure it landed.', from_email: 'automations@wavespestcontrol.com', enabled: true };
@@ -238,8 +250,7 @@ describe('estimate_sent at delivery', () => {
   test.each([
     ['viewed_at', { viewed_at: new Date() }],
     ['last_viewed_at', { last_viewed_at: new Date() }],
-    ['view_count', { view_count: 3 }],
-  ])('gate on: opened (%s) + proof + matching address gets the new body; the subject stays the step\'s', async (_name, extra) => {
+  ])('gate on: opened (%s) after the delivery + proof + matching address gets the new body; the subject stays the step\'s', async (_name, extra) => {
     const { log } = queues({ estimateRows: [undefined, estimateRow(extra)] });
     const sent = await sendOnce();
     expect(sent.subject).toBe('A quick note on your Waves estimate, Pat');
@@ -255,23 +266,41 @@ describe('estimate_sent at delivery', () => {
     expect(log.asked.template_key).toEqual(['estimate.delivery', 'estimate.proposal_delivery', 'estimate.updated_delivery']);
     expect(log.asked.status).toEqual(expect.arrayContaining(['sent', 'delivered']));
     expect(log.asked.address).toBe('pat@example.com');
+    expect(log.asked.sql).toBe('LOWER(TRIM(recipient_email_snapshot)) = ?');
+    expect(log.asked.select).toEqual(['status', 'sent_at', 'queued_at']);
   });
 
-  test('gate on: an unopened estimate (with proof and a matching address) gets today\'s DB body exactly, and no log read', async () => {
-    queues({ estimateRows: [undefined, estimateRow()] });
+  test.each([
+    ['an unopened estimate', {}],
+    ['a view_count with no view timestamp', { view_count: 3 }],
+    ['an unreadable view time', { viewed_at: 'not a time' }],
+  ])('gate on: %s (with proof and a matching address) gets today\'s DB body exactly, and no log read', async (_name, extra) => {
+    queues({ estimateRows: [undefined, estimateRow(extra)] });
     expectTodaysBody(await sendOnce());
     expect(db).not.toHaveBeenCalledWith('email_messages');
   });
 
   test.each([
     ['no proof (an SMS-only send: no delivery email row)', emailLog({})],
-    ['a delivery email row for another address', emailLog({ 'other@example.com': [{ status: 'sent' }] })],
-    ['a delivery email that was only queued or failed', emailLog({ 'pat@example.com': [{ status: 'failed' }, { status: 'queued' }] })],
+    ['a delivery email row for another address', emailLog({ 'other@example.com': [{ status: 'sent', sent_at: DELIVERED_AT }] })],
+    ['a delivery email that was only queued or failed', emailLog({ 'pat@example.com': [{ status: 'failed', queued_at: DELIVERED_AT }, { status: 'queued', queued_at: DELIVERED_AT }] })],
+    ['a delivery email with an unreadable time', emailLog({ 'pat@example.com': [{ status: 'delivered', sent_at: 'not a time', queued_at: null }] })],
+    ['a view before the delivery to this address (an earlier recipient\'s open)', emailLog({ 'pat@example.com': [{ status: 'delivered', sent_at: '2026-11-20T17:00:00Z' }] })],
     ['a failed read of the email log', emailLog({}, { fail: true })],
   ])('gate on: an opened estimate with %s gets today\'s DB body exactly', async (_name, log) => {
     queues({ estimateRows: [undefined, opened()], log });
     expectTodaysBody(await sendOnce());
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('941-555-0100');
+  });
+
+  test('gate on: the EARLIEST accepted delivery to this address is the one the view is compared with', async () => {
+    const log = emailLog({ 'pat@example.com': [
+      { status: 'delivered', sent_at: '2026-11-20T18:00:00Z' },
+      { status: 'sent', sent_at: null, queued_at: '2026-11-20T15:30:00Z' },
+      { status: 'failed', sent_at: '2026-11-20T10:00:00Z' },
+    ] });
+    queues({ estimateRows: [undefined, opened()], log });
+    expect((await sendOnce()).html).toMatch(NEW_BODY);
   });
 
   test('gate on: an opened estimate whose step goes to another address (the account holder) gets today\'s DB body, no log read', async () => {
@@ -282,13 +311,40 @@ describe('estimate_sent at delivery', () => {
     expect(db).not.toHaveBeenCalledWith('email_messages');
   });
 
-  test('gate on: only the seeded 2-hour step is replaced; a later step of the template keeps its own body', async () => {
+  describe('a later step of the template (step_order 1)', () => {
     const second = { ...STEP_ZERO, id: 'step-2', step_order: 1, html_body: '<p>Second step body.</p>', text_body: 'Second step text.' };
-    queues({ estimateRows: [undefined, opened()], steps: [STEP_ZERO, second], enrollment: { current_step: 1 } });
-    const sent = await sendOnce();
-    expect(sent.html).toContain('Second step body.');
-    expect(sent.html).not.toContain('The Waves app keeps everything in one place');
-    expect(sent.text).toContain('Second step text.');
+    const laterStep = (estimateRows) => queues({ estimateRows, steps: [STEP_ZERO, second], enrollment: { current_step: 1 } });
+
+    test('keeps its own body, even for an opened estimate with proof; only the accept stop read the estimate', async () => {
+      laterStep([undefined]);
+      const sent = await sendOnce();
+      expect(sent.html).toContain('Second step body.');
+      expect(sent.text).toContain('Second step text.');
+      expect(sent.html).not.toContain('The Waves app keeps everything in one place');
+      expect(db.mock.calls.filter(([table]) => table === 'estimates')).toHaveLength(1);
+      expect(db).not.toHaveBeenCalledWith('email_messages');
+    });
+
+    test('a recorded reply does not cancel it', async () => {
+      followUp.hasRepliedSince.mockResolvedValue(true);
+      const { enrollmentUpdate } = laterStep([undefined]);
+      expect((await sendOnce()).html).toContain('Second step body.');
+      expect(followUp.hasRepliedSince).not.toHaveBeenCalled();
+      expect(enrollmentUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
+    });
+
+    test('a closed or archived estimate does not cancel it', async () => {
+      const { enrollmentUpdate } = laterStep([undefined, { ...estimateRow(), status: 'declined', archived_at: new Date() }]);
+      expect((await sendOnce()).html).toContain('Second step body.');
+      expect(enrollmentUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
+    });
+
+    test('the accept stop still cancels it', async () => {
+      const { enrollmentUpdate } = laterStep([{ id: 'est-1' }]);
+      await expect(sendStep('enrollment-n')).resolves.toEqual({ sent: false, blocked: true, reason: 'The customer accepted the estimate' });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      cancelledWith(enrollmentUpdate, 'estimate_accepted');
+    });
   });
 
   test('gate on: the stops and the body use one read of the estimate', async () => {
@@ -323,12 +379,21 @@ describe('estimate_sent at delivery', () => {
     cancelledWith(enrollmentUpdate, 'estimate_closed');
   });
 
-  test.each([['accepted'], ['declined'], ['expired'], ['void'], ['draft']])('gate on: status %s cancels as estimate_closed', async (status) => {
+  test.each([['accepted'], ['declined'], ['expired'], ['void']])('gate on: terminal status %s cancels as estimate_closed', async (status) => {
     const { enrollmentUpdate } = queues({ estimateRows: [undefined, { ...estimateRow(), status }] });
 
     await expect(sendStep('enrollment-n')).resolves.toEqual({ sent: false, blocked: true, reason: 'The estimate is no longer open' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     cancelledWith(enrollmentUpdate, 'estimate_closed');
+  });
+
+  test.each([['sending'], ['draft'], ['scheduled'], ['send_failed']])('gate on: a transient status (%s) is no stop and gets no new body: the DB body goes', async (status) => {
+    const { enrollmentUpdate } = queues({ estimateRows: [undefined, { ...opened(), status }] });
+
+    expectTodaysBody(await sendOnce());
+    expect(enrollmentUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
+    expect(followUp.hasRepliedSince).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalledWith('email_messages');
   });
 
   test('gate on: an estimate opted out of follow-ups cancels', async () => {

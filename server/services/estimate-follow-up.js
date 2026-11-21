@@ -1949,6 +1949,7 @@ module.exports._private = {
   mintStageLinks,
   hasRepliedRecently,
   hasRepliedSince,
+  TERMINAL_STATUSES,
   wasRecentlyOpened,
   estimateMidCheckout,
   followupMayStillSend,
