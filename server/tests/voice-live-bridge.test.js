@@ -1222,12 +1222,13 @@ describe("the reply delay is read from the caller's own audio", () => {
   });
 
   test("audio missing between two frames (a jump in Twilio's media timestamps) ends a run of voice; a stamp under one frame late does not", async () => {
-    const speechAfter = async (stamps) => {
+    // Each frame: its timestamp, or [timestamp, length in ms]; 20 ms when not given.
+    const speechAfter = async (frames) => {
       const t = setup();
       await t.ready();
-      for (const stamp of stamps) {
-        t.advance(20);
-        t.twilio.emit('message', JSON.stringify({ event: 'media', media: { track: 'inbound', timestamp: String(stamp), payload: b64(160) } }));
+      for (const [stamp, ms = 20] of frames.map((frame) => [].concat(frame))) {
+        t.advance(ms);
+        t.twilio.emit('message', JSON.stringify({ event: 'media', media: { track: 'inbound', timestamp: String(stamp), payload: b64(ms * 8) } }));
       }
       return t.bridge.callerSpokeAt !== null;
     };
@@ -1236,6 +1237,8 @@ describe("the reply delay is read from the caller's own audio", () => {
     expect(await speechAfter([20, 40, 60, 80, 119])).toBe(true);
     expect(await speechAfter([20, 40, 60, 80, 2000])).toBe(false); // 80 ms of voice, 1.9 s missing, a click
     expect(await speechAfter([20, 40, 60, 80, 2000, 2020, 2040, 2060, 2080])).toBe(true); // a new run of 100 ms after the gap
+    expect(await speechAfter([20, 40, 60, [80, 40]])).toBe(true); // 60 ms, then a 40 ms frame right after it
+    expect(await speechAfter([20, 40, 60, [100, 40]])).toBe(false); // 20 ms is missing before a longer frame: its length does not hide the gap
   });
 
   // Two end-to-end runs on the live API: the real bridge, a synthetic caller,

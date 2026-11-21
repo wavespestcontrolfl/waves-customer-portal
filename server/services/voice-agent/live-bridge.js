@@ -42,6 +42,7 @@ const REPLY_SILENCE_MIN_MS = 600; // model audio silent this long before voice b
 const VOICED_SAMPLE_MIN = 300; // a decoded sample at or above this magnitude (16-bit scale) is voice
 const CALLER_VOICED_RMS_MIN = 300; // a caller frame at or above this RMS (16-bit scale) holds voice
 const CALLER_SPEECH_MIN_MS = 100; // caller frames that hold voice this long in a row are speech; a shorter sound (a click, a knock) is not
+const CALLER_GAP_MIN_MS = 20; // caller audio missing this long before a frame, by Twilio's media timestamps (one 20 ms frame of its), ends a run of voice
 const CALLER_STOPPED_MIN_MS = 200; // a reply whose first voice comes sooner than this after the caller's last speech did not wait for the caller to stop
 const TAIL_DROP_MAX_MS = 1500; // after a barge-in, drop the cut-off reply's tail at most this long
 // Caller audio that arrives before session.started (admission and the OpenAI
@@ -344,8 +345,9 @@ class LiveBridge {
   // At CALLER_VOICED_RMS_MIN or more the frame holds voice. Caller SPEECH is
   // voice for CALLER_SPEECH_MIN_MS in a row, and nothing else: a shorter sound
   // (a click, a knock) times nothing. Frames are in a row by Twilio's media
-  // timestamp, the frame's place in the stream: when a frame or more is
-  // missing before this one, that ends the run as a silent frame does. The
+  // timestamp, the frame's place in the stream: when CALLER_GAP_MIN_MS of
+  // audio or more is missing before this frame, whatever this frame's own
+  // length, that ends the run as a silent frame does. The
   // arrival of the latest frame of speech is kept (callerSpokeAt); reply
   // delays start there (onReplyStart). Speech from before session.started
   // starts no delay: the model hears it only once the session is up, and the
@@ -364,7 +366,7 @@ class LiveBridge {
     this.callerMs += ms;
     const stamp = Number.parseInt(timestamp, 10);
     if (Number.isFinite(stamp)) {
-      if (this.callerStampEnd !== null && stamp - this.callerStampEnd >= ms) this.callerRunMs = 0;
+      if (this.callerStampEnd !== null && stamp - this.callerStampEnd >= CALLER_GAP_MIN_MS) this.callerRunMs = 0;
       this.callerStampEnd = stamp + ms;
     }
     if (atLevel(CALLER_VOICED_RMS_MIN)) {
