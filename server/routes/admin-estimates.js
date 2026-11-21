@@ -4457,7 +4457,7 @@ router.get('/', async (req, res, next) => {
     const soldByById = await loadSoldByForList(db, estimates);
     // Call list: the newest outbound call to each VIEWED row's phone, one batched read.
     // A failed read costs only the field (lastCalledAt stays null).
-    const { lastCalledAtByEstimateId, lastCallOutcomeByEstimateId, callTodayFields } = require('../services/estimate-call-list');
+    const { lastCalledAtByEstimateId, lastCallOutcomeByEstimateId, stillDecidingByEstimateId, callTodayFields } = require('../services/estimate-call-list');
     let lastCalledById = new Map();
     try {
       lastCalledById = await lastCalledAtByEstimateId(db, estimates);
@@ -4474,6 +4474,14 @@ router.get('/', async (req, res, next) => {
       lastCallOutcomeById = await lastCallOutcomeByEstimateId(db, estimates.map((e) => e.id));
     } catch (err) {
       logger.warn(`[estimates] call-list call outcome read failed (${err?.code || 'no code'})`);
+    }
+    // What each customer said would help them decide (the estimate page's "Not ready yet?" sheet), one batched read.
+    // A failed read costs only the field: the row then follows the plain 2h rule and shows no reason.
+    let stillDecidingById = new Map();
+    try {
+      stillDecidingById = await stillDecidingByEstimateId(db, estimates.map((e) => e.id));
+    } catch (err) {
+      logger.warn(`[estimates] call-list still-deciding read failed (${err?.code || 'no code'})`);
     }
 
     res.json({
@@ -4544,6 +4552,7 @@ router.get('/', async (req, res, next) => {
             lastCalledAt: lastCalledById.get(e.id),
             lastCallOutcome: lastCallOutcomeById?.get(e.id),
             callOutcomeUnknown: !lastCallOutcomeById,
+            stillDeciding: stillDecidingById.get(e.id),
             undeliveredSelfServe: require('../services/self-serve-estimates').isUndeliveredSelfServe(e.source, estData),
           }),
           source: e.source || 'manual',

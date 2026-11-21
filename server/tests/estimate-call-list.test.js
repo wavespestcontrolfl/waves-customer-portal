@@ -5,6 +5,8 @@
  *   - Reviving an expired row (extend, direct and grouped siblings) sheds a staff loss reason.
  *   - lastCalledAt: one batched call_log read for the viewed rows, phone matched as call_log.to_phone is stored.
  *   - Call outcomes: POST /api/admin/estimates/:id/call-outcome saves one activity_log row; one batched read per list.
+ *   - Still deciding: one batched read of the reason a customer sent on the estimate page; the shared rule shows that
+ *     row at once and keeps it until someone answers the reason.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
@@ -486,6 +488,139 @@ describe('call outcomes', () => {
       const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
       expect(src).toContain('lastCallOutcomeByEstimateId(db, ');
       expect(src).toContain('lastCallOutcome: ');
+    }
+  });
+});
+
+// Owner 2026-11-21 (estimate page changes, change 1): a customer who says what would help them decide goes on
+// "Call today" with the reason.
+describe('what would help a still-deciding customer', () => {
+  const { stillDecidingByEstimateId, callTodayFields } = require('../services/estimate-call-list');
+  const shared = require('../../shared/estimate-call-today.cjs');
+  const HOUR = 3600000;
+  const now = Date.parse('2026-11-21T15:00:00Z');
+  const ago = (hours) => new Date(now - hours * HOUR).toISOString();
+  const stored = (viewedHoursAgo, over = {}) => ({
+    status: 'viewed', customer_phone: '+19415550101', archived_at: null, sent_at: ago(viewedHoursAgo + 24),
+    viewed_at: ago(viewedHoursAgo), last_viewed_at: ago(viewedHoursAgo), last_follow_up_at: null, ...over,
+  });
+  const onList = (row, fields) => shared.isCallTodayEstimate(callTodayFields(row, fields), now);
+
+  test('one read: the newest reason per estimate, at the time the customer sent it', async () => {
+    const calls = [];
+    const q = {};
+    for (const name of ['where', 'whereIn', 'whereRaw', 'distinctOn', 'orderBy', 'select']) q[name] = (...args) => { calls.push([name, ...args]); return q; };
+    q.then = (ok, no) => Promise.resolve([
+      { estimate_id: 'e1', created_at: '2026-11-21T13:00:00Z', metadata: { reason: 'person', reason_at: '2026-11-21T13:04:00Z' } },
+      { estimate_id: 'e2', created_at: '2026-11-21T13:10:00Z', metadata: { reason: 'price' } },
+      { estimate_id: 'e3', created_at: '2026-11-21T13:20:00Z', metadata: { reason: 'constructor' } },
+    ]).then(ok, no);
+    const database = jest.fn(() => q);
+    const out = await stillDecidingByEstimateId(database, ['e1', 'e2', 'e3', 'e4']);
+    expect(database).toHaveBeenCalledTimes(1);
+    expect(database).toHaveBeenCalledWith('activity_log');
+    expect(calls).toEqual([
+      ['where', 'action', 'estimate_customer_still_deciding'],
+      ['whereIn', 'estimate_id', ['e1', 'e2', 'e3', 'e4']],
+      // A later tap with no reason (Skip) never hides the reason the customer sent before it.
+      ['whereRaw', "metadata->>'reason' IS NOT NULL"],
+      ['distinctOn', 'estimate_id'],
+      ['orderBy', [{ column: 'estimate_id' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]],
+      ['select', 'estimate_id', 'created_at', 'metadata'],
+    ]);
+    expect(out.get('e1')).toEqual({ reason: 'person', at: '2026-11-21T13:04:00Z' });
+    expect(out.get('e2')).toEqual({ reason: 'price', at: '2026-11-21T13:10:00Z' }); // no reason_at: the row's own time
+    expect(out.has('e3')).toBe(false); // not one of the five
+    expect(out.has('e4')).toBe(false);
+  });
+
+  test('no ids = no query', async () => {
+    const database = jest.fn();
+    expect((await stillDecidingByEstimateId(database, [])).size).toBe(0);
+    expect(database).not.toHaveBeenCalled();
+  });
+
+  test('the row words every reason the server accepts, and no other', () => {
+    const { STILL_DECIDING_REASONS } = require('../services/estimate-change-request');
+    expect(Object.keys(shared.STILL_DECIDING_HELP).sort()).toEqual(Object.keys(STILL_DECIDING_REASONS).sort());
+  });
+
+  test('a sent reason shows the row at once: no 2 h wait', () => {
+    const fresh = stored(0.2);
+    expect(onList(fresh)).toBe(false); // opened 12 minutes ago: the wait gives the customer time to book alone
+    expect(callTodayFields(fresh).stillDeciding).toBeNull();
+    const told = { reason: 'person', at: ago(0.1) };
+    expect(callTodayFields(fresh, { stillDeciding: told }).stillDeciding).toEqual(told);
+    expect(onList(fresh, { stillDeciding: told })).toBe(true);
+    for (const reason of Object.keys(shared.STILL_DECIDING_HELP)) {
+      expect(onList(fresh, { stillDeciding: { reason, at: ago(0.1) } })).toBe(true);
+    }
+  });
+
+  test('the row stays until someone answers the reason: a call, a follow-up or an outcome after it', () => {
+    const row = stored(6);
+    const told = { reason: 'price', at: ago(5) };
+    expect(onList(row, { stillDeciding: told })).toBe(true);
+    expect(onList(row, { stillDeciding: told, lastCalledAt: ago(1) })).toBe(false);
+    expect(onList(row, { stillDeciding: told, lastCallOutcome: { outcome: 'call_back', at: ago(1), by: 'Virginia' } })).toBe(false);
+    expect(onList(stored(6, { last_follow_up_at: ago(1) }), { stillDeciding: told })).toBe(false);
+    // A contact from BEFORE the reason does not answer it.
+    expect(onList(stored(0.5), { stillDeciding: { reason: 'person', at: ago(0.2) }, lastCalledAt: ago(3) })).toBe(true);
+  });
+
+  test('a reason is a customer touch: it puts back a row a call had taken off', () => {
+    // Opened 6 h ago, called 3 h ago (off the list), then the customer sent a reason 20 minutes ago.
+    const row = stored(6);
+    expect(onList(row, { lastCalledAt: ago(3) })).toBe(false);
+    expect(onList(row, { lastCalledAt: ago(3), stillDeciding: { reason: 'quotes', at: ago(0.3) } })).toBe(true);
+    expect(shared.lastEngagementMs(callTodayFields(row, { stillDeciding: { reason: 'quotes', at: ago(0.3) } }))).toBe(now - 0.3 * HOUR);
+  });
+
+  test('after the answer, a new open follows the plain rule again', () => {
+    // Reason 10 h ago, call 8 h ago, the customer opened the page again later.
+    const answered = { stillDeciding: { reason: 'person', at: ago(10) }, lastCalledAt: ago(8) };
+    expect(onList(stored(1), answered)).toBe(false); // inside the 2 h wait
+    expect(onList(stored(3), answered)).toBe(true);
+  });
+
+  test('the limits of the list still hold for a row with a reason', () => {
+    const told = { reason: 'person', at: ago(0.1) };
+    // 48 h since the last touch: off the list (the Going cold view has it).
+    expect(onList(stored(60), { stillDeciding: { reason: 'person', at: ago(49) } })).toBe(false);
+    expect(onList(stored(60), { stillDeciding: { reason: 'person', at: ago(47) } })).toBe(true);
+    // A self-serve quote nobody delivered: the zero-follow-up contract.
+    expect(onList(stored(0.2), { stillDeciding: told, undeliveredSelfServe: true })).toBe(false);
+    // A failed outcome read still withholds the row.
+    expect(onList(stored(0.2), { stillDeciding: told, callOutcomeUnknown: true })).toBe(false);
+    // No phone, an archived row, a settled row: not callable.
+    expect(onList(stored(0.2, { customer_phone: null }), { stillDeciding: told })).toBe(false);
+    expect(onList(stored(0.2, { archived_at: ago(0.05) }), { stillDeciding: told })).toBe(false);
+    expect(onList(stored(0.2, { status: 'accepted' }), { stillDeciding: told })).toBe(false);
+  });
+
+  // The call read goes back 30 days, so an old reason can look unanswered. It must not skip the wait for a new open.
+  test('the skip lasts 48 h from the reason: after that a new open follows the plain rule', () => {
+    const old = { reason: 'person', at: ago(60) };
+    expect(onList(stored(0.5), { stillDeciding: old })).toBe(false);
+    expect(onList(stored(3), { stillDeciding: old })).toBe(true);
+    // Inside 48 h the reason still skips the wait for a new open.
+    expect(onList(stored(0.5), { stillDeciding: { reason: 'person', at: ago(40) } })).toBe(true);
+  });
+
+  test('a reason the list does not know, or one with no time, changes nothing', () => {
+    expect(onList(stored(0.2), { stillDeciding: { reason: 'constructor', at: ago(0.1) } })).toBe(false);
+    expect(onList(stored(0.2), { stillDeciding: { reason: 'price', at: 'not a date' } })).toBe(false);
+    expect(onList(stored(5), { stillDeciding: { reason: 'constructor', at: ago(0.1) } })).toBe(true);
+  });
+
+  test('the list route and the 9 AM push both read reasons through the one batched read; a failed read costs only the field', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const file of ['routes/admin-estimates.js', 'services/estimate-call-today-push.js']) {
+      const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+      expect(src).toContain('stillDecidingByEstimateId(db, ');
+      expect(src).toContain('stillDeciding: ');
+      expect(src).toContain('still-deciding read failed (${err?.code || \'no code\'})');
     }
   });
 });
