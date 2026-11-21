@@ -249,9 +249,15 @@ async function estimateSentStop(enrollment) {
   return estimateSentNameServiceStop(enrollment);
 }
 
+// The estimate row each estimate_sent send evaluated its stops on, keyed by the enrollment object of that send. The body is
+// built from THIS row (withEstimateSentBody), never from a second read, so a row that changed after the stops were judged
+// cannot still get the email built for the old row.
+const stopEvaluatedEstimates = new WeakMap();
+
 async function estimateSentNameServiceStop(enrollment) {
   const estimate = await nameServiceEstimateFor(enrollment);
   if (!estimate) return null;
+  stopEvaluatedEstimates.set(enrollment, estimate);
   const closed = estimateNoLongerOpen(estimate);
   if (closed) return closed;
   if (await customerRepliedSinceEstimate(estimate, enrollment)) {
@@ -316,11 +322,13 @@ async function estimateSentLink(estimate, recipient) {
 const ESTIMATE_SENT_INITIAL_STEP_ORDER = 0;
 
 // The rendered content to send: the per-estimate body for the 2-hour estimate_sent email, else the content passed in
-// (today's step body: gate off, no estimate id, no estimate row, a test send, another template or another step).
+// (today's step body: gate off, no estimate id, no estimate row, a test send, another template or another step). The estimate
+// is the row the stops judged (one read for both).
 async function withEstimateSentBody({ html, text }, { template, step, enrollment, recipient, testRecipient, personal, asmGroupId }) {
   if (template.key !== 'estimate_sent' || testRecipient || Number(step?.step_order) !== ESTIMATE_SENT_INITIAL_STEP_ORDER) return { html, text };
-  const estimate = await nameServiceEstimateFor(enrollment);
+  const estimate = stopEvaluatedEstimates.get(enrollment);
   if (!estimate) return { html, text };
+  stopEvaluatedEstimates.delete(enrollment);
   const { buildEstimateSentEmail } = require('./estimate-sent-email-by-service');
   const body = buildEstimateSentEmail({ estimate, estimateUrl: await estimateSentLink(estimate, recipient) });
   return renderAutomationStepContent({ template, htmlBody: body.html_body, textBody: body.text_body, customer: personal, asmGroupId });

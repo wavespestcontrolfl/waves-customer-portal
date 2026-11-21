@@ -29,7 +29,9 @@
  * may use typographic dashes; they render as HTML.
  */
 
-const { inferEstimateServiceLines, closedServiceKeys, recurringRowServiceKeys } = require('./estimate-service-lines');
+const {
+  inferEstimateServiceLines, closedServiceKeys, recurringRowServiceKeys, oneTimeLineKeys,
+} = require('./estimate-service-lines');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 
@@ -366,17 +368,36 @@ function quotedServiceName(estimate) {
   return PACKS.bundle.label;
 }
 
-// The lawn + pest pack applies only to exactly those two lanes on a recurring estimate, when both are recurring-terms
-// lanes, and only on affirmative RECURRING evidence: the stored recurring rows name exactly lawn + pest. Ticked boxes
-// alone never qualify (they fold one-time and recurring services into one family), and the legacy (text-inclusive) lane
-// keys must agree, so a lane found only in free text keeps the neutral bundle terms instead of the recurring promises.
+// A sold one-time service line of any kind: a one-time item, spec item or area add-on the estimate carries, or one-time
+// dollars. A recurring estimate's inferred lanes never show these, so the lawn + pest pack checks them here.
+function carriesOneTimeService(estimate) {
+  return oneTimeLineKeys(estimate || {}).length > 0
+    || (Number(estimate?.onetime_total ?? estimate?.onetimeTotal ?? estimate?.oneTimeTotal) || 0) > 0;
+}
+
+// The lawn + pest pack applies only to a PURE recurring lawn + pest estimate: the stored recurring rows name exactly lawn +
+// pest, both are recurring-terms lanes, and the estimate carries no one-time service line and no termite key from any closed
+// source. Ticked boxes alone never qualify (they fold one-time and recurring services into one family), and the legacy
+// (text-inclusive) lane keys must agree, so a lane found only in free text keeps the neutral bundle terms.
 function usesLawnPestPack(estimate, legacyKeys) {
   const terms = (key) => PACKS[key].benefit === RECURRING_TERMS_BENEFIT;
   const sameTwo = (keys) => keys.length === 2 && keys.includes('lawn') && keys.includes('pest');
   try {
     return sameTwo(recurringRowServiceKeys(estimate || {})) && sameTwo(legacyKeys || [])
-      && terms('lawn') && terms('pest') && !estimateIsOneTimeOnly(estimate);
+      && terms('lawn') && terms('pest') && !estimateIsOneTimeOnly(estimate)
+      && !carriesOneTimeService(estimate)
+      && !closedServiceKeys(estimate || {}).some((k) => TERMITE_LANES.has(k));
   } catch { return false; }
+}
+
+// Gate on: a termite job sold as a one-time line (trenching, pre-slab, Bora-Care) counts as termite for the no-guarantee
+// override, though the recurring rows hide it from the legacy lane keys.
+function hasTermiteLane(estimate, legacyKeys, nameService) {
+  const keys = [...(legacyKeys || [])];
+  if (nameService) {
+    try { keys.push(...oneTimeLineKeys(estimate || {})); } catch { /* the legacy keys stand */ }
+  }
+  return keys.some((k) => TERMITE_LANES.has(k));
 }
 
 function packForEstimate(estimate) {
@@ -421,7 +442,7 @@ function followupEmailVars(estimate) {
   // pre-slab / Bora-Care quotes fold to `one_time`, termite + pest to
   // `bundle`, bait monitoring to `commercial`, and all three carry
   // "satisfaction guaranteed".
-  const hasTermite = (keys || []).some((k) => TERMITE_LANES.has(k));
+  const hasTermite = hasTermiteLane(estimate, keys, nameService);
   return emailVarsFor(pack, nameService ? quotedServiceName(estimate) : pack.label, hasTermite);
 }
 

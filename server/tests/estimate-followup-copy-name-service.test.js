@@ -217,6 +217,39 @@ describe('followupEmailVars', () => {
     expect(vars.category_included).not.toContain('free callbacks');
   });
 
+  test('gate on: a recurring lawn + pest plan plus a one-time trenching job gets neutral terms and no guarantee line', () => {
+    gateOn();
+    const est = recurring('Pest Control', 'Lawn Care');
+    est.estimate_data.result.oneTime = { items: [{ service: 'termite_trenching', name: 'Termite trenching', price: 800 }] };
+    est.onetime_total = 800;
+    const vars = followupEmailVars(est);
+    expect(vars.service_label).toBe('lawn care and pest control');
+    expect(vars.category_headline).toBe(PACKS.bundle.headline);
+    expect(vars.category_benefit).toBe(NO_GUARANTEE_BENEFIT);
+    expect(vars.faq_terms).toBe('');
+    expect(vars.faq_between_visits).toBe('');
+    expect(vars.category_included).not.toMatch(/callback|guarantee/i);
+    gateOff();
+    // gate off is today's output: the bundle pack, whose benefit keeps its own wording
+    expect(followupEmailVars(est).category_benefit).toBe(PACKS.bundle.benefit);
+  });
+
+  test('gate on: a recurring lawn + pest plan with any other one-time service line is not the combined pack', () => {
+    gateOn();
+    const est = recurring('Pest Control', 'Lawn Care');
+    est.estimate_data.result.oneTime = { items: [{ service: 'one_time_pest', name: 'One-time pest treatment', price: 150 }] };
+    const vars = followupEmailVars(est);
+    expect(vars.category_headline).toBe(PACKS.bundle.headline);
+    expect(vars.faq_terms).toBe('');
+  });
+
+  test('gate on: a pure recurring lawn + pest plan is the combined pack', () => {
+    gateOn();
+    const vars = followupEmailVars(recurring('Pest Control', 'Lawn Care'));
+    expect(vars.category_headline).toBe(LAWN_PEST_PACK.headline);
+    expect(vars.category_benefit).toBe(RECURRING_TERMS_BENEFIT);
+  });
+
   test('gate on: a termite estimate keeps no guarantee and gets no contract claim', () => {
     gateOn();
     const vars = followupEmailVars(recurring('Termite Bait Monitoring'));

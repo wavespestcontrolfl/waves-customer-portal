@@ -159,7 +159,7 @@ describe('buildEstimateSentEmail', () => {
       ['a termite estimate', recurring('Termite Bait Monitoring')],
     ])('%s: paragraph, linked poster and caption sit after the question rows and before the closing', (_name, estimate) => {
       const { html_body: html, text_body: text } = buildEstimateSentEmail({ estimate, estimateUrl: 'https://waves.test/l/abc123' });
-      expect(APP_PARAGRAPH).toBe('The Waves app keeps everything in one place — every visit and every report, pay in a tap, and if a time stops working you can reschedule any visit yourself, right from the app.');
+      expect(APP_PARAGRAPH).toBe('The Waves app keeps everything in one place — every visit and every report, pay in a tap, and if a time stops working you can reschedule a visit yourself, right from the app.');
       expect(APP_TOUR_POSTER_URL).toBe('https://portal.wavespestcontrol.com/app-email/videos/waves-app-tour-poster.jpg');
       expect(APP_TOUR_VIDEO_URL).toBe('https://portal.wavespestcontrol.com/app-email/videos/waves-app-tour.mp4');
       expect(APP_CAPTION).toBe('Tap to watch the Waves app in action.');
@@ -374,6 +374,24 @@ describe('estimate_sent at delivery', () => {
     expect(sent.html).toContain('Second step body.');
     expect(sent.html).not.toContain('The Waves app keeps everything in one place');
     expect(sent.text).toContain('Second step text.');
+  });
+
+  test('gate on: the body is built from the row the stops judged, never from a second read', async () => {
+    // A third read would see an archived lawn estimate; there is none: the body comes from the stop row (pest).
+    queues({ estimateRows: [undefined, recurring('Pest Control'), { ...recurring('Lawn Care'), archived_at: new Date() }] });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-one-row' });
+
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+    expect(sendgrid.sendOne.mock.calls[0][0].html).toContain('Your pest control estimate is ready');
+    expect(db.mock.calls.filter(([table]) => table === 'estimates')).toHaveLength(2);
+  });
+
+  test('gate on: a row that is no longer open when the stops read it sends nothing and cancels the enrollment', async () => {
+    const { enrollmentUpdate } = queues({ estimateRows: [undefined, { ...recurring('Pest Control'), accepted_at: new Date(), status: 'accepted' }] });
+
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ blocked: true, reason: 'The estimate is no longer open' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    cancelledWith(enrollmentUpdate, 'estimate_closed');
   });
 
   test('gate on: an archived estimate cancels as estimate_closed', async () => {

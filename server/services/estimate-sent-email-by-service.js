@@ -24,7 +24,7 @@ const CLOSING = "If you've got a question that's not on that list, just reply to
 const SIGN_OFF = '— The Waves Pest Control team';
 
 // The Waves app block (owner 2026-11-21: these emails show the app). A linked poster that opens the app tour video.
-const APP_PARAGRAPH = 'The Waves app keeps everything in one place — every visit and every report, pay in a tap, and if a time stops working you can reschedule any visit yourself, right from the app.';
+const APP_PARAGRAPH = 'The Waves app keeps everything in one place — every visit and every report, pay in a tap, and if a time stops working you can reschedule a visit yourself, right from the app.';
 const APP_IMAGE_ALT = 'Tap to watch: the Waves app — visits, reports, reschedule, and payments in one place';
 const APP_CAPTION = 'Tap to watch the Waves app in action.';
 const APP_TOUR_POSTER_URL = 'https://portal.wavespestcontrol.com/app-email/videos/waves-app-tour-poster.jpg';

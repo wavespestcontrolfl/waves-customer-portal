@@ -481,6 +481,16 @@ function recurringRowServiceKeys(estimate = {}) {
   return unique(recurringServicesFromData(data).map((line) => line.key).filter((key) => key && key !== 'unknown'));
 }
 
+// The keys of the one-time service lines the estimate carries (its one-time items and spec items, and its area add-ons), as
+// text keys: `unknown` stays when a line names no lane. [] when it carries none. A recurring estimate's inferred lines never
+// show these (inferEstimateServiceLines returns early on recurring rows), so copy that must not promise recurring terms
+// over a one-time job (trenching, pre-slab) reads them here.
+function oneTimeLineKeys(estimate = {}) {
+  const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
+  const addOns = areaAddOnLinesFromData(data, estimate.pricingAuthority ?? estimate.pricing_authority);
+  return unique([...oneTimeServicesFromData(data), ...addOns].map((line) => line.key));
+}
+
 function inferEstimateServiceInterest(estimate = {}) {
   const explicit = String(estimate.serviceInterest || estimate.service_interest || '').trim();
   if (explicit) return explicit;
@@ -497,6 +507,7 @@ module.exports = {
   recurringRowServiceKeys,
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
+  oneTimeLineKeys,
   oneTimeServicesFromData,
   parseEstimateData,
   serviceKeysFromText,
