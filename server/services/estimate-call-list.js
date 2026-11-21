@@ -215,8 +215,9 @@ function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, lastC
     lastCallOutcome: lastCallOutcome || null,
     // The outcome read failed, so null above proves nothing: the shared rule withholds the row from Call today.
     callOutcomeUnknown: Boolean(callOutcomeUnknown),
-    // The newest reason the customer sent under "What would help you decide?", { reason, at }, or null.
-    stillDeciding: stillDeciding || null,
+    // The newest reason the customer sent under "What would help you decide?", { reason, at }, or null. Only on an open
+    // offer (sent or viewed): an accepted, declined or expired row is not still deciding, and must not say so.
+    stillDeciding: (row.status === 'sent' || row.status === 'viewed') ? (stillDeciding || null) : null,
     // A self-serve quote nobody delivered (plan restart, plan start, report card) never makes the
     // list: the zero-follow-up contract (services/self-serve-estimates.js). The caller passes the
     // rule's answer.

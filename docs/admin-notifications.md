@@ -714,7 +714,8 @@ on the list at once: the rule skips its 2-hour wait for that row and keeps it un
 is newer than the reason, or 48 hours pass since the customer's last touch. The skip lasts 48 hours from the reason;
 after that a new open follows the plain 2-hour rule. The reason is the day's
 `estimate_customer_still_deciding` `activity_log` row (`metadata.reason`), read in one batch by
-`stillDecidingByEstimateId`; the row shows it as "Still deciding: wants a lower price · 9:42 AM". This list, not the
+`stillDecidingByEstimateId`; an open row (sent or viewed) shows it as "Still deciding: wants a lower price · 9:42 AM",
+and a settled row (accepted, declined, expired) never carries it. This list, not the
 `estimate_stuck` bell, is where a promised call waits: it does not depend on the bell category being on, and a later
 booking problem cannot rewrite it. A failed reason read costs only the reasons (the count can be low, never high), so
 the banner still goes out. The words carry a count

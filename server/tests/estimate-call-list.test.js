@@ -607,6 +607,16 @@ describe('what would help a still-deciding customer', () => {
     expect(onList(stored(0.5), { stillDeciding: { reason: 'person', at: ago(40) } })).toBe(true);
   });
 
+  test('only an open offer carries the reason: a settled row is not still deciding', () => {
+    const told = { reason: 'price', at: ago(5) };
+    for (const status of ['sent', 'viewed']) {
+      expect(callTodayFields(stored(6, { status }), { stillDeciding: told }).stillDeciding).toEqual(told);
+    }
+    for (const status of ['accepted', 'declined', 'expired', 'draft']) {
+      expect(callTodayFields(stored(6, { status }), { stillDeciding: told }).stillDeciding).toBeNull();
+    }
+  });
+
   test('a reason the list does not know, or one with no time, changes nothing', () => {
     expect(onList(stored(0.2), { stillDeciding: { reason: 'constructor', at: ago(0.1) } })).toBe(false);
     expect(onList(stored(0.2), { stillDeciding: { reason: 'price', at: 'not a date' } })).toBe(false);
