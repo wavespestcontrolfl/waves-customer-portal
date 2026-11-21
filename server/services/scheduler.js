@@ -8403,6 +8403,15 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Ad route-areas record failed: ${err.message}`);
     }
+    // Ads follow the route, step 2 (record only, $0): for each campaign marked with a route line, what the route rule
+    // would do (base or stop, and the change to its location list). Its own try and its own job_health row, after
+    // the budget run, so it can never delay or fail a budget change. It reads Google Ads and changes nothing. With
+    // no marked campaign it is one read of ad_campaigns. See ads/route-fill.js.
+    try {
+      await runExclusive('ads-route-fill', () => require('./ads/route-fill').recordRouteFill());
+    } catch (err) {
+      logger.error(`Ad route-fill record failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
