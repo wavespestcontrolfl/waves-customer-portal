@@ -54,9 +54,9 @@ permissions:
 
 # Installs are cached between runs (2026-11-20, owner *a*): .github/actions/npm-install.
 # Kept only if 20 first-try PR runs show the median run 30 s or more faster.
-# Jest's compiled files are not cached (owner *drop*, 2026-11-20). With that cache warm,
-# server-unit (4) ran out of heap in public-route-allowlist.test.js in 8 of 13 runs,
-# against 1 in about 17 before it. .github/actions/jest-cache-restore can bring it back.
+# Jest's compiled files are not cached (owner *drop*, 2026-11-20): with that cache warm,
+# server-unit (4) ran out of heap in public-route-allowlist.test.js far more often.
+# .github/actions/jest-cache-restore can bring it back.
 jobs:
   server:
     runs-on: ubuntu-latest
