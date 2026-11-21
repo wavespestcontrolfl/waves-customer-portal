@@ -34,7 +34,7 @@ const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
 const { SOURCE_TYPE: COMMISSION_SOURCE_TYPE } = require('./payroll-commission');
 const { SOURCE_TYPE: REVIEW_BONUS_SOURCE_TYPE } = require('./payroll-review-bonuses');
 const { etDateString } = require('../utils/datetime-et');
-const { STAFF_TIME_ZONE, addStaffWorkDays } = require('../utils/staff-time-work-date');
+const { STAFF_TIME_ZONE, addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // The level ladder has no source yet: the calculator's entry level.
@@ -313,8 +313,9 @@ function componentShareCents(component, checkWeekStart, fromDay, toDay) {
  * weekly pay means August work is paid in September; a catch-up line or premium paid later counts when it was
  * earned). It is the sum, over every finalized check, of the components (see checkComponents, which holds the
  * component table and each one's earning date rule) whose earning dates fall in the window; a component that
- * straddles an edge counts its in-window share. D5-5 pay lines MUST use this helper (with readGross) for the
- * season bonus base and the stay bonus's prior 12 months, so the board and the pay line can never differ.
+ * straddles an edge counts its in-window share. D5-5 pay lines MUST use this helper for the season bonus base
+ * (with readGross) and the stay bonus's prior 12 months (with readStayPay, which also fixes which checks count), so
+ * the board and the pay line can never differ.
  */
 function earnedGrossCents(checks, from, to) {
   const fromDay = dayNumber(from);
@@ -405,27 +406,20 @@ function ordinaryPremium(lines, storedWeeks, earlier = {}) {
   return { weeks, excludedCents: sum(plain) - sum(weeks) };
 }
 
-// A pay line `l` whose pay, or the overtime it adds, can count in a window of days. Its pay is earned between the first day it
-// covers (or its pay week) and the last (lineComponents). Its overtime is priced over WHOLE workweeks (weeksOfLine), and a
-// week's premium counts on each of that week's seven days: so the test runs from the Monday of the first week it covers to the
-// Sunday of the last, not from the covered days themselves (a line for Tuesday to Friday adds premium that counts on that
-// Monday). Never narrower than what readGross counts. Bindings: the window's last day, then its first.
-const LINE_IN_WINDOW_SQL = "LEAST(date_trunc('week', l.covers_from::timestamp)::date, l.earned_week_start) <= ?::date"
-  + " AND GREATEST(date_trunc('week', l.covers_to::timestamp)::date + 6, l.earned_week_start + 6) >= ?::date";
-
 /**
  * The technician's finalized checks that can hold pay earned in [from, to] (every check whose pay week ends on or
  * after `from`: a catch-up line or premium can be paid long after it was earned), with their dated parts, then
  * earnedGrossCents. Day records are read only for a week that straddles a window edge.
- * Returns { cents, checkIds }. checkIds are the checks the figure was worked out from, sorted: every check read whose pay
- * week touches the window, or that paid a pay line that can count in it (LINE_IN_WINDOW_SQL). The pay run keeps them on a
- * bonus line it works out from this figure (tech-rewards-pay-lines.js), so those checks cannot be voided under a paid bonus.
+ * `throughWeek` (a Monday) leaves out every check for a later pay week (readStayPay).
+ * Returns { cents, checkIds }: the figure, and the ids of the checks read, sorted.
  */
-async function readGrossAndChecks(conn, technicianId, from, to) {
-  const rows = await conn('payroll_checks as c')
+async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = null } = {}) {
+  const query = conn('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
-    .whereRaw('c.week_start + 6 >= ?::date', [from])
+    .whereRaw('c.week_start + 6 >= ?::date', [from]);
+  if (throughWeek) query.whereRaw('c.week_start <= ?::date', [throughWeek]);
+  const rows = await query
     .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), conn.raw("to_char(r.pay_date, 'YYYY-MM-DD') AS pay_date"), 'c.gross_cents', 'c.regular_pay_cents',
       'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents', 'c.tech_rewards_cents',
       conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"));
@@ -435,10 +429,8 @@ async function readGrossAndChecks(conn, technicianId, from, to) {
     .where('l.status', 'paid')
     .select('l.check_id', 'l.kind', 'l.amount_cents', conn.raw("to_char(l.earned_week_start, 'YYYY-MM-DD') AS week_start"),
       conn.raw("to_char(l.covers_from, 'YYYY-MM-DD') AS covers_from"), conn.raw("to_char(l.covers_to, 'YYYY-MM-DD') AS covers_to"),
-      conn.raw(`to_char(${LINE_DAY_SQL}, 'YYYY-MM-DD') AS earned_on`, lineEarnedOnBindings()),
-      conn.raw(`(${LINE_IN_WINDOW_SQL}) AS in_window`, [to, from]));
+      conn.raw(`to_char(${LINE_DAY_SQL}, 'YYYY-MM-DD') AS earned_on`, lineEarnedOnBindings()));
   const checks = [];
-  const checkIds = [];
   // In pay order (pay date, then pay week: the order finalize keeps within a tax year), so each check is read with what the
   // checks before it paid (ordinaryPremium `earlier`), as the pay run priced it. Every check that paid a line for a week of
   // the window is in `rows`: a line is paid by its own week's run or a later one.
@@ -468,34 +460,31 @@ async function readGrossAndChecks(conn, technicianId, from, to) {
       techRewardsPremiumCents: premium.excludedCents,
     };
     const weekEnd = addStaffWorkDays(check.weekStart, 6);
-    if ((weekEnd >= from && check.weekStart <= to) || ownLines.some((line) => line.in_window)) checkIds.push(row.id);
     if (weekEnd >= from && check.weekStart <= to && (check.weekStart < from || weekEnd > to)) {
       check.dayMinutes = await readDayMinutes(conn, technicianId, check.weekStart);
       Object.assign(check, await readTimeOffRecords(conn, technicianId, check.weekStart));
     }
     checks.push(check);
   }
-  return { cents: earnedGrossCents(checks, from, to), checkIds: checkIds.sort() };
+  return { cents: earnedGrossCents(checks, from, to), checkIds: rows.map((row) => row.id).sort() };
 }
 
 const readGross = async (conn, technicianId, from, to) => (await readGrossAndChecks(conn, technicianId, from, to)).cents;
 
-
 /**
- * The oldest pay week of an OPEN pay line of the technician that readGross would count in [from, to] once a pay run pays it,
- * or null. A Tech Rewards line is not pay earned by work (checkComponents), so it never counts. The pay run asks before it
- * works a bonus out from the window: the bonus waits until that line is paid, so its base is complete
- * (tech-rewards-pay-lines.js).
+ * The pay a stay bonus is worked out from, and the checks that hold it: { cents, checkIds }. It is the pay earned from
+ * `earningsStart` to `earningsEnd` (stayWindow), dated as readGross dates it, on the finalized checks OF THOSE PAY WEEKS: the
+ * weeks up to the one the 12 months end in. A check for a later pay week never counts, whatever it pays (a commission
+ * recorded late, the overtime a later commission adds to an old week). The cut is fixed on purpose. A commission line
+ * reaches back to the week its sale was accepted and keeps coming for 12 months (payroll-commission.js), so the overtime it
+ * adds to old weeks never stops arriving: a base that waited for it would never be complete, and one that took whatever was
+ * paid so far would depend on the day the bonus was worked out. With the cut, every check read holds a week of the 12 months,
+ * the figure is the same on every pay run that works it out, and the board and the pay line (tech-rewards-pay-lines.js) take
+ * it from here, so they never differ.
  */
-async function oldestOpenLineWeek(conn, technicianId, from, to) {
-  const row = await conn('payroll_pay_lines as l')
-    .where({ 'l.technician_id': technicianId, 'l.status': 'open' })
-    .whereNotIn('l.kind', TECH_REWARD_KINDS)
-    .whereRaw(LINE_IN_WINDOW_SQL, [to, from])
-    .select(conn.raw("to_char(MIN(l.earned_week_start), 'YYYY-MM-DD') AS week"))
-    .first();
-  return row && row.week ? row.week : null;
-}
+const readStayPay = (conn, technicianId, earningsStart, earningsEnd) => readGrossAndChecks(conn, technicianId, earningsStart, earningsEnd, {
+  throughWeek: staffWeekStartForWorkDate(earningsEnd),
+});
 
 // Commission pay lines earned from Jan 1 to today: 'paid' on a finalized check, 'open' on a run not finalized yet,
 // dated by LINE_EARNED_ON_SQL.
@@ -556,7 +545,7 @@ async function readAll(conn, technicianId, today) {
     asks: await readAskCount(conn, technicianId, season),
     reviews: await readReviewCount(conn, technicianId, season),
     grossSeasonCents: await readGross(conn, technicianId, season.start, season.asOf),
-    priorYearGrossCents: due && due.estimateCents !== null ? await readGross(conn, technicianId, due.earningsStart, stayEnd) : 0,
+    priorYearGrossCents: due && due.estimateCents !== null ? (await readStayPay(conn, technicianId, due.earningsStart, stayEnd)).cents : 0,
     commission: await readCommission(conn, technicianId, today),
     commissionRecordedThrough: await readCommissionRecordedThrough(conn, technicianId),
   };
@@ -582,5 +571,5 @@ async function listTechnicians(conn = db) {
 
 module.exports = {
   ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents,
-  ordinaryPremium, readGross, readGrossAndChecks, stayWindow, oldestOpenLineWeek,
+  ordinaryPremium, readGross, stayWindow, readStayPay,
 };

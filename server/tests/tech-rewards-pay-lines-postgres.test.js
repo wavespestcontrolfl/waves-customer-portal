@@ -1430,29 +1430,38 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(checkOf(final, alpha)).not.toHaveProperty('techRewardsCents');
     });
 
-    it('waits while an open pay line counts in the 12 months; the next run, after it is paid, counts it', async () => {
+    it('counts the paychecks of the 12 months\' pay weeks only: a pay line that a later check pays is no part of it and never holds the bonus', async () => {
       const alpha = await stayTech('Sample Alpha');
       await paidWeeks(alpha);
       await approvedWeek(alpha, EARLY_WEEK);
       await approvedWeek(alpha, GIFT_WEEK);
-      // a commission for the week of Nov 16, entered late: this run pays it
-      await trx('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', amount_cents: 10000, earned_week_start: '2026-11-16' });
+      // Two open lines this run pays. A commission for the week of Nov 16, entered late. And one for Tue Nov 24 to Fri Nov 27,
+      // days after the 12 months (they end Mon Nov 23) in their last week. Both land on the check of the week of Nov 30.
+      await trx('payroll_pay_lines').insert([
+        { technician_id: alpha, kind: 'commission', amount_cents: 10000, earned_week_start: '2026-11-16' },
+        { technician_id: alpha, kind: 'commission', amount_cents: 4000, earned_week_start: EARLY_WEEK, covers_from: '2026-11-24', covers_to: '2026-11-27' },
+      ]);
       const run = await draft(EARLY_WEEK);
-      expect(checkOf(run, alpha)).toMatchObject({ commissionCents: 10000, grossCents: 98000 });
-      expect(await linesOf(alpha)).toHaveLength(0);
-      const open = 'a pay line of theirs from the week of Nov 16, 2026 counts in the 12 months it is worked out from and is not paid yet';
-      expect(await notesOf(run.id)).toEqual([stayWaits('Sample Alpha', open)]);
-      expect((await syncEventOf(run.id, 'waits')).flatMap((m) => m.waits))
-        .toContainEqual(expect.objectContaining({ technician_id: alpha, reason: 'pay_line_open', week: '2026-11-16' }));
+      expect(checkOf(run, alpha)).toMatchObject({ commissionCents: 14000, techRewardsCents: 5280 });
+      expect(await lineOf(alpha)).toMatchObject({ amount_cents: 5280, note: `2% of $2,640.00, ${PERIOD}` });
+      expect(await notesOf(run.id)).toEqual([]);
+      const counted = (await lineOf(alpha)).counted_check_ids;
+      expect(counted).toHaveLength(3);
       await finalize(run.id);
-      // 2% of 2,640.00 + 100.00
-      const next = await draft(GIFT_WEEK);
-      expect(await lineOf(alpha)).toMatchObject({ amount_cents: 5480, note: `2% of $2,740.00, ${PERIOD}` });
-      expect(checkOf(next, alpha).techRewardsCents).toBe(5480);
-      // a pay line for a week after the 12 months does not hold the bonus
-      await trx('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', amount_cents: 2500, earned_week_start: EARLY_WEEK });
-      const again = await recompute(next.id);
-      expect(checkOf(again, alpha)).toMatchObject({ techRewardsCents: 5480, commissionCents: 2500 });
+      // the same answer on every later sync: the check that paid the two lines is for a later pay week, so it never counts
+      await voidRun(run.id);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      const next = await finalize((await draft(EARLY_WEEK)).id);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 5280, counted_check_ids: counted });
+      expect(counted).not.toContain(checkOf(next, alpha).id);
+      // a commission for a week of the 12 months that the NEXT run pays changes nothing, and that run is voided freely
+      await trx('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', amount_cents: 2000, earned_week_start: '2026-11-09' });
+      const later = await finalize((await draft(GIFT_WEEK)).id);
+      expect(checkOf(later, alpha)).toMatchObject({ commissionCents: 2000 });
+      expect(checkOf(later, alpha)).not.toHaveProperty('techRewardsCents');
+      expect(await linesOf(alpha)).toHaveLength(1);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 5280, counted_check_ids: counted });
+      await voidRun(later.id);
     });
 
     it('waits, with a note, when no finalized paycheck holds pay for the 12 months: no bonus on a base of nothing', async () => {
@@ -1654,53 +1663,16 @@ postgres('tech rewards pay lines: the December gift', () => {
       await voidRun(lateRun);
     });
 
-    it('holds a run outside the 12 months that paid a pay line counted in them, and no run the bonus did not count', async () => {
+    it('keeps the record of a paid bonus: the migration is not rolled back while a paid line holds its counted checks', async () => {
+      const migration = require('../models/migrations/20261121180000_pay_line_counted_checks');
       const alpha = await stayTech('Sample Alpha');
       await paidWeeks(alpha);
-      await approvedWeek(alpha, EARLY_WEEK);
-      await approvedWeek(alpha, GIFT_WEEK);
-      await approvedWeek(alpha, NEXT_WEEK);
-      // a commission for the week of Nov 16, entered late: the run of Nov 30 pays it, so the bonus waits for the run of Dec 7
-      await trx('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', amount_cents: 10000, earned_week_start: '2026-11-16' });
-      const lineRun = await finalize((await draft(EARLY_WEEK)).id); // finalize stores the checks again: read their ids after it
-      const bonusRun = await draft(GIFT_WEEK);
-      const bonus = await lineOf(alpha);
-      expect(bonus.amount_cents).toBe(5480);
-      // the three paid weeks and the check that paid the commission: its own week lies after the 12 months
-      expect(bonus.counted_check_ids).toHaveLength(4);
-      expect(bonus.counted_check_ids).toContain(checkOf(lineRun, alpha).id);
-      await finalize(bonusRun.id);
-      // a run finalized AFTER the bonus was paid is not counted, also when it pays a line of the 12 months: it is voided freely
-      await trx('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', amount_cents: 2000, earned_week_start: '2026-11-09' });
-      const after = await draft(NEXT_WEEK);
-      expect(checkOf(after, alpha)).toMatchObject({ commissionCents: 2000 });
-      await finalize(after.id);
-      expect((await lineOf(alpha))).toMatchObject({ status: 'paid', amount_cents: 5480 }); // a paid bonus never changes
-      await voidRun(after.id);
-      // the tax year's own order holds the commission's run while the bonus's run is final; the bonus holds it too
-      expect((await refusedVoid(lineRun.id))[0]).toBe(409);
-      await voidRun(bonusRun.id);
-      expect(await linesOf(alpha)).toHaveLength(0);
-      await voidRun(lineRun.id);
-    });
-
-    it('waits for an open pay line that covers only days after the 12 months, in their last week: its overtime is priced over that whole week', async () => {
-      const alpha = await stayTech('Sample Alpha');
-      await paidWeeks(alpha);
-      await approvedWeek(alpha, EARLY_WEEK);
-      // The 12 months end Mon Nov 23. A commission for Tue Nov 24 to Fri Nov 27, in the pay week of Nov 30: no day it covers is
-      // in the 12 months, and the overtime it adds to the week of Nov 23 counts on that Monday.
-      await trx('payroll_pay_lines').insert({
-        technician_id: alpha, kind: 'commission', amount_cents: 10000, earned_week_start: EARLY_WEEK, covers_from: '2026-11-24', covers_to: '2026-11-27',
-      });
       const run = await draft(EARLY_WEEK);
-      expect(await linesOf(alpha)).toHaveLength(0);
-      expect((await syncEventOf(run.id, 'waits')).flatMap((m) => m.waits))
-        .toContainEqual(expect.objectContaining({ technician_id: alpha, kind: 'stay_bonus', reason: 'pay_line_open', week: EARLY_WEEK }));
-      // a line for Mon Nov 30 to Fri Dec 4 covers no day of that week: it does not hold the bonus
-      await trx('payroll_pay_lines').where({ technician_id: alpha, kind: 'commission' }).update({ covers_from: '2026-11-30', covers_to: '2026-12-04' });
-      const again = await recompute(run.id);
-      expect(checkOf(again, alpha)).toMatchObject({ techRewardsCents: 5280, commissionCents: 10000 });
+      // an open line is no evidence yet, and a paid one is
+      await finalize(run.id);
+      expect((await lineOf(alpha)).counted_check_ids).toHaveLength(3);
+      await expect(migration.down(trx)).rejects.toThrow('holds the paychecks a paid bonus was worked out from');
+      expect(await trx.schema.hasColumn('payroll_pay_lines', 'counted_check_ids')).toBe(true);
     });
   });
 });

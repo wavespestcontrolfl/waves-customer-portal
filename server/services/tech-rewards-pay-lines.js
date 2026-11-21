@@ -8,8 +8,8 @@
  *   who is a technician                         recipients() here: W-2, the technician role, and technician-eligibility.js
  *                                               applyAssignable (active, field dispatchable). An admin account gets none.
  *   the stay bonus milestones, rates and math   tech-rewards-calc.js stayBonusSchedule, stayBonus
- *   the 12 months of a stay bonus, and the pay  tech-rewards-scoreboard.js stayWindow, readGross (the board's own figures, so
- *   earned in them                              the board and the pay line never differ), oldestOpenLineWeek
+ *   the 12 months of a stay bonus, and the pay  tech-rewards-scoreboard.js stayWindow, readStayPay (the board's own figures,
+ *   a stay bonus is worked out from             so the board and the pay line never differ)
  *   which weeks hold recorded work              payroll-runs.js workedWeeks (the test the pay run itself uses)
  *   which covered week would hold a pay run     payroll-runs.js lineGuardWeek (the two guards a run applies to every pay line)
  *   whether a check can be worked out at all    payroll-runs.js lineOnlyCheckProblem (buildCheck, the pay run's own builder)
@@ -75,16 +75,17 @@
  *     milestone again.
  *   - WHAT IT COVERS. The 12 months (staySpanOf), spread over their workweeks like every line that has a span, so it adds
  *     overtime premium to the weeks it covers.
- *   - THE AMOUNT is worked out from pay, so it is written only when that pay is complete (priceStay): by a run for a week
- *     AFTER the last week of the 12 months, when every week of them that holds work has a finalized check and no open pay line
- *     counts in them. It is the rate times the pay the FINALIZED checks hold, as the board reads it; the line's note says the
- *     rate, the base and the period. An open line is worked out again at every sync; finalize pays what its own sync worked
- *     out, and a PAID line never changes.
+ *   - THE AMOUNT is the rate times the pay earned in the 12 months on the FINALIZED checks of those pay weeks, as the board
+ *     reads it (readStayPay). A check for a later pay week never counts. So it is written only when those checks are all
+ *     final (priceStay): by a run for a week AFTER the last week of the 12 months, when every week of them that holds work
+ *     has a finalized check. From then on every run works out the same amount. The line's note says the rate, the base and
+ *     the period. An open line is worked out again at every sync; finalize pays what its own sync worked out, and a PAID
+ *     line never changes.
  *   - A PAID stay bonus holds the pay runs it counted. The sync keeps the checks the amount was worked out from on the line
  *     (counted_check_ids), and a run that holds one of them cannot be voided before the run that paid the bonus
- *     (paidBonusCounting, in payroll-runs.js voidRun). Pay of the 12 months that a run finalizes AFTER the bonus was paid (a
- *     commission recorded late, an old week paid late) does not change the paid bonus: the office corrects that by voiding
- *     the run that paid it, which works it out again.
+ *     (paidBonusCounting, in payroll-runs.js voidRun). A check of one of those pay weeks that is finalized AFTER the bonus
+ *     was paid (an old week paid late) does not change the paid bonus: the office corrects that by voiding the run that paid
+ *     it, which works it out again.
  *   - ONE GATE EACH. A kind's gate off takes that kind's open lines off and leaves the other kind's.
  */
 const { recordAuditEvent } = require('./audit-log');
@@ -100,7 +101,7 @@ const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-
 
 // payroll-runs.js loads this file, so its helpers are read on first use.
 const payrollRuns = () => require('./payroll-runs');
-// The board is the one home of the pay a bonus is worked out from (readGross) and of the stay bonus's 12 months (stayWindow).
+// The board is the one home of the pay a stay bonus is worked out from (readStayPay) and of its 12 months (stayWindow).
 // It pulls in the score and review modules, so it loads on first use: a pay run that has no stay bonus to look at never reads it.
 const scoreboard = () => require('./tech-rewards-scoreboard');
 
@@ -338,18 +339,18 @@ async function priceGift(trx, cand, tech, run) {
 
 /**
  * The stay bonus of one candidate: { amountCents, span, note } or { wait: { reason, week } } (not on this run). The amount is
- * the milestone's rate times the pay EARNED in its 12 months, exactly as the board reads it (tech-rewards-scoreboard.js
- * readGross: the finalized checks, by the day the pay was earned; no Tech Rewards line and none of the overtime one caused),
- * worked out by tech-rewards-calc.js stayBonus. So the bonus is worked out only when that pay is complete:
+ * the milestone's rate times the pay EARNED in its 12 months on the checks of those pay weeks, exactly as the board reads it
+ * (tech-rewards-scoreboard.js readStayPay: the finalized checks, by the day the pay was earned; no Tech Rewards line and none
+ * of the overtime one caused; no check for a later pay week), worked out by tech-rewards-calc.js stayBonus. So the bonus is
+ * worked out only when those checks are all final, and it is the same on every run after that:
  *   pay_week_too_early  this run pays the last week of the 12 months or an earlier one. Its own check is not final, so the
  *                       pay of that week is not in the base yet: the run of a later week writes the bonus (week = that last week)
  *   (spanWaitOf)        later_check_final, week_not_paid, week_needs_review, as for the gift: every week from the start of
  *                       the 12 months to the day before the run's week that holds work has a finalized check
- *   pay_line_open       an open pay line of theirs counts in the 12 months once it is paid (a commission recorded late, a
- *                       line this run itself pays): the next run after it is paid writes the bonus (week = the line's pay week)
  *   no_pay_on_file      no finalized check holds pay of theirs for the 12 months (pay made outside the pay runs): no bonus on
  *                       a base of nothing, and a note so the office sees it
  *   no_paycheck         as for the gift, asked with the bonus's own amount
+ * An open pay line never holds the bonus: the run that pays it is for a later pay week, so it is no part of the base.
  * The line guards read the weeks a line covers, never its amount, so they are asked with 1 cent before the pay is read.
  */
 async function priceStay(trx, cand, tech, run) {
@@ -359,9 +360,7 @@ async function priceStay(trx, cand, tech, run) {
   if (run.week_start <= lastWeek) return { wait: { reason: 'pay_week_too_early', week: lastWeek } };
   const wait = await spanWaitOf(trx, run, tech.id, span, 1);
   if (wait) return { wait };
-  const openWeek = await scoreboard().oldestOpenLineWeek(trx, tech.id, span.coversFrom, span.coversTo);
-  if (openWeek) return { wait: { reason: 'pay_line_open', week: openWeek } };
-  const { cents: baseCents, checkIds } = await scoreboard().readGrossAndChecks(trx, tech.id, span.coversFrom, span.coversTo);
+  const { cents: baseCents, checkIds } = await scoreboard().readStayPay(trx, tech.id, span.coversFrom, span.coversTo);
   const amountCents = baseCents > 0
     ? calc.stayBonus({ hireDate: tech.hire_date, asOf: milestone.dueDate, priorTwelveMonthsPayCents: baseCents }).cents
     : 0;
@@ -395,7 +394,6 @@ const WAIT_WORDS = {
     : `this pay run pays an earlier week than the week of ${dayLabel(w.week)}, the last week the gift covers`),
   other_gift_line: () => 'a December gift line that the pay run did not write is already on file for them, so check that line first',
   other_stay_line: () => 'a stay bonus line that the pay run did not write is already on file for them, so check that line first',
-  pay_line_open: (w) => `a pay line of theirs from the week of ${dayLabel(w.week)} counts in the 12 months it is worked out from and is not paid yet`,
   no_pay_on_file: () => 'no finalized paycheck holds pay of theirs for the 12 months it is worked out from',
 };
 
@@ -687,8 +685,8 @@ async function waitNotes(conn, runId) {
 
 /**
  * True when a PAID line on another pay run was worked out from a check of this finalized run (counted_check_ids: the checks
- * priceStay read for a stay bonus, kept on the line by the sync that priced it; finalize syncs first, so they are the checks
- * the paid amount came from). payroll-runs.js voidRun asks it and refuses the void: the bonus would stay on its check, worked
+ * priceStay read for a stay bonus, each one for a pay week of its 12 months, kept on the line by the sync that priced it;
+ * finalize syncs first, so they are the checks the paid amount came from). payroll-runs.js voidRun asks it and refuses the void: the bonus would stay on its check, worked
  * out from pay that is gone. Voiding the run that paid the bonus first takes the bonus line off (dropRewardLinesOfWeek), and
  * the next run dated for it works it out again. The pay dates of the two runs do not matter: within a tax year the pay run's
  * own order usually refuses such a void already (laterFinalCheckExists), and this holds it across the year line and for pay
