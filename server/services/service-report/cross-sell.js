@@ -1086,6 +1086,11 @@ async function buildReportCrossSell(service, database, {
     );
 
     const option = result.ok ? pickOption(result.options, targetKey) : null;
+    // No zero-tree-count check here: this report path only ever targets the
+    // ladder (pest, lawn — tree & shrub left it 2026-11-21). A REQUESTED
+    // tree & shrub offer (My Plan list, photo triage) prices in
+    // composePricedOfferBasis, which keeps that guard (pinned in
+    // portal-offer.test.js).
     // A seed whose own estimate required field verification never prices
     // (codex #3367 PR r13). Conservative by design: the flag demotes even
     // when the seed only partly filled the profile, because the estimate's
