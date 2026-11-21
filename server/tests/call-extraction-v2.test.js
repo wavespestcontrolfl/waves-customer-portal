@@ -139,7 +139,7 @@ function validPersisted() {
 
 describe('schema validation', () => {
   test('schema version is 1.21.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.30.0');
+    expect(SCHEMA_VERSION).toBe('1.31.0');
   });
 
   describe('model-output schema', () => {
@@ -305,6 +305,56 @@ describe('schema validation', () => {
       odd.meta.schema_version = '1.29.0';
       odd.service_request.billing_choice = 'monthly';
       expect(flatView(odd).billing_choice).toBeNull();
+    });
+
+    test('1.31.0: service_request.estimate_response validates in both schemas as an optional nullable enum, older payloads without it still do, bad values are refused', () => {
+      expect(validateModelOutput(validModelOutput()).valid).toBe(true); // absent: unchanged
+      for (const value of ['accepted', 'accepted_with_condition', 'undecided', 'declined', null]) {
+        const out = validModelOutput();
+        out.service_request.estimate_response = value;
+        expect(validateModelOutput(out).valid).toBe(true);
+        const persisted = validPersisted();
+        persisted.meta.schema_version = '1.31.0';
+        persisted.service_request.estimate_response = value;
+        expect(validatePersisted(persisted).valid).toBe(true);
+      }
+      const older = validPersisted();
+      older.meta.schema_version = '1.30.0';
+      expect(validatePersisted(older).valid).toBe(true);
+      for (const bad of ['yes', 'no', 'maybe', 'ACCEPTED', true, 12]) {
+        const out = validModelOutput();
+        out.service_request.estimate_response = bad;
+        expect(validateModelOutput(out).valid).toBe(false);
+        const persisted = validPersisted();
+        persisted.service_request.estimate_response = bad;
+        expect(validatePersisted(persisted).valid).toBe(false);
+      }
+      for (const schema of [require('../schemas/call-extraction.model-output.schema.json'), require('../schemas/call-extraction.persisted.schema.json')]) {
+        const field = schema.properties.service_request.properties.estimate_response;
+        expect(field.type).toEqual(['string', 'null']);
+        expect(field.enum).toEqual(['accepted', 'accepted_with_condition', 'undecided', 'declined', null]);
+        expect(schema.properties.service_request.required).not.toContain('estimate_response');
+        expect(field.description).toContain('/service_request/estimate_response');
+        expect(field.description).toContain('never reads this field as consent to be charged');
+        expect(field.description).toContain('never as an instruction to change an account');
+      }
+    });
+
+    test('1.31.0: estimate_response survives normalization and reads in the flat view, null when absent or not an answer', () => {
+      for (const value of ['accepted', 'accepted_with_condition', 'undecided', 'declined']) {
+        const out = validModelOutput();
+        out.service_request.estimate_response = value;
+        out.meta.schema_version = '1.31.0'; // flatView reads only a stamped (V2) extraction
+        expect(normalizeExtractionV2(out).service_request.estimate_response).toBe(value);
+        expect(flatView(out).estimate_response).toBe(value);
+      }
+      const bare = validModelOutput();
+      bare.meta.schema_version = '1.31.0';
+      expect(flatView(bare).estimate_response).toBeNull();
+      const odd = validModelOutput();
+      odd.meta.schema_version = '1.31.0';
+      odd.service_request.estimate_response = 'maybe';
+      expect(flatView(odd).estimate_response).toBeNull();
     });
 
     test('1.30.0: the household safety notes survive normalization and read in the flat view, null when absent, blank or not text', () => {

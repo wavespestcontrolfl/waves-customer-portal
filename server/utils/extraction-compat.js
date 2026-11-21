@@ -38,6 +38,9 @@ function pricesSignature(prices) {
   return prices.map(priceEntrySignature).join(';');
 }
 
+// The caller's answer to an estimate Waves already sent (schema 1.31.0).
+const ESTIMATE_RESPONSES = new Set(['accepted', 'accepted_with_condition', 'undecided', 'declined']);
+
 // A household safety note (schema 1.30.0) as flat text: a non-empty string, else null.
 function safetyNote(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -207,6 +210,9 @@ function flatView(extraction) {
     // (every older row) or not one of the two plans. A claim only; the pinned caller quote decides.
     billing_choice: svc.billing_choice === 'annual_prepay' || svc.billing_choice === 'per_application'
       ? svc.billing_choice : null,
+    // The caller's answer to an estimate Waves already sent (schema 1.31.0): null when absent
+    // (every older row) or not one of the four answers. A claim only; nothing reads it yet.
+    estimate_response: ESTIMATE_RESPONSES.has(svc.estimate_response) ? svc.estimate_response : null,
     staff_accepted_proposed_slot: typeof sched.staff_accepted_proposed_slot === 'boolean' ? sched.staff_accepted_proposed_slot : null,
     selected_day_words: typeof sched.selected_day_words === 'string' ? sched.selected_day_words : null,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,
