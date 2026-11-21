@@ -747,6 +747,110 @@ async function removeCampaignNegativeKeyword(resourceName) {
 }
 
 // ---------------------------------------------------------------------------
+// Campaign location targets (route fill record; owner 2026-11-21, "Ads Follow
+// the Route"). Read where a campaign shows and find the Google id of a ZIP
+// code. Reads only: nothing here changes a campaign. The caller
+// (services/ads/route-fill.js) owns every rule about where a campaign shows.
+// Each function returns null on any failure, like updateBudget.
+// ---------------------------------------------------------------------------
+
+// A campaign id as GAQL takes it: digits only (it is written into the query text).
+const campaignIdOk = (id) => /^\d+$/.test(String(id ?? ''));
+
+// The criterion types that say WHERE a campaign shows: a place (a ZIP, a city), a radius, and a radius around the
+// account's business locations. All three are read, so a radius can never hide behind a ZIP list.
+const GEO_CRITERION_TYPES = ['LOCATION', 'PROXIMITY', 'LOCATION_GROUP'];
+
+/**
+ * Where the campaign shows: { search, presenceOnly, targets: [{ resourceName, type, geoId }] }.
+ *   search: Google says it is a Search campaign (the local ad_campaigns.campaign_type can be edited).
+ *   presenceOnly: the campaign's location option is "Presence" (people IN the locations). Google's default,
+ *     "Presence or interest", also shows the ad to people elsewhere who search about the locations.
+ *   targets: every positive LOCATION, PROXIMITY and LOCATION_GROUP criterion. geoId is set for a LOCATION only.
+ * Excluded locations (negative criteria) are not listed and never changed. null on any failure, on an unknown
+ * campaign, and on an answer that cannot be read in full.
+ */
+async function readCampaignGeoTargets(platformCampaignId) {
+  const customer = getCustomer();
+  if (!customer || !campaignIdOk(platformCampaignId)) return null;
+
+  try {
+    const [campaignRow] = await customer.query(`
+      SELECT campaign.id, campaign.advertising_channel_type, campaign.geo_target_type_setting.positive_geo_target_type
+      FROM campaign
+      WHERE campaign.id = ${platformCampaignId}
+    `);
+    if (!campaignRow?.campaign) {
+      logger.error(`[google-ads] readCampaignGeoTargets: campaign ${platformCampaignId} not found`);
+      return null;
+    }
+    const channel = campaignRow.campaign.advertising_channel_type;
+    const option = campaignRow.campaign.geo_target_type_setting?.positive_geo_target_type;
+    const rows = await customer.query(`
+      SELECT campaign.id, campaign_criterion.resource_name, campaign_criterion.type, campaign_criterion.location.geo_target_constant
+      FROM campaign_criterion
+      WHERE campaign.id = ${platformCampaignId}
+        AND campaign_criterion.type IN (${GEO_CRITERION_TYPES.map(gaqlString).join(', ')})
+        AND campaign_criterion.negative = FALSE
+        AND campaign_criterion.status != 'REMOVED'
+    `);
+    const targets = (rows || []).map((r) => {
+      const c = r.campaign_criterion || {};
+      const type = typeof c.type === 'number' ? enums.CriterionType[c.type] : c.type;
+      const geoId = type === 'LOCATION' ? String(c.location?.geo_target_constant || '').split('/').pop() || null : null;
+      return { resourceName: c.resource_name || null, type: type || null, geoId };
+    });
+    // A target with no resource name could not be removed: the answer is not usable.
+    if (targets.some((t) => !t.resourceName)) {
+      logger.error(`[google-ads] readCampaignGeoTargets: campaign ${platformCampaignId} has a target with no resource name`);
+      return null;
+    }
+    return {
+      search: channel === enums.AdvertisingChannelType.SEARCH || channel === 'SEARCH',
+      presenceOnly: option === enums.PositiveGeoTargetType.PRESENCE || option === 'PRESENCE',
+      targets,
+    };
+  } catch (err) {
+    logger.error(`[google-ads] readCampaignGeoTargets failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Google's location id of each US ZIP code: { '34202': '9012345' }. A ZIP
+ * Google has no enabled postal-code target for is left out of the answer.
+ */
+async function findPostalGeoTargets(zips) {
+  const customer = getCustomer();
+  if (!customer) return null;
+  const wanted = [...new Set((zips || []).map(String).filter((z) => /^\d{5}$/.test(z)))];
+  if (!wanted.length) return {};
+
+  try {
+    const rows = await customer.query(`
+      SELECT geo_target_constant.id, geo_target_constant.name, geo_target_constant.canonical_name, geo_target_constant.status
+      FROM geo_target_constant
+      WHERE geo_target_constant.country_code = 'US'
+        AND geo_target_constant.target_type = 'Postal Code'
+        AND geo_target_constant.name IN (${wanted.map(gaqlString).join(', ')})
+    `);
+    const found = {};
+    for (const r of rows || []) {
+      const g = r.geo_target_constant || {};
+      const enabled = g.status === enums.GeoTargetConstantStatus.ENABLED || g.status === 'ENABLED';
+      // The canonical name starts with the ZIP ("34202,Florida,United States"): a row for another place is not taken.
+      if (enabled && wanted.includes(String(g.name)) && String(g.canonical_name || '').startsWith(`${g.name},`) && g.id != null) {
+        found[String(g.name)] = String(g.id);
+      }
+    }
+    return found;
+  } catch (err) {
+    logger.error(`[google-ads] findPostalGeoTargets failed: ${err.message}`);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // convertingSearchTerms — every search term that brought a conversion
 // ---------------------------------------------------------------------------
 // Read-only. All campaigns, trailing `days`. null on any failure, so a caller
@@ -792,6 +896,8 @@ module.exports = {
   updateBudget,
   addCampaignNegativeKeyword,
   removeCampaignNegativeKeyword,
+  readCampaignGeoTargets,
+  findPostalGeoTargets,
   convertingSearchTerms,
   _private: {
     gaqlString,

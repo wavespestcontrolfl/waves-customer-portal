@@ -88,6 +88,13 @@ function alertsTick() {
   return regs[0][1];
 }
 
+test('a run whose route fill record did not finish fails the job_health tick', async () => {
+  mockAdjustBudgets.mockResolvedValue({ evaluated: 2, changed: 1, failed: 0, routeFailed: true });
+  await expect(budgetTick()()).resolves.toBeUndefined();
+  expect(mockJobOutcomes['ads-budget-adjust']).toBe('failed: ad budget adjustment: the route fill record did not finish for every campaign');
+  expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('the route fill record did not finish'));
+});
+
 test('the ads health alerts run every 2 hours at :20 ET under runExclusive("ads-health-alerts")', async () => {
   mockRunAdsHealthAlerts.mockResolvedValue({ skipped: 'off' });
   await alertsTick()();

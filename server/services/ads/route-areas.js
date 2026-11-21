@@ -614,6 +614,7 @@ module.exports = {
   LAST_KEY,
   HISTORY_KEY,
   HISTORY_MAX,
+  LINES,
   buildRouteAreas,
   loadRouteAreasInput,
   recordRouteAreas,

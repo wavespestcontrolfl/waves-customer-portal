@@ -8390,6 +8390,11 @@ function initScheduledJobs() {
         if (result && result.recordFailed) {
           throw new Error('ad budget adjustment: the gap-rule record was not saved');
         }
+        // Route fill record (services/ads/route-fill.js): a marked campaign failed a check or the run was not saved
+        // (the log names it). No budget depends on the record.
+        if (result && result.routeFailed) {
+          throw new Error('ad budget adjustment: the route fill record did not finish for every campaign');
+        }
         return result;
       });
     } catch (err) {
