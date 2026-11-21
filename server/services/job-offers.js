@@ -1804,14 +1804,26 @@ async function storeFirstDaysMarks(trx, signed, marks) {
 
 const closeChecklistBell = (trx, applicationId, now, resolution) => require('./admin-alert-episodes')
   .closeAdminAlertKeys(trx, [checklistBellKey(applicationId)], 'checklist_done', { now, resolution });
+// The row forgets what it rang for an item that is now done (its ring keys, see checklistRingKeys). An undo is then a
+// new key for the next run, which rings, whether or not a run came between the mark and the undo.
+const forgetChecklistRingKeys = (trx, applicationId, key) => trx('notifications').where({ recipient_type: 'admin' })
+  .whereRaw("metadata->>'dedupeKey' = ?", [checklistBellKey(applicationId)])
+  .whereRaw("jsonb_typeof(metadata->'itemKeys') = 'array'")
+  .update({
+    metadata: trx.raw(
+      "jsonb_set(metadata, '{itemKeys}', COALESCE((SELECT jsonb_agg(k) FROM jsonb_array_elements_text(metadata->'itemKeys') AS k WHERE k NOT IN (?, ?, ?)), '[]'::jsonb))",
+      [key, `${key}:due`, `${key}:late`],
+    ),
+  });
 
 /**
  * Marks one first-days item done, or not done again (done: false). Owner account only (the route). The write names
  * the offer the card showed the checklist on: when the application is no longer Hired, or a newer offer was signed
  * since that read, nothing is written (CHECKLIST_CLOSED). A second mark of a done item keeps the first one.
  *
- * A mark that leaves no item due that day closes the bell in the same transaction. Every other change of the bell
- * (its words after a mark, an item due again after an undo) is the next run of ringDueChecklists.
+ * A mark that leaves no item due that day closes the bell in the same transaction. Any other mark of an open item
+ * takes the item's ring keys off the row. Every other change of the bell (its words after a mark, a ring for an item
+ * due again after an undo) is the next run of ringDueChecklists.
  * Returns { firstDays } as the write left it.
  * clock: the time source, for tests. It is read after the locks: a write that waited across Eastern midnight marks
  * and closes on the day it ran.
@@ -1836,6 +1848,8 @@ async function setChecklistItem(applicationId, offerId, key, done, actor, clock 
     if (newlyDone && !dueFirstDaysItems(held.signed, marks, held.firstDay, etDateString(now)).length) {
       const all = FIRST_DAYS_ITEMS.every((item) => marks[item.key]);
       await closeChecklistBell(trx, application.id, now, all ? 'Every first-days item is marked done' : 'No first-days item is due today');
+    } else if (newlyDone) {
+      await forgetChecklistRingKeys(trx, application.id, key);
     }
     return { firstDays: firstDaysOf(held.signed, marks, held.firstDay) };
   });
@@ -1853,22 +1867,31 @@ const checklistRingKeys = (due) => due
 
 // Raises the hire's row, or rewrites the standing one. `due`: dueFirstDaysItems, not empty.
 async function raiseChecklistBell(trx, application, offer, open, due) {
-  const { composeAdminAlert, raiseAdminAlert } = require('./admin-alert-compose');
+  const { composeAdminAlert } = require('./admin-alert-compose');
   const { fitAction } = require('./admin-alert-names');
   const next = due.reduce((first, item) => (item.dueOn < first.dueOn ? item : first));
   const dueWords = `${next.late ? 'was due' : 'due'}${next.afterStart ? '' : ' before'} ${fmtDay(next.dueOn)}`;
-  const spec = {
+  const compose = (name) => composeAdminAlert({
     area: 'Leads',
-    action: fitAction('Leads', contactOf(application).name || 'An applicant', [(n) => `finish ${n}'s first-days checklist`, (n) => `finish ${n}'s checklist`]),
+    action: fitAction('Leads', name, [(n) => `finish ${n}'s first-days checklist`, (n) => `finish ${n}'s checklist`]),
     why: `${open} of ${FIRST_DAYS_ITEMS.length} items ${open === 1 ? 'is' : 'are'} open; next: ${next.inBell}, ${dueWords}.`,
     severity: 'needs-you',
     link: `/admin/recruiting?application=${application.id}`,
     subject: { type: 'check', id: `job-offer:${offer.id}` },
     doneWhen: 'checklist_done',
     who: 'person',
-  };
+  });
+  let alert;
+  try {
+    alert = compose(contactOf(application).name || 'An applicant');
+  } catch (err) {
+    // A name the alert copy rules refuse (an emoji, an exclamation mark): the row is written with no name, through
+    // the same helper, so it still closes and comes back.
+    if (err.code !== 'ADMIN_ALERT_RULE') throw err;
+    alert = compose('An applicant');
+  }
   const itemKeys = checklistRingKeys(due);
-  const opts = {
+  return require('./admin-alert-episodes').raiseAdminAlertWithReopen('job_application', alert.headline, alert.why, {
     bell: true,
     dedupeKey: checklistBellKey(application.id),
     trx,
@@ -1878,18 +1901,8 @@ async function raiseChecklistBell(trx, application, offer, open, due) {
     bumpOnRefresh: true,
     // The row follows the hire's contract: a replacement offer with the same words still rewrites it, with no ring.
     dedupeVersion: offer.id,
-    metadata: { applicationId: application.id, offerId: offer.id, itemKeys },
-  };
-  let alert;
-  try {
-    alert = composeAdminAlert(spec);
-  } catch (err) {
-    // A copy violation still rings through raiseAdminAlert's fallback (and throws under tests).
-    if (err.code !== 'ADMIN_ALERT_RULE') throw err;
-    return raiseAdminAlert('job_application', spec, opts);
-  }
-  return require('./admin-alert-episodes').raiseAdminAlertWithReopen('job_application', alert.headline, alert.why, {
-    ...opts, link: alert.link, metadata: { ...opts.metadata, ...alert.metadata },
+    link: alert.link,
+    metadata: { ...alert.metadata, applicationId: application.id, offerId: offer.id, itemKeys },
   });
 }
 

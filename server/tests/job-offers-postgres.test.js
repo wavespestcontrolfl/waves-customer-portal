@@ -2174,6 +2174,36 @@ jest.setTimeout(120000);
           expect(await ring(morning(1, '07:30'))).toEqual(NONE);
         });
 
+        test('a mark takes the item off the row at once, so an undo before the next run rings a row the owner marked done; a name the alert rules refuse keeps the same row', async () => {
+          const made = await hire();
+          expect(await ring(morning(1))).toEqual({ ...NONE, rung: 1 });
+          const [row] = await bellsOf(made.app.id);
+          await root('notifications').where({ id: row.id }).update(byHand());
+          // A mark and its undo with no run between them: the item is due again, and the next run rings the row.
+          await mark(made, 'license', true, morning(1, '08:00')());
+          expect((await bellsOf(made.app.id).first()).metadata.itemKeys).toEqual(['driving_record', 'workers_comp']);
+          expect(await openBellsOf(made.app.id)).toHaveLength(0);
+          await mark(made, 'license', false, morning(1, '08:05')());
+          expect(await ring(morning(1, '08:15'))).toEqual({ ...NONE, rung: 1 });
+          expect(await bellsOf(made.app.id)).toMatchObject([{ id: row.id, done_at: null, read_at: null, body: row.body }]);
+
+          // The alert copy rules refuse this name. The row is written with no name, with no ring.
+          const { contact_snapshot: snapshot } = await root('job_applications').where({ id: made.app.id }).first('contact_snapshot');
+          const contact = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
+          await root('job_applications').where({ id: made.app.id }).update({ contact_snapshot: JSON.stringify({ ...contact, name: 'Jordan Rivera!' }) });
+          expect(await ring(morning(1, '08:30'))).toEqual(NONE);
+          expect(await bellsOf(made.app.id)).toMatchObject([{ id: row.id, done_at: null, title: "Leads — finish An applicant's first-days checklist" }]);
+          // It still closes with the last due mark and comes back with an undo.
+          for (const key of ['driving_record', 'license', 'workers_comp']) await mark(made, key, true, morning(1, '09:00')());
+          expect(await bellsOf(made.app.id)).toMatchObject([{ id: row.id, done_by: 'episodes', resolution: 'No first-days item is due today' }]);
+          await mark(made, 'workers_comp', false, morning(1, '09:05')());
+          expect(await ring(morning(1, '09:15'))).toEqual({ ...NONE, rung: 1 });
+          expect(await bellsOf(made.app.id)).toMatchObject([{
+            id: row.id, done_at: null, title: "Leads — finish An applicant's first-days checklist",
+            body: expect.stringContaining("2 of 4 items are open; next: workers' comp in force"),
+          }]);
+        });
+
         test('a replacement offer keeps the marks and the one row: the next run moves the row to the newer offer with no ring', async () => {
           const made = await hire();
           await mark(made, 'license');
