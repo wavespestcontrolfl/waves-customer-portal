@@ -290,11 +290,12 @@ describe('recordRun', () => {
     expect(out.problems).toEqual(['Waves Fill - Pest (route): Google did not answer the location read']);
   });
 
-  test('a campaign that is not in Google keeps its decision and has no Google step', async () => {
+  test('a marked campaign with no Google campaign id cannot be checked: no base budget, and a problem', async () => {
     const { conn } = fakeConn({ campaigns: [campaign({ platform_campaign_id: null })] });
     const out = await routeFill.recordRun({ now: NOW, conn });
-    expect(entryOf(out, 'c-pest')).toMatchObject({ budget_mode: 'base', targets: null });
+    expect(entryOf(out, 'c-pest')).toMatchObject({ budget_mode: null, targets: { ok: false, error: 'the campaign has no Google campaign id' } });
     expect(mockGoogle.readCampaignGeoTargets).not.toHaveBeenCalled();
+    expect(out.problems).toEqual(['Waves Fill - Pest (route): the campaign has no Google campaign id']);
   });
 
   test('a route record that cannot be built throws, and nothing is recorded', async () => {

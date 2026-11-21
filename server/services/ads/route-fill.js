@@ -134,16 +134,17 @@ async function countTargets(campaign, zips, geo) {
   }
 }
 
-/** The Google step of one campaign: null for a campaign that is not in Google. With no ZIPs it checks the campaign only. */
+/** The Google step of one campaign. With no ZIPs it checks the campaign only. */
 async function campaignTargets(campaign, decision, { geo, geoError }) {
-  if (!campaign.platform_campaign_id) return null;
-  if (decision.zips.length && geoError) return { ok: false, add: 0, remove: 0, unmapped: [], error: geoError };
+  const failed = (error) => ({ ok: false, add: 0, remove: 0, unmapped: [], error });
+  // Not linked to a Google campaign: neither Search nor "Presence" can be checked, so it is a failed check.
+  if (!campaign.platform_campaign_id) return failed('the campaign has no Google campaign id');
+  if (decision.zips.length && geoError) return failed(geoError);
   return countTargets(campaign, decision.zips, geo);
 }
 
 /** Lays the Google step's result over the decision. Returns the run's problem line for this campaign, or null. */
 function applyTargets(decision, targets, campaign) {
-  if (!targets) return null;
   if (targets.unmapped.length) {
     decision.reason += `; no Google location for ${targets.unmapped.join(', ')}`;
     logger.warn(`[ads-route-fill] ${campaign.campaign_name}: no Google location id for ZIP ${targets.unmapped.join(', ')}`);
@@ -155,10 +156,7 @@ function applyTargets(decision, targets, campaign) {
   return `${campaign.campaign_name}: ${targets.error}`;
 }
 
-const targetsNote = (t) => {
-  if (!t) return '';
-  return `, list +${t.add} -${t.remove}${t.ok ? '' : ` FAILED (${t.error})`}`;
-};
+const targetsNote = (t) => `, list +${t.add} -${t.remove}${t.ok ? '' : ` FAILED (${t.error})`}`;
 
 /** One campaign's entry in the history: the decision in numbers, no ZIP list. */
 const compactCampaign = (c) => ({
@@ -168,7 +166,7 @@ const compactCampaign = (c) => ({
   budget_mode: c.budget_mode,
   zips: c.zips.length,
   areas: c.areas,
-  targets: c.targets ? { ok: c.targets.ok, add: c.targets.add, remove: c.targets.remove, unmapped: c.targets.unmapped.length } : null,
+  targets: { ok: c.targets.ok, add: c.targets.add, remove: c.targets.remove, unmapped: c.targets.unmapped.length },
 });
 
 /** Both rows in one transaction; one history entry per tick (a second run of the same cron occurrence replaces it). */
