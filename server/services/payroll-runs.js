@@ -575,7 +575,7 @@ async function lineWeeksUnreviewed(conn, priced) {
 // ({ amountCents, earnedWeekStart, coversFrom, coversTo }), or null. Tech Rewards asks before it writes a line
 // (tech-rewards-pay-lines.js waitOf), so a line it writes never holds a pay run.
 async function lineGuardWeek(conn, technicianId, line) {
-  // only the covered weeks are read here, never the premium, so what earlier checks paid is not read
+  // only the covered weeks are read here, never the premium, so which weeks were already paid for is not read
   const priced = await priceLines(conn, new Map([[technicianId, { lines: [line] }]]), { history: false });
   const waitingOn = (await lineWeeksWaiting(conn, priced)).get(technicianId);
   const unreviewed = shiftCloseReviewLive() ? (await lineWeeksUnreviewed(conn, priced)).get(technicianId) : undefined;

@@ -288,60 +288,85 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await linesOf(tech)).toHaveLength(0);
     });
 
-    it('pays the difference for a week an earlier check already paid line overtime for: 33 then 34, together the 67 of one check', async () => {
+    it('rounds a week up when a finalized check already paid line pay for it: 33 then 34, never under the 67 of one check', async () => {
       const tech = await readyTech('Sample Alpha');
       const WEEK = '2026-11-09'; // 45 h worked, 5 of them overtime
       await approvedWeek(tech, WEEK, '2400.00', '300.00');
-      // a 6.00 commission earned that week rides on the week's own check: 1/2 x 600 / 45 h x 5 h = 33.33 -> 33
+      // a 6.00 commission earned that week rides on the week's own check, the first to pay for the week: 33.33 -> 33
       await trx('payroll_pay_lines').insert({ technician_id: tech, kind: 'commission', amount_cents: 600, earned_week_start: WEEK });
       const own = await draft(WEEK);
       expect(checkOf(own, tech)).toMatchObject({ commissionCents: 600, lineOvertimePremiumCents: 33 });
+      const ownStored = await trx('payroll_checks').where({ id: checkOf(own, tech).id }).first();
+      expect(ownStored.calc_snapshot.lineOvertimeWeeks[0]).not.toHaveProperty('roundedUp');
       await finalize(own.id);
-      // the gift's share of that week is also 6.00 (30,000 over 50 workweeks). One check with both lines would owe
-      // 1/2 x 1,200 / 45 h x 5 h = 66.67 -> 67, and 33 is paid: the gift's check pays 34
+      // the gift's share of that week is also 6.00 (30,000 over 50 workweeks); a check already paid for the week: 33.33 -> 34
       await approvedWeek(tech, GIFT_WEEK);
       const giftRun = await draft(GIFT_WEEK);
       const check = checkOf(giftRun, tech);
       expect(check).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 34 });
       const stored = await trx('payroll_checks').where({ id: check.id }).first();
-      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
-        allocatedCents: 600, premiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33,
-      });
-      // a week no earlier check paid for carries no earlier figures
-      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === '2026-11-02')).not.toHaveProperty('earlierPremiumCents');
-      // a recompute and the finalize give the same figure (the draft check itself is not an earlier check)
+      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({ allocatedCents: 600, premiumCents: 34, roundedUp: true });
+      // a week nobody paid for is not marked
+      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === '2026-11-02')).not.toHaveProperty('roundedUp');
+      // a recompute and the finalize give the same figure (this run's own lines are open, so they are no history)
       expect(checkOf(await recompute(giftRun.id), tech).lineOvertimePremiumCents).toBe(34);
       await finalize(giftRun.id);
       const final = await trx('payroll_checks').where({ run_id: giftRun.id, technician_id: tech, status: 'finalized' }).first();
       expect(Number(final.line_overtime_premium_cents)).toBe(34);
     });
 
-    it('pays the difference in either order: a late line on a later run first (33), then the week\'s own run with a later pay date (34)', async () => {
+    it('works in either order: a late line on a later run first (33), then the week\'s own run with a later pay date (34)', async () => {
       delete process.env.GATE_TECH_REWARDS_PAY_LINES; // commission lines only: the rule belongs to every pay line
       const tech = await readyTech('Sample Alpha');
       const WEEK = '2026-11-09'; // 45 h worked, 5 of them overtime
       const AFTER = '2026-11-16';
       await approvedWeek(tech, WEEK, '2400.00', '300.00');
       await approvedWeek(tech, AFTER);
-      // the next week's run is finalized first and carries a 6.00 line earned in WEEK: 33.33 -> 33
+      // the next week's run is finalized first and carries a 6.00 line earned in WEEK: the first to pay for it, 33.33 -> 33
       const [first] = await trx('payroll_pay_lines').insert({ technician_id: tech, kind: 'commission', amount_cents: 600, earned_week_start: WEEK }).returning('id');
       const later = await draft(AFTER);
       expect(checkOf(later, tech)).toMatchObject({ commissionCents: 600, lineOvertimePremiumCents: 33 });
       await finalize(later.id);
       expect((await trx('payroll_pay_lines').where({ id: first.id || first }).first()).status).toBe('paid');
-      // then WEEK's own run, dated after that check, with another 6.00 line of the same week: 67 on the 12.00, less 33
+      // then WEEK's own run, dated after that check, with another 6.00 line of the same week: 33.33 -> 34
       await trx('payroll_pay_lines').insert({ technician_id: tech, kind: 'commission', amount_cents: 600, earned_week_start: WEEK });
       const own = await draft(WEEK, '2026-12-04');
       expect(checkOf(own, tech)).toMatchObject({ commissionCents: 600, lineOvertimePremiumCents: 34 });
       await finalize(own.id);
       const paid = await trx('payroll_checks').where({ technician_id: tech, status: 'finalized' }).whereIn('run_id', [later.id, own.id]);
       expect(paid.map((c) => Number(c.line_overtime_premium_cents)).sort()).toEqual([33, 34]);
-      // a voided run's premium is not an earlier payment: void the first check, and a new line of that week pays in full again
+      // a voided run's lines are open again and are no history: both lines on one new check, the first to pay: 66.67 -> 67
       await voidRun(own.id);
       await voidRun(later.id);
       const again = await draft(WEEK, '2026-12-04');
-      // both 6.00 lines are open again and ride on this one check: 67, with nothing paid before
       expect(checkOf(again, tech)).toMatchObject({ commissionCents: 1200, lineOvertimePremiumCents: 67 });
+    });
+
+    it('never leaves a later check short when the earlier check is voided, across tax years too: the later check paid what its line earns alone', async () => {
+      delete process.env.GATE_TECH_REWARDS_PAY_LINES; // commission lines only
+      const tech = await readyTech('Sample Alpha');
+      const WEEK = '2025-12-15'; // 45 h worked, 5 of them overtime; paid in December 2025
+      const NEW_YEAR_WEEK = '2026-01-05';
+      await approvedWeek(tech, WEEK, '2400.00', '300.00');
+      await approvedWeek(tech, NEW_YEAR_WEEK);
+      // December: a finalized check of the week's own run paid a 6.03 line of that week (33.5 -> 34 on that check)
+      const decemberRun = await paidWeek(tech, WEEK);
+      const decemberCheck = await trx('payroll_checks').where({ run_id: decemberRun, technician_id: tech }).first('id');
+      const [decemberLine] = await trx('payroll_pay_lines').insert({
+        technician_id: tech, kind: 'commission', amount_cents: 603, earned_week_start: WEEK, status: 'paid', check_id: decemberCheck.id,
+      }).returning('id');
+      // January: another 6.03 line of that week rides on a 2026 run. A check already paid for the week: 33.5 up = 34
+      await trx('payroll_pay_lines').insert({ technician_id: tech, kind: 'commission', amount_cents: 603, earned_week_start: WEEK });
+      const january = await draft(NEW_YEAR_WEEK);
+      expect(checkOf(january, tech)).toMatchObject({ commissionCents: 603, lineOvertimePremiumCents: 34 });
+      await finalize(january.id);
+      // the December run is voided (no later check of its own tax year is final) and its reopened line is taken out
+      await voidRun(decemberRun);
+      expect((await trx('payroll_pay_lines').where({ id: decemberLine.id || decemberLine }).first()).status).toBe('open');
+      await trx('payroll_pay_lines').where({ id: decemberLine.id || decemberLine }).del();
+      // the January check is final and whole: 34 is what its 6.03 line earns alone (1/2 x 603 / 45 h x 5 h = 33.5 -> 34)
+      const kept = await trx('payroll_checks').where({ run_id: january.id, technician_id: tech, status: 'finalized' }).first();
+      expect(Number(kept.line_overtime_premium_cents)).toBe(34);
     });
 
     it('adds the half-time premium of the overtime weeks it covers', async () => {

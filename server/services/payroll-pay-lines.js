@@ -310,54 +310,32 @@ async function openLinesFor(conn, end, { lock = false } = {}) {
 const lineSpan = (line) => (line.coversFrom ? { coversFrom: line.coversFrom, coversTo: line.coversTo } : { weekStart: line.earnedWeekStart });
 
 /**
- * What finalized checks already paid toward the weeks in `weeks` (Mondays), for the technicians in `ids`. Map of technician
- * id -> { lines, premiums }, the two inputs lineOvertimePremium takes as earlierLines and earlierPremiums:
- * - lines: every PAID pay line whose weeks can touch them. A paid line is on a finalized check; a voided run opens its
- *   lines again, so they are not here.
- * - premiums: the week rows those technicians' finalized checks stored for these weeks (calc_snapshot.lineOvertimeWeeks,
- *   written with every line premium since pay lines began, #6988). A check pays only for its own week or an earlier one, so
- *   checks of an earlier pay week than the first week asked are not read, and neither is a check with no line premium.
- * Two reads for the whole run, whatever the number of technicians. Finalize and void change both tables under the payroll
- * lock, the same lock every pay run evaluation holds, so neither read can see half of a finalize.
+ * The weeks in `weeks` (Mondays) that a finalized check already paid line pay for, for the technicians in `ids`: Map of
+ * technician id -> Set of Mondays. These are the weeks lineOvertimePremium rounds up (payroll-regular-rate.js says why).
+ * The test is the PAID pay lines whose weeks touch them: a paid line is on a finalized check, and a voided run opens its
+ * lines again, so they do not count. Only whether a week was paid for is read, never an amount: no check's premium depends
+ * on the amount of another check. One read for the whole run, whatever the number of technicians. Finalize and void change
+ * the lines under the payroll lock, the same lock every pay run evaluation holds.
  */
-async function earlierLinePay(conn, ids, weeks) {
-  const byTech = new Map(ids.map((id) => [id, { lines: [], premiums: [] }]));
+async function weeksAlreadyPaid(conn, ids, weeks) {
+  const byTech = new Map(ids.map((id) => [id, new Set()]));
   if (!ids.length || !weeks.length) return byTech;
   const sorted = [...weeks].sort();
-  const first = sorted[0];
-  const last = addStaffWorkDays(sorted[sorted.length - 1], 6);
   const wanted = new Set(sorted);
   const paid = await conn('payroll_pay_lines')
     .whereIn('technician_id', ids)
     .where({ status: 'paid' })
-    .whereRaw('COALESCE(covers_to, earned_week_start + 6) >= ?::date', [first])
-    .whereRaw('COALESCE(covers_from, earned_week_start) <= ?::date', [last])
+    .whereRaw('COALESCE(covers_to, earned_week_start + 6) >= ?::date', [sorted[0]])
+    .whereRaw('COALESCE(covers_from, earned_week_start) <= ?::date', [addStaffWorkDays(sorted[sorted.length - 1], 6)])
     .select(
-      'technician_id', 'amount_cents',
+      'technician_id',
       conn.raw("to_char(earned_week_start, 'YYYY-MM-DD') as earned_week_start"),
       conn.raw("to_char(covers_from, 'YYYY-MM-DD') as covers_from"),
       conn.raw("to_char(covers_to, 'YYYY-MM-DD') as covers_to"),
     );
   for (const row of paid) {
-    byTech.get(row.technician_id).lines.push({
-      amountCents: Number(row.amount_cents),
-      ...lineSpan({ coversFrom: row.covers_from || null, coversTo: row.covers_to || null, earnedWeekStart: row.earned_week_start }),
-    });
-  }
-  const checks = await conn('payroll_checks as c')
-    .join('payroll_runs as r', 'r.id', 'c.run_id')
-    .whereIn('c.technician_id', ids)
-    .where({ 'c.status': 'finalized', 'r.status': 'finalized' })
-    .where('c.week_start', '>=', first)
-    .where('c.line_overtime_premium_cents', '>', 0)
-    .select('c.technician_id', conn.raw("COALESCE(c.calc_snapshot->'lineOvertimeWeeks', '[]'::jsonb) as weeks"));
-  for (const check of checks) {
-    for (const week of Array.isArray(check.weeks) ? check.weeks : []) {
-      const cents = Number(week && week.premiumCents);
-      if (week && wanted.has(week.weekStart) && Number.isSafeInteger(cents) && cents > 0) {
-        byTech.get(check.technician_id).premiums.push({ weekStart: week.weekStart, premiumCents: cents });
-      }
-    }
+    const span = lineSpan({ coversFrom: row.covers_from || null, coversTo: row.covers_to || null, earnedWeekStart: row.earned_week_start });
+    for (const week of weeksOfLine(span)) if (wanted.has(week)) byTech.get(row.technician_id).add(week);
   }
   return byTech;
 }
@@ -372,9 +350,9 @@ async function earlierLinePay(conn, ids, weeks) {
  * missing week holds worked time, so a line is never paid without that week's
  * overtime, and holds the check when a covered week has an unreviewed automatic
  * clock-out (GATE_SHIFT_CLOSE_REVIEW).
- * The premium is the DIFFERENCE for each week: the premium on the week's whole line pay, less what finalized checks already
- * paid for that week (earlierLinePay; payroll-regular-rate.js says why). A caller that reads only the weeks, never the
- * premium, passes history: false and skips those two reads.
+ * A week that a finalized check already paid line pay for rounds UP, every other week half up (weeksAlreadyPaid;
+ * payroll-regular-rate.js says why). A caller that reads only the weeks, never the premium, passes history: false and
+ * skips that read.
  */
 async function priceLines(conn, byTech, { lock = false, history = true } = {}) {
   const priced = new Map();
@@ -393,16 +371,14 @@ async function priceLines(conn, byTech, { lock = false, history = true } = {}) {
     .select('technician_id', 'regular_minutes', 'overtime_minutes', conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"));
   if (lock) query.forUpdate();
   const summaries = await query;
-  const earlier = history ? await earlierLinePay(conn, [...byTech.keys()], [...weekSet]) : new Map();
+  const paidWeeks = history ? await weeksAlreadyPaid(conn, [...byTech.keys()], [...weekSet]) : new Map();
   for (const [technicianId, lines] of spansByTech) {
     const rows = summaries.filter((row) => row.technician_id === technicianId);
     const weeks = rows.map((row) => ({ weekStart: row.week_start, regularMinutes: row.regular_minutes, overtimeMinutes: row.overtime_minutes }));
     const approvedWeeks = new Set(rows.map((row) => row.week_start));
     const covered = [...new Set(lines.flatMap((line) => weeksOfLine(line)))].sort();
     priced.set(technicianId, {
-      ...lineOvertimePremium({
-        weeks, lines, earlierLines: earlier.get(technicianId)?.lines, earlierPremiums: earlier.get(technicianId)?.premiums,
-      }),
+      ...lineOvertimePremium({ weeks, lines, roundUpWeeks: paidWeeks.get(technicianId) || [] }),
       coveredWeeks: covered,
       missingWeeks: covered.filter((week) => !approvedWeeks.has(week)),
     });

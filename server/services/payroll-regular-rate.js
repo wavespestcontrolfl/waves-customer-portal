@@ -23,20 +23,26 @@
  * - Paid time off and holiday hours are not hours worked and never enter here.
  *   The caller passes only worked minutes (regular plus overtime).
  * - A week with no overtime, no hours or no approved timesheet earns no premium.
- * - Integer cents. A week's premium rounds half up once (the same BigInt half-up
- *   rule payroll-calc.js uses). Line shares are kept as exact fractions until then,
- *   so splitting 100 cents over 3 weeks loses nothing before the round.
- * - One workweek's line pay can arrive on more than one check: a commission on the
- *   week's own check, then a bonus that covers the same week months later, or a
- *   late line first and the week's own run after it. If each check priced only its
- *   own lines, two checks could pay 1 cent less for the week than one check with
- *   both lines (33 + 33 against 67). So a check pays the DIFFERENCE: the half-up
- *   premium on the week's WHOLE line pay (the lines of this check plus the lines
- *   earlier checks paid for that week), less the premium those earlier checks
- *   already paid for the week. Never below zero. After every check, whatever the
- *   order of the checks and whatever rule an older check was priced by, the
- *   checks for a week add up to at least the premium on the week's whole line pay.
- *   A week with no earlier line pay is priced exactly as before.
+ * - Integer cents, one rounding per week on a check. Line shares are kept as exact
+ *   fractions until then, so splitting 100 cents over 3 weeks loses nothing before
+ *   the round.
+ * - Which way a week rounds. One workweek's line pay can arrive on more than one
+ *   check: a commission on the week's own check, then a bonus that covers the same
+ *   week months later, or a late line first and the week's own run after it. Each
+ *   check prices only its own lines. If every check rounded half up, two checks
+ *   could pay 1 cent less for the week than one check with both lines (33 + 33
+ *   against 67). So:
+ *     the FIRST check that pays line pay for a week rounds half up (the same BigInt
+ *     half-up rule payroll-calc.js uses), exactly as a week on one check always did;
+ *     a check that pays line pay for a week that a finalized check ALREADY paid line
+ *     pay for (`roundUpWeeks`) rounds that week UP to the next whole cent.
+ *   Why this is enough: a figure rounded up is never below its exact value, and at
+ *   most one check for a week rounds half up (off by under half a cent), so the
+ *   checks for a week never add up to less than the half-up premium on the week's
+ *   whole line pay. And no check depends on the AMOUNT another check paid: a later
+ *   check pays at least what its own lines earn alone, so voiding an earlier check
+ *   never leaves a later one short. The cost is under 1 cent per week, per later
+ *   check.
  *
  * Minutes arrive like computePaycheck's: numbers or decimal strings, read at two
  * decimals (hundredths of a minute). The units cancel in the formula.
@@ -82,24 +88,23 @@ function weeksOfLine(line) {
   return [...weeks];
 }
 
+// numerator / denominator, rounded up to a whole number. Both are zero or more, and the denominator is never zero.
+const ceilDiv = (numerator, denominator) => (numerator + denominator - 1n) / denominator;
+
 /**
  * weeks: [{ weekStart, regularMinutes, overtimeMinutes }] for the weeks that have
  *   an approved timesheet (a week left out counts as no hours worked).
  * lines: [{ id?, amountCents, weekStart } or { id?, amountCents, coversFrom, coversTo }]
- *   the lines of THIS check. weekStart is the earned week (a Monday) and is used only
- *   when there is no span.
- * earlierLines: the same shape, the lines that finalized checks already paid and that
- *   cover a week these lines cover (a line that covers none of them changes nothing).
- * earlierPremiums: [{ weekStart, premiumCents }], the line premium those checks paid
- *   for each week (their stored week rows; several rows for one week add up).
+ *   weekStart is the earned week (a Monday) and is used only when there is no span.
+ * roundUpWeeks: the weeks (any date in each) that a finalized check already paid line
+ *   pay for. Their premium rounds up; every other week rounds half up.
  * Returns { extraPremiumCents, weeks: [{ weekStart, workedMinutes, overtimeMinutes,
- *   allocatedCents, premiumCents }] } with one entry per week that holds line pay of
- *   this check, oldest first. allocatedCents is this check's line pay for the week
- *   rounded to the cent for display; the premium comes from the exact shares. A week
- *   that earlier checks paid for also carries earlierAllocatedCents and
- *   earlierPremiumCents, so the stored row shows why its premium is the difference.
+ *   allocatedCents, premiumCents }] } with one entry per week that holds line pay,
+ *   oldest first. allocatedCents is the week's line pay rounded to the cent for
+ *   display; the premium comes from the exact share. A week that was rounded up
+ *   carries roundedUp: true, so a stored row says which rule priced it.
  */
-function lineOvertimePremium({ weeks = [], lines = [], earlierLines = [], earlierPremiums = [] }) {
+function lineOvertimePremium({ weeks = [], lines = [], roundUpWeeks = [] }) {
   const hoursByWeek = new Map();
   for (const week of weeks) {
     const regular = nonNegativeUnits(week.regularMinutes, 'Regular minutes');
@@ -109,45 +114,31 @@ function lineOvertimePremium({ weeks = [], lines = [], earlierLines = [], earlie
     hoursByWeek.set(key, { worked: seen.worked + regular + overtime, overtime: seen.overtime + overtime });
   }
 
-  const spanOf = (line) => ({ cents: positiveCents(line.amountCents, 'Pay line amount'), weeks: weeksOfLine(line) });
-  const spans = lines.map(spanOf);
+  const spans = lines.map((line) => ({
+    cents: positiveCents(line.amountCents, 'Pay line amount'),
+    weeks: weeksOfLine(line),
+  }));
   if (!spans.length) return { extraPremiumCents: 0, weeks: [] };
-  const own = new Set(spans.flatMap((span) => span.weeks));
-  // only an earlier line that shares a week with this check matters
-  const before = earlierLines.map(spanOf).filter((span) => span.weeks.some((week) => own.has(week)));
+  const up = new Set([...roundUpWeeks].map((week) => staffWeekStartForWorkDate(week)));
 
   // Every share is cents / (weeks in its span); put them over one common denominator.
-  const denominator = [...spans, ...before].reduce((acc, span) => lcm(acc, BigInt(span.weeks.length)), 1n);
-  const sharesOf = (list) => {
-    const byWeek = new Map();
-    for (const span of list) {
-      const share = span.cents * (denominator / BigInt(span.weeks.length));
-      for (const week of span.weeks) byWeek.set(week, (byWeek.get(week) || 0n) + share);
-    }
-    return byWeek;
-  };
-  const shareByWeek = sharesOf(spans);
-  const earlierShareByWeek = sharesOf(before);
-  const paidByWeek = new Map();
-  for (const row of earlierPremiums) {
-    const cents = Number(row.premiumCents || 0);
-    if (!Number.isSafeInteger(cents) || cents < 0) throw new Error('An earlier premium must be a whole number of cents, zero or more');
-    const key = staffWeekStartForWorkDate(row.weekStart);
-    paidByWeek.set(key, (paidByWeek.get(key) || 0n) + BigInt(cents));
+  const denominator = spans.reduce((acc, span) => lcm(acc, BigInt(span.weeks.length)), 1n);
+  const shareByWeek = new Map();
+  for (const span of spans) {
+    const share = span.cents * (denominator / BigInt(span.weeks.length));
+    for (const week of span.weeks) shareByWeek.set(week, (shareByWeek.get(week) || 0n) + share);
   }
 
   let extra = 0n;
   const breakdown = [...shareByWeek.keys()].sort().map((weekStart) => {
     const share = shareByWeek.get(weekStart);
-    const earlierShare = earlierShareByWeek.get(weekStart) || 0n;
-    const paid = paidByWeek.get(weekStart) || 0n;
     const hours = hoursByWeek.get(weekStart) || { worked: 0n, overtime: 0n };
-    // 1/2 x (line pay / worked) x overtime on the week's WHOLE line pay, over the common denominator, half up once;
-    // this check pays what the earlier checks have not.
-    const due = hours.worked > 0n && hours.overtime > 0n
-      ? roundDiv((share + earlierShare) * hours.overtime, 2n * denominator * hours.worked)
+    const roundedUp = up.has(weekStart);
+    // 1/2 x (share / worked) x overtime, with share over the common denominator: half up, or up for a week that a
+    // finalized check already paid line pay for (see the rules above).
+    const premium = hours.worked > 0n && hours.overtime > 0n
+      ? (roundedUp ? ceilDiv : roundDiv)(share * hours.overtime, 2n * denominator * hours.worked)
       : 0n;
-    const premium = due > paid ? due - paid : 0n;
     extra += premium;
     return {
       weekStart,
@@ -155,9 +146,7 @@ function lineOvertimePremium({ weeks = [], lines = [], earlierLines = [], earlie
       overtimeMinutes: Number(hours.overtime) / 100,
       allocatedCents: Number(roundDiv(share, denominator)),
       premiumCents: Number(premium),
-      ...(earlierShare > 0n || paid > 0n
-        ? { earlierAllocatedCents: Number(roundDiv(earlierShare, denominator)), earlierPremiumCents: Number(paid) }
-        : {}),
+      ...(roundedUp ? { roundedUp: true } : {}),
     };
   });
   return { extraPremiumCents: Number(extra), weeks: breakdown };

@@ -91,17 +91,19 @@ describe('ordinaryPremium: the overtime a check paid for its ordinary lines only
     expect(ordinaryPremium([reward], stored)).toEqual({ weeks: [], excludedCents: 4000 });
   });
 
-  test('a week\'s ordinary part is never more than the check stored for it (a check that paid a difference)', () => {
-    // 45 hours, 5 of them overtime: a 600 commission alone would earn 33. This check stored 10 for the week, because
-    // earlier checks had already paid most of the week's premium. The base takes the 10 it paid, not 33.
-    const week = [{ weekStart: '2026-11-09', workedMinutes: 2700, overtimeMinutes: 300, premiumCents: 10 }];
+  test('prices the ordinary lines by the rule the check used for each week: up where the check stored roundedUp, half up elsewhere', () => {
+    // 45 hours, 5 of them overtime: a 600 commission earns 33.33 of premium, and the 600 weekly share of a gift the same
     const lines = [
       { kind: 'commission', cents: 600, weekStart: '2026-11-09' },
       { kind: 'december_gift', cents: 600, weekStart: '2026-11-09', coversFrom: '2026-11-09', coversTo: '2026-11-15' },
     ];
-    expect(ordinaryPremium(lines, week)).toEqual({ weeks: [{ weekStart: '2026-11-09', premiumCents: 10 }], excludedCents: 0 });
-    // with 67 stored (no earlier pay), the commission's part is 33 and the gift's 34
-    expect(ordinaryPremium(lines, [{ ...week[0], premiumCents: 67 }])).toEqual({ weeks: [{ weekStart: '2026-11-09', premiumCents: 33 }], excludedCents: 34 });
+    const row = { weekStart: '2026-11-09', workedMinutes: 2700, overtimeMinutes: 300, premiumCents: 67 };
+    // the first check for the week (and every check stored before the rule): the commission's part is 33
+    expect(ordinaryPremium(lines, [row])).toEqual({ weeks: [{ weekStart: '2026-11-09', premiumCents: 33 }], excludedCents: 34 });
+    expect(ordinaryPremium(lines, [{ ...row, roundedUp: false }])).toEqual({ weeks: [{ weekStart: '2026-11-09', premiumCents: 33 }], excludedCents: 34 });
+    // a later check for the week (an earlier commission was paid 33): this commission's part is 34, so the two commissions
+    // together count 67, what they earn together
+    expect(ordinaryPremium(lines, [{ ...row, roundedUp: true }])).toEqual({ weeks: [{ weekStart: '2026-11-09', premiumCents: 34 }], excludedCents: 33 });
   });
 });
 
