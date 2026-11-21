@@ -32,7 +32,7 @@
 const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const logger = require('./logger');
-const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
+const { assertAssignableTechnician, shiftExcluding, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
@@ -182,6 +182,13 @@ function requireKnownBookingWindowConfig(slotIdOrNull) {
 //   `${base}.${exp}.${arrivalGrace}.${sig}`
 // e.g. "2026-04-29_10-00_7d34c5e6-....1767216000000.90.dGhl..."
 const SLOT_ID_RE = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})_(.+)$/;
+
+// A hold's own block in minutes after midnight, for the shift check (technician-eligibility.js `hours`).
+// A time that cannot be read is null, and that check then leaves the hold to the others.
+function holdBlock(windowStart, windowEnd) {
+  const { parseHHMM } = require('./scheduling/window-rules');
+  return { startMin: parseHHMM(windowStart), endMin: parseHHMM(windowEnd) };
+}
 
 function parseSlotId(slotId) {
   if (!slotId || typeof slotId !== 'string') return null;
@@ -1596,7 +1603,10 @@ async function reserveSlot({
           // hold time — not just accepted and later caught by the identical
           // commit-time re-check (assertAssignableTechnician with `date`,
           // same as the graduate-hold paths below use).
-          activeTech = await assertAssignableTechnician(techId, { conn: trx, date, workDays: true });
+          // `hours` (GATE_TECH_SHIFT_HOURS): the hold's own block against the technician's shift, the
+          // rule the offer was held to (filterCollidingSlots). The office may have changed the hours since.
+          activeTech = await assertAssignableTechnician(techId, { conn: trx, date, workDays: true,
+            hours: { startMin: slotStartMinutes, endMin: slotStartMinutes + effectiveDurationMinutes } });
         } catch (techErr) {
           if (techErr?.code !== NOT_ASSIGNABLE) {
             logger.warn(`[slot-reservation] technician lookup failed for slot ${slotId}: ${techErr.message}`);
@@ -2361,6 +2371,16 @@ async function commitReservation({
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
       throw err;
     }
+    // The technician's shift (GATE_TECH_SHIFT_HOURS) on the same FINAL window: the office may have
+    // changed the hours since the reserve, or the profile lengthened the job past the shift end. Same
+    // recovery as the technician re-check above (the customer re-picks a time).
+    if (await shiftExcluding(client, row.technician_id, scheduledDate,
+      holdBlock(windowStart, windowEnd || row.window_end))) {
+      const err = new Error('slot technician is not available');
+      err.code = 'SLOT_UNAVAILABLE';
+      err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
+      throw err;
+    }
     // GRACE-EXEMPT: no arrivalGraceMinutes here (owner ruling 2026-09-28,
     // Codex round 2 P0 on #5314): a hold is certified ONCE, at reserveSlot — re-applying a
     // freshly re-read grace here would let a since-LOWERED
@@ -3052,7 +3072,8 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // Same error codes, so the route and client recovery are unchanged.
     if (row.technician_id) {
       try {
-        await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate, workDays: true });
+        await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate, workDays: true,
+          hours: holdBlock(windowStart, windowEnd) });
       } catch (eligErr) {
         if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
         const err = new Error('slot technician is not available');

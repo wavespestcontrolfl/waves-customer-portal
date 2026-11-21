@@ -1014,11 +1014,17 @@ the route would run it (an arrival late in the hour counts), and it must not
 push another stop to end after the shift end. On today's date the shift runs
 from that technician's clock-in, for the same length of day. A technician
 without set hours is offered as before, and the shift never adds an hour a
-surface would not offer. Offers only: no field is added or removed, and the
-reserve and confirm routes do not check the shift yet (an offer signed before
-the gate was set stays redeemable until it expires). The one exception is the
-estimate page's make-room hour, which `/reserve` and `/extend` prove again
-with the same filter. Gate off: byte-identical.
+surface would not offer. No field is added or removed. The booking commits
+check the shift too (D4 part 3a), on the visit's own block (its start, and its
+start plus its length): the estimate `/reserve` and `/extend`, the accept of a
+held time (on the final window), `POST /api/booking/confirm`, the re-service
+link, inspection booking and a signed proposal's first visit. A visit the
+technician's shift does not hold gets the route's existing recoverable answer
+(409 `SLOT_UNAVAILABLE`, or `SLOT_TAKEN` from the `/book` commit), so an offer
+signed before the gate was set, or before the office changed the hours, is
+refused and the customer picks another time. Not yet checked at a commit:
+public reschedule moves, and the day as the route would run it (capacity
+mode). Gate off: byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
 browse horizon answers `400 { error: 'date is beyond the booking horizon',
 lastBookableDate, horizonDays }` (owner 2026-11-06, new-customer walk E2):
