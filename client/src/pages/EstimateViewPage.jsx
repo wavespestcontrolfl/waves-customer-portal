@@ -9727,6 +9727,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // a plan credit on the selected cadence and a pest service the customer turned off. The
   // last two are read directly, not through the average: its rounding band would let a very
   // small credit pass.
+  // Known limit: deposit collection is retired, so `required` is always false now, yet the
+  // accept still credits a deposit paid before that. /data carries no ledger balance, so the
+  // page cannot see one (the "Reserve your spot" box has the same blind spot). No open
+  // estimate held such a deposit on 2026-11-21. If deposits return, send the balance in
+  // /data and add it here.
   const serviceTurnedOff = services.filter((section) => section?.isRecurring).some((section) => {
     const chosen = selectedAddOns[section.key];
     return (selectedFrequencyForSection(section, selected)?.addOns || [])
