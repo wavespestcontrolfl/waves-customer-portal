@@ -90,7 +90,7 @@ describe('sendDueReferralRewardEmails', () => {
     mockState.credits = [credit({ credit_dollars: '25.50' })];
     await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
     const sent = mockSendTemplate.mock.calls[0][0];
-    expect(sent.payload.reward_line).toBe('Your $25.50 referral reward has been added to your Waves account as a credit. To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.');
+    expect(sent.payload.reward_line).toBe('Your $25.50 referral reward has been added to your Waves account as a credit. To use it, turn on "Apply my credit to invoices automatically" in the Waves app.');
   });
 
   test('a credit from yesterday afternoon sends one email at 9:00 AM: the referrer, account-credit wording, keyed by referral', async () => {
@@ -105,7 +105,7 @@ describe('sendDueReferralRewardEmails', () => {
       idempotencyKey: 'referral.reward_earned:ref-1',
       triggerEventId: 'referral.reward_earned:ref-1',
     });
-    expect(sent.payload.reward_line).toBe('Your $25 referral reward has been added to your Waves account as a credit. To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.');
+    expect(sent.payload.reward_line).toBe('Your $25 referral reward has been added to your Waves account as a credit. To use it, turn on "Apply my credit to invoices automatically" in the Waves app.');
     expect(sent.payload.cta_label).toBe('View my account credit');
   });
 
@@ -125,7 +125,7 @@ describe('sendDueReferralRewardEmails', () => {
     expect(await line({ active: true, account_credits: null, auto_apply_account_credit: false })).toBe(alone);
     // Balance above 0 and the switch off: the instruction goes.
     expect(await line({ active: true, account_credits: '12.50', auto_apply_account_credit: false }))
-      .toBe(`${alone} To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.`);
+      .toBe(`${alone} To use it, turn on "Apply my credit to invoices automatically" in the Waves app.`);
   });
 
   test('a member whose account is inactive or unknown gets the credit sentence alone: the billing tab hides the switch there', async () => {

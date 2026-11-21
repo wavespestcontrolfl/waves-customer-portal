@@ -75,7 +75,7 @@ describe('the friend and credit-email words (gate on)', () => {
     expect(memberInviteFriendClause(3250)).toBe('they get a $32.50 credit after their first plan service');
   });
   test('the member credit email line says how to use the credit, for whole dollars and cents', () => {
-    expect(memberCreditEmailLine(25, { canTurnOnAutomaticCredit: true })).toBe('Your $25 referral reward has been added to your Waves account as a credit. To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.');
+    expect(memberCreditEmailLine(25, { canTurnOnAutomaticCredit: true })).toBe('Your $25 referral reward has been added to your Waves account as a credit. To use it, turn on "Apply my credit to invoices automatically" in the Waves app.');
     // No switch to turn on (an inactive or unknown account): the credit sentence alone.
     expect(memberCreditEmailLine(25)).toBe('Your $25 referral reward has been added to your Waves account as a credit.');
     expect(memberCreditEmailLine(25.5, { canTurnOnAutomaticCredit: true })).toContain('Your $25.50 referral reward');

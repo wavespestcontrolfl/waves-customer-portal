@@ -620,23 +620,23 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 // Best-effort and idempotent per referral, so the call sites can never
 // double-send. Promoters aren't always customers, so
 // the send goes straight to promoter.customer_email.
+// The credited member's account, read when the credit email goes out (the morning after the credit). The billing tab
+// shows the automatic-credit switch only on an active account with a credit balance or the switch already on
+// (PortalPage: (totalCredits > 0 || autoApplyCredit) && !cancelledAccount). True only for a member who can see the
+// switch and still has it off. Unknown or unreadable = false: the email then gives no switch instruction.
+async function memberCanTurnOnAutomaticCredit(referral, promoter) {
+  const memberId = referral?.referrer_customer_id || promoter?.customer_id;
+  if (!memberId) return false;
+  const member = await db('customers').where({ id: memberId }).whereNull('deleted_at')
+    .first('active', 'account_credits', 'auto_apply_account_credit').catch(() => null);
+  return member?.active === true && member.auto_apply_account_credit !== true && Number(member.account_credits) > 0;
+}
+
 async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destination = 'referral_balance') {
   try {
     const email = String(promoter?.customer_email || '').trim();
     if (!email || !email.includes('@')) return;
     const EmailTemplateLibrary = require('./email-template-library');
-    // The credited member's account, read when the email goes out (the morning after the credit). The billing tab
-    // shows the automatic-credit switch only on an active account with a credit balance or the switch already on
-    // (PortalPage: (totalCredits > 0 || autoApplyCredit) && !cancelledAccount). So the instruction goes only to a
-    // member who can see the switch and still has it off. Unknown or unreadable = no instruction.
-    const memberId = referral?.referrer_customer_id || promoter?.customer_id;
-    const member = destination === 'account_credit' && memberId
-      ? await db('customers').where({ id: memberId }).whereNull('deleted_at')
-        .first('active', 'account_credits', 'auto_apply_account_credit').catch(() => null)
-      : null;
-    const canTurnOnAutomaticCredit = member?.active === true
-      && member.auto_apply_account_credit !== true
-      && Number(member.account_credits) > 0;
     await EmailTemplateLibrary.sendTemplate({
       templateKey: 'referral.reward_earned',
       to: email,
@@ -647,7 +647,7 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
         // credit (postCreditMovement), not referral balance — the email must
         // point the promoter at the right ledger.
         reward_line: destination === 'account_credit'
-          ? step2.memberCreditEmailLine(rewardDollars, { canTurnOnAutomaticCredit })
+          ? step2.memberCreditEmailLine(rewardDollars, { canTurnOnAutomaticCredit: await memberCanTurnOnAutomaticCredit(referral, promoter) })
           : `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your referral balance.`,
         // CTA points at the ledger the reward actually landed in: account
         // credits live on the billing tab, referral balance on the refer tab.
