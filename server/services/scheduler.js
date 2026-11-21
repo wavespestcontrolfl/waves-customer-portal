@@ -8099,6 +8099,32 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 11:51PM — Tab reload check (read-only). Posts one engineering FIX
+  // row to the ops digest when a staff page view it has not read yet ran an
+  // out-of-date portal build that should have reloaded (the usage beacon logs
+  // the tab's build and what kept it there), and retires it on the first
+  // clean night. Late evening, after the day's staff use. No other fixed or
+  // hourly job runs at this minute (#3208 rule). See
+  // server/services/tab-reload-check.js.
+  // =========================================================================
+  cron.schedule('51 23 * * *', async () => {
+    try {
+      await runExclusive('tab-reload-check', async () => {
+        const { runTabReloadCheck } = require('./tab-reload-check');
+        const result = await runTabReloadCheck();
+        logger.info(`[tab-reload-check] cron run: ${JSON.stringify({ views: result.views })}`);
+        // A finding that could not be delivered must read as a FAILED run in
+        // job_health: rethrow so runExclusive records it.
+        if (result.delivery && result.delivery.ok === false) {
+          throw new Error(`tab-reload-check: the finding was not delivered (${result.delivery.error || 'send failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Tab reload check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 11:30PM — Late-sent bill check (read-only). Posts one engineering
   // FIX row to the ops digest when an open self-pay bill first sent in the
   // last 7 days had a due date before the day it went out (a delivery path
