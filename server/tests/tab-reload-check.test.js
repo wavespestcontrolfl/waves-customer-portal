@@ -25,7 +25,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const sendgrid = require('../services/sendgrid-mail');
 const { deliverOpsDigest } = require('../services/ops-digest');
 const { retireIfClean } = require('../services/ops-digest-fall-off');
-const { runTabReloadCheck, windowStart, OPS_KEY, RUN_AT, FAILED_NAMES } = require('../services/tab-reload-check');
+const { runTabReloadCheck, readWindow, OPS_KEY, RUN_AT, FAILED_NAMES } = require('../services/tab-reload-check');
 const { RELOAD_BLOCKERS, NO_SERVER_HEARD } = require('../routes/admin-usage');
 
 const TECH_A = 'a0000000-0000-4000-8000-000000000001';
@@ -75,7 +75,7 @@ describe('runTabReloadCheck', () => {
     expect(sent.headline.length).toBeLessThanOrEqual(60);
     expect(sent.summary.length).toBeLessThanOrEqual(110);
     expect(sent.text).toContain('6 staff page views by 2 staff members');
-    expect(sent.text).toContain('Since the nightly check before this one, 6 staff page views');
+    expect(sent.text).toContain('In the day before this check, 6 staff page views');
     expect(sent.text).toContain('- no-server-heard (3): the tab had still heard no server');
     expect(sent.text).toContain('- no name (3): the move was due a reload');
     expect(sent.text).toContain('- pipeline: 5\n- dashboard: 1');
@@ -145,11 +145,26 @@ describe('runTabReloadCheck', () => {
   });
 });
 
-// A run reads from the scheduled time of the run before it. From one 11:51
-// PM Eastern to the next is 25 hours on the night the clocks go back and 23
-// on the night they go forward.
-describe('windowStart', () => {
-  const iso = (text) => windowStart(new Date(text)).toISOString();
+// A run reads from the scheduled time of the run before it up to its own.
+// From one 11:51 PM Eastern to the next is 25 hours on the night the clocks
+// go back and 23 on the night they go forward.
+describe('readWindow', () => {
+  const iso = (text) => readWindow(new Date(text)).start.toISOString();
+  const end = (text) => readWindow(new Date(text)).end.toISOString();
+
+  test('a run reads up to its own scheduled time, so the next run starts where it ended', () => {
+    // Nov 20 2026, 11:51:02 PM EST: up to 11:51:00 PM, not up to now.
+    expect(end('2026-11-21T04:51:02Z')).toBe('2026-11-21T04:51:00.000Z');
+    expect(iso('2026-11-22T04:51:02Z')).toBe('2026-11-21T04:51:00.000Z');
+    // A moment early, and held up past midnight: the same night.
+    expect(end('2026-11-21T04:50:59.990Z')).toBe('2026-11-21T04:51:00.000Z');
+    expect(end('2026-11-21T05:20:00Z')).toBe('2026-11-21T04:51:00.000Z');
+    // The nights the clocks change: 25 hours, then 23.
+    expect(end('2026-11-02T04:51:02Z')).toBe('2026-11-02T04:51:00.000Z');
+    expect(end('2027-03-15T03:51:02Z')).toBe('2027-03-15T03:51:00.000Z');
+    // By hand at 10:00 AM EST: the night that ended half a day ago or more.
+    expect(end('2026-11-21T15:00:00Z')).toBe('2026-11-21T04:51:00.000Z');
+  });
 
   test('a run starts its read at the scheduled time of the night before', () => {
     // Nov 20 2026, 11:51:02 PM EST.

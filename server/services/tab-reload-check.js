@@ -5,9 +5,9 @@
 // option A). Each staff page view logs whether the tab's build was out of
 // date and what kept it there (admin_usage_events.stale_build and
 // reload_hold, written by routes/admin-usage.js). This job reads, once a
-// night, the page views since the scheduled time of the run before it, and
-// posts one engineering FIX row to the ops digest when out-of-date page
-// views show a failed reload:
+// night, the page views from the scheduled time of the run before it up to
+// its own, and posts one engineering FIX row to the ops digest when
+// out-of-date page views show a failed reload:
 // - no name: the move was due a reload, or no move was noted for the page
 //   (components/PortalUpdate.jsx);
 // - 'no-server-heard': the tab had still heard no server as the page view
@@ -51,24 +51,30 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// Where a run's read starts: the scheduled time of the run before it, in
-// Eastern time. From one run to the next is 23, 24 or 25 hours (the clocks
-// change), so a fixed 24 hours would skip the hour after the last run on the
-// night the clocks go back. It is the latest scheduled time at least half a
-// day old (a run starts a moment after its own): the scheduled time on the
-// Eastern day of the moment half a day ago, or the one a day before it.
-function windowStart(now = new Date()) {
+// What a run reads: from the scheduled time of the run before it (`start`)
+// up to its own (`end`, not included), in Eastern time. Each page view is so
+// read by one run: a run starts a moment after its scheduled time, and a
+// view of that moment belongs to the next night. From one scheduled time to
+// the next is 23, 24 or 25 hours (the clocks change), so a fixed 24 hours
+// would skip the hour after the last run on the night the clocks go back.
+// `start` is the latest scheduled time at least half a day old: the
+// scheduled time on the Eastern day of the moment half a day ago, or the one
+// a day before it.
+function readWindow(now = new Date()) {
   const halfDayAgo = new Date(now.getTime() - HALF_DAY_MS);
   const scheduledOn = (day) => parseETDateTime(`${etDateString(day)}T${RUN_AT}`);
   const sameDay = scheduledOn(halfDayAgo);
-  return sameDay.getTime() <= halfDayAgo.getTime() ? sameDay : scheduledOn(addETDays(halfDayAgo, -1));
+  const start = sameDay.getTime() <= halfDayAgo.getTime() ? sameDay : scheduledOn(addETDays(halfDayAgo, -1));
+  return { start, end: scheduledOn(addETDays(start, 1)) };
 }
 
-// Out-of-date staff page views since the run before this one whose name
-// shows a failed reload, counted for each name, page and staff member.
+// Out-of-date staff page views of this run's window whose name shows a
+// failed reload, counted for each name, page and staff member.
 function readMissedReloads({ now = new Date(), knex = db } = {}) {
+  const { start, end } = readWindow(now);
   return knex('admin_usage_events')
-    .where('created_at', '>=', windowStart(now))
+    .where('created_at', '>=', start)
+    .where('created_at', '<', end)
     .where('stale_build', true)
     .where((q) => q.whereNull('reload_hold').orWhereIn('reload_hold', FAILED_NAMES))
     .select('reload_hold', 'page_key', 'technician_id')
@@ -97,14 +103,14 @@ function summarize(rows) {
 function composeDigest({ views, people, names, pages }) {
   const s = views === 1 ? '' : 's';
   const who = `${people} staff member${people === 1 ? '' : 's'}`;
-  const lead = `Since the nightly check before this one, ${views} staff page view${s} by ${who} ran an out-of-date portal build that should have reloaded.`;
+  const lead = `In the day before this check, ${views} staff page view${s} by ${who} ran an out-of-date portal build that should have reloaded.`;
   const causeLine = ([name, n]) => `${name === 'none' ? 'no name' : name} (${n}): ${CAUSES[name]}`;
   const pageLine = ([page, n]) => `${page}: ${n}`;
   const source = 'Rows: admin_usage_events with stale_build true (routes/admin-usage.js).';
   return {
     subject: `FIX: ${views} staff page view${s} missed a reload to the live portal build`,
     headline: 'System — fix the reload of out-of-date staff tabs',
-    summary: `${views} staff page view${s} since the last check ran an out-of-date build that should have reloaded.`,
+    summary: `${views} staff page view${s} in the day before this check ran an out-of-date build that should have reloaded.`,
     text: [lead, '', 'By cause:', ...names.map((e) => `- ${causeLine(e)}`), '', 'By page:', ...pages.map((e) => `- ${pageLine(e)}`), '', source].join('\n'),
     html: [
       `<p>${esc(lead)}</p>`,
@@ -168,7 +174,7 @@ async function runTabReloadCheck({ readRows = readMissedReloads, mailer = sendgr
 module.exports = {
   runTabReloadCheck,
   readMissedReloads,
-  windowStart,
+  readWindow,
   OPS_KEY,
   RUN_AT,
   FAILED_NAMES,

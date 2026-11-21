@@ -1,7 +1,8 @@
 /**
  * The nightly tab reload check's read, on PostgreSQL: readMissedReloads
- * counts only the stale page views since the scheduled time of the run
- * before it, with no name, 'no-server-heard', 'reloaded' or 'reload-missed'.
+ * counts only the stale page views from the scheduled time of the run
+ * before it up to its own, with no name, 'no-server-heard', 'reloaded' or
+ * 'reload-missed'.
  * The two columns it reads have their own test
  * (admin-usage-reload-columns-postgres.test.js).
  *
@@ -62,8 +63,19 @@ jest.setTimeout(60000);
     ...fields,
   });
 
-  test('counts the stale page views since the run before it whose name shows a failed reload', async () => {
+  test('counts the stale page views of its window whose name shows a failed reload', async () => {
+    const START = new Date('2026-11-01T03:51:00Z');
+    const END = new Date('2026-11-02T04:51:00Z');
+    const at = (date, ms) => ({ ...view(0, { stale_build: true, reload_hold: 'reloaded', page_key: 'schedule', path: '/admin/schedule' }), created_at: new Date(date.getTime() + ms) });
     await database('admin_usage_events').insert([
+      // The window's edges: its first moment counts; the moment before it,
+      // its end and the second after the end (before this run read) do not.
+      // The next run starts at that end.
+      at(START, 0),
+      at(START, -1),
+      at(END, -1),
+      at(END, 0),
+      at(END, 1000),
       view(10, { stale_build: true, reload_hold: null }),
       view(20, { stale_build: true, reload_hold: null }),
       view(30, { stale_build: true, reload_hold: 'no-server-heard', page_key: 'dashboard', path: '/admin/dashboard' }),
@@ -92,6 +104,7 @@ jest.setTimeout(60000);
       ['none', 'pipeline', TECH, 2],
       ['reload-missed', 'pipeline', TECH, 1],
       ['reloaded', 'pipeline', TECH, 1],
+      ['reloaded', 'schedule', TECH, 2],
     ]);
   });
 });
