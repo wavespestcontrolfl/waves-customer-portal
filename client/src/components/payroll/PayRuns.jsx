@@ -504,23 +504,34 @@ function ConfirmFinalize({ run, busy, onYes, onCancel }) {
 }
 
 export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
-  const [confirming, setConfirming] = useState(false);
+  // While the finalize prompt is open: the review token of the numbers on screen when Finalize was pressed.
+  const [confirmToken, setConfirmToken] = useState(null);
   const [voiding, setVoiding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [stubFor, setStubFor] = useState(null);
+  const canFinalize = canFinalizeRun(run);
+  // A read in the background can bring other numbers under the open prompt. Time off that a time-off bank
+  // does not pay changes the token and does not make the draft out of date, so "Yes" would finalize numbers
+  // the owner did not confirm. The prompt closes, and the owner reviews them and presses Finalize again.
+  const confirming = confirmToken !== null && (busy || (confirmToken === run.token && canFinalize));
+  useEffect(() => {
+    if (confirmToken === null || confirming) return;
+    setConfirmToken(null);
+    setError('The numbers changed. Review them, then press Finalize again.');
+  }, [confirmToken, confirming]);
 
   async function act(action, path, body, done) {
     setBusy(true); setError('');
     try {
       const data = await call(path, { method: 'POST', ...(body ? { body } : {}) });
-      setConfirming(false); setVoiding(false);
+      setConfirmToken(null); setVoiding(false);
       onMessage(done);
       await onChanged(data.run.id);
     } catch (failure) {
       setError(failure.message);
       // A changed draft was already saved by the server: show it.
-      if (action === 'finalize') { setConfirming(false); await onChanged(run.id); }
+      if (action === 'finalize') { setConfirmToken(null); await onChanged(run.id); }
     }
     // A finalized or voided run changes the tax form figures on this page. Refetch them after a
     // failure too: the server may have committed before the error reached the page.
@@ -544,7 +555,6 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
 
   const isDraft = run.status === 'draft';
   const isFinal = run.status === 'finalized';
-  const canFinalize = canFinalizeRun(run);
 
   return <Card className="grid gap-4 p-4" aria-label={`Pay run for ${weekLabel(run.weekStart)}`}>
     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -572,8 +582,8 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
 
     {confirming && <ConfirmFinalize
       run={run} busy={busy}
-      onYes={() => act('finalize', `/runs/${run.id}/finalize`, { token: run.token }, 'Pay run finalized.')}
-      onCancel={() => setConfirming(false)}
+      onYes={() => act('finalize', `/runs/${run.id}/finalize`, { token: confirmToken }, 'Pay run finalized.')}
+      onCancel={() => setConfirmToken(null)}
     />}
 
     {voiding && <VoidForm
@@ -584,7 +594,7 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
 
     {!confirming && !voiding && <div className="flex flex-wrap gap-2">
       {isDraft && <Button variant="secondary" disabled={busy} onClick={() => act('recompute', `/runs/${run.id}/recompute`, null, 'Pay run recomputed.')}>Recompute</Button>}
-      {isDraft && <Button disabled={busy || !canFinalize} onClick={() => setConfirming(true)}>Finalize</Button>}
+      {isDraft && <Button disabled={busy || !canFinalize} onClick={() => { setError(''); setConfirmToken(run.token); }}>Finalize</Button>}
       {(isDraft || isFinal) && <Button variant="secondary" disabled={busy} onClick={() => setVoiding(true)}>Void</Button>}
       {run.status !== 'voided' && run.checks.length > 0 && <Button variant="secondary" disabled={busy} onClick={exportCsv}>Export CSV</Button>}
     </div>}
@@ -622,42 +632,54 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
   // Only the newest read sets the open run. An older read that answers last (a reload after a setting was
   // saved, a slow network) must not put another run back under the Finalize and Void buttons.
   // `shown` is the run on screen. `wanted` is the run the owner last asked for: it differs from `shown`
-  // only while that read is on its way. `readAgain` is set when something a run depends on changed while
-  // such a read was on its way: its answer can be from before the change, so it is read once more.
+  // only while that read is on its way. `changes` counts the changes of something a run depends on, and
+  // `readThrough` is the count the run on screen was read at. A read that a change ended under can be from
+  // before the change, so it is made once more; and the run on screen is behind while the two counts differ.
   const newestOpen = useRef(0);
   const shown = useRef(null);
   const wanted = useRef(null);
-  const readAgain = useRef(false);
-  const show = useCallback((next) => {
-    shown.current = next.id; wanted.current = next.id;
+  const changes = useRef(0);
+  const readThrough = useRef(0);
+  const show = useCallback((next, seen) => {
+    shown.current = next.id; wanted.current = next.id; readThrough.current = seen;
     setRun(next);
   }, []);
-  const open = useCallback(async (id) => {
+  // `kept` is the failure that sent the owner back to the run on screen. It stays up while that run is read
+  // again: the list is not reloaded then, because a list reload clears the message.
+  const open = useCallback(async (id, kept = '') => {
     wanted.current = id;
     newestOpen.current += 1;
     const mine = newestOpen.current;
     try {
       let data;
+      let seen;
       do {
-        readAgain.current = false;
+        seen = changes.current;
         data = await call(`/runs/${id}`);
         if (mine !== newestOpen.current) return;
-      } while (readAgain.current);
-      show(data.run); setError('');
+      } while (seen !== changes.current);
+      show(data.run, seen); setError(kept);
     } catch (failure) {
       if (mine !== newestOpen.current) return;
       wanted.current = shown.current;
       setError(failure.message);
+      // The owner is back on the run on screen. A change that ended while they waited is not in it (its read
+      // was held back, or dropped for this one): read it now.
+      if (shown.current && shown.current !== id && readThrough.current !== changes.current) {
+        open(shown.current, failure.message);
+        return;
+      }
     }
-    loadList();
+    if (!kept) loadList();
   }, [call, loadList, show]);
   // Something a run depends on changed (time off, a yearly-hours setting, another run finalized or voided).
   // The run on screen is read again now. While the owner waits for another run or a new one, that read is
   // not started: it would be dropped for this one, and the first run would stay under the buttons. The run
-  // they wait for is read once more when it answers (readAgain). Returns the read it started, or null.
+  // they wait for is read once more when it answers, and the run on screen is read when that one fails
+  // (both by the count). Returns the read it started, or null.
   const refresh = useCallback(() => {
+    changes.current += 1;
     if (shown.current && wanted.current === shown.current) return open(shown.current);
-    readAgain.current = true;
     return null;
   }, [open]);
 
@@ -693,20 +715,24 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
     // The owner asks for a new run. It becomes the open run when it answers, unless they picked another
     // run meanwhile. Until then no refresh may read the shown run again: that read would take its place.
     // A change that ended while the run was being made can be missing from its answer: read it once more.
+    // When no run comes, the run on screen has not read that change: read it, as a failed open does.
     wanted.current = NEW_RUN;
     newestOpen.current += 1;
     const mine = newestOpen.current;
-    readAgain.current = false;
+    const seen = changes.current;
     try {
       const data = await call('/runs', { method: 'POST', body: { weekStart: week, payDate } });
       if (mine === newestOpen.current) {
-        show(data.run);
-        if (readAgain.current) open(data.run.id);
+        show(data.run, seen);
+        if (seen !== changes.current) open(data.run.id);
       }
       loadList();
     } catch (failure) {
-      if (mine === newestOpen.current) wanted.current = shown.current;
       setError(failure.message);
+      if (mine === newestOpen.current) {
+        wanted.current = shown.current;
+        if (shown.current && readThrough.current !== changes.current) open(shown.current, failure.message);
+      }
     }
     setBusy(false);
   }

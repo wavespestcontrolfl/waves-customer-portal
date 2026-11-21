@@ -336,6 +336,47 @@ describe('The banks on the time off panel stay current', () => {
     expect(screen.getByText(/10\.00 hours of time off are not paid/)).toBeInTheDocument();
   });
 
+  it('closes the finalize prompt when the numbers under it change, and then finalizes the numbers the owner confirmed', async () => {
+    let status = 'draft';
+    let hoursNotPaid = '10.00';
+    const original = adminFetch.getMockImplementation();
+    // The list of time off not paid is in the review token, and a change of it does not make the draft out of date.
+    const runNow = () => ({
+      ...RUN, status, checks: [], totals: { ...totals, checkCount: 0 }, token: `token-${hoursNotPaid}`,
+      unpaidTimeOff: [{
+        technicianId: 'tech-a', name: 'Sample Alpha', hours: hoursNotPaid,
+        reason: `${hoursNotPaid} hours of time off are not paid, because the time-off bank does not hold them.`,
+      }],
+    });
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', weekEnd: '2026-10-18', payDate: '2026-10-23', status, totals }] });
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: runNow() });
+      if (path === '/admin/payroll/runs/run-1/finalize' && method === 'POST') { calls.push({ path, method, body: options.body }); status = 'finalized'; return reply({ run: runNow() }); }
+      if (path.startsWith('/admin/payroll/time-off/') && method === 'DELETE') hoursNotPaid = '2.00';
+      return original(path, options);
+    });
+    const CHANGED = 'The numbers changed. Review them, then press Finalize again.';
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finalize' }));
+    expect(await screen.findByRole('group', { name: 'Confirm finalize' })).toBeInTheDocument();
+    // A day off is removed while the prompt is open. The run is read again and lists other hours.
+    fireEvent.click(within(await panel()).getByRole('button', { name: 'Remove time off for Sample Alpha on Oct 14, 2026' }));
+    expect(await screen.findByText(/2\.00 hours of time off are not paid/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Confirm finalize' })).toBeNull());
+    expect(screen.getByText(CHANGED)).toBeInTheDocument();
+    expect(writes().map(c => c.path)).toEqual(['/admin/payroll/time-off/off-1']);
+    // The owner presses Finalize again: the prompt is for the numbers on screen now.
+    fireEvent.click(screen.getByRole('button', { name: 'Finalize' }));
+    expect(screen.queryByText(CHANGED)).toBeNull();
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, finalize' }));
+    await waitFor(() => expect(writes().map(c => c.path)).toEqual(['/admin/payroll/time-off/off-1', '/admin/payroll/runs/run-1/finalize']));
+    expect(writes()[1].body).toEqual({ token: 'token-2.00' });
+    expect(await screen.findByText('No paychecks in this run.')).toBeInTheDocument();
+    expect(screen.queryByText(CHANGED)).toBeNull();
+  });
+
   it('keeps the newest banks when an older request answers last', async () => {
     let hours = 80;
     let asked = 0;
@@ -661,6 +702,66 @@ describe('The open pay run stays the one the owner picked', () => {
     expect(await screen.findByLabelText(SECOND)).toBeInTheDocument();
     expect(held.secondReads).toBe(2);
     expect(screen.queryByLabelText(FIRST)).toBeNull();
+  });
+
+  it('reads the run on screen again when the run the owner asked for does not come after a change ended, and keeps that failure on screen', async () => {
+    const held = { second: null, create: null };
+    const original = adminFetch.getMockImplementation();
+    const firstReads = () => calls.filter(c => c.path === '/admin/payroll/runs/run-1').length;
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs' && method === 'GET') return reply({ runs: LIST });
+      if (path === '/admin/payroll/runs' && method === 'POST') {
+        return new Promise(resolve => { held.create = () => resolve(reply({ error: 'No W-2 hours to pay for that week.' }, false, 409)); });
+      }
+      if (path === '/admin/payroll/runs/run-1') { calls.push({ path, method }); return reply({ run: DRAFT }); }
+      if (path === '/admin/payroll/runs/run-2') {
+        return new Promise(resolve => { held.second = () => resolve(reply({ error: 'Pay run not found.' }, false, 404)); });
+      }
+      return original(path, options);
+    });
+    const land = async (name) => {
+      const answer = held[name];
+      held[name] = null;
+      await act(async () => { answer(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    };
+    const removeADay = async () => {
+      const view = within(await panel());
+      fireEvent.click(view.getByRole('button', { name: 'Remove time off for Sample Alpha on Oct 14, 2026' }));
+      await view.findByText('Time off removed.');
+      await waitFor(() => expect(view.getByRole('button', { name: 'Remove time off for Sample Alpha on Oct 14, 2026' })).toBeEnabled());
+    };
+    const askForTheOther = async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Open pay run for Oct 5, 2026 to Oct 11, 2026' }));
+      await waitFor(() => expect(held.second).toBeTypeOf('function'));
+    };
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    await screen.findByLabelText(FIRST);
+    const before = firstReads();
+    // The owner asks for the other run, and a day off is removed before it answers: the draft is not read yet.
+    await askForTheOther();
+    await removeADay();
+    expect(firstReads()).toBe(before);
+    // The other run does not come. The draft stays on screen and has not read the change: it is read now.
+    await land('second');
+    await waitFor(() => expect(firstReads()).toBe(before + 1));
+    expect(screen.getByText('Pay run not found.')).toBeInTheDocument();
+    expect(screen.getByLabelText(FIRST)).toBeInTheDocument();
+    // The same when a new pay run is refused.
+    fireEvent.click(screen.getByRole('button', { name: 'New pay run' }));
+    await waitFor(() => expect(held.create).toBeTypeOf('function'));
+    await removeADay();
+    expect(firstReads()).toBe(before + 1);
+    await land('create');
+    await waitFor(() => expect(firstReads()).toBe(before + 2));
+    expect(screen.getByText('No W-2 hours to pay for that week.')).toBeInTheDocument();
+    expect(screen.getByLabelText(FIRST)).toBeInTheDocument();
+    // With no change in between, a run that does not come starts no read of the draft.
+    await askForTheOther();
+    await land('second');
+    expect(firstReads()).toBe(before + 2);
+    expect(screen.getByLabelText(FIRST)).toBeInTheDocument();
   });
 
   // A new pay run whose answer is held back until release() runs.
