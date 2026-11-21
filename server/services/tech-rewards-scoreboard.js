@@ -405,12 +405,23 @@ function ordinaryPremium(lines, storedWeeks, earlier = {}) {
   return { weeks, excludedCents: sum(plain) - sum(weeks) };
 }
 
+// A pay line `l` whose pay, or the overtime it adds, can count in a window of days. Its pay is earned between the first day it
+// covers (or its pay week) and the last (lineComponents). Its overtime is priced over WHOLE workweeks (weeksOfLine), and a
+// week's premium counts on each of that week's seven days: so the test runs from the Monday of the first week it covers to the
+// Sunday of the last, not from the covered days themselves (a line for Tuesday to Friday adds premium that counts on that
+// Monday). Never narrower than what readGross counts. Bindings: the window's last day, then its first.
+const LINE_IN_WINDOW_SQL = "LEAST(date_trunc('week', l.covers_from::timestamp)::date, l.earned_week_start) <= ?::date"
+  + " AND GREATEST(date_trunc('week', l.covers_to::timestamp)::date + 6, l.earned_week_start + 6) >= ?::date";
+
 /**
  * The technician's finalized checks that can hold pay earned in [from, to] (every check whose pay week ends on or
  * after `from`: a catch-up line or premium can be paid long after it was earned), with their dated parts, then
  * earnedGrossCents. Day records are read only for a week that straddles a window edge.
+ * Returns { cents, checkIds }. checkIds are the checks the figure was worked out from, sorted: every check read whose pay
+ * week touches the window, or that paid a pay line that can count in it (LINE_IN_WINDOW_SQL). The pay run keeps them on a
+ * bonus line it works out from this figure (tech-rewards-pay-lines.js), so those checks cannot be voided under a paid bonus.
  */
-async function readGross(conn, technicianId, from, to) {
+async function readGrossAndChecks(conn, technicianId, from, to) {
   const rows = await conn('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
@@ -418,14 +429,16 @@ async function readGross(conn, technicianId, from, to) {
     .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), conn.raw("to_char(r.pay_date, 'YYYY-MM-DD') AS pay_date"), 'c.gross_cents', 'c.regular_pay_cents',
       'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents', 'c.tech_rewards_cents',
       conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"));
-  if (!rows.length) return 0;
+  if (!rows.length) return { cents: 0, checkIds: [] };
   const lineRows = await conn('payroll_pay_lines as l')
     .whereIn('l.check_id', rows.map((row) => row.id))
     .where('l.status', 'paid')
     .select('l.check_id', 'l.kind', 'l.amount_cents', conn.raw("to_char(l.earned_week_start, 'YYYY-MM-DD') AS week_start"),
       conn.raw("to_char(l.covers_from, 'YYYY-MM-DD') AS covers_from"), conn.raw("to_char(l.covers_to, 'YYYY-MM-DD') AS covers_to"),
-      conn.raw(`to_char(${LINE_DAY_SQL}, 'YYYY-MM-DD') AS earned_on`, lineEarnedOnBindings()));
+      conn.raw(`to_char(${LINE_DAY_SQL}, 'YYYY-MM-DD') AS earned_on`, lineEarnedOnBindings()),
+      conn.raw(`(${LINE_IN_WINDOW_SQL}) AS in_window`, [to, from]));
   const checks = [];
+  const checkIds = [];
   // In pay order (pay date, then pay week: the order finalize keeps within a tax year), so each check is read with what the
   // checks before it paid (ordinaryPremium `earlier`), as the pay run priced it. Every check that paid a line for a week of
   // the window is in `rows`: a line is paid by its own week's run or a later one.
@@ -455,20 +468,18 @@ async function readGross(conn, technicianId, from, to) {
       techRewardsPremiumCents: premium.excludedCents,
     };
     const weekEnd = addStaffWorkDays(check.weekStart, 6);
+    if ((weekEnd >= from && check.weekStart <= to) || ownLines.some((line) => line.in_window)) checkIds.push(row.id);
     if (weekEnd >= from && check.weekStart <= to && (check.weekStart < from || weekEnd > to)) {
       check.dayMinutes = await readDayMinutes(conn, technicianId, check.weekStart);
       Object.assign(check, await readTimeOffRecords(conn, technicianId, check.weekStart));
     }
     checks.push(check);
   }
-  return earnedGrossCents(checks, from, to);
+  return { cents: earnedGrossCents(checks, from, to), checkIds: checkIds.sort() };
 }
 
-// A pay line `l` whose pay, or the overtime it adds, can count in a window of days: its earning day and the weeks its overtime
-// is priced over all lie between the first day it covers (or its pay week) and the last (lineComponents, weeksOfLine). Never
-// narrower than what readGross counts. Takes the window's last day, then its first, as SQL: a binding each by default, or
-// the columns of a joined row (tech-rewards-pay-lines.js paidBonusCounting).
-const lineInWindowSql = (last = '?::date', first = '?::date') => `LEAST(l.covers_from, l.earned_week_start) <= ${last} AND GREATEST(l.covers_to, l.earned_week_start + 6) >= ${first}`;
+const readGross = async (conn, technicianId, from, to) => (await readGrossAndChecks(conn, technicianId, from, to)).cents;
+
 
 /**
  * The oldest pay week of an OPEN pay line of the technician that readGross would count in [from, to] once a pay run pays it,
@@ -480,7 +491,7 @@ async function oldestOpenLineWeek(conn, technicianId, from, to) {
   const row = await conn('payroll_pay_lines as l')
     .where({ 'l.technician_id': technicianId, 'l.status': 'open' })
     .whereNotIn('l.kind', TECH_REWARD_KINDS)
-    .whereRaw(lineInWindowSql(), [to, from])
+    .whereRaw(LINE_IN_WINDOW_SQL, [to, from])
     .select(conn.raw("to_char(MIN(l.earned_week_start), 'YYYY-MM-DD') AS week"))
     .first();
   return row && row.week ? row.week : null;
@@ -571,5 +582,5 @@ async function listTechnicians(conn = db) {
 
 module.exports = {
   ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents,
-  ordinaryPremium, readGross, stayWindow, oldestOpenLineWeek, lineInWindowSql,
+  ordinaryPremium, readGross, readGrossAndChecks, stayWindow, oldestOpenLineWeek,
 };

@@ -80,17 +80,18 @@
  *     counts in them. It is the rate times the pay the FINALIZED checks hold, as the board reads it; the line's note says the
  *     rate, the base and the period. An open line is worked out again at every sync; finalize pays what its own sync worked
  *     out, and a PAID line never changes.
- *   - A PAID stay bonus holds the pay runs it counted (paidBonusCounting, in payroll-runs.js voidRun): a run that is earlier in
- *     pay order cannot be voided before the run that paid the bonus. Pay of the 12 months that a run finalizes AFTER the bonus
- *     was paid (a commission recorded late, an old week paid late) does not change the paid bonus: the office corrects that by
- *     voiding the run that paid it, which works it out again.
+ *   - A PAID stay bonus holds the pay runs it counted. The sync keeps the checks the amount was worked out from on the line
+ *     (counted_check_ids), and a run that holds one of them cannot be voided before the run that paid the bonus
+ *     (paidBonusCounting, in payroll-runs.js voidRun). Pay of the 12 months that a run finalizes AFTER the bonus was paid (a
+ *     commission recorded late, an old week paid late) does not change the paid bonus: the office corrects that by voiding
+ *     the run that paid it, which works it out again.
  *   - ONE GATE EACH. A kind's gate off takes that kind's open lines off and leaves the other kind's.
  */
 const { recordAuditEvent } = require('./audit-log');
 const calc = require('./tech-rewards-calc');
 const { applyAssignable } = require('./technician-eligibility');
 const {
-  KIND_WORDS, TECH_REWARD_KINDS, TECH_REWARDS_SOURCE, techRewardsSourceId, techRewardsOwnKey, techRewardsOwnedSql,
+  KIND_WORDS, TECH_REWARDS_SOURCE, techRewardsSourceId, techRewardsOwnKey, techRewardsOwnedSql,
 } = require('./payroll-pay-lines');
 const {
   payrollPayLinesLive, techRewardsPayLinesLive, techRewardsStayBonusLive, payrollTimeOffLive,
@@ -118,8 +119,6 @@ const FRIDAY = 5;
 // The first hire anniversary that has a stay bonus: the day the owner approved the plan. A pay run for an old week, dated before
 // it, never writes a bonus for an anniversary from before the plan.
 const FIRST_STAY_DATE = '2026-11-20';
-// The kinds a pay run works out from the technician's pay. A paid one holds the pay runs it counted (paidBonusCounting).
-const BASE_KINDS = [STAY];
 // A line is looked for in a run dated up to this many days after its due date: the first ready run writes it, and a gate turned
 // on later does not reach back further.
 const LOOKBACK_DAYS = 60;
@@ -362,13 +361,13 @@ async function priceStay(trx, cand, tech, run) {
   if (wait) return { wait };
   const openWeek = await scoreboard().oldestOpenLineWeek(trx, tech.id, span.coversFrom, span.coversTo);
   if (openWeek) return { wait: { reason: 'pay_line_open', week: openWeek } };
-  const baseCents = await scoreboard().readGross(trx, tech.id, span.coversFrom, span.coversTo);
+  const { cents: baseCents, checkIds } = await scoreboard().readGrossAndChecks(trx, tech.id, span.coversFrom, span.coversTo);
   const amountCents = baseCents > 0
     ? calc.stayBonus({ hireDate: tech.hire_date, asOf: milestone.dueDate, priorTwelveMonthsPayCents: baseCents }).cents
     : 0;
   if (!amountCents) return { wait: { reason: 'no_pay_on_file', week: null } };
   const noCheck = await checkWaitOf(trx, run, tech.id, { kind: STAY, amountCents });
-  return noCheck ? { wait: noCheck } : { amountCents, span, note: stayNote(milestone, span, baseCents) };
+  return noCheck ? { wait: noCheck } : { amountCents, span, note: stayNote(milestone, span, baseCents), countedCheckIds: checkIds };
 }
 
 const PRICE = { [GIFT]: priceGift, [STAY]: priceStay };
@@ -377,7 +376,7 @@ const OTHER_LINE = { [GIFT]: 'other_gift_line', [STAY]: 'other_stay_line' };
 
 // ---- Sync
 
-const lineColumns = (trx) => ['id', 'technician_id', 'kind', 'status', 'amount_cents', 'note', 'source_type', 'source_id',
+const lineColumns = (trx) => ['id', 'technician_id', 'kind', 'status', 'amount_cents', 'note', 'counted_check_ids', 'source_type', 'source_id',
   trx.raw("to_char(earned_week_start, 'YYYY-MM-DD') as earned_week_start"),
   trx.raw("to_char(covers_from, 'YYYY-MM-DD') as covers_from"),
   trx.raw("to_char(covers_to, 'YYYY-MM-DD') as covers_to")];
@@ -529,13 +528,18 @@ async function loadState(trx, run, lock) {
 }
 
 // priced: { amountCents, span, note } (a gift has no note)
-const changed = (open, { amountCents, span, note }) => Number(open.amount_cents) !== amountCents
-  || open.covers_from !== span.coversFrom || open.covers_to !== span.coversTo || (open.note || null) !== (note || null);
+const changed = (open, { amountCents, span, note, countedCheckIds }) => Number(open.amount_cents) !== amountCents
+  || open.covers_from !== span.coversFrom || open.covers_to !== span.coversTo || (open.note || null) !== (note || null)
+  || String(open.counted_check_ids || []) !== String(countedCheckIds || []);
 
-// An open line gets the pay week, the span, the amount and the note of the run that pays it now.
-const moveLine = (trx, id, { amountCents, span, note }) => trx('payroll_pay_lines').where({ id, status: 'open' }).update({
-  amount_cents: amountCents, earned_week_start: span.earnedWeekStart, covers_from: span.coversFrom, covers_to: span.coversTo,
-  ...(note ? { note } : {}),
+// The checks a line was worked out from (counted_check_ids), for a line that is worked out from pay; none for the gift.
+const countedOf = ({ countedCheckIds }) => (countedCheckIds ? { counted_check_ids: countedCheckIds } : {});
+
+// An open line gets the pay week, the span, the amount, the note and the counted checks of the run that pays it now.
+const moveLine = (trx, id, priced) => trx('payroll_pay_lines').where({ id, status: 'open' }).update({
+  amount_cents: priced.amountCents, earned_week_start: priced.span.earnedWeekStart, covers_from: priced.span.coversFrom, covers_to: priced.span.coversTo,
+  ...(priced.note ? { note: priced.note } : {}),
+  ...countedOf(priced),
   updated_at: trx.fn.now(),
 });
 
@@ -572,6 +576,7 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
     covers_from: span.coversFrom,
     covers_to: span.coversTo,
     ...(priced.note ? { note: priced.note } : {}),
+    ...countedOf(priced),
     source_type: SOURCE_TYPE,
     source_id: sourceId,
   }).returning('id');
@@ -681,38 +686,22 @@ async function waitNotes(conn, runId) {
 }
 
 /**
- * True when a PAID stay bonus of a technician on this finalized run counted the run's pay: the bonus is on a check of another
- * run that is later in pay order (the pay date, then the pay week: the order finalize keeps), and its 12 months hold this
- * run's pay week or a pay line this run paid. payroll-runs.js voidRun asks it and refuses the void: the bonus would stay on
- * its check, worked out from pay that is gone, and its overtime from hours that can change. Voiding the run that paid the
- * bonus first takes the bonus line off (dropRewardLinesOfWeek), and the next run dated for it works it out again. Within a tax
- * year the pay run's own order already refuses such a void (laterFinalCheckExists); this holds it across the year line, where
- * a stay bonus's 12 months nearly always reach. Not behind a gate: a paid bonus is protected with the gate off too. One read,
- * and no row when no stay bonus is paid.
+ * True when a PAID line on another pay run was worked out from a check of this finalized run (counted_check_ids: the checks
+ * priceStay read for a stay bonus, kept on the line by the sync that priced it; finalize syncs first, so they are the checks
+ * the paid amount came from). payroll-runs.js voidRun asks it and refuses the void: the bonus would stay on its check, worked
+ * out from pay that is gone. Voiding the run that paid the bonus first takes the bonus line off (dropRewardLinesOfWeek), and
+ * the next run dated for it works it out again. The pay dates of the two runs do not matter: within a tax year the pay run's
+ * own order usually refuses such a void already (laterFinalCheckExists), and this holds it across the year line and for pay
+ * dates that are out of week order. It cannot lock two runs against each other: a counted check was final before the bonus
+ * was paid, so the run that was finalized last can always be voided first. Not behind a gate: a paid bonus is protected with
+ * the gate off too. One read, and no row while no such line is paid.
  */
 async function paidBonusCounting(trx, run) {
-  const weekEnd = addStaffWorkDays(run.week_start, 6);
   const found = await trx('payroll_pay_lines as b')
     .join('payroll_checks as bc', 'bc.id', 'b.check_id')
-    .join('payroll_checks as c', 'c.technician_id', 'b.technician_id')
-    .where({ 'b.status': 'paid', 'b.source_type': SOURCE_TYPE, 'bc.status': 'finalized', 'c.run_id': run.id, 'c.status': 'finalized' })
-    .whereIn('b.kind', BASE_KINDS)
-    .whereRaw(techRewardsOwnedSql('b'))
+    .where({ 'b.status': 'paid', 'bc.status': 'finalized' })
     .whereNot('bc.run_id', run.id)
-    .where(function later() {
-      this.where('bc.pay_date', '>', run.pay_date).orWhere(function sameDay() {
-        this.where('bc.pay_date', run.pay_date).andWhere('bc.week_start', '>', run.week_start);
-      });
-    })
-    .where(function counted() {
-      this.whereRaw('b.covers_from <= ?::date AND b.covers_to >= ?::date', [weekEnd, run.week_start])
-        .orWhereExists(function paidLine() {
-          this.from('payroll_pay_lines as l').whereRaw('l.check_id = c.id').where('l.status', 'paid')
-            .whereNotIn('l.kind', TECH_REWARD_KINDS)
-            .whereRaw(scoreboard().lineInWindowSql('b.covers_to', 'b.covers_from'))
-            .select(trx.raw('1'));
-        });
-    })
+    .whereRaw("b.counted_check_ids && ARRAY(SELECT c.id FROM payroll_checks AS c WHERE c.run_id = ? AND c.status = 'finalized')", [run.id])
     .first('b.id');
   return Boolean(found);
 }

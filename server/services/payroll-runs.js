@@ -1082,7 +1082,7 @@ async function voidRun(runId, input, actor, conn = db) {
     // A paid stay bonus on a later check was worked out from this run's pay (tech-rewards-pay-lines.js paidBonusCounting): the
     // run that paid the bonus goes first, in another tax year too. Not behind a gate.
     if (run.status === 'finalized' && await paidBonusCounting(trx, run)) {
-      throw new PayrollError(409, 'A stay bonus on a later paycheck was worked out from this pay run. Void the pay run that paid the bonus first.');
+      throw new PayrollError(409, 'A stay bonus on another paycheck was worked out from this pay run. Void the pay run that paid the bonus first.');
     }
     // Money may be on its way through Mercury: not behind a gate, so turning the gates off never lets a void through.
     await require('./payroll-mercury').assertNoOpenPayments(trx, rows.map((row) => row.id));
