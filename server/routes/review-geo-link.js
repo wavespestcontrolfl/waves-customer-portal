@@ -10,9 +10,12 @@
  * (cf-ipcountry, cf-iplatitude, cf-iplongitude: an IP-based estimate; zone
  * Managed Transform "Add visitor location headers"), the same headers
  * public-pest-forecast.js /nearest reads. PRIVACY: the location values are
- * read, turned into an office id, and dropped. They are never logged, stored
- * or forwarded; the only thing recorded is which office was picked, as one
- * click on the reserved `review-<office id>` short code.
+ * read, turned into an office id, and dropped. This route never logs, stores
+ * or forwards them. The only thing it records is which office was picked: one
+ * click on the reserved `review-<office id>` short code, with no IP, no IP
+ * hash and no user agent. (The app-wide access log writes its usual line for
+ * this request as for any other; that line has no location header and no
+ * redirect target.)
  *
  * Fails open: anything that goes wrong still answers 302 to the fallback
  * office's review form. The redirect target ALWAYS comes from
@@ -26,7 +29,7 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../services/logger');
-const { WAVES_LOCATIONS, haversineMiles } = require('../config/locations');
+const { WAVES_LOCATIONS, haversineMiles, nearestLocation } = require('../config/locations');
 const { resolveShortCode } = require('../services/short-url');
 const { isBotUserAgent } = require('../utils/bot-ua');
 const { shouldRecord } = require('../services/customer-page-views');
@@ -68,15 +71,11 @@ function pickReviewOfficeId({ country, latitude, longitude } = {}) {
     return REVIEW_GEO_FALLBACK_OFFICE_ID;
   }
 
-  const origin = { latitude: lat, longitude: lng };
-  let best = null;
-  let bestMiles = Infinity;
-  for (const loc of WAVES_LOCATIONS) {
-    const miles = haversineMiles(origin, loc);
-    if (miles < bestMiles) { bestMiles = miles; best = loc; }
-  }
-  if (!best || bestMiles > REVIEW_GEO_MAX_MILES) return REVIEW_GEO_FALLBACK_OFFICE_ID;
-  return best.id;
+  // The shared nearest-office lookup, then this route's own distance cap.
+  const best = nearestLocation(lat, lng);
+  if (!best) return REVIEW_GEO_FALLBACK_OFFICE_ID;
+  const miles = haversineMiles({ latitude: lat, longitude: lng }, best);
+  return miles > REVIEW_GEO_MAX_MILES ? REVIEW_GEO_FALLBACK_OFFICE_ID : best.id;
 }
 
 // The reserved short code that counts clicks for one office. Rows are created
@@ -125,15 +124,14 @@ router.get('/', (req, res) => {
     });
 
     // Count the pick fire-and-forget. Bots and unfurlers (the QR is also
-    // pasted into chats) are not counted, staff previews bump the aggregate
-    // only (recordClick), and nothing here can change the redirect. The IP is
-    // deliberately not passed: it is a location proxy, and only the office
-    // pick may be recorded.
-    const ua = req.headers['user-agent'];
-    if (req.method === 'GET' && !isBotUserAgent(ua)) {
+    // pasted into chats) are filtered HERE and not counted, staff previews
+    // bump the aggregate only (recordClick), and nothing here can change the
+    // redirect. Neither the IP nor the user agent is passed on: the counter
+    // would store them (last_click_ip / last_click_ua, and ip_hash /
+    // user_agent on the click row), and only the office pick may be recorded.
+    if (req.method === 'GET' && !isBotUserAgent(req.headers['user-agent'])) {
       Promise.resolve()
         .then(() => resolveShortCode(reviewShortCodeForOffice(officeId), {
-          userAgent: ua,
           recordClick: shouldRecord(req),
         }))
         .catch(() => { /* counting never blocks the redirect; resolveShortCode logs its own errors */ });

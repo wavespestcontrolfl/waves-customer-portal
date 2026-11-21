@@ -157,11 +157,17 @@ describe('GET /rv', () => {
     expect(res.headers.get('location')).toBe(reviewUrl('parrish'));
   });
 
-  test('no location value or client IP is passed to the counter or a log', async () => {
-    await hit({ 'cf-ipcountry': 'US', 'cf-region-code': 'FL', 'cf-iplatitude': '27.5698', 'cf-iplongitude': '-82.4265', 'x-forwarded-for': '203.0.113.9' });
-    const [, opts] = resolveShortCode.mock.calls[0];
-    expect(Object.keys(opts).sort()).toEqual(['recordClick', 'userAgent']);
+  test('no location value, client IP or user agent is passed to the counter or to a log of this route', async () => {
+    await hit({
+      'cf-ipcountry': 'US', 'cf-region-code': 'FL', 'cf-iplatitude': '27.5698', 'cf-iplongitude': '-82.4265',
+      'x-forwarded-for': '203.0.113.9', 'user-agent': 'Mozilla/5.0 (iPhone; scan-probe-ua)',
+    });
+    const [code, opts] = resolveShortCode.mock.calls[0];
+    expect(code).toBe('review-parrish');
+    // Only the staff-preview switch goes to the counter: with no ip and no
+    // userAgent it stores neither on the code row nor on the click row.
+    expect(Object.keys(opts)).toEqual(['recordClick']);
     const everything = JSON.stringify([resolveShortCode.mock.calls, logger.error.mock.calls, logger.info.mock.calls]);
-    expect(everything).not.toMatch(/27\.5698|82\.4265|203\.0\.113\.9/);
+    expect(everything).not.toMatch(/27\.5698|82\.4265|203\.0\.113\.9|scan-probe-ua/);
   });
 });

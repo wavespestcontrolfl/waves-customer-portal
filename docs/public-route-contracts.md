@@ -6427,12 +6427,16 @@ nothing in the request names it, and a throw anywhere still 302s to the
 Lakewood Ranch form. `Cache-Control: private, no-store`, `noindex`,
 `Referrer-Policy: no-referrer` on every status (set before the limiter).
 Mounts OUTSIDE the `/api/` limiter with its own 120/min per-key limiter (the
-`/l` budget); over the limit is a plain 429. **Privacy**: latitude, longitude,
-region, country and the client IP are never logged, stored or forwarded; the
-only record is which office was picked, one fire-and-forget `resolveShortCode`
-on the reserved code `review-<office id>` (`review-bradenton`, `review-parrish`,
-`review-sarasota`, `review-venice`), so `short_codes.click_count` gives the office
-mix. Bot user agents are not counted; a missing row is a silent no-op. No
+`/l` budget); over the limit is a plain 429. **Privacy**: the route never logs,
+stores or forwards latitude, longitude, region or country. Its only record is
+which office was picked: one fire-and-forget `resolveShortCode` on the reserved
+code `review-<office id>` (`review-bradenton`, `review-parrish`,
+`review-sarasota`, `review-venice`), called with NO ip and NO user agent, so the
+code row keeps `click_count` and the last-click time only and the click row has
+a null `ip_hash` and a null `user_agent`. `short_codes.click_count` gives the
+office mix. (The app-wide access log writes its usual line for the request, as
+for every route; it carries no location header and no redirect target.) Bot
+user agents are filtered in the route and not counted; a missing row is a silent no-op. No
 `GATE_*`: it sends nothing, charges nothing and deletes nothing. Excluded from
 the iOS universal-link claim (`BROWSER_ONLY_PATH_ROOTS`) so a scan never opens
 the app.)
