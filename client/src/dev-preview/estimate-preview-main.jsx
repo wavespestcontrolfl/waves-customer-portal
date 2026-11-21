@@ -1207,7 +1207,7 @@ window.fetch = async (input, init) => {
       lawnCalendar: { programs: { standard: { visitsPerYear: 9 } } },
       ...referral,
       // softExit mirrors the GATE_ESTIMATE_SOFT_EXIT /data flag on a live row so
-      // the "Not ready yet?" sheet is exercised in preview.
+      // the "Not what you expected?" sheet is exercised in preview.
       softExit: true,
       softExitChange: true,
       ...(pdfPass && documentRenderAffirmed(proposal) ? { documentRender: true } : {}),
@@ -1228,9 +1228,7 @@ window.fetch = async (input, init) => {
       : respond({ error: 'invalid_code' }, 400);
   }
   if (url.includes('/change-request') || url.endsWith('/decline')) {
-    // The server promises a call for "Talking to a person first" when the estimate has a phone; the preview has one.
-    const wantsPerson = /"reason":"person"/.test(String(init?.body || ''));
-    return respond({ success: true, deduped: false, ...(wantsPerson ? { callPromised: true } : {}) });
+    return respond({ success: true, deduped: false });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;
