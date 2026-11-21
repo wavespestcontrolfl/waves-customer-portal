@@ -30,8 +30,8 @@
  *   rate for new employers is .0270 (2.7%)").
  *
  * Pay lines (GATE_PAYROLL_PAY_LINES, owner 2026-10-29, D5 part 1): a caller may
- * pass `payLines` (review bonus, commission, health allowance, employer HSA and
- * the extra overtime those cause, from payroll-regular-rate.js) and
+ * pass `payLines` (review bonus, commission, health allowance, employer HSA, tech
+ * rewards (season bonus, stay bonus, December gift) and the extra overtime those cause, from payroll-regular-rate.js) and
  * `flsaCovered`. The bonus, commission, allowance and line overtime are taxable
  * wages: they add to gross and so to every tax base. The employer HSA money is
  * Section 125 cafeteria-plan pay: not gross, not net pay and in no tax base, but
@@ -233,6 +233,9 @@ function taxYearOf(payDate) {
 }
 
 // A pay line figure: omitted is zero; a supplied one must be a whole number of cents.
+// A figure that rides on the output only when it is more than zero, so a check with none keeps exactly its earlier keys.
+const presentWhenPositive = (key, cents) => (cents > 0n ? { [key]: cents } : {});
+
 function wholeCents(value, label) {
   if (value == null) return 0n;
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be a non-negative whole number of cents`);
@@ -345,9 +348,11 @@ function computePaycheck({
   const commission = wholeCents(lineFigures.commissionCents, 'Commission');
   const healthAllowance = wholeCents(lineFigures.healthAllowanceCents, 'Health allowance');
   const hsaEmployer = wholeCents(lineFigures.hsaEmployerCents, 'Employer HSA');
+  // Season bonus, stay bonus and December gift pay lines (Tech Rewards Plan): taxable wages like a review bonus.
+  const techRewards = wholeCents(lineFigures.techRewardsCents, 'Tech rewards');
   const lineOvertimePremium = wholeCents(lineFigures.lineOvertimePremiumCents, 'Overtime on pay lines');
   const gross = regularPay + overtimePay + ptoPay + holidayPay
-    + reviewBonus + commission + healthAllowance + lineOvertimePremium;
+    + reviewBonus + commission + healthAllowance + techRewards + lineOvertimePremium;
 
   const ytd = nonNegativeCents(ytdGrossWages, 'Year-to-date wages');
   const socialSecurityWages = min(gross, max0(tables.socialSecurityWageBase - ytd));
@@ -390,6 +395,8 @@ function computePaycheck({
         commissionCents: commission,
         healthAllowanceCents: healthAllowance,
         lineOvertimePremiumCents: lineOvertimePremium,
+        // Present only when a rewards line is on the check, so every other check keeps exactly its earlier keys.
+        ...presentWhenPositive('techRewardsCents', techRewards),
       } : {}),
       grossPayCents: gross,
       federalIncomeTaxCents: federalIncomeTax,

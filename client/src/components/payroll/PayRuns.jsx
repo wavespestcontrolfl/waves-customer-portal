@@ -101,6 +101,7 @@ export function StubDialog({ call, check, onClose }) {
               {stub.earnings.reviewBonusCents > 0 && <TR><TD>Review bonus</TD><TD nums align="right">{centsToDollars(stub.earnings.reviewBonusCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.commissionCents > 0 && <TR><TD>Commission</TD><TD nums align="right">{centsToDollars(stub.earnings.commissionCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.healthAllowanceCents > 0 && <TR><TD>Health allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.healthAllowanceCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.techRewardsCents > 0 && <TR><TD>Tech rewards (season bonus, stay bonus or December gift)</TD><TD nums align="right">{centsToDollars(stub.earnings.techRewardsCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.lineOvertimePremiumCents > 0 && <TR><TD>Overtime on bonus, commission and allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.lineOvertimePremiumCents)}</TD><TD nums align="right" /></TR>}
               <TR><TD><strong>Gross pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.earnings.grossCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.grossCents)}</TD></TR>
               <TR><TD>Federal income tax</TD><TD nums align="right">{centsToDollars(stub.taxes.federalIncomeTaxCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.federalIncomeTaxCents)}</TD></TR>
@@ -283,7 +284,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
   // Only a run read with GATE_PAYROLL_MERCURY_STATUS on carries each check's payment.
   const showMercury = isFinal && run.checks.some(check => check.payment);
   // Only a pay run drafted with pay lines turned on carries these figures.
-  const showLines = run.checks.some(check => check.reviewBonusCents > 0 || check.commissionCents > 0 || check.healthAllowanceCents > 0 || check.lineOvertimePremiumCents > 0);
+  const showLines = run.checks.some(check => check.reviewBonusCents > 0 || check.commissionCents > 0 || check.healthAllowanceCents > 0 || check.techRewardsCents > 0 || check.lineOvertimePremiumCents > 0);
   const showHsa = run.checks.some(check => check.hsaEmployerCents > 0);
   return <>
     <Table aria-label="Paychecks">
@@ -310,7 +311,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
           <TD nums align="right">{hoursWord(check.overtimeHours)}</TD>
           {showPto && <TD nums align="right">{hoursWord(check.ptoHours)} · {centsToDollars(check.ptoPayCents)}</TD>}
           {showHoliday && <TD nums align="right">{hoursWord(check.holidayHours)} · {centsToDollars(check.holidayPayCents)}</TD>}
-          {showLines && <TD nums align="right">{centsToDollars(check.reviewBonusCents + check.commissionCents + check.healthAllowanceCents)}</TD>}
+          {showLines && <TD nums align="right">{centsToDollars(check.reviewBonusCents + check.commissionCents + check.healthAllowanceCents + (check.techRewardsCents || 0))}</TD>}
           {showLines && <TD nums align="right">{centsToDollars(check.lineOvertimePremiumCents)}</TD>}
           <TD nums align="right">{centsToDollars(Math.round(Number(check.hourlyRate) * 100))}</TD>
           <TD nums align="right">{centsToDollars(check.grossCents)}</TD>

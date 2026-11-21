@@ -466,6 +466,20 @@ describe('computePaycheck: SIMPLE IRA (employee deferral and Waves 2%)', () => {
     expect(withLines).toHaveProperty('qualifiedOvertimeCents');
   });
 
+  test('tech rewards pay (season bonus, stay bonus, December gift) is taxable wages in gross; without it the output is today\'s', () => {
+    const base = paycheck({ simple: undefined, payLines: { commissionCents: 10000 } });
+    const rewards = paycheck({ simple: undefined, payLines: { commissionCents: 10000, techRewardsCents: 30000 } });
+    expect(rewards.grossPayCents).toBe(base.grossPayCents + 30000);
+    expect(rewards.techRewardsCents).toBe(30000);
+    expect(rewards.incomeTaxWagesCents).toBe(base.incomeTaxWagesCents + 30000);
+    expect(rewards.taxableWages.medicareCents).toBe(base.taxableWages.medicareCents + 30000);
+    expect(rewards.medicareEmployeeCents).toBeGreaterThan(base.medicareEmployeeCents);
+    // the key is absent when there is none (also a zero), so a check with no rewards keeps exactly its earlier keys
+    expect(base).not.toHaveProperty('techRewardsCents');
+    expect(paycheck({ simple: undefined, payLines: { commissionCents: 10000, techRewardsCents: 0 } })).toEqual(base);
+    expect(() => paycheck({ simple: undefined, payLines: { techRewardsCents: -1 } })).toThrow(/Tech rewards/);
+  });
+
   test('no SIMPLE input is byte for byte today; bad input is refused', () => {
     expect(JSON.stringify(paycheck({ simple: undefined }))).toBe(JSON.stringify(plain));
     expect(JSON.stringify(paycheck({ simple: null }))).toBe(JSON.stringify(plain));
