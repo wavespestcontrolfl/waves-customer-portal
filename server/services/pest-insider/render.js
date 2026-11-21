@@ -364,12 +364,14 @@ function pollBlock(pollQuizId) {
 // is a key into the fixed label map below. There is no next-visit line on
 // purpose: the night planner can still move an untold visit's day, so a day
 // named here could be wrong by the time the email is read.
+// A label names the service line of the visit, never a result: an inspection-only visit
+// is on the termite or rodent line too, so those two say "service", not "protection" or "control".
 const HOME_LINE_LABELS = Object.freeze({
   pest: 'pest control',
   lawn: 'lawn care',
   mosquito: 'mosquito control',
-  termite: 'termite protection',
-  rodent: 'rodent control',
+  termite: 'termite service',
+  rodent: 'rodent service',
   tree_shrub: 'tree and shrub care',
 });
 

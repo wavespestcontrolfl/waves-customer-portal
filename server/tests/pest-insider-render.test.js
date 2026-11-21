@@ -520,9 +520,15 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
     expect(homeSubstitutions({ ...HOME, lastVisit: { date: '2026-11-10', line } }, { now: NOW }).substitutions[HOME_TEXT_TOKEN]).toBe(b.text);
   });
 
+  test('no label claims a result: an inspection-only visit is on the termite or rodent line too', () => {
+    for (const label of Object.values(HOME_LINE_LABELS)) expect(label).not.toMatch(/protect|guarantee|eliminat|free\b/i);
+    expect(HOME_LINE_LABELS.termite).toBe('termite service');
+    expect(HOME_LINE_LABELS.rodent).toBe('rodent service');
+  });
+
   test('the labels are the six service lines', () => {
     expect(Object.keys(HOME_LINE_LABELS)).toEqual(['pest', 'lawn', 'mosquito', 'termite', 'rodent', 'tree_shrub']);
-    expect(Object.values(HOME_LINE_LABELS)).toEqual(['pest control', 'lawn care', 'mosquito control', 'termite protection', 'rodent control', 'tree and shrub care']);
+    expect(Object.values(HOME_LINE_LABELS)).toEqual(['pest control', 'lawn care', 'mosquito control', 'termite service', 'rodent service', 'tree and shrub care']);
   });
 
   test.each([null, undefined, 'lawn and tree', 'constructor', '__proto__', 'toString', 7, {}, ['pest']])('an unknown or missing line (%p) prints no label', (line) => {

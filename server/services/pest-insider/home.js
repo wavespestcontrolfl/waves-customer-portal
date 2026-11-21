@@ -89,9 +89,13 @@ function homeFromRow(row, today) {
 // The per-chunk read. A reader gets a row only when its link, address and
 // household are unambiguous: the subscriber's address is the one this customer has
 // on file; no other live customer has it; no sibling profile shares the account
-// (COALESCE(account_id, id) is account-properties.js accountPropertyIds' key); at
-// most one active saved property, and a lived-in one. family_occupied stays out on
-// purpose: that home's payer can be another person.
+// (COALESCE(account_id, id) is account-properties.js accountPropertyIds' key); the
+// customer is the owner, not a property manager or a tenant (customers.contact_role);
+// and there is at most one saved property EVER, active, lived-in and the customer's
+// own (relationship NULL or own_home: not a client's or a family member's home).
+// One property ever, not one active: the last visit is read over the customer's whole
+// history, so a visit to a retired second property must not stand as this home's.
+// family_occupied stays out on purpose: that home's payer can be another person.
 const FACTS_SQL = (idList) => `
 SELECT ns.id AS subscriber_id, c.id AS customer_id, c.member_since, c.property_type, c.waveguard_tier,
        LOWER(TRIM(ns.email)) AS reader_address, v.last_date, t.last_types
@@ -114,9 +118,12 @@ WHERE ns.id IN (${idList})
                   AND LOWER(TRIM(o.email)) = LOWER(TRIM(c.email)))
   AND NOT EXISTS (SELECT 1 FROM customers o WHERE o.id <> c.id AND o.deleted_at IS NULL AND o.active IS DISTINCT FROM false
                   AND COALESCE(o.account_id, o.id) = COALESCE(c.account_id, c.id))
-  AND (SELECT COUNT(*) FROM customer_properties p WHERE p.customer_id = c.id AND p.active) <= 1
-  AND NOT EXISTS (SELECT 1 FROM customer_properties p WHERE p.customer_id = c.id AND p.active
-                  AND (p.occupancy_type IS NULL OR p.occupancy_type NOT IN ('owner_occupied', 'seasonal')
+  AND COALESCE(c.contact_role, 'owner') = 'owner'
+  AND (SELECT COUNT(*) FROM customer_properties p WHERE p.customer_id = c.id) <= 1
+  AND NOT EXISTS (SELECT 1 FROM customer_properties p WHERE p.customer_id = c.id
+                  AND (p.active IS NOT TRUE
+                       OR p.occupancy_type IS NULL OR p.occupancy_type NOT IN ('owner_occupied', 'seasonal')
+                       OR COALESCE(p.relationship, 'own_home') <> 'own_home'
                        OR LOWER(COALESCE(p.property_type, '')) IN ('commercial', 'business')))`;
 
 /**

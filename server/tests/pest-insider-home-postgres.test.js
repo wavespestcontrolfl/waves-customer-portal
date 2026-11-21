@@ -91,7 +91,7 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     await record(c, '2026-11-05', 'Quarterly Pest Control');
     const s = await reader(c);
     const facts = await loadHomeFacts(db, [s], NOW);
-    expect(facts.get(s)).toEqual({ customerId: c, lastVisit: { date: '2026-11-05', line: 'pest' }, sinceDate: '2024-03-05' });
+    expect(facts.get(s)).toEqual({ customerId: c, address: `${c}@example.invalid`, lastVisit: { date: '2026-11-05', line: 'pest' }, sinceDate: '2024-03-05' });
   });
 
   test('a record with a NULL status counts as completed; a non-completed or future-dated record does not', async () => {
@@ -207,13 +207,45 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     expect((await loadHomeFacts(db, [rootReader], NOW)).has(rootReader)).toBe(false);
   });
 
-  test('two active saved properties leave the reader out; one active and one retired does not', async () => {
+  test('one active saved property keeps the reader; a second one, active or retired, leaves the reader out', async () => {
+    const two = await eligible();
+    await property(two.c);
+    expect((await loadHomeFacts(db, [two.s], NOW)).has(two.s)).toBe(true);
+    await property(two.c);
+    expect((await loadHomeFacts(db, [two.s], NOW)).has(two.s)).toBe(false);
+    // The last visit is read over the whole history: a visit to a retired second property must not stand as this home's.
+    const retired = await eligible();
+    await property(retired.c);
+    await property(retired.c, { occupancy_type: 'rental_investment', active: false });
+    expect((await loadHomeFacts(db, [retired.s], NOW)).has(retired.s)).toBe(false);
+  });
+
+  test('a customer whose only saved property is retired has no entry', async () => {
     const { c, s } = await eligible();
     await property(c, { active: false });
-    await property(c);
-    expect((await loadHomeFacts(db, [s], NOW)).has(s)).toBe(true);
-    await property(c);
-    expect((await loadHomeFacts(db, [s], NOW)).has(s)).toBe(false);
+    expect((await loadHomeFacts(db, [s], NOW)).size).toBe(0);
+  });
+
+  test.each([
+    ['own_home', true],
+    [null, true],
+    ['rental_owned', false],
+    ['family_home', false],
+    ['managed_for_client', false],
+  ])('a saved property with relationship %p: the reader has an entry = %p', async (relationship, shown) => {
+    const { c, s } = await eligible();
+    await property(c, { relationship });
+    expect((await loadHomeFacts(db, [s], NOW)).has(s)).toBe(shown);
+  });
+
+  test.each([
+    ['owner', true],
+    [null, true],
+    ['property_manager', false],
+    ['tenant', false],
+  ])('a customer whose contact role is %p: the reader has an entry = %p', async (role, shown) => {
+    const { s } = await eligible({ contact_role: role });
+    expect((await loadHomeFacts(db, [s], NOW)).has(s)).toBe(shown);
   });
 
   test.each([
@@ -228,12 +260,6 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     const { c, s } = await eligible();
     await property(c, { occupancy_type: occupancy, ...over });
     expect((await loadHomeFacts(db, [s], NOW)).size).toBe(0);
-  });
-
-  test('a retired rental property does not leave the reader out', async () => {
-    const { c, s } = await eligible();
-    await property(c, { occupancy_type: 'rental_investment', active: false });
-    expect((await loadHomeFacts(db, [s], NOW)).has(s)).toBe(true);
   });
 
   test('a last visit over 365 days old has no entry; exactly 365 days old still does; no record at all has none', async () => {
@@ -256,8 +282,8 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     await record(b, '2026-11-01', 'Spring special');
     const [sA, sB] = [await reader(a), await reader(b)];
     const facts = await loadHomeFacts(db, [sA, sB], NOW);
-    expect(facts.get(sA)).toEqual({ customerId: a, lastVisit: { date: '2026-10-01', line: 'lawn' }, sinceDate: '2023-02-01' });
-    expect(facts.get(sB)).toEqual({ customerId: b, lastVisit: { date: '2026-11-01', line: null }, sinceDate: '2025-09-15' });
+    expect(facts.get(sA)).toEqual({ customerId: a, address: `${a}@example.invalid`, lastVisit: { date: '2026-10-01', line: 'lawn' }, sinceDate: '2023-02-01' });
+    expect(facts.get(sB)).toEqual({ customerId: b, address: `${b}@example.invalid`, lastVisit: { date: '2026-11-01', line: null }, sinceDate: '2025-09-15' });
   });
 
   test('a reader with no customer, an empty list and a reader not asked for return nothing', async () => {
