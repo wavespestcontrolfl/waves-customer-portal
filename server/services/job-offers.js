@@ -1259,18 +1259,20 @@ async function declineOffer(token, { reason, version }) {
 
 // ------------------------------------------------------------ 7-day close
 
-const CLOSE_BATCH = 50;
-
-// Stores the expiry of one sent offer and returns the row, or null when there is nothing to close: the applicant
-// answered, the owner withdrew or replaced the offer, or the application left Offer while this waited for the locks.
+// Stores the expiry of one sent offer and writes its bell in the same transaction, so the two commit together: a close
+// whose bell was not written is rolled back, the row stays sent, and the next pass does both again. False when there
+// is nothing to close: the applicant answered, the owner withdrew or replaced the offer, or the application left Offer
+// while this waited for the locks.
 async function closeIfExpired(applicationId, offerId) {
   return db.transaction(async (trx) => {
     const application = await trx('job_applications').where({ id: applicationId }).forUpdate().first('status');
     const offer = await trx('job_offers').where({ id: offerId }).forUpdate().first();
     // The clock is read after both locks, as for the applicant's own writes (lockByToken).
-    if (!application || application.status !== 'offer' || !offer || !expiredByClock(offer, new Date())) return null;
+    if (!application || application.status !== 'offer' || !offer || !expiredByClock(offer, new Date())) return false;
     await trx('job_offers').where({ id: offerId }).update({ status: 'expired', updated_at: new Date() });
-    return offer;
+    const written = await raiseBell('expired', offer, fmtDay(instantToEtDay(offer.expires_at)), trx);
+    if (!written) throw new Error('the closed-unsigned bell was not written');
+    return true;
   });
 }
 
@@ -1278,20 +1280,19 @@ async function closeIfExpired(applicationId, offerId) {
  * The 7-day close. Each sent offer past its expiry, on an application still at Offer, is stored as 'expired' and rings
  * one bell for the owner. Both pages already read such a row as expired by the clock (expiredByClock); this stores it,
  * so the row stops being an offer out. A date request does not expire: the owner answers it. The sweep is a catch-up
- * (every pass closes all that is due, so a missed pass loses nothing) and sends the applicant nothing.
+ * (every pass tries each offer that is due, so a missed pass loses nothing) and sends the applicant nothing.
+ *
+ * The list has no page size: an application has at most one sent offer (the partial unique index), so it is never
+ * longer than the applications at Offer, and an offer that keeps failing cannot hold back the ones after it.
  */
 async function closeExpiredOffers() {
   const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
     .where('o.status', 'sent').where('a.status', 'offer').where('o.expires_at', '<', new Date())
-    .orderBy('o.expires_at').limit(CLOSE_BATCH).select('o.id', 'o.application_id');
+    .orderBy('o.expires_at').select('o.id', 'o.application_id');
   const result = { closed: 0, failed: 0 };
   for (const row of due) {
     try {
-      const offer = await closeIfExpired(row.application_id, row.id);
-      if (offer) {
-        result.closed += 1;
-        await bell('expired', offer, fmtDay(instantToEtDay(offer.expires_at)));
-      }
+      if (await closeIfExpired(row.application_id, row.id)) result.closed += 1;
     } catch (err) {
       result.failed += 1;
       logger.error(`[job-offers] close failed (offer ${row.id}): ${errTag(err)}`);
@@ -1329,32 +1330,37 @@ const BELLS = {
   },
 };
 
-/**
- * One bell per offer event, after the commit. Names the applicant (the bell is admin-only and rings whatever the
- * category override says: an applicant signing is a person acting). Never throws.
- */
+// Raises the bell for one offer event. It names the applicant (the bell is admin-only and rings whatever the category
+// override says: an applicant acting, or an offer closing, is the owner's to see). With `trx` the bell row is written
+// in that transaction and an error propagates to it.
+async function raiseBell(kind, offer, extra, trx = null) {
+  const { raiseAdminAlert } = require('./admin-alert-compose');
+  const { fitAction } = require('./admin-alert-names');
+  const application = await (trx || db)('job_applications').where({ id: offer.application_id }).first('contact_snapshot');
+  const name = contactOf(application).name || 'An applicant';
+  const spec = BELLS[kind];
+  const templates = spec.actions.map((make) => (who) => make(who, extra));
+  return raiseAdminAlert('job_application', {
+    area: 'Leads',
+    action: fitAction('Leads', name, templates),
+    why: spec.why(extra),
+    severity: 'needs-you',
+    link: `/admin/recruiting?application=${offer.application_id}`,
+    subject: { type: 'check', id: `job-offer:${offer.id}` },
+    doneWhen: spec.doneWhen,
+    who: 'person',
+  }, {
+    bell: true,
+    dedupeKey: `job-offer-${kind}:${offer.id}`,
+    metadata: { applicationId: offer.application_id, offerId: offer.id },
+    ...(trx ? { trx } : {}),
+  });
+}
+
+/** One bell per applicant answer, after the commit: it never undoes the answer and never throws. */
 async function bell(kind, offer, extra) {
   try {
-    const { raiseAdminAlert } = require('./admin-alert-compose');
-    const { fitAction } = require('./admin-alert-names');
-    const application = await db('job_applications').where({ id: offer.application_id }).first('contact_snapshot');
-    const name = contactOf(application).name || 'An applicant';
-    const spec = BELLS[kind];
-    const templates = spec.actions.map((make) => (who) => make(who, extra));
-    await raiseAdminAlert('job_application', {
-      area: 'Leads',
-      action: fitAction('Leads', name, templates),
-      why: spec.why(extra),
-      severity: 'needs-you',
-      link: `/admin/recruiting?application=${offer.application_id}`,
-      subject: { type: 'check', id: `job-offer:${offer.id}` },
-      doneWhen: spec.doneWhen,
-      who: 'person',
-    }, {
-      bell: true,
-      dedupeKey: `job-offer-${kind}:${offer.id}`,
-      metadata: { applicationId: offer.application_id, offerId: offer.id },
-    });
+    await raiseBell(kind, offer, extra);
   } catch (err) {
     logger.error(`[job-offers] ${kind} bell not raised (offer ${offer.id}): ${errTag(err)}`);
   }

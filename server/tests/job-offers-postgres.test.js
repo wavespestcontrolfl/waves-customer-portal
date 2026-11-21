@@ -908,6 +908,7 @@ jest.setTimeout(120000);
         });
         expect(spec.why).toMatch(/^It closed \w{3}, \w{3} \d{1,2} with no answer; open the application to make a new offer or close it\.$/);
         expect(opts).toMatchObject({ bell: true, dedupeKey: `job-offer-expired:${sent.id}` });
+        expect(typeof opts.trx).toBe('function'); // written in the transaction that stores the expiry
         // The alert rules (one sentence, the length limits) take the bell as written: a refused bell is never raised.
         expect(jest.requireActual('../services/admin-alert-compose').composeAdminAlert(spec).headline)
           .toBe("Leads — Jordan Rivera's job offer closed unsigned");
@@ -956,6 +957,42 @@ jest.setTimeout(120000);
         expect(await withNextTransaction(withdrawThenOpen, () => JobOffers.closeExpiredOffers())).toEqual({ closed: 0, failed: 0 });
         expect(await statusOf(sent.id)).toBe('withdrawn');
         expect(mockRaise).not.toHaveBeenCalled();
+      });
+
+      test('the real alert writer stores the bell row in the close, once', async () => {
+        const app = await newApplication();
+        const sent = (await sendNew(app)).offer;
+        await lapse(sent.id);
+        const { raiseAdminAlert } = jest.requireActual('../services/admin-alert-compose');
+        mockRaise.mockImplementation((...args) => raiseAdminAlert(...args));
+        try {
+          expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 1, failed: 0 });
+        } finally {
+          mockRaise.mockImplementation(async () => ({ id: 'bell-1' }));
+        }
+        const bells = await root('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`job-offer-expired:${sent.id}`]);
+        expect(bells).toHaveLength(1);
+        expect(bells[0]).toMatchObject({
+          recipient_type: 'admin', category: 'job_application', title: "Leads — Jordan Rivera's job offer closed unsigned",
+          link: `/admin/recruiting?application=${app.id}`,
+        });
+      });
+
+      test('a close whose bell is not written is undone, and the next pass stores the expiry and rings', async () => {
+        const sent = (await sendNew(await newApplication())).offer;
+        await lapse(sent.id);
+        mockRaise.mockRejectedValueOnce(new Error('insert failed'));
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 0, failed: 1 });
+        expect(await statusOf(sent.id)).toBe('sent');
+        // A write that reports no row is a failure too.
+        mockRaise.mockResolvedValueOnce(null);
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 0, failed: 1 });
+        expect(await statusOf(sent.id)).toBe('sent');
+
+        mockRaise.mockClear();
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 1, failed: 0 });
+        expect(await statusOf(sent.id)).toBe('expired');
+        expect(mockRaise).toHaveBeenCalledTimes(1);
       });
 
       test('an offer whose close fails is counted, the next one still closes, and a later pass closes the first', async () => {
