@@ -43,7 +43,7 @@
  */
 
 const logger = require('../logger');
-const { assertAssignableTechnician } = require('../technician-eligibility');
+const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('../technician-eligibility');
 
 const EARLIEST_START_MINUTES = 8 * 60; // house rule: no client appointments before 8am ET
 
@@ -420,7 +420,10 @@ async function commitVoiceBooking({
       });
       if (clash.length) return { status: 'slot_taken' };
 
-      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr, workDays: true });
+      // `hours` (GATE_TECH_SHIFT_HOURS): the visit's own block against the technician's shift, the rule the
+      // offer was held to (the /book engine). A refusal books nothing and answers slot_taken (the catch below).
+      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr, workDays: true,
+        hours: visitBlock(windowStart, windowEnd, insertData.estimated_duration_minutes) });
       const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
       // Surface the pending request in the existing admin confirm queue — the
       // same outbound_booking_review card the office already works. Only
@@ -510,6 +513,13 @@ async function commitVoiceBooking({
       );
       return { status: 'already_requested' };
     }
+    // Not a failure either: the technician's shift stopped holding this block after the engine's
+    // re-check (the hours changed, or today's clock-in arrived). Nothing was written, and the time
+    // is gone as a taken one is, so the agent looks for fresh times. Every other refusal stays an error.
+    if (err && err.code === NOT_ASSIGNABLE && err.outsideShift) {
+      logger.warn(`[voice-relay-booking] ${dateStr} ${windowStart} refused at the commit for customer ${customerId}: technician ${err.technicianId} outside_shift`);
+      return { status: 'slot_taken' };
+    }
     logger.error(`[voice-relay-booking] commit failed for customer ${customerId} on ${dateStr}: ${err.message}`);
     return { status: 'error' };
   }
@@ -528,6 +538,19 @@ function addMinutesToClock(value, minutes) {
 function clockToMinutes(value) {
   const m = String(value || '').match(/^(\d{1,2}):(\d{2})/);
   return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+}
+
+/**
+ * A visit's own block in minutes after midnight, for the shift check (technician-eligibility.js
+ * `hours`): its start, and the later of its window end and its start plus its length (60 minutes
+ * when none), the end commitVoiceBooking writes. Kept in minutes, so a long visit late in the day
+ * is not wrapped at midnight. A start that cannot be read is null: that check then leaves the
+ * visit to the others.
+ */
+function visitBlock(windowStart, windowEnd, minutes) {
+  const startMin = clockToMinutes(windowStart);
+  if (startMin === null) return { startMin: null, endMin: null };
+  return { startMin, endMin: Math.max(clockToMinutes(windowEnd) ?? 0, startMin + (Number(minutes) || 60)) };
 }
 
 /** The later of two 'HH:MM[:SS]' clocks; either may be null/unparseable. */
