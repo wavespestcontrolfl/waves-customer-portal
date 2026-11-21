@@ -1,9 +1,10 @@
-// The pre-push hook's round log (scripts/hooks/pre-push: round_log_row,
-// round_log_unaudited_push, write_round_log). Each pushed commit that has
-// something to audit gets one JSON line in codex-review-rounds-YYYY-MM.jsonl
-// in the clone's COMMON git dir: "audited" with its counts, or "unaudited"
-// with the reason. So a branch that takes ten local audit rounds can be told
-// from one that takes one, and a push that passed with no audit is on record.
+// The pre-push hook's round log (scripts/hooks/pre-push: round_log_mark,
+// round_log_unmarked_why, write_round_log). Each pushed commit gets one JSON
+// line in codex-review-rounds-YYYY-MM.jsonl in the clone's COMMON git dir:
+// "audited" with its counts, or "unaudited" with the reason. Only a commit
+// git proves has no diff against the base is left out. So a branch that
+// takes ten local audit rounds can be told from one that takes one, and a
+// push that passed with no audit is on record.
 // Credible regressions this pins:
 // - the log changing the hook's exit code (it runs from the EXIT trap, and
 //   that code is the push verdict), or a failed write printing or blocking;
@@ -35,7 +36,7 @@ const BLOCKING = JSON.stringify({
   ],
 });
 
-let root; let work; let fakeBin; let baseSha; let sha; let markedSha;
+let root; let work; let fakeBin; let baseSha; let sha; let markedSha; let orphanSha;
 
 function git(cwd, args) {
   return execFileSync('git', args, {
@@ -110,6 +111,12 @@ beforeAll(() => {
   git(work, ['add', '-A']);
   git(work, ['commit', '-q', '-m', 'marked change']);
   markedSha = git(work, ['rev-parse', 'HEAD']);
+  // A branch that shares no history with main: git cannot diff it against the base.
+  git(work, ['checkout', '-q', '--orphan', 'lonely']);
+  fs.writeFileSync(path.join(work, 'c.js'), 'module.exports = 4;\n');
+  git(work, ['add', '-A']);
+  git(work, ['commit', '-q', '-m', 'no shared history']);
+  orphanSha = git(work, ['rev-parse', 'HEAD']);
   git(work, ['checkout', '-q', '-b', 'feature', 'main']);
   fs.writeFileSync(path.join(work, 'a.js'), 'module.exports = 2;\n');
   git(work, ['commit', '-q', '-am', 'change']);
@@ -195,6 +202,28 @@ describe('pre-push round log', () => {
     expect(rounds()).toEqual([expect.objectContaining({ ref: 'refs/heads/feature', sha, outcome: 'audited' })]);
   }, 120000);
 
+  test('a commit git cannot compare with the base is logged as un-audited, not dropped as "no changes"', () => {
+    // The audit loop reads a failed diff as an empty one and skips the commit. The log must not: nothing was
+    // proven about this commit, and it was pushed with no audit.
+    const run = runHook({ pushes: [['refs/heads/lonely', orphanSha, 'refs/heads/lonely'], ['refs/heads/feature', sha, 'refs/heads/feature']] });
+    expect(run.status).toBe(0);
+    expect(rounds()).toEqual([
+      expect.objectContaining({ ref: 'refs/heads/lonely', sha: orphanSha, outcome: 'unaudited', why: 'diff_failed', p0: 0, p1: 0, exit: 0 }),
+      expect.objectContaining({ ref: 'refs/heads/feature', sha, outcome: 'audited', exit: 0 }),
+    ]);
+    for (const name of monthFiles()) fs.rmSync(path.join(gitDir(), name), { force: true });
+    // The same commit on a push that skips the audit: the more exact reason wins over "skipped".
+    expect(runHook({ pushes: [['refs/heads/lonely', orphanSha, 'refs/heads/lonely']], env: { SKIP_CODEX_REVIEW: '1' } }).status).toBe(0);
+    expect(rounds()).toEqual([expect.objectContaining({ sha: orphanSha, outcome: 'unaudited', why: 'diff_failed' })]);
+  }, 120000);
+
+  test('a commit this clone does not hold is logged as un-audited', () => {
+    const missingSha = 'f'.repeat(40);
+    const run = runHook({ pushes: [['refs/heads/ghost', missingSha, 'refs/heads/ghost']] });
+    expect(run.status).toBe(0);
+    expect(rounds()).toEqual([expect.objectContaining({ ref: 'refs/heads/ghost', sha: missingSha, outcome: 'unaudited', why: 'sha_unreachable', exit: 0 })]);
+  }, 120000);
+
   test('a linked worktree appends to the same file as the main checkout', () => {
     const linked = path.join(root, 'linked');
     git(work, ['worktree', 'add', '-q', '-b', 'feature-two', linked, sha]);
@@ -230,19 +259,26 @@ describe('pre-push round log', () => {
   }, 120000);
 
   test('a push with no auditor on PATH passes and is logged as un-audited; a commit with nothing to audit still gets no line', () => {
-    // PATH without the fake codex. The system folders hold git and the shell tools; jq is linked in when it lives elsewhere.
-    const systemDirs = ['/usr/bin', '/bin', '/usr/sbin', '/sbin'];
-    const inSystemDirs = (tool) => systemDirs.some((dir) => fs.existsSync(path.join(dir, tool)));
-    expect(inSystemDirs('codex')).toBe(false);
+    // The test, not the machine, decides whether an auditor is on PATH: one folder of links to every tool in
+    // the system folders (and to jq and git, wherever they live) except the two auditors. codex may be
+    // installed in /usr/bin, so a PATH of the system folders themselves would not do.
     const tools = path.join(root, 'tools');
     fs.mkdirSync(tools);
-    if (!inSystemDirs('jq')) {
-      const found = process.env.PATH.split(path.delimiter).map((dir) => path.join(dir, 'jq')).find((file) => fs.existsSync(file));
-      fs.symlinkSync(fs.realpathSync(found), path.join(tools, 'jq'));
+    const linked = new Set(['codex', 'claude']);
+    const link = (dir, name) => {
+      if (linked.has(name) || !fs.existsSync(path.join(dir, name))) return;
+      fs.symlinkSync(path.join(dir, name), path.join(tools, name));
+      linked.add(name);
+    };
+    for (const dir of ['/usr/bin', '/bin', '/usr/sbin', '/sbin']) {
+      if (fs.existsSync(dir)) for (const name of fs.readdirSync(dir)) link(dir, name);
     }
+    for (const dir of process.env.PATH.split(path.delimiter).filter(Boolean)) for (const name of ['jq', 'git']) link(dir, name);
+    expect(fs.existsSync(path.join(tools, 'codex'))).toBe(false);
+    expect(fs.existsSync(path.join(tools, 'claude'))).toBe(false);
     const run = runHook({
       pushes: [['refs/heads/main', baseSha, 'refs/heads/same-as-main'], ['refs/heads/feature', sha, 'refs/heads/feature']],
-      env: { PATH: [tools, ...systemDirs].join(path.delimiter) },
+      env: { PATH: tools },
     });
     expect(run.stderr).toContain('no LLM auditor on PATH');
     expect(run.status).toBe(0);
@@ -300,7 +336,8 @@ describe('pre-push round log', () => {
     // errors so that a log fault can never block a push, so on jq 1.6 one such name would drop every line with
     // no sign. No jq 1.6 runs in CI, so this reads the source instead.
     const source = fs.readFileSync(HOOK, 'utf8');
-    const block = source.slice(source.indexOf('round_log_row() {'), source.indexOf("trap 'ROUND_LOG_RC=$?; write_round_log"));
+    const block = source.slice(source.indexOf('write_round_log() {'), source.indexOf("trap 'ROUND_LOG_RC=$?; write_round_log"));
+    expect(block.length).toBeGreaterThan(500);
     const names = [...block.matchAll(/--arg ([A-Za-z_][A-Za-z0-9_]*)/g)].map((match) => match[1]);
     expect(names.length).toBeGreaterThanOrEqual(11);
     const keywords = ['def', 'module', 'import', 'include', 'if', 'then', 'else', 'elif', 'end', 'as', 'reduce', 'foreach', 'try', 'catch', 'label', 'and', 'or', 'not', '__loc__'];

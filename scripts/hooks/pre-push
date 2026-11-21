@@ -325,100 +325,130 @@ ${hits}
 fi
 
 # ── Round log ────────────────────────────────────────────────────────────
-# One line for each pushed commit that has something to audit, in the clone's
-# COMMON git dir, so every worktree of this clone appends to the same files.
+# One line for each pushed commit, in the clone's COMMON git dir, so every
+# worktree of this clone appends to the same files:
+#   <dir>/codex-review-rounds-YYYY-MM.jsonl   (UTC month)
+#   CODEX_REVIEW_ROUND_LOG=<dir>   write the month files there instead
+#   CODEX_REVIEW_ROUND_LOG=off     write nothing
 # Why: local rounds were invisible. The artifact dir below keeps only the
 # last run, so a branch that took ten audit rounds looked the same as one
 # that took one, and nobody could see a branch looping (waves-ship §4's round
 # cap counts GitHub rounds only). A weekly read shows rounds per branch, P0
-# blocks and un-audited pushes.
-#   <dir>/codex-review-rounds-YYYY-MM.jsonl   (UTC month)
-#   CODEX_REVIEW_ROUND_LOG=<dir>   write the month files there instead
-#   CODEX_REVIEW_ROUND_LOG=off     write nothing
-# Rules it keeps:
-# - A commit is "audited" (with its P0/P1 counts and its auditor) or
-#   "unaudited" with the reason: skipped (SKIP_CODEX_REVIEW=1), no_auditor,
-#   no_schema, no_agents_md, no_base, diff_too_large, auditors_failed. A push
-#   that passes with no audit must not look like no push at all.
-# - Each line carries its own commit's destination ref(s) and its own counts.
-#   A push of two branches writes two lines, so a block on one is never
-#   booked to the other. `exit` is the verdict of the whole push.
-# - A commit with nothing to audit (no diff vs the base, or not reachable)
-#   writes no line: it is not a round. Nor does a push the applied-migration
-#   guard above blocks (no audit ran, nothing was pushed), a delete-only
-#   push, or a machine without jq (the lines are built with it).
-# - A file is only ever appended to, in one write per push, and never
-#   rewritten: a second worktree's line cannot be lost to a trim. Size is
-#   bounded by deleting whole month files past the newest ROUND_LOG_KEEP.
-# - The lines are written from the EXIT trap, after the verdict is decided.
-#   It never prints, never changes the exit code, and a failed write is dropped.
+# blocks and pushes that went out with no audit.
+#
+# ONE place decides what is written: write_round_log, in the EXIT trap. It
+# walks every pushed commit (REF_SHAS). The rest of the hook only reports
+# what it knows:
+#   round_log_mark  — the per-ref loop, when it has an outcome for a commit
+#   ROUND_LOG_WHY   — an exit before the loop (skip, preflight), the reason
+# A commit nobody marked is written as "unaudited", so an exit path that
+# reports nothing, today's or a later one, still leaves a line. The only
+# commit left out is one git proves has no diff against the base. Earlier
+# drafts logged at each exit site, and each audit of them found one more
+# site that left no line.
+#
+# What a line holds: its commit's own destination ref(s), outcome "audited"
+# (with that commit's P0/P1 counts and its auditor) or "unaudited" (with
+# `why`), and `exit`, the verdict of the whole push. A push of two branches
+# is two lines, so a block on one is never booked to the other.
+# `why`: skipped (SKIP_CODEX_REVIEW=1), no_auditor, no_schema, no_agents_md,
+# no_base, diff_too_large, auditors_failed, sha_unreachable, diff_failed (git
+# could not compare the commit with the base), not_reached (anything else).
+#
+# No line at all: a delete-only push, a push the applied-migration guard
+# above blocks (nothing was pushed, no audit ran), and a machine without jq
+# (the lines are built with it).
+#
+# Each line is one short write to a file opened for append, and no file is
+# ever rewritten, so two worktrees pushing at once cannot lose or split each
+# other's lines. Size is bounded by deleting whole month files past the
+# newest ROUND_LOG_KEEP. Nothing here prints, changes the exit code, or
+# blocks: a line that cannot be built or written is dropped.
 ROUND_LOG_KEEP=3
-ROUND_LOG_ROWS=""
+ROUND_LOG_WHY=""
+ROUND_LOG_OUTCOME=()
+ROUND_LOG_REASON=()
+ROUND_LOG_P0=()
+ROUND_LOG_P1=()
+ROUND_LOG_AUDITOR=()
 
-# round_log_row <sha> <local label> <audited|unaudited> <why> <p0> <p1> <auditor>
-# Queues one line for the commit just handled. Never fails, never prints.
-round_log_row() {
-  local dests="" row="" j
-  for j in "${!GUARD_SHAS[@]}"; do
-    if [ "${GUARD_SHAS[$j]}" = "$1" ] && [ -n "${GUARD_REMOTE_REFS[$j]:-}" ]; then
-      dests="${dests}${GUARD_REMOTE_REFS[$j]}
-"
-    fi
-  done
-  # jq 1.6 (still on some runners) reserves keywords as variable names:
-  # `$label` does not compile there, and this function would drop every line
-  # in silence. Keep these names clear of jq's keywords.
-  row="$(jq -cn --arg sha "$1" --arg local_ref "$2" --arg outcome "$3" --arg why "$4" \
-    --arg p0 "$5" --arg p1 "$6" --arg auditor "$7" --arg dests "$dests" \
-    '($dests | split("\n") | map(select(length > 0))) as $refs
-     | {ref: ($refs[0] // $local_ref), refs: $refs, sha: $sha, outcome: $outcome}
-       + (if $why == "" then {} else {why: $why} end)
-       + {p0: ($p0 | tonumber), p1: ($p1 | tonumber)}
-       + (if $auditor == "" then {} else {auditor: $auditor} end)' 2>/dev/null)" || return 0
-  [ -n "$row" ] || return 0
-  ROUND_LOG_ROWS="${ROUND_LOG_ROWS}${row}
-"
+# round_log_mark <REF_SHAS index> <audited|unaudited> <why> <p0> <p1> <auditor>
+round_log_mark() {
+  ROUND_LOG_OUTCOME[$1]="$2"
+  ROUND_LOG_REASON[$1]="$3"
+  ROUND_LOG_P0[$1]="$4"
+  ROUND_LOG_P1[$1]="$5"
+  ROUND_LOG_AUDITOR[$1]="$6"
   return 0
 }
 
-# round_log_unaudited_push <why>: the audit will not start for this push, so
-# each pushed commit that has something to audit is queued as un-audited. It
-# skips the same commits the per-ref loop skips (not reachable, no diff vs
-# the base); with no base to diff against, every reachable commit counts.
-round_log_unaudited_push() {
-  local k sha base_ok=0
-  command -v jq >/dev/null 2>&1 || return 0
-  git rev-parse --verify "$BASE" >/dev/null 2>&1 && base_ok=1
-  for k in "${!REF_SHAS[@]}"; do
-    sha="${REF_SHAS[$k]}"
-    git cat-file -e "$sha" 2>/dev/null || continue
-    if [ "$base_ok" = "1" ]; then
-      git diff --quiet "$BASE...$sha" >/dev/null 2>&1
-      [ "$?" = "1" ] || continue
-    fi
-    round_log_row "$sha" "${REF_LABELS[$k]}" unaudited "$1" 0 0 ""
-  done
+# round_log_unmarked_why <sha>: why a commit nobody marked went un-audited.
+# Prints nothing when git proves it has no diff against the base.
+round_log_unmarked_why() {
+  if ! git cat-file -e "$1" 2>/dev/null; then
+    printf 'sha_unreachable'
+    return 0
+  fi
+  if git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+    git diff --quiet "$BASE...$1" >/dev/null 2>&1
+    case "$?" in
+      0) return 0 ;;
+      1) ;;
+      *) printf 'diff_failed'; return 0 ;;
+    esac
+  fi
+  printf '%s' "${ROUND_LOG_WHY:-not_reached}"
   return 0
 }
 
-# write_round_log <hook exit code>: appends the queued lines. EXIT trap only.
+# write_round_log <hook exit code>. EXIT trap only.
 write_round_log() {
-  local rc="$1" dir="${CODEX_REVIEW_ROUND_LOG:-}" lines="" now=""
+  local rc="$1" dir="${CODEX_REVIEW_ROUND_LOG:-}" now="" file="" line="" dests=""
+  local i j sha outcome why
   [ "$dir" = "off" ] && return 0
-  [ -n "${ROUND_LOG_ROWS:-}" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   if [ -z "$dir" ]; then
-    dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+    dir="$(git rev-parse --git-common-dir 2>/dev/null)" || return 0
+    dir="$(cd "$dir" 2>/dev/null && pwd -P)" || return 0
   fi
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
-  # One clock read: the line's time and its month file must agree, also in
-  # the last second of a month.
+  # One clock read: a line's time and its month file agree, also in the last
+  # second of a month.
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  lines="$(printf '%s' "$ROUND_LOG_ROWS" | jq -c \
-    --arg ts "$now" --arg rc "$rc" --arg seconds "${SECONDS:-0}" \
-    '{ts: $ts} + . + {exit: ($rc | tonumber), seconds: ($seconds | tonumber)}' 2>/dev/null)" || return 0
-  [ -n "$lines" ] || return 0
-  printf '%s\n' "$lines" >> "$dir/codex-review-rounds-${now:0:7}.jsonl" || return 0
+  file="$dir/codex-review-rounds-${now:0:7}.jsonl"
+  for i in "${!REF_SHAS[@]}"; do
+    sha="${REF_SHAS[$i]}"
+    outcome="${ROUND_LOG_OUTCOME[$i]:-}"
+    why="${ROUND_LOG_REASON[$i]:-}"
+    if [ -z "$outcome" ]; then
+      why="$(round_log_unmarked_why "$sha")"
+      [ -n "$why" ] || continue
+      outcome="unaudited"
+    fi
+    dests=""
+    for j in "${!GUARD_SHAS[@]}"; do
+      if [ "${GUARD_SHAS[$j]}" = "$sha" ] && [ -n "${GUARD_REMOTE_REFS[$j]:-}" ]; then
+        dests="${dests}${GUARD_REMOTE_REFS[$j]}
+"
+      fi
+    done
+    # jq 1.6 (still on some runners) reserves keywords as variable names:
+    # `$label` does not compile there, and with jq's errors silenced every
+    # line would be dropped with no sign. Keep these names clear of jq's
+    # keywords.
+    line="$(jq -cn --arg ts "$now" --arg sha "$sha" --arg local_ref "${REF_LABELS[$i]:-}" \
+      --arg dests "$dests" --arg outcome "$outcome" --arg why "$why" \
+      --arg p0 "${ROUND_LOG_P0[$i]:-0}" --arg p1 "${ROUND_LOG_P1[$i]:-0}" \
+      --arg auditor "${ROUND_LOG_AUDITOR[$i]:-}" --arg rc "$rc" --arg seconds "${SECONDS:-0}" \
+      '($dests | split("\n") | map(select(length > 0))) as $refs
+       | {ts: $ts, ref: ($refs[0] // $local_ref), refs: $refs, sha: $sha, outcome: $outcome}
+         + (if $why == "" then {} else {why: $why} end)
+         + {p0: ($p0 | tonumber), p1: ($p1 | tonumber)}
+         + (if $auditor == "" then {} else {auditor: $auditor} end)
+         + {exit: ($rc | tonumber), seconds: ($seconds | tonumber)}' 2>/dev/null)" || continue
+    [ -n "$line" ] || continue
+    printf '%s\n' "$line" >> "$file" || return 0
+  done
   # Month names sort by date, so the first matches are the oldest files.
   set -- "$dir"/codex-review-rounds-[0-9][0-9][0-9][0-9]-[0-9][0-9].jsonl
   while [ "$#" -gt "$ROUND_LOG_KEEP" ]; do
@@ -427,12 +457,12 @@ write_round_log() {
   done
   return 0
 }
-# From here on every exit writes the queued lines: the skip and the preflight
-# exits below queue theirs and leave, and the per-ref loop queues one per commit.
+# From here on every exit goes through write_round_log. The per-ref section
+# below replaces this trap with one that also removes its temp dir.
 trap 'ROUND_LOG_RC=$?; write_round_log "$ROUND_LOG_RC" 2>/dev/null || true' EXIT
 
 if [ "$SKIP_AUDIT" = "1" ]; then
-  round_log_unaudited_push skipped
+  ROUND_LOG_WHY=skipped
   exit 0
 fi
 
@@ -458,7 +488,7 @@ SPLIT_WARN_BYTES="${SPLIT_WARN_BYTES:-120000}"
 warn_and_pass() {
   echo "[codex-review] $1" >&2
   echo "[codex-review] push allowed (advisory check skipped)." >&2
-  round_log_unaudited_push "$2"
+  ROUND_LOG_WHY="$2"
   exit 0
 }
 
@@ -1320,7 +1350,7 @@ for i in "${!REF_SHAS[@]}"; do
   if [ "$MAX_DIFF_BYTES" -gt 0 ] && [ "$DIFF_BYTES" -gt "$MAX_DIFF_BYTES" ]; then
     echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): diff is $DIFF_BYTES bytes (cap $MAX_DIFF_BYTES) — skipping audit for this ref. Set CODEX_REVIEW_MAX_DIFF_BYTES=0 to disable the cap." >&2
     UNAUDITED_REFS=$((UNAUDITED_REFS + 1))
-    round_log_row "$AUDIT_SHA" "$AUDIT_LABEL" unaudited diff_too_large 0 0 ""
+    round_log_mark "$i" unaudited diff_too_large 0 0 ""
     continue
   fi
 
@@ -1492,7 +1522,7 @@ for i in "${!REF_SHAS[@]}"; do
     fi
     UNAUDITED_REFS=$((UNAUDITED_REFS + 1))
     persist_ref_artifacts "$i"
-    round_log_row "$AUDIT_SHA" "$AUDIT_LABEL" unaudited auditors_failed 0 0 ""
+    round_log_mark "$i" unaudited auditors_failed 0 0 ""
     continue
   fi
 
@@ -1507,7 +1537,7 @@ for i in "${!REF_SHAS[@]}"; do
   P1_COUNT="$(jq '[.findings[]? | select(.priority=="P1")] | length' "$OUT_FILE")"
   P0_TOTAL=$((P0_TOTAL + P0_COUNT))
   P1_TOTAL=$((P1_TOTAL + P1_COUNT))
-  round_log_row "$AUDIT_SHA" "$AUDIT_LABEL" audited "" "$P0_COUNT" "$P1_COUNT" "$AUDITOR"
+  round_log_mark "$i" audited "" "$P0_COUNT" "$P1_COUNT" "$AUDITOR"
 
   echo "" >&2
   echo "──────── Review · $AUDIT_LABEL ($SHORT_SHA) · auditor: $AUDITOR ────" >&2
