@@ -52,9 +52,16 @@ const mockDb = jest.fn((table) => {
     // The withdraw route closes the application's live job offers in the same transaction.
     const filter = {};
     const offers = {
-      where(cond) { filter.where = cond; return offers; },
+      where(cond, operator, value) {
+        if (typeof cond === 'string') filter.column = [cond, operator, value];
+        else filter.where = cond;
+        return offers;
+      },
       whereIn(_column, list) { filter.statuses = list; return offers; },
-      update: async (payload) => { mockDb.__closedOffers.push({ ...filter, payload }); return 1; },
+      // The close first stores the expiry of a sent offer already past its date, then withdraws the live offers.
+      update: async (payload) => { (payload.status === 'expired' ? mockDb.__expiryStores : mockDb.__closedOffers).push({ ...filter, payload }); return 1; },
+      // Last it clears the "closed unsigned" bell of each expired offer: none here.
+      pluck: async () => [],
     };
     return offers;
   }
@@ -134,6 +141,7 @@ mockDb.schema = { hasTable: jest.fn(async () => true) };
 // taken BEFORE the slot listing.
 mockDb.__rawCalls = [];
 mockDb.__closedOffers = [];
+mockDb.__expiryStores = [];
 mockDb.transaction = async (fn) => fn(mockDb);
 // db.raw is only used for the jsonb history append; carry the bound entries
 // so update() above can apply them like Postgres would.
@@ -545,18 +553,26 @@ describe('POST /interview/:token/withdraw', () => {
   test('withdrawing also withdraws the application\'s live job offers (an old offer link cannot revive on reopen)', async () => {
     mockDb.__setRows([appRow()]);
     mockDb.__closedOffers.length = 0;
-    await fetch(`${base}/api/public/careers/interview/${TOKEN}/withdraw`, { method: 'POST' });
+    mockDb.__expiryStores.length = 0;
+    const res = await fetch(`${base}/api/public/careers/interview/${TOKEN}/withdraw`, { method: 'POST' });
+    expect(res.status).toBe(200);
     expect(mockDb.__closedOffers).toEqual([expect.objectContaining({
       where: { application_id: 'app-1' }, statuses: ['draft', 'sent', 'date_requested'], payload: expect.objectContaining({ status: 'withdrawn' }),
+    })]);
+    // A sent offer already past its expiry is stored as expired, not withdrawn (job-offers.js closeOffersWithApplication).
+    expect(mockDb.__expiryStores).toEqual([expect.objectContaining({
+      where: { application_id: 'app-1', status: 'sent' }, column: ['expires_at', '<', expect.any(Date)], payload: expect.objectContaining({ status: 'expired' }),
     })]);
   });
 
   test('a withdraw that matches no row closes no offer', async () => {
     mockDb.__setRows([appRow()]);
     mockDb.__closedOffers.length = 0;
+    mockDb.__expiryStores.length = 0;
     mockDb.__onFirstReadOnce(() => { mockDb.__rows()[0].status = 'offer'; });
     await fetch(`${base}/api/public/careers/interview/${TOKEN}/withdraw`, { method: 'POST' });
     expect(mockDb.__closedOffers).toEqual([]);
+    expect(mockDb.__expiryStores).toEqual([]);
   });
 
   test('404 when the atomic update matches 0 rows (race)', async () => {
