@@ -173,9 +173,10 @@ it('keeps the scalar delivery controls for an older server without the array cap
   expect(screen.getByRole('button', { name: 'Save billing preferences' })).toBeInTheDocument();
 });
 
-// The scalar form sends its receipt channel on every save. The server stores App over an untouched
-// Text default only when the customer changed the selector (routes/notifications.js dropLegacyReceiptAppEcho).
-it('marks a scalar receipt choice only on a save where the customer changed the selector', async () => {
+// The scalar form sends its receipt channel only on a save where the customer changed the selector, with a
+// mark. The server writes an App value from this form only with that mark (routes/notifications.js
+// dropLegacyReceiptAppEcho).
+it('sends and marks a scalar receipt choice only on a save where the customer changed the selector', async () => {
   prefs.billingChannelsAvailable = false;
   prefs.paymentConfirmationChannel = 'sms';
   prefs.receiptChannelEditMark = true;
@@ -183,18 +184,53 @@ it('marks a scalar receipt choice only on a save where the customer changed the 
   const select = await screen.findByRole('combobox', { name: 'Delivery method for payment confirmations' });
   fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
   await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(1));
-  expect(api.updateNotificationPrefs.mock.calls[0][0]).toMatchObject({ paymentConfirmationChannel: 'sms' });
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).toMatchObject({ billingEmail: '', billingReminderChannel: 'sms' });
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('paymentConfirmationChannel');
   expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('paymentConfirmationChannelEdited');
   await waitFor(() => expect(within(select).getByRole('option', { name: 'App', exact: true })).not.toBeDisabled());
   fireEvent.change(select, { target: { value: 'push' } });
   fireEvent.click(await screen.findByRole('button', { name: /^(Save billing preferences|Saved)$/ }));
   await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(2));
   expect(api.updateNotificationPrefs.mock.calls[1][0]).toMatchObject({ paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: true });
-  // The mark covers one save: the next untouched save sends the channel without it.
+  // The change covers one save: the next untouched save sends neither the channel nor the mark.
   fireEvent.click(await screen.findByRole('button', { name: /^(Save billing preferences|Saved)$/ }));
   await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(3));
-  expect(api.updateNotificationPrefs.mock.calls[2][0]).toMatchObject({ paymentConfirmationChannel: 'push' });
+  expect(api.updateNotificationPrefs.mock.calls[2][0]).not.toHaveProperty('paymentConfirmationChannel');
   expect(api.updateNotificationPrefs.mock.calls[2][0]).not.toHaveProperty('paymentConfirmationChannelEdited');
+  expect(select).toHaveValue('push');
+});
+
+// Two tabs. The other tab changed the stored receipt channel after this one loaded.
+it.each([
+  ['Text', 'sms', 'push'],
+  ['App', 'push', 'sms'],
+])('an untouched scalar save from a tab that shows %s leaves the stored receipt channel alone and then shows it', async (_label, shown, stored) => {
+  prefs.billingChannelsAvailable = false;
+  prefs.paymentConfirmationChannel = shown;
+  prefs.receiptChannelEditMark = true;
+  render(<BillingTab customer={customer} />);
+  const select = await screen.findByRole('combobox', { name: 'Delivery method for payment confirmations' });
+  await waitFor(() => expect(select).toHaveValue(shown));
+  prefs.paymentConfirmationChannel = stored;
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(1));
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('paymentConfirmationChannel');
+  await screen.findByRole('button', { name: 'Saved', exact: true });
+  expect(select).toHaveValue(stored);
+  expect(prefs.paymentConfirmationChannel).toBe(stored);
+});
+
+// With no deliverable email an Email receipt choice is locked to Text, and that lock is saved.
+it('still saves Text for a scalar receipt Email choice that has no deliverable email', async () => {
+  prefs.billingChannelsAvailable = false;
+  prefs.paymentConfirmationChannel = 'email';
+  render(<BillingTab customer={{ ...customer, email: '' }} />);
+  const select = await screen.findByRole('combobox', { name: 'Delivery method for payment confirmations' });
+  await waitFor(() => expect(select).toHaveValue('sms'));
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(1));
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).toMatchObject({ paymentConfirmationChannel: 'sms' });
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('paymentConfirmationChannelEdited');
 });
 
 // An older server's schema rejects an unknown key and would fail the whole billing save.

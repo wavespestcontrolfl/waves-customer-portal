@@ -7382,6 +7382,12 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
     }
     setBillingPrefsSaving(true);
     setBillingPrefsStatus(null);
+    // The receipt channel the selector shows: with no deliverable email an Email choice is locked to Text.
+    const receiptShown = paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms';
+    // The receipt channel goes with this save only when the customer changed the selector, or when that lock
+    // changes the stored value. An untouched selector sends nothing: a second tab's untouched Text must not
+    // overwrite an App choice saved in the first tab.
+    const receiptChannelSent = receiptChannelEdited || receiptShown !== paymentConfirmationChannel;
     // An App pick for receipts that this save carries. The server writes it only with the mark below.
     const receiptAppPickSent = !billingChannelsAvailable && receiptChannelEdited && paymentConfirmationChannel === 'push';
     api.updateNotificationPrefs({
@@ -7390,12 +7396,12 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       // No email on file (or email messages opted out portal-wide) → the
       // dropdowns render locked to Text; persist what is shown so an
       // SMS-suppressing 'email' choice can't linger with no deliverable
-      // email leg.
+      // email leg. (The receipt channel: only when changed or locked, above.)
       ...(!billingChannelsAvailable ? {
         billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
         ...(appPreferencesAvailable && invoiceChannel !== savedInvoiceChannel ? { invoiceChannel } : {}),
         ...(appPreferencesAvailable && paymentIssueChannel !== savedPaymentIssueChannel ? { paymentIssueChannel } : {}),
-        paymentConfirmationChannel: paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms',
+        ...(receiptChannelSent ? { paymentConfirmationChannel: receiptShown } : {}),
         ...(receiptChannelEdited && receiptEditMarkAccepted ? { paymentConfirmationChannelEdited: true } : {}),
       } : {}),
     })
@@ -7412,11 +7418,15 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         if (result?.preferences) setReceiptEditMarkAccepted(result.preferences.receiptChannelEditMark === true);
         // The server did not store the App pick (it got no mark: the page loaded from a server that did not
         // offer one). Show what is stored and report the failure, as the invoice selectors above do.
-        if (receiptAppPickSent && result?.preferences?.paymentConfirmationChannel !== 'push') {
-          setPaymentConfirmationChannel(result?.preferences?.paymentConfirmationChannel || 'sms');
+        const storedReceipt = !billingChannelsAvailable ? result?.preferences?.paymentConfirmationChannel : undefined;
+        if (receiptAppPickSent && storedReceipt !== 'push') {
+          setPaymentConfirmationChannel(storedReceipt || 'sms');
           setReceiptChannelEdited(false);
           throw new Error('Receipt delivery preference was not saved');
         }
+        // Show where receipts go now. Another tab may have changed the stored channel, or the server
+        // dropped an App value this page showed and did not change.
+        if (storedReceipt) setPaymentConfirmationChannel(storedReceipt);
         if (!billingChannelsAvailable) {
           setSavedInvoiceChannel(invoiceChannel);
           setSavedPaymentIssueChannel(paymentIssueChannel);
@@ -7430,7 +7440,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         // just normalized away from.
         if (!billingChannelsAvailable && !hasBillingEmail) {
           setBillingReminderChannel('sms');
-          if (paymentConfirmationChannel !== 'push') setPaymentConfirmationChannel('sms');
+          if ((storedReceipt || paymentConfirmationChannel) !== 'push') setPaymentConfirmationChannel('sms');
         }
         setBillingPrefsSaving(false);
         setPaymentSmsReenabled(false);
