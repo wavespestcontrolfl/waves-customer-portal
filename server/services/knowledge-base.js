@@ -1002,7 +1002,7 @@ const KnowledgeBaseService = {
         .select('service_product_usage.*', 'products_catalog.name as product_name',
           'products_catalog.best_price', 'products_catalog.active_ingredient',
           'products_catalog.unit_size_oz', 'products_catalog.cost_per_unit', 'products_catalog.cost_unit',
-          'products_catalog.container_size')
+          'products_catalog.container_size', 'products_catalog.inventory_unit')
         .orderBy('service_type');
 
       const grouped = {};
