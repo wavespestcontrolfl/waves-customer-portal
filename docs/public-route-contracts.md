@@ -7018,11 +7018,15 @@ and its stored centre (never caller-supplied, no key); `imageYear` is that photo
 prints on the pin and in the list; `x` and `y` are 0-1 fractions of the photo from its top-left corner; `type` is a roof
 entry type or `other`; `label` is the plain name, followed by the staff note when one was saved ("Roof return, front left");
 `action` is the repair word ("seal", "trim back"). No AI read, no read id, no suggestion source, no prices. The key is
-ABSENT unless a copy exists, the points were saved for the address the estimate had then and still has
-(`roof_entry_reads.points_address`, checked at the freeze), the copy was frozen for the estimate's current address (the
-misting layout's address rule), and staff have not hidden the points (checked at request time against the frozen read,
-the estimate's newest finished read with or without points, and its newest read with saved points); every other response
-stays byte-identical. A storage failure omits the key, never the response. The interactive estimate page
+ABSENT unless all of these hold: a copy exists; the points were saved for the address the estimate has
+(`roof_entry_reads.points_address`: the address the staff lookup that gave the photo centre ran for, sent by the staff
+panel with the points and never read from the estimate row; checked at the freeze); the copy belongs to the estimate's
+latest handoff (`estimate_roof_points.delivered_at` is not older than `estimate_data.deliveryState.lastDeliveredAt`,
+so a copy that a later send could not replace or delete is not shown); the copy was frozen for the estimate's current
+address (the misting layout's address comparison, but an address missing on either side counts as no match); and
+staff have not hidden the points (checked at request time, each with its own query, against the frozen read, the
+estimate's newest finished read with or without points, and its newest finished read with saved points). Every other
+response stays byte-identical. A storage failure omits the key, never the response. The interactive estimate page
 (`EstimateViewPage`, Waves AI card) shows it in the place of the satellite photo (a misting layout wins when both are
 present) and puts the satellite photo back when the picture fails to load. `EstimateProposalDocument` (the emailed PDF)
 ignores it, and the emailed-PDF fingerprint does not read it.

@@ -102,9 +102,6 @@ jest.mock('../models/db', () => {
         // The flags merge is SQL (COALESCE(col, '{}') || ?::jsonb); the mock applies the same merge to the stored JSON.
         const mergeFlags = patch.tech_final_flags && patch.tech_final_flags.raw ? JSON.parse(patch.tech_final_flags.bindings[0]) : null;
         if (mergeFlags) delete patch.tech_final_flags;
-        // points_address is a subquery on the read's estimate (same statement); the mock reads it from mockRefs.estimates.
-        const addressFromEstimate = !!(patch.points_address && patch.points_address.raw);
-        if (addressFromEstimate) delete patch.points_address;
         return settled(() => {
           if (mockUpdateError && name === 'roof_entry_reads') { const err = mockUpdateError; mockUpdateError = null; throw err; }
           mockEvents.push(renewing ? 'renew' : `update:${patch.status || ''}`);
@@ -112,7 +109,6 @@ jest.mock('../models/db', () => {
           rows.forEach((r) => {
             Object.assign(r, patch);
             if (mergeFlags) r.tech_final_flags = JSON.stringify({ ...(r.tech_final_flags ? JSON.parse(r.tech_final_flags) : {}), ...mergeFlags });
-            if (addressFromEstimate) r.points_address = (mockRefs.estimates || []).find((e) => e.id === r.estimate_id)?.address ?? null;
           });
           return rows;
         });
@@ -1444,6 +1440,7 @@ describe('validateTechPins', () => {
 describe('saveTechCount pins', () => {
   const PINS = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }, { x: 0.8, y: 0.7, type: 'other', note: null }];
   const CROP = { lat: 27.46, lng: -82.57 };
+  const ADDRESS = '12 Synthetic Way, Bradenton, FL 34203';
   beforeEach(() => {
     mockRows.push({
       id: READ_A, lookup_key: CROP_KEY(), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
@@ -1453,22 +1450,37 @@ describe('saveTechCount pins', () => {
   });
 
   it('saves the points with the crop centre that hashes to the row, and stores the rounded centre', async () => {
-    const read = await svc.saveTechCount(READ_A, { pins: PINS, crop: { lat: 27.460004, lng: -82.570004 } });
+    const read = await svc.saveTechCount(READ_A, { pins: PINS, crop: { lat: 27.460004, lng: -82.570004 }, address: ADDRESS });
     expect(read.tech_pins).toEqual(PINS);
     expect(read.hide_on_estimate).toBe(false);
     expect(mockRows[0].crop_lat).toBe(27.46);
     expect(mockRows[0].crop_lng).toBe(-82.57);
   });
 
-  it('records the estimate address in the same write, so a send can tell the points belong to that home', async () => {
+  it('stores the address the panel sent with the points, never the address on the estimate row', async () => {
+    // The estimate moved to another home while this photo was open: the points keep the home the photo is of.
     mockRows[0].estimate_id = EST;
-    mockRefs.estimates = [{ id: EST, address: '12 Synthetic Way, Bradenton, FL 34203' }];
-    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
-    expect(mockRows[0].points_address).toBe('12 Synthetic Way, Bradenton, FL 34203');
-    // A count-only or hide-only save never rewrites it.
-    mockRefs.estimates[0].address = '99 Other Road, Sarasota, FL 34232';
-    await svc.saveTechCount(READ_A, { count: 2, hideOnEstimate: true });
-    expect(mockRows[0].points_address).toBe('12 Synthetic Way, Bradenton, FL 34203');
+    mockRefs.estimates = [{ id: EST, address: '99 Other Road, Sarasota, FL 34232' }];
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: `  ${ADDRESS} ` });
+    expect(mockRows[0].points_address).toBe(ADDRESS);
+    // A count-only or hide-only save never rewrites it, with or without an address in the call.
+    await svc.saveTechCount(READ_A, { count: 2, hideOnEstimate: true, address: '99 Other Road, Sarasota, FL 34232' });
+    expect(mockRows[0].points_address).toBe(ADDRESS);
+    // A later points save from the right lookup replaces it.
+    await svc.saveTechCount(READ_A, { pins: [PINS[0]], crop: CROP, address: '14 Synthetic Way, Bradenton, FL 34203' });
+    expect(mockRows[0].points_address).toBe('14 Synthetic Way, Bradenton, FL 34203');
+  });
+
+  it.each([
+    ['no address', undefined],
+    ['a blank address', '   '],
+    ['an address that is not text', 12],
+    ['an address over 300 characters', 'a'.repeat(301)],
+  ])('refuses points with %s with address_missing and writes nothing', async (_name, address) => {
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address, count: 3 })).rejects.toMatchObject({ code: 'address_missing' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].tech_final_count).toBeNull();
+    expect(mockRows[0].points_address).toBeUndefined();
   });
 
   it.each([
@@ -1477,7 +1489,7 @@ describe('saveTechCount pins', () => {
     ['a crop without numbers', { lat: '27.46', lng: '-82.57' }],
     ['an out of range crop', { lat: 270, lng: -82.57 }],
   ])('refuses points drawn on %s with crop_mismatch and writes nothing', async (_name, c) => {
-    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: c, count: 3 })).rejects.toMatchObject({ code: 'crop_mismatch' });
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: c, address: ADDRESS, count: 3 })).rejects.toMatchObject({ code: 'crop_mismatch' });
     expect(mockRows[0].tech_pins).toBeNull();
     expect(mockRows[0].crop_lat).toBeNull();
     expect(mockRows[0].tech_final_count).toBeNull();
@@ -1485,45 +1497,45 @@ describe('saveTechCount pins', () => {
 
   it.each(['failed', 'pending'])('refuses points on a %s read with read_not_usable and writes nothing', async (status) => {
     mockRows[0].status = status;
-    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, count: 3 })).rejects.toMatchObject({ code: 'read_not_usable' });
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, count: 3 })).rejects.toMatchObject({ code: 'read_not_usable' });
     expect(mockRows[0].tech_pins).toBeNull();
     expect(mockRows[0].crop_lat).toBeNull();
     expect(mockRows[0].tech_final_count).toBeNull();
   });
 
   it('saves only while the row still holds the list the edit started from, else points_changed with no write', async () => {
-    const first = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, expectedPins: null });
+    const first = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, expectedPins: null });
     expect(first.tech_pins).toEqual(PINS);
     // A second window still holds the empty list it loaded: its save must not erase the first window's points.
-    await expect(svc.saveTechCount(READ_A, { pins: [PINS[1]], crop: CROP, expectedPins: null }))
+    await expect(svc.saveTechCount(READ_A, { pins: [PINS[1]], crop: CROP, address: ADDRESS, expectedPins: null }))
       .rejects.toMatchObject({ code: 'points_changed' });
     expect(JSON.parse(mockRows[0].tech_pins)).toEqual(PINS);
     // Started from the saved list (any key order), the save lands.
     const reordered = PINS.map((pt) => ({ note: pt.note, type: pt.type, y: pt.y, x: pt.x }));
-    const next = await svc.saveTechCount(READ_A, { pins: [PINS[0]], crop: CROP, expectedPins: reordered });
+    const next = await svc.saveTechCount(READ_A, { pins: [PINS[0]], crop: CROP, address: ADDRESS, expectedPins: reordered });
     expect(next.tech_pins).toEqual([PINS[0]]);
   });
 
   it('refuses points on a finished read whose tier is unknown (an unreadable roof is never reopened)', async () => {
     mockRows[0].ai_tier = 'unknown';
-    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, expectedPins: null })).rejects.toMatchObject({ code: 'read_not_usable' });
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, expectedPins: null })).rejects.toMatchObject({ code: 'read_not_usable' });
     expect(mockRows[0].tech_pins).toBeNull();
   });
 
   it('clears the points with null, and keeps the stored crop centre', async () => {
-    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
     const read = await svc.saveTechCount(READ_A, { pins: null });
     expect(read.tech_pins).toBeNull();
     expect(mockRows[0].crop_lat).toBe(27.46);
   });
 
   it('saves an empty list: the technician confirmed none', async () => {
-    const read = await svc.saveTechCount(READ_A, { pins: [], crop: CROP });
+    const read = await svc.saveTechCount(READ_A, { pins: [], crop: CROP, address: ADDRESS });
     expect(read.tech_pins).toEqual([]);
   });
 
   it('changes the hide flag alone, and leaves the points, count and flags alone', async () => {
-    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, count: 2 });
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, count: 2 });
     const hidden = await svc.saveTechCount(READ_A, { hideOnEstimate: true });
     expect(hidden.hide_on_estimate).toBe(true);
     expect(hidden.tech_pins).toEqual(PINS);
@@ -1532,14 +1544,14 @@ describe('saveTechCount pins', () => {
   });
 
   it('leaves the points alone when only a count is saved', async () => {
-    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
     const read = await svc.saveTechCount(READ_A, { count: 5 });
     expect(read.tech_pins).toEqual(PINS);
     expect(read.tech_final_count).toBe(5);
   });
 
   it('returns null for an unknown id', async () => {
-    expect(await svc.saveTechCount(MISSING, { pins: PINS, crop: CROP })).toBeNull();
+    expect(await svc.saveTechCount(MISSING, { pins: PINS, crop: CROP, address: ADDRESS })).toBeNull();
     expect(await svc.saveTechCount(MISSING, { hideOnEstimate: true })).toBeNull();
   });
 });
@@ -1613,6 +1625,7 @@ describe('cropImageUrl and customerPointsFromRow', () => {
 describe('PATCH /:id/tech-count with points', () => {
   const PINS = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }, { x: 0.8, y: 0.7, type: 'other' }];
   const CROP = { lat: 27.46, lng: -82.57 };
+  const ADDRESS = '12 Synthetic Way, Bradenton, FL 34203';
   const patch = (body, opts) => call('PATCH', `/${READ_A}/tech-count`, { body, ...opts });
   beforeEach(() => {
     mockRows.push({
@@ -1622,9 +1635,10 @@ describe('PATCH /:id/tech-count with points', () => {
     });
   });
 
-  it('saves points with the crop and the hide flag, and answers with the normalized read', async () => {
-    const res = await patch({ pins: PINS, crop: CROP, expected_pins: null, hide_on_estimate: true });
+  it('saves points with the crop, the address and the hide flag, and answers with the normalized read', async () => {
+    const res = await patch({ pins: PINS, crop: CROP, address: ` ${ADDRESS} `, expected_pins: null, hide_on_estimate: true });
     expect(res.status).toBe(200);
+    expect(mockRows[0].points_address).toBe(ADDRESS);
     expect(res.json.read.tech_pins).toEqual([
       { x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' },
       { x: 0.8, y: 0.7, type: 'other', note: null },
@@ -1634,16 +1648,16 @@ describe('PATCH /:id/tech-count with points', () => {
   });
 
   it('stores and returns a point source, and refuses a bad one with 400', async () => {
-    const res = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'gable_vents:1' }], crop: CROP, expected_pins: null });
+    const res = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'gable_vents:1' }], crop: CROP, address: ADDRESS, expected_pins: null });
     expect(res.status).toBe(200);
     expect(res.json.read.tech_pins).toEqual([{ x: 0.2, y: 0.3, type: 'other', note: null, source: 'gable_vents:1' }]);
-    const bad = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'other:1' }], crop: CROP, expected_pins: null });
+    const bad = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'other:1' }], crop: CROP, address: ADDRESS, expected_pins: null });
     expect(bad.status).toBe(400);
     expect(mockRows[0].tech_pins).toBe(JSON.stringify([{ x: 0.2, y: 0.3, type: 'other', note: null, source: 'gable_vents:1' }]));
   });
 
   it('saves the hide flag alone without touching the points, and clears the points with null', async () => {
-    await patch({ pins: PINS, crop: CROP, expected_pins: null });
+    await patch({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null });
     const hide = await patch({ hide_on_estimate: true });
     expect(hide.status).toBe(200);
     expect(hide.json.read.tech_pins).toHaveLength(2);
@@ -1654,28 +1668,28 @@ describe('PATCH /:id/tech-count with points', () => {
   });
 
   it('answers 409 for a clear that started from an older list, and keeps the saved points', async () => {
-    expect((await patch({ pins: PINS, crop: CROP, expected_pins: null })).status).toBe(200);
+    expect((await patch({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null })).status).toBe(200);
     const stale = await patch({ pins: null, expected_pins: null });
     expect(stale.status).toBe(409);
     expect(JSON.parse(mockRows[0].tech_pins)).toHaveLength(2);
   });
 
   it('still takes a count and flags with the points in one save', async () => {
-    const res = await patch({ count: 3, flags: { gable_vents: 'yes' }, pins: PINS, crop: CROP, expected_pins: null });
+    const res = await patch({ count: 3, flags: { gable_vents: 'yes' }, pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null });
     expect(res.status).toBe(200);
     expect(res.json.read).toEqual(expect.objectContaining({ tech_final_count: 3, tech_final_flags: { gable_vents: 'yes' } }));
   });
 
   it.each([
-    ['nothing but a crop', { crop: CROP }],
-    ['points without a crop', { pins: PINS, expected_pins: null }],
-    ['points with a crop that has no numbers', { pins: PINS, crop: { lat: 'a', lng: 'b' }, expected_pins: null }],
-    ['points with a crop out of range', { pins: PINS, crop: { lat: 91, lng: 0 }, expected_pins: null }],
-    ['21 points', { pins: Array.from({ length: 21 }, () => PINS[0]), crop: CROP, expected_pins: null }],
-    ['a point outside the photo', { pins: [{ x: 1.2, y: 0.5, type: 'other' }], crop: CROP, expected_pins: null }],
-    ['an unknown point type', { pins: [{ x: 0.5, y: 0.5, type: 'attic_door' }], crop: CROP, expected_pins: null }],
-    ['a note over 40 characters', { pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'n'.repeat(41) }], crop: CROP, expected_pins: null }],
-    ['points as an object', { pins: { x: 0.5 }, crop: CROP, expected_pins: null }],
+    ['nothing but a crop and an address', { crop: CROP, address: ADDRESS }],
+    ['points without a crop', { pins: PINS, address: ADDRESS, expected_pins: null }],
+    ['points with a crop that has no numbers', { pins: PINS, crop: { lat: 'a', lng: 'b' }, address: ADDRESS, expected_pins: null }],
+    ['points with a crop out of range', { pins: PINS, crop: { lat: 91, lng: 0 }, address: ADDRESS, expected_pins: null }],
+    ['21 points', { pins: Array.from({ length: 21 }, () => PINS[0]), crop: CROP, address: ADDRESS, expected_pins: null }],
+    ['a point outside the photo', { pins: [{ x: 1.2, y: 0.5, type: 'other' }], crop: CROP, address: ADDRESS, expected_pins: null }],
+    ['an unknown point type', { pins: [{ x: 0.5, y: 0.5, type: 'attic_door' }], crop: CROP, address: ADDRESS, expected_pins: null }],
+    ['a note over 40 characters', { pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'n'.repeat(41) }], crop: CROP, address: ADDRESS, expected_pins: null }],
+    ['points as an object', { pins: { x: 0.5 }, crop: CROP, address: ADDRESS, expected_pins: null }],
     ['a string hide flag', { hide_on_estimate: 'true' }],
     ['a number hide flag', { hide_on_estimate: 1 }],
   ])('rejects %s with 400 and writes nothing', async (_name, body) => {
@@ -1685,8 +1699,21 @@ describe('PATCH /:id/tech-count with points', () => {
     expect(mockRows[0].hide_on_estimate).toBe(false);
   });
 
+  it.each([
+    ['no address', undefined],
+    ['a blank address', '   '],
+    ['an address that is not text', 12],
+    ['an address over 300 characters', 'a'.repeat(301)],
+  ])('answers 400 with the address message for points with %s, and writes nothing', async (_name, address) => {
+    const res = await patch({ pins: PINS, crop: CROP, address, expected_pins: null, hide_on_estimate: true });
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'The address is missing. Look up the address again before adding points.' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].hide_on_estimate).toBe(false);
+  });
+
   it('answers 400 with the photo message for a crop that is not this read\'s, and writes nothing', async () => {
-    const res = await patch({ pins: PINS, crop: { lat: 28.1, lng: -82.1 }, expected_pins: null, hide_on_estimate: true });
+    const res = await patch({ pins: PINS, crop: { lat: 28.1, lng: -82.1 }, address: ADDRESS, expected_pins: null, hide_on_estimate: true });
     expect(res.status).toBe(400);
     expect(res.json).toEqual({ error: 'These points were not drawn on this roof photo' });
     expect(mockRows[0].tech_pins).toBeNull();
@@ -1695,21 +1722,21 @@ describe('PATCH /:id/tech-count with points', () => {
 
   it('answers 400 with the read-again message for points on a failed read, and writes nothing', async () => {
     mockRows[0].status = 'failed';
-    const res = await patch({ pins: PINS, crop: CROP, expected_pins: null });
+    const res = await patch({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null });
     expect(res.status).toBe(400);
     expect(res.json).toEqual({ error: 'This roof read did not work. Read the roof again before adding points.' });
     expect(mockRows[0].tech_pins).toBeNull();
   });
 
   it('answers 400 for a points list without expected_pins, and writes nothing', async () => {
-    const res = await patch({ pins: PINS, crop: CROP });
+    const res = await patch({ pins: PINS, crop: CROP, address: ADDRESS });
     expect(res.status).toBe(400);
     expect(mockRows[0].tech_pins).toBeNull();
   });
 
   it('answers 409 with the other-window message for a stale save, and keeps the saved points', async () => {
-    expect((await patch({ pins: PINS, crop: CROP, expected_pins: null })).status).toBe(200);
-    const stale = await patch({ pins: [PINS[0]], crop: CROP, expected_pins: null });
+    expect((await patch({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null })).status).toBe(200);
+    const stale = await patch({ pins: [PINS[0]], crop: CROP, address: ADDRESS, expected_pins: null });
     expect(stale.status).toBe(409);
     expect(stale.json).toEqual({ error: 'These points were changed in another window. Read the roof again to load them.' });
     expect(JSON.parse(mockRows[0].tech_pins)).toHaveLength(2);
@@ -1718,7 +1745,7 @@ describe('PATCH /:id/tech-count with points', () => {
   it('logs and answers a database failure without the notes or the crop centre in either', async () => {
     logger.error.mockClear();
     mockUpdateError = Object.assign(new Error('update "roof_entry_reads" set "tech_pins" = $1 - SECRET NOTE 27.46 failed'), { code: '57014' });
-    const res = await patch({ pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'SECRET NOTE' }], crop: CROP, expected_pins: null });
+    const res = await patch({ pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'SECRET NOTE' }], crop: CROP, address: ADDRESS, expected_pins: null });
     expect(res.status).toBe(500);
     expect(JSON.stringify(res.json)).not.toMatch(/SECRET|27\.46/);
     const logged = logger.error.mock.calls.map((c) => String(c[0])).join('\n');
@@ -1727,8 +1754,8 @@ describe('PATCH /:id/tech-count with points', () => {
   });
 
   it('answers 404 for an unknown read, and keeps a technician out', async () => {
-    expect((await call('PATCH', `/${MISSING}/tech-count`, { body: { pins: PINS, crop: CROP, expected_pins: null } })).status).toBe(404);
-    expect((await patch({ pins: PINS, crop: CROP, expected_pins: null }, { role: 'technician' })).status).toBe(403);
+    expect((await call('PATCH', `/${MISSING}/tech-count`, { body: { pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null } })).status).toBe(404);
+    expect((await patch({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null }, { role: 'technician' })).status).toBe(403);
     expect(mockRows[0].tech_pins).toBeNull();
   });
 });

@@ -9,6 +9,7 @@ const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `estimate_roof_points_${randomUUID().replaceAll('-', '')}`;
 const TABLE = 'estimate_roof_points';
+const SENT = '2026-11-20T16:00:00.000Z';
 const SNAPSHOT = { imageUrl: 'https://example.test/aerial.jpg', imageYear: 2025, pins: [{ n: 1, x: 0.25, y: 0.4, type: 'other', label: 'Entry point', action: 'seal' }] };
 
 postgres('estimate_roof_points (PostgreSQL)', () => {
@@ -39,33 +40,35 @@ postgres('estimate_roof_points (PostgreSQL)', () => {
     if (admin) await admin.destroy();
   });
 
-  test('a row holds the read id, the address and the snapshot as jsonb, with frozen_at defaulted', async () => {
-    await app(TABLE).insert({ estimate_id: estimateA, read_id: readA, address: '12 Synthetic Way', snapshot: JSON.stringify(SNAPSHOT) });
+  test('a row holds the read id, the address, the handoff time and the snapshot as jsonb, with frozen_at defaulted', async () => {
+    await app(TABLE).insert({ estimate_id: estimateA, read_id: readA, address: '12 Synthetic Way', snapshot: JSON.stringify(SNAPSHOT), delivered_at: SENT });
     const row = await app(TABLE).where({ estimate_id: estimateA }).first();
     expect(row.snapshot).toEqual(SNAPSHOT);
     expect(row.read_id).toBe(readA);
     expect(row.address).toBe('12 Synthetic Way');
+    expect(row.delivered_at.toISOString()).toBe(SENT);
     expect(row.frozen_at).toBeInstanceOf(Date);
   });
 
   test('an estimate has one frozen copy: a second insert is refused, and an upsert replaces it', async () => {
-    await expect(app(TABLE).insert({ estimate_id: estimateA, snapshot: JSON.stringify(SNAPSHOT) })).rejects.toMatchObject({ code: '23505' });
+    await expect(app(TABLE).insert({ estimate_id: estimateA, snapshot: JSON.stringify(SNAPSHOT), delivered_at: SENT })).rejects.toMatchObject({ code: '23505' });
     const next = { ...SNAPSHOT, pins: [] };
-    await app(TABLE).insert({ estimate_id: estimateA, read_id: null, snapshot: JSON.stringify(next) }).onConflict('estimate_id').merge();
+    await app(TABLE).insert({ estimate_id: estimateA, read_id: null, snapshot: JSON.stringify(next), delivered_at: SENT }).onConflict('estimate_id').merge();
     const rows = await app(TABLE).where({ estimate_id: estimateA });
     expect(rows).toHaveLength(1);
     expect(rows[0].snapshot).toEqual(next);
     expect(rows[0].read_id).toBeNull();
   });
 
-  test('the snapshot is required, and a copy needs a real estimate and a real read', async () => {
-    await expect(app(TABLE).insert({ estimate_id: estimateB })).rejects.toMatchObject({ code: '23502' });
-    await expect(app(TABLE).insert({ estimate_id: randomUUID(), snapshot: JSON.stringify(SNAPSHOT) })).rejects.toMatchObject({ code: '23503' });
-    await expect(app(TABLE).insert({ estimate_id: estimateB, read_id: randomUUID(), snapshot: JSON.stringify(SNAPSHOT) })).rejects.toMatchObject({ code: '23503' });
+  test('the snapshot and the handoff time are required, and a copy needs a real estimate and a real read', async () => {
+    await expect(app(TABLE).insert({ estimate_id: estimateB, delivered_at: SENT })).rejects.toMatchObject({ code: '23502' });
+    await expect(app(TABLE).insert({ estimate_id: estimateB, snapshot: JSON.stringify(SNAPSHOT) })).rejects.toMatchObject({ code: '23502' });
+    await expect(app(TABLE).insert({ estimate_id: randomUUID(), snapshot: JSON.stringify(SNAPSHOT), delivered_at: SENT })).rejects.toMatchObject({ code: '23503' });
+    await expect(app(TABLE).insert({ estimate_id: estimateB, read_id: randomUUID(), snapshot: JSON.stringify(SNAPSHOT), delivered_at: SENT })).rejects.toMatchObject({ code: '23503' });
   });
 
   test('deleting the read keeps the copy (read_id goes null); deleting the estimate removes it', async () => {
-    await app(TABLE).insert({ estimate_id: estimateB, read_id: readA, snapshot: JSON.stringify(SNAPSHOT) });
+    await app(TABLE).insert({ estimate_id: estimateB, read_id: readA, snapshot: JSON.stringify(SNAPSHOT), delivered_at: SENT });
     await app('roof_entry_reads').where({ id: readA }).del();
     const kept = await app(TABLE).where({ estimate_id: estimateB }).first();
     expect(kept.read_id).toBeNull();

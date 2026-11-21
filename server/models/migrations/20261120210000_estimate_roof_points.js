@@ -11,6 +11,9 @@
  *              page checks hide_on_estimate now); SET NULL keeps the frozen row if the read is ever deleted, and the
  *              page then shows it (nothing left to hide it with).
  *   address    the estimate's address at send time; the page prints nothing when the estimate has since moved.
+ *   delivered_at  the handoff time of the send that wrote this copy (the estimate's deliveryState.lastDeliveredAt for
+ *              that send). The page prints the copy only while no later handoff exists on the estimate, so a copy a
+ *              later send could not replace or delete is never shown.
  * Additive and idempotent. down() drops the table: the rows are copies, the source reads stay in roof_entry_reads.
  */
 
@@ -21,6 +24,7 @@ exports.up = async function up(knex) {
     table.uuid('read_id').nullable().references('id').inTable('roof_entry_reads').onDelete('SET NULL');
     table.text('address').nullable();
     table.jsonb('snapshot').notNullable();
+    table.timestamp('delivered_at', { useTz: true }).notNullable();
     table.timestamp('frozen_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
   });
 };

@@ -225,17 +225,20 @@ jest.setTimeout(60000);
     expect(stored.tech_final_flags).toEqual({ gable_vents: 'no', chimney_or_flue: 'yes' });
   });
 
-  test("a points save stores the estimate's address in the same statement; a count save leaves it", async () => {
-    const est = await insertId('estimates', { address: '12 Synthetic Way, Bradenton, FL 34203' });
+  test("a points save stores the address the panel sent, not the estimate row's; a count save leaves it", async () => {
+    // The estimate row already names another home (it moved while this photo was open).
+    const est = await insertId('estimates', { address: '99 Other Road, Sarasota, FL 34232' });
     const { read } = await svc.runRoofEntryRead(home({ estimateId: est }));
     const pins = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }];
-    const saved = await svc.saveTechCount(read.id, { pins, crop: { lat: 27.46, lng: -82.57 }, expectedPins: null });
+    const address = '12 Synthetic Way, Bradenton, FL 34203';
+    const saved = await svc.saveTechCount(read.id, { pins, crop: { lat: 27.46, lng: -82.57 }, address, expectedPins: null });
     expect(saved.tech_pins).toEqual(pins);
     const stored = () => database('roof_entry_reads').where({ id: read.id }).first('points_address');
-    expect((await stored()).points_address).toBe('12 Synthetic Way, Bradenton, FL 34203');
-    await database('estimates').where({ id: est }).update({ address: '99 Other Road, Sarasota, FL 34232' });
+    expect((await stored()).points_address).toBe(address);
     await svc.saveTechCount(read.id, { count: 2 });
-    expect((await stored()).points_address).toBe('12 Synthetic Way, Bradenton, FL 34203');
+    expect((await stored()).points_address).toBe(address);
+    await expect(svc.saveTechCount(read.id, { pins, crop: { lat: 27.46, lng: -82.57 }, expectedPins: pins }))
+      .rejects.toMatchObject({ code: 'address_missing' });
   });
 
   test('a customer retired by a duplicate merge (deleted_at + merged- phone) is refused; an archived one is not', async () => {

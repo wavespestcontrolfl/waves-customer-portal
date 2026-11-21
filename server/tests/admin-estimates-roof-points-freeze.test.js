@@ -3,7 +3,8 @@
  * handoff copies the technician-confirmed roof points of the newest finished read into estimate_roof_points (the customer
  * page prints that copy), but only when the points were saved for the address the estimate still has. A re-send replaces
  * it, a send with no confirmed points (or with the points hidden) deletes it, a send with no real handoff leaves it alone,
- * and a failure in the step never fails the send. The real estimate-roof-points service runs against a small in-memory stand-in for the two
+ * and a failure in the step never fails the send. The copy carries the handoff time the same send stamps on the estimate,
+ * so a copy a later send could not replace or delete is older than that stamp and the page does not print it. The real estimate-roof-points service runs against a small in-memory stand-in for the two
  * tables; the rest of the send harness is the one the channel-link suite uses.
  */
 
@@ -84,6 +85,7 @@ const smsTemplates = require('../routes/admin-sms-templates');
 
 
 const logger = require('../services/logger');
+const { roofPointsDocBlock } = require('../services/estimate-roof-points');
 
 function estimateRow(overrides = {}) {
   return {
@@ -140,13 +142,14 @@ function readsBuilder() {
   const q = {};
   let where = {};
   q.where = jest.fn((w) => { where = { ...where, ...w }; return q; });
-  q.whereRaw = jest.fn(() => q); // the SQL filter (tech_pins saved as an array) is applied in first()
+  let pointsOnly = false;
+  q.whereRaw = jest.fn(() => { pointsOnly = true; return q; }); // the SQL filter (tech_pins saved as an array), applied in first()
   q.orderBy = jest.fn(() => q);
   q.first = jest.fn(async () => {
     if (failOn === 'reads') throw new Error('reads down');
     const rows = reads
       .filter((r) => Object.entries(where).every(([k, v]) => r[k] === v))
-      .filter((r) => (where.id ? true : Array.isArray(r.tech_pins)))
+      .filter((r) => !pointsOnly || Array.isArray(r.tech_pins))
       .sort((a, b) => b.created_at - a.created_at);
     return rows[0];
   });
@@ -184,6 +187,16 @@ beforeEach(() => {
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, providerAttempted: true, providerAccepted: true, message: { provider_message_id: 'sg-1' } });
 });
 
+// The handoff time a send stamped on the estimate row: the newest deliveryState.lastDeliveredAt among the JSON merge
+// patches it wrote (db.raw is a pass-through here, so its bindings are the patches).
+function stampedHandoff() {
+  const stamps = db.raw.mock.calls
+    .map(([, bindings]) => { try { return JSON.parse(bindings[0]).deliveryState.lastDeliveredAt; } catch { return null; } })
+    .filter(Boolean);
+  return stamps[stamps.length - 1];
+}
+const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
 describe('sendEstimateNow: roof points frozen at send', () => {
   test('a delivered send copies the confirmed points, numbered, with the read id and the estimate address', async () => {
     reads = [read()];
@@ -198,6 +211,38 @@ describe('sendEstimateNow: roof points frozen at send', () => {
         { n: 2, x: 0.7, y: 0.55, type: 'trees_touching_roof', label: 'Branch touching the roof', action: 'trim back' },
       ],
     });
+  });
+
+  test('the copy carries the handoff time this send stamps on the estimate, and the page prints it', async () => {
+    reads = [read()];
+    await router.sendEstimateNow(estimateRow(), 'email');
+    const stamped = stampedHandoff();
+    expect(Number.isFinite(Date.parse(stamped))).toBe(true);
+    expect(store['est-1'].delivered_at).toBe(stamped);
+    const sent = estimateRow({ estimate_data: { deliveryState: { lastDeliveredAt: stamped } } });
+    expect((await roofPointsDocBlock(sent, { knex: db })).roofPoints.pins).toHaveLength(2);
+  });
+
+  test('points removed, then the re-send cannot delete the copy: the copy is older than the new handoff and the page omits it', async () => {
+    reads = [read()];
+    await router.sendEstimateNow(estimateRow(), 'email');
+    const first = stampedHandoff();
+    await pause(5);
+    reads = [read({ tech_pins: [] })];
+    failOn = 'write';
+    const result = await router.sendEstimateNow(estimateRow({ estimate_data: { deliveryState: { firstDeliveredAt: first, lastDeliveredAt: first } } }), 'email');
+    failOn = null;
+    expect(result.sent).toBe(true);
+    const second = stampedHandoff();
+    expect(Date.parse(second)).toBeGreaterThan(Date.parse(first));
+    // The delete failed: the first send's copy is still stored, under the first handoff time.
+    expect(store['est-1'].delivered_at).toBe(first);
+    const now = estimateRow({ estimate_data: { deliveryState: { lastDeliveredAt: second } } });
+    expect(await roofPointsDocBlock(now, { knex: db })).toEqual({});
+    // Before the re-send the same copy was printed.
+    const before = estimateRow({ estimate_data: { deliveryState: { lastDeliveredAt: first } } });
+    reads = [read()];
+    expect((await roofPointsDocBlock(before, { knex: db })).roofPoints).toBeDefined();
   });
 
   test('a re-send replaces the copy with the points as they stand now; between sends the copy does not change', async () => {
@@ -329,6 +374,9 @@ describe('sendEstimateNow: roof points frozen at send', () => {
     expect(result.sent).toBe(true);
     expect(store['est-1']).toMatchObject({ read_id: 'read-1' });
     expect(store['est-2']).toMatchObject({ read_id: 'read-2', address: '14 Synthetic Way, Bradenton, FL 34203' });
+    // One handoff: both copies carry the time the anchor's and the sibling's delivery state get.
+    expect(store['est-1'].delivered_at).toBe(stampedHandoff());
+    expect(store['est-2'].delivered_at).toBe(store['est-1'].delivered_at);
   });
 
   test('a sibling whose publication fails (released for a re-send) gets no copy; the anchor keeps its own', async () => {

@@ -8,12 +8,14 @@
  *   - freezeRoofPointsForEstimate: at every send with a real provider handoff (and for each group sibling once that send
  *     published it), copy what customerPointsFromRow gives for the newest finished read that has confirmed points into
  *     estimate_roof_points (a re-send replaces it; no points now deletes it). The points must have been saved for the
- *     address the estimate has now (points_address), or nothing is copied. Between sends the copy never changes, so a
- *     re-read, an edit or a label change cannot alter an estimate the customer already holds.
- *     Fail-soft by contract: it never throws, so it can never block or fail a send.
+ *     address the estimate has now (points_address: the address the staff lookup ran for, sent by the panel with the
+ *     points and the photo centre), or nothing is copied. The copy names the handoff that wrote it (delivered_at).
+ *     Between sends the copy never changes, so a re-read, an edit or a label change cannot alter an estimate the
+ *     customer already holds. Fail-soft by contract: it never throws, so it can never block or fail a send.
  *   - roofPointsDocBlock: the /data key `{ roofPoints: { imageUrl, imageYear, pins } }`, or `{}` so a response with no
  *     snapshot stays byte-identical. Staff hiding is immediate (checked against the read rows NOW); the content is the
- *     frozen copy. An estimate moved to another address since the send prints nothing.
+ *     frozen copy. An estimate moved to another address since the send prints nothing, and so does a copy older than
+ *     the estimate's latest handoff (a later send could not replace or delete it).
  */
 
 const db = require('../models/db');
@@ -24,8 +26,6 @@ const { sameProperty } = require('./misting-layout-validate');
 const TABLE = 'estimate_roof_points';
 const READS = 'roof_entry_reads';
 const NEWEST = [{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }];
-// Reads per estimate are a handful (each "Read the roof" tap reuses a recent read); the cap only bounds the hide check.
-const MAX_HIDE_READS = 50;
 // Knex puts bound values (the address, the photo centre, the technician's notes) in err.message: log the code only.
 const errCode = (err) => err?.code || 'error';
 
@@ -35,31 +35,36 @@ function parsed(v) {
   try { return JSON.parse(v); } catch { return null; }
 }
 
+const finishedReads = (estimateId, knex) => knex(READS).where({ estimate_id: estimateId, status: 'done' });
+
 /**
  * The newest finished read for the estimate on which the technician saved points (hidden or not), or undefined. A saved
  * empty list counts: the technician confirmed none, so an older read's points must not come back.
  */
-function newestPointsRead(estimateId, knex) {
-  return knex(READS)
-    .where({ estimate_id: estimateId, status: 'done' })
+function newestPointsRead(estimateId, knex, columns = []) {
+  return finishedReads(estimateId, knex)
     .whereRaw("tech_pins IS NOT NULL AND jsonb_typeof(tech_pins) = 'array'")
     .orderBy(NEWEST)
-    .first();
+    .first(...columns);
 }
-const hasSavedPoints = (row) => Array.isArray(parsed(row?.tech_pins));
+
+// Both sides must name an address: with one missing nothing proves the roof is this home's, so nothing is shown.
+const sameHome = (a, b) => Boolean(a && b) && sameProperty(a, b);
+
+const timeMs = (v) => (v ? new Date(v).getTime() : NaN);
 
 /**
- * Freeze (or clear) one estimate's roof points. `estimate` needs { id, address }. Returns 'frozen', 'cleared' or 'skipped'
- * (never throws; a storage error is logged and reported as 'skipped').
+ * Freeze (or clear) one estimate's roof points for the send handed off at `deliveredAt` (the lastDeliveredAt that send
+ * stamps on the estimate). `estimate` needs { id, address }. Returns 'frozen', 'cleared' or 'skipped' (never throws; a
+ * storage error is logged and reported as 'skipped', and the page then omits the older copy: see copyIsCurrent).
  */
-async function freezeRoofPointsForEstimate(estimate, { knex = db } = {}) {
-  if (!estimate?.id) return 'skipped';
+async function freezeRoofPointsForEstimate(estimate, { deliveredAt, knex = db } = {}) {
+  if (!estimate?.id || !Number.isFinite(timeMs(deliveredAt))) return 'skipped';
   try {
     const row = await newestPointsRead(estimate.id, knex);
-    // The points were confirmed for the address the estimate had when they were saved. An estimate moved to another home
-    // since is another roof: it gets no points until staff read and confirm that one.
-    const sameRoof = Boolean(row?.points_address && estimate.address) && sameProperty(row.points_address, estimate.address);
-    const points = sameRoof ? customerPointsFromRow(row) : null;
+    // The points were saved for the address the staff lookup ran for (the same lookup gave the photo centre). An
+    // estimate that has another address now is another roof: it gets no points until staff read and confirm that one.
+    const points = sameHome(row?.points_address, estimate.address) ? customerPointsFromRow(row) : null;
     if (!points) {
       await knex(TABLE).where({ estimate_id: estimate.id }).del();
       return 'cleared';
@@ -67,8 +72,9 @@ async function freezeRoofPointsForEstimate(estimate, { knex = db } = {}) {
     const record = {
       estimate_id: estimate.id,
       read_id: row.id,
-      address: estimate.address ? String(estimate.address) : null,
+      address: String(estimate.address),
       snapshot: JSON.stringify(points),
+      delivered_at: new Date(deliveredAt).toISOString(),
       frozen_at: knex.fn.now(),
     };
     await knex(TABLE).insert(record).onConflict('estimate_id').merge();
@@ -80,20 +86,28 @@ async function freezeRoofPointsForEstimate(estimate, { knex = db } = {}) {
 }
 
 /**
+ * True when the copy belongs to the estimate's latest handoff. Every real handoff stamps deliveryState.lastDeliveredAt
+ * and rewrites or deletes the copy; when that write fails the old copy stays, older than the handoff, and is not shown.
+ * A copy newer than the stamp (the copy landed, the estimate's own write is still to come) is that send's copy.
+ */
+function copyIsCurrent(row, estimate) {
+  const latest = timeMs(parsed(estimate.estimate_data)?.deliveryState?.lastDeliveredAt);
+  const copy = timeMs(row.delivered_at);
+  return Number.isFinite(latest) && Number.isFinite(copy) && copy >= latest;
+}
+
+/**
  * True when staff hid the points NOW: on the frozen read, on the estimate's newest finished read (staff can hide without
- * saving any points, so it counts with or without a points list), or on its newest read with saved points.
+ * saving any points, so it counts with or without a points list), or on its newest read with saved points. Each is its
+ * own query, so no number of later reads can push a hidden one out of view.
  */
 async function hiddenNow(estimateId, readId, knex) {
-  if (readId) {
-    const frozen = await knex(READS).where({ id: readId }).first('hide_on_estimate');
-    if (frozen?.hide_on_estimate) return true;
-  }
-  const reads = await knex(READS)
-    .where({ estimate_id: estimateId, status: 'done' })
-    .orderBy(NEWEST)
-    .limit(MAX_HIDE_READS)
-    .select('id', 'hide_on_estimate', 'tech_pins');
-  return [reads[0], reads.find(hasSavedPoints)].some((r) => Boolean(r?.hide_on_estimate));
+  const [frozen, newest, newestWithPoints] = await Promise.all([
+    readId ? knex(READS).where({ id: readId }).first('hide_on_estimate') : null,
+    finishedReads(estimateId, knex).orderBy(NEWEST).first('hide_on_estimate'),
+    newestPointsRead(estimateId, knex, ['hide_on_estimate']),
+  ]);
+  return [frozen, newest, newestWithPoints].some((r) => Boolean(r?.hide_on_estimate));
 }
 
 function cleanSnapshot(snapshot) {
@@ -118,8 +132,8 @@ async function roofPointsDocBlock(estimate, { knex = db } = {}) {
   if (!estimate?.id) return {};
   try {
     const row = await knex(TABLE).where({ estimate_id: estimate.id }).first();
-    if (!row) return {};
-    if (!sameProperty(row.address, estimate.address)) return {};
+    if (!row || !copyIsCurrent(row, estimate)) return {};
+    if (!sameHome(row.address, estimate.address)) return {};
     const snapshot = cleanSnapshot(row.snapshot);
     if (!snapshot) return {};
     if (await hiddenNow(estimate.id, row.read_id, knex)) return {};

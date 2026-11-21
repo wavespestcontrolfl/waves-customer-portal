@@ -695,6 +695,16 @@ function validateTechPins(pins) {
   return out;
 }
 
+// The longest address a points save may name (the estimate's own address column is far shorter in practice).
+const MAX_POINTS_ADDRESS = 300;
+
+// The home a points save names: trimmed text of 1 to MAX_POINTS_ADDRESS characters, else code 'address_missing'.
+function pointsAddressFrom(address) {
+  const text = typeof address === 'string' ? address.trim() : '';
+  if (!text || text.length > MAX_POINTS_ADDRESS) throw Object.assign(new Error('These points name no address'), { code: 'address_missing' });
+  return text;
+}
+
 const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && Number.isFinite(c.lng)
   && Math.abs(c.lat) <= 90 && Math.abs(c.lng) <= 180;
 
@@ -704,9 +714,13 @@ const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && 
  * whole (null clears them). Pins are drawn on the read's crop, so the caller also names the crop centre it drew on
  * ({ lat, lng }, the panel's map point): it must hash to this row's lookup_key, so no other roof's photo can carry these
  * pins, and the rounded centre is stored so the estimate can rebuild the same county crop. A centre that does not match
- * throws code 'crop_mismatch' and writes nothing. Returns the public read, or null for an unknown id.
+ * throws code 'crop_mismatch' and writes nothing. The caller names the home too: `address`, the address the staff
+ * lookup that gave that map point ran for. It is stored with the points (points_address), and the customer estimate
+ * shows them only while the estimate has that address. It is never read from the estimate row here: the estimate may
+ * have moved to another home while this photo was open. No address throws code 'address_missing' and writes nothing.
+ * Returns the public read, or null for an unknown id.
  */
-async function saveTechCount(id, { count, flags, pins, crop, expectedPins, hideOnEstimate } = {}) {
+async function saveTechCount(id, { count, flags, pins, crop, address, expectedPins, hideOnEstimate } = {}) {
   const patch = {};
   if (count !== undefined) patch.tech_final_count = count;
   // Merged in SQL in one statement, so two saves of different types (or two tabs) keep both; a type sent again is replaced.
@@ -715,6 +729,7 @@ async function saveTechCount(id, { count, flags, pins, crop, expectedPins, hideO
   const where = { id };
   if (pins === null) patch.tech_pins = null;
   else if (pins !== undefined) {
+    const pointsAddress = pointsAddressFrom(address);
     const row = await db(TABLE).where({ id }).first('id', 'image_source', 'lookup_key', 'status', 'ai_tier');
     if (!row) return null;
     // Only a finished, readable read can carry points: the customer estimate shows points from those rows only, and a
@@ -728,9 +743,9 @@ async function saveTechCount(id, { count, flags, pins, crop, expectedPins, hideO
     patch.tech_pins = JSON.stringify(pins);
     patch.crop_lat = roundCentre(crop.lat);
     patch.crop_lng = roundCentre(crop.lng);
-    // The estimate's address as the points are saved, in the same statement: a send freezes them only while the estimate
-    // still has it (estimate-roof-points.js), so an estimate moved to another home never shows this roof.
-    patch.points_address = db.raw('(SELECT address FROM estimates WHERE estimates.id = roof_entry_reads.estimate_id)');
+    // The home this photo is of, from the same lookup as the centre just checked. A send freezes the points only while
+    // the estimate has this address (estimate-roof-points.js), so an estimate moved to another home never shows this roof.
+    patch.points_address = pointsAddress;
     // lookup_key never changes, so this also proves the row still names the crop that was checked.
     where.lookup_key = row.lookup_key;
   }

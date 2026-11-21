@@ -2,8 +2,8 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 process.env.ESTIMATE_DOC_PIN_SECRET = 'test-doc-pin-secret';
 
 // Roof points on the customer estimate (owner ruling 2026-11-20, choice 4A): GET /:token/data carries `roofPoints` only
-// when a frozen copy exists, staff have not hidden it now, and the estimate is still at the address it was sent for. In every
-// other case the response is byte-identical to an estimate that never had points.
+// when a frozen copy exists for the estimate's latest handoff, staff have not hidden it now, and the estimate is still at
+// the address it was sent for. In every other case the response is byte-identical to an estimate that never had points.
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
@@ -68,6 +68,7 @@ function chainFor(result) {
 db.mockImplementation((table) => chainFor(dbRows[table]));
 
 const ADDRESS = '123 Trust Ln, Bradenton, FL 34203';
+const SENT = '2026-11-20T16:00:00.000Z';
 function estimateRow(overrides = {}) {
   return {
     id: 'est-roof-points', token: 'roofpointstoken', status: 'sent', sent_at: null, viewed_at: null,
@@ -78,6 +79,7 @@ function estimateRow(overrides = {}) {
     service_interest: 'Lawn',
     monthly_total: 42.3, annual_total: 507.6, onetime_total: 0,
     estimate_data: {
+      deliveryState: { firstDeliveredAt: SENT, lastDeliveredAt: SENT },
       result: { recurring: { services: [{ service: 'lawn_care', name: 'lawn_care', visitsPerYear: 6 }] } },
       sendSnapshot: { pricingBundle: {
         combinedRecurring: { waveGuardDiscountPct: 0 },
@@ -117,7 +119,7 @@ const SNAPSHOT = {
   imageYear: 2025,
   pins: [{ n: 1, x: 0.25, y: 0.4, type: 'roof_returns_and_valleys', label: 'Roof return, front left', action: 'seal' }],
 };
-const POINT = { estimate_id: 'est-roof-points', read_id: 'read-1', address: ADDRESS, snapshot: SNAPSHOT };
+const POINT = { estimate_id: 'est-roof-points', read_id: 'read-1', address: ADDRESS, snapshot: SNAPSHOT, delivered_at: new Date(SENT) };
 const READ = { id: 'read-1', estimate_id: 'est-roof-points', status: 'done', tech_pins: [{}], hide_on_estimate: false };
 const base = (extra = {}) => ({
   estimates: estimateRow(extra.estimate),
@@ -135,6 +137,15 @@ describe('GET /:token/data: roofPoints', () => {
       expect(body.estimate).toBeDefined();
       expect(body.roofPoints).toEqual(SNAPSHOT);
     });
+  });
+
+  test('a copy from an older handoff than the estimate\'s latest leaves the response byte-identical', async () => {
+    let none;
+    dbRows = base();
+    await withServer(async (baseUrl) => { none = await getText(baseUrl); });
+    const stale = { ...POINT, delivered_at: new Date('2026-11-19T16:00:00.000Z') };
+    dbRows = base({ tables: { estimate_roof_points: stale, roof_entry_reads: [READ] } });
+    await withServer(async (baseUrl) => { expect(diffPaths(JSON.parse(await getText(baseUrl)), JSON.parse(none))).toEqual([]); });
   });
 
   test('hidden now, a moved address, and no frozen copy all leave the response byte-identical', async () => {

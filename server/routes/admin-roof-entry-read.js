@@ -10,20 +10,23 @@
  *         400 { error: 'reference_mismatch' } when both ids are given and the estimate belongs to a different customer.
  *   PATCH /api/admin/roof-entry-read/:id/tech-count the technician's final count, flags and confirmed points
  *         body { count?: int 0-500, flags?: { <entry type>: 'yes' | 'no' | 'unsure' },
- *                pins?: [{ x, y, type, note?, source? }, ...] | null, crop?: { lat, lng }, expected_pins?: [...] | null,
- *                hide_on_estimate?: boolean } -> { read }
+ *                pins?: [{ x, y, type, note?, source? }, ...] | null, crop?: { lat, lng }, address?: string,
+ *                expected_pins?: [...] | null, hide_on_estimate?: boolean } -> { read }
  *         At least one of count, flags, pins, hide_on_estimate is required. pins (owner ruling 2026-11-20, choice 4A) are the
  *         points the technician confirmed on the photo, saved whole (null clears them); the customer estimate shows only
  *         these, never the AI read. When pins is a list, crop is required: the crop centre the panel drew on, which must
- *         belong to this read's photo (else 400 { error: 'These points were not drawn on this roof photo' }). An invalid
+ *         belong to this read's photo (else 400 { error: 'These points were not drawn on this roof photo' }). address is
+ *         required with a list too (1 to 300 characters): the address the lookup that gave that map point ran for. It is
+ *         saved with the points, and the customer estimate shows them only while the estimate has that address (missing,
+ *         blank, not text or too long: 400 { error: 'The address is missing. Look up the address again ...' }). An invalid
  *         pins list (over 20 points, x or y outside 0-1, an unknown type, a note over 40 characters) is 400.
  *         source (optional) is "<entry type>:<index into that type's AI pins>", the AI suggestion a point was confirmed from;
  *         the staff panel uses it to keep that suggestion hidden, and the customer estimate never gets it.
  *         With pins (a list or null), expected_pins is required too: the list the panel last loaded (null = none saved).
  *         The save or clear lands only while the row still holds exactly that list, else 409 (another window changed it).
  *         Points need a finished, readable read (else 400 "Read the roof again").
- *         hide_on_estimate true keeps the points off the customer estimate. Send only what changed: pins and crop only when
- *         the points were edited, hide_on_estimate only when the checkbox changed.
+ *         hide_on_estimate true keeps the points off the customer estimate. Send only what changed: pins, crop and
+ *         address only when the points were edited, hide_on_estimate only when the checkbox changed.
  *
  * Admin only, like the other admin estimate routes. The gate is this router's first middleware, ahead of the staff
  * login that reads the technicians table: gate off = 404 { enabled: false } from the router, with no route-level
@@ -96,7 +99,11 @@ function techCountInput(body) {
     if (!pointsOk || !expectedOk) return null;
     out.pins = pins;
     out.expectedPins = e;
-    if (!clear) out.crop = { lat: c.lat, lng: c.lng };
+    if (!clear) {
+      out.crop = { lat: c.lat, lng: c.lng };
+      // The address the lookup ran for. saveTechCount is its one check (code address_missing, a 400 below).
+      out.address = b.address;
+    }
   }
   return Object.keys(out).length ? out : null;
 }
@@ -124,7 +131,7 @@ router.patch('/:id/tech-count', async (req, res, next) => {
     const input = techCountInput(req.body);
     if (!input) {
       return res.status(400).json({
-        error: 'Send count (whole number, 0-500), flags ({ <entry type>: yes | no | unsure }), pins (up to 20, with crop) and/or hide_on_estimate (true or false)',
+        error: 'Send count (whole number, 0-500), flags ({ <entry type>: yes | no | unsure }), pins (up to 20, with crop and address) and/or hide_on_estimate (true or false)',
       });
     }
     const read = await saveTechCount(req.params.id, input);
@@ -132,6 +139,7 @@ router.patch('/:id/tech-count', async (req, res, next) => {
     return res.json({ read });
   } catch (err) {
     if (err.code === 'crop_mismatch') return res.status(400).json({ error: 'These points were not drawn on this roof photo' });
+    if (err.code === 'address_missing') return res.status(400).json({ error: 'The address is missing. Look up the address again before adding points.' });
     if (err.code === 'read_not_usable') return res.status(400).json({ error: 'This roof read did not work. Read the roof again before adding points.' });
     if (err.code === 'points_changed') return res.status(409).json({ error: 'These points were changed in another window. Read the roof again to load them.' });
     // A database error can carry the bound values (the technician's notes, the crop centre): log and forward only the

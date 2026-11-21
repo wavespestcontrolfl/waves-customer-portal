@@ -266,7 +266,7 @@ function SaveNote({ state, statusTestId, errorTestId }) {
 // The photo and the technician's confirmed points. It mounts with each loaded read (the panel hides it while a read
 // runs), so its state starts from what the server holds. `saved` is the server's last answer for the points and the
 // checkbox: the baseline a save is checked against, set at load and by each points save. A count save never touches it.
-function RoofPointsEditor({ read, imageUrl, spot, estimateId, onReadAgain }) {
+function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, onReadAgain }) {
   const pointId = useRef(0);
   const nextId = () => { pointId.current += 1; return `pt${pointId.current}`; };
   const frameRef = useRef(null);
@@ -330,7 +330,7 @@ function RoofPointsEditor({ read, imageUrl, spot, estimateId, onReadAgain }) {
       setPointsState({ ...IDLE, err: "Change a point or the checkbox first." });
       return;
     }
-    if (pointsEdited && !spot) {
+    if (pointsEdited && (!spot || !String(address || "").trim())) {
       setPointsState({ ...IDLE, err: "The map point is missing. Look up the address again." });
       return;
     }
@@ -345,6 +345,9 @@ function RoofPointsEditor({ read, imageUrl, spot, estimateId, onReadAgain }) {
               x: round4(p.x), y: round4(p.y), type: p.type, note: p.note.trim() || null, ...(p.source ? { source: p.source } : {}),
             })),
             crop: { lat: spot.lat, lng: spot.lng },
+            // The address comes from the same lookup as the map point. The server saves it with the points, and the
+            // customer estimate shows the points only while the estimate has this address.
+            address: String(address).trim(),
             // The list these edits started from: the server refuses the save (409) if another window changed it since.
             expected_pins: saved.pins,
           } : {}),
@@ -563,7 +566,7 @@ function TechCountForm({ read, estimateId }) {
   );
 }
 
-export default function RoofReadPanel({ spot, addressDoubt = false, estimateId = null, customerId = null }) {
+export default function RoofReadPanel({ spot, address, addressDoubt = false, estimateId = null, customerId = null }) {
   const [phase, setPhase] = useState("idle");
   const [problem, setProblem] = useState("");
   const [result, setResult] = useState(null);
@@ -638,7 +641,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
       )}
       {read && (
         <div className="space-y-4" data-testid="roof-read-result">
-          <RoofPointsEditor read={read} imageUrl={result.image_url} spot={spot} estimateId={estimateId} onReadAgain={readRoof} />
+          <RoofPointsEditor read={read} imageUrl={result.image_url} spot={spot} address={address} estimateId={estimateId} onReadAgain={readRoof} />
           <p className="text-14 text-zinc-600">
             {String(read.county).replace(/^./, (c) => c.toUpperCase())} County aerial, {read.image_year}.
             {result.cached ? " Reused from an earlier read." : ""}

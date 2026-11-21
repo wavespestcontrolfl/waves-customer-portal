@@ -1,7 +1,7 @@
 // estimate-roof-points: the /data block for the customer page (owner ruling 2026-11-20, choice 4A). It prints the frozen
-// copy, but staff hiding is immediate (the frozen read, the estimate's newest finished read with or without points, or its
-// newest read with saved points, hidden NOW), and an estimate that has moved to another address prints nothing. Any miss
-// is `{}` so the response stays byte-identical.
+// copy, but only the copy of the estimate's latest handoff, staff hiding is immediate (the frozen read, the estimate's
+// newest finished read with or without points, or its newest read with saved points, hidden NOW), and an estimate that
+// has moved to another address prints nothing. Any miss is `{}` so the response stays byte-identical.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -17,29 +17,40 @@ const SNAPSHOT = {
   ],
 };
 const ADDRESS = '12 Synthetic Way, Bradenton, FL 34203';
+const SENT = '2026-11-20T16:00:00.000Z';
+const LATER = '2026-11-20T19:30:00.000Z';
 
+// The reads table answers one row per query (first), as the service asks: there is no list and no limit to hide behind.
 function fakeKnex({ point, reads = [], throwOn = null }) {
   const knex = (table) => {
     const q = {};
     let where = {};
+    let pointsOnly = false;
     q.where = (w) => { where = { ...where, ...w }; return q; };
-    q.whereRaw = () => q;
-    q.orderBy = () => q;
-    q.limit = () => q;
-    const matching = () => {
-      if (throwOn === table) throw Object.assign(new Error(`${table} down: 12 Synthetic Way, note "front left"`), { code: '57014' });
-      return reads.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v)).sort((a, b) => b.created_at - a.created_at);
+    // The one raw filter the service uses: reads that hold a saved points list.
+    q.whereRaw = (sql) => {
+      if (!/tech_pins IS NOT NULL AND jsonb_typeof\(tech_pins\) = 'array'/.test(sql)) throw new Error(`unexpected raw filter: ${sql}`);
+      pointsOnly = true;
+      return q;
     };
-    q.first = async () => (table === 'estimate_roof_points' && throwOn !== table ? point : matching()[0]);
-    q.select = async () => matching();
+    q.orderBy = () => q;
+    q.first = async () => {
+      if (throwOn === table) throw Object.assign(new Error(`${table} down: 12 Synthetic Way, note "front left"`), { code: '57014' });
+      if (table === 'estimate_roof_points') return point;
+      return reads
+        .filter((r) => Object.entries(where).every(([k, v]) => r[k] === v))
+        .filter((r) => !pointsOnly || Array.isArray(r.tech_pins))
+        .sort((a, b) => b.created_at - a.created_at)[0];
+    };
     return q;
   };
   knex.fn = { now: () => 'NOW' };
   return knex;
 }
-const point = (over = {}) => ({ estimate_id: 'est-1', read_id: 'read-1', address: ADDRESS, snapshot: SNAPSHOT, ...over });
+const point = (over = {}) => ({ estimate_id: 'est-1', read_id: 'read-1', address: ADDRESS, snapshot: SNAPSHOT, delivered_at: new Date(SENT), ...over });
 const frozenRead = (over = {}) => ({ id: 'read-1', estimate_id: 'est-1', status: 'done', tech_pins: [{}], hide_on_estimate: false, created_at: new Date('2026-11-20T15:00:00Z'), ...over });
-const estimate = { id: 'est-1', address: ADDRESS };
+const est = (over = {}) => ({ id: 'est-1', address: ADDRESS, estimate_data: { deliveryState: { lastDeliveredAt: SENT } }, ...over });
+const estimate = est();
 
 describe('roofPointsDocBlock', () => {
   test('a frozen copy that is not hidden and still matches the address is published as { imageUrl, imageYear, pins }', async () => {
@@ -47,13 +58,36 @@ describe('roofPointsDocBlock', () => {
     expect(out).toEqual({ roofPoints: SNAPSHOT });
   });
 
-  test('the snapshot may arrive as a JSON string', async () => {
-    const out = await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point({ snapshot: JSON.stringify(SNAPSHOT) }), reads: [frozenRead()] }) });
+  test('the snapshot and the estimate data may arrive as JSON strings', async () => {
+    const knex = fakeKnex({ point: point({ snapshot: JSON.stringify(SNAPSHOT), delivered_at: SENT }), reads: [frozenRead()] });
+    const out = await roofPointsDocBlock(est({ estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: SENT } }) }), { knex });
     expect(out.roofPoints.pins).toHaveLength(2);
   });
 
   test('no frozen copy: {}', async () => {
     expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: undefined, reads: [frozenRead()] }) })).toEqual({});
+  });
+
+  test('a copy older than the latest handoff: {} (a later send could not replace or delete it)', async () => {
+    const knex = fakeKnex({ point: point(), reads: [frozenRead()] });
+    expect(await roofPointsDocBlock(est({ estimate_data: { deliveryState: { lastDeliveredAt: LATER } } }), { knex })).toEqual({});
+    // One millisecond is enough.
+    expect(await roofPointsDocBlock(est({ estimate_data: { deliveryState: { lastDeliveredAt: '2026-11-20T16:00:00.001Z' } } }), { knex })).toEqual({});
+  });
+
+  test('a copy newer than the stamp on the estimate shows (the copy landed, the estimate write did not)', async () => {
+    const knex = fakeKnex({ point: point({ delivered_at: new Date(LATER) }), reads: [frozenRead()] });
+    expect((await roofPointsDocBlock(estimate, { knex })).roofPoints).toEqual(SNAPSHOT);
+  });
+
+  test.each([
+    ['no delivery state on the estimate', est({ estimate_data: { result: {} } }), point()],
+    ['no estimate data', est({ estimate_data: null }), point()],
+    ['estimate data that is not JSON', est({ estimate_data: 'not json' }), point()],
+    ['a handoff time that is not a date', est({ estimate_data: { deliveryState: { lastDeliveredAt: 'soon' } } }), point()],
+    ['no handoff time on the copy', estimate, point({ delivered_at: null })],
+  ])('%s: {} (nothing proves the copy is the latest send)', async (_name, row, copy) => {
+    expect(await roofPointsDocBlock(row, { knex: fakeKnex({ point: copy, reads: [frozenRead()] }) })).toEqual({});
   });
 
   test('the frozen read hidden NOW: {} (hiding is immediate, the content stays frozen)', async () => {
@@ -75,15 +109,35 @@ describe('roofPointsDocBlock', () => {
     expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
   });
 
+  test('the newest read with saved points hidden, under 60 newer reads with no points: {} (no count of reads un-hides it)', async () => {
+    const newer = Array.from({ length: 60 }, (_, i) => frozenRead({
+      id: `read-later-${i}`, tech_pins: null, created_at: new Date(Date.parse('2026-11-20T18:00:00Z') + i * 60000),
+    }));
+    const reads = [frozenRead(), frozenRead({ id: 'read-2', hide_on_estimate: true, created_at: new Date('2026-11-20T17:00:00Z') }), ...newer];
+    expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
+  });
+
   test('a newer read of the estimate hidden NOW: {} even though the frozen read is not hidden', async () => {
     const reads = [frozenRead(), frozenRead({ id: 'read-2', hide_on_estimate: true, created_at: new Date('2026-11-20T18:00:00Z') })];
     expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
   });
 
-  test('the estimate moved to another address since the send: {}; a missing address on either side still shows', async () => {
+  test('an older hidden read under a newer visible one with points does not hide it; another estimate\'s hidden read does not either', async () => {
+    const reads = [
+      frozenRead({ id: 'read-0', hide_on_estimate: true, created_at: new Date('2026-11-19T15:00:00Z') }),
+      frozenRead(),
+      frozenRead({ id: 'read-x', estimate_id: 'est-2', hide_on_estimate: true, created_at: new Date('2026-11-20T18:00:00Z') }),
+    ];
+    expect((await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).roofPoints).toEqual(SNAPSHOT);
+  });
+
+  test('the estimate moved to another address since the send: {}; so does a missing address on either side', async () => {
     const knex = fakeKnex({ point: point(), reads: [frozenRead()] });
-    expect(await roofPointsDocBlock({ id: 'est-1', address: '99 Other Road, Sarasota, FL 34232' }, { knex })).toEqual({});
-    expect((await roofPointsDocBlock({ id: 'est-1', address: null }, { knex })).roofPoints).toBeDefined();
+    expect(await roofPointsDocBlock(est({ address: '99 Other Road, Sarasota, FL 34232' }), { knex })).toEqual({});
+    expect(await roofPointsDocBlock(est({ address: null }), { knex })).toEqual({});
+    expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point({ address: null }), reads: [frozenRead()] }) })).toEqual({});
+    // Case, spacing, punctuation and a trailing ZIP or state do not make it another home.
+    expect((await roofPointsDocBlock(est({ address: '12 synthetic way,  Bradenton FL' }), { knex })).roofPoints).toEqual(SNAPSHOT);
   });
 
   test('a copy with no photo or no points: {}', async () => {
@@ -107,9 +161,15 @@ describe('roofPointsDocBlock', () => {
 describe('freeze helpers never throw', () => {
   test('a failing read reports skipped and logs only the code; a row with no id is skipped', async () => {
     const knex = fakeKnex({ reads: [], throwOn: 'roof_entry_reads' });
-    expect(await freezeRoofPointsForEstimate({ id: 'est-1', address: ADDRESS }, { knex })).toBe('skipped');
+    expect(await freezeRoofPointsForEstimate({ id: 'est-1', address: ADDRESS }, { knex, deliveredAt: SENT })).toBe('skipped');
     expect(logger.warn).toHaveBeenLastCalledWith('[estimate-roof-points] freeze skipped for estimate est-1: 57014');
-    expect(await freezeRoofPointsForEstimate({}, { knex })).toBe('skipped');
-    expect(await freezeRoofPointsForEstimate(null, { knex })).toBe('skipped');
+    expect(await freezeRoofPointsForEstimate({}, { knex, deliveredAt: SENT })).toBe('skipped');
+    expect(await freezeRoofPointsForEstimate(null, { knex, deliveredAt: SENT })).toBe('skipped');
+  });
+
+  test.each([undefined, null, '', 'soon'])('a freeze that names no handoff time (%p) is skipped and touches no table', async (deliveredAt) => {
+    const knex = jest.fn();
+    expect(await freezeRoofPointsForEstimate({ id: 'est-1', address: ADDRESS }, { knex, deliveredAt })).toBe('skipped');
+    expect(knex).not.toHaveBeenCalled();
   });
 });
