@@ -328,14 +328,12 @@ describe('two alerts, not one a day (in the app)', () => {
   const welcome = (ids, extra) => moving('new_plan_without_welcome', ids, extra);
   const posts = () => NotificationService.notifyAdmin.mock.calls.map(([, title, , options]) => ({ title, ...options }));
   const keysPosted = () => posts().map((post) => post.metadata.opsKey);
-  // The newest standing alert in the feed (null = none).
-  const setFeed = (alert) => { mockTables.notifications = mockChain({ first: alert }); };
-  // The run state the sweep reads (undefined = no row), and the feed that goes with it: the standing alert the
-  // state names is the newest one and is open. It also clears the 20 h send marker.
+  // The run state row the sweep reads (undefined = no row): the result of a finished run, so its start mark equals
+  // its time unless the test says otherwise. It also clears the 20 h send marker and the feed's call log.
   const setState = (state) => {
     mockTables.ops_email_send_state = mockChain({ first: null });
-    mockTables.system_settings = mockChain({ first: state === undefined ? null : { value: JSON.stringify(state) } });
-    setFeed(state?.alertId ? { id: state.alertId, metadata: { opsKey: STANDING_KEY } } : null);
+    mockTables.system_settings = mockChain({ first: state === undefined ? null : { value: JSON.stringify({ attempt: state.runAt, ...state }) } });
+    mockTables.notifications = mockChain();
   };
   // The state yesterday's run wrote: the failing standing checks, how long ago the standing alert posted, the findings.
   const lastRun = (items, alertedAgoMs, seen = {}) => setState(items === undefined ? undefined : {
@@ -343,10 +341,16 @@ describe('two alerts, not one a day (in the app)', () => {
     items, alertedAt: alertedAgoMs == null ? null : new Date(NOW.getTime() - alertedAgoMs).toISOString(),
     alertId: alertedAgoMs == null ? null : 'alert-1', seen,
   });
+  // The result the run saved: its last write to the row. A saved result carries its own time as the start mark.
   const savedState = () => {
     const call = mockTables.system_settings.insert.mock.calls.at(-1);
-    return call ? { key: call[0].key, ...JSON.parse(call[0].value) } : null;
+    if (!call) return null;
+    const { attempt, ...state } = JSON.parse(call[0].value);
+    expect(attempt).toBe(state.runAt);
+    return { key: call[0].key, ...state };
   };
+  // Every write of the run to the row, in order: the start mark first.
+  const stateWrites = () => mockTables.system_settings.insert.mock.calls.map(([row]) => JSON.parse(row.value));
   // The next run reads what this run saved.
   const carry = () => {
     const { key, ...state } = savedState();
@@ -407,6 +411,12 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(await sweep([ok('a'), fails('b', 9)])).toEqual({ skipped: 'no_new_item', results: { a: 0, b: 9 } });
       expect(posts()).toHaveLength(0);
       expect(resolve).not.toHaveBeenCalled(); // the list still stands: nothing is closed
+      // A quiet run tries the seam's close of older standing alerts again (it can fail right after a new alert is
+      // written, and the seam only logs that). It keeps the alert the state names and touches only the standing key.
+      expect(mockTables.notifications.whereRaw).toHaveBeenCalledWith("metadata->>'opsKey' = ?", [STANDING_KEY]);
+      expect(mockTables.notifications.where).toHaveBeenCalledWith('id', '<>', 'alert-1');
+      expect(mockTables.notifications.whereRaw).toHaveBeenCalledWith('created_at <= (SELECT created_at FROM notifications WHERE id = ?)', ['alert-1']);
+      expect(mockTables.notifications.update).toHaveBeenCalledTimes(1);
       expect(mockTables.ops_email_send_state.insert).not.toHaveBeenCalled();
       expect(savedState()).toEqual({ key: RUN_STATE_KEY, runAt: NOW.toISOString(), items: ['b'], alertedAt: new Date(NOW.getTime() - DAY).toISOString(), alertId: 'alert-1', seen: {} });
     });
@@ -484,35 +494,45 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(posts()).toHaveLength(0);
     });
 
-    test('the run state counts only while the feed holds the alert it names', async () => {
-      // The alert row and the run state are two writes. When the state write fails, the state is about an alert that
-      // was replaced or closed, and must not keep a failing check quiet.
-      const unchanged = () => sweep([fails('b')]);
+    test('a run marks its start before it does anything: a result older than the latest start is not trusted', async () => {
+      const yesterday = new Date(NOW.getTime() - DAY).toISOString();
       lastRun(['b'], DAY);
-      expect(await unchanged()).toMatchObject({ skipped: 'no_new_item' }); // the alert the state names is the newest, open
-      // A newer standing alert replaced it (and that run's state write failed).
+      expect(await sweep([fails('b')])).toMatchObject({ skipped: 'no_new_item' });
+      // The first write is the start mark: the last result as it was, with this run's start time. The last write is
+      // this run's result.
+      expect(stateWrites()).toHaveLength(2);
+      expect(stateWrites()[0]).toMatchObject({ attempt: NOW.toISOString(), runAt: yesterday, items: ['b'], alertId: 'alert-1' });
+      expect(stateWrites()[1]).toMatchObject({ attempt: NOW.toISOString(), runAt: NOW.toISOString(), items: ['b'] });
+      // A run started three hours ago. It posted or closed alerts, and its result was not saved: the row still holds
+      // the result before it. That older result no longer matches the feed, so the same list must post.
+      const unsaved = { runAt: yesterday, attempt: new Date(NOW.getTime() - 3 * 60 * 60 * 1000).toISOString(), items: ['b'], alertedAt: yesterday, alertId: 'alert-1' };
+      setState({ ...unsaved, seen: {} });
+      expect(await sweep([fails('b')])).toMatchObject({ sent: true });
+      // The same for a moving-window finding: it cleared on the unsaved run and is back, so it posts again.
+      const seen = { new_plan_without_welcome: itemHashes({ key: 'new_plan_without_welcome', itemKeys: ['c1'], count: 1 }, NOW) };
+      setState({ ...unsaved, items: [], seen });
+      expect(await sweep([welcome(['c1'])])).toMatchObject({ sent: true });
+      setState({ ...unsaved, items: [], attempt: yesterday, seen }); // the saved result of the last run: trusted
+      expect(await sweep([welcome(['c1'])])).toMatchObject({ skipped: 'no_new_item' });
+    });
+
+    test('a start that cannot be marked: the run trusts nothing and posts', async () => {
       lastRun(['b'], DAY);
-      setFeed({ id: 'alert-2', metadata: { opsKey: STANDING_KEY } });
-      expect(await unchanged()).toMatchObject({ sent: true });
-      // A clean run closed it (and that run's state write failed): the same check failing again must post.
+      mockTables.system_settings.merge = jest.fn().mockRejectedValueOnce(new Error('deadlock detected')).mockResolvedValue(1);
+      expect(await sweep([fails('b')])).toMatchObject({ sent: true });
+      expect(savedState()).toMatchObject({ items: ['b'], alertedAt: NOW.toISOString() });
+    });
+
+    test('a clean run marks its start too, so a close with an unsaved result cannot leave the old result in force', async () => {
       lastRun(['b'], DAY);
-      setFeed({ id: 'alert-1', metadata: JSON.stringify({ opsKey: STANDING_KEY, resolved: true, resolvedBy: `${STANDING_KEY}:clean-run` }) });
-      expect(await unchanged()).toMatchObject({ sent: true });
-      // The feed holds no standing alert, or cannot be read.
-      lastRun(['b'], DAY);
-      setFeed(null);
-      expect(await unchanged()).toMatchObject({ sent: true });
-      lastRun(['b'], DAY);
-      mockTables.notifications.first = jest.fn(async () => { throw new Error('connection terminated'); });
-      expect(await unchanged()).toMatchObject({ sent: true });
-      expect(posts()).toHaveLength(4);
-      // A person closed the alert: that is a decision. It stays quiet until the weekly alert.
-      lastRun(['b'], DAY);
-      setFeed({ id: 'alert-1', done_at: NOW.toISOString(), metadata: { opsKey: STANDING_KEY } });
-      expect(await unchanged()).toMatchObject({ skipped: 'no_new_item' });
-      // The read asks for the newest row of the standing key only.
-      expect(mockTables.notifications.whereRaw).toHaveBeenCalledWith("metadata->>'opsKey' = ?", [STANDING_KEY]);
-      expect(mockTables.notifications.orderBy).toHaveBeenCalledWith('created_at', 'desc');
+      mockTables.system_settings.merge = jest.fn().mockResolvedValueOnce(1).mockRejectedValue(new Error('deadlock detected'));
+      expect(await sweep([ok('a'), ok('b')])).toEqual({ skipped: 'clean', results: { a: 0, b: 0 } });
+      expect(resolve).toHaveBeenCalledTimes(1); // the standing alert is closed
+      // The row now holds yesterday's result with today's start mark. The next run does not trust it: `b` posts.
+      const row = stateWrites()[0];
+      expect(row).toMatchObject({ attempt: NOW.toISOString(), items: ['b'] });
+      setState(row);
+      expect(await sweep([fails('b')], after(1))).toMatchObject({ sent: true });
     });
 
     test('the feed write fails and the fallback email goes out: the state stays, so the next run writes the alert', async () => {
@@ -558,8 +578,9 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(keysPosted()).toEqual([RECORD_KEY]);
       expect(posts()[0].detail).not.toContain('FAIL a');
       expect(resolve).not.toHaveBeenCalled();
-      expect(mockTables.notifications.update).not.toHaveBeenCalled(); // nothing superseded
-      expect(savedState()).toMatchObject({ items: ['a'], alertedAt: new Date(NOW.getTime() - DAY).toISOString() });
+      expect(mockTables.notifications.where).toHaveBeenCalledWith('id', '<>', 'alert-1'); // the standing alert is kept
+      expect(mockTables.notifications.whereRaw).not.toHaveBeenCalledWith("metadata->>'opsKey' = ?", [RECORD_KEY]);
+      expect(savedState()).toMatchObject({ items: ['a'], alertedAt: new Date(NOW.getTime() - DAY).toISOString(), alertId: 'alert-1' });
       // The day after, with the closeout check clean: the standing alert still stands and nothing posts.
       carry();
       expect(await sweep([fails('a', 5), closeout([])], after(1))).toMatchObject({ skipped: 'no_new_item' });
