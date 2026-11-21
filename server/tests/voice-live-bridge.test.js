@@ -124,25 +124,89 @@ describe('session setup and caller audio', () => {
     expect(msg.session.delegation).toEqual({ type: 'client' });
   });
 
-  test('caller audio before session.started is held and forwarded in order after the greeting; later audio goes straight through', async () => {
+  // One 20 ms caller frame of one mu-law byte: 0x00, 0x01 and 0x02 are all loud.
+  const frameOf = (byte) => Buffer.alloc(160, byte).toString('base64');
+
+  test('caller audio with voice in it before session.started is held and forwarded in order once the session is up; later audio goes straight through', async () => {
     const t = setup();
-    t.twilioMedia('EARLY'); // before even the start frame
+    t.twilioMedia(frameOf(0x00)); // before even the start frame
     await t.twilioStart();
     t.openai.emit('open');
-    t.twilioMedia('BEFORE');
+    t.twilioMedia(frameOf(0x01));
     expect(t.openai.types()).toEqual(['session.start']); // nothing sent before the session is up
     t.openai.receive({ type: 'session.started', session: { id: 's1' } });
     await flush();
-    t.twilioMedia('AFTER');
-    expect(t.openai.types()).toEqual(['session.start', 'session.commentary.append', 'session.input_audio.append', 'session.input_audio.append', 'session.input_audio.append']);
-    expect(t.openai.sent.filter((m) => m.audio).map((m) => m.audio)).toEqual(['EARLY', 'BEFORE', 'AFTER']);
+    t.twilioMedia(frameOf(0x02));
+    expect(t.openai.types()).toEqual(['session.start', 'session.input_audio.append', 'session.input_audio.append', 'session.input_audio.append']);
+    expect(t.openai.sent.filter((m) => m.audio).map((m) => m.audio)).toEqual([frameOf(0x00), frameOf(0x01), frameOf(0x02)]);
+  });
+
+  test('held opening audio that is silent is not sent; from session.started on every frame is, silence included', async () => {
+    const t = setup();
+    await t.twilioStart();
+    t.openai.emit('open');
+    for (let i = 0; i < 80; i++) t.twilioMedia(silence(160)); // 1.6 s of line silence while OpenAI starts
+    t.openai.receive({ type: 'session.started', session: { id: 's1' } });
+    await flush();
+    expect(t.openai.types()).toEqual(['session.start']);
+    t.twilioMedia(silence(160));
+    expect(t.openai.sent.filter((m) => m.audio).map((m) => m.audio)).toEqual([silence(160)]);
+  });
+
+  test('held opening audio is sent from 100 ms before the caller\'s first sound', async () => {
+    const t = setup();
+    await t.twilioStart();
+    t.openai.emit('open');
+    for (let i = 0; i < 50; i++) t.twilioMedia(silence(160));
+    t.twilioMedia(frameOf(0x00)); // the caller says something
+    for (let i = 0; i < 10; i++) t.twilioMedia(silence(160));
+    t.openai.receive({ type: 'session.started', session: { id: 's1' } });
+    await flush();
+    const sent = t.openai.sent.filter((m) => m.audio).map((m) => m.audio);
+    expect(sent).toHaveLength(16); // 5 frames of lead, the frame with sound, the 10 after it
+    expect(sent[5]).toBe(frameOf(0x00));
+  });
+
+  test('quiet speech in the held opening audio is sent', async () => {
+    const t = setup();
+    await t.twilioStart();
+    t.openai.emit('open');
+    for (let i = 0; i < 20; i++) t.twilioMedia(silence(160));
+    for (let i = 0; i < 10; i++) t.twilioMedia(frameOf(0xee)); // a soft "hello": every sample 148 on the 16-bit scale
+    for (let i = 0; i < 5; i++) t.twilioMedia(silence(160));
+    t.openai.receive({ type: 'session.started', session: { id: 's1' } });
+    await flush();
+    const sent = t.openai.sent.filter((m) => m.audio).map((m) => m.audio);
+    expect(sent).toHaveLength(20); // 5 frames of lead, the 10 quiet frames, the 5 after them
+    expect(sent[5]).toBe(frameOf(0xee));
+    expect(sent[14]).toBe(frameOf(0xee));
+  });
+
+  test('held line noise under the sound level (RMS 100) is dropped like silence; at that level the held audio is sent', async () => {
+    const hold = async (payload) => {
+      const t = setup();
+      await t.twilioStart();
+      t.openai.emit('open');
+      for (let i = 0; i < 80; i++) t.twilioMedia(payload);
+      t.openai.receive({ type: 'session.started', session: { id: 's1' } });
+      await flush();
+      return t.openai.sent.filter((m) => m.audio).length;
+    };
+    expect(await hold(frameOf(0xfa))).toBe(0); // every sample 40
+    expect(await hold(frameOf(0xf3))).toBe(0); // every sample 96
+    expect(await hold(frameOf(0xf2))).toBe(80); // every sample 104
+    const click = Buffer.alloc(160, 0xff);
+    click[80] = 0x9f; // one sample of 8316 in a silent frame: an RMS of 657, sound
+    expect(await hold(click.toString('base64'))).toBe(80);
+    click[80] = 0xcf; // one sample of 924: an RMS of 73, no sound
+    expect(await hold(click.toString('base64'))).toBe(0);
   });
 
   test('the held opening audio keeps only the latest 150 frames (3 s)', async () => {
     const t = setup();
     await t.twilioStart();
     t.openai.emit('open');
-    for (let i = 0; i < 160; i++) t.twilioMedia(`F${i}`);
+    for (let i = 0; i < 160; i++) t.twilioMedia(`F${i}`); // every one decodes to loud bytes: the caller is speaking
     t.openai.receive({ type: 'session.started', session: { id: 's1' } });
     await flush();
     const held = t.openai.sent.filter((m) => m.audio).map((m) => m.audio);
@@ -151,10 +215,23 @@ describe('session setup and caller audio', () => {
     expect(held[149]).toBe('F159');
   });
 
-  test('session.started sends the greeting as commentary', async () => {
+  test('session.start carries the greeting as a developer message; nothing more is sent at session.started', async () => {
     const t = setup();
     await t.ready();
-    expect(t.openai.sent).toContainEqual({ type: 'session.commentary.append', delegation_id: null, content: 'Waves, this is Sandy.' });
+    expect(t.openai.sent[0].session.input).toEqual([{
+      type: 'message',
+      role: 'developer',
+      content: [{ type: 'input_text', text: 'Greet the caller now in English. Say exactly: "Waves, this is Sandy." Then pause and listen.' }],
+    }]);
+    expect(t.openai.types()).toEqual(['session.start']); // no commentary greeting
+  });
+
+  test('a greeting with quotation marks cannot close the quoted sentence; no greeting, no developer message', () => {
+    const { buildSessionStart } = bridgeMod;
+    const quoted = buildSessionStart({ instructions: 'I', voice: 'marin', greeting: 'Hi. Say "pest"' });
+    expect(quoted.session.input[0].content[0].text).toBe('Greet the caller now in English. Say exactly: "Hi. Say \'pest\'" Then pause and listen.');
+    expect('input' in buildSessionStart({ instructions: 'I', voice: 'marin', greeting: '  ' }).session).toBe(false);
+    expect('input' in buildSessionStart({ instructions: 'I', voice: 'marin' }).session).toBe(false);
   });
 
   test('a start frame for another CallSid closes the call and never opens OpenAI', async () => {
@@ -1153,7 +1230,7 @@ describe('reservation admission', () => {
     expect(summaryOf(t)).toMatchObject({ close_reason: 'start_timeout', openai_contacted: false });
   });
 
-  test('once shutdown begins (session.close sent), caller audio and a late greeting are no longer sent', async () => {
+  test('once shutdown begins (session.close sent), nothing more is sent to OpenAI: not caller audio, not on a late session.started', async () => {
     const t = setup({ closeReply: false, deps: { closeWaitMs: 50 } });
     await t.ready();
     const done = t.bridge.finalize('cap');
@@ -1164,6 +1241,17 @@ describe('reservation admission', () => {
     const after = t.openai.sent.slice(closeAt + 1).map((m) => m.type);
     expect(after).not.toContain('session.input_audio.append');
     expect(after).not.toContain('session.commentary.append');
+    await done;
+  });
+
+  test('shutdown that begins before session.started: a late session.started does not send the held opening audio', async () => {
+    const t = setup({ closeReply: false, deps: { closeWaitMs: 50 } });
+    await t.twilioStart();
+    t.openai.emit('open');
+    for (let i = 0; i < 10; i++) t.twilioMedia(); // the caller is speaking while OpenAI starts
+    const done = t.bridge.finalize('cap');
+    t.openai.receive({ type: 'session.started', session: { id: 's1' } });
+    expect(t.openai.types()).not.toContain('session.input_audio.append');
     await done;
   });
 

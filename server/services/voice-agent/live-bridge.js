@@ -42,9 +42,12 @@ const REPLY_SILENCE_MIN_MS = 600; // model audio silent this long before voice b
 const VOICED_SAMPLE_MIN = 300; // a decoded sample at or above this magnitude (16-bit scale) is voice
 const TAIL_DROP_MAX_MS = 1500; // after a barge-in, drop the cut-off reply's tail at most this long
 // Caller audio that arrives before session.started (admission and the OpenAI
-// start) is held in memory, never stored, and forwarded in order once the
-// session is up: the latest 3 s at most (Twilio sends 20 ms frames).
+// start) is held in memory, never stored: the latest 3 s at most (Twilio sends
+// 20 ms frames). It is forwarded in order once the session is up when it
+// holds sound (onSessionStarted).
 const OPENING_AUDIO_MAX_FRAMES = 150;
+const OPENING_SOUND_RMS_MIN = 100; // a held frame at or above this RMS (16-bit scale) may hold speech, quiet speech too; the noise of a quiet line is under it
+const OPENING_LEAD_FRAMES = 5; // held frames sent ahead of the first one that holds sound (100 ms)
 const MULAW_BYTES_PER_MS = 8; // 8000 samples a second, one byte each
 // G.711 mu-law to a 16-bit linear sample.
 function mulawToLinear(byte) {
@@ -57,6 +60,8 @@ function mulawToLinear(byte) {
 // Whether each mu-law byte is voice (digital silence is 0xFF and 0x7F).
 const VOICED_BYTE = Uint8Array.from({ length: 256 }, (_, b) => (Math.abs(mulawToLinear(b)) >= VOICED_SAMPLE_MIN ? 1 : 0));
 const REPLY_SILENCE_MIN_SAMPLES = REPLY_SILENCE_MIN_MS * MULAW_BYTES_PER_MS;
+// The squared linear value of each mu-law byte, for a frame's RMS.
+const MULAW_SQUARE = Float64Array.from({ length: 256 }, (_, b) => mulawToLinear(b) ** 2);
 
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
 
@@ -102,13 +107,37 @@ function buildLiveInstructions() {
   return text;
 }
 
-function buildSessionStart({ instructions, voice }) {
+// The greeting is a developer message in session.start, as OpenAI's Live guide
+// says ("include greeting instructions in a developer message in
+// session.input"). The bridge used to send it as session.commentary.append
+// after session.started: on the live API 2026-11-20 that was acknowledged and
+// never spoken (9 s of silence, until the caller spoke). With this message the
+// model greeted 2.0 s after session.started (2026-11-21, Sandy's full prompt).
+// OpenAI does not promise the model speaks first.
+// Whether a caller frame holds sound: its RMS, so one stray sample does not
+// count. Only the level is read; no audio is kept.
+function frameHoldsSound(payload) {
+  const audio = Buffer.from(payload, 'base64');
+  let sum = 0;
+  for (let i = 0; i < audio.length; i++) sum += MULAW_SQUARE[audio[i]];
+  return audio.length > 0 && sum >= audio.length * OPENING_SOUND_RMS_MIN ** 2;
+}
+
+function buildSessionStart({ instructions, voice, greeting }) {
   const { OPENAI_VOICE_LIVE } = require('../../config/models');
+  const say = String(greeting || '').replace(/"/g, "'").trim();
   return {
     type: 'session.start',
     session: {
       model: OPENAI_VOICE_LIVE,
       instructions,
+      ...(say ? {
+        input: [{
+          type: 'message',
+          role: 'developer',
+          content: [{ type: 'input_text', text: `Greet the caller now in English. Say exactly: "${say}" Then pause and listen.` }],
+        }],
+      } : {}),
       audio: {
         format: { type: 'audio/pcmu', rate: 8000 },
         output: { voice: LIVE_VOICES.includes(voice) ? voice : DEFAULT_VOICE },
@@ -306,7 +335,7 @@ class LiveBridge {
     // the caller's opening audio is held (OPENING_AUDIO_MAX_FRAMES).
     if (this._finalizing || typeof media.payload !== 'string' || (media.track && media.track !== 'inbound')) return;
     if (!this.ready) {
-      this.openingAudio.push(media.payload);
+      this.openingAudio.push({ payload: media.payload, sound: frameHoldsSound(media.payload) });
       if (this.openingAudio.length > OPENING_AUDIO_MAX_FRAMES) this.openingAudio.shift();
       return;
     }
@@ -323,7 +352,7 @@ class LiveBridge {
     }
     let startMsg;
     try {
-      startMsg = buildSessionStart({ instructions: this.deps.buildInstructions(), voice: this.voice });
+      startMsg = buildSessionStart({ instructions: this.deps.buildInstructions(), voice: this.voice, greeting: this.deps.greeting() });
     } catch (err) {
       logger.error(`[voice-live] session setup failed callSid=${this.callSid}: ${err.message}`);
       this.noteError('setup_failed');
@@ -375,11 +404,20 @@ class LiveBridge {
     this.ready = true;
     this.sessionStartWall = this.deps.now();
     clearTimeout(this.startTimer);
-    if (this._finalizing) return; // shutting down: no greeting
-    this.toOpenAi({ type: 'session.commentary.append', delegation_id: null, content: this.deps.greeting() });
+    if (this._finalizing) return; // shutting down: nothing more is sent
+    // The held opening audio goes to OpenAI only when it holds sound (the
+    // caller spoke, quietly too), and then from just before the first sound.
+    // Held silence, the noise of a quiet line included, is dropped: it holds
+    // nothing to answer. The one live session that got 1.6 s of it in a burst
+    // (2026-11-20) was the one where the greeting was never spoken; the
+    // session without it (11-21) greeted. From here on the caller's audio runs
+    // in real time, silence included, as OpenAI's guide asks ("Wait for
+    // session.started before sending audio", "keep input audio running").
     const opening = this.openingAudio;
     this.openingAudio = [];
-    for (const audio of opening) this.toOpenAi({ type: 'session.input_audio.append', audio });
+    const first = opening.findIndex((frame) => frame.sound);
+    if (first < 0) return;
+    for (const frame of opening.slice(Math.max(0, first - OPENING_LEAD_FRAMES))) this.toOpenAi({ type: 'session.input_audio.append', audio: frame.payload });
   }
 
   // One pass over a model audio chunk, sample by sample, so the result does
@@ -457,7 +495,7 @@ class LiveBridge {
   }
 
   // The pending measure is consumed only here, by a reply start. The first
-  // reply start is the greeting (sent at session.started): it is never timed,
+  // reply start is the greeting (asked for in session.start): it is never timed,
   // even when the caller spoke before it.
   onReplyStart(t, ambiguous, voiceAt) {
     const greeting = this.replyStartWall === null;
