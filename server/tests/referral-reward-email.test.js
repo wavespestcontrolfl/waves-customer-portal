@@ -67,7 +67,7 @@ beforeEach(() => {
   mockState.immediate = [];
   mockState.messages = {};
   mockState.promoters = { 'pro-1': { id: 'pro-1', first_name: 'Lea', customer_email: 'lea@example.com' } };
-  mockState.customers = { 'cust-lea': { active: true } };
+  mockState.customers = { 'cust-lea': { active: true, account_credits: '25.00', auto_apply_account_credit: false } };
   mockState.ledgerCalls = [];
   mockState.settings = undefined;
 });
@@ -109,6 +109,25 @@ describe('sendDueReferralRewardEmails', () => {
     expect(sent.payload.cta_label).toBe('View my account credit');
   });
 
+  test('a member who already has the switch on, or whose credit is used up, gets the credit sentence alone', async () => {
+    const line = async (customer) => {
+      mockSendTemplate.mockClear();
+      mockState.credits = [credit()];
+      mockState.customers = { 'cust-lea': customer };
+      await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
+      return mockSendTemplate.mock.calls[0][0].payload.reward_line;
+    };
+    const alone = 'Your $25 referral reward has been added to your Waves account as a credit.';
+    // Switch already on: nothing to turn on.
+    expect(await line({ active: true, account_credits: '25.00', auto_apply_account_credit: true })).toBe(alone);
+    // Balance 0 with the switch off (the credit was used before the email): the billing tab shows no switch.
+    expect(await line({ active: true, account_credits: '0.00', auto_apply_account_credit: false })).toBe(alone);
+    expect(await line({ active: true, account_credits: null, auto_apply_account_credit: false })).toBe(alone);
+    // Balance above 0 and the switch off: the instruction goes.
+    expect(await line({ active: true, account_credits: '12.50', auto_apply_account_credit: false }))
+      .toBe(`${alone} To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.`);
+  });
+
   test('a member whose account is inactive or unknown gets the credit sentence alone: the billing tab hides the switch there', async () => {
     const line = async () => {
       mockSendTemplate.mockClear();
@@ -116,7 +135,7 @@ describe('sendDueReferralRewardEmails', () => {
       await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
       return mockSendTemplate.mock.calls[0][0].payload.reward_line;
     };
-    mockState.customers = { 'cust-lea': { active: false } };
+    mockState.customers = { 'cust-lea': { active: false, account_credits: '25.00', auto_apply_account_credit: false } };
     expect(await line()).toBe('Your $25 referral reward has been added to your Waves account as a credit.');
     mockState.customers = {};
     expect(await line()).toBe('Your $25 referral reward has been added to your Waves account as a credit.');

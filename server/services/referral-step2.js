@@ -83,8 +83,9 @@ const friendShareClause = (refereeCents, code) => `they'll give you a ${dollars(
 const memberInviteFriendClause = (refereeCents) => `they get a ${dollars(refereeCents)} credit after their first plan service`;
 
 // The member's credit email, account-credit destination (the same line with the gate on or off). Account credit is used
-// on an invoice only after the customer turns the switch on, so the line says how. The billing tab shows that switch on
-// an active account only: any other reader gets the credit sentence alone, never an instruction they cannot follow.
+// on an invoice only after the customer turns the switch on, so the line says how. The caller passes true only for a
+// member who can see that switch and has it off (active account, credit balance above 0, switch off): any other reader
+// gets the credit sentence alone, never an instruction they cannot follow or do not need.
 const memberCreditEmailLine = (rewardDollars, { canTurnOnAutomaticCredit = false } = {}) => `Your ${formatDollars(rewardDollars)} referral reward has been added to your Waves account as a credit.${
   canTurnOnAutomaticCredit ? ' To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.' : ''}`;
 
