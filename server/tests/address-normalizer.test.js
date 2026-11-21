@@ -848,10 +848,11 @@ describe('streetLineNamesStreet (codex pre-push r31 P1 on #8132)', () => {
 
   test('a house number and a street name one, with or without a unit in either position; a road number in any spelling counts', () => {
     for (const line of ['1 Main St', '1 Main St Apt 4', '1 Main St Apt#4', '1 Main St Apt-4', '1 Main St Apt # 4', 'Unit 4, 1 Main St',
-      'Apt 204 at 1 Main St', '#204 900 Bayview Ter', 'Bldg 9, Apt 204, 123 Main St', '12345 FL-70', '12345 FL 70',
+      'Apt 204 at 1 Main St', '#204 900 Bayview Ter', 'Bldg 9, Apt 204, 123 Main St', 'AptA, 123 Main St', '12345 FL-70', '12345 FL 70',
       '12345 FL70', '12345 FL 9336', '12345 Florida 70', '12345 Highway 70', '4500 US-41', '4500 US 41', '12345 SR64', '123 1st',
       '123 5th St', '123 5th St Fl 2', '123-104th St E', '100B Beach Rd', '100 1/2 Beach Rd',
-      '100 Space Coast Pkwy', '123 Unity Way', '123 Sarasota Blvd', '123 Main St, Sarasota, FL 34236']) {
+      '100 Space Coast Pkwy', '123 Unity Way', '123 Sarasota Blvd', '123 Main St, Sarasota, FL 34236',
+      '123 Main St Sarasota Florida 34236', '123 Sarasota Blvd Sarasota FL']) {
       expect([line, namesStreet(line)]).toEqual([line, true]);
     }
   });
@@ -871,6 +872,7 @@ describe('streetLineNamesStreet (codex pre-push r31 P1 on #8132)', () => {
     }
     // A word that only starts like a unit designator is not a unit: nothing is cut, so no house number comes first.
     expect(namesStreet('Floral 12 Main St')).toBe(false);
+    expect(namesStreet('Florida 70 East')).toBe(false);
   });
 
   test('after a house number, a floor or the state and ZIP is not a street: a road number has at most four digits', () => {
@@ -879,8 +881,9 @@ describe('streetLineNamesStreet (codex pre-push r31 P1 on #8132)', () => {
     }
   });
 
-  test('a city is not a street: the row\'s own city after the number, or a city with no house number', () => {
-    for (const line of ['Sarasota', '123 Sarasota', 'Apt 4, Sarasota, FL 34236', 'Apt 4 Sarasota FL 34236',
+  test('a city is not a street: the row\'s own city after the number, with or without the state and ZIP, or a city with no house number', () => {
+    for (const line of ['Sarasota', '123 Sarasota', '123 Sarasota FL', '123 Sarasota Florida', '123 Sarasota Florida 34236',
+      '123 Sarasota FL 34236-1234', '123 Sarasota 34236', 'Apt 4, Sarasota, FL 34236', 'Apt 4 Sarasota FL 34236',
       'Apt 4, Bradenton, FL 34203', 'Apt 4, Bradenton FL 34203', 'Bradenton, FL', 'Bradenton']) {
       expect([line, namesStreet(line)]).toEqual([line, false]);
     }

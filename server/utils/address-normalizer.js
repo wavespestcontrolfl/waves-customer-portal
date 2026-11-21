@@ -527,10 +527,13 @@ function splitUnitFirstLine(value) {
 // word is the floor ("123 5th Floor"). FL and a number right after the
 // house number is the state road ("12345 FL 70", "12345 FL70"), never a
 // floor. A road number has at most four digits: five is the ZIP ("123 FL
-// 34236"). The row's own city is not a street ("123 Sarasota"). A leading
-// unit is cut only when the line starts with a designator or a hash: the
-// unit-first pattern also takes a word that starts like one ("Florida 70"
-// as "Fl" + "orida").
+// 34236"). The end of the line is not the street: a ZIP, the state and the
+// row's own city are cut off the end first, in that order ("123 Sarasota",
+// "123 Sarasota Florida 34236"). A leading unit is cut when the line starts
+// with a whole-word designator or a hash, or when its first comma segment
+// is all unit ("AptA, 123 Main St"): the unit-first pattern also takes a
+// word that only starts like a designator ("Florida 70 East" as "Fl" +
+// "orida", with house number 70).
 // What the rule cannot tell: any other word after a house number counts as
 // the street ("123 Rear", "123 Bradenton" on a Sarasota row). A street-type
 // allow-list would close that, and it refused 40 real homes of 1,528 on
@@ -545,24 +548,28 @@ const ORDINAL_RE = /^\d+(?:st|nd|rd|th)$/;
 const FLOOR_WORD_RE = /^(?:fl|floor)$/;
 const ROAD_NUMBER_RE = /^(?:a1a|(?:sr|cr|us|i|hwy)-?\d+[a-z]?|fl-\d{1,4}[a-z]?|\d+(?:st|nd|rd|th))$/;
 const STATE_ROAD_AFTER_HOUSE_RE = /^\d\S*\s+fl[- ]?\d{1,4}[a-z]?(?:\s|$)/;
+const ZIP_TAIL_RE = /\s+\d{5}(?:-\d{4})?$/;
+// Not after an ordinal: "123 5th Fl" ends in a floor, not the state.
+const STATE_TAIL_RE = /(?<!\d(?:st|nd|rd|th))\s+(?:fl|florida)$/;
+const lowerPlain = (value) => cleanString(String(value || '').toLowerCase().replace(/[.']/g, ''));
 function streetLineNamesStreet({ address_line1, city } = {}) {
   const line = cleanString(address_line1);
-  const rest = LEAD_UNIT_RE.test(line) ? splitUnitFirstLine(line)?.rest : null;
+  const cutsUnit = LEAD_UNIT_RE.test(line) || UNIT_FIRST_SEGMENT_RE.test(line.split(',')[0].trim());
+  const rest = cutsUnit ? splitUnitFirstLine(line)?.rest : null;
   // A hash joins its value ("Apt # AB" reads as "Apt #AB").
-  const segment = (rest || line).toLowerCase().replace(/[.']/g, '').replace(/#\s+/g, '#').split(',')[0].trim();
+  let segment = lowerPlain((rest || line).split(',')[0]).replace(/#\s+/g, '#').replace(ZIP_TAIL_RE, '').replace(STATE_TAIL_RE, '');
+  const rowCity = lowerPlain(city);
+  if (rowCity && segment.endsWith(` ${rowCity}`)) segment = segment.slice(0, -rowCity.length - 1);
   if (!HOUSE_NUMBER_FIRST_RE.test(segment)) return false;
   if (STATE_ROAD_AFTER_HOUSE_RE.test(segment)) return true;
-  const words = segment.split(' ').filter(Boolean).slice(1);
-  const named = [];
+  const words = segment.split(' ').slice(1);
   for (let i = 0; i < words.length; i += 1) {
     if (BARE_DESIGNATOR_RE.test(words[i])) i += 1;
     else if (ORDINAL_RE.test(words[i]) && FLOOR_WORD_RE.test(words[i + 1])) i += 1;
     else if (ROAD_NUMBER_RE.test(words[i])) return true;
-    else if (!NOT_A_NAME_RE.test(words[i])) named.push(words[i].replace(/[^a-z]/g, ''));
+    else if (!NOT_A_NAME_RE.test(words[i]) && words[i].replace(/[^a-z]/g, '').length >= 2) return true;
   }
-  const rowCity = cleanString(city).toLowerCase().replace(/[^a-z]/g, '');
-  if (rowCity && named.join('') === rowCity) return false;
-  return named.some((word) => word.length >= 2);
+  return false;
 }
 
 // The unit a line carries in EITHER supported position — trailing/inline
