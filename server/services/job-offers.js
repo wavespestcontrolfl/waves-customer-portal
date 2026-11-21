@@ -7,7 +7,8 @@
  *     unit-tested on their own;
  *   - the Technician Terms lookup (ISSUED versions only, never a draft);
  *   - admin operations (panel, save draft, send, withdraw, revise, signed copy);
- *   - public operations (view, text consent, accept, date request, decline).
+ *   - public operations (view, text consent, accept, date request, decline);
+ *   - the scheduled 7-day close (closeExpiredOffers).
  *
  * Every state change is ONE transaction that locks the application row, then the offer row (always in that order),
  * re-reads the status under the lock and refuses a replay with the current state. Comms and bells run AFTER the
@@ -1256,6 +1257,49 @@ async function declineOffer(token, { reason, version }) {
   return result;
 }
 
+// ------------------------------------------------------------ 7-day close
+
+const CLOSE_BATCH = 50;
+
+// Stores the expiry of one sent offer and returns the row, or null when there is nothing to close: the applicant
+// answered, the owner withdrew or replaced the offer, or the application left Offer while this waited for the locks.
+async function closeIfExpired(applicationId, offerId) {
+  return db.transaction(async (trx) => {
+    const application = await trx('job_applications').where({ id: applicationId }).forUpdate().first('status');
+    const offer = await trx('job_offers').where({ id: offerId }).forUpdate().first();
+    // The clock is read after both locks, as for the applicant's own writes (lockByToken).
+    if (!application || application.status !== 'offer' || !offer || !expiredByClock(offer, new Date())) return null;
+    await trx('job_offers').where({ id: offerId }).update({ status: 'expired', updated_at: new Date() });
+    return offer;
+  });
+}
+
+/**
+ * The 7-day close. Each sent offer past its expiry, on an application still at Offer, is stored as 'expired' and rings
+ * one bell for the owner. Both pages already read such a row as expired by the clock (expiredByClock); this stores it,
+ * so the row stops being an offer out. A date request does not expire: the owner answers it. The sweep is a catch-up
+ * (every pass closes all that is due, so a missed pass loses nothing) and sends the applicant nothing.
+ */
+async function closeExpiredOffers() {
+  const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
+    .where('o.status', 'sent').where('a.status', 'offer').where('o.expires_at', '<', new Date())
+    .orderBy('o.expires_at').limit(CLOSE_BATCH).select('o.id', 'o.application_id');
+  const result = { closed: 0, failed: 0 };
+  for (const row of due) {
+    try {
+      const offer = await closeIfExpired(row.application_id, row.id);
+      if (offer) {
+        result.closed += 1;
+        await bell('expired', offer, fmtDay(instantToEtDay(offer.expires_at)));
+      }
+    } catch (err) {
+      result.failed += 1;
+      logger.error(`[job-offers] close failed (offer ${row.id}): ${errTag(err)}`);
+    }
+  }
+  return result;
+}
+
 // ------------------------------------------------------------------ bells
 
 const BELLS = {
@@ -1277,6 +1321,11 @@ const BELLS = {
     ],
     why: (extra) => `Asked to start ${extra}; open the application to make an updated offer or withdraw.`,
     doneWhen: 'offer_answered',
+  },
+  expired: {
+    actions: [(n) => `${n}'s job offer closed unsigned`, (n) => `${n}'s offer closed unsigned`],
+    why: (extra) => `It closed ${extra} with no answer; open the application to make a new offer or close it.`,
+    doneWhen: 'offer_reviewed',
   },
 };
 
@@ -1326,4 +1375,6 @@ module.exports = {
   loadIssuedTerms, draftHashOf, heldOffersOf, stageMoveClosesOffers, liveOffersOf, offerStampOf, liveOfferStake, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
   // public
   publicView, setTextConsent, acceptOffer, requestDate, declineOffer,
+  // scheduled
+  closeExpiredOffers,
 };

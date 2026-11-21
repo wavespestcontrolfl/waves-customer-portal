@@ -9348,7 +9348,7 @@ hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{n
 textConsent, version, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
 snapshot frozen at Send (`job_offers.snapshot`), never from live records, so the Terms the applicant reads are the
 issued version the owner sent; for `superseded`, `withdrawn` and `expired` it returns only `{state, message,
-contactPhone}` (no terms). A sent offer past `expires_at` reads `expired` before any sweep, and an offer whose
+contactPhone}` (no terms). A sent offer past `expires_at` reads `expired` by the clock; the 15-minute close sweep (`closeExpiredOffers`) then stores that state and the answer stays the same. An offer whose
 application the owner moved to hired/rejected/withdrawn reads `withdrawn` (that stage change also marks the offer row withdrawn in the same transaction, so reopening the application cannot revive the link). The first GET stamps `opened_at`, every
 GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean, version}` -> `{textConsent, version}`, where
 `version` is the offer row's `updated_at` from the read the choice was made on: a choice already stored answers 200 with

@@ -868,6 +868,112 @@ jest.setTimeout(120000);
       expect(panel2.history.map((o) => o.status)).toEqual(['expired']);
     });
 
+    describe('the 7-day close', () => {
+      const lapse = (id, msAgo = 60000) => root('job_offers').where({ id }).update({ expires_at: new Date(Date.now() - msAgo) });
+      const statusOf = async (id) => (await root('job_offers').where({ id }).first('status')).status;
+      const tokenOf = async (id) => (await root('job_offers').where({ id }).first('token')).token;
+      // Earlier cases leave lapsed offers in the shared transaction: close them first, so each count is this case's own.
+      beforeEach(async () => {
+        await JobOffers.closeExpiredOffers();
+        mockRaise.mockClear();
+      });
+      // Runs `work` with the service's next transaction opened by `first`; the ones after it are the real ones.
+      async function withNextTransaction(first, work) {
+        const real = mockDb;
+        let used = false;
+        const stand = (...args) => real(...args);
+        stand.raw = (...args) => real.raw(...args);
+        stand.transaction = (...args) => {
+          if (used) return real.transaction(...args);
+          used = true;
+          return first(...args);
+        };
+        mockDb = stand;
+        try { return await work(); } finally { mockDb = real; }
+      }
+
+      test('a sent offer past its expiry is stored as expired and rings one bell; a second pass does nothing', async () => {
+        const app = await newApplication();
+        const sent = (await sendNew(app)).offer;
+        await lapse(sent.id);
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 1, failed: 0 });
+        expect(await statusOf(sent.id)).toBe('expired');
+        expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
+        expect(mockRaise).toHaveBeenCalledTimes(1);
+        const [category, spec, opts] = mockRaise.mock.calls[0];
+        expect(category).toBe('job_application');
+        expect(spec).toMatchObject({
+          action: "Jordan Rivera's job offer closed unsigned", severity: 'needs-you', who: 'person',
+          link: `/admin/recruiting?application=${app.id}`,
+        });
+        expect(spec.why).toMatch(/^It closed \w{3}, \w{3} \d{1,2} with no answer; open the application to make a new offer or close it\.$/);
+        expect(opts).toMatchObject({ bell: true, dedupeKey: `job-offer-expired:${sent.id}` });
+        // The alert rules (one sentence, the length limits) take the bell as written: a refused bell is never raised.
+        expect(jest.requireActual('../services/admin-alert-compose').composeAdminAlert(spec).headline)
+          .toBe("Leads — Jordan Rivera's job offer closed unsigned");
+
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 0, failed: 0 });
+        expect(mockRaise).toHaveBeenCalledTimes(1);
+        // Both pages read the stored state as they read the clock before it, and a new offer can go out.
+        expect((await JobOffers.publicView(await tokenOf(sent.id))).state).toBe('expired');
+        const panel = await JobOffers.adminPanel(app.id, actor());
+        expect(panel.current).toMatchObject({ id: sent.id, status: 'expired' });
+        expect(panel.current.timeline.map((item) => item.kind)).toContain('expired');
+        const next = await JobOffers.saveDraft(app.id, {}, actor());
+        expect((await sendAsPage(app.id, next.id, next.draftHash)).offer.status).toBe('sent');
+      });
+
+      test('it leaves an offer still open, a date request, and an offer whose application left Offer', async () => {
+        const open = (await sendNew(await newApplication())).offer;
+        const asked = (await sendNew(await newApplication())).offer;
+        const askedToken = await tokenOf(asked.id);
+        await JobOffers.requestDate(askedToken, {
+          requestedStartDate: addStaffWorkDays(JobOffers.suggestStartDate(), 7), version: await shownVersion(askedToken),
+        });
+        await lapse(asked.id);
+        const goneApp = await newApplication();
+        const gone = (await sendNew(goneApp)).offer;
+        await lapse(gone.id);
+        await root('job_applications').where({ id: goneApp.id }).update({ status: 'rejected' });
+        mockRaise.mockClear(); // the date request rang its own bell
+
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 0, failed: 0 });
+        expect(await statusOf(open.id)).toBe('sent');
+        expect(await statusOf(asked.id)).toBe('date_requested');
+        expect(await statusOf(gone.id)).toBe('sent');
+        expect(mockRaise).not.toHaveBeenCalled();
+      });
+
+      test('an offer the owner withdrew while the close waited is left withdrawn, with no bell', async () => {
+        const app = await newApplication();
+        const sent = (await sendNew(app)).offer;
+        await lapse(sent.id);
+        // The withdrawal lands after the pass listed the offer and before it took the locks.
+        const withdrawThenOpen = async (work) => {
+          await root('job_offers').where({ id: sent.id }).update({ status: 'withdrawn', withdrawn_at: new Date(), updated_at: new Date() });
+          return root.transaction(work);
+        };
+        expect(await withNextTransaction(withdrawThenOpen, () => JobOffers.closeExpiredOffers())).toEqual({ closed: 0, failed: 0 });
+        expect(await statusOf(sent.id)).toBe('withdrawn');
+        expect(mockRaise).not.toHaveBeenCalled();
+      });
+
+      test('an offer whose close fails is counted, the next one still closes, and a later pass closes the first', async () => {
+        const first = (await sendNew(await newApplication())).offer;
+        const second = (await sendNew(await newApplication())).offer;
+        await lapse(first.id, 120000); // the pass takes the oldest expiry first
+        await lapse(second.id);
+        const lost = async () => { throw new Error('connection lost'); };
+        expect(await withNextTransaction(lost, () => JobOffers.closeExpiredOffers())).toEqual({ closed: 1, failed: 1 });
+        expect(await statusOf(first.id)).toBe('sent');
+        expect(await statusOf(second.id)).toBe('expired');
+        expect(mockRaise).toHaveBeenCalledTimes(1);
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 1, failed: 0 });
+        expect(await statusOf(first.id)).toBe('expired');
+        expect(mockRaise).toHaveBeenCalledTimes(2);
+      });
+    });
+
     test('Discard (withdraw) is tied to the state the owner saw: a stale one writes nothing', async () => {
       const app = await newApplication();
       const draft = await JobOffers.saveDraft(app.id, {}, actor());
