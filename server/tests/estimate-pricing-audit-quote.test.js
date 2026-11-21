@@ -956,7 +956,9 @@ describe('coverage: every delivery path snapshots', () => {
     expect(src.slice(first - 1200, second + 400)).toMatch(/pricing audit snapshot failed \(send stands\)/);
   });
   test('click-mint delivery saves a cta_mint snapshot after commit, fail-soft', () => {
-    const src = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
+    // The report card's tap moved to the shared cross-sell-tap service
+    // (owner 2026-11-21: the receipt and tracker run the same tap).
+    const src = fs.readFileSync(path.join(__dirname, '../services/service-report/cross-sell-tap.js'), 'utf8');
     const idx = src.indexOf("'cta_reuse_backfill' : 'cta_mint'");
     expect(idx).toBeGreaterThan(0);
     expect(src.slice(idx - 1400, idx + 600)).toMatch(/pricing audit snapshot failed \(mint .* stands\)/);
