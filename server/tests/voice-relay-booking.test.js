@@ -560,9 +560,9 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     });
 
     test.each([
-      ['starts before the shift', '09:30', '18:00', 'is on shift 09:30 to 18:00'],
-      ['ends after the shift end', '08:00', '09:59', 'is on shift 08:00 to 09:59'],
-    ])('a visit that %s is not booked: nothing is written, and the agent is sent for fresh times', async (_case, start, end, reason) => {
+      ['starts before the shift', '09:30', '18:00'],
+      ['ends after the shift end', '08:00', '09:59'],
+    ])('a visit that %s is not booked: nothing is written, and the agent is sent for fresh times', async (_case, start, end) => {
       process.env.GATE_TECH_SHIFT_HOURS = 'true';
       techOnShift(start, end);
       const ctx = slotCtx();
@@ -573,8 +573,10 @@ describe('BOTH GATES ON — request_booking behavior', () => {
       expect(ctx.bookingRequested()).toBe(false);
       expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
       expect(trxBuilders.triage_items.insert).not.toHaveBeenCalled();
-      // The refusal is the shift rule's own, logged as a refusal and not as an error.
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(`${reason} on ${BOOK_DATE}, not for a job from 09:00 to 10:00,`));
+      // The refusal is the shift rule's own, logged as a refusal and not as an error: ids and a fixed
+      // reason, never the technician's name or hours.
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('technician t-1 outside_shift'));
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/Tech One|on shift/);
       expect(logger.error).not.toHaveBeenCalled();
       assertNoComms();
     });

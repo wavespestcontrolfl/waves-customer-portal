@@ -511,10 +511,17 @@ function clockOf(minutes) {
  * with the end after the start): such a job is left to the caller's other
  * checks, as before. A failed read of the hours throws, as it does for the
  * offers.
+ *
+ * On a transaction (gate on) the technician's row is held FOR SHARE before
+ * the hours are read, with or without set hours, so an hours edit waits for
+ * the caller's commit. assertAssignableTechnician holds that row already; a
+ * caller that checks a block without it (a plan's longer first visit) gets
+ * the same hold here.
  */
 async function shiftExcluding(conn, technicianId, date, hours) {
   const { startMin, endMin } = hours || {};
   if (!technicianId || !date || !Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return null;
+  if (conn.isTransaction && techShiftHoursLive()) await conn('technicians').where({ id: technicianId }).forShare().first('id');
   const shift = (await loadTechShifts(conn, { technicianIds: [technicianId] }))(technicianId, date);
   const day = shiftBounds(shift, startMin, endMin);
   return day.openMin > startMin || day.closeMin < endMin ? shift : null;

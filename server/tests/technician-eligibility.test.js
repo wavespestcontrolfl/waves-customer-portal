@@ -846,10 +846,20 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
         expect(unassigned.answer).toBeNull();
         expect(unassigned.conn).not.toHaveBeenCalled();
       }
+      // On a transaction the technician's row is held FOR SHARE before the hours are read, set hours or not.
+      for (const shiftRows of [[DAY_TECH], []]) {
+        const held = await at('tech-1', TOMORROW, job(8, 18), { shiftRows, transaction: true });
+        expect(held.answer).toBeNull();
+        expect(held.calls.technicians.slice(0, 3)).toEqual([['where', { id: 'tech-1' }], ['forShare'], ['whereNotNull', 'shift_start']]);
+      }
+      // Off a transaction there is nothing to hold.
+      expect((await at('tech-1', TOMORROW, job(8, 18))).calls.technicians).not.toContainEqual(['forShare']);
       delete process.env.GATE_TECH_SHIFT_HOURS;
-      const off = await at('tech-1', TOMORROW, job(17, 19));
-      expect(off.answer).toBeNull();
-      expect(off.conn).not.toHaveBeenCalled();
+      for (const transaction of [false, true]) {
+        const off = await at('tech-1', TOMORROW, job(17, 19), { transaction });
+        expect(off.answer).toBeNull();
+        expect(off.conn).not.toHaveBeenCalled();
+      }
     });
   });
 });

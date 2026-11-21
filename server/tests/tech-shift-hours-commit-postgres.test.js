@@ -7,6 +7,7 @@
  */
 const { createCapacityDbFixture, describeDb } = require('./helpers/scheduling-capacity-db');
 const { reserveSlot, commitReservation, extendReservation } = require('../services/slot-reservation');
+const { shiftExcluding } = require('../services/technician-eligibility');
 jest.setTimeout(30000);
 
 describeDb('technician shift hours at a commit (PostgreSQL)', () => {
@@ -100,6 +101,35 @@ describeDb('technician shift hours at a commit (PostgreSQL)', () => {
       delete process.env.GATE_TECH_SHIFT_HOURS;
       const booked = await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId: f.ids.customer });
       expect(booked).toMatchObject({ window_start: '11:00:00', reservation_expires_at: null });
+    });
+  });
+
+  describe('the rule on a transaction (shiftExcluding)', () => {
+    const block = { startMin: 600, endMin: 660 };
+    // A second connection changes the hours. It gives up after 300 ms when the row is held.
+    const editHours = () => f.db.transaction(async (other) => {
+      await other.raw("SET LOCAL lock_timeout = '300ms'");
+      await other('technicians').where({ id: f.ids.technician }).update({ shift_start: '08:15', shift_end: '11:45' });
+    });
+
+    test('it holds the technician row until its transaction ends: an hours edit waits, also for a technician with no set hours', async () => {
+      for (const hours of [['08:00', '12:00'], [null, null]]) {
+        await setShift(...hours);
+        await f.db.transaction(async (trx) => {
+          expect(await shiftExcluding(trx, f.ids.technician, f.date, block)).toBeNull();
+          await expect(editHours()).rejects.toMatchObject({ code: '55P03' });
+        });
+        await editHours();
+        expect(await f.db('technicians').where({ id: f.ids.technician }).first('shift_start', 'shift_end')).toEqual({ shift_start: '08:15:00', shift_end: '11:45:00' });
+      }
+    });
+
+    test('gate off: no row is held, and the hours can change beside the open transaction', async () => {
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      await f.db.transaction(async (trx) => {
+        expect(await shiftExcluding(trx, f.ids.technician, f.date, block)).toBeNull();
+        await editHours();
+      });
     });
   });
 

@@ -517,7 +517,7 @@ async function commitVoiceBooking({
     // re-check (the hours changed, or today's clock-in arrived). Nothing was written, and the time
     // is gone as a taken one is, so the agent looks for fresh times. Every other refusal stays an error.
     if (err && err.code === NOT_ASSIGNABLE && err.outsideShift) {
-      logger.warn(`[voice-relay-booking] ${dateStr} ${windowStart} refused at the commit for customer ${customerId}: ${err.message}`);
+      logger.warn(`[voice-relay-booking] ${dateStr} ${windowStart} refused at the commit for customer ${customerId}: technician ${err.technicianId} outside_shift`);
       return { status: 'slot_taken' };
     }
     logger.error(`[voice-relay-booking] commit failed for customer ${customerId} on ${dateStr}: ${err.message}`);
