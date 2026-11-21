@@ -45,26 +45,25 @@ function validateWorkDate(workDate) {
 // addStaffWorkDays and staffWeekStartForWorkDate are pure functions of a calendar date (and a whole number of days), and
 // each call costs several time zone conversions: about 1 ms. Payroll asks for the same few dates again and again while it
 // holds the payroll lock (a pay line that covers a year asks for every week of it, for every technician: measured
-// 2026-11-21, 2 s of CPU per pay run recompute for 10 technicians). So the last answers are kept. The date is validated on
-// every call, before anything is read or kept, and the oldest answer is dropped at the cap.
+// 2026-11-21, 2 s of CPU per pay run recompute for 10 technicians). So the answers are kept. The date is validated on
+// every call, before anything is read or kept. At the cap the answers start again from none: they cost little to rebuild.
+// Plain Maps in this module, read and filled in place: no callback and no row of any table is involved.
 const KEPT_ANSWERS_MAX = 5000;
-const ADDED_DAYS = new Map();
-const WEEK_STARTS = new Map();
-
-function kept(answers, key, compute) {
-  const answer = answers.get(key);
-  if (answer !== undefined) return answer;
-  const fresh = compute();
-  if (answers.size >= KEPT_ANSWERS_MAX) answers.delete(answers.keys().next().value);
-  answers.set(key, fresh);
-  return fresh;
-}
+let addedDays = new Map();
+let weekStarts = new Map();
 
 function addStaffWorkDays(workDate, days) {
   const validDate = validateWorkDate(workDate);
-  const compute = () => etDateString(addETDays(parseETDateTime(`${validDate}T12:00`), days));
   // only a whole number of days has one answer worth keeping; anything else is worked out as before
-  return Number.isInteger(days) ? kept(ADDED_DAYS, `${validDate}|${days}`, compute) : compute();
+  if (!Number.isInteger(days)) return etDateString(addETDays(parseETDateTime(`${validDate}T12:00`), days));
+  const key = `${validDate}|${days}`;
+  let answer = addedDays.get(key);
+  if (answer === undefined) {
+    answer = etDateString(addETDays(parseETDateTime(`${validDate}T12:00`), days));
+    if (addedDays.size >= KEPT_ANSWERS_MAX) addedDays = new Map();
+    addedDays.set(key, answer);
+  }
+  return answer;
 }
 
 function staffWeekRange(weekStart) {
@@ -74,7 +73,13 @@ function staffWeekRange(weekStart) {
 
 function staffWeekStartForWorkDate(workDate) {
   const validDate = validateWorkDate(workDate);
-  return kept(WEEK_STARTS, validDate, () => etWeekStart(parseETDateTime(`${validDate}T12:00`)));
+  let answer = weekStarts.get(validDate);
+  if (answer === undefined) {
+    answer = etWeekStart(parseETDateTime(`${validDate}T12:00`));
+    if (weekStarts.size >= KEPT_ANSWERS_MAX) weekStarts = new Map();
+    weekStarts.set(validDate, answer);
+  }
+  return answer;
 }
 
 module.exports = {

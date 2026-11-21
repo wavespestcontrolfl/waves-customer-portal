@@ -86,7 +86,7 @@ describe('Staff payroll work-date semantics', () => {
     }
   });
 
-  test('works a date out once, drops the oldest answer at the cap, and never keeps a number of days that is not whole', () => {
+  test('works a date out once, starts again at the cap, and never keeps a number of days that is not whole', () => {
     // The time zone helpers are stubbed here, so only the keeping is tested (and 5,000 dates cost nothing).
     jest.isolateModules(() => {
       const addETDays = jest.fn((anchor, days) => `${anchor}+${days}`);
@@ -104,11 +104,14 @@ describe('Staff payroll work-date semantics', () => {
       for (let days = 2; days <= 4998; days += 1) fresh.addStaffWorkDays('2026-06-03', days); // 5,000 answers: the cap
       expect(addETDays).toHaveBeenCalledTimes(5000);
       fresh.addStaffWorkDays('2026-06-03', 1);
-      expect(addETDays).toHaveBeenCalledTimes(5000); // still kept
-      fresh.addStaffWorkDays('2026-06-03', 4999); // one more answer: the oldest one is dropped
-      fresh.addStaffWorkDays('2026-06-03', 1);
-      expect(addETDays).toHaveBeenCalledTimes(5002); // worked out again, with the same result
-      expect(fresh.addStaffWorkDays('2026-06-03', 1)).toBe('2026-06-03T12:00+1');
+      fresh.addStaffWorkDays('2026-06-03', 4998);
+      expect(addETDays).toHaveBeenCalledTimes(5000); // all still kept
+      fresh.addStaffWorkDays('2026-06-03', 4999); // one more answer: the kept answers start again from this one
+      expect(addETDays).toHaveBeenCalledTimes(5001);
+      fresh.addStaffWorkDays('2026-06-03', 4999);
+      expect(addETDays).toHaveBeenCalledTimes(5001); // the new one is kept
+      expect(fresh.addStaffWorkDays('2026-06-03', 1)).toBe('2026-06-03T12:00+1'); // an old one is worked out again: same result
+      expect(addETDays).toHaveBeenCalledTimes(5002);
       // not a whole number of days: worked out on every call
       fresh.addStaffWorkDays('2026-06-03', 1.5);
       fresh.addStaffWorkDays('2026-06-03', 1.5);
