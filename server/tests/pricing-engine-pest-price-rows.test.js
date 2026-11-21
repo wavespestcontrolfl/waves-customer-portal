@@ -974,6 +974,36 @@ describe('the settings for a price nobody watches', () => {
       expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
     });
 
+    // A refresh changes the constants and then reads the catalogs, before it checks what it loaded. A check
+    // that fails puts the constants back. A strict refresh also runs while the shared settings read fresh, and
+    // a caller of the shared refresh must not price in that window from what will be put back.
+    test('while the refresh runs, the shared settings read stale and a caller of the shared refresh waits, also on a warm worker and for a refresh that then fails', async () => {
+      const worker = freshWorker();
+      const base = worker.constants.PEST.base;
+      appRows(worker, fullRows(worker.constants));
+      await expect(priceOn(worker)).resolves.toEqual(priced(base));
+      expect(worker.bridge.needsSync()).toBe(false);
+
+      const running = pauseAtCatalogRead(appRows(worker, refusedRows(worker.constants)));
+      const price = jest.fn();
+      const mine = priceOn(worker, price);
+      await running.paused;
+      expect(worker.bridge.needsSync()).toBe(true);
+      const other = configDb(worker, fullRows(worker.constants));
+      const shared = worker.bridge.syncConstantsFromDB(other);
+      await new Promise((resolve) => { setImmediate(resolve); });
+      expect(refreshesOn(other)).toBe(0);
+      running.release();
+      await expect(mine).resolves.toEqual(refused('not_loaded'));
+      expect(price).not.toHaveBeenCalled();
+      // Still stale: the caller that waited reads the rows itself.
+      expect(worker.bridge.needsSync()).toBe(true);
+      await expect(shared).resolves.toBe(true);
+      expect(refreshesOn(other)).toBe(1);
+      expect(worker.constants.PEST.base).toBe(base);
+      expect(worker.bridge.needsSync()).toBe(false);
+    });
+
     test('rows that lack an input of the pest price: the refresh succeeds, and the price is refused', async () => {
       const worker = freshWorker();
       const partial = fullRows(worker.constants);

@@ -1237,12 +1237,16 @@ async function maybeSyncPricingEngine(db) {
 //    PRICING_CONFIG_UNAVAILABLE, and the engine is not called. The whole
 //    question of "are these the rows' prices" is the bridge's: the pricer
 //    asks nothing of the cache.
-// 3. The hand check (in the option loop). An option whose engine result
-//    needs a hand check is not returned. The test is the one the plan-start
-//    mint refuses on (engineResultNeedsReview: a review marker on a line, a
-//    footprint the engine guessed, low confidence, field verification). The
-//    default returns such an option with manualReview: true, for a card a
-//    person reads. With nobody watching, it must not go out as a price.
+// 3. The hand check (strictPriceNeedsHandCheck, in the option loop). An
+//    option that needs a hand check is not returned. The test is the pair
+//    the plan-start mint refuses on: the engine's result
+//    (engineResultNeedsReview: a review marker on a line, a footprint the
+//    engine guessed, low confidence, field verification) and the estimate
+//    seed the price was made from (seedRefusesPrice: a seed that carries its
+//    own field-verification mark can still give a clean engine result). The
+//    default returns such an option, marked manualReview: true where the
+//    engine marked it, for a card a person reads. With nobody watching, it
+//    must not go out as a price.
 function priceSettingsUnavailable(message) {
   return Object.assign(new Error(message), { code: 'PRICING_CONFIG_UNAVAILABLE' });
 }
@@ -1261,6 +1265,15 @@ async function strictPriceOnOwnSettings(price) {
 // caller's mistake, never a price.
 function assertStrictPriceCall(db, customer) {
   if (!db || !customer?.id) throw new Error('strictPriceSettings needs a database handle and a customer id');
+  // The settings are read on the app's connection, one caller at a time. A caller that waits there with a
+  // transaction open keeps a connection of that pool: enough of them leave none for the read.
+  if (db.isTransaction === true) throw new Error('strictPriceSettings needs a database handle that is not a transaction');
+}
+// Rule 3: is this a price the plan-start mint would refuse for a hand check? The mint asks the engine's
+// result and the estimate seed the price was made from (restart.js: engineResultNeedsReview, seedRefusesPrice).
+function strictPriceNeedsHandCheck(estimate, propertySeed, serviceKey) {
+  const restart = require('./cancellation-resolution/restart');
+  return restart.engineResultNeedsReview(estimate) || restart.seedRefusesPrice(propertySeed, [restart.pricingKeyFor(serviceKey)]);
 }
 function planStartBlocked(blocker) {
   return Object.assign(new Error(`strictPriceSettings: the account may not start a plan (${blocker})`), { code: 'PLAN_START_BLOCKED', blocker });
@@ -1485,8 +1498,8 @@ async function buildCustomerPricingResponse({
           recurringCustomer: currentServiceKeys.length > 0,
           services: targetServices,
         });
-        // strict: a price the engine marked for a hand check is not a price for a caller nobody watches (rule 3).
-        if (strictPriceSettings && require('./cancellation-resolution/restart').engineResultNeedsReview(estimate)) continue;
+        // strict: a price marked for a hand check is not a price for a caller nobody watches (rule 3).
+        if (strictPriceSettings && strictPriceNeedsHandCheck(estimate, propertySeed, serviceKey)) continue;
         const quoted = buildQuoteOption({
           option,
           estimate,

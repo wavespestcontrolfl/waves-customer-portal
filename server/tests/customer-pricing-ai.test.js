@@ -2628,6 +2628,18 @@ describe('strictPriceSettings', () => {
     expect(blocker).not.toHaveBeenCalled();
   });
 
+  // The settings are read on the app's connection, one strict caller at a time. A caller that waits there with a
+  // transaction open keeps a connection of the same pool, and enough of them leave none for that read.
+  test('strict on a transaction is a mistake of the caller, refused before any read; the default takes one as before', async () => {
+    const inTransaction = () => Object.assign(refreshable(), { isTransaction: true });
+    await expect(strict({ db: inTransaction() })).rejects.toThrow('strictPriceSettings needs a database handle that is not a transaction');
+    expect(blocker).not.toHaveBeenCalled();
+    expect(ownSettings).not.toHaveBeenCalled();
+    expectPriced(await price({ db: inTransaction() }));
+    // A handle that only says it is no transaction is taken.
+    expectPriced(await strict({ db: Object.assign(refreshable(), { isTransaction: false }) }));
+  });
+
   describe('the account', () => {
     test.each(['not_live', 'commercial', 'has_plan'])('an account the shared answer blocks (%s) is refused before any property lookup or load of the settings', async (reason) => {
       blocker.mockResolvedValue(reason);
@@ -2908,6 +2920,40 @@ describe('strictPriceSettings', () => {
       expectPriced(marked);
       expect(marked.options.every((option) => option.manualReview === true)).toBe(true);
       expect(await strict({ propertyLookup })).toMatchObject({ ok: true, options: [] });
+    });
+
+    // The estimate seed carries its own hold: the estimate it came from needed field verification. The seed can
+    // still fill sizes that give a clean engine result, and the plan-start mint refuses such a price.
+    describe('by the estimate seed the price was made from', () => {
+      // The seed gives the engine the property type here; the sizes come from the lookup.
+      const seed = (extra = {}) => ({ propertyType: 'townhome_end', ...extra });
+      const restart = require('../services/cancellation-resolution/restart');
+      let engine;
+      beforeEach(() => { engine = jest.spyOn(pricingEngine, 'generateEstimate'); });
+      afterEach(() => { engine.mockRestore(); });
+      // Every engine call priced the seed's type, and no result carries a review marker.
+      const expectCleanEngineResultsFromTheSeed = () => {
+        expect(engine.mock.calls.length).toBeGreaterThan(0);
+        expect(engine.mock.calls.every(([input]) => input.propertyType === 'townhome_end')).toBe(true);
+        expect(engine.mock.results.every((result) => restart.engineResultNeedsReview(result.value) === false)).toBe(true);
+      };
+
+      test('a seed that needs field verification: strict returns no option though the engine result is clean, the default prices', async () => {
+        expectPriced(await strict({ propertySeed: seed() }));
+        expectCleanEngineResultsFromTheSeed();
+        engine.mockClear();
+        expect(await strict({ propertySeed: seed({ requiresFieldVerification: true }) })).toMatchObject({ ok: true, options: [] });
+        // As clean as the result above: the seed alone refused the price.
+        expectCleanEngineResultsFromTheSeed();
+        expectPriced(await price({ propertySeed: seed({ requiresFieldVerification: true }) }));
+      });
+
+      test.each([
+        ['a mark that is not exactly true', { requiresFieldVerification: 'yes' }],
+        ['a tree count of unknown provenance, which holds a Tree & Shrub price only', { zeroTreeCountAmbiguous: true }],
+      ])('%s does not hold a pest price', async (_label, extra) => {
+        expectPriced(await strict({ propertySeed: seed(extra) }));
+      });
     });
 
     describe('by each kind of marker', () => {

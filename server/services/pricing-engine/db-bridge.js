@@ -2526,7 +2526,9 @@ function invalidatePricingConfigCache() {
 //      refresh, and it reads on the app's connection, never on the caller's
 //      handle: a transaction can hold an edit of the settings that never
 //      commits, and what a refresh reads goes into the constants every
-//      caller prices from;
+//      caller prices from. (So the caller must hold no transaction while it
+//      waits here: its connection is one of the pool this read needs.)
+//      The shared settings read stale while it runs;
 //   2. three questions: did the refresh succeed; was an edit of the settings
 //      signaled in this process since the moment before the refresh read
 //      the rows (_invalidations); did the rows carry every input of the
@@ -2547,6 +2549,10 @@ function invalidatePricingConfigCache() {
 function withSettingsForUnattendedPrice(price) {
   const run = _syncQueue.then(async () => {
     const invalidations = _invalidations;
+    // While this refresh runs, the shared settings read stale, as they do during any shared refresh. A caller
+    // of the shared refresh then waits in the queue. It does not price from constants that this refresh has
+    // begun to change and may still put back. A refresh that succeeds marks them fresh at its end.
+    _lastSync = 0;
     const loaded = await _syncConstantsFromDBUnserialized();
     if (loaded !== true) return { priced: false, reason: 'not_loaded' };
     if (invalidations !== _invalidations) {

@@ -42,6 +42,9 @@ postgres('strictPriceSettings of the customer pricer (live Postgres)', () => {
   jest.setTimeout(90000);
   let database;
   let trx;
+  // What a caller passes as `db`. Strict refuses a transaction (a test below), so the suite passes a handle
+  // that is none and reads through the test's transaction: every read still rolls back with the test.
+  let handle;
   let logSpy;
 
   beforeAll(async () => {
@@ -77,6 +80,7 @@ postgres('strictPriceSettings of the customer pricer (live Postgres)', () => {
     logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     trx = await database.transaction();
     mockSettingsHandle = trx;
+    handle = new Proxy(trx, { get: (target, key, receiver) => (key === 'isTransaction' ? false : Reflect.get(target, key, receiver)) });
   });
 
   afterEach(async () => {
@@ -111,7 +115,7 @@ postgres('strictPriceSettings of the customer pricer (live Postgres)', () => {
     status: 'confirmed', is_recurring: true,
   });
   const ask = (worker, customer, extra = {}) => worker.pricer.buildCustomerPricingResponse({
-    customer, prompt: 'I am interested in adding pest control', db: trx, propertyLookup: async () => SAVED_LOOKUP, ...extra,
+    customer, prompt: 'I am interested in adding pest control', db: handle, propertyLookup: async () => SAVED_LOOKUP, ...extra,
   });
   const strict = (worker, customer) => ask(worker, customer, { strictPriceSettings: true });
   const expectPriced = (result) => {
@@ -126,6 +130,17 @@ postgres('strictPriceSettings of the customer pricer (live Postgres)', () => {
     expect(result.currentServices).toEqual([]);
     expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
     expect(worker.bridge.needsSync()).toBe(false);
+  });
+
+  // A strict caller waits in the bridge's queue for a read on the app's connection. With a transaction open it
+  // would keep a connection of that pool while it waits.
+  test('a real transaction as the handle is refused before any read; the default prices on it as before', async () => {
+    const worker = freshWorker();
+    const customer = await seedCustomer();
+    expect(trx.isTransaction).toBe(true);
+    await expect(ask(worker, customer, { db: trx, strictPriceSettings: true })).rejects.toThrow('strictPriceSettings needs a database handle that is not a transaction');
+    expect(worker.bridge.needsSync()).toBe(true);
+    expectPriced(await ask(worker, customer, { db: trx }));
   });
 
   // The bridge keeps the shared settings for a minute, and an edit marks them stale only in the process that
