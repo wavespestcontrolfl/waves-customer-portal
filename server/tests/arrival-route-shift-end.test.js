@@ -227,6 +227,16 @@ describe('next to the engine\'s other limits', () => {
     expect(fit).toEqual(evaluateArrivalPlacement(route(), { ...at('09:00'), returnByMin: 11 * 60 }));
   });
 
+  test('an order that crowds a later stop and an order past the shift end: the answer names the shift end', () => {
+    // The visit first reaches stop l at 09:50, 10 minutes before its promise ends: under the 15-minute margin.
+    // The visit last is reached at 09:55 and ends at 10:55.
+    const tight = () => movedTo([stop('l', '08:00', 27.50, { route_order: 1 })], moved('08:00', 27.325));
+    const open = evaluateArrivalPlacement(tight(), at('08:00'));
+    expect(order(open)).toEqual(['l', 'target']);
+    expect(rowOf(open, 'target').departure).toBe('10:55');
+    expect(evaluateArrivalPlacement(tight(), { ...at('08:00'), shiftEndMin: 10 * 60 + 54 })).toMatchObject(REFUSED);
+  });
+
   test('a day that is already late (the staff lists): the hour is listed only when it ends inside the shift', () => {
     // A takes four hours, so B (promised 08:30) is late with or without the new visit.
     const lateDay = () => ({
@@ -241,6 +251,46 @@ describe('next to the engine\'s other limits', () => {
     // The day's own refusal stands: its arrival promises are already broken.
     expect(evaluateArrivalPlacement(lateDay(), { ...at('15:00'), lateDays: true, shiftEndMin: 15 * 60 + 59 }))
       .toMatchObject({ feasible: false, reason: 'arrival_window' });
+  });
+});
+
+describe('a day that is already late, and the only order that keeps every promise ends past the shift end', () => {
+  // The search's own road times (context.travel). The direct road from stop a to stop b takes 120
+  // minutes and every other leg takes 20. Without the visit stop b is reached at 12:30, 30 minutes
+  // after its promise ends. With the 30-minute visit between them it is reached at 11:40, on time.
+  const travel = { lookup: ({ from, to }) => ({ minutes: Number(from.lat) === 27.45 && Number(to.lat) === 27.6 ? 120 : 20, source: 'google_traffic', reason: null }) };
+  const route = () => ({
+    ...movedTo([stop('a', '10:00', 27.45, { minutes: 30, route_order: 1 }), stop('b', '10:00', 27.60, { route_order: 2 })],
+      moved('09:00', 27.50, { minutes: 30 })),
+    travel,
+  });
+  const HOUR = { windowStart: '09:00', windowEnd: '09:30', durationMinutes: 30 };
+
+  test('no shift end given: the visit goes between the two stops and ends at 11:20, and the day is on time', () => {
+    const fit = evaluateArrivalPlacement(route(), { ...HOUR, lateDays: true });
+    expect(order(fit)).toEqual(['a', 'target', 'b']);
+    expect(rowOf(fit, 'target')).toMatchObject({ arrival: '10:50', departure: '11:20' });
+    expect(rowOf(fit, 'b')).toMatchObject({ arrival: '11:40', departure: '12:40' });
+    expect(fit.dayAlreadyLate).toBeUndefined();
+    expect(evaluateArrivalPlacement(route(), { ...HOUR, lateDays: true, shiftEndMin: 11 * 60 + 20 })).toEqual(fit);
+  });
+
+  test('an 11:19 shift end, the staff lists: the visit goes first, ends at 09:30, and stop b stays as late as it is', () => {
+    const fit = evaluateArrivalPlacement(route(), { ...HOUR, lateDays: true, shiftEndMin: 11 * 60 + 19 });
+    expect(fit).toMatchObject({ feasible: true, dayAlreadyLate: true });
+    expect(order(fit)).toEqual(['target', 'a', 'b']);
+    expect(rowOf(fit, 'target').departure).toBe('09:30');
+    // Stop a still ends at 10:30, and stop b at 13:30: the same as without the visit.
+    expect(rowOf(fit, 'a').departure).toBe('10:30');
+    expect(rowOf(fit, 'b')).toMatchObject({ arrival: '12:30', departure: '13:30' });
+  });
+
+  test('a path that lists no late day (the customer paths): the same hour is refused as shift_end', () => {
+    expect(evaluateArrivalPlacement(route(), { ...HOUR, shiftEndMin: 11 * 60 + 19 })).toMatchObject(REFUSED);
+  });
+
+  test('a 09:29 shift end: no order ends the visit inside it, so the answer names the shift end', () => {
+    expect(evaluateArrivalPlacement(route(), { ...HOUR, lateDays: true, shiftEndMin: 9 * 60 + 29 })).toMatchObject(REFUSED);
   });
 });
 

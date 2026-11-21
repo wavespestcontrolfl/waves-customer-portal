@@ -671,12 +671,18 @@ function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, 
   return { winner, returnTooLate, tooTight, pastShiftEnd };
 }
 
-/** The refusal when an order kept every arrival promise but broke one of the day's limits: the
- *  technician's shift end (`shiftEndMin`), or the requested return time (`returnByMin`). */
-function limitRefusal({ pastShiftEnd, returnTooLate }, date) {
-  if (pastShiftEnd) return { reason: 'shift_end', warning: `With this visit the modeled route ends a stop after the technician's shift end on ${date}.` };
-  if (returnTooLate) return { reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` };
-  return null;
+/** Which limit refuses a placement no order won, when an order kept every arrival promise and
+ *  broke only a limit. One of three, in this precedence:
+ *  - `shiftEnd`: the technician's shift end (`shiftEndMin`). The caller refuses with it only after
+ *    the late-day pass had its turn: on a day that is already late, an order that leaves a late
+ *    stop as late as it is can still keep the shift end.
+ *  - `returnTime`: the requested return time (`returnByMin`). Refused at once.
+ *  - `margin`: every place the visit fits crowds a later customer. Refused at once. */
+function limitRefusal(winner, { pastShiftEnd, returnTooLate, tooTight }, date) {
+  if (winner) return {};
+  if (pastShiftEnd) return { shiftEnd: { reason: 'shift_end', warning: `With this visit the modeled route ends a stop after the technician's shift end on ${date}.` } };
+  if (returnTooLate) return { returnTime: { reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` } };
+  return { margin: tooTight };
 }
 
 /** True when the day's existing stops alone cannot keep their promises in
@@ -997,9 +1003,10 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // The technician's shift end, minute of day: a caller passes it to hold the placement to that
   // technician's shift hours. Only an order in which the placed visit does not keep the technician
   // on a stop after it is certified (overrunsShiftEnd: the visit ends by it, and no other service
-  // ends after it later than without the visit). The answer is `shift_end` when every order that
-  // fits breaks that. On a day that is already late (`lateDays`) the arrival-window refusal stands
-  // instead. Unset: nothing reads it and the result is exactly what it was.
+  // ends after it later than without the visit). The answer is `shift_end` when an order keeps
+  // every arrival promise and each such order breaks that. With `lateDays` the late-day orders are
+  // tried first, under the same rule. A day on which no order keeps every promise keeps its
+  // arrival-window refusal. Unset: nothing reads it and the result is exactly what it was.
   shiftEndMin }) {
   if (!context) return unverified(null, 'this date');
   const { date, grouped } = context;
@@ -1122,10 +1129,10 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   const words = describe => (detail === true ? describe() : null);
   const candidateOrders = () => orders.map(entry => entry.order);
   const baselineOrders = () => sequencers.map(sequence => sequence(groupedPending));
-  const overLimit = !winner && limitRefusal({ pastShiftEnd, returnTooLate }, date);
-  if (overLimit) return detailed({ ...fail, ...overLimit });
+  const refusal = limitRefusal(winner, { pastShiftEnd, returnTooLate, tooTight }, date);
+  if (refusal.returnTime) return detailed({ ...fail, ...refusal.returnTime });
   // Every place it fits crowds a later customer (staff route insertion).
-  if (!winner && tooTight) {
+  if (refusal.margin) {
     return detailed({ ...fail, reason: 'arrival_margin',
       warning: `The route on ${date} fits this visit only by leaving a later stop less than ${INSERTION_MARGIN_MINUTES} minutes before its arrival window closes. Choose another window.` },
     words(() => describeTightness({ date, candidates: candidateOrders(), simulate, target, own, rangeForStop, margin: INSERTION_MARGIN_MINUTES })));
@@ -1146,6 +1153,8 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
         home: context.home || RouteOptimizer.HQ, roadTravel: !!context.travel }), dayAlreadyLate: true };
     }
   }
+  // Only the shift end stopped an order that keeps every promise, and no late-day order took its place.
+  if (refusal.shiftEnd) return detailed({ ...fail, ...refusal.shiftEnd });
   // Tell "this visit breaks the day" apart from "the day is already broken":
   // the existing stops alone cannot keep their promises in any order tried.
   if (!winner && capacity && dayIsOvercommitted(sequencers, groupedPending, simulate)) {
