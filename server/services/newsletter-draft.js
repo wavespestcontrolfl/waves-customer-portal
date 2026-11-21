@@ -1992,12 +1992,14 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     }).filter(Boolean).join('\n\n');
   }
 
-  if (!draft.textBody && draft.events?.length && typeConfig?.flagship) {
+  if (draft.events?.length && typeConfig?.flagship) {
     // Structured plain-text alternative (owner-accepted critique
     // 2026-07-29): real sections, event names, dates, prices, and full
     // destination urls — not tag-stripped HTML collapsed into one
     // paragraph. Direct event urls on purpose: text-only clients get no
-    // per-recipient substitution pass for evclick tokens.
+    // per-recipient substitution pass for evclick tokens. Always built from
+    // the locked draft: a textBody the writer added on its own (the prompt
+    // asks for none) would skip the factual lock and the issue's poll.
     draft.textBody = buildFlagshipTextBody(draft, { pollQuizId });
   }
   if (!draft.textBody && draft.htmlBody) {

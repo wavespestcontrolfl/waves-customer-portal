@@ -7,13 +7,36 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
+// For the full weekly draft below: the writer's answer, the lineup rows, and
+// no fact, image or event-history lookups.
+const mockDispatch = jest.fn();
+const mockEventRows = [];
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: mockDispatch }));
+jest.mock('../services/email-division/fact-register', () => ({
+  factsPromptBlock: jest.fn(async () => ''), findUnverifiedClaims: jest.fn(() => []), listFacts: jest.fn(async () => []),
+}));
+jest.mock('../services/content/image-generator', () => ({
+  generate: jest.fn(async () => { throw new Error('no image calls in tests'); }),
+}));
+jest.mock('../services/event-freshness', () => ({
+  ...jest.requireActual('../services/event-freshness'),
+  isEligibleForFreshDigest: () => true,
+  excludeRoutineRecurringFromQuery: async () => mockEventRows,
+}));
+jest.mock('../services/newsletter-event-selection', () => ({
+  ...jest.requireActual('../services/newsletter-event-selection'),
+  loadSharedYearPool: async () => [],
+  filterRepeatedDateIdentities: async (rows) => rows,
+  filterPreviouslyFeaturedIdentities: async (rows) => rows,
+}));
 
+const db = require('../models/db');
 const {
   NEWSLETTER_POLL_IDS, POLL_ISSUE_GAP, QUIZ_TOKEN_PATTERN, getQuiz, chooseNewsletterPoll, pollInBody,
   hasQuizToken, buildQuizSubstitutions, neutralizeQuizTokens,
 } = require('../services/newsletter-quiz');
 const {
-  assembleBeehiivNewsletter, buildFlagshipTextBody, GREETING_NAME_TOKEN, CITY_TOKEN, GRASS_TYPE_TOKEN,
+  assembleBeehiivNewsletter, buildFlagshipTextBody, createNewsletterDraft, GREETING_NAME_TOKEN, CITY_TOKEN, GRASS_TYPE_TOKEN,
 } = require('../services/newsletter-draft');
 const { buildFeedbackSubstitutions } = require('../services/newsletter-feedback');
 const { buildEvclickSubstitutions } = require('../services/newsletter-event-clicks');
@@ -99,6 +122,42 @@ describe('Waves Newsletter polls', () => {
     expect(text.split(textToken)).toHaveLength(2);
     expect(text.indexOf('Closing words.')).toBeLessThan(text.indexOf(textToken));
     expect(text.indexOf(textToken)).toBeLessThan(text.indexOf('— The Waves Team'));
+  });
+
+  test('the weekly draft carries the poll in both parts, even when the writer adds its own plain text', async () => {
+    const eventId = 'b0000000-0000-4000-8000-000000000001';
+    mockEventRows.splice(0, mockEventRows.length, {
+      id: eventId, title: 'Harbor Art Walk', description: 'Local artists along the harbor.',
+      start_at: '2026-12-05T22:00:00Z', end_at: null, venue_name: 'Harbor Park', venue_address: '1 Harbor Way',
+      city: 'Bradenton', event_url: 'https://events.example.com/art-walk', image_url: null, categories: ['arts'],
+      is_free: true, admin_status: 'approved', event_type: 'one_time', recurrence_type: 'none',
+      freshness_status: 'fresh_one_time', times_featured: 0, last_featured_at: null, pulled_at: '2026-11-28T12:00:00Z',
+      price_text: null, family_friendly: true, audience_tags: [], novelty_type: null, region_zone: null,
+      score_breakdown: {}, source_name: 'Synthetic source',
+    });
+    const lineupQuery = {};
+    ['leftJoin', 'select', 'whereIn', 'whereNull', 'whereNotIn', 'orderByRaw']
+      .forEach((m) => { lineupQuery[m] = jest.fn(() => lineupQuery); });
+    db.mockImplementation(() => lineupQuery);
+    mockDispatch.mockResolvedValue({ ok: true, json: {
+      selectedSubject: 'Local picks',
+      events: [{ eventId, title: 'Harbor Art Walk', emoji: '🎨', description: 'Go see it.' }],
+      closingHeading: 'See You Out There', closingText: 'Closing words.', signoff: '— The Waves Team',
+      textBody: 'WRITER TEXT WITH NO POLL',
+    } });
+    try {
+      const { draft: issue } = await createNewsletterDraft({
+        prompt: 'Weekend events.', eventIds: [eventId], newsletterType: 'local-weekly-fresh-events',
+        issueReference: '2026-12-01T11:00:00Z', persist: false, pollQuizId: P2,
+      });
+      expect(issue.htmlBody.split(`{{quiz:${P2}}}`)).toHaveLength(2);
+      expect(issue.textBody.split(`{{quiz-text:${P2}}}`)).toHaveLength(2);
+      expect(issue.textBody).toContain('Harbor Art Walk');
+      expect(issue.textBody).not.toContain('WRITER TEXT WITH NO POLL');
+    } finally {
+      db.mockReset();
+      mockDispatch.mockReset();
+    }
   });
 
   test.each([

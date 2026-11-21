@@ -2,10 +2,12 @@
  * Waves Newsletter polls against real Postgres:
  * - newsletterIssuePolls reads one newsletter type's poll history from the
  *   issues readers got: the polls of the newest two, and every poll such an
- *   issue carried, in either body part. A 'failed' send that reached readers
- *   before it stopped counts; a draft, a send that reached no reader (also a
- *   'sent' one whose recipients all dropped out) and another type's issue
- *   never count. An issue with no send time sorts by its first delivery.
+ *   issue carried, in either body part, by the sender's own reach rule. A
+ *   'failed' send that reached readers before it stopped counts, and so does
+ *   one whose only proof is a reader's spam report; a draft, a send that
+ *   reached no reader (a 'sent' one whose recipients all dropped out, or whose
+ *   every message hard-bounced) and another type's issue never count. An
+ *   issue with no send time sorts by its first delivery.
  * - recordQuizResponse records a poll vote only from an issue that carried
  *   that poll.
  * Real Postgres, because these are a LIKE over the stored bodies, an EXISTS
@@ -62,6 +64,8 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
         email: `poll-test-${randomUUID().slice(0, 8)}@example.invalid`,
         status: d.status,
         sent_at: d.sentAt || null,
+        bounced_at: d.bouncedAt || null,
+        complained_at: d.complainedAt || null,
         ...(d.answered ? { quiz_id: d.answered.quizId, quiz_answer: d.answered.answer, quiz_answered_at: d.answered.at } : {}),
       }));
       out.push(deliveries.length
@@ -111,8 +115,9 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
       // None of these reached a reader of this newsletter.
       { poll: P3, status: 'draft' },
       { poll: P4, status: 'failed', sentAt: daysAgo(3), deliveries: [{ status: 'failed' }] },
-      // 'sent', but every recipient dropped out before dispatch.
-      { poll: P4, sentAt: daysAgo(2), deliveries: [] },
+      // 'sent', but every recipient dropped out before dispatch. The issue row
+      // reads 'sent' with a send time; only its delivery row says no one got it.
+      { poll: P4, sentAt: daysAgo(2), deliveries: [{ status: 'skipped' }] },
       { poll: P3, type: newType(), sentAt: daysAgo(1) },
     ]);
 
@@ -155,6 +160,20 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     expect(history.recent).toEqual([P1, null]);
     expect(history.used).toEqual([P1]);
     expect(chooseNewsletterPoll(history)).toBeNull();
+  });
+
+  test('the sender\'s reach rule decides: a hard-bounced issue does not count; a reader\'s spam report does', async () => {
+    const TYPE = newType();
+    await insertIssues(TYPE, [
+      { poll: null, sentAt: daysAgo(21) },
+      // SendGrid took the message (sent_at), then the address hard-bounced.
+      { poll: P1, sentAt: daysAgo(14), deliveries: [{ status: 'bounced', sentAt: daysAgo(14), bouncedAt: daysAgo(14) }] },
+      // The sender lost SendGrid's answer; the reader's own spam report proves the message arrived.
+      { poll: P2, status: 'failed', createdAt: daysAgo(7), deliveries: [{ status: 'complained', complainedAt: daysAgo(6) }] },
+    ]);
+    const history = await newsletterIssuePolls({ newsletterType: TYPE });
+    expect(history.used).toEqual([P2]);
+    expect(history.recent).toEqual([P2, null]);
   });
 
   test('a poll vote counts only from an issue that carried that poll', async () => {

@@ -2115,11 +2115,24 @@ function refusedDelivery(q) {
 }
 
 /**
- * A send's delivery ledger: how many readers got it (any success signal, as
+ * A delivery row whose reader got the message: any success signal, as
  * hasDeliverySuccessSignal reads one, or a reader's own spam report or
  * unsubscribe, which only a delivered message gets, also when the sender lost
- * SendGrid's acceptance; and not refused), how many it reached no inbox of for
- * good (refusedDelivery), and how many a Resume would still mail:
+ * SendGrid's acceptance; and not refused (refusedDelivery). Unqualified
+ * columns, so it also serves a subquery over newsletter_send_deliveries
+ * (newsletter-quiz.js newsletterIssuePolls).
+ */
+function reachedDelivery(q) {
+  return q.where((got) => got.whereIn('status', TERMINAL_SUCCESS_STATUSES).orWhereNotNull('sent_at')
+    .orWhereNotNull('delivered_at').orWhereNotNull('opened_at').orWhereNotNull('clicked_at')
+    .orWhereNotNull('complained_at').orWhereNotNull('unsubscribed_at'))
+    .whereNot(refusedDelivery);
+}
+
+/**
+ * A send's delivery ledger: how many readers got it (reachedDelivery), how
+ * many it reached no inbox of for good (refusedDelivery), and how many a
+ * Resume would still mail:
  * outstandingEligibleDeliveries (the resume precheck's own predicate), and for
  * a planned issue only the readers its plan still holds, as each batch
  * re-checks them (narrowToPlannedAudience, then plannedEligibleRows on the
@@ -2127,11 +2140,7 @@ function refusedDelivery(q) {
  */
 async function ledgerProgress(trx, send) {
   const ledger = () => trx('newsletter_send_deliveries').where({ send_id: send.id });
-  const reached = await ledger()
-    .where((q) => q.whereIn('status', TERMINAL_SUCCESS_STATUSES).orWhereNotNull('sent_at').orWhereNotNull('delivered_at')
-      .orWhereNotNull('opened_at').orWhereNotNull('clicked_at').orWhereNotNull('complained_at').orWhereNotNull('unsubscribed_at'))
-    .whereNot(refusedDelivery)
-    .count('* as c').first();
+  const reached = await reachedDelivery(ledger()).count('* as c').first();
   const refused = await ledger().where(refusedDelivery).count('* as c').first();
   const got = Number(reached?.c) || 0;
   const refusedCount = Number(refused?.c) || 0;
@@ -2498,4 +2507,4 @@ async function markEventsFeatured(send) {
 module.exports = {
   applyRetryableDeliveryFilter,
   outstandingEligibleDeliveries,
-  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, ledgerProgress, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, ledgerProgress, reachedDelivery, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };
