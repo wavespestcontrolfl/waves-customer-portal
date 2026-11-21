@@ -1375,26 +1375,43 @@ async function publishMintedEstimate(mint, { offer, estimateData }) {
 // A mint that waits here holds no connection. One mint for every
 // MINT_POOL_SHARE pool connections runs at once (5 on the default 20), so
 // the mints together use at most half of the pool. First come, first served.
+// The wait in line has an end (#8256 pre-push r1): a mint that started long
+// after its tap would archive a quote, and free its slot hold, for a customer
+// whose page already gave up. After MINT_WAIT_MS it leaves the line and
+// refuses with a coded answer, which both cards show and neither turns into
+// a request: nothing was read, minted or archived. The words are the ones
+// this module's failed-read refusals already use.
 const MINT_POOL_SHARE = 4;
 const MINT_SLOTS_UNKNOWN_POOL = 5;
+const MINT_WAIT_MS = 10000;
+const MINT_BUSY_MESSAGE = 'We could not verify your services just now. Please try again in a moment.';
 const mintSlots = { running: 0, waiting: [] };
 function mintSlotLimit(dbh) {
   const poolMax = Number(dbh?.client?.pool?.max);
   if (!Number.isFinite(poolMax) || poolMax <= 0) return MINT_SLOTS_UNKNOWN_POOL;
   return Math.max(1, Math.floor(poolMax / MINT_POOL_SHARE));
 }
+// One place in line. A finished mint hands its slot to the first place; a
+// place whose wait ends first leaves the line, so no slot is handed to it.
+function waitForMintSlot() {
+  return new Promise((resolve, reject) => {
+    const place = { take: null };
+    const timer = setTimeout(() => {
+      mintSlots.waiting.splice(mintSlots.waiting.indexOf(place), 1);
+      reject(new RestartUnavailableError('busy', MINT_BUSY_MESSAGE));
+    }, MINT_WAIT_MS);
+    place.take = () => { clearTimeout(timer); resolve(); };
+    mintSlots.waiting.push(place);
+  });
+}
 async function mintTransaction(dbh, work) {
-  if (mintSlots.running < mintSlotLimit(dbh)) {
-    mintSlots.running += 1;
-  } else {
-    // The mint that finishes hands its slot to the first one in line.
-    await new Promise((resolve) => { mintSlots.waiting.push(resolve); });
-  }
+  if (mintSlots.running < mintSlotLimit(dbh)) mintSlots.running += 1;
+  else await waitForMintSlot();
   try {
     return await dbh.transaction(work);
   } finally {
     const next = mintSlots.waiting.shift();
-    if (next) next();
+    if (next) next.take();
     else mintSlots.running -= 1;
   }
 }

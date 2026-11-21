@@ -1337,6 +1337,59 @@ describe('mintTransaction', () => {
     await drain(run);
   });
 
+  // #8256 pre-push r1: the wait in line has an end. A mint that started long after its tap would archive
+  // a quote, and free its slot hold, for a customer whose page already gave up.
+  describe('a mint that waits in line longer than 10 seconds', () => {
+    beforeEach(() => jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] }));
+    afterEach(() => jest.useRealTimers());
+
+    test('leaves the line with the coded "try again" refusal, never runs, and takes no slot from the mints behind it', async () => {
+      const run = start(handle(4), 1);
+      await tick();
+      const ran = [];
+      const waited = (name) => mintTransaction(handle(4), async () => { ran.push(name); return name; });
+      const first = waited('first');
+      const outcome = first.then(() => 'ran', (err) => err);
+      jest.advanceTimersByTime(4000);
+      const second = waited('second');
+      jest.advanceTimersByTime(5999);
+      await tick();
+      expect(ran).toEqual([]);
+      // 10 s after ITS tap, the first in line gives up. The route answers a restartUnavailable error
+      // with 409 { error, code }; both cards show the message, and neither files a request for this code.
+      jest.advanceTimersByTime(1);
+      const refusal = await outcome;
+      expect(refusal).toMatchObject({
+        restartUnavailable: true, code: 'busy', message: 'We could not verify your services just now. Please try again in a moment.',
+      });
+      // The slot that frees next goes to the mint still in line, not to the one that left.
+      run.releases[0]();
+      await run.settled[0];
+      await expect(second).resolves.toBe('second');
+      expect(ran).toEqual(['second']);
+      // Nothing is left held or waiting: a new mint starts at once, and no timer is pending.
+      await expect(waited('third')).resolves.toBe('third');
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    test('a mint that gets its slot in time is not refused later', async () => {
+      const run = start(handle(4), 1);
+      await tick();
+      let release;
+      const slow = mintTransaction(handle(4), () => new Promise((resolve) => { release = resolve; }));
+      jest.advanceTimersByTime(9999);
+      run.releases[0]();
+      await run.settled[0];
+      await tick();
+      // It runs now, and its wait has no timer left. A long mint is not cut off: the limit is on the
+      // wait in line only.
+      expect(jest.getTimerCount()).toBe(0);
+      jest.advanceTimersByTime(60000);
+      release('minted');
+      await expect(slow).resolves.toBe('minted');
+    });
+  });
+
   test('the restart mint runs in it: on a pool of four, three taps hold one transaction at a time', async () => {
     tables.customers = [{ ...CUSTOMER }];
     tables.cancellation_cases = [{ id: 'case-1', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-22' }];
