@@ -6276,6 +6276,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
     }
   }
 
+  // Observational only: verify the original invoice's live receipt after the
+  // existing activation/cancellation workflow has finished. When the caller
+  // supplied its money transaction the alert row lands in that same commit;
+  // dispatch-alerts defers only the live socket broadcast.
+  await require('./commercial-prepay-dispatch-review').reconcileInvoice(conn, invoice.id);
+
   return results;
 }
 

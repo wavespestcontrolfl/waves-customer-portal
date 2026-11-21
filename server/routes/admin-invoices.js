@@ -3317,6 +3317,8 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         };
         if (waiveSetupFee) updates.setup_fee_waived = true;
         await trx('invoices').where({ id }).update(updates);
+        await require('../services/commercial-prepay-dispatch-review')
+          .reconcileInvoice(trx, id);
         // Fully credit-covered — any active payment plan is done collecting.
         await PaymentPlans.completeActivePlansForInvoice(id, trx);
 
@@ -3631,6 +3633,12 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
             );
           }
         }
+
+        // Credit reversal has no provider webhook. Persist the observational
+        // review with this invoice-specific ledger episode; only its socket
+        // broadcast waits for commit.
+        await require('../services/commercial-prepay-dispatch-review')
+          .reconcileInvoice(trx, id);
 
         return { invoice: locked, restore, balanceAfter };
       });

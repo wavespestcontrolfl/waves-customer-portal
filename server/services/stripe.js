@@ -6012,6 +6012,10 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
+    // The sale marker is immutable and predates every replacement payment, so
+    // this lock-free discriminator may be read before the money transaction.
+    const observeCommercialPrepayReview = await require('./commercial-prepay-sale-record')
+      .hasRecordedUnbookedSale(db, invoiceId);
     // Phase 2: an accrued invoice is collected ONLY via its consolidated
     // statement — never confirm an individual payment for it.
     if (invoice.payer_statement_id) {
@@ -6367,7 +6371,13 @@ const StripeService = {
             .where({ stripe_payment_intent_id: paymentIntentId })
             .orderBy('created_at', 'desc')
             .first();
-          if (existingPayment) return existingPayment;
+          if (existingPayment) {
+            if (observeCommercialPrepayReview) {
+              await require('./commercial-prepay-dispatch-review')
+                .reconcileInvoice(trx, invoiceId);
+            }
+            return existingPayment;
+          }
           throw new Error('Invoice already paid');
         }
         if (lockedInvoice.status === 'prepaid') {
@@ -6499,6 +6509,7 @@ const StripeService = {
           .where({ stripe_payment_intent_id: paymentIntentId })
           .orderBy('created_at', 'desc')
           .first();
+        let record;
         if (existingPayment) {
           // Never clobber a money-LEFT row: refunded/disputed rows record cash
           // that went back to the customer. A miss here means the row flipped
@@ -6522,7 +6533,7 @@ const StripeService = {
           // refund that resolved since must not have its cleared markers
           // written back (pre-push audit). A settlement moment the row
           // already carries (the webhook's event time) outranks this one (r13).
-          const [record] = await trx('payments')
+          [record] = await trx('payments')
             .where({ id: existingPayment.id })
             .whereNotIn('status', ['refunded', 'disputed'])
             .update({ ...paymentPayload,
@@ -6532,11 +6543,16 @@ const StripeService = {
           if (!record) {
             throw new Error('Payment record changed while confirming — refresh the invoice and try again');
           }
-          return record;
+        } else {
+          [record] = await trx('payments').insert(paymentPayload).returning('*');
         }
 
-        const [record] = await trx('payments').insert(paymentPayload).returning('*');
-
+        if (paymentStatus === 'paid') {
+          if (observeCommercialPrepayReview) {
+            await require('./commercial-prepay-dispatch-review')
+              .reconcileInvoice(trx, invoiceId);
+          }
+        }
         return record;
       });
 

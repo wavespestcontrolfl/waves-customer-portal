@@ -1504,6 +1504,12 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
       if (isAnchor) anchorPaymentRow = inserted;
       settledInvoiceIds.push(invoice.id);
     }
+
+    if (invoiceStatus === 'paid') {
+      for (const invoiceId of new Set(settledInvoiceIds)) {
+        await require('./commercial-prepay-dispatch-review').reconcileInvoice(trx, invoiceId);
+      }
+    }
   });
 
   // Post-settle side effects, per invoice, outside the money transaction —

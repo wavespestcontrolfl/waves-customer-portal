@@ -1,3 +1,7 @@
+jest.mock('../services/commercial-prepay-dispatch-review', () => ({
+  reconcileInvoice: jest.fn(async () => null),
+}));
+
 jest.mock('../models/db', () => {
   const dbFn = jest.fn();
   // Codex round-7 P1/P2: recordDecision's own advisory lock

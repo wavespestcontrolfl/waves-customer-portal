@@ -159,6 +159,9 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     jest.doMock('../services/annual-prepay-renewals', () => ({
       syncTermForInvoicePayment: jest.fn(async () => undefined),
     }));
+    jest.doMock('../services/commercial-prepay-sale-record', () => ({
+      hasRecordedUnbookedSale: jest.fn(async () => false),
+    }));
   });
 
   test('refuses to settle when the payments row is disputed (chargeback replay)', async () => {

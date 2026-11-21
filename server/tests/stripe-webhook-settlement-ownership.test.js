@@ -65,6 +65,9 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   scheduleReceiptDeliveryDrain: jest.fn(),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
+jest.mock('../services/commercial-prepay-sale-record', () => ({
+  hasRecordedUnbookedSale: jest.fn(async () => false),
+}));
 jest.mock('../services/estimate-deposits', () => ({
   handleDepositChargeReversed: jest.fn(async () => ({ handled: false })),
   handleDepositIntentSucceeded: jest.fn(async () => {}),
@@ -237,13 +240,14 @@ describe('a part payment already on the invoice survives the settlement rewrite'
     expect(flip.payload.total).toBe(130);
   });
 
-  test('the in-SQL rewrite after it adds amount_paid back and resets it in the same UPDATE', async () => {
+  test('the fallback keeps its principal rewrite inside the locked UPDATE', async () => {
     await handlePaymentIntentSucceeded(succeededPI());
 
-    const flip = mockState.updates.find((u) => u.table === 'invoices' && !u.inTrx && u.payload?.status === 'paid');
+    const flip = mockState.updates.find((u) => u.table === 'invoices' && u.inTrx && u.payload?.status === 'paid');
     expect(flip).toBeTruthy();
     expect(flip.payload.amount_paid).toBe(0);
-    expect(flip.payload.total.__raw).toMatch(/COALESCE\(credit_applied, 0\) \+ COALESCE\(amount_paid, 0\)/);
+    expect(flip.payload.total).toBe(100);
+    expect(mockState.updates.find((u) => u.table === 'invoices' && !u.inTrx && u.payload?.status === 'paid')).toBeFalsy();
   });
 });
 

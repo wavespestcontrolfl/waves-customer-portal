@@ -33,10 +33,13 @@ function fakeTrx({ openAlertIds = [], updateReturns = [] } = {}) {
   updateReturns.forEach((rows) => returning.mockResolvedValueOnce(rows));
   if (!updateReturns.length) returning.mockResolvedValue([]);
   const update = jest.fn(() => ({ returning }));
+  const fallbackUpdate = jest.fn().mockResolvedValue(0);
+  const whereRaw = jest.fn(() => ({ update: fallbackUpdate }));
+  const whereNotNull = jest.fn(() => ({ whereRaw }));
   // `select`: autoResolveUnassignedAlertsForJob reads its open alerts
   // through where -> whereNull -> select.
   const whereNull = jest.fn(() => ({ update, select: selectForOpenAlerts }));
-  const where = jest.fn(() => ({ whereNull }));
+  const where = jest.fn(() => ({ whereNull, whereNotNull }));
 
   const notificationsChain = { whereIn: () => notificationsChain, whereNull: () => notificationsChain, where: () => notificationsChain, update: jest.fn() };
 
@@ -47,7 +50,9 @@ function fakeTrx({ openAlertIds = [], updateReturns = [] } = {}) {
   });
   trx.fn = { now: jest.fn(() => 'NOW()') };
   trx.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
-  return { trx, where, whereNull, update, returning, selectForOpenAlerts };
+  return {
+    trx, where, whereNull, whereNotNull, whereRaw, update, fallbackUpdate, returning, selectForOpenAlerts,
+  };
 }
 
 beforeEach(() => {
@@ -80,6 +85,21 @@ describe('resolveAlert auto stamp', () => {
     const patch = update.mock.calls[0][0];
     expect(patch).toEqual({ resolved_at: 'NOW()', resolved_by: 'tech-1' });
     expect(patch.payload).toBeUndefined();
+  });
+
+  test('a stale click cannot reopen an invoice review superseded by a payment transition', async () => {
+    const { trx, whereRaw, fallbackUpdate } = fakeTrx({ updateReturns: [[]] });
+
+    await dispatchAlerts.resolveAlert({
+      id: 'commercial-review-1', resolvedBy: 'tech-1', trx,
+    });
+
+    expect(whereRaw).toHaveBeenCalledWith(
+      "payload->>'superseded_at' IS NOT NULL AND type <> 'commercial_prepay_setup_review'",
+    );
+    expect(fallbackUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      resolved_by: 'tech-1',
+    }));
   });
 });
 

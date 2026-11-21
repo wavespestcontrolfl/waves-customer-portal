@@ -476,6 +476,9 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
       updates.paid_at = t.fn.now();
     }
     await t('invoices').where({ id: invoiceId }).update(updates);
+    if (fullyCovered) {
+      await require('./commercial-prepay-dispatch-review').reconcileInvoice(t, invoiceId);
+    }
     return {
       applied: applyAmt,
       creditApplied: newCreditApplied,

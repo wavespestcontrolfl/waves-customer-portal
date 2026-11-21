@@ -618,6 +618,12 @@ async function recordManualPayment(id, {
       critical: true,
       trx,
     });
+    // Off-provider repayment has no webhook replay. Persist the commercial
+    // original-invoice observation beside its receipt and audit marker; the
+    // classifier makes every unrelated invoice a cheap no-op.
+    if (!row.scheduled_service_id) {
+      await require('./commercial-prepay-dispatch-review').reconcileInvoice(trx, id);
+    }
     // The invoice is settled — an active payment plan has nothing left to
     // collect. Complete it on the SAME trx so a paid invoice never keeps
     // an `active` plan that blocks edits / credit reversal.
