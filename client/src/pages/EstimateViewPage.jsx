@@ -3809,6 +3809,8 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
   };
 
   const finish = (kind) => {
+    // Skip can follow a reason that failed to send: the closing screen never carries that error.
+    setError('');
     setDoneKind(kind);
     setStep('done');
   };

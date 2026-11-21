@@ -122,6 +122,18 @@ describe('SoftExitSheet', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
   });
 
+  it('Skip after a reason that failed to send closes with the general words and no error', async () => {
+    await openDecidingStep();
+    fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({}) });
+    fireEvent.click(screen.getByRole('button', { name: 'A lower price' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+    expect(screen.getByRole('dialog', { name: 'No rush' })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('a failed tap stays on the chooser: no reasons step without the signal', async () => {
     fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({}) });
     render(<SoftExitSheet token="tok" onClose={vi.fn()} onDeclined={vi.fn()} />);
