@@ -856,7 +856,8 @@ function slotTaken(slotId) {
 // that keeps an estimate hold (a re-tap, an extend, an accept) keep technician `techId` on `date`? Another truck may
 // have taken this far-south day while the hold was lapsed, or after it ran out while its writer waited on the date
 // lock. The zone is the hold's own stamp: the zone reserveSlot resolved for the estimate (resolveEstimateZone, the zone
-// the estimate page's list funnels by) and stamped, found again by its slug (only reserveSlot writes holds). So the
+// the estimate page's list funnels by) and stamped, found again by its slug (only reserveSlot writes holds), or, when
+// no row carries that slug any more, a row of the same funneled pool (zone-day-funnel.js zoneOfHoldStamp). So the
 // check covers exactly the holds that list funneled, and a refused write's next list no longer offers that truck that
 // day. A hold with no stamp (its estimate in no zone when held) is not checked: its list did not funnel it, and a
 // check would refuse a time that list offers again. true when the rule does not apply, with no read.
@@ -865,7 +866,7 @@ async function holdKeepsSouthDay(conn, { stamp, date, techId }) {
   const slug = String(stamp || '').trim().toLowerCase();
   if (!slug || techId == null || !funnel.perTruckLive() || !funnel.funnelOn()) return true;
   const zones = await conn('service_zones').select('id', 'cities', 'zone_name');
-  const estimateZone = zones.find((zone) => zoneSlugOf(zone) === slug) || null;
+  const estimateZone = funnel.zoneOfHoldStamp(zones, slug);
   return funnel.truckMayTakeDate(conn, { estimateZone, date, technicianId: techId });
 }
 

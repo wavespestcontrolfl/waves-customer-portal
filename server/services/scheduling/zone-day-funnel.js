@@ -68,7 +68,8 @@
  * row. The estimate page re-checks it under the same date lock at each hold
  * write: a new hold in the zone it stamps (reserveSlot), and a re-tap, an
  * extend and an accept in the hold's stamp (slot-reservation.js
- * holdKeepsSouthDay), the zone its list funneled. A hold that list did not
+ * holdKeepsSouthDay), the zone its list funneled (zoneOfHoldStamp: a stamp whose
+ * row is gone is checked in the same funneled pool). A hold that list did not
  * funnel (no stamp: its estimate in no zone when held) is not checked. The stop read
  * counts a hold by the real clock (clock_timestamp), not the writer's
  * transaction start; under the date lock it also counts a visit staff booked
@@ -337,6 +338,20 @@ async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
   return !dates.has(date) || onZoneDay(date, technicianId, dates, techs);
 }
 
+// The zone row a hold's zone stamp names, for the check at a kept hold's write (slot-reservation.js holdKeepsSouthDay).
+// The row with that slug: the row the hold's list funneled by. When no row carries the stamp any more (its zone was
+// renamed or removed while the hold was held), a funneled row the stamp matches by the stop read's own rule
+// (slugMatchesZone: every funneled slug names the one consolidated south pool), because the stop read still counts
+// the hold as that pool's stop; a row with cities first, so the unstamped stops match by city. Else null.
+function zoneOfHoldStamp(zones, stamp) {
+  const slug = String(stamp || '').trim().toLowerCase();
+  if (!slug) return null;
+  const own = zones.find((zone) => zoneSlugOf(zone) === slug);
+  if (own) return own;
+  const pool = zones.filter((zone) => isFunnelZone(zone) && slugMatchesZone(slug, zoneSlugOf(zone)));
+  return pool.find((zone) => (zone.cities || []).length) || pool[0] || null;
+}
+
 // The funnel for an offer pool that is not built by the estimate page (the lead assessment link:
 // routes/booking.js buildBookingAvailability, fed the lead's address text), read in two steps because that
 // builder keeps one technician per date and start: offerFunnelView before its claims (per truck,
@@ -401,6 +416,7 @@ module.exports = {
   applyZoneDayFunnel,
   dropOtherTruckDays,
   truckMayTakeDate,
+  zoneOfHoldStamp,
   offerFunnelView,
   funnelOfferPool,
   funnelZoneRows,
