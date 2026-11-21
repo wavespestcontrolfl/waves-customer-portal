@@ -900,6 +900,7 @@ module.exports = {
   splitStreetLineUnit,
   splitStreetLineUnitParts,
   splitUnitFirstLine,
+  unitOnlySegment,
   unitAnywhereOnLine,
   dwellingUnitOnLine,
   dwellingUnitOfUnitLine,

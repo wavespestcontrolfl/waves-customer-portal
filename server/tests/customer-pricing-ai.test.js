@@ -2254,14 +2254,14 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ has_multi_home: true }), expect.any(String), { unresolvedFails: true });
   });
 
-  test('absent when the premises proof says no or fails, or the account has no street with a city or zip', async () => {
+  test('absent when the premises proof says no or fails, or the account has no street with a city or zip, or a first line that names only a unit (codex pre-push r31 P1)', async () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';
     premises.mockResolvedValueOnce(false);
     expect('planStart' in await ask(plain())).toBe(false);
     premises.mockRejectedValueOnce(new Error('pg down'));
     expect('planStart' in await ask(plain())).toBe(false);
     premises.mockClear();
-    for (const street of [{ address_line1: null }, { city: null, zip: null }]) {
+    for (const street of [{ address_line1: null }, { city: null, zip: null }, { address_line1: '', address_line2: 'Apt 4' }, { address_line1: 'Apt 4' }]) {
       const result = await ask(plain(street));
       // Still priced: only the street check turns booking off.
       expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);

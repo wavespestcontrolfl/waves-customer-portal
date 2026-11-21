@@ -720,8 +720,16 @@ async function accountHasOtherProfile(dbh, customer) {
 // plan-free profile beside a member profile would sell a first plan. Any
 // other non-deleted profile counts, active or not, as the proof counts every
 // property row. Plan restart keeps the portal offer's default, as on main.
+// Both modes refuse a first line that names no street (codex pre-push r31
+// P1): blank with the unit on line 2, only a unit ("Apt 4", "#4", "Bldg 2"),
+// or no street name ("4"). Its key would be the unit alone ("4|city|zip"),
+// which names no house. A unit-first line names the street behind its unit
+// ("Unit 4, 100 Beach Rd").
 async function singlePremisesStreet(dbh, customer, { proof, strict = false } = {}) {
   const linkage = require('../estimate-property-linkage');
+  const { splitUnitFirstLine, unitOnlySegment } = require('../../utils/address-normalizer');
+  const streetText = String(splitUnitFirstLine(customer.address_line1)?.rest ?? customer.address_line1 ?? '').replace(/\s+/g, ' ').trim();
+  if (!/[a-z]/i.test(streetText) || unitOnlySegment(streetText)) return null;
   const street = linkage.normalizedStampedStreet(customer.address_line1, customer.address_line2, customer.city, customer.zip);
   if (!street || linkage.scopeKeyLacksLocality(street)) return null;
   // Through the exports, so a suite can stand in for the account read.
