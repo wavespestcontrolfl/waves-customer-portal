@@ -941,6 +941,14 @@ describe('planStartBlocker', () => {
       // home. A type in a payload is asked with a manager where the account is one, or where the payload itself
       // names one (the relationship the estimator resolved, or the caller of a call the payload keeps).
       const MANAGER_ACCOUNT = { customer: { contact_role: 'property_manager' } };
+      // A payload can keep the customer's other properties as a call described them (a lead does). An entry there
+      // is asked by the call's rule for a property: a building of units is a business with a manager only.
+      test("an estimate that keeps the list of a call's other properties reads each entry by the call's rule", async () => {
+        const estimate = (property_type) => ESTIMATE({ estimate_data: { ...ESTIMATE().estimate_data, additional_properties: [{ address_line1: '12 Example Test Way', is_rental: true, occupancy: 'rental_investment', property_type }] } });
+        expect(await blocker(withEstimates([ESTIMATE(), estimate('multi_family')]))).toBeNull();
+        expect(await blocker(withEstimates([ESTIMATE(), estimate('multi_family')], MANAGER_ACCOUNT))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE(), estimate('commercial')]))).toBe('commercial');
+      });
       test('a condo estimate on the account of a property manager, under either spelling of the type: commercial', async () => {
         expect(await blocker(withEstimates([ESTIMATE(), DRAFT(null)], MANAGER_ACCOUNT))).toBe('commercial');
         expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data: farDown({ property_type: 'condo_upper' }) })], MANAGER_ACCOUNT))).toBe('commercial');
@@ -1033,24 +1041,6 @@ describe('planStartBlocker', () => {
         expect(await blocker(withEstimates([ESTIMATE(), analysis]))).toBe(expected ? 'commercial' : null);
       });
 
-      // The proof writes the lookup's rule out (it cannot load a route module). This pins the rule it copies:
-      // when the lookup's rule changes, this fails, and lookupModelSaysBusiness in the proof follows it.
-      test("the lookup's rule for its model's answer is the one the proof copies", () => {
-        const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/property-lookup-v2.js'), 'utf8');
-        const start = source.indexOf('function hasStructuredCommercialAiSignal(');
-        const rule = source.slice(start, source.indexOf('\n}\n', start));
-        expect(rule.replace(/\s+/g, ' ')).toBe([
-          "function hasStructuredCommercialAiSignal(ai = {}) {",
-          "const propertyUse = String(ai?.propertyUse || '').trim().toUpperCase();",
-          "const commercialUseType = String(ai?.commercialUseType || '').trim().toUpperCase();",
-          "const nonCommercialUseTypes = ['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'];",
-          "if (['COMMERCIAL', 'MIXED'].includes(propertyUse)) return true;",
-          "if (!commercialUseType || nonCommercialUseTypes.includes(commercialUseType)) { return false; }",
-          "return commercialUseType === 'OTHER' || normalizePricingPropertyType(commercialUseType) === 'commercial';",
-        ].join(' '));
-        expect(source).toContain("const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');");
-      });
-
       // The converter's two rules are rules for a SERVICE LINE: they read the word in a line's name, label or
       // display name. A payload keeps other objects with a name (a contact, a product, a summary), and none of
       // those is a line. A service line is an item of a list of service lines, or an object that names a service.
@@ -1103,6 +1093,8 @@ describe('planStartBlocker', () => {
         ['the payload scan of the save', '../services/estimate-delivery-options', 'isCommercialEstimateData', (given) => given],
         ['the classifier of the accept routes', '../services/estimate-commercial-identity', 'isCommercialAutoAcceptEstimate', (given) => given?.estimate_data],
         ["the pricing engine's rule for a profile", '../services/pricing-engine/commercial-helpers', 'isCommercialProperty', (given) => given],
+        // The lookup's own rule, in the module the lookup route calls: the proof keeps no copy of it.
+        ["the lookup's rule for its model's answer", '../services/property-lookup/commercial-ai-signal', 'hasStructuredCommercialAiSignal', (given) => given],
         // The converter's two rules are asked of a service line, so their mark sits on an item of a list of lines.
         ["the converter's rule for the names of a service line", '../services/estimate-converter', 'isCommercialRecurringLine', (given) => given, true, { services: [{ depot: true }] }],
         // This rule answers a key, not a yes.
@@ -1368,6 +1360,56 @@ describe('planStartBlocker', () => {
 
       test.each([['owner_occupied'], ['rental_investment'], ['seasonal'], ['vacant'], ['unknown'], [null]])('a lead that keeps an extra property with the occupancy %j is not commercial', async (occupancy) => {
         expect(await blocker(withLeads([LEAD({ extracted_data: EXTRA_PROPERTY({ occupancy }) }), LEAD()]))).toBeNull();
+      });
+
+      // An extra property on a lead is the copy of what a call (or a form) said about the customer's other
+      // property. It is asked by the CALL's rule for a property, and by no mark of a payload: the pricing engine
+      // reads a building of units as commercial for a quote, and the call's rule does so for a manager only.
+      const RENTAL = (property_type, more = {}) => EXTRA_PROPERTY({ is_rental: true, occupancy: 'rental_investment', is_primary_residence: false, property_type, ...more });
+      test.each([
+        ['multi_family', null, 'commercial'], ['apartment', null, 'commercial'], ['Apartment complex', null, 'commercial'], ['condo', null, 'commercial'],
+        ['commercial', 'commercial', 'commercial'], ['office', 'commercial', 'commercial'], ['hoa_common_area', 'commercial', 'commercial'],
+        ['single_family', null, null], ['townhome', null, null], ['house', null, null], [null, null, null],
+      ])('a lead that keeps an extra property of the type %j: alone %j, with a manager %j', async (property_type, alone, withManager) => {
+        const lead = LEAD({ extracted_data: RENTAL(property_type) });
+        expect(await blocker(withLeads([LEAD(), lead]))).toBe(alone);
+        // The manager of the record: the account's role, or one the lead's own payload names.
+        expect(await blocker(withLeads([LEAD(), lead], { customer: { contact_role: 'property_manager' } }))).toBe(withManager);
+        const namesItsManager = LEAD({ extracted_data: { ...RENTAL(property_type), caller: { relationship_to_property: 'property_manager' } } });
+        expect(await blocker(withLeads([namesItsManager, LEAD()]))).toBe(withManager);
+      });
+
+      test('the same building of units as a property of the payload itself is read by the rules for a payload: commercial', async () => {
+        const entry = RENTAL('multi_family').additional_properties[0];
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { properties: [entry] } })]))).toBe('commercial');
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { property: entry } })]))).toBe('commercial');
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { additional_properties: [entry] } })]))).toBeNull();
+      });
+
+      test("no mark of the proof's own scan is read on an extra property: only the call's rule for a property", async () => {
+        // Each of these is a mark of the proof's scan anywhere else in a payload. The call's rule reads none of
+        // them on a property.
+        for (const more of [{ propertyUse: 'MIXED' }, { commercialUseType: 'OFFICE_RETAIL' }, { propertyType: 'Multi-Family' }, { occupancyType: 'hotel' }, { categoryConflict: 'property_manager:condo' }, { notes: 'commercial_pest' }]) {
+          expect(await blocker(withLeads([LEAD({ extracted_data: RENTAL('single_family', more) }), LEAD()]))).toBeNull();
+          expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { property: RENTAL('single_family', more).additional_properties[0] } })]))).toBe('commercial');
+        }
+        // The app's own classifier of a payload still gets the whole payload, as at a save, and its marks count
+        // wherever it reads them (the intakes keep no such field on an entry).
+        for (const more of [{ isCommercial: true }, { category: 'COMMERCIAL' }]) {
+          expect(require('../services/estimate-delivery-options').isCommercialEstimateData(RENTAL('single_family', more))).toBe(true);
+          expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: RENTAL('single_family', more) })]))).toBe('commercial');
+        }
+        // And each field the call's rule does read is a mark there, at any depth of the entry.
+        for (const more of [{ occupancy: 'commercial' }, { service_address_occupancy: 'commercial' }, { hoa_common_area_service: true }, { commercial_subtype: 'office' }, { unit: { occupancy: 'commercial' } }]) {
+          expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: RENTAL('single_family', more) })]))).toBe('commercial');
+        }
+      });
+
+      test('an extra property that is no list of entries carries no mark, and one entry alone is read', async () => {
+        for (const value of [null, 2, 'commercial_pest', [], [null, 'multi_family', 7]]) {
+          expect(await blocker(withLeads([LEAD({ extracted_data: { additional_properties: value } }), LEAD()]))).toBeNull();
+        }
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { additional_properties: { property_type: 'commercial' } } })]))).toBe('commercial');
       });
 
       // The lead's merge keeps every field of a property entry, so a field of a call's property can sit there.
@@ -1776,6 +1818,27 @@ describe('planStartBlocker', () => {
         })],
       ])('the call of a property manager where %s: commercial', async (_label, call) => {
         expect(await blocker(withCalls([CALL(), call, CALL()]))).toBe('commercial');
+      });
+
+      // The call processor copies a call's other properties to its lead: mapAdditionalPropertiesToLegacy makes the
+      // entries, mergeLeadExtractedData joins them to the lead's payload. The copy adds no evidence, so the account
+      // reads the same before the lead keeps it and after.
+      test.each([
+        ['a tenant', 'tenant', 'multi_family', null], ['a tenant', 'tenant', 'apartment', null], ['an owner', 'owner', 'condo', null], ['a caller with no stated role', null, 'multi_family', null],
+        ['a property manager', 'property_manager', 'multi_family', 'commercial'], ['a property manager', 'property_manager', 'condo', 'commercial'],
+        ['a tenant', 'tenant', 'commercial', 'commercial'],
+      ])('the call of %s (%j) about a second property of the type %j reads %j, before and after its lead keeps the copy', async (_who, relationship_to_property, property_type, expected) => {
+        const { mapAdditionalPropertiesToLegacy } = require('../utils/extraction-compat');
+        const { mergeLeadExtractedData } = require('../utils/lead-extracted-data-merge');
+        const property = SECOND(property_type);
+        const call = CALL(extraction({ caller: { relationship_to_property }, property }));
+        const copied = mergeLeadExtractedData({ pain_points: 'Ants in the kitchen.' }, { additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties) });
+        expect(copied.additional_properties).toEqual([expect.objectContaining({ address_line1: '12 Example Test Way', occupancy: 'rental_investment', property_type })]);
+        const lead = { is_commercial: false, is_residential: true, service_interest: 'Pest Control', extracted_data: copied };
+        expect(await blocker(withCalls([CALL(), call]))).toBe(expected);
+        expect(await blocker(world({ tables: { call_log: [CALL(), call], leads: [lead] } }))).toBe(expected);
+        // The lead alone says what the entry says, with no caller: a home, unless the entry is a business by itself.
+        expect(await blocker(world({ tables: { leads: [lead] } }))).toBe(property_type === 'commercial' ? 'commercial' : null);
       });
 
       test.each([['owner'], ['tenant'], ['hoa_board_member'], ['real_estate_agent'], ['unknown'], [null]])('a second property that is a condo, on the call of a caller with the relationship %j, is a home', async (relationship_to_property) => {

@@ -469,8 +469,10 @@ const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.m
 // - the answer of the lookup's model on the use of the property, which the
 //   lookup keeps under the same name in four words of its own (RESIDENTIAL,
 //   COMMERCIAL, MIXED, UNKNOWN) and beside a use type (commercialUseType).
-//   It is asked by the lookup's rule for that answer (lookupModelSaysBusiness
-//   below): a mixed use is a business there, and it is here;
+//   It is asked by the lookup's own rule for that answer
+//   (hasStructuredCommercialAiSignal in property-lookup/commercial-ai-signal.js,
+//   the last vote of the lookup for the category it saves): a mixed use is a
+//   business there, and it is here;
 // - the flag a call sets when the service is for the common areas of an
 //   association (hoa_common_area_service). The call system routes such a job
 //   commercial by definition: commercialCategoryConflict reads the flag
@@ -485,29 +487,13 @@ const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.m
 //   with the caller) or of the lookup's own (lookupCategoryConflict). A draft
 //   can be the only record of that call on the account. Any value that is
 //   set counts.
-// The lookup's rule for the answer of its model
-// (hasStructuredCommercialAiSignal in routes/property-lookup-v2.js, the last
-// vote of detectCategory for the category the lookup saves): the use
-// COMMERCIAL or MIXED, or a use type that is not one of the lookup's words
-// for "no" and that the pricing engine normalizes to commercial (or OTHER).
-// The rule is written out here with the engine's own normalizer: it lives in
-// a route module, and loading a route from this proof would load the whole
-// lookup.
-const LOOKUP_BUSINESS_USES = Object.freeze(['COMMERCIAL', 'MIXED']);
-const LOOKUP_NO_USE_TYPES = Object.freeze(['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL']);
-const upperWord = (value) => String(value || '').trim().toUpperCase();
-function lookupModelSaysBusiness(node) {
-  if (LOOKUP_BUSINESS_USES.includes(upperWord(node.propertyUse))) return true;
-  const useType = upperWord(node.commercialUseType);
-  if (!useType || LOOKUP_NO_USE_TYPES.includes(useType)) return false;
-  return useType === 'OTHER' || require('./pricing-engine/commercial-helpers').normalizePropertyType(useType) === 'commercial';
-}
 const OCCUPANCY_NAMES = Object.freeze(['bedbugOccupancyType', 'occupancyType', 'occupancy_type', 'occupancy', 'service_address_occupancy']);
 const COMMERCIAL_OCCUPANCIES = Object.freeze(['apartment', 'hotel', 'studenthousing', 'commercial']);
 const isCommercialOccupancy = (value) => COMMERCIAL_OCCUPANCIES.includes(String(value ?? '').trim().toLowerCase());
 function namesCommercialPremises(node, managed) {
+  const { hasStructuredCommercialAiSignal } = require('./property-lookup/commercial-ai-signal');
   return [node.property_type, node.propertyType].some((type) => isCommercialPropertyType(type, managed))
-    || estimatorReadsCommercial(node.propertyUse, managed) || lookupModelSaysBusiness(node)
+    || estimatorReadsCommercial(node.propertyUse, managed) || hasStructuredCommercialAiSignal(node)
     || OCCUPANCY_NAMES.some((name) => isCommercialOccupancy(node[name]))
     || node.hoa_common_area_service === true
     || isSet(node.categoryConflict);
@@ -565,12 +551,29 @@ const COMMERCIAL_KEY = /^commercial_[a-z0-9_:]*$/;
 // An object is an item of a list of service lines where the list sits under
 // one of LINE_LIST_NAMES (inLineList). A list in such a list keeps the place;
 // an object under a name of an item starts again.
+// One name holds no part of the payload's own: the customer's OTHER
+// properties (additional_properties), as a call's extraction describes them.
+// The intakes copy the list to a lead whole, each entry in the call's format
+// (normalizeAdditionalProperties in utils/intake-normalize.js makes the
+// entries of a call and of a web form; the call processor and the hold of an
+// unverified lead save them in extracted_data). So an entry there is asked
+// by the CALL's rule for a property (describesCommercialProperty below), with
+// the manager of the record, and by no mark of this scan: the copy of what a
+// call said says what the call said. The pricing engine reads the type
+// 'multi_family' as commercial for a quote; the call's rule reads it so for a
+// manager only, and the tenant of a unit in a second building stays a home,
+// on the call and on the lead made from it. (The app's own classifiers of a
+// payload get the whole payload, as at a save. None of them reads a property
+// type there.)
+const CALL_PROPERTIES_NAME = 'additional_properties';
 function payloadSaysCommercial(value, managed, inLineList = false) {
   if (typeof value === 'string') return COMMERCIAL_KEY.test(value.trim().toLowerCase());
   if (!value || typeof value !== 'object') return false;
   if (Array.isArray(value)) return value.some((item) => payloadSaysCommercial(item, managed, inLineList));
   return nodeSaysCommercial(value, managed, inLineList)
-    || Object.entries(value).some(([name, item]) => payloadSaysCommercial(item, managed, Array.isArray(item) && LINE_LIST_NAMES.includes(name)));
+    || Object.entries(value).some(([name, item]) => (name === CALL_PROPERTIES_NAME
+      ? someObject(item, (property) => describesCommercialProperty(property, managed))
+      : payloadSaysCommercial(item, managed, Array.isArray(item) && LINE_LIST_NAMES.includes(name))));
 }
 
 // The part of a payload that NO rule reads, under seven names, at any depth:

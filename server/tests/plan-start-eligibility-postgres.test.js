@@ -1089,6 +1089,26 @@ postgres('planStartBlocker (live Postgres)', () => {
       })).toBe('commercial');
     });
 
+    // The call processor copies a call's other properties to its lead (mapAdditionalPropertiesToLegacy, then
+    // mergeLeadExtractedData). The copy adds no evidence: the account reads the same with the call alone and with
+    // the call and the lead that keeps the copy.
+    test.each([
+      ['a tenant', 'tenant', 'multi_family', null], ['a caller with no stated role', null, 'apartment', null],
+      ['a property manager', 'property_manager', 'multi_family', 'commercial'], ['a tenant', 'tenant', 'commercial', 'commercial'],
+    ])('the call of %s (%j) about a second property of the type %j reads %j, before and after its lead keeps the copy', async (_who, relationship_to_property, property_type, expected) => {
+      const { mapAdditionalPropertiesToLegacy } = require('../utils/extraction-compat');
+      const { mergeLeadExtractedData } = require('../utils/lead-extracted-data-merge');
+      const property = { property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: 'rental_investment', property_type }] };
+      const call = enriched({ caller: { relationship_to_property }, property });
+      const copied = mergeLeadExtractedData({ pain_points: 'Ants in the kitchen.' }, { additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties) });
+      expect(copied.additional_properties).toEqual([expect.objectContaining({ address_line1: '12 Example Test Way', property_type })]);
+      expect(await blockerFor((customer) => seedCall(customer, call))).toBe(expected);
+      expect(await blockerFor(async (customer) => {
+        await seedCall(customer, call);
+        await seedLead(customer, { extracted_data: JSON.stringify(copied) });
+      })).toBe(expected);
+    });
+
     test('the call of a property manager about single homes only is not commercial', async () => {
       expect(await blockerFor((customer) => seedCall(customer, enriched({ ...MANAGER_CALLER, property: { property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', property_type: 'townhouse' }] } })))).toBeNull();
     });
