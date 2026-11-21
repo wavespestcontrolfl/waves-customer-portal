@@ -712,6 +712,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
       expect(mediaPayloads(t)).not.toContain(mixed);
       expect(mediaPayloads(t)).toContain(b64(800)); // the reply alone: it plays at once, until +1550
       expect(t.bridge.playbackEndsAt - t.bridge.sessionStartWall).toBe(1550);
+      expect(t.bridge.voiceEndsAt - t.bridge.sessionStartWall).toBe(1550);
       expect((await end(t)).after_barge_in_ambiguous_ms).toEqual([150]); // its voice at +1450, speech ended +1300
     });
 
@@ -834,6 +835,62 @@ describe('reply start on the continuous GPT-Live stream', () => {
     run(t, 7, silence(800)); // +1300..+2000
     delta(t, b64(800)); // the next reply at +2000
     expect((await end(t)).turns).toEqual([900]);
+  });
+
+  describe('the barge-in flush cuts queued voice only', () => {
+    const clears = (t) => t.twilio.sent.filter((m) => m.event === 'clear').length;
+
+    test('a caller question over queued silence flushes nothing: the answer is a turn', async () => {
+      const t = await start();
+      delta(t, b64(160)); // greeting
+      t.advance(1000);
+      delta(t, silence(4000)); // one burst after a stall: 500 ms of silence queued until +1500
+      t.advance(100);
+      said(t, 'hello', 600, 1000); // at +1100, with 400 ms of silence still queued
+      expect(clears(t)).toBe(0);
+      t.advance(800);
+      delta(t, b64(800)); // the answer at +1900, after a gap
+      const s = await end(t);
+      expect(s.turns).toEqual([900]);
+      expect(s.interruptions).toBe(0);
+      expect(s.after_barge_in_ambiguous_ms).toEqual([]);
+    });
+
+    test('voice queued behind silence is still flushed', async () => {
+      const t = await start();
+      delta(t, b64(160)); // greeting
+      t.advance(1000);
+      delta(t, silence(8000)); // one burst at +1000: 1000 ms of silence...
+      delta(t, b64(2400)); // ...then a reply: its voice plays +2000..+2300
+      t.advance(400);
+      said(t, 'wait', 1250, 1350); // at +1400: the caller spoke after the reply began to arrive
+      expect(clears(t)).toBe(1);
+    });
+
+    test('silence queued after the last voice of a reply is nothing to cut', async () => {
+      const t = await start();
+      delta(t, b64(160)); // greeting
+      t.advance(1000);
+      delta(t, Buffer.concat([Buffer.alloc(2400, 0x00), Buffer.alloc(5600, 0xff)]).toString('base64')); // voice +1000..+1300, then silence until +2000
+      t.advance(400);
+      said(t, 'ok', 1250, 1350); // at +1400: the voice has played, 600 ms of silence is queued
+      expect(clears(t)).toBe(0);
+    });
+
+    test('a flush leaves no voice queued: more caller speech sends no second clear', async () => {
+      const t = await start();
+      delta(t, b64(160)); // greeting
+      t.advance(1000);
+      delta(t, b64(8000)); // a reply...
+      t.advance(240);
+      delta(t, b64(8000)); // ...2000 ms of voice queued in all
+      t.advance(160);
+      said(t, 'wait', 1100, 1300); // barge-in at +1400
+      t.advance(100);
+      said(t, ' a moment', 1300, 1500); // at +1500
+      expect(clears(t)).toBe(1);
+      expect((await end(t)).interruptions).toBe(1);
+    });
   });
 
   test('caller speech over evenly paced voice: under 200 ms is queued, so nothing is flushed or dropped', async () => {

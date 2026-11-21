@@ -191,6 +191,7 @@ class LiveBridge {
     this.speechEndWall = null;
     this.awaitingReply = false;
     this.playbackEndsAt = 0;
+    this.voiceEndsAt = 0; // wall time Twilio finishes the last voiced sample forwarded (silence queued after it is nothing to cut)
     this.replyStartWall = null; // wall time the model's current reply began (its audio arrived)
     this.replyVoiceWall = null; // ...and when its first voiced sample reached the bridge (delays run to it)
     this.prevReplyStartWall = null; // ...and the reply before it
@@ -385,10 +386,12 @@ class LiveBridge {
   // not depend on how OpenAI cuts the stream into chunks. A voiced sample
   // starts a reply when it is the first voice of the call, or follows at least
   // REPLY_SILENCE_MIN_MS of silent audio, or follows an arrival gap. Returns
-  // the index of the first such sample, or -1. A chunk is one arrival: it
-  // marks one reply start at the most.
+  // the index of the first such sample (-1: none) and of the last voiced
+  // sample (-1: none). A chunk is one arrival: it marks one reply start at
+  // the most.
   scanModelAudio(audio) {
     let start = -1;
+    let last = -1;
     for (let i = 0; i < audio.length; i++) {
       if (!VOICED_BYTE[audio[i]]) {
         this.silentSamples += 1;
@@ -398,8 +401,9 @@ class LiveBridge {
       this.voiceSeen = true;
       this.gapSinceVoice = false;
       this.silentSamples = 0;
+      last = i;
     }
-    return start;
+    return { start, last };
   }
 
   onOutputAudio(msg) {
@@ -417,7 +421,7 @@ class LiveBridge {
     const audio = Buffer.from(msg.delta, 'base64');
     if (this.lastAudioAt !== null && t - this.lastAudioAt >= NEW_REPLY_GAP_MS) this.gapSinceVoice = true;
     this.lastAudioAt = t;
-    const start = this.scanModelAudio(audio);
+    const { start, last } = this.scanModelAudio(audio);
     // After a barge-in, audio that starts no reply is the cut-off reply's
     // tail: it is dropped, so the caller never hears it restart mid-sentence
     // (for TAIL_DROP_MAX_MS at the most). A reply start ends that: its chunk
@@ -444,7 +448,10 @@ class LiveBridge {
       // sample must not depend on a later flush.
       this.onReplyStart(t, ambiguous, t + (start - from) / MULAW_BYTES_PER_MS);
     }
-    this.playbackEndsAt = Math.max(t, this.playbackEndsAt) + (audio.length - from) / MULAW_BYTES_PER_MS;
+    // Twilio plays this chunk after whatever is still queued.
+    const playsAt = Math.max(t, this.playbackEndsAt);
+    if (last >= 0) this.voiceEndsAt = playsAt + (last + 1 - from) / MULAW_BYTES_PER_MS;
+    this.playbackEndsAt = playsAt + (audio.length - from) / MULAW_BYTES_PER_MS;
     const payload = from ? audio.subarray(from).toString('base64') : msg.delta;
     this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload } });
   }
@@ -490,6 +497,7 @@ class LiveBridge {
     if (text.trim() && this.isBargeIn(t, speechEnd)) {
       this.toTwilio({ event: 'clear', streamSid: this.streamSid });
       this.playbackEndsAt = t;
+      this.voiceEndsAt = t;
       this.tailDropSince = t;
       this.ambiguousUntil = t + TAIL_DROP_MAX_MS;
       this.interruptions += 1;
@@ -532,9 +540,11 @@ class LiveBridge {
   // A barge-in is caller speech that runs past the start of the reply still
   // playing. A late transcript of words the caller finished BEFORE the reply
   // began is not one: flushing then would cut the answer to their question.
-  // No timing, no flush.
+  // No timing, no flush. Silence queued at Twilio is nothing to cut: the check
+  // runs to the last voiced sample queued. A pause inside a reply still to
+  // play counts, because that reply is not over.
   isBargeIn(t, speechEnd) {
-    if (t >= this.playbackEndsAt - BARGE_IN_MARGIN_MS) return false; // nothing (much) left to cut
+    if (t >= this.voiceEndsAt - BARGE_IN_MARGIN_MS) return false; // no voice (much) left to cut
     if (speechEnd === null || this.replyStartWall === null) return false;
     return speechEnd > this.replyStartWall + BARGE_IN_MARGIN_MS;
   }
