@@ -392,9 +392,18 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } =
   if (!estData || typeof estData !== 'object') return false;
   const { lineNeedsReviewBeforeExactPrice } = require('../estimator-engine/draft-builder');
   const listsCodes = (list) => Array.isArray(list) && list.length > 0;
+  // The row test's zero-tree marker asks for the row's service. The mapped
+  // result keeps the Tree & Shrub pricer's treeCountSource on the selected
+  // program's meta (results.tsMeta), which names no service, so a price on a
+  // default of zero trees read as clean (pre-push r6 on this branch). Only
+  // that pricer writes the field: an object that holds it and names no
+  // service is graded as the tree_shrub row it describes. The meta keeps the
+  // palm count and its source and not the reserve state, so palms priced
+  // through an armed reserve do not clear it here.
+  const asRow = (c) => (c.treeCountSource !== undefined && c.service === undefined ? { ...c, service: 'tree_shrub' } : c);
   const markedForReview = (c, turfCounts) => listsCodes(c.fieldVerify) || listsCodes(c.fieldVerifyFlags)
     || (turfCounts && listsCodes(c.turfFlags))
-    || lineNeedsReviewBeforeExactPrice(c, { turfGrade: turfCounts });
+    || lineNeedsReviewBeforeExactPrice(asRow(c), { turfGrade: turfCounts });
   const turfSummaryCounts = (result) => replaysLawnSize || !Array.isArray(result.fieldVerify);
   const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';
   const servicePicks = (node, key, value) => node === estData && key === 'services' && isKeyed(value);

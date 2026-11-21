@@ -622,6 +622,33 @@ describe('buildReportCrossSell', () => {
         expect([name, flagged(line(fields))]).toEqual([name, true]);
       }
       expect(flagged({ engineResult: { fieldVerify: [], lineItems: [{ service: 'tree_shrub', treeCountSource: 'default_zero' }] } })).toBe(true);
+
+      // The mapped result keeps the tree-count source on the Tree & Shrub
+      // meta, which names no service (pre-push r6). Built with the real
+      // engine and the real mapper: a price on a default of zero trees
+      // demotes; a stated count or a density estimate does not.
+      const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+      const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+      const mappedQuote = (features, treeShrub = {}) => mapV1ToLegacyShape(generateEstimate({ ...inputs, propertyType: 'Single Family', estimatedTurfSf: 2500, features, services: { treeShrub } }));
+      const zeroTrees = mappedQuote({});
+      expect(zeroTrees.results.tsMeta).toMatchObject({ treeCountSource: 'default_zero' });
+      expect(zeroTrees.results.tsMeta.service).toBeUndefined();
+      expect(zeroTrees.fieldVerify).toEqual([]);
+      expect(flagged({ result: zeroTrees })).toBe(true);
+      for (const [name, quote, source] of [['stated count', mappedQuote({}, { treeCount: 4 }), 'explicit'], ['density', mappedQuote({ trees: 'moderate' }), 'density_estimate']]) {
+        expect([name, quote.results.tsMeta.treeCountSource, flagged({ result: quote })]).toEqual([name, source, false]);
+      }
+      // The meta alone, with the row test's palm rule: palms on the service
+      // line priced, so they clear it; a property palm count does not.
+      const meta = (fields) => ({ result: { fieldVerify: [], results: { tsMeta: { eb: 900, et: 0, ...fields } } } });
+      expect(flagged(meta({ treeCountSource: 'default_zero' }))).toBe(true);
+      expect(flagged(meta({ treeCountSource: 'default_zero', palmCount: 2, palmCountSource: 'property' }))).toBe(true);
+      expect(flagged(meta({ treeCountSource: 'default_zero', palmCount: 2, palmCountSource: 'service_line' }))).toBe(false);
+      for (const source of ['explicit', 'density_estimate', null]) {
+        expect([source, flagged(meta({ treeCountSource: source }))]).toEqual([source, false]);
+      }
+      // A row that names another service keeps its own identity.
+      expect(flagged({ result: { fieldVerify: [], lineItems: [{ service: 'pest_control', treeCountSource: 'default_zero' }] } })).toBe(false);
       // The mint holds a fresh result to the same row test: one function, so
       // a marker added for one is a marker for the other.
       const { lineNeedsReviewBeforeExactPrice } = require('../services/estimator-engine/draft-builder');
