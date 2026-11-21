@@ -54,18 +54,9 @@ function mulawToLinear(byte) {
   return u & 0x80 ? 0x84 - x : x - 0x84;
 }
 
-// First and last voiced sample index of a mu-law chunk; -1 for both when none.
-function voicedRange(buf) {
-  let first = -1;
-  let last = -1;
-  for (let i = 0; i < buf.length; i++) {
-    if (Math.abs(mulawToLinear(buf[i])) >= VOICED_SAMPLE_MIN) {
-      if (first < 0) first = i;
-      last = i;
-    }
-  }
-  return { first, last };
-}
+// Whether each mu-law byte is voice (digital silence is 0xFF and 0x7F).
+const VOICED_BYTE = Uint8Array.from({ length: 256 }, (_, b) => (Math.abs(mulawToLinear(b)) >= VOICED_SAMPLE_MIN ? 1 : 0));
+const REPLY_SILENCE_MIN_SAMPLES = REPLY_SILENCE_MIN_MS * MULAW_BYTES_PER_MS;
 
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
 
@@ -201,12 +192,13 @@ class LiveBridge {
     this.awaitingReply = false;
     this.queueEndsAt = 0; // when Twilio finishes playing everything forwarded so far, silence included
     this.playbackEndsAt = 0; // when the last VOICED model audio in that queue finishes playing
-    this.replyStartWall = null; // wall time the model's current reply began
+    this.replyStartWall = null; // wall time the model's current reply began (its first voiced sample arrived)
+    this.replyHeardWall = null; // ...and when Twilio plays that sample: later when audio is queued ahead of it
     this.prevReplyStartWall = null; // ...and the reply before it
     this.replySample = null; // { index, speechEnd } of the delay sample the current reply has
     this.lastAudioAt = null; // arrival time of the last model audio chunk
     this.voiceSeen = false; // a voiced chunk has arrived
-    this.silentRunMs = 0; // silent model audio (audio time) since the last voiced sample
+    this.silentSamples = 0; // silent model audio samples since the last voiced sample
     this.gapSinceVoice = false; // an arrival gap happened since the last voiced chunk
     this.tailDropSince = null; // a barge-in cleared Twilio at this time: drop the old reply's tail
 
@@ -390,6 +382,31 @@ class LiveBridge {
     for (const audio of opening) this.toOpenAi({ type: 'session.input_audio.append', audio });
   }
 
+  // One pass over a model audio chunk, sample by sample, so the result does
+  // not depend on how OpenAI cuts the stream into chunks. A voiced sample
+  // starts a reply when it is the first voice of the call, or follows at least
+  // REPLY_SILENCE_MIN_MS of silent audio, or follows an arrival gap. Returns
+  // the index of every such sample, and of the first and last voiced sample
+  // (-1 for a silent chunk).
+  scanModelAudio(audio) {
+    const starts = [];
+    let first = -1;
+    let last = -1;
+    for (let i = 0; i < audio.length; i++) {
+      if (!VOICED_BYTE[audio[i]]) {
+        this.silentSamples += 1;
+        continue;
+      }
+      if (!this.voiceSeen || this.gapSinceVoice || this.silentSamples >= REPLY_SILENCE_MIN_SAMPLES) starts.push(i);
+      this.voiceSeen = true;
+      this.gapSinceVoice = false;
+      this.silentSamples = 0;
+      if (first < 0) first = i;
+      last = i;
+    }
+    return { starts, first, last };
+  }
+
   onOutputAudio(msg) {
     if (typeof msg.delta !== 'string' || !msg.delta || !this.streamSid) return;
     const t = this.deps.now();
@@ -398,61 +415,60 @@ class LiveBridge {
     // on) with digital silence (every mu-law byte 0xFF) between utterances, so
     // arrival gaps do not mark replies. A reply starts at the first voiced
     // sample after at least REPLY_SILENCE_MIN_MS of silent audio, or after an
-    // arrival gap (OpenAI pausing the stream); the onset is refined to the
-    // voiced sample inside its chunk. Pauses inside one utterance are under
-    // about 500 ms. Silent chunks always go to Twilio. They take their place in
-    // Twilio's queue (queueEndsAt) but are not playback to cut: a barge-in
-    // flush fires only while voice is still queued (playbackEndsAt).
-    // After a barge-in, the cut-off reply's voiced tail is dropped (for
-    // TAIL_DROP_MAX_MS at the most) so the caller never hears it restart
-    // mid-sentence. GPT-Live audio carries no reply id or timing (OpenAI's
-    // guide), so a new reply inside the tail-drop window is ambiguous: a fast
-    // reply to the barge-in, or the tail after a network stall. It plays
-    // (cutting a real answer is worse) and its delay is kept apart from turns.
+    // arrival gap (OpenAI pausing the stream). Its delay runs to the moment
+    // Twilio plays that sample: after whatever audio is queued ahead of it.
+    // Pauses inside one utterance are under about 500 ms.
     const audio = Buffer.from(msg.delta, 'base64');
     if (this.lastAudioAt !== null && t - this.lastAudioAt >= NEW_REPLY_GAP_MS) this.gapSinceVoice = true;
     this.lastAudioAt = t;
-    const { first, last } = voicedRange(audio);
-    if (first < 0) {
-      this.silentRunMs += audio.length / MULAW_BYTES_PER_MS;
-      this.queueEndsAt = Math.max(t, this.queueEndsAt) + audio.length / MULAW_BYTES_PER_MS;
-      this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload: msg.delta } });
-      return;
+    const { starts, first, last } = this.scanModelAudio(audio);
+    // After a barge-in, voice that starts no reply is the cut-off reply's
+    // tail: it is dropped (for TAIL_DROP_MAX_MS at the most) so the caller
+    // never hears it restart mid-sentence. Silence always goes to Twilio. A
+    // chunk that holds the tail and then a new reply is forwarded from the
+    // reply on.
+    let from = 0;
+    if (this.tailDropSince !== null && last >= 0) {
+      if (!starts.length && t - this.tailDropSince < TAIL_DROP_MAX_MS) return;
+      if (starts.length && first < starts[0]) from = starts[0];
+      this.tailDropSince = null;
     }
-    const onset = t + first / MULAW_BYTES_PER_MS;
-    const newReply = !this.voiceSeen
-      || this.silentRunMs + first / MULAW_BYTES_PER_MS >= REPLY_SILENCE_MIN_MS
-      || this.gapSinceVoice;
-    this.voiceSeen = true;
-    this.silentRunMs = (audio.length - 1 - last) / MULAW_BYTES_PER_MS;
-    this.gapSinceVoice = false;
-    if (newReply) {
-      // The ambiguity window runs its full 1.5 s from the barge-in, apart from
-      // tail suppression (which the first new reply ends).
+    // Twilio plays this chunk after whatever is still queued (queueEndsAt).
+    // Silence takes its place in that queue but is not playback to cut: a
+    // barge-in flush fires only while voice is still queued (playbackEndsAt,
+    // the last voiced sample).
+    const playsAt = Math.max(t, this.queueEndsAt);
+    for (const i of starts) {
+      const offset = (i - from) / MULAW_BYTES_PER_MS; // where the sample sits in what is forwarded
+      const onset = t + offset; // arrival: orders replies against caller speech
+      // GPT-Live audio carries no reply id or timing (OpenAI's guide), so a
+      // reply that starts inside the 1.5 s after a barge-in is ambiguous: a
+      // fast reply to it, or the cut-off tail after a network stall. It plays
+      // (cutting a real answer is worse) and its delay is kept apart from turns.
       const ambiguous = this.ambiguousUntil !== null && onset < this.ambiguousUntil;
-      this.tailDropSince = null;
-      this.onReplyStart(onset, ambiguous);
-    } else if (this.tailDropSince !== null) {
-      if (t - this.tailDropSince < TAIL_DROP_MAX_MS) return;
-      this.tailDropSince = null;
+      this.onReplyStart(onset, ambiguous, playsAt + offset);
     }
-    this.queueEndsAt = Math.max(t, this.queueEndsAt) + audio.length / MULAW_BYTES_PER_MS;
-    this.playbackEndsAt = this.queueEndsAt - this.silentRunMs; // at the chunk's last voiced sample
-    this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload: msg.delta } });
+    this.queueEndsAt = playsAt + (audio.length - from) / MULAW_BYTES_PER_MS;
+    if (last >= 0) this.playbackEndsAt = this.queueEndsAt - (audio.length - 1 - last) / MULAW_BYTES_PER_MS;
+    const payload = from ? audio.subarray(from).toString('base64') : msg.delta;
+    this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload } });
   }
 
   // The pending measure is consumed only here, by a reply start. The first
   // reply start is the greeting (sent at session.started): it is never timed,
-  // even when the caller spoke before it.
-  onReplyStart(t, ambiguous = false) {
+  // even when the caller spoke before it. Which reply answers which speech is
+  // decided on arrival times (t); the delay itself runs to the moment the
+  // caller hears the reply (heardAt).
+  onReplyStart(t, ambiguous, heardAt) {
     const greeting = this.replyStartWall === null;
     this.prevReplyStartWall = this.replyStartWall;
     this.replyStartWall = t;
+    this.replyHeardWall = heardAt;
     this.replySample = null;
     this.replyAmbiguous = ambiguous;
     if (ambiguous) {
       if (this.awaitingReply && this.speechEndWall !== null) {
-        this.ambiguousReplies.push(Math.max(0, Math.round(t - this.speechEndWall)));
+        this.ambiguousReplies.push(Math.max(0, Math.round(heardAt - this.speechEndWall)));
         this.replySample = { index: this.ambiguousReplies.length - 1, speechEnd: this.speechEndWall };
       }
       this.awaitingReply = false;
@@ -462,10 +478,10 @@ class LiveBridge {
     // it may instead be the answer: that delay is kept apart, never mixed into
     // the per-turn delays and never lost.
     if (greeting && this.awaitingReply && this.speechEndWall !== null) {
-      this.firstReplyAmbiguousMs = Math.max(0, Math.round(t - this.speechEndWall));
+      this.firstReplyAmbiguousMs = Math.max(0, Math.round(heardAt - this.speechEndWall));
     }
     if (!greeting && this.awaitingReply && this.speechEndWall !== null) {
-      this.latencies.push(Math.max(0, Math.round(t - this.speechEndWall)));
+      this.latencies.push(Math.max(0, Math.round(heardAt - this.speechEndWall)));
       this.replySample = { index: this.latencies.length - 1, speechEnd: this.speechEndWall };
     }
     this.awaitingReply = false;
@@ -499,7 +515,7 @@ class LiveBridge {
       this.awaitingReply = true;
       return;
     }
-    const delay = Math.max(0, Math.round(this.replyStartWall - speechEnd));
+    const delay = Math.max(0, Math.round(this.replyHeardWall - speechEnd));
     if (this.prevReplyStartWall === null) {
       // A late transcript of speech that ended before the FIRST reply: that
       // reply may be the greeting or an answer, so the delay refines the
@@ -521,8 +537,9 @@ class LiveBridge {
     }
   }
 
-  // A barge-in is caller speech that runs past the start of the reply still
-  // playing. A late transcript of words the caller finished BEFORE the reply
+  // A barge-in is caller speech that runs past the moment the caller began to
+  // hear the reply still playing (replyHeardWall: a reply queued behind other
+  // audio is heard later than it arrived). A late transcript of words the caller finished BEFORE the reply
   // began is not one: flushing then would cut the answer to their question.
   // No timing, no flush.
   // The flush covers only voice already queued at Twilio, which GPT-Live can
@@ -532,8 +549,8 @@ class LiveBridge {
   // voice flushes nothing and drops nothing.
   isBargeIn(t, speechEnd) {
     if (t >= this.playbackEndsAt - BARGE_IN_MARGIN_MS) return false; // nothing (much) left to cut
-    if (speechEnd === null || this.replyStartWall === null) return false;
-    return speechEnd > this.replyStartWall + BARGE_IN_MARGIN_MS;
+    if (speechEnd === null || this.replyHeardWall === null) return false;
+    return speechEnd > this.replyHeardWall + BARGE_IN_MARGIN_MS;
   }
 
   // usage.seconds is a running total ("use the latest usage.seconds"): keep
