@@ -76,7 +76,10 @@ const { customersWithStreetLineHoldingLocality, customersWithUnpinnedSavedAddres
 const { runPredicate } = require('../services/completion-record-invariants');
 const {
   runLeadToCashInvariantSweep, DETECTORS,
-  _private: { runDetectors, composeReport, failingItems, SEND_MARKER_KEY, DIGEST_KEY, RUN_STATE_KEY, REPEAT_AFTER_MS, REPLACEABLE, SAMPLE_IDS, CLOSEOUT_VISIT_CAP },
+  _private: {
+    runDetectors, composeReport, failingItems, recordIdentity,
+    SEND_MARKER_KEY, RECORD_KEY, STANDING_KEY, RUN_STATE_KEY, REPEAT_AFTER_MS, RECORD_DEDUPE_MS, SAMPLE_IDS, CLOSEOUT_VISIT_CAP,
+  },
 } = require('../services/lead-to-cash-invariants');
 
 const NOW = new Date('2026-06-15T10:55:00Z'); // 06:55 ET, any fixed instant (no near-today literal semantics)
@@ -104,6 +107,16 @@ describe('registry contract', () => {
       expect(typeof d.run).toBe('function');
     }
     expect(Object.isFrozen(DETECTORS)).toBe(true);
+  });
+
+  // A check whose query is bound to a look-back or look-ahead date can lose a finding with nothing fixed, so its failures
+  // post as records, never in the standing list a clean run closes. A new detector with such a date filter joins this list.
+  test('the moving-window checks are the closeout day, the 14-day welcome audit and the ghost lanes', () => {
+    expect(DETECTORS.filter((d) => d.moving).map((d) => d.key).sort())
+      .toEqual(['closeout_failed_facts', 'completion_lane_ghost_lanes', 'new_plan_without_welcome']);
+    // Only the closeout check reads a different window on each run (yesterday).
+    expect(DETECTORS.filter((d) => d.freshEachRun).map((d) => d.key)).toEqual(['closeout_failed_facts']);
+    for (const d of DETECTORS) if (d.freshEachRun) expect(d.moving).toBe(true);
   });
 
   test('scheduler registers the sweep at 6:55 ET with a lazy require and job_health rethrow', () => {
@@ -210,10 +223,9 @@ describe('runLeadToCashInvariantSweep', () => {
       alert.metadata = options.metadata;
       return alert;
     });
-    // The retire a clean run asks for, as the database applies it: only a row whose metadata contains whereMeta.
-    const resolve = jest.spyOn(opsDigest, 'resolveOpsDigest').mockImplementation(async ({ whereMeta } = {}) => {
-      const matches = Object.entries(whereMeta || {}).every(([k, v]) => alert.metadata?.[k] === v);
-      if (!matches) return 0;
+    // A retire, as the database applies it: only the rows of the key it names.
+    const resolve = jest.spyOn(opsDigest, 'resolveOpsDigest').mockImplementation(async ({ key }) => {
+      if (alert.metadata?.opsKey !== key) return 0;
       alert.read_at = 'resolved';
       alert.metadata.resolved = true;
       return 1;
@@ -224,7 +236,7 @@ describe('runLeadToCashInvariantSweep', () => {
       getCloseoutStatus.mockResolvedValue({ found: true, summary: { failed: ['license_current'], contradictions: [] } });
       expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [closeout] })).toMatchObject({ sent: true, violations: 1 });
       expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-      expect(alert.metadata).toMatchObject({ opsKey: 'lead-to-cash-invariants', standingOnly: false });
+      expect(alert.metadata).toMatchObject({ opsKey: 'lead-to-cash-invariants' });
       expect(alert.metadata).not.toHaveProperty('fallOff');
 
       mockTables.scheduled_services = mockChain({ select: [] });
@@ -233,9 +245,10 @@ describe('runLeadToCashInvariantSweep', () => {
         skipped: 'clean', results: { closeout_failed_facts: 0 },
       });
       expect(getCloseoutStatus).toHaveBeenCalledTimes(1); // The older visit was not rechecked.
-      // The clean run retires only alerts stamped standingOnly: true. This one records a closeout failure.
-      expect(resolve).toHaveBeenCalledTimes(1);
-      expect(resolve).toHaveBeenCalledWith({ key: DIGEST_KEY, source: null, resolvedBy: `${DIGEST_KEY}:clean-run`, whereMeta: { standingOnly: true } });
+      // The clean run closes the standing list only. The closeout failure is a record under its own key.
+      expect(resolve).toHaveBeenCalled();
+      for (const [args] of resolve.mock.calls) expect(args).toEqual({ key: STANDING_KEY, source: null, resolvedBy: `${STANDING_KEY}:clean-run` });
+      expect(alert.metadata.opsKey).toBe(RECORD_KEY);
       expect(alert.read_at).toBeNull();
       expect(alert.metadata).not.toHaveProperty('resolved');
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
@@ -301,18 +314,18 @@ describe('runLeadToCashInvariantSweep', () => {
   });
 });
 
-// Owner 2026-11-20 "go" (data-check audit step 4): the sweep posted the same standing list every morning, 45 alerts
-// in 45 days, each closed by hand. A new failing check posts; a higher count alone does not; an unchanged list posts
-// again after 7 days. A check that reads a moving window (closeout: 1 day; welcome text: 14 days) posts again before its
-// window passes, and an alert that lists one is never closed or replaced by the sweep.
-describe('one alert, not one a day', () => {
+// Owner 2026-11-20 "go" (data-check audit step 4). The sweep posted one alert every morning; most checks read standing
+// state, so the same list came back daily (45 alerts in 45 days, each closed by hand). In the app it now keeps a
+// STANDING LIST (one open alert, replaced on a new failing check or weekly, closed by a clean run) and RECORDS (one
+// immutable row for each new set of moving-window failures). The email path is unchanged and is covered above.
+describe('two alerts, not one a day (in the app)', () => {
   const DAY = 24 * 60 * 60 * 1000;
   const fails = (key, count = 1) => det(key, async () => ({ count, ids: Array.from({ length: count }, (_, i) => `${key}-${i}`) }));
-  // A check that reads only the last `days` days (registry `windowDays`).
-  const windowed = (key, days, count = 1) => ({ ...fails(key, count), windowDays: days });
+  const moving = (key, ids, extra = {}) => ({ ...det(key, async () => ({ count: ids.length, ids })), moving: true, ...extra });
+  const posts = () => NotificationService.notifyAdmin.mock.calls.map(([, title, , options]) => ({ title, ...options }));
   const lastRun = (items, alertedAgoMs) => {
     mockTables.ops_email_send_state = mockChain({ first: null });
-    mockTables.system_settings = mockChain({
+    mockTables.system_settings = mockChain(items === undefined ? { first: null } : {
       first: { value: JSON.stringify({ items, alertedAt: alertedAgoMs == null ? null : new Date(NOW.getTime() - alertedAgoMs).toISOString() }) },
     });
   };
@@ -320,141 +333,191 @@ describe('one alert, not one a day', () => {
     const call = mockTables.system_settings.insert.mock.calls.at(-1);
     return call ? { key: call[0].key, ...JSON.parse(call[0].value) } : null;
   };
+  let resolve;
 
-  test('the same failing check with a higher count posts nothing and keeps the time of the last alert', async () => {
-    lastRun(['b'], DAY);
-    const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [ok('a'), fails('b', 9)] });
-    expect(res).toEqual({ skipped: 'no_new_item', results: { a: 0, b: 9 } });
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(mockTables.ops_email_send_state.insert).not.toHaveBeenCalled();
-    expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: ['b'], alertedAt: new Date(NOW.getTime() - DAY).toISOString() });
+  beforeEach(() => {
+    gateEnvValue.mockReturnValue(true);
+    NotificationService.notifyAdmin.mockImplementation(async (_category, _title, _body, options) => ({ id: `row-${NotificationService.notifyAdmin.mock.calls.length}`, metadata: options.metadata }));
+    NotificationService._private = { openToCloser: (q) => q, doneColumns: () => ({}) };
+    mockTables.notifications = mockChain();
+    resolve = jest.spyOn(opsDigest, 'resolveOpsDigest').mockResolvedValue(0);
+  });
+  afterEach(() => {
+    resolve.mockRestore();
+    delete NotificationService._private;
+    NotificationService.notifyAdmin.mockReset();
   });
 
-  test('a check that was not failing on the last run posts an alert and stamps the alert time', async () => {
-    lastRun(['b'], DAY);
-    const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), fails('b')] });
-    expect(res).toMatchObject({ sent: true, violations: 2 });
-    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
-    expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: ['a', 'b'], alertedAt: NOW.toISOString() });
+  describe('the standing list', () => {
+    test('the first failing run posts one standing alert: its own key, pinned, and it replaces the older one', async () => {
+      lastRun(undefined);
+      const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a', 3), ok('b')] });
+      expect(res).toEqual({ sent: true, violations: 3, unavailable: 0, results: { a: 3, b: 0 } });
+      expect(posts()).toHaveLength(1);
+      const [post] = posts();
+      expect(post.metadata).toMatchObject({ opsKey: STANDING_KEY, fallOff: true, kind: 'FIX', audience: 'engineering' });
+      expect(post.metadata.subject).toMatch(/^FIX: lead-to-cash standing list — 3 violations across 1 check \(/);
+      expect(post.detail).toContain('Standing list: one open alert.');
+      expect(post).not.toHaveProperty('dedupeKey'); // a new row each time, so the nightly tab sees a new alert
+      // supersedePrior: every older open row of the STANDING key closes; the record key is never named.
+      expect(mockTables.notifications.whereRaw).toHaveBeenCalledWith("metadata->>'opsKey' = ?", [STANDING_KEY]);
+      expect(mockTables.notifications.whereRaw).not.toHaveBeenCalledWith("metadata->>'opsKey' = ?", [RECORD_KEY]);
+      expect(mockTables.notifications.update).toHaveBeenCalledTimes(1);
+      expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: ['a'], alertedAt: NOW.toISOString() });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+
+    test('the same failing check with a higher count posts nothing and keeps the time of the last alert', async () => {
+      lastRun(['b'], DAY);
+      const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [ok('a'), fails('b', 9)] });
+      expect(res).toEqual({ skipped: 'no_new_item', results: { a: 0, b: 9 } });
+      expect(posts()).toHaveLength(0);
+      expect(resolve).not.toHaveBeenCalled(); // the list still stands: nothing is closed
+      expect(mockTables.ops_email_send_state.insert).not.toHaveBeenCalled();
+      expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: ['b'], alertedAt: new Date(NOW.getTime() - DAY).toISOString() });
+    });
+
+    test('a check that was not failing on the last run posts a new alert', async () => {
+      lastRun(['b'], DAY);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), fails('b')] })).toMatchObject({ sent: true, violations: 2 });
+      expect(posts()).toHaveLength(1);
+      expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: ['a', 'b'], alertedAt: NOW.toISOString() });
+    });
+
+    test('a check that cleared and came back is new: the last RUN is the comparison, not the last alert', async () => {
+      lastRun(['a', 'b'], 2 * DAY);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), ok('b')] })).toMatchObject({ skipped: 'no_new_item' });
+      expect(savedState().items).toEqual(['a']); // b cleared: it is no longer on the list
+      lastRun(savedState().items, 2 * DAY);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), fails('b')] })).toMatchObject({ sent: true });
+    });
+
+    test('a check that cannot run where it failed before is a new item', async () => {
+      lastRun(['b'], DAY);
+      const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [det('b', async () => { throw new Error('x'); })] });
+      expect(res).toMatchObject({ sent: true, unavailable: 1 });
+      expect(failingItems([{ key: 'b', ok: false, unavailable: true }, { key: 'a', ok: false }, { key: 'c', ok: true }])).toEqual(['a', 'b:unavailable']);
+    });
+
+    test('an unchanged list posts again on the 7th daily run after the last alert, not on the 6th', async () => {
+      // The 6th run is 6 days after the alert; the 7th is 7 days, give or take the cron's seconds of jitter.
+      expect(REPEAT_AFTER_MS).toBeGreaterThan(6 * DAY + 60 * 60 * 1000);
+      expect(REPEAT_AFTER_MS).toBeLessThan(7 * DAY - 60 * 60 * 1000);
+      lastRun(['b'], 6 * DAY + 30 * 1000);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ skipped: 'no_new_item' });
+      lastRun(['b'], 7 * DAY - 30 * 1000);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+    });
+
+    test('a run state that is missing, unreadable or has no alert time never hides a finding', async () => {
+      lastRun(undefined);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+      mockTables.system_settings = mockChain({ first: { value: '{not json' } });
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+      mockTables.system_settings = mockChain();
+      mockTables.system_settings.first = jest.fn(async () => { throw new Error('relation does not exist'); });
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+      lastRun(['b'], null);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+      expect(posts()).toHaveLength(4);
+    });
+
+    test('a clean run closes the standing list by its own key and empties the run state, keeping the alert time', async () => {
+      lastRun(['b'], DAY);
+      resolve.mockResolvedValue(1);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [ok('a'), ok('b')] })).toEqual({ skipped: 'clean', results: { a: 0, b: 0 } });
+      expect(resolve).toHaveBeenCalledTimes(1);
+      expect(resolve).toHaveBeenCalledWith({ key: STANDING_KEY, source: null, resolvedBy: `${STANDING_KEY}:clean-run` });
+      expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: [], alertedAt: new Date(NOW.getTime() - DAY).toISOString() });
+      expect(posts()).toHaveLength(0);
+    });
   });
 
-  test('a check that cleared and came back is new: the last RUN is the comparison, not the last alert', async () => {
-    lastRun(['a', 'b'], 2 * DAY);
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), ok('b')] })).toMatchObject({ skipped: 'no_new_item' });
-    expect(savedState().items).toEqual(['a']); // b cleared: it is no longer on the list
-    lastRun(savedState().items, 2 * DAY);
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), fails('b')] })).toMatchObject({ sent: true });
-  });
+  describe('records (moving-window checks)', () => {
+    const closeout = (ids) => moving('closeout_failed_facts', ids, { freshEachRun: true });
+    const welcome = (ids) => moving('new_plan_without_welcome', ids);
 
-  test('a check that fails closed (cannot run) where it failed before is a new item', async () => {
-    lastRun(['b'], DAY);
-    const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [det('b', async () => { throw new Error('x'); })] });
-    expect(res).toMatchObject({ sent: true, unavailable: 1 });
-    expect(failingItems([{ key: 'b', ok: false, unavailable: true }, { key: 'a', ok: false }, { key: 'c', ok: true }])).toEqual(['a', 'b:unavailable']);
-  });
+    test('a moving-window failure posts as a record: the old key, immutable, deduped by what it reports', async () => {
+      lastRun([], DAY);
+      const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [ok('a'), closeout(['v1 [license_current]'])] });
+      expect(res).toMatchObject({ sent: true, violations: 1 });
+      expect(posts()).toHaveLength(1);
+      const [post] = posts();
+      expect(post.metadata).toMatchObject({ opsKey: RECORD_KEY, kind: 'FIX' });
+      expect(post.metadata.subject).toMatch(/^FIX: lead-to-cash invariants — 1 violation across 1 check \(/);
+      // Nothing can resolve a record, so it is not pinned, not refreshed and it replaces nothing.
+      expect(post.metadata).not.toHaveProperty('fallOff');
+      expect(post).not.toHaveProperty('refreshOnDedupe');
+      expect(post.dedupeKey).toMatch(/^ops-digest:lead-to-cash-record:[0-9a-f]{20}$/);
+      expect(post.dedupeWindowMs).toBe(RECORD_DEDUPE_MS);
+      expect(RECORD_DEDUPE_MS).toBeGreaterThan(14 * DAY); // longer than the longest moving window
+      expect(mockTables.notifications.update).not.toHaveBeenCalled();
+      // The record lists the moving-window checks only; the standing checks have their own alert.
+      expect(post.detail).toContain('FAIL closeout_failed_facts — 1');
+      expect(post.detail).not.toContain('OK   a');
+    });
 
-  test('an unchanged list posts again on the 7th daily run after the last alert, not on the 6th', async () => {
-    // The 6th run is 6 days after the alert; the 7th is 7 days, give or take the cron's seconds of jitter.
-    expect(REPEAT_AFTER_MS).toBeGreaterThan(6 * DAY + 60 * 60 * 1000);
-    expect(REPEAT_AFTER_MS).toBeLessThan(7 * DAY - 60 * 60 * 1000);
-    lastRun(['b'], 6 * DAY + 30 * 1000);
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ skipped: 'no_new_item' });
-    lastRun(['b'], 7 * DAY - 30 * 1000);
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
-  });
+    test('a closeout failure never joins or disturbs the standing list (the pinned alert stays)', async () => {
+      // Day 2 of a standing failure, with a closeout failure beside it: one record, no new standing alert, no close.
+      lastRun(['a'], DAY);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a', 5), closeout(['v1 [x]'])] })).toMatchObject({ sent: true });
+      expect(posts().map((p) => p.metadata.opsKey)).toEqual([RECORD_KEY]);
+      expect(posts()[0].detail).not.toContain('FAIL a');
+      expect(resolve).not.toHaveBeenCalled();
+      expect(mockTables.notifications.update).not.toHaveBeenCalled(); // nothing superseded
+      expect(savedState()).toMatchObject({ items: ['a'] });
+    });
 
-  test('only the closeout and welcome checks read a moving window, and the welcome window matches its audit', () => {
-    const windows = Object.fromEntries(DETECTORS.filter((d) => d.windowDays).map((d) => [d.key, d.windowDays]));
-    const welcome = fs.readFileSync(path.join(__dirname, '..', 'services', 'new-recurring-welcome-sms.js'), 'utf8');
-    const auditDays = Number(welcome.match(/^const WELCOME_AUDIT_WINDOW_DAYS = (\d+);$/m)[1]);
-    expect(windows).toEqual({ closeout_failed_facts: 1, new_plan_without_welcome: auditDays });
-  });
+    test('a new standing check and a moving-window failure on the same run post one alert each', async () => {
+      lastRun(['a'], DAY);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), fails('b'), welcome(['c1'])] })).toMatchObject({ sent: true, violations: 3 });
+      expect(posts().map((p) => p.metadata.opsKey)).toEqual([STANDING_KEY, RECORD_KEY]);
+      expect(posts()[0].detail).not.toContain('new_plan_without_welcome');
+    });
 
-  test('a 1-day window failure (closeout) posts on every daily run, even when the last run listed it', async () => {
-    lastRun(['closeout_failed_facts'], DAY - 30 * 1000);
-    const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [windowed('closeout_failed_facts', 1)] });
-    expect(res).toMatchObject({ sent: true, violations: 1 });
-    // A closeout check that could not run did not verify the day: the same rule.
-    lastRun(['closeout_failed_facts:unavailable'], DAY - 30 * 1000);
-    const down = { ...windowed('closeout_failed_facts', 1), run: async () => { throw new Error('x'); } };
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [down] })).toMatchObject({ sent: true, unavailable: 1 });
-  });
+    test('with every standing check clean, a moving-window failure still lets the standing list close', async () => {
+      lastRun(['a'], DAY);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [ok('a'), welcome(['c1'])] })).toMatchObject({ sent: true });
+      expect(resolve).toHaveBeenCalledWith({ key: STANDING_KEY, source: null, resolvedBy: `${STANDING_KEY}:clean-run` });
+      expect(resolve).not.toHaveBeenCalledWith(expect.objectContaining({ key: RECORD_KEY }));
+      expect(savedState()).toMatchObject({ items: [] });
+    });
 
-  test('a moving-window failure posts again before its window passes, so each finding is listed once', async () => {
-    // A 3-day window: the 2nd daily run after the alert stays quiet, the 3rd posts.
-    lastRun(['w'], 2 * DAY + 30 * 1000);
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [windowed('w', 3)] })).toMatchObject({ skipped: 'no_new_item' });
-    lastRun(['w'], 3 * DAY - 30 * 1000);
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [windowed('w', 3)] })).toMatchObject({ sent: true });
-    // The 14-day welcome window is longer than the weekly repeat, so the weekly repeat governs.
-    lastRun(['new_plan_without_welcome'], 6 * DAY + 30 * 1000);
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [windowed('new_plan_without_welcome', 14)] })).toMatchObject({ skipped: 'no_new_item' });
-    lastRun(['new_plan_without_welcome'], 7 * DAY - 30 * 1000);
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [windowed('new_plan_without_welcome', 14)] })).toMatchObject({ sent: true });
-  });
+    test('the record identity: same findings = same record; a new finding, a new day of closeouts or a longer list = a new one', async () => {
+      const result = (key, sample, extra = {}) => ({ key, ok: false, unavailable: false, moving: true, freshEachRun: false, sample, count: sample.length, truncated: false, ...extra });
+      const tomorrow = new Date(NOW.getTime() + DAY);
+      // A 14-day window: the same signups on the next day are the same record, in any order.
+      expect(recordIdentity([result('w', ['c1', 'c2'])], NOW)).toBe(recordIdentity([result('w', ['c2', 'c1'])], tomorrow));
+      expect(recordIdentity([result('w', ['c1', 'c2'])], NOW)).not.toBe(recordIdentity([result('w', ['c1', 'c2', 'c3'])], NOW));
+      // A check that passes is not part of the identity.
+      expect(recordIdentity([result('w', ['c1']), { key: 'x', ok: true, moving: true, sample: [] }], NOW)).toBe(recordIdentity([result('w', ['c1'])], NOW));
+      // The closeout check reads a different day on each run: "could not run" on two days is two records.
+      const down = { key: 'closeout_failed_facts', ok: false, unavailable: true, moving: true, freshEachRun: true, sample: [], count: 0, truncated: false };
+      expect(recordIdentity([down], NOW)).not.toBe(recordIdentity([down], tomorrow));
+      expect(recordIdentity([{ ...down, freshEachRun: false }], NOW)).toBe(recordIdentity([{ ...down, freshEachRun: false }], tomorrow));
+      // Past the sample only the count can show a change.
+      const capped = (count) => result('w', ['c1'], { truncated: true, count });
+      expect(recordIdentity([capped(30)], NOW)).not.toBe(recordIdentity([capped(31)], NOW));
+    });
 
-  test('a run state that is missing, unreadable or has no alert time never hides a finding', async () => {
-    mockTables.ops_email_send_state = mockChain({ first: null });
-    mockTables.system_settings = mockChain({ first: null });
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
-    mockTables.system_settings = mockChain({ first: { value: '{not json' } });
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
-    mockTables.system_settings = mockChain();
-    mockTables.system_settings.first = jest.fn(async () => { throw new Error('relation does not exist'); });
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
-    lastRun(['b'], null);
-    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
-    expect(sendgrid.sendOne).toHaveBeenCalledTimes(4);
+    test('the same welcome finding on the next day goes to the feed under the same dedupe key (no second row)', async () => {
+      lastRun([], DAY);
+      await runLeadToCashInvariantSweep({ now: NOW, detectors: [welcome(['c1'])] });
+      mockTables.ops_email_send_state = mockChain({ first: null });
+      await runLeadToCashInvariantSweep({ now: new Date(NOW.getTime() + DAY), detectors: [welcome(['c1'])] });
+      const keys = posts().map((p) => p.dedupeKey);
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toBe(keys[1]);
+    });
   });
 
   test('a failed send leaves the run state alone, so the next run still sees the item as new', async () => {
     lastRun(['b'], DAY);
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null); // the bell row is not written: the seam falls back to email
     sendgrid.sendOne.mockRejectedValueOnce(new Error('sg 500'));
     expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), fails('b')] })).toEqual({ error: 'send_failed', results: { a: 1, b: 1 } });
     expect(mockTables.system_settings.insert).not.toHaveBeenCalled();
-  });
-
-  test('a clean run retires only the replaceable alerts and empties the list, keeping the alert time', async () => {
-    lastRun(['b'], DAY);
-    const resolve = jest.spyOn(opsDigest, 'resolveOpsDigest').mockResolvedValue(1);
-    try {
-      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [ok('a'), ok('b')] })).toEqual({ skipped: 'clean', results: { a: 0, b: 0 } });
-      expect(resolve).toHaveBeenCalledWith({ key: DIGEST_KEY, source: null, resolvedBy: `${DIGEST_KEY}:clean-run`, whereMeta: REPLACEABLE });
-      expect(REPLACEABLE).toEqual({ standingOnly: true });
-      expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: [], alertedAt: new Date(NOW.getTime() - DAY).toISOString() });
-    } finally {
-      resolve.mockRestore();
-    }
-  });
-
-  test('in the app: a standing-only alert is stamped, pinned and replaces only older stamped alerts; a moving-window alert is a record', async () => {
-    gateEnvValue.mockReturnValue(true);
-    lastRun([], DAY);
-    mockTables.notifications = mockChain();
-    NotificationService._private = { openToCloser: (q) => q, doneColumns: () => ({}) };
-    NotificationService.notifyAdmin.mockImplementation(async (_category, _title, _body, options) => ({ id: 'new-alert', metadata: options.metadata }));
-    try {
-      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
-      // fallOff: the Activity feed keeps the alert listed, read or not, until the sweep resolves it.
-      expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ opsKey: DIGEST_KEY, standingOnly: true, fallOff: true });
-      expect(mockTables.notifications.whereRaw).toHaveBeenCalledWith('metadata @> ?::jsonb', [JSON.stringify({ standingOnly: true })]);
-      expect(mockTables.notifications.update).toHaveBeenCalledTimes(1);
-      expect(sendgrid.sendOne).not.toHaveBeenCalled();
-
-      // A moving-window failure (here the welcome check, with a standing one beside it): stamped false, so no later run
-      // closes it, and not pinned, because nothing would ever resolve it. It still replaces the older stamped alerts.
-      for (const detector of [windowed('closeout_failed_facts', 1), windowed('new_plan_without_welcome', 14)]) {
-        NotificationService.notifyAdmin.mockClear();
-        lastRun([], DAY);
-        expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b'), detector] })).toMatchObject({ sent: true });
-        const { metadata } = NotificationService.notifyAdmin.mock.calls[0][3];
-        expect(metadata).toMatchObject({ standingOnly: false });
-        expect(metadata).not.toHaveProperty('fallOff');
-      }
-    } finally {
-      delete NotificationService._private;
-      NotificationService.notifyAdmin.mockReset();
-    }
+    expect(mockTables.ops_email_send_state.insert).not.toHaveBeenCalled();
   });
 });
 
@@ -519,12 +582,17 @@ describe('detector adapters', () => {
     mockTables.services = mockChain({ select: [{ service_key: 'known_key' }, { service_key: 'bad_key' }] });
     // second call (registry lookup) resolves the same table mock — known_key present, gone_key absent
     classifyCatalogRow.mockImplementation((row) => row.service_key === 'bad_key' ? { lane: 'generic', flags: ['no_profile'] } : { lane: 'ok', flags: [] });
-    db.raw.mockResolvedValueOnce({ rows: [] });
     const out = await byKey('completion_lane_coverage').run({ now: NOW });
     expect(out.count).toBe(2);
     expect(out.ids).toEqual(['bad_key (generic: no_profile)', 'registry-only:gone_key']);
-    expect(out.detail).toEqual({ activeServices: 2, ghostLanes: 0 });
-    // ghost-lane query is date-bound to today (ET) and mirrors the canonical audit's terminal set
+    expect(out.detail).toEqual({ activeServices: 2 });
+    // The catalog check reads present state only: the date-bound ghost-lane query is its own check.
+    expect(db.raw).not.toHaveBeenCalled();
+  });
+
+  test('completion_lane_ghost_lanes: the query is date-bound to today (ET) and mirrors the canonical audit', async () => {
+    db.raw.mockResolvedValueOnce({ rows: [] });
+    expect(await byKey('completion_lane_ghost_lanes').run({ now: NOW })).toEqual({ count: 0, ids: [] });
     const [sql, bindings] = db.raw.mock.calls[0];
     expect(sql).toContain("ss.status NOT IN ('completed', 'cancelled', 'skipped')");
     expect(sql).toContain("regexp_replace(ss.service_type, '\\s+service$', '', 'i')");
@@ -532,20 +600,18 @@ describe('detector adapters', () => {
     expect(bindings).toEqual([expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)]);
   });
 
-  test('completion_lane_coverage: inactive/archived services still routing upcoming visits are defects (ghost lanes)', async () => {
-    mockTables.services = mockChain({ select: [{ service_key: 'known_key' }, { service_key: 'gone_key' }] });
+  test('completion_lane_ghost_lanes: inactive/archived services still routing upcoming visits are defects (ghost lanes)', async () => {
     classifyCatalogRow.mockImplementation((row) => row.service_key === 'old_pest' ? { lane: 'generic', flags: ['no_profile'] } : { lane: 'ok', flags: [] });
     db.raw.mockResolvedValueOnce({ rows: [
       { service_key: 'old_pest', is_archived: true, upcoming: '3' },
       { service_key: 'paused_lawn', is_archived: false, upcoming: 1 },
     ] });
-    const out = await byKey('completion_lane_coverage').run({ now: NOW });
+    const out = await byKey('completion_lane_ghost_lanes').run({ now: NOW });
     expect(out.count).toBe(2);
     expect(out.ids).toEqual([
       'old_pest (generic: archived_service_with_upcoming_visits:3,no_profile)',
       'paused_lawn (ok: inactive_service_with_upcoming_visits:1)',
     ]);
-    expect(out.detail).toEqual({ activeServices: 2, ghostLanes: 2 });
   });
 
   test('completion_lane_coverage: a key absent from prod by design is not registry-only, but an active row or ghost lane for it is still a defect', async () => {
@@ -553,13 +619,11 @@ describe('detector adapters', () => {
     classifyCatalogRow.mockImplementation((row) => row.service_key === 'absent_by_design_key' ? { lane: 'generic', flags: ['no_profile'] } : { lane: 'ok', flags: [] });
     db.raw.mockResolvedValueOnce({ rows: [{ service_key: 'absent_by_design_key', is_archived: true, upcoming: '2' }] });
     const out = await byKey('completion_lane_coverage').run({ now: NOW });
-    expect(out.ids).toEqual([
-      'absent_by_design_key (generic: no_profile)',
-      'registry-only:gone_key',
-      'absent_by_design_key (generic: archived_service_with_upcoming_visits:2,no_profile)',
-    ]);
+    expect(out.ids).toEqual(['absent_by_design_key (generic: no_profile)', 'registry-only:gone_key']);
     expect(out.ids).not.toContain('registry-only:absent_by_design_key');
-    expect(out.count).toBe(3);
+    expect(out.count).toBe(2);
+    const ghosts = await byKey('completion_lane_ghost_lanes').run({ now: NOW });
+    expect(ghosts.ids).toEqual(['absent_by_design_key (generic: archived_service_with_upcoming_visits:2,no_profile)']);
   });
 
   test('closeout_failed_facts flags failed facts/contradictions and treats unevaluable visits as findings', async () => {

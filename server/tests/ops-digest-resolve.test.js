@@ -67,17 +67,6 @@ test('source: null scopes to rows with NO source (the in-process senders)', asyn
   expect(q.whereRaw).not.toHaveBeenCalledWith("metadata->>'source' = ?", expect.anything());
 });
 
-test('whereMeta narrows the retire to rows whose metadata contains it (the lead-to-cash clean run)', async () => {
-  const q = chain(1);
-  mockDb.mockReturnValue(q);
-  expect(await resolveOpsDigest({ key: 'lead-to-cash-invariants', source: null, whereMeta: { standingOnly: true } })).toBe(1);
-  expect(q.whereRaw).toHaveBeenCalledWith('metadata @> ?::jsonb', ['{"standingOnly":true}']);
-  const plain = chain(1);
-  mockDb.mockReturnValue(plain);
-  await resolveOpsDigest({ key: 'lead-to-cash-invariants', source: null });
-  expect(plain.whereRaw).not.toHaveBeenCalledWith('metadata @> ?::jsonb', expect.anything());
-});
-
 test('no source filter when source is omitted; blank key is a no-op', async () => {
   const q = chain(1);
   mockDb.mockReturnValue(q);

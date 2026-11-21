@@ -523,9 +523,6 @@ function inAppEnabled() {
  * @param {boolean} [p.supersedePrior] after this send's row lands, close every older OPEN row of the same key
  *                                    (see supersedeOlderDigests): a daily digest that writes one row per send
  *                                    keeps one open row, not one per morning
- * @param {object} [p.supersedeWhereMeta] with supersedePrior: close only the older rows whose metadata contains
- *                                    this object (jsonb containment). The lead-to-cash sweep passes
- *                                    { standingOnly: true }, so a row that records a failed closeout stays open
  * @param {boolean} [p.fallOff]       the sender retires this key on its clean run (ops-digest-fall-off.js);
  *                                    stamps metadata.fallOff so the Activity feed pins the row until resolved
  * @param {object} [p.trx]            caller transaction for atomic companion/digest persistence
@@ -536,7 +533,7 @@ function inAppEnabled() {
  * eval) still get an ops_digest row here: that row is what the Activity feed
  * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, itemKeys, ringOnFirstIdentity = false, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, supersedePrior, supersedeWhereMeta, trx = null, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, itemKeys, ringOnFirstIdentity = false, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, supersedePrior, trx = null, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
@@ -629,7 +626,7 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
     return { ...emailOutcome(result), fallback: true };
   }
   logger.info(`[ops-digest] ${key}: recorded in-app (${row.id || 'suppressed'}) — email skipped`);
-  await supersedeOlderDigests({ key, row, conn: trx, enabled: supersedePrior, whereMeta: supersedeWhereMeta });
+  await supersedeOlderDigests({ key, row, conn: trx, enabled: supersedePrior });
   return { ok: true, channel: 'in_app', id: row.id || null };
 }
 
@@ -651,12 +648,9 @@ const SUPERSEDED_RESOLUTION = 'Replaced by a newer digest from the same check';
 // standing row stays and the quiet one closes. Only a ring-gate quiet
 // (metadata.quiet) counts, so an engineering/fyi digest still stands.
 // Never throws: the new row is already written, and the next send retries.
-// `whereMeta` (optional): only older rows whose metadata CONTAINS this object
-// close (jsonb @>). A row without the stamp, such as one written before the
-// sender stamped its rows, never matches and stays as it was.
 // `enabled` is the sender's `supersedePrior` flag, checked here so the caller
 // (deliverOpsDigest, at the complexity limit) carries no branch for it.
-async function supersedeOlderDigests({ key, row, conn = null, enabled, whereMeta = null }) {
+async function supersedeOlderDigests({ key, row, conn = null, enabled }) {
   if (!enabled || !row?.id || row.suppressed) return 0;
   try {
     const db = conn || require('../models/db');
@@ -689,7 +683,6 @@ async function supersedeOlderDigests({ key, row, conn = null, enabled, whereMeta
     // while a JS Date from the insert result carries only milliseconds, which
     // would put the new row itself just past its own cutoff.
     q = q.whereRaw('created_at <= (SELECT created_at FROM notifications WHERE id = ?)', [row.id]);
-    if (whereMeta) q = q.whereRaw('metadata @> ?::jsonb', [JSON.stringify(whereMeta)]);
     const closed = await q.update({
       ...ns._private.doneColumns({ by: key, resolution: SUPERSEDED_RESOLUTION, at, keepExisting: true, conn: db }),
       // Same stamp a clean-run retire writes, minus the dedupeKey, so the
@@ -748,10 +741,7 @@ async function supersedeOlderDigests({ key, row, conn = null, enabled, whereMeta
 // for legacy rows without one. A delayed 10:00 failure inserted at 10:20
 // must clear under a 10:10 clean observation. The ingest route rejects
 // older re-posts under the same advisory lock, keeping this stamp monotonic.
-// `whereMeta` (optional): only rows whose metadata CONTAINS this object retire
-// (jsonb @>), the same filter supersedeOlderDigests takes. It does not apply
-// to the `alsoRetire` companion rows.
-async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey = null, notAfter = null, alsoRetire = null, whereMeta = null, throwOnError = false } = {}) {
+async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey = null, notAfter = null, alsoRetire = null, throwOnError = false } = {}) {
   const opsKey = String(key || '').trim();
   if (!opsKey) return 0;
   const db = require('../models/db');
@@ -765,7 +755,6 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
     if (source === null) q = q.whereRaw("metadata->>'source' IS NULL");
     else if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
     if (notAfter) q = q.whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) < ?::timestamptz", [notAfter]);
-    if (whereMeta) q = q.whereRaw('metadata @> ?::jsonb', [JSON.stringify(whereMeta)]);
     return q.update({
       ...notificationService()._private.doneColumns({ by: resolvedBy, resolution: 'The check that raised this finding has run clean', at: new Date(stamp), keepExisting: true, conn }),
       // Drop the dedupeKey with the resolve stamp: a resolved row must never
