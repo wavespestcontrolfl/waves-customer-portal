@@ -385,20 +385,21 @@ class LiveBridge {
   // not depend on how OpenAI cuts the stream into chunks. A voiced sample
   // starts a reply when it is the first voice of the call, or follows at least
   // REPLY_SILENCE_MIN_MS of silent audio, or follows an arrival gap. Returns
-  // the index of every such sample.
+  // the index of the first such sample, or -1. A chunk is one arrival: it
+  // marks one reply start at the most.
   scanModelAudio(audio) {
-    const starts = [];
+    let start = -1;
     for (let i = 0; i < audio.length; i++) {
       if (!VOICED_BYTE[audio[i]]) {
         this.silentSamples += 1;
         continue;
       }
-      if (!this.voiceSeen || this.gapSinceVoice || this.silentSamples >= REPLY_SILENCE_MIN_SAMPLES) starts.push(i);
+      if (start < 0 && (!this.voiceSeen || this.gapSinceVoice || this.silentSamples >= REPLY_SILENCE_MIN_SAMPLES)) start = i;
       this.voiceSeen = true;
       this.gapSinceVoice = false;
       this.silentSamples = 0;
     }
-    return starts;
+    return start;
   }
 
   onOutputAudio(msg) {
@@ -412,35 +413,39 @@ class LiveBridge {
     // inside one utterance are under about 500 ms), or after an arrival gap
     // (OpenAI pausing the stream). A reply start marks its chunk whatever is
     // still queued at Twilio, so a fast reply and a reply right after a
-    // barge-in are both timed. A chunk that starts no reply after a barge-in
-    // is the cut-off reply's tail: it is dropped, so the caller never hears it
-    // restart mid-sentence (for TAIL_DROP_MAX_MS at the most).
-    // GPT-Live audio carries no reply id or timing (OpenAI's guide), so a
-    // reply start inside the tail-drop window is ambiguous: a fast reply to
-    // the barge-in, or the cut-off reply's tail after a network stall. It
-    // plays (cutting a real answer is worse) and its delay is kept apart from
-    // turns.
+    // barge-in are both timed.
     const audio = Buffer.from(msg.delta, 'base64');
     if (this.lastAudioAt !== null && t - this.lastAudioAt >= NEW_REPLY_GAP_MS) this.gapSinceVoice = true;
     this.lastAudioAt = t;
-    const starts = this.scanModelAudio(audio);
+    const start = this.scanModelAudio(audio);
+    // After a barge-in, audio that starts no reply is the cut-off reply's
+    // tail: it is dropped, so the caller never hears it restart mid-sentence
+    // (for TAIL_DROP_MAX_MS at the most). A reply start ends that: its chunk
+    // is forwarded from the reply's first voiced sample on.
+    let from = 0;
+    if (this.tailDropSince !== null) {
+      const dropping = t - this.tailDropSince < TAIL_DROP_MAX_MS;
+      if (dropping && start < 0) return;
+      if (dropping) from = start;
+      this.tailDropSince = null;
+    }
     // Twilio plays this chunk after whatever is still queued.
     const playsAt = Math.max(t, this.playbackEndsAt);
-    if (starts.length) {
-      // The ambiguity window runs its full 1.5 s from the barge-in, apart from
-      // tail suppression (which the first reply start ends).
+    if (start >= 0) {
+      // GPT-Live audio carries no reply id or timing (OpenAI's guide), so a
+      // reply start inside the 1.5 s after a barge-in is ambiguous: a fast
+      // reply to the barge-in, or the cut-off reply's tail after a network
+      // stall. It plays (cutting a real answer is worse) and its delay is kept
+      // apart from turns.
       const ambiguous = this.ambiguousUntil !== null && t < this.ambiguousUntil;
-      this.tailDropSince = null;
       // Which reply answers which speech is decided on the chunk's arrival
       // (t): the model had sent all of it by then. The delay runs to the
       // moment the caller hears the reply's first voiced sample.
-      for (const i of starts) this.onReplyStart(t, ambiguous, playsAt + i / MULAW_BYTES_PER_MS);
-    } else if (this.tailDropSince !== null) {
-      if (t - this.tailDropSince < TAIL_DROP_MAX_MS) return;
-      this.tailDropSince = null;
+      this.onReplyStart(t, ambiguous, playsAt + (start - from) / MULAW_BYTES_PER_MS);
     }
-    this.playbackEndsAt = playsAt + audio.length / MULAW_BYTES_PER_MS;
-    this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload: msg.delta } });
+    this.playbackEndsAt = playsAt + (audio.length - from) / MULAW_BYTES_PER_MS;
+    const payload = from ? audio.subarray(from).toString('base64') : msg.delta;
+    this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload } });
   }
 
   // The pending measure is consumed only here, by a reply start. The first
