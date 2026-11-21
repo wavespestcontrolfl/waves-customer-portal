@@ -17,7 +17,8 @@
  *      visible to step 1.
  *
  * Deliberate boundaries:
- *   - Offer-time only. There is NO redemption re-check in reserveSlot: the
+ *   - Offer-time only. There is NO redemption re-check of the cluster choice
+ *     in reserveSlot (owner rule B per truck, below, is a different check): the
  *     signed slot offer (slot-offer-token) already binds surface + estimate +
  *     date, so a customer can only tap a day this funnel genuinely offered —
  *     and unlike an owner blackout, a cluster day shifting between offer and
@@ -64,9 +65,11 @@
  * before either is written, so the assessment link's booking transaction
  * re-checks the truck under its date lock (truckMayTakeDate,
  * createSelfBooking callbackVisit.slotGuard) with the zone it stamps on its
- * row. The estimate page's holds do not re-check it: like the cluster choice
- * (Deliberate boundaries), two offers held before either is written can send
- * a second truck south that day, bounded by the offer-token TTL. The stop read
+ * row. The estimate page re-checks it under the same date lock at each hold
+ * write: a new hold in the zone it stamps (reserveSlot), and a re-tap, an
+ * extend and an accept in the hold's stamp (slot-reservation.js
+ * holdKeepsSouthDay), the zone its list funneled. A hold that list did not
+ * funnel (no stamp: its estimate in no zone when held) is not checked. The stop read
  * counts a hold by the real clock (clock_timestamp), not the writer's
  * transaction start; under the date lock it also counts a visit staff booked
  * that keeps its old hold time (zoneStopDays). The
@@ -325,7 +328,8 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = 
 // Owner rule B when a booking is written, under the writer's date lock: may `technicianId` still take `date` for a
 // booking in `estimateZone`, the zone the writer stamps on its row? Two bookings can pick the same new day for two
 // trucks before either is written; the date lock serializes them, and this read on the locked transaction sees the
-// first one's stop. Writer: the lead assessment link (createSelfBooking callbackVisit.slotGuard). true when the rule
+// first one's stop. Writers: the lead assessment link (createSelfBooking callbackVisit.slotGuard) and the estimate page's
+// hold writes (slot-reservation.js reserveSlot and holdKeepsSouthDay). true when the rule
 // does not apply (gate off, fleet view, no technician, no funneled zone), with no read. A query failure throws, so the writer's transaction fails closed like its other reads.
 async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
   if (technicianId == null || !perTruckLive() || !isFunnelZone(estimateZone)) return true;
