@@ -20,9 +20,13 @@ export function roofPointsLead(count) {
     : `Your Waves technician found ${count} places where rodents can get into your roof.`;
 }
 
+// Whether a roof points block can show: a photo and at least one point. The Waves AI card asks this before it swaps out
+// the satellite photo, so the card never hides that photo for an empty block.
+export const hasRoofPoints = (points) => Boolean(points?.imageUrl) && Array.isArray(points.pins) && points.pins.length > 0;
+
 export default function RoofPointsCard({ points, address, onImageError }) {
-  const pins = (Array.isArray(points?.pins) ? points.pins : []).slice().sort((a, b) => a.n - b.n);
-  if (!points?.imageUrl || !pins.length) return null;
+  if (!hasRoofPoints(points)) return null;
+  const pins = points.pins.slice().sort((a, b) => a.n - b.n);
   const count = pins.length;
   return (
     <div data-testid="roof-points-card">

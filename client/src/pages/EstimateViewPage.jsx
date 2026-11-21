@@ -79,7 +79,7 @@ import { hasPurchasedTrenchingWarranty, hasIncludedReentryGuarantee, includedRee
 const glassAppearanceActive = () => document.documentElement.hasAttribute('data-glass-theme');
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import MistingLayoutCard from '../components/estimate/MistingLayoutCard';
-import RoofPointsCard from '../components/estimate/RoofPointsCard';
+import RoofPointsCard, { hasRoofPoints } from '../components/estimate/RoofPointsCard';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
@@ -972,7 +972,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   );
 }
 
-function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null, roofPoints = null }) {
+function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null, roofPoints }) {
   const phone = useIsMobile(560);
   // GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn misting layout (/data `mistingLayout`) takes the satellite photo's
   // place. A picture that fails to load puts the satellite photo back, so there is never a hole.
@@ -983,7 +983,9 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
   const [roofPointsFailed, setRoofPointsFailed] = useState(false);
   if (!intelligence) return null;
   const showMisting = Boolean(mistingLayout?.imageUrl) && !mistingFailed;
-  const showRoofPoints = !showMisting && Boolean(roofPoints?.imageUrl) && Array.isArray(roofPoints?.pins) && roofPoints.pins.length > 0 && !roofPointsFailed;
+  const showRoofPoints = !showMisting && !roofPointsFailed && hasRoofPoints(roofPoints);
+  // A staff-made picture (misting layout or roof points) is showing in the satellite photo's place.
+  const photoReplaced = showMisting || showRoofPoints;
   const metrics = Array.isArray(intelligence.metrics) ? intelligence.metrics : [];
   const signals = Array.isArray(intelligence.signals) ? intelligence.signals : [];
   // "Show your work" (estimateShowYourWork gate): the parcel-outline
@@ -1011,7 +1013,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       </div>
 
       <p className="gc-lead" style={{
-        margin: satelliteUrl || showMisting || showRoofPoints || metrics.length ? '0 0 14px' : '0',
+        margin: satelliteUrl || photoReplaced || metrics.length ? '0 0 14px' : '0',
         color: '#3F4A65',
         fontSize: 14,
         lineHeight: 1.5,
@@ -1040,7 +1042,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         />
       ) : null}
 
-      {showYourWork?.overlaySatelliteUrl && !showMisting && !showRoofPoints ? (
+      {showYourWork?.overlaySatelliteUrl && !photoReplaced ? (
         <div style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
           Red outline: your property boundary from county records.
         </div>
