@@ -405,13 +405,14 @@ function clockInShift(at, shift) {
  * caller's transaction stays usable: do not call this from inside another
  * savepointRead on the same transaction, it would wait on its own caller); a
  * failed read of the hours themselves throws, as absentTechDays does.
- * `technicianIds` narrows the reads (an empty list reads every technician).
+ * `technicianIds` narrows the reads. An empty list asks about no technician:
+ * nothing is read (a search whose technician filter matched nobody).
  */
 async function loadTechShifts(conn, { technicianIds = null, now = new Date() } = {}) {
   const none = () => null;
-  if (!techShiftHoursLive()) return none;
+  if (!techShiftHoursLive() || (Array.isArray(technicianIds) && !technicianIds.length)) return none;
   let query = conn('technicians').whereNotNull('shift_start').whereNotNull('shift_end');
-  if (Array.isArray(technicianIds) && technicianIds.length) query = query.whereIn('id', technicianIds);
+  if (Array.isArray(technicianIds)) query = query.whereIn('id', technicianIds);
   const shifts = new Map();
   for (const row of await query.select('id', 'shift_start', 'shift_end')) {
     const shift = storedShift(row);

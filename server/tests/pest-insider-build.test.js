@@ -24,6 +24,11 @@ jest.mock('../services/pest-insider/posts', () => {
   const postUrl = (id) => (Object.prototype.hasOwnProperty.call(POSTS, id) ? `${actual.SITE}${POSTS[id].path}` : null);
   return { ...actual, POSTS, postUrl, POST_URLS: Object.freeze([...new Set(Object.keys(POSTS).map(postUrl))]) };
 });
+// The send validator is wrapped, not replaced: a case reads what it was given.
+jest.mock('../services/newsletter-validator', () => {
+  const actual = jest.requireActual('../services/newsletter-validator');
+  return { ...actual, validateNewsletterDraft: jest.fn(actual.validateNewsletterDraft) };
+});
 const { buildIssue, NEWSLETTER_TYPE } = require('../services/pest-insider');
 const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
 const { SPECIES, planIssue } = require('../services/pest-insider/plan');
@@ -72,6 +77,20 @@ describe('buildIssue', () => {
     // no live tool named: no tool, and no Amazon link anywhere
     expect(r.tool).toBeNull();
     for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
+  });
+
+  test('the send check reads the issue without the "Your home" tokens, which each reader fills at send time', () => {
+    usePlan(A01);
+    validateNewsletterDraft.mockClear();
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, pollQuizId: PEST_INSIDER_POLL_IDS[0] });
+    expect(r.ok).toBe(true);
+    // The shared body (the archive's copy, once stripped) holds both tokens, right before the sign-off.
+    expect(r.issue.html_body).toContain('{{pi-home}}');
+    expect(r.issue.text_body).toContain('{{pi-home-text}}');
+    const [checked] = validateNewsletterDraft.mock.calls[validateNewsletterDraft.mock.calls.length - 1];
+    expect(checked.html_body).not.toMatch(/pi-home|\{\{/);
+    expect(checked.text_body).not.toMatch(/pi-home|\{\{/);
+    expect(checked.newsletter_type).toBe(NEWSLETTER_TYPE);
   });
 
   test("every identifier species builds: its band, latin name and verdict chip pass the copy and send checks", () => {
