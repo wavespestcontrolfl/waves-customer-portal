@@ -36,6 +36,7 @@ const BROWSER_ONLY_PATH_ROOTS = Object.freeze([
   '/careers', // job applicants, not customers
   '/help', // static how-to pages (client/public/help): no app screens, so Safari opens them
   '/newsletter', // public newsletter pages
+  '/rv', // printed-card review QR: 302 to a Google review form, so the app would only bounce it to the browser
 ]);
 
 // /quote, bare /estimate and the /estimate/<service> pages redirect to the

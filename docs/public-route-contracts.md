@@ -6413,6 +6413,29 @@ to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs and staff — the
 filter `/l` uses — still redirect but log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
 is on, but the route stays live regardless of the gate so links already sent
 keep working. Destinations are never tagged or altered.)
+`/rv` (printed business-card review QR, owner 2026-11-21 "less clicks to give
+reviews is always better" — `server/routes/review-geo-link.js`; `GET /rv` is a
+302 straight to the Google review form of the nearest Waves office, never a
+page. `/go` was taken by the outside-link redirect and `/review/:token` is a
+client route, so it uses `/rv`. The office comes from Cloudflare's visitor-location
+headers (`cf-ipcountry`, `cf-iplatitude`, `cf-iplongitude`; an IP-based estimate):
+a non-US country, a missing, non-numeric or out-of-range coordinate, or a nearest
+office more than 20 miles away (a carrier IP in Tampa is ~26 miles from Parrish)
+gets the Lakewood Ranch profile (office id `bradenton`). **Not an open
+redirect**: the target is ONLY a `googleReviewUrl` from `config/locations.js`;
+nothing in the request names it, and a throw anywhere still 302s to the
+Lakewood Ranch form. `Cache-Control: private, no-store`, `noindex`,
+`Referrer-Policy: no-referrer` on every status (set before the limiter).
+Mounts OUTSIDE the `/api/` limiter with its own 120/min per-key limiter (the
+`/l` budget); over the limit is a plain 429. **Privacy**: latitude, longitude,
+region, country and the client IP are never logged, stored or forwarded; the
+only record is which office was picked, one fire-and-forget `resolveShortCode`
+on the reserved code `review-<office id>` (`review-bradenton`, `review-parrish`,
+`review-sarasota`, `review-venice`), so `short_codes.click_count` gives the office
+mix. Bot user agents are not counted; a missing row is a silent no-op. No
+`GATE_*`: it sends nothing, charges nothing and deletes nothing. Excluded from
+the iOS universal-link claim (`BROWSER_ONLY_PATH_ROOTS`) so a scan never opens
+the app.)
 `/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
 (`server/routes/og-preview.js`, link-preview images, owner 2026-09-27: the
 picture iMessage/SMS/email crawlers show under a texted or emailed customer

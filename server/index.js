@@ -879,6 +879,8 @@ app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
 app.use('/r', require('./routes/referral-links'));
 app.use('/l', require('./routes/public-shortlinks'));
+// Printed-card review QR: 302 to the nearest office's Google review form (no page).
+app.use('/rv', require('./routes/review-geo-link'));
 // Outside-link click redirect for prep guides — registered destinations only.
 app.use('/go', require('./routes/outbound-redirect'));
 // Digital business card — public token-scoped data + Save-contact vCard.

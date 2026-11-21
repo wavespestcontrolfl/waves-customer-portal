@@ -184,6 +184,16 @@
       ]
     },
     {
+      "router": "server/routes/review-geo-link.js",
+      "mount": "/rv",
+      "reason": "Printed business-card review QR (owner 2026-11-21) — GET /rv is a 302 to a Google review form chosen from Cloudflare visitor-location headers; the target is only a googleReviewUrl from config/locations.js (nothing in the request names it, so not an open redirect), no token and no row lookup; location values are never logged or stored; per-route limiter; see docs/public-route-contracts.md",
+      "routes": [
+        "GET /rv",
+        "USE /rv (express-rate-limit({ handler#8859f1ea }))",
+        "USE /rv (inline function#29df873e)"
+      ]
+    },
+    {
       "router": "server/routes/og-preview.js",
       "mount": "/og",
       "reason": "Link-preview images for iMessage/SMS/email crawlers (no login possible; owner sign-off 2026-09-28). Only /og/report/:token.jpg reads its token: 32-hex gate, typedReportDelivery suppression, no-store/noindex/no-referrer, per-IP limiter; unknown links get the byte-identical default card. /og/<kind>.jpg are fixed brand images with no token and no lookup.",
