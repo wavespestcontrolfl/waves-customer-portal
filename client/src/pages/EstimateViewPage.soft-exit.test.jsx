@@ -122,6 +122,18 @@ describe('SoftExitSheet', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
   });
 
+  it('while the still-deciding tap is in flight the other two choices are locked', async () => {
+    let answer;
+    fetchMock.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    render(<SoftExitSheet token="tok" expiresAt="2026-09-15T04:00:00.000Z" onClose={vi.fn()} onDeclined={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /still deciding/i }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'One moment…' })).toBeDisabled());
+    expect(screen.getByRole('button', { name: /change something/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /This isn.t for me/ })).toBeDisabled();
+    answer({ ok: true, json: async () => ({ success: true }) });
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'What would help you decide?' })).toBeInTheDocument());
+  });
+
   it('while Send is in flight the picked reason is locked; a failed Send unlocks it', async () => {
     await openDecidingStep();
     let answer;

@@ -3908,14 +3908,16 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
                   says so via softExitChange), so the branch is withheld
                   rather than failing on submit (GH codex P2). */}
               {changeEligible ? (
-                <button type="button" onClick={() => goTo('change')} style={softExitOptionStyle}>
+                <button type="button" onClick={() => goTo('change')} disabled={submitting} style={softExitOptionStyle}>
                   I&rsquo;d like to change something
                 </button>
               ) : null}
               <button type="button" onClick={startStillDeciding} disabled={submitting} style={softExitOptionStyle}>
                 {submitting ? 'One moment…' : 'I’m still deciding'}
               </button>
-              <button type="button" onClick={() => goTo('decline')} style={softExitOptionStyle}>
+              {/* The other two choices are locked while the still-deciding tap is in flight: its answer moves the
+                  sheet to the next step, and must not replace a form the customer opened meanwhile. */}
+              <button type="button" onClick={() => goTo('decline')} disabled={submitting} style={softExitOptionStyle}>
                 This isn&rsquo;t for me
               </button>
             </div>
