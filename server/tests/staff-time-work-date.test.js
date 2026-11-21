@@ -4,6 +4,7 @@ const path = require('path');
 const {
   STAFF_TIME_ZONE,
   STAFF_WORK_DATE_SQL,
+  addStaffWorkDays,
   staffWeekRange,
   staffWeekStartForWorkDate,
   staffWorkDate,
@@ -50,6 +51,80 @@ describe('Staff payroll work-date semantics', () => {
     });
     expect(staffWeekStartForWorkDate('2026-03-08')).toBe('2026-03-02');
     expect(staffWeekStartForWorkDate('2026-11-01')).toBe('2026-10-26');
+  });
+
+  test('a kept answer is the same as the first one, and both match the plain calendar, across DST and the year end', () => {
+    // the plain calendar answer, worked out with no time zone at all
+    const plain = (date, days) => {
+      const [year, month, day] = date.split('-').map(Number);
+      return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+    };
+    const monday = (date) => plain(date, -((new Date(`${date}T00:00:00Z`).getUTCDay() + 6) % 7));
+    // the weeks around the spring-forward day (Mar 8), the fall-back day (Nov 1) and the year end
+    const dates = [];
+    for (const [from, to] of [['2026-03-02', '2026-03-15'], ['2026-10-26', '2026-11-08'], ['2026-12-25', '2027-01-07']]) {
+      for (let date = from; date <= to; date = plain(date, 1)) dates.push(date);
+    }
+    for (const pass of [1, 2]) { // the second pass reads the kept answers
+      for (const date of dates) {
+        expect([pass, date, staffWeekStartForWorkDate(date)]).toEqual([pass, date, monday(date)]);
+        for (const days of [-11, -1, 6, 60]) {
+          expect([pass, date, days, addStaffWorkDays(date, days)]).toEqual([pass, date, days, plain(date, days)]);
+        }
+      }
+    }
+  });
+
+  test('checks the date on every call, whether or not an answer is kept', () => {
+    expect(staffWeekStartForWorkDate('2026-06-03')).toBe('2026-06-01');
+    expect(addStaffWorkDays('2026-06-03', 1)).toBe('2026-06-04');
+    for (const bad of ['2026-02-30', '2026-6-3', '', null, undefined, new Date('2026-06-03T12:00:00Z')]) {
+      for (let pass = 0; pass < 2; pass += 1) {
+        expect(() => staffWeekStartForWorkDate(bad)).toThrow(/Staff work date/);
+        expect(() => addStaffWorkDays(bad, 1)).toThrow(/Staff work date/);
+      }
+    }
+  });
+
+  test('works a date out once, drops the oldest answer at the cap, and never keeps a number of days that is not whole', () => {
+    // The time zone helpers are stubbed here, so only the keeping is tested (and 5,000 dates cost nothing).
+    jest.isolateModules(() => {
+      const addETDays = jest.fn((anchor, days) => `${anchor}+${days}`);
+      const etWeekStart = jest.fn((anchor) => `week of ${anchor}`);
+      jest.doMock('../utils/datetime-et', () => ({
+        TZ: 'America/New_York', parseETDateTime: (text) => text, etDateString: (value) => value, addETDays, etWeekStart,
+      }));
+      const fresh = require('../utils/staff-time-work-date');
+      expect(fresh.addStaffWorkDays('2026-06-03', 1)).toBe('2026-06-03T12:00+1');
+      expect(fresh.addStaffWorkDays('2026-06-03', 1)).toBe('2026-06-03T12:00+1');
+      expect(addETDays).toHaveBeenCalledTimes(1); // the second call read the kept answer
+      expect(fresh.addStaffWorkDays('2026-06-04', 1)).toBe('2026-06-04T12:00+1'); // another date is another answer
+      expect(fresh.addStaffWorkDays('2026-06-03', -1)).toBe('2026-06-03T12:00+-1');
+      expect(addETDays).toHaveBeenCalledTimes(3);
+      for (let days = 2; days <= 4998; days += 1) fresh.addStaffWorkDays('2026-06-03', days); // 5,000 answers: the cap
+      expect(addETDays).toHaveBeenCalledTimes(5000);
+      fresh.addStaffWorkDays('2026-06-03', 1);
+      expect(addETDays).toHaveBeenCalledTimes(5000); // still kept
+      fresh.addStaffWorkDays('2026-06-03', 4999); // one more answer: the oldest one is dropped
+      fresh.addStaffWorkDays('2026-06-03', 1);
+      expect(addETDays).toHaveBeenCalledTimes(5002); // worked out again, with the same result
+      expect(fresh.addStaffWorkDays('2026-06-03', 1)).toBe('2026-06-03T12:00+1');
+      // not a whole number of days: worked out on every call
+      fresh.addStaffWorkDays('2026-06-03', 1.5);
+      fresh.addStaffWorkDays('2026-06-03', 1.5);
+      fresh.addStaffWorkDays('2026-06-03', '2');
+      fresh.addStaffWorkDays('2026-06-03', '2');
+      expect(addETDays).toHaveBeenCalledTimes(5006);
+      // the week start is kept by date, apart from the day sums
+      expect(fresh.staffWeekStartForWorkDate('2026-06-03')).toBe('week of 2026-06-03T12:00');
+      expect(fresh.staffWeekStartForWorkDate('2026-06-03')).toBe('week of 2026-06-03T12:00');
+      expect(etWeekStart).toHaveBeenCalledTimes(1);
+      // a date that is not valid throws before anything is worked out or kept
+      expect(() => fresh.staffWeekStartForWorkDate('2026-02-30')).toThrow(/valid calendar date/);
+      expect(() => fresh.addStaffWorkDays('2026-02-30', 1)).toThrow(/valid calendar date/);
+      expect([addETDays.mock.calls.length, etWeekStart.mock.calls.length]).toEqual([5006, 1]);
+    });
+    jest.dontMock('../utils/datetime-et');
   });
 
   test('all Staff entry-date predicates route through the shared ET expression', () => {

@@ -56,8 +56,9 @@
  * it (techRewardsNotes, waitNotes: with the reason on a draft, without it on a finalized run) until the gift is paid, and the
  * next run that is ready writes it.
  *
- * Every skip, wait and change is recorded in one audit event per sync (payroll.tech_rewards_lines_synced): technician ids, kinds,
- * reason codes, weeks and line ids, never an amount. Money is integer cents.
+ * Every sync that examined a gift (a run dated for one, or one that holds an open line) writes one audit event
+ * (payroll.tech_rewards_lines_synced), also when it changed nothing: technician ids, kinds, reason codes, weeks, line ids and
+ * the count of lines left as they were, never an amount. Money is integer cents.
  */
 const { recordAuditEvent } = require('./audit-log');
 const { applyAssignable } = require('./technician-eligibility');
@@ -425,18 +426,25 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {
   }
   const state = await loadState(trx, run, lock);
   const ids = { added: [], updated: [], removed: [] };
+  let examined = 0;
+  let unchanged = 0;
   for (const [sourceId, cand] of [...state.candidates].sort(([a], [b]) => (a < b ? -1 : 1))) {
     if (state.settled.has(sourceId)) continue;
+    examined += 1;
     const done = await applyCandidate(trx, run, sourceId, cand, state);
+    if (!Object.keys(done).length) unchanged += 1; // its open line is on this run and is still right
     for (const key of Object.keys(ids)) if (done[key]) ids[key].push(done[key]);
     if (done.skip) result.skipped.push({ technicianId: cand.technicianId, kind: cand.kind, reason: done.skip });
     if (done.wait) result.waits.push({ technicianId: cand.technicianId, kind: cand.kind, sourceId, ...done.wait });
   }
   await saveWaits(trx, run, result.waits);
   Object.assign(result, { added: ids.added.length, updated: ids.updated.length, removed: ids.removed.length });
-  if (ids.added.length || ids.updated.length || ids.removed.length || result.skipped.length || result.waits.length) {
+  // One event for every sync that examined a gift, also when it changed nothing (a finalize that checked the lines again and
+  // found them right): the trail then tells a sync that ran from one that did not. A run that is dated for no gift and holds no
+  // open line examines nothing and writes none, and so does a run whose gifts are all paid.
+  if (examined) {
     await audit(trx, actorId, run, {
-      added_line_ids: ids.added, updated_line_ids: ids.updated, removed_line_ids: ids.removed,
+      added_line_ids: ids.added, updated_line_ids: ids.updated, removed_line_ids: ids.removed, unchanged_count: unchanged,
       skipped: result.skipped.map((s) => ({ technician_id: s.technicianId, kind: s.kind, reason: s.reason })),
       waits: result.waits.map(waitRow),
     });

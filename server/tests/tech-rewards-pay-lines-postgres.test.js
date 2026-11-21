@@ -239,11 +239,20 @@ postgres('tech rewards pay lines: the December gift', () => {
       const paid = await lineOf(tech);
       expect(paid).toMatchObject({ id, status: 'paid', amount_cents: GIFT, check_id: checkOf(final, tech).id });
       expect((await trx('payroll_checks').where({ id: paid.check_id }).first()).tech_rewards_cents).toBe(String(GIFT));
+      // The audit trail has one event for each of the four syncs, also the three that changed nothing (the direct sync, the
+      // recompute and the finalize that checked the line again): a sync that ran is told from one that did not.
+      const nothing = { updated_line_ids: [], removed_line_ids: [], skipped: [], waits: [] };
+      const events = (await syncEventOf(run.id, 'unchanged_count')).map(({ run_id: _run, week_start: _week, ...rest }) => rest);
+      expect(events).toHaveLength(4);
+      expect(events.filter((e) => e.added_line_ids.length)).toEqual([{ added_line_ids: [id], unchanged_count: 0, ...nothing }]);
+      expect(events.filter((e) => !e.added_line_ids.length)).toEqual(Array(3).fill({ added_line_ids: [], unchanged_count: 1, ...nothing }));
       // a paid line is evidence: a later run, and a direct sync, never write the gift again
       await approvedWeek(tech, NEXT_WEEK);
       const next = await draft(NEXT_WEEK);
       expect(checkOf(next, tech)).not.toHaveProperty('techRewardsCents');
       expect(await linesOf(tech)).toHaveLength(1);
+      // every gift of that run is paid: it examines nothing and writes no event
+      expect(await syncEventOf(next.id, 'unchanged_count')).toEqual([]);
     });
 
     it('with the gate off writes no line; turning it off takes the open line off the next run and leaves a paid one', async () => {
@@ -399,6 +408,8 @@ postgres('tech rewards pay lines: the December gift', () => {
       // the sync ran (it looks for open lines of its week), and asked nothing of the technicians
       expect(statements.some((sql) => /from "payroll_pay_lines" where .*"source_type" = /is.test(sql))).toBe(true);
       expect(statements.filter((sql) => /from "technicians" where .*"employment_status" = .* for share/is.test(sql))).toEqual([]);
+      // it examined no gift, so it wrote no audit event
+      expect(await syncEvents()).toEqual([]);
     });
 
     it('reads the technicians FOR SHARE and asks a bounded number of questions for a year of covered weeks', async () => {
@@ -666,8 +677,8 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(stored.tech_rewards_waits).toEqual([{ technician_id: tech, kind: 'december_gift', source_id: `december_gift:${tech}:2026`, reason: 'week_not_paid', week: '2026-11-02' }]);
       // the audit event holds the same rows and line ids, and no key for an amount
       expect(await syncEventOf(run.id, 'waits')).toEqual([{
-        run_id: run.id, week_start: GIFT_WEEK, added_line_ids: [], updated_line_ids: [], removed_line_ids: [], skipped: [],
-        waits: stored.tech_rewards_waits,
+        run_id: run.id, week_start: GIFT_WEEK, added_line_ids: [], updated_line_ids: [], removed_line_ids: [], unchanged_count: 0,
+        skipped: [], waits: stored.tech_rewards_waits,
       }]);
       delete process.env.GATE_TECH_REWARDS_PAY_LINES;
       expect(await notesOf(run.id)).toEqual([]);
