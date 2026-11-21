@@ -4,6 +4,8 @@
  * 20261120220000), the time round trip, the two CHECKs, and loadTechShifts reading
  * the hours and today's clock-in from time_entries on the Staff work date. A mocked
  * knex proves none of the CHECKs, the time type or the Eastern work-date SQL.
+ * The last block runs the booking offers (the hour finder) over the same rows:
+ * it reads the hours through that reader.
  *
  * Runs in the DB-gated CI step (DATABASE_URL on the migrated waves_test database) or
  * a local scratch Postgres migrated with `knex migrate:latest`; it skips without one.
@@ -31,6 +33,7 @@ postgres('technician shift hours (real Postgres)', () => {
   const made = { techIds: [], entryIds: [] };
   let dayTech;
   let lateTech;
+  let earlyTech;
   let noHours;
 
   async function makeTech(name, hours) {
@@ -75,6 +78,7 @@ postgres('technician shift hours (real Postgres)', () => {
     ({ ACTIVE_WRITE_GENERATION } = require('../constants/staff-time'));
     dayTech = await makeTech('Synthetic Shift', ['08:00', '18:00']);
     lateTech = await makeTech('Synthetic Late', ['10:00', '20:00']);
+    earlyTech = await makeTech('Synthetic Early', ['07:00', '13:00']);
     noHours = await makeTech('Synthetic Open', null);
     // dayTech: a completed clock-in at 7:52 AM EST today (out at 8:52), an active one at 9:30 AM, a voided one
     // at 6:00 AM, and a completed one the evening before (01:00Z on 2031-03-04 is 8:00 PM EST on 2031-03-03:
@@ -229,6 +233,47 @@ postgres('technician shift hours (real Postgres)', () => {
       expect(shiftOf(dayTech.id, TODAY)).toEqual({ startMin: 472, endMin: 1072, source: 'clock_in' });
       // By 10:00 PM the 4:00 PM clock-in has happened; ten hours from it would pass midnight.
       expect(shiftOf(lateTech.id, TODAY)).toEqual({ startMin: 960, endMin: 1440, source: 'clock_in' });
+    });
+  });
+
+  // Owner 2026-11-19, page item D4: "offers and confirmations allow only jobs that end by that
+  // tech's shift end". Every technician here has an empty day on TOMORROW, so the technician
+  // without set hours shows the path's own day, and a shift may only take hours away from it.
+  describe('the booking offers obey the shift', () => {
+    const PIN = { lat: 27.42, lng: -82.4 };
+    const startsOf = (result, techId) => result.slots
+      .filter((slot) => slot.technician.id === techId && slot.date === TOMORROW)
+      .map((slot) => slot.start_time)
+      .sort();
+    const endsBy = (limit) => (start) => Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5)) + 60 <= limit;
+    // The finder reads the clock (which dates are past, and the same-day lead), so it is pinned to NOW:
+    // on the real 2031-03-05 these hours would start to go. Date only: pg keeps its real timers.
+    beforeAll(() => {
+      jest.useFakeTimers({
+        now: NOW,
+        doNotFake: ['setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'nextTick',
+          'queueMicrotask', 'performance', 'hrtime'],
+      });
+    });
+    afterAll(() => { jest.useRealTimers(); });
+
+    test('the hour finder (the customer path): 07:00 to 13:00 ends the day at 13:00, 10:00 to 20:00 opens it at 10:00', async () => {
+      const { findAvailableSlots } = require('../services/scheduling/find-time');
+      const everyHour = (technicianId) => findAvailableSlots({
+        ...PIN, durationMinutes: 60, dateFrom: TOMORROW, dateTo: TOMORROW, technicianId, topN: 50, slotStepMinutes: 60, everyStepStart: true, dayEndHour: 18,
+      });
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const open = startsOf(await everyHour(noHours.id), noHours.id);
+      // The path's own day reaches both sides of the two shifts.
+      expect(open[0] < '10:00').toBe(true);
+      expect(open.at(-1) > '12:00').toBe(true);
+      expect(startsOf(await everyHour(earlyTech.id), earlyTech.id)).toEqual(open.filter(endsBy(13 * 60)));
+      expect(startsOf(await everyHour(lateTech.id), lateTech.id)).toEqual(open.filter((start) => start >= '10:00'));
+      // 08:00 to 18:00 is no narrower than the path's own day.
+      expect(startsOf(await everyHour(dayTech.id), dayTech.id)).toEqual(open);
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      expect(startsOf(await everyHour(earlyTech.id), earlyTech.id)).toEqual(open);
+      expect(startsOf(await everyHour(lateTech.id), lateTech.id)).toEqual(open);
     });
   });
 });
