@@ -97,6 +97,8 @@ async function emailedServiceName(estimate, todayLabel) {
     const fresh = await db('estimates').where({ id: estimate.id }).first();
     const address = String(fresh?.customer_email || '').trim().toLowerCase();
     if (!fresh || !address) return null;
+    // The follow-up goes to the address on the engine's row. A different address now = no name.
+    if (address !== String(estimate.customer_email || '').trim().toLowerCase()) return null;
     const rows = await db('email_messages')
       .where({ estimate_id: fresh.id })
       .whereIn('template_key', DELIVERY_TEMPLATE_KEYS())

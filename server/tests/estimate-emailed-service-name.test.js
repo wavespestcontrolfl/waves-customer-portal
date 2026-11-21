@@ -166,12 +166,12 @@ describe('emailedServiceName', () => {
       await expect(emailedServiceName(stale, BUNDLE)).resolves.toBeNull();
     });
 
-    test('the address changed after the engine read the row: the email log is asked for the new address', async () => {
-      rows = [];
+    test('the address changed after the engine read the row: no name, even when the new address has a delivery row', async () => {
+      rows = [row()];
       const stale = estimate();
       freshRow = { ...stale, customer_email: 'New@Example.com' };
       await expect(emailedServiceName(stale, BUNDLE)).resolves.toBeNull();
-      expect(builder.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(recipient_email_snapshot)) = ?', ['new@example.com']);
+      expect(db).not.toHaveBeenCalledWith('email_messages');
     });
 
     test('the row is gone: no name and no email-log read', async () => {
