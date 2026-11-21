@@ -61,6 +61,13 @@ import LawnPlanTab from "../../components/schedule/LawnPlanTab";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
+import CommercialSetupVisitReviewDialog, {
+  COMMERCIAL_SETUP_BOOKING_CHANGED_NOTICE,
+  commercialSetupDecision,
+  commercialSetupPayloadUnchanged,
+  commercialSetupPropertySnapshot,
+  commercialSetupReviewFromError,
+} from "../../components/schedule/CommercialSetupVisitReviewDialog";
 
 import { etDateString, formatETDateOnly } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
@@ -753,6 +760,7 @@ function adminFetch(path, options = {}) {
       err.status = r.status;
       if (body?.code) err.code = body.code;
       if (body?.violations) err.violations = body.violations;
+      if (body?.setupFeeReview) err.setupFeeReview = body.setupFeeReview;
       // Collective series moves: a refused ack hands back the refreshed
       // preview the surface must re-render (GATE_ADMIN_COLLECTIVE_MOVE).
       if (body?.preview) err.preview = body.preview;
@@ -1555,6 +1563,16 @@ function editFrequenciesFor(storedPattern) {
   const customAt = EDIT_FREQUENCIES.findIndex((f) => f.value === "custom");
   return [...EDIT_FREQUENCIES.slice(0, customAt), LAWN_ROUNDS_FREQUENCY, ...EDIT_FREQUENCIES.slice(customAt)];
 }
+function editSetupReviewCadence(pattern, { intervalDays, nth, weekday } = {}) {
+  if (!pattern || pattern === "one_time") return "One-time";
+  if (pattern === "custom") return `Every ${intervalDays || "custom"} days`;
+  if (pattern === "monthly_nth_weekday") {
+    const nthLabel = EDIT_NTH_OPTIONS.find((option) => option.value === Number(nth))?.label || nth;
+    const weekdayLabel = EDIT_WEEKDAY_OPTIONS.find((option) => option.value === Number(weekday))?.label || weekday;
+    return [nthLabel, weekdayLabel, "monthly"].filter(Boolean).join(" ");
+  }
+  return editFrequenciesFor(pattern).find((option) => option.value === pattern)?.label || pattern;
+}
 const EDIT_NTH_OPTIONS = [
   { value: 1, label: "1st" },
   { value: 2, label: "2nd" },
@@ -1911,6 +1929,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveErrorState] = useState("");
+  const [commercialSetupReview, setCommercialSetupReview] = useState(null);
   const setSaveError = setSaveErrorState;
   const saveErrorRef = useRef(null);
   useEffect(() => { saveErrorRef.current?.focus(); }, [saveError]);
@@ -3391,7 +3410,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     return Object.keys(before).some((k) => !Object.is(before[k], after[k]));
   };
 
-  const handleSave = async ({ takePayment = false } = {}) => {
+  const handleSave = async ({ takePayment = false, commercialSetupRetry = null } = {}) => {
     if (stackingUnconfirmedBlocksSave) return;
     if (lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) return;
     // Codex pre-push audit structural round on #4657: Save is blocked while
@@ -3510,6 +3529,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
     }
     let saveRequestSent = false;
+    let submittedSetupPayload = null;
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -3531,10 +3551,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       if (comboTogether && comboRegroupingEdit) {
         throw new Error("A different service can take this service off the shared stop. Save that change on its own first, or choose Separate.");
       }
-      saveRequestSent = true;
-      const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
-        method: "PUT",
-        body: JSON.stringify({
+      const savePayload = {
           ...form,
           // The auto-dispatch box and the value it opened with; the server acts only on a flip.
           autoDispatchLocked,
@@ -3676,7 +3693,30 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             moneyPreviewFresh && moneyPreview.total == null
               ? null
               : typeof appointmentTotal === "number" ? appointmentTotal : undefined,
-        }),
+        };
+      const setupRetryPayloadUnchanged = commercialSetupRetry
+        && commercialSetupPayloadUnchanged(commercialSetupRetry.body, savePayload);
+      if (commercialSetupRetry && !setupRetryPayloadUnchanged) {
+        setCommercialSetupReview(null);
+        setSaveError(COMMERCIAL_SETUP_BOOKING_CHANGED_NOTICE);
+        savingRef.current = false;
+        setSaving(false);
+        return;
+      }
+      submittedSetupPayload = setupRetryPayloadUnchanged
+        ? {
+            ...commercialSetupRetry.body,
+            commercialSetupDecision: commercialSetupDecision(
+              commercialSetupRetry.review,
+              commercialSetupRetry.resolution,
+            ),
+          }
+        : savePayload;
+      if (commercialSetupRetry) setCommercialSetupReview(null);
+      saveRequestSent = true;
+      const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
+        method: "PUT",
+        body: JSON.stringify(submittedSetupPayload),
       });
       // The whole-stop move's outcome rides in the saved answer: the other
       // changes are saved either way.
@@ -3853,6 +3893,47 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
       onSaved?.();
     } catch (e) {
+      const setupReview = commercialSetupReviewFromError(e);
+      if (setupReview) {
+        const originalPayload = { ...(submittedSetupPayload || {}) };
+        delete originalPayload.commercialSetupDecision;
+        const reviewPattern = originalPayload.recurringPattern
+          || service.recurringPattern
+          || service.recurring_pattern
+          || (originalPayload.isRecurring ? recurringFreq : "one_time");
+        const booking = commercialSetupRetry?.booking || {
+          serviceNames: editServices.map((item) => item.name),
+          cadence: editSetupReviewCadence(reviewPattern, {
+            intervalDays: originalPayload.recurringIntervalDays ?? recurringIntervalDays,
+            nth: originalPayload.recurringNth ?? recurringNth,
+            weekday: originalPayload.recurringWeekday ?? recurringWeekday,
+          }),
+          scheduledDate: originalPayload.scheduledDate,
+          windowStart: originalPayload.windowStart,
+          windowEnd: originalPayload.windowEnd,
+          ...commercialSetupPropertySnapshot({
+            property: selectedProperty,
+            propertyId: selectedPropertyId || service.propertyId || service.property_id,
+            fallback: {
+              address: service.address || customer.address?.line1 || "",
+              city: service.city || customer.address?.city || "",
+              state: service.state || customer.address?.state || "",
+              zip: service.zip || customer.address?.zip || "",
+            },
+            fallbackLabel: "Current appointment address",
+          }),
+        };
+        setCommercialSetupReview({
+          review: setupReview,
+          body: originalPayload,
+          takePayment,
+          changed: !!commercialSetupRetry,
+          booking,
+        });
+        savingRef.current = false;
+        setSaving(false);
+        return;
+      }
       const ack = parseSeriesAckError(e);
       // The server refused a date/time change because the stop is shared and
       // this form did not know it (the read on open was slow, failed, or the
@@ -3903,6 +3984,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     }
     savingRef.current = false;
     setSaving(false);
+  };
+
+  const resolveCommercialSetupReview = async (resolution) => {
+    if (!commercialSetupReview || savingRef.current) return;
+    await handleSave({
+      takePayment: commercialSetupReview.takePayment,
+      commercialSetupRetry: { ...commercialSetupReview, resolution },
+    });
   };
 
   // no_show is terminal on the server too (the status route 409s a
@@ -4861,6 +4950,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         fontFamily: "Roboto, Arial, sans-serif",
       }}
     >
+      <CommercialSetupVisitReviewDialog
+        review={commercialSetupReview?.review}
+        changed={commercialSetupReview?.changed}
+        booking={commercialSetupReview?.booking}
+        busy={saving}
+        onResolve={resolveCommercialSetupReview}
+        onCancel={() => setCommercialSetupReview(null)}
+      />
       {" "}
       <div
         onClick={(e) => e.stopPropagation()}

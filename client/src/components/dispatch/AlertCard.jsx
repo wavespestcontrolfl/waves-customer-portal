@@ -183,6 +183,56 @@ function GenericBody({ alert }) {
   );
 }
 
+function CommercialPrepaySetupReviewBody({ alert }) {
+  const payload = alert.payload || {};
+  const amount = Number(payload.amount);
+  const amountLabel = Number.isFinite(amount) ? `$${amount.toFixed(2)}` : 'The setup fee';
+  return (
+    <div className="text-14 text-ink-primary space-y-2">
+      {payload.paymentRestored === true ? (
+        <>
+          <p>
+            Payment was restored on the original commercial rodent prepay invoice, including its {amountLabel} setup fee.
+          </p>
+          <p className="text-ink-secondary">
+            Check whether a separate setup fee was billed during the earlier review, then reconcile any duplicate through normal office billing.
+          </p>
+        </>
+      ) : (
+        <>
+          <p>
+            The commercial rodent prepay was reversed before a visit was confirmed. {amountLabel} is still tied to the source invoice.
+          </p>
+          <p className="text-ink-secondary">
+            Compare the correct visit and property with the accepted service, then check whether the setup fee was already billed before settling it through normal office billing.
+          </p>
+        </>
+      )}
+      {payload.estimateId && (
+        <p className="text-12 text-ink-tertiary">Accepted estimate #{payload.estimateId}</p>
+      )}
+      <div className="flex flex-wrap gap-x-3 gap-y-1">
+        {payload.sourceInvoiceId && (
+          <a
+            className="text-ink-primary underline underline-offset-2"
+            href={`/admin/invoices?invoice=${encodeURIComponent(payload.sourceInvoiceId)}`}
+          >
+            Review source invoice
+          </a>
+        )}
+        {payload.customerId && (
+          <a
+            className="text-ink-primary underline underline-offset-2"
+            href={`/admin/customers?customerId=${encodeURIComponent(payload.customerId)}`}
+          >
+            Review customer account
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RouteQualityBody({ alert }) {
   const { date, issues = [], departureMinutes, techName } = alert.payload || {};
   const departure = Number.isFinite(departureMinutes)
@@ -388,6 +438,7 @@ const TYPE_RENDERERS = {
   moa_violation: MoaViolationBody,
   schedule_route_quality: RouteQualityBody,
   tech_out_overflow: TechOutOverflowBody,
+  commercial_prepay_setup_review: CommercialPrepaySetupReviewBody,
 };
 
 // Header label for types that get a plain-English sentence instead of the
@@ -396,6 +447,7 @@ const PRETTY_HEADER_LABEL = {
   [NOT_CLOSED_OUT_TYPE]: 'Visit not closed out',
   schedule_route_quality: 'Route needs review',
   tech_out_overflow: 'Needs a decision',
+  commercial_prepay_setup_review: 'Setup fee needs review',
 };
 
 export default function AlertCard({ alert, onResolve, onOpenJob, onDecide }) {
