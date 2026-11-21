@@ -1791,6 +1791,15 @@ async function reserveSlot({
         err.slotId = slotId;
         throw err;
       }
+      // Owner rule B per truck (zone-day-funnel.js truckMayTakeDate): a new hold never sends a second truck south on a
+      // day another truck already drives there, in the zone it stamps. Two offers for two trucks on one new far-south day
+      // are serialized by the date lock taken first, so the second reads the first one's hold. Read BEFORE the
+      // estimate's other holds are dropped, as the list read the day: a customer changing the hour keeps the truck's
+      // day that the hold being replaced holds (pre-push P1 on 69000b1ef3: read after the delete, a day two trucks
+      // drive refused every other hour the list offered that truck).
+      if (!(await require('./scheduling/zone-day-funnel').truckMayTakeDate(trx, { estimateZone: reserveZone, date, technicianId: techId }))) {
+        throw slotTaken(slotId);
+      }
       if ((liveHolds || []).length) {
         await trx('scheduled_services').whereIn('id', liveHolds.map((hold) => hold.id)).del();
       }
@@ -1815,13 +1824,6 @@ async function reserveSlot({
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
         throw err;
-      }
-
-      // Owner rule B per truck (zone-day-funnel.js truckMayTakeDate): a new hold never sends a second truck south on a
-      // day another truck already drives there, in the zone it stamps. Two offers for two trucks on one new far-south day
-      // are serialized by the date lock taken first, so the second reads the first one's hold.
-      if (!(await require('./scheduling/zone-day-funnel').truckMayTakeDate(trx, { estimateZone: reserveZone, date, technicianId: techId }))) {
-        throw slotTaken(slotId);
       }
 
       // Zone-capacity check: the tech-scoped conflict above misses

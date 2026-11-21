@@ -386,7 +386,7 @@ describe('slot reservation helpers', () => {
 
     // A new hold for a Venice estimate on tech-1, with the real check: `stopRows` are that day's far-south stops, or
     // null when the gate is off and nothing is read (a read would take the next builder and break the sequence).
-    function reserveVeniceHold({ perTruck = true, stopRows = null } = {}) {
+    function reserveVeniceHold({ perTruck = true, stopRows = null, liveHolds = [] } = {}) {
       jest.useFakeTimers();
       jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
       if (perTruck) process.env.GATE_MULTI_TECH_CONFIRM = 'true';
@@ -394,18 +394,20 @@ describe('slot reservation helpers', () => {
       const insertBuilder = makeInsertBuilder({ id: 'scheduled-123', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
       const zoneConflict = { ...makeConflictBuilder(null), leftJoin: jest.fn().mockReturnThis() };
       const stopRead = stopRows ? makeStopReadBuilder(stopRows) : null;
+      // The estimate's other live holds (a changed hour) are dropped after the far-south read.
+      const dropped = { whereIn: jest.fn().mockReturnThis(), del: jest.fn().mockResolvedValue(liveHolds.length) };
       // Per truck the global probe is scoped to the slot's technician plus unassigned rows (occupancy.js applyTechScope).
       const globalProbe = makeGlobalProbeBuilder([]);
       globalProbe.orWhere = jest.fn(() => globalProbe);
       const trx = makeTrx({
         estimateBuilder: makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', address: '1 Test Way, Venice, FL 34285' }),
         technicianBuilder: makeTechnicianBuilder(),
-        scheduledBuilders: [makeLiveHoldsBuilder([]), makeConflictBuilder(null), ...(stopRead ? [stopRead] : []), zoneConflict, globalProbe, insertBuilder],
+        scheduledBuilders: [makeLiveHoldsBuilder(liveHolds), ...(stopRead ? [stopRead] : []), ...(liveHolds.length ? [dropped] : []), makeConflictBuilder(null), zoneConflict, globalProbe, insertBuilder],
         zones: [VENICE],
       });
       db.transaction = jest.fn(async (callback) => callback(trx));
       const run = slotReservation.reserveSlot({ estimateId: 'estimate-456', slotId: signedSlotId(SLOT), selectedFrequency: 'quarterly' });
-      return { run, insertBuilder, stopRead, trx };
+      return { run, insertBuilder, stopRead, trx, dropped };
     }
     const veniceStop = (technicianId) => ({ scheduled_date: '2027-05-20', zone: 'venice', service_city: null, customer_city: null, technician_id: technicianId });
 
@@ -429,6 +431,29 @@ describe('slot reservation helpers', () => {
       await expect(run).resolves.toMatchObject({ scheduledServiceId: 'scheduled-123' });
       expect(stopRead.select).toHaveBeenCalledTimes(1);
       expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({ zone: 'venice', technician_id: 'tech-1', scheduled_date: '2027-05-20' }));
+    });
+
+    // A customer changes the hour: the hold being replaced is its truck's only far-south stop on a day another truck
+    // drives too. The list counted that hold when it offered the truck's other hours, so the check reads the day
+    // before the hold is dropped (pre-push P1 on 69000b1ef3).
+    const OWN_HOLD = {
+      id: 'held-old', scheduled_date: '2027-05-20', window_start: '11:00:00', technician_id: 'tech-1',
+      estimated_duration_minutes: 90, reservation_expires_at: '2027-05-20T13:05:00.000Z', zone: 'venice',
+    };
+
+    test('a changed hour on its own truck\'s day: the day is read before the replaced hold is dropped, then the new hold is written', async () => {
+      const { run, insertBuilder, stopRead, dropped } = reserveVeniceHold({ liveHolds: [OWN_HOLD], stopRows: [veniceStop('tech-1'), veniceStop('tech-2')] });
+      await expect(run).resolves.toMatchObject({ scheduledServiceId: 'scheduled-123' });
+      expect(dropped.whereIn).toHaveBeenCalledWith('id', ['held-old']);
+      expect(stopRead.select.mock.invocationCallOrder[0]).toBeLessThan(dropped.del.mock.invocationCallOrder[0]);
+      expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({ zone: 'venice', technician_id: 'tech-1' }));
+    });
+
+    test('a changed hour onto another truck\'s far-south day: slot-taken, and the held time is not dropped', async () => {
+      const { run, insertBuilder, dropped } = reserveVeniceHold({ liveHolds: [{ ...OWN_HOLD, scheduled_date: '2027-05-21' }], stopRows: [veniceStop('tech-2')] });
+      await expect(run).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: signedSlotId(SLOT) });
+      expect(dropped.del).not.toHaveBeenCalled();
+      expect(insertBuilder.insert).not.toHaveBeenCalled();
     });
 
     test('gate off (one truck): no far-south read, the hold inserts as before', async () => {
