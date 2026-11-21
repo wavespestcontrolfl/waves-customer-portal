@@ -310,9 +310,16 @@ async function recordEstimateStillDeciding({
       .where({ estimate_id: lockedEstimate.id, action: STILL_DECIDING_ACTION })
       .where('created_at', '>', dbx.raw("NOW() - interval '1 day'"))
       .first();
+    // "We will call you" is the server's to say: only for "Talking to a person first", and only while the locked
+    // estimate has a phone. The sheet words its closing text from this answer, never from the page it loaded.
+    const answer = {
+      success: true,
+      estimateId: lockedEstimate.id,
+      ...(reasonKey === 'person' && String(lockedEstimate.customer_phone || '').trim() ? { callPromised: true } : {}),
+    };
     if (recent) {
       if (reasonKey) await dbx('activity_log').where({ id: recent.id }).update({ description, metadata });
-      return { success: true, deduped: true, estimateId: lockedEstimate.id };
+      return { ...answer, deduped: true };
     }
 
     await dbx('activity_log').insert({
@@ -323,7 +330,7 @@ async function recordEstimateStillDeciding({
       metadata,
     });
     logger.info(`[estimate-change-request] still-deciding signal for estimate ${lockedEstimate.id}`);
-    return { success: true, deduped: false, estimateId: lockedEstimate.id };
+    return { ...answer, deduped: false };
   });
 
   const { estimateId, ...result } = outcome;

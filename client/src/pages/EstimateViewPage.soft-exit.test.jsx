@@ -76,7 +76,7 @@ describe('SoftExitSheet', () => {
   });
 
   it('Send posts the picked reason once and closes with the same words as Skip', async () => {
-    await openDecidingStep({ canCall: true });
+    await openDecidingStep();
     fireEvent.click(screen.getByRole('button', { name: 'Comparing other quotes' }));
     fireEvent.click(screen.getByRole('button', { name: 'A lower price' }));
     expect(screen.getByRole('button', { name: 'A lower price' })).toHaveAttribute('aria-pressed', 'true');
@@ -88,8 +88,12 @@ describe('SoftExitSheet', () => {
     expect(screen.getByText(/^Take your time — this estimate stays open through September 1[45]\. Questions\? Call \(941\) 297-5749\.$/)).toBeInTheDocument();
   });
 
-  it('"Talking to a person first" on an estimate with a phone: "We will call you" and the open-through date', async () => {
-    await openDecidingStep({ canCall: true });
+  // The server reads the phone as it saves the reason and answers callPromised; the sheet says only what it answered.
+  const promisedCall = { ok: true, json: async () => ({ success: true, deduped: true, callPromised: true }) };
+
+  it('"Talking to a person first", and the server promises the call: "We will call you" and the open-through date', async () => {
+    await openDecidingStep();
+    fetchMock.mockResolvedValueOnce(promisedCall);
     fireEvent.click(screen.getByRole('button', { name: 'Talking to a person first' }));
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'We will call you' })).toBeInTheDocument());
@@ -98,7 +102,7 @@ describe('SoftExitSheet', () => {
     expect(screen.queryByText(/Take your time/)).not.toBeInTheDocument();
   });
 
-  it('"Talking to a person first" with no phone on the estimate promises no call and gives our number', async () => {
+  it('"Talking to a person first", and the server promises no call (no phone on the estimate): our number instead', async () => {
     await openDecidingStep();
     fireEvent.click(screen.getByRole('button', { name: 'Talking to a person first' }));
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
@@ -109,7 +113,7 @@ describe('SoftExitSheet', () => {
   });
 
   it('a reason that fails to send shows the error and stays on the step, with no call promised', async () => {
-    await openDecidingStep({ canCall: true });
+    await openDecidingStep();
     fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({ error: 'Too many requests. Please call our office and we’ll get you sorted.' }) });
     fireEvent.click(screen.getByRole('button', { name: 'Talking to a person first' }));
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
@@ -239,11 +243,12 @@ describe('estimate page: the "Not ready yet?" link', () => {
     ...extra,
   });
   const renderPage = async (body) => {
-    const pageFetch = vi.fn(async (url) => ({
-      ok: true,
-      status: 200,
-      json: async () => (String(url).includes('/available-slots') ? { primary: [], expander: [] } : body),
-    }));
+    const answerFor = (url, init) => {
+      if (String(url).includes('/available-slots')) return { primary: [], expander: [] };
+      if (String(url).includes('/change-request')) return { success: true, deduped: true, ...(/"reason":"person"/.test(init?.body || '') ? { callPromised: true } : {}) };
+      return body;
+    };
+    const pageFetch = vi.fn(async (url, init) => ({ ok: true, status: 200, json: async () => answerFor(url, init) }));
     vi.stubGlobal('fetch', pageFetch);
     const view = render(<EstimateViewPage />);
     await waitFor(() => expect(view.container.querySelector('#estimate-price-section')).not.toBeNull());
@@ -256,7 +261,7 @@ describe('estimate page: the "Not ready yet?" link', () => {
   const sheetTitle = () => document.querySelector('[role="dialog"]')?.getAttribute('aria-label');
 
   it('shows twice, beside the approve area and at the page bottom, and opens the sheet', async () => {
-    const { container } = await renderPage(payload({ softExit: true, softExitChange: true, softExitCall: true }));
+    const { container } = await renderPage(payload({ softExit: true, softExitChange: true }));
     const links = await screen.findAllByText(LINK);
     expect(links).toHaveLength(2);
     // The first one comes before the Ask Waves box; the second one after it.
@@ -267,8 +272,8 @@ describe('estimate page: the "Not ready yet?" link', () => {
     expect(sheetTitle()).toBe('Not ready yet?');
   }, 20000);
 
-  it('passes the server\'s phone answer to the sheet: a call is promised only with softExitCall', async () => {
-    const { pageFetch } = await renderPage(payload({ softExit: true, softExitCall: true }));
+  it('the page\'s sheet posts the signal, then the reason, and shows the call the server promised', async () => {
+    const { pageFetch } = await renderPage(payload({ softExit: true }));
     fireEvent.click((await screen.findAllByText(LINK))[0]);
     fireEvent.click(sheet().getByRole('button', { name: /still deciding/i }));
     await waitFor(() => expect(sheetTitle()).toBe('What would help you decide?'));

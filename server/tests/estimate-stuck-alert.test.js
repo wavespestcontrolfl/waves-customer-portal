@@ -111,13 +111,26 @@ describe('still deciding: what the customer said would help (owner 2026-11-21)',
     expect(raised().map((a) => a.why)).toEqual(['Wants to talk to a person first; the estimate has no phone number.']);
   });
 
-  test('it rings over a row that says something else today, and once for a day of still-deciding reasons', async () => {
+  test('it rings over a row that rang for a booking problem today, and once a day for still-deciding reasons', async () => {
     await stuck.noteStillDeciding(REQ, EST, 'person');
     const { ringOnRefresh, metadata } = raised()[0].opts;
-    expect(ringOnRefresh({}, { stuckDay: metadata.stuckDay, stuckReason: 'stuck' })).toBe(true);
-    expect(ringOnRefresh({}, { stuckDay: metadata.stuckDay, stuckReason: 'expired' })).toBe(true);
-    expect(ringOnRefresh({}, { stuckDay: metadata.stuckDay, stuckReason: 'deciding' })).toBe(false);
-    expect(ringOnRefresh({}, { stuckDay: '2026-11-04', stuckReason: 'deciding' })).toBe(true);
+    const today = metadata.stuckDay;
+    expect(metadata.decidingDay).toBe(today);
+    // A row a booking problem rang today: the reason still rings.
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'stuck' })).toBe(true);
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'expired' })).toBe(true);
+    // A second reason today is quiet, also after a booking problem rewrote the row in between.
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today })).toBe(false);
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'stuck', decidingDay: today })).toBe(false);
+    // A new day rings again.
+    expect(ringOnRefresh({}, { stuckDay: '2026-11-04', stuckReason: 'deciding', decidingDay: '2026-11-04' })).toBe(true);
+  });
+
+  test('a booking problem never stamps the still-deciding day, and keeps its own once-a-day ring', async () => {
+    await stuck.noteExpiredReturn(OPEN_ROW, { offered: true, selfServe: true });
+    const { ringOnRefresh, metadata } = raised()[0].opts;
+    expect(metadata).not.toHaveProperty('decidingDay');
+    expect(ringOnRefresh({}, { stuckDay: metadata.stuckDay, decidingDay: '2026-11-04' })).toBe(false);
   });
 
   test('a quote with no send stamp still rings (the sheet shows only on a live estimate); a stuck reason on it does not', async () => {

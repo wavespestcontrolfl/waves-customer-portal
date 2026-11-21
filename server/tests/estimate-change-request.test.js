@@ -254,6 +254,18 @@ describe('recordEstimateStillDeciding', () => {
       expect(noteReason).toHaveBeenCalledWith(REQ, 'est-1', 'price');
     });
 
+    // The sheet says "We will call you" only on this answer, so it is true only when a call can be made.
+    test('the answer promises a call only for "Talking to a person first" on an estimate with a phone', async () => {
+      const withPhone = { ...ESTIMATE_ROW, customer_phone: ' +19415550100 ' };
+      const noteReason = async () => undefined;
+      expect(await record(mockDb({ estimate: withPhone }), 'person', noteReason)).toEqual({ success: true, deduped: false, callPromised: true });
+      expect(await record(mockDb({ estimate: withPhone, recentSignal: { id: 'act-1' } }), 'person', noteReason))
+        .toEqual({ success: true, deduped: true, callPromised: true });
+      expect(await record(mockDb({ estimate: { ...ESTIMATE_ROW, customer_phone: '  ' } }), 'person', noteReason)).toEqual({ success: true, deduped: false });
+      expect(await record(mockDb({ estimate: withPhone }), 'price', noteReason)).toEqual({ success: true, deduped: false });
+      expect(await record(mockDb({ estimate: withPhone }), undefined, noteReason)).toEqual({ success: true, deduped: false });
+    });
+
     test('a signal with no reason never clears a reason and rings nothing', async () => {
       for (const reason of [undefined, null, '']) {
         const database = mockDb({ recentSignal: { id: 'act-1', metadata: { reason: 'person' } } });

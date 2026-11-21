@@ -742,7 +742,7 @@ customer came back to an expired estimate. It rings at most once per Eastern day
 number", and then the page promised no call), "Is comparing other quotes.", "Says it is not the right time yet." or
 "Picked Something else and gave no detail." This reason also rings over a row that says something else that day, so a
 customer who asked for a call is never hidden behind an earlier stuck alert; a second still-deciding reason that day
-does not ring. A tap with no reason raises nothing. It raises on a live quote with no send stamp too. A ring also sends a
+does not ring (`metadata.decidingDay`). A tap with no reason raises nothing. It raises on a live quote with no send stamp too. A ring also sends a
 phone banner with the New lead sound (`bell-banners.js` kind `estimate_stuck`, 7:00 AM to 9:00 PM Eastern). The category
 rings by default and the owner can silence it under Push Settings ("Customers stuck or still deciding on an estimate"); while it is
 silenced nothing raises or refreshes (notifyAdmin reads the mute only on a fresh insert) and the 5-minute pass closes the

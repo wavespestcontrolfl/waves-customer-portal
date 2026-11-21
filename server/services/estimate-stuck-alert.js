@@ -13,9 +13,9 @@
  * and "<name> came back to an expired estimate", with when it expired and what the page offers them.
  *
  * The same bell carries "<name> is still deciding" (owner 2026-11-21, estimate page changes, change 1): the customer
- * tapped "I'm still deciding" and picked what would help. The why is that reason, in the office's words. It rings
- * like a new day's reason unless today's row already says still deciding, so a customer who asked for a call is
- * never hidden behind an earlier stuck alert.
+ * tapped "I'm still deciding" and picked what would help. The why is that reason, in the office's words. It keeps
+ * its own day (metadata.decidingDay): it rings once per Eastern day, also over a row a booking problem already rang
+ * today, so a customer who asked for a call is never hidden behind an earlier stuck alert.
  *
  * Each search, hold start and hold end is a row in audit_log (audit-log.js auditEstimateBookingStep), so the next
  * booking audit can see this step; the empty-search count reads the same rows.
@@ -73,7 +73,7 @@ const ACTIONS = {
 };
 // What the customer picked under "What would help you decide?" (estimate-change-request.js STILL_DECIDING_REASONS),
 // as the office reads it after "<name> is still deciding". The page tells a customer who picks "Talking to a person
-// first" that we will call, but only when the estimate has a phone (estimate-public.js softExitCall).
+// first" that we will call, but only when the estimate has a phone (the still_deciding response's callPromised).
 const DECIDING_WHY = {
   price: () => 'Wants a lower price.',
   person: (row) => (String(row.customer_phone || '').trim()
@@ -184,14 +184,14 @@ async function raiseStuck(estimateId, kind, whyFor, { now = new Date() } = {}) {
     dedupeVersion: day,
     refreshOnDedupe: true,
     bumpOnRefresh: true,
-    // A still-deciding reason also rings over a row that says something else today (see the header).
-    ringOnRefresh: (existing, existingMeta) => existingMeta?.stuckDay !== day
-      || (kind === 'deciding' && existingMeta?.stuckReason !== 'deciding'),
+    // A still-deciding reason keeps its own day (decidingDay): it rings over a row that already rang for a booking
+    // problem today, and at most once a day itself, whatever the row was rewritten with in between.
+    ringOnRefresh: (existing, existingMeta) => (kind === 'deciding' ? existingMeta?.decidingDay : existingMeta?.stuckDay) !== day,
     // triggerKey names the phone banner (bell-banners.js); customerId sits at the top level, where
     // notification-service's test-customer suppression reads it.
     metadata: {
       triggerKey: STUCK_CATEGORY, estimateId: estimate.id, customerId: estimate.customer_id || null,
-      stuckDay: day, stuckReason: kind,
+      stuckDay: day, stuckReason: kind, ...(kind === 'deciding' ? { decidingDay: day } : {}),
     },
   };
   const result = alertEpisodesLive()

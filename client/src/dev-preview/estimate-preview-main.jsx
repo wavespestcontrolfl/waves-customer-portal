@@ -1210,7 +1210,6 @@ window.fetch = async (input, init) => {
       // the "Not ready yet?" sheet is exercised in preview.
       softExit: true,
       softExitChange: true,
-      softExitCall: true,
       ...(pdfPass && documentRenderAffirmed(proposal) ? { documentRender: true } : {}),
     });
   }
@@ -1229,7 +1228,9 @@ window.fetch = async (input, init) => {
       : respond({ error: 'invalid_code' }, 400);
   }
   if (url.includes('/change-request') || url.endsWith('/decline')) {
-    return respond({ success: true, deduped: false });
+    // The server promises a call for "Talking to a person first" when the estimate has a phone; the preview has one.
+    const wantsPerson = /"reason":"person"/.test(String(init?.body || ''));
+    return respond({ success: true, deduped: false, ...(wantsPerson ? { callPromised: true } : {}) });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;

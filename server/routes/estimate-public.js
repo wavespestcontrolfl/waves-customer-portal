@@ -32036,10 +32036,6 @@ async function composeEstimateDataPayload(estimate, {
           // email-only estimate would 400 on submit, so the page withholds
           // the branch instead (GH codex P2). Include-when-true.
           ...(estimate.customer_id || String(estimate.customer_phone || '').trim() ? { softExitChange: true } : {}),
-          // The sheet tells a customer who wants to talk to a person "We will
-          // call you" only when the estimate has a number to call (the Call
-          // today list needs the same phone). Include-when-true.
-          ...(String(estimate.customer_phone || '').trim() ? { softExitCall: true } : {}),
         } : {}),
       // Services this customer has opted out of. Present only when there is
       // something to report, so a gate-off (or never-used) response stays

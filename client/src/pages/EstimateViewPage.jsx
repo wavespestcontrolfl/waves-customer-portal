@@ -3742,7 +3742,7 @@ const softExitInputStyle = {
 };
 
 // What the sheet says once an exit is done: [heading, text]. `callPromised`: the customer asked to talk to a person
-// and the estimate has a phone.
+// and the server answered that the estimate has a phone to call.
 function softExitDoneCopy(doneKind, callPromised, expiresDisplay) {
   if (doneKind === 'change') {
     return ['Got it — we’ll send a revised estimate',
@@ -3770,8 +3770,7 @@ function SoftExitDecidingButtons({ picked, submitting, onSend, onSkip }) {
   );
 }
 
-// `canCall`: the estimate has a phone (the server's softExitCall), so the sheet may say "We will call you".
-export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, canCall = false, onClose, onDeclined }) {
+export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, onClose, onDeclined }) {
   const [step, setStep] = useState('choose'); // choose | deciding | change | decline | done
   const [doneKind, setDoneKind] = useState(null); // change | still_deciding | decline
   const [topics, setTopics] = useState(() => new Set());
@@ -3824,12 +3823,13 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
     () => post('change-request', 'POST', { kind: 'still_deciding' }),
     () => goTo('deciding'),
   );
+  // "We will call you" shows only on the server's word (callPromised): it read the phone as it saved the reason.
   const sendHelp = () => run(
-    () => post('change-request', 'POST', { kind: 'still_deciding', reason: help }),
-    () => {
-      setCallPromised(help === 'person' && canCall);
-      finish('still_deciding');
+    async () => {
+      const saved = await post('change-request', 'POST', { kind: 'still_deciding', reason: help });
+      setCallPromised(saved?.callPromised === true);
     },
+    () => finish('still_deciding'),
   );
   const submitDecline = () => run(() => post('decline', 'PUT', {
     reason,
@@ -11104,7 +11104,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           token={token}
           expiresAt={estimate.expiresAt || null}
           changeEligible={data?.softExitChange === true}
-          canCall={data?.softExitCall === true}
           onClose={() => setSoftExitOpen(false)}
           // A decline is terminal: reload so the server's terminal state
           // (declined card, no CTAs) paints from truth, not local state.

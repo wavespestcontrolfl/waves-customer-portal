@@ -9248,10 +9248,10 @@ the day's row (`metadata.reason`, `metadata.reason_at`; the newest one wins,
 and a signal with no reason never clears it) and, after the commit, goes to
 the office on the estimate's one `estimate_stuck` bell
 (`estimate-stuck-alert.js` `noteStillDeciding`, which never throws and skips
-bots, staff browsers and the office network). No reason, no bell. The `/data`
-payload's `softExitCall: true` (present only beside `softExit`, when the
-estimate has a phone) is what lets the sheet answer "Talking to a person
-first" with "We will call you".
+bots, staff browsers and the office network). No reason, no bell. The
+response carries `callPromised: true` only for `person` on an estimate that
+has a phone as the reason is saved; only then does the sheet answer "We will
+call you".
 `kind:'callback'` instead gates on `GATE_WEBSITE_QUOTE_BOOKING`, requires
 the server's `websiteSelfService` stamp on the locked estimate, and parks
 one `estimate_callback_request` through the same office-request writer and
