@@ -4,7 +4,10 @@
  * shift end"). Each of find-time.js's three finders reads every technician's
  * shift once (technician-eligibility.js loadTechShifts: the real reader runs
  * here, over a database double) and offers a technician with set hours only a
- * job that starts at or after the shift start and ends by the shift end.
+ * job that starts at or after the shift start and ends by the shift end. The two
+ * finders that check an hour on the route also need the route's own simulation to
+ * finish the visit by the shift end (the route engine is a double here: its real
+ * run over real rows is in tech-shift-hours-postgres.test.js).
  *
  * A failure here means one of two things. A customer or the office was offered
  * an hour the technician does not work. Or the shift took an hour away from a
@@ -91,6 +94,12 @@ beforeEach(() => {
   tables = { technicians: [tech('t1', ['10:00:00', '15:00:00'])] };
   db.mockImplementation((table) => chain(tables[table] || []));
 });
+
+// 'HH:MM' plus minutes.
+const plus = (hhmm, minutes) => {
+  const total = Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5)) + minutes;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+};
 
 const startsOf = (result, technicianId = 't1', date = WED) => result.slots
   .filter((slot) => slot.technician.id === technicianId && slot.date === date)
@@ -208,10 +217,13 @@ describe('the hour finder (findAvailableSlots, the customer path in production)'
 });
 
 describe('the staff arrival finder (findArrivalWindowSlots, the office and technician pickers)', () => {
-  const fit = {
-    feasible: true, routeOrder: ['candidate'], detourMinutes: 4, driveMinutes: 10, occupiedMinutes: 60, waitingMinutes: 0,
-    arrivalDelayMinutes: 0, estimatedArrival: '10:00', arrivals: [{ id: 'candidate' }], finishMinute: 700,
-  };
+  // One hour the route engine certified: the visit reached at `arrival` and finished at `departure`.
+  const placement = (windowStart, windowEnd, arrival = windowStart, departure = windowEnd) => ({
+    windowStart, windowEnd, fit: {
+      feasible: true, target: { id: 'candidate' }, routeOrder: ['candidate'], detourMinutes: 4, driveMinutes: 10, occupiedMinutes: 60, waitingMinutes: 0,
+      arrivalDelayMinutes: 0, estimatedArrival: arrival, arrivals: [{ id: 'candidate', arrival, departure }], finishMinute: 700,
+    },
+  });
   const STAFF = {
     lat: 27.4, lng: -82.5, durationMinutes: 60, dateFrom: TODAY, dateTo: THU, topN: 50,
     arrivalWindow: { prospective: { lat: 27.4, lng: -82.5, estimated_duration_minutes: 60 } },
@@ -222,7 +234,7 @@ describe('the staff arrival finder (findArrivalWindowSlots, the office and techn
 
   beforeEach(() => {
     loadArrivalRouteContext.mockImplementation(async ({ date, technicianId }) => ({ date, technicianId, target: { id: 'candidate' }, rows: [] }));
-    enumerateArrivalPlacements.mockReturnValue({ placements: [{ windowStart: '10:00', windowEnd: '11:00', fit }], evaluated: 1, rejections: {} });
+    enumerateArrivalPlacements.mockReturnValue({ placements: [placement('10:00', '11:00')], evaluated: 1, rejections: {} });
   });
 
   test('the route engine is asked for hours from the shift start, with the job ended by the shift end', async () => {
@@ -256,6 +268,32 @@ describe('the staff arrival finder (findArrivalWindowSlots, the office and techn
     });
   });
 
+  test('an hour the route would finish after the shift end is refused, for that technician only', async () => {
+    tables.technicians = [tech('t1', ['10:00:00', '15:00:00']), tech('t2', null)];
+    // A stop before the 14:00 hour runs long: the route reaches it at 14:20, so the visit ends at 15:20.
+    enumerateArrivalPlacements.mockReturnValue({
+      placements: [placement('13:00', '14:00'), placement('14:00', '15:00', '14:20', '15:20')], evaluated: 3, rejections: { arrival_window: 1 },
+    });
+    const result = await findAvailableSlots({ ...STAFF, dateFrom: WED, dateTo: WED });
+    expect(startsOf(result, 't1')).toEqual(['13:00']);
+    expect(startsOf(result, 't2')).toEqual(['13:00', '14:00']);
+    // The engine's own refusals on both routes, and the one hour the shift refused.
+    expect(result.rejections_by_date).toEqual({ [WED]: { arrival_window: 2, shift_end: 1 } });
+  });
+
+  test('a visit the route finishes exactly at the shift end is kept', async () => {
+    enumerateArrivalPlacements.mockReturnValue({ placements: [placement('14:00', '15:00', '14:00', '15:00')], evaluated: 1, rejections: {} });
+    const result = await findAvailableSlots({ ...STAFF, dateFrom: WED, dateTo: WED });
+    expect(startsOf(result)).toEqual(['14:00']);
+    expect(result.rejections_by_date).toEqual({});
+  });
+
+  test('no technician matches the search: the hours are not read', async () => {
+    tables.technicians = [];
+    expect((await findAvailableSlots({ ...STAFF, technicianId: 't9' })).slots).toEqual([]);
+    expect(reads('technicians')).toBe(1);
+  });
+
   test('the gate off: the picker\'s own day for everyone, and no shift or clock-in read', async () => {
     delete process.env.GATE_TECH_SHIFT_HOURS;
     await findAvailableSlots({ ...STAFF, dateFrom: WED, dateTo: WED });
@@ -267,15 +305,22 @@ describe('the staff arrival finder (findArrivalWindowSlots, the office and techn
 
 describe('the capacity finder (findCapacitySlots: capacity mode, and the night search)', () => {
   const CAPACITY = { lat: 27.4, lng: -82.5, durationMinutes: 60, dateFrom: WED, dateTo: WED, topN: 50, serviceType: 'pest_control' };
+  // The route engine's answer for one hour: it fits, and the route reaches the visit `late(context)` minutes into the hour.
+  const certify = (late = () => 0) => (context, { windowStart, windowEnd }) => {
+    const minutes = late(context);
+    return {
+      feasible: true, target: context.target, routeOrder: ['candidate'], detourMinutes: 5, driveMinutes: 0, occupiedMinutes: 0, waitingMinutes: 0,
+      arrivalDelayMinutes: minutes, estimatedArrival: plus(windowStart, minutes),
+      arrivals: [{ id: 'candidate', arrival: plus(windowStart, minutes), departure: plus(windowEnd, minutes) }],
+      finishMinute: 1080, travelSource: 'none', travelReasons: [],
+    };
+  };
   beforeEach(() => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     loadArrivalRouteContext.mockImplementation(async ({ date, technicianId }) => ({
       date, technicianId, target: { id: 'candidate', service_type: 'pest_control' }, rows: [],
     }));
-    evaluateArrivalPlacement.mockReturnValue({
-      feasible: true, routeOrder: ['candidate'], detourMinutes: 5, driveMinutes: 0, occupiedMinutes: 0, waitingMinutes: 0,
-      estimatedArrival: null, arrivals: [{}], finishMinute: 1080, travelSource: 'none', travelReasons: [],
-    });
+    evaluateArrivalPlacement.mockImplementation(certify());
   });
 
   test('no set hours: every hour of the shared 08:00 to 18:00 shift', async () => {
@@ -292,8 +337,11 @@ describe('the capacity finder (findCapacitySlots: capacity mode, and the night s
     expect(startsOf(result, 't2')).toHaveLength(10);
   });
 
-  test('a ninety-minute job must end by the shift end', async () => {
-    expect(startsOf(await findAvailableSlots({ ...CAPACITY, durationMinutes: 90 }))).toEqual(['10:00', '11:00', '12:00', '13:00']);
+  test('a ninety-minute job must end by the shift end, and an hour that cannot hold it is not sent to the route engine', async () => {
+    const result = await findAvailableSlots({ ...CAPACITY, durationMinutes: 90 });
+    expect(startsOf(result)).toEqual(['10:00', '11:00', '12:00', '13:00']);
+    expect(result.evaluated).toBe(4);
+    expect(result.rejections).toEqual({});
   });
 
   test('the shift only narrows the shared shift: 06:00 to 21:00 offers no hour before 08:00 or ending after 18:00', async () => {
@@ -308,6 +356,31 @@ describe('the capacity finder (findCapacitySlots: capacity mode, and the night s
     const result = await findAvailableSlots({ ...CAPACITY, dateFrom: TODAY });
     expect(startsOf(result, 't1', TODAY)).toEqual(['11:00', '12:00']);
     expect(startsOf(result, 't1', WED)).toEqual(['08:00', '09:00', '10:00', '11:00', '12:00', '13:00']);
+  });
+
+  test('a late arrival: the route reaches every hour 20 minutes in, so the 14:00 hour would end at 15:20 and is refused', async () => {
+    tables.technicians = [tech('t1', ['10:00:00', '15:00:00']), tech('t2', null)];
+    evaluateArrivalPlacement.mockImplementation(certify(() => 20));
+    const result = await findAvailableSlots(CAPACITY);
+    expect(startsOf(result, 't1')).toEqual(['10:00', '11:00', '12:00', '13:00']);
+    // No set hours: the same late route keeps every hour, as before.
+    expect(startsOf(result, 't2')).toHaveLength(10);
+    expect(result.rejections).toEqual({ shift_end: 1 });
+    expect(result.rejections_by_date).toEqual({ [WED]: { shift_end: 1 } });
+  });
+
+  test('the check without traffic times must finish the visit inside the shift too', async () => {
+    // Only the second check of each hour (travel: null, the drive times a save uses) reaches it 20 minutes in.
+    evaluateArrivalPlacement.mockImplementation(certify((context) => (context.travel === null ? 20 : 0)));
+    const result = await findAvailableSlots(CAPACITY);
+    expect(startsOf(result)).toEqual(['10:00', '11:00', '12:00', '13:00']);
+    expect(result.rejections).toEqual({ conservative_travel: 1 });
+  });
+
+  test('no technician matches the search: the hours are not read', async () => {
+    tables.technicians = [];
+    expect((await findAvailableSlots({ ...CAPACITY, technicianId: 't9' })).slots).toEqual([]);
+    expect(reads('technicians')).toBe(1);
   });
 
   test('the night search (arrivalSearch) gets the same hours with the capacity gate off', async () => {

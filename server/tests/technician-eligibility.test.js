@@ -668,5 +668,13 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
     expect(empty.calls.time_entries).toEqual([]);
     expect(shiftOf('tech-3', TOMORROW)).toBeNull();
   });
+
+  test('an empty technician list asks about no one: nothing is read', async () => {
+    gateOn();
+    const nobody = shiftConn({ techRows: [DAY_TECH] });
+    const shiftOf = await loadTechShifts(nobody.conn, { technicianIds: [], now: NOW });
+    expect(nobody.conn).not.toHaveBeenCalled();
+    expect(shiftOf('tech-1', TOMORROW)).toBeNull();
+  });
 });
 

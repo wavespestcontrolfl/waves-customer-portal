@@ -192,6 +192,29 @@ function arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }) {
 // The hours are read once per request, next to the absent tech-days
 // (technician-eligibility.js loadTechShifts; today's shift follows the
 // clock-in), and shiftBounds in that file is the rule.
+//
+// The two finders that check an hour on the route (the staff arrival finder
+// and the capacity finder) hold the shift end to the visit as the route would
+// run it, too: the engine's own simulation must finish the visit, with every
+// service worked at that stop, by the shift end. A 14:00 hour the route
+// reaches at 14:20 ends at 15:20, not at 15:00. An hour that fails is refused
+// as 'shift_end', next to the engine's own refusals. No shift, or an hour the
+// engine already refused: the result as it is.
+function withinShift(fit, shift) {
+  if (!shift || !fit.feasible) return fit;
+  const own = fit.arrivals.find((row) => row.id === fit.target.id);
+  const endMin = own ? timeToMinutes(own.departure) : null;
+  return endMin != null && endMin <= shift.endMin ? fit : { feasible: false, target: fit.target, reason: 'shift_end' };
+}
+
+// enumerateArrivalPlacements' answer for one route, held to the shift (withinShift).
+function placementsInShift(candidates, shift) {
+  if (!shift) return candidates;
+  const placements = candidates.placements.filter(({ fit }) => withinShift(fit, shift).feasible);
+  const refused = candidates.placements.length - placements.length;
+  if (!refused) return candidates;
+  return { ...candidates, placements, rejections: { ...candidates.rejections, shift_end: refused } };
+}
 
 async function findArrivalWindowSlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 60, technicianId, topN = 10 } = opts;
@@ -255,9 +278,10 @@ async function findArrivalWindowSlots(opts) {
       // (the capacity path below applies the same filter).
       if (context.target.memberServices && (await require('../technician-capabilities')
         .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices)).length) continue;
-      const day = shiftBounds(shiftOf(tech.id, date), DAY_START_HOUR * 60, ADMIN_DAY_END_MINUTES);
+      const shift = shiftOf(tech.id, date);
+      const day = shiftBounds(shift, DAY_START_HOUR * 60, ADMIN_DAY_END_MINUTES);
       const floor = Math.max(day.openMin, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: day.closeMin, lateDays: true } });
+      routes.push({ date, tech, context, shift, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: day.closeMin, lateDays: true } });
     }
   }
   // The road days' routes are driven on Google, only each route's hours near
@@ -267,7 +291,7 @@ async function findArrivalWindowSlots(opts) {
   if (onRoads.length) await preloadBandLegs(roadTravel, onRoads);
   for (const route of routes) {
     const { date, tech, context, limits } = route;
-    const candidates = enumerateArrivalPlacements(context, limits);
+    const candidates = placementsInShift(enumerateArrivalPlacements(context, limits), route.shift);
     evaluated += candidates.evaluated;
     for (const [reason, count] of Object.entries(candidates.rejections)) {
       if (!rejectionsByDate[date]) rejectionsByDate[date] = {};
@@ -377,7 +401,8 @@ async function findCapacitySlots(opts) {
         .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices || [context.target])).length) continue;
       // This technician's own hours inside the shared shift (shiftBounds): no
       // set hours = the shared shift, and the loop below is as it was.
-      const day = shiftBounds(shiftOf(tech.id, date), SHIFT.startMinutes, SHIFT.endMinutes);
+      const shift = shiftOf(tech.id, date);
+      const day = shiftBounds(shift, SHIFT.startMinutes, SHIFT.endMinutes);
       const floor = Math.max(day.openMin, startFloorFor(date, opts.earliestStartMin, opts.startFloorByDate),
         date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       // Enumerate every on-the-hour start through the shift close and let
@@ -399,7 +424,7 @@ async function findCapacitySlots(opts) {
       for (let start = Math.ceil(floor / 60) * 60; start + durationMinutes <= day.closeMin; start += 60) {
         if (opts.customerFacing && !customerWindowAdmits({ startMin: start, endMin: start + durationMinutes })) continue;
         if (!placementFitsShift(start, start + durationMinutes)) continue;
-        candidates.push({ context, date, tech, start, options: {
+        candidates.push({ context, date, tech, start, shift, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),
           // Owner policy: ordinary setup/closeout is already in the on-site allowance.
           durationMinutes, bufferMinutes: 0, allowInsertion: opts.capacityPlacement === true,
@@ -440,11 +465,12 @@ async function findCapacitySlots(opts) {
     ? customerMaxDetourMinutes(zoneRouteDays ? { date, technicianId, zoneSlug: opts.zoneSlug, zoneRouteDays } : undefined)
     : Infinity);
   for (const candidate of candidates) {
-    const { context, date, tech, start, options } = candidate;
-    const fit = evaluateArrivalPlacement(context, options);
+    const { context, date, tech, start, shift, options } = candidate;
+    // The route must also finish the visit inside the technician's shift (withinShift).
+    const fit = withinShift(evaluateArrivalPlacement(context, options), shift);
     if (!fit.feasible) { reject(fit.reason, date); continue; }
     // Existing save probes have no traffic preload; their fallback must fit too.
-    if (!opts.capacityPlacement && !evaluateArrivalPlacement({ ...context, travel: null }, options).feasible) {
+    if (!opts.capacityPlacement && !withinShift(evaluateArrivalPlacement({ ...context, travel: null }, options), shift).feasible) {
       reject('conservative_travel', date);
       continue;
     }

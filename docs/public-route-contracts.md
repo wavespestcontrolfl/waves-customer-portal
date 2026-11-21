@@ -1008,7 +1008,9 @@ the slot finder behind every public availability surface (the estimate
 `/find-slots`, the `/capture-intent` revalidation, public reschedule, public
 re-service and inspection booking) finds, for a technician who has set shift
 hours (`technicians.shift_start` / `shift_end`, the Team tab), only a start at
-or after the shift start whose visit ends by the shift end. On today's date
+or after the shift start whose visit ends by the shift end. In capacity mode
+the visit must also end by the shift end as the route would run it (an arrival
+late in the hour counts). On today's date
 the shift runs from that technician's clock-in, for the same length of day. A
 technician without set hours is unchanged, and the shift never adds a start.
 The hours a surface adds to the finder's own (an open day's block, a gap's
