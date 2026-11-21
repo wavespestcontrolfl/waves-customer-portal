@@ -1426,6 +1426,29 @@ above. The estimate surface follows the same rule in hour mode: the offer filter
 (`filterCollidingSlots`), the ASAP packing dates and the hold/commit probes in
 `slot-reservation.js` count only the slot technician's rows plus unassigned ones
 while the gate is on, so an offered estimate hour reserves and commits.
+Far-south customers (owner rule B, 2026-11-19, with `GATE_SOUTH_ZONE_DAY_FUNNEL`
+live): the estimate page and the lead assessment link offer a technician on a
+far-south zone day only when that technician has a far-south stop that day, or
+the day has an unassigned far-south stop (`zone-day-funnel.js`
+`dropOtherTruckDays`, run before either page chooses among technicians). When
+no such opening is left, the page opens one new day, as with one technician.
+The assessment link's commit rebuild drops the same openings, so it books that
+zone-day technician or answers `SLOT_TAKEN`. Its booking transaction checks the
+technician again under the date lock (`truckMayTakeDate`), so two commits that
+rebuilt the same new day before either booked never send two technicians south:
+the second answers `SLOT_TAKEN`. The estimate page's holds and accepts book the
+offered slot's own technician and do not check the rule again (follow-up): two
+offers held before either is written can send a second technician south that
+day, bounded by the offer-token TTL. The stop read counts a hold by the real
+clock, so a hold that ran out while its writer waited on the date lock no
+longer holds the day. Under that lock it also counts a visit staff booked that
+keeps its old hold time (`bookedVisitOrLiveHold`), and so do the lists when that
+check runs (per truck); fleet-wide they count a hold only while unexpired, as
+main's other list reads do. The assessment
+link's list and its booking resolve the zone from the one booking address the
+same way (its city decides, its text only without one; `callbackVisit.zoneAddress`,
+read only with the far-south funnel on), so a list never offers a time that
+check refuses. No field or status changes.
 Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
 all-day read and some follow-up seeders — are unchanged. The
 date-wide occupancy advisory lock (rung 1) that every one of these writers takes
@@ -8018,7 +8041,11 @@ whichever address is on file); with none resolvable, `availability: null`
 and `needs_address: true` — the page asks for an address via `POST
 /:token/availability { address }` (not persisted by the availability
 call; the commit persists the validated, in-area address onto the customer
-in its phase 1 and KEEPS it even if the booking attempt then fails — owner
+in its phase 1, keeping the profile's city name when the address matches the
+profile (same street and unit, and ZIP or pin) and, with the far-south funnel
+on, that city decides the address's far-south zone (the typed city is in no
+zone and the profile's city is in a funneled one; a place the area check
+refuses is never kept), and KEEPS it even if the booking attempt then fails — owner
 ruling 2026-09-24, since undoing it raced concurrent bookings that had
 already adopted it; a retry with a different address writes that one)
 before showing times. GET is routed through the SAME
@@ -8043,11 +8070,140 @@ estimate page's own helpers (`services/scheduling/zone-day-funnel.js`,
 `funnelOfferPool`; the pool narrows before the customer route check; the
 seed prefers the zone's route day under `GATE_ZONE_ROUTE_DAYS`), so such a lead
 can see fewer days, or one. A lead outside those zones, a gate-off request and
-any zone or stop lookup failure get the unfunneled list. The funnel is
-offer-time only, like the route check: the commit's single-day anti-forgery
-build and the location re-validation omit the address and are not funneled, so
-a time the funnel hid can still be committed by a request built by hand. No
-field, status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
+any zone or stop lookup failure get the unfunneled list. The commit's
+single-day anti-forgery build and the location re-validation pass the address
+too. With one technician (`GATE_MULTI_TECH_CONFIRM` off) a one-day build funnels
+to itself and reads nothing, so the funnel stays offer-time only, like the route
+check: a time the funnel hid can still be committed by a request built by hand.
+Per truck (`GATE_MULTI_TECH_CONFIRM` on, owner rule B 2026-11-19) every list,
+the commit build included, first drops each opening of a technician on another
+technician's far-south day (`dropOtherTruckDays`), so a zone day's start books
+its own technician, or answers `SLOT_TAKEN` when that technician lost the hour.
+The booking transaction checks it again under the date lock (`createSelfBooking`
+`callbackVisit.slotGuard`, `truckMayTakeDate`, with the zone the visit is
+stamped with): when another commit booked a different technician south on that
+day first, it answers `SLOT_TAKEN`. Every list reads the zone from the address's
+own city (the zone that lists it, else the zone whose city its name contains;
+the address text only when there is no city), and with the far-south funnel on
+the booking resolves its zone from the same address the same way
+(`callbackVisit.zoneAddress`; off, from the customer's city as before), so its
+stamp and its check match the list. A booking at the profile's own address
+reads that address from the booking's own customer row, not from a copy the
+commit read earlier. An address that resolves to no zone takes
+the customer's city on file, as a visit with no zone stamp is read later by its
+customer's city. Phase one keeps the profile's city when that city decides
+the far-south zone of a typed address that matches the profile, so the
+booking, a refusal's fresh times and the retry read the zone the list read.
+Any other typed address writes its own city: a city the funnel does not need,
+a city in a zone with no truck rule (Sarasota), a place the area check refuses
+(that booking then reads no zone), a typed address that names a served South
+Hillsborough town by city or ZIP (the area check may admit it by that name
+alone), and, with the funnel off, every city. Phase one judges the match on the
+same view of the profile as the list (its pin can be the primary property's). A profile phase one corrects in place to another
+typed address takes that address's city for all three: the city on file
+named the old address. With the funnel on, the booking transaction also refuses with
+`CUSTOMER_CHANGED_RETRY` when the customer's address changed after its zone read it, and the
+page gets the answer an account change under the booking fence already gets:
+`SLOT_TAKEN` with `address_changed: true`, the address on file and no times, or
+`422 address_unresolved` when the token no longer reaches that customer. Every list that knows the trusted customer (GET,
+`POST /:token/availability`, `POST /:token/find-slots`, the new_lead email
+times and a refused booking's list) reads the same fallback when the address
+is that customer's own property (the same street and unit, and ZIP or pin) and
+the city is one phase one keeps (never a place the area check refuses, nor over
+a typed South Hillsborough town, unless phase one keeps the whole profile: a
+staff-verified pin, and the typed address matches the customer's row by its own
+ZIP or pin, which the list reads from that row too), so a list never offers an hour that
+zone refuses, nor hides one the booking admits. With the funnel off a list reads no
+fallback and no row. A failed read of that row is no fallback (logged): the list
+reads the address's own zone only, and with none it serves the unfiltered list, as
+the funnel fails open. For another street the city on
+file named the old address: phase one books it on a corrected or another profile
+with its own city, and makes that profile the trusted one, so a retry's list
+reads it. The commit's own builds read it too, so the
+commit gives the hour to the truck its list offered. A matched profile at another stored location books with its
+own address (the slot is checked again with it); at the same pin the booking
+keeps the typed address, as the list read it. When the customer's city decides
+a far-south zone (one the funnel covers) and the commit's first build read
+another city, or none (phase one linked or changed the profile, or booked a
+sibling's street), the slot is checked
+again per truck (both far-south gates on). That check reads the city on file
+of the profile phase one booked, the city the booking falls back to: a sibling
+phase one reuses keeps its own, even a place the area check refuses. When the commit's first check,
+before phase one provisions the customer, no longer has the time, its
+`SLOT_TAKEN` answer carries fresh times at the resolved location, built with
+that address and the trusted customer, as the lists and the next commit's first
+check read them. A booking refused after phase one (its re-check or the booking
+itself), with the funnel on, carries fresh times only when the page's next
+commit reads this one's inputs: an address typed (the page sends it again) at
+the same pin, on the same profile, or no address typed, a booking phase one did not
+move, and that profile's stored pin and address, read again, still the ones this
+booking used. They are built
+there with that address and the trusted customer read again (phase one's copy
+can be stale by then), as the next commit's first build reads them; for the
+stored address the page then makes no new lookup. A booking with no address typed
+that phase one moved to a matched profile's other stored location answers
+`address_changed: true` with no times: the page shows the address it resolved, so
+it reloads that address and its times together. When the next commit's phase
+one would keep another staff-verified pin for the typed address (staff verified
+one since), the refusal answers `address_changed: true` with no times, as a
+moved booking does below. A typed address a geocode review now quarantines for that
+customer, at the same pin or a moved one, answers the next commit's own `422 address_unresolved` in place of
+`SLOT_TAKEN`, by the rule the next commit's phase one applies (a blocked
+profile with no address on file takes no typed address there), and the page
+shows its address message. A failed read, and any
+other refusal after phase one, answer `availability: null`, and the page
+reloads its own list (GET, or
+`POST /:token/availability` with the address it holds), which reads the same
+resolver and trusted customer as its next commit. A booking moved to a matched
+profile's other stored location also answers `address_changed: true` when that
+profile is the trusted customer the next commit loads and still has the stored
+pin and address phase one adopted: the page drops the typed address, so its
+reload and its retry read that profile's stored location and address. Until that
+reload brings the address on file, the page shows no address, and its change-address
+action stays. When the
+next commit would load another profile, staff changed that profile's pin or
+address since phase one, or that read fails, the typed address stays. A failed build answers with no times too.
+When a `SLOT_TAKEN` answer carries no times and the page's own reload then fails,
+or answers 200 with no list (its build failed), the page clears its times, the
+emailed time included (a 200 still applies, so the address it carries shows),
+closes its search, and asks the customer to reload the page:
+nothing vouches for the old ones, and the address behind them can have changed
+(`address_changed`, this answer's or the account-change one's, or phase one linked a
+profile at another address), so a search would bring times for the address the
+server resolves now under the address the page still shows. A newly typed address
+(which brings its own list) opens the search again and clears the reload message.
+Another link opened in the same
+page (another token) starts a fresh page, so nothing from the old link carries over:
+no typed address, closed search, result or out-of-area stop. The search is
+closed while that reload runs, and opens again when the reload brings a list, so a
+search never finishes over a failed reload. A time picked from the old calendar while
+it runs is not kept: the reload's list drops it, even when it offers the same start.
+"Show all open times" applies its answer as it is: with no list, the old times, pick
+and address leave, and the page shows the answer's address and no times. It starts a
+new page view too, as a change of address does: a search still running when it starts
+belongs to the old view, and it ends quietly (no search error). A search starts one too, so of the searches, resets and
+changes of address the latest one wins. A booking and a search or reset never overlap:
+while a booking runs, no search or reset starts, so that booking's refusal always shows;
+while a search or reset runs, every Book button is off, because a reset answers the
+address on file now, and a booking from the calendar it replaces would book that address.
+No search or second reset starts while a reset runs, so nothing but a change of address
+cancels the reset that brings that address; a reset may cancel a search. A list for another address (the street, city and ZIP
+the page shows) keeps no picked or emailed time, even at the same start. A change of unit
+alone keeps the pick: the commit books the unit on file either way. A
+booking's success or terminal state always shows. A held address's reload that answers `422 out_of_area` stops on the
+out-of-area card with its waitlist ticket, as the address form does. A terminal state, the address form, or the GET's own no-times answers
+(`service_area_unavailable`, `booking_unavailable`) in that answer still replace the
+page, and the page then shows no "latest open times" message. The reload runs under the page's request controller: a
+change of address while it runs supersedes it, and it then applies no list,
+clears nothing and shows no message. A refusal that lands after a change of
+address, a reload or another link (which remounts the page) belongs to the old page,
+and the page applies none of it: no times, no dropped address, no message, no reload.
+A terminal state (`already_booked`, `converted`, `gone`) is the link's, not an
+address's, so the commit's terminal answer still replaces the page.
+A booking that fails after that (a network error) shows no message either. A booking always shows. With the
+funnel off, every refusal carries fresh times at the booking location, as
+before. No field,
+status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than
 a raw `resolveServiceAddress` — a directly supplied out-of-area address

@@ -1250,6 +1250,32 @@ describe('ReschedulePage customer pick (Quick Move hand-off)', () => {
     await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
   });
 
+  // A booking and a search never overlap: while a search runs, the times card
+  // books nothing, and the search's answer turns it on again.
+  it('C: every time and the "you pick for me" button are disabled while a search runs', async () => {
+    let finishSearch;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return new Promise((resolve) => { finishSearch = resolve; });
+      return Promise.resolve(jsonResponse(pickPayload()));
+    }));
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'See all open times' }));
+    fireEvent.change(await screen.findByLabelText('Search for a service date or time'), { target: { value: 'next week' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(finishSearch).toBeTypeOf('function'));
+    const card = screen.getByTestId('customer-pick-times');
+    within(card).getAllByRole('button', { name: /^Book / }).forEach((chip) => expect(chip).toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Any of these work — you pick for me' })).toBeDisabled();
+
+    finishSearch(jsonResponse({ availability: pickAvailability(), summary: 'Open next week.' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Any of these work — you pick for me' })).toBeEnabled());
+    within(screen.getByTestId('customer-pick-times')).getAllByRole('button', { name: /^Book / }).forEach((chip) => expect(chip).toBeEnabled());
+  });
+
   it('C: a time taken meanwhile shows the error in the card and refreshes its times', async () => {
     stubFetch({
       get: jsonResponse(pickPayload()),
