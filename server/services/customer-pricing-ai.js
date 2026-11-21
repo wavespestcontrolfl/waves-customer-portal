@@ -1459,9 +1459,29 @@ async function buildCustomerPricingResponse({
     };
   }
 
-  // Every engine call of this request, in one synchronous function. The default runs it after the shared
-  // refresh. Strict hands it to the bridge, which runs it inside a refresh of its own (rule 2 above
-  // strictPriceOnOwnSettings).
+  // Composed BEFORE the option loop so every priced option carries the owned
+  // half of a mixed request into what staff receive (codex #3253 r2).
+  const ownedRequestNote = alreadyIncluded.length
+    ? `Customer also asked about ${alreadyIncluded.map(toKeyLabel).join(', ')}, already active on this account — not re-priced in the portal; review that change with them.`
+    : '';
+  // The RAW staff-writable price-bearing sources this pricing read
+  // (GitHub #3391 round: address/property_type equality alone
+  // misses these) — the mint re-reads both rows under its lock and
+  // treats any change as offer drift. The same for every option (each one
+  // carries its own copy), and no engine value is in it.
+  const pricingSourceStamp = {
+    lot_sqft: customer.lot_sqft ?? null,
+    property_sqft: customer.property_sqft ?? null,
+    bed_sqft: customer.bed_sqft ?? null,
+    palm_count: customer.palm_count ?? null,
+    lawn_type: customer.lawn_type ?? null,
+    turf_lawn_sqft: turfProfile?.lawn_sqft ?? null,
+    turf_track_key: turfProfile?.track_key ?? turfProfile?.grass_type ?? null,
+  };
+
+  // Every engine call of this request, and nothing else, in one synchronous function. The default runs it
+  // after the shared refresh. Strict hands it to the bridge, which runs it inside a refresh of its own (rule 2
+  // above strictPriceOnOwnSettings).
   const priceOptions = () => {
     const context = {
       grassType: propertyContext.grassType,
@@ -1482,11 +1502,6 @@ async function buildCustomerPricingResponse({
     // plan-start hint runs the mint's own review check on it (codex pre-push P1).
     const engineResults = new Map();
     const generic = !text;
-    // Composed BEFORE the option loop so every priced option carries the owned
-    // half of a mixed request into what staff receive (codex #3253 r2).
-    const ownedRequestNote = alreadyIncluded.length
-      ? `Customer also asked about ${alreadyIncluded.map(toKeyLabel).join(', ')}, already active on this account — not re-priced in the portal; review that change with them.`
-      : '';
     for (const serviceKey of servicesToPrice) {
       for (const option of variantsForService(serviceKey, text, generic)) {
         const targetServices = {
@@ -1527,19 +1542,7 @@ async function buildCustomerPricingResponse({
             propertyInput: propertyContext.propertyInput,
             targetOnlyServices: optionServices(option, context),
             currentServiceKeys: [...currentServiceKeys],
-            // The RAW staff-writable price-bearing sources this pricing read
-            // (GitHub #3391 round: address/property_type equality alone
-            // misses these) — the mint re-reads both rows under its lock and
-            // treats any change as offer drift.
-            pricingSourceStamp: {
-              lot_sqft: customer.lot_sqft ?? null,
-              property_sqft: customer.property_sqft ?? null,
-              bed_sqft: customer.bed_sqft ?? null,
-              palm_count: customer.palm_count ?? null,
-              lawn_type: customer.lawn_type ?? null,
-              turf_lawn_sqft: turfProfile?.lawn_sqft ?? null,
-              turf_track_key: turfProfile?.track_key ?? turfProfile?.grass_type ?? null,
-            },
+            pricingSourceStamp: { ...pricingSourceStamp },
           };
         }
         if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) {

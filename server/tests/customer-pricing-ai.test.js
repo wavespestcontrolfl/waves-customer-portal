@@ -2572,6 +2572,43 @@ describe('GATE_CAGE_TWO_SIZES keeps the manual-quote hold in the customer price 
 // strictPriceSettings (opt-in, for a caller that prices with nobody watching): the standard pest plan's price
 // for an account that may start a plan, from price settings that are loaded and are the rows' own. The default
 // stays as it was: it answers from what the engine holds, and it asks none of the strict rules.
+// The stamp of the raw price sources (engineContext.pricingSourceStamp): the mint reads the customer row and the
+// turf profile again under its lock and compares them with it, field by field. The pricer makes it once for a
+// request, from those two rows alone, and each option carries its own copy.
+describe('the price source stamp of an option (includeEngineContext)', () => {
+  const customer = propertyCustomer({ id: 'cust-stamp', waveguard_tier: null, monthly_rate: null, bed_sqft: 300, palm_count: 2 });
+  const ask = (turfProfiles, extra = {}) => buildCustomerPricingResponse({
+    db: dbForTables({ customers: [customer], scheduled_services: [], customer_turf_profiles: turfProfiles }),
+    propertyLookup: async () => ({ enriched: { homeSqFt: 2200, stories: 1 } }),
+    prompt: 'I am interested in adding pest control and mosquito service',
+    customer,
+    includeEngineContext: true,
+    ...extra,
+  });
+  const FROM_CUSTOMER = { lot_sqft: 7000, property_sqft: 2200, bed_sqft: 300, palm_count: 2, lawn_type: 'St. Augustine' };
+  const stamps = (result) => result.options.map((option) => option.engineContext.pricingSourceStamp);
+
+  test('every option carries the seven raw sources, and a copy of its own', async () => {
+    const result = await ask([{ customer_id: customer.id, lawn_sqft: 4500, track_key: 'A', grass_type: 'St. Augustine' }]);
+    expect(result.options.length).toBeGreaterThan(1);
+    stamps(result).forEach((stamp) => expect(stamp).toEqual({ ...FROM_CUSTOMER, turf_lawn_sqft: 4500, turf_track_key: 'A' }));
+    expect(new Set(stamps(result)).size).toBe(result.options.length);
+  });
+
+  test('a source that is not on file is null, and the grass type stands in for a missing track', async () => {
+    const noProfile = await ask([], { customer: { ...customer, bed_sqft: undefined, palm_count: undefined } });
+    stamps(noProfile).forEach((stamp) => expect(stamp).toEqual({ ...FROM_CUSTOMER, bed_sqft: null, palm_count: null, turf_lawn_sqft: null, turf_track_key: null }));
+    const noTrack = await ask([{ customer_id: customer.id, lawn_sqft: 0, grass_type: 'Zoysia' }]);
+    stamps(noTrack).forEach((stamp) => expect(stamp).toEqual({ ...FROM_CUSTOMER, turf_lawn_sqft: 0, turf_track_key: 'Zoysia' }));
+  });
+
+  test('without the option no engine context is in the answer', async () => {
+    const result = await ask([], { includeEngineContext: false });
+    expect(result.options.length).toBeGreaterThan(1);
+    expect(result.options.every((option) => option.engineContext === undefined)).toBe(true);
+  });
+});
+
 describe('strictPriceSettings', () => {
   const pricingEngine = require('../services/pricing-engine');
   const bridge = require('../services/pricing-engine/db-bridge');
