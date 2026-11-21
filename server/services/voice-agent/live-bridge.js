@@ -38,10 +38,12 @@ const CLOSE_WAIT_MS = 5000;
 const START_DEADLINE_MS = 10000; // session.started must arrive within this, or the call ends
 const BARGE_IN_MARGIN_MS = 200;
 const REPLY_SILENCE_MIN_MS = 800; // model audio silent this long before voice begins starts a new reply
+const TAIL_SILENCE_MIN_MS = 600; // ...and this long inside the tail drop after a barge-in (main's boundary): there a muted answer is worse than a tail that plays on
 const VOICED_SAMPLE_MIN = 300; // a decoded sample at or above this magnitude (16-bit scale) is voice
 const CALLER_VOICED_RMS_MIN = 300; // a caller frame at or above this RMS (16-bit scale) holds voice: the timing rule
 const OPENING_SOUND_RMS_MIN = 100; // a held opening frame at or above this RMS may hold speech, quiet speech too; the noise of a quiet line is under it
 const CALLER_END_LOOKBACK_MS = 2000; // a transcript fragment's speech ended at the caller's last voiced frame, at most this long before it arrived
+const BARGE_IN_VOICE_MIN_MS = 100; // caller frames voiced this long in a row are a caller who speaks; a shorter sound (a click, a knock) never flushes a reply
 const CALLER_STOPPED_MIN_MS = 200; // a reply whose first voice comes sooner than this after the caller's last sound did not wait for the caller to stop
 const TAIL_DROP_MAX_MS = 1500; // after a barge-in, drop the cut-off reply's tail at most this long
 // Caller audio that arrives before session.started (admission and the OpenAI
@@ -64,6 +66,7 @@ const VOICED_BYTE = Uint8Array.from({ length: 256 }, (_, b) => (Math.abs(mulawTo
 // The squared linear value of each mu-law byte, for a frame's RMS.
 const MULAW_SQUARE = Float64Array.from({ length: 256 }, (_, b) => mulawToLinear(b) ** 2);
 const REPLY_SILENCE_MIN_SAMPLES = REPLY_SILENCE_MIN_MS * MULAW_BYTES_PER_MS;
+const TAIL_SILENCE_MIN_SAMPLES = TAIL_SILENCE_MIN_MS * MULAW_BYTES_PER_MS;
 
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
 
@@ -211,6 +214,8 @@ class LiveBridge {
     this.startedAt = this.deps.now();
     this.sessionStartWall = null; // when session.started arrived
     this.callerVoiceAt = null; // arrival of the caller's latest frame that holds voice
+    this.callerRunMs = 0; // how long the caller's frames have held voice in a row
+    this.callerSpokeAt = null; // arrival of the caller's latest frame in a run of BARGE_IN_VOICE_MIN_MS or more
     this.callerMs = 0; // caller audio received, and the part of it in frames that hold voice
     this.callerVoicedMs = 0;
     this.speechEndWall = null;
@@ -341,10 +346,11 @@ class LiveBridge {
 
   // Reads one caller frame's level: its RMS, so a stray sample at speech level
   // does not count. At CALLER_VOICED_RMS_MIN or more the frame holds voice, and
-  // its arrival time is kept: a time, never audio. Returns whether the frame
-  // holds any sound (OPENING_SOUND_RMS_MIN or more). That level is lower on
-  // purpose: timing must be sure of voice, and the opening audio must not lose
-  // quiet speech.
+  // its arrival time is kept: a time, never audio. Frames that hold voice for
+  // BARGE_IN_VOICE_MIN_MS in a row are a caller who speaks (callerSpokeAt):
+  // only that can flush a reply. Returns whether the frame holds any sound
+  // (OPENING_SOUND_RMS_MIN or more). That level is lower on purpose: timing
+  // must be sure of voice, and the opening audio must not lose quiet speech.
   noteCallerFrame(payload) {
     const audio = Buffer.from(payload, 'base64');
     let sum = 0;
@@ -355,6 +361,10 @@ class LiveBridge {
     if (atLevel(CALLER_VOICED_RMS_MIN)) {
       this.callerVoicedMs += ms;
       this.callerVoiceAt = this.deps.now();
+      this.callerRunMs += ms;
+      if (this.callerRunMs >= BARGE_IN_VOICE_MIN_MS) this.callerSpokeAt = this.callerVoiceAt;
+    } else {
+      this.callerRunMs = 0;
     }
     return atLevel(OPENING_SOUND_RMS_MIN);
   }
@@ -462,11 +472,11 @@ class LiveBridge {
   // One pass over a model audio chunk, sample by sample, so the result does
   // not depend on how OpenAI cuts the stream into chunks. A voiced sample
   // starts a reply when it is the first voice of the call, or follows at least
-  // REPLY_SILENCE_MIN_MS of silent audio. Returns
+  // silenceMinSamples of silent audio. Returns
   // the index of the first such sample (-1: none) and of the last voiced
   // sample (-1: none). A chunk is one arrival: it marks one reply start at
   // the most.
-  scanModelAudio(audio) {
+  scanModelAudio(audio, silenceMinSamples) {
     let start = -1;
     let last = -1;
     for (let i = 0; i < audio.length; i++) {
@@ -474,7 +484,7 @@ class LiveBridge {
         this.silentSamples += 1;
         continue;
       }
-      if (start < 0 && (!this.voiceSeen || this.silentSamples >= REPLY_SILENCE_MIN_SAMPLES)) start = i;
+      if (start < 0 && (!this.voiceSeen || this.silentSamples >= silenceMinSamples)) start = i;
       this.voiceSeen = true;
       this.silentSamples = 0;
       last = i;
@@ -497,14 +507,17 @@ class LiveBridge {
     // reply start marks its chunk whatever is still queued at Twilio, so a fast
     // reply and a reply right after a barge-in are both timed.
     const audio = Buffer.from(msg.delta, 'base64');
-    const { start, last } = this.scanModelAudio(audio);
+    // Inside the tail drop after a barge-in the boundary is main's 600 ms: a
+    // new answer that follows a shorter silence than REPLY_SILENCE_MIN_MS must
+    // play, and its delay is kept apart from turns there in any case.
+    const dropping = this.tailDropSince !== null && t - this.tailDropSince < TAIL_DROP_MAX_MS;
+    const { start, last } = this.scanModelAudio(audio, dropping ? TAIL_SILENCE_MIN_SAMPLES : REPLY_SILENCE_MIN_SAMPLES);
     // After a barge-in, audio that starts no reply is the cut-off reply's
     // tail: it is dropped, so the caller never hears it restart mid-sentence
     // (for TAIL_DROP_MAX_MS at the most). A reply start ends that: its chunk
     // is forwarded from the reply's first voiced sample on.
     let from = 0;
     if (this.tailDropSince !== null) {
-      const dropping = t - this.tailDropSince < TAIL_DROP_MAX_MS;
       if (dropping && start < 0) return;
       if (dropping) from = start;
       this.tailDropSince = null;
@@ -634,10 +647,16 @@ class LiveBridge {
   // No timing, no flush. Silence queued at Twilio is nothing to cut: the check
   // runs to the last voiced sample queued. A pause inside a reply still to
   // play counts, because that reply is not over.
+  // The proof is the caller's own audio: voice for BARGE_IN_VOICE_MIN_MS in a
+  // row, past the reply's start, in the CALLER_END_LOOKBACK_MS this fragment
+  // can be about. One noise frame after the reply began is not that: with it,
+  // a late fragment of the finished question would cut its answer.
   isBargeIn(t, speechEnd) {
     if (t >= this.voiceEndsAt - BARGE_IN_MARGIN_MS) return false; // no voice (much) left to cut
     if (speechEnd === null || this.replyStartWall === null) return false;
-    return speechEnd > this.replyStartWall + BARGE_IN_MARGIN_MS;
+    const spoke = this.callerSpokeAt;
+    if (spoke === null || spoke < t - CALLER_END_LOOKBACK_MS) return false;
+    return spoke > this.replyStartWall + BARGE_IN_MARGIN_MS;
   }
 
   // usage.seconds is a running total ("use the latest usage.seconds"): keep

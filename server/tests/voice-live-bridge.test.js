@@ -820,6 +820,25 @@ describe('reply start on the continuous GPT-Live stream', () => {
       expect((await end(t)).after_barge_in_ambiguous_ms).toEqual([200]); // its voice at +1500, speech ended +1300
     });
 
+    test('inside the 1.5 s the boundary is 600 ms of silent audio, as on main: an answer after 600 or 700 ms plays, voice after 500 ms is still the tail', async () => {
+      const after = async (silentMs) => {
+        const t = await bargeIn(); // the flush at +1400
+        const before = mediaPayloads(t).length;
+        t.advance(100);
+        delta(t, silenceThenVoice(silentMs)); // at +1500: silent audio, then 100 ms of voice
+        return { played: mediaPayloads(t).slice(before), summary: await end(t) };
+      };
+      const tail = await after(500);
+      expect(tail.played).toEqual([]);
+      expect(tail.summary.after_barge_in_ambiguous_ms).toEqual([]);
+      for (const silentMs of [600, 700]) {
+        const answer = await after(silentMs);
+        expect(answer.played).toEqual([b64(800)]); // from its first voiced sample on
+        expect(answer.summary.after_barge_in_ambiguous_ms).toEqual([200]); // its voice at +1500, speech ended +1300
+        expect(answer.summary.turns).toEqual([]);
+      }
+    });
+
     test('past the 1.5 s nothing is trimmed: the chunk plays whole', async () => {
       const t = await bargeIn();
       t.advance(50);
@@ -989,6 +1008,60 @@ describe('reply start on the continuous GPT-Live stream', () => {
       expect(s.interruptions).toBe(0);
       expect(s.turns).toEqual([]);
       expect(s.after_barge_in_ambiguous_ms).toEqual([]);
+    });
+
+    test('one noise frame after the answer began, then a late fragment of the finished question: nothing is flushed', async () => {
+      const t = await start({ speech: [[500, 900], [1300, 1320]] }); // the question, then one 20 ms knock
+      delta(t, b64(160)); // greeting
+      t.advance(1000);
+      delta(t, silence(8000)); // one burst at +1000: 1000 ms of silence...
+      delta(t, b64(2400)); // ...then the answer: its voice plays +2000..+2300
+      t.advance(400);
+      said(t, 'do you treat ants', 500, 900); // at +1400: late, and the knock at +1320 is the caller's last sound
+      expect(clears(t)).toBe(0);
+      expect((await end(t)).interruptions).toBe(0);
+    });
+
+    test('caller voice for 100 ms in a row after the answer began is a barge-in; 80 ms, or 120 ms in two parts, is not', async () => {
+      const flushed = async (speech) => {
+        const t = await start({ speech });
+        delta(t, b64(160)); // greeting
+        t.advance(1000);
+        delta(t, silence(8000)); // one burst at +1000: 1000 ms of silence...
+        delta(t, b64(2400)); // ...then the answer: its voice plays +2000..+2300
+        t.advance(450);
+        said(t, 'wait', 1300, 1400); // at +1450
+        return clears(t);
+      };
+      expect(await flushed([[1300, 1380]])).toBe(0);
+      expect(await flushed([[1300, 1360], [1380, 1440]])).toBe(0);
+      expect(await flushed([[1300, 1400]])).toBe(1);
+    });
+
+    test('caller speech that runs 200 ms into the answer is the end of their question, not a barge-in; past 200 ms it is', async () => {
+      const flushed = async (speech) => {
+        const t = await start({ speech });
+        delta(t, b64(160)); // greeting
+        t.advance(1000);
+        delta(t, silence(8000)); // one burst at +1000: 1000 ms of silence...
+        delta(t, b64(2400)); // ...then the answer: its voice plays +2000..+2300
+        t.advance(450);
+        said(t, 'in my kitchen', 800, 1200); // at +1450
+        return clears(t);
+      };
+      expect(await flushed([[800, 1200]])).toBe(0);
+      expect(await flushed([[800, 1220]])).toBe(1);
+    });
+
+    test('caller speech early in a long answer, then one noise frame and a fragment over 2 s later: the old speech is no proof, nothing is flushed', async () => {
+      const t = await start({ speech: [[1300, 1500], [3700, 3720]] });
+      delta(t, b64(160)); // greeting
+      t.advance(1000);
+      delta(t, silence(8000)); // one burst at +1000: 1000 ms of silence...
+      delta(t, b64(40000)); // ...then a long answer: its voice plays +2000..+7000
+      t.advance(2750); // the caller said "mm-hm" at +1300..+1500; no fragment came for it
+      said(t, 'uh', 3700, 3720); // at +3750, after one noise frame at +3720
+      expect(clears(t)).toBe(0);
     });
 
     test('silence queued after the last voice of a reply is nothing to cut', async () => {
