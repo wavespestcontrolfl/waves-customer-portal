@@ -343,17 +343,16 @@ function positiveOrNull(value) {
 //     and reading it would end nearly every seeded price;
 //   - the turf grade on a result's `property` summary: the engine's own
 //     lawn-size guess, which every result carries, a pest-only quote
-//     included. It counts only when the seed replays a lawn size
-//     (inputs.lawnSqFt / turfSf), the one case where a guess could reach a
-//     new price as a supplied measurement. Without one, a new lawn price
-//     computes and grades its own turf.
+//     included. It counts unless the caller replays no lawn size
+//     (replaysLawnSize false; the seed loader passes what it replays). A
+//     replayed size is the one case where a guess could reach a new price as
+//     a supplied measurement. Without one, a new lawn price computes and
+//     grades its own turf.
 const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
 
-function estimateRequiresFieldVerification(estData) {
+function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } = {}) {
   if (!estData || typeof estData !== 'object') return false;
   const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
-  const inputs = estData.engineInputs || estData.inputs || estData.engineInput || {};
-  const replaysLawnSize = !!(positiveOrNull(inputs.lawnSqFt) || positiveOrNull(inputs.turfSf));
   const markedForReview = (c, isPropertySummary) => (Array.isArray(c.fieldVerify) && c.fieldVerify.length > 0)
     || (Array.isArray(c.fieldVerifyFlags) && c.fieldVerifyFlags.length > 0)
     || lineRequiresReview(c)
@@ -530,10 +529,11 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     delete cleanedFeatures.treeCount;
     zeroTreeCountAmbiguous = true;
   }
+  const seedLawnSqFt = positiveOrNull(inputs.lawnSqFt) || positiveOrNull(inputs.turfSf);
   const seed = {
     homeSqFt: positiveOrNull(inputs.homeSqFt),
     lotSqFt: positiveOrNull(inputs.lotSqFt),
-    lawnSqFt: positiveOrNull(inputs.lawnSqFt) || positiveOrNull(inputs.turfSf),
+    lawnSqFt: seedLawnSqFt,
     bedArea: positiveOrNull(inputs.bedArea),
     bedAreaSource: cleanString(inputs.bedAreaSource),
     stories: positiveOrNull(inputs.stories),
@@ -562,7 +562,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // must not be replayed into an exact price for a different service,
     // which would be graded high-confidence on inputs that were never
     // qualified. Demotes to the quote CTA; the offer itself still renders.
-    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData),
+    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData, { replaysLawnSize: seedLawnSqFt != null }),
     propertyType: cleanString(inputs.propertyType),
     yearBuilt: positiveOrNull(inputs.yearBuilt),
     constructionMaterial: cleanString(inputs.constructionMaterial),

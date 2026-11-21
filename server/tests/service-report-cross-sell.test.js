@@ -564,7 +564,8 @@ describe('buildReportCrossSell', () => {
   describe('the seed review check reads every stored row (#8132 pre-push r31)', () => {
     const { estimateRequiresFieldVerification } = _private;
     const inputs = { homeSqFt: 2100, lotSqFt: 8000, stories: 1 };
-    const flagged = (extra) => estimateRequiresFieldVerification({ inputs, ...extra });
+    // As the seed loader calls it for a seed that replays no lawn size.
+    const flagged = (extra) => estimateRequiresFieldVerification({ inputs, ...extra }, { replaysLawnSize: false });
 
     test('a marker demotes wherever the stored estimate keeps the row', () => {
       const pestRow = { service: 'pest_control', requiresManualReview: true, manualReviewReasons: ['large_lot'] };
@@ -644,28 +645,47 @@ describe('buildReportCrossSell', () => {
       for (const key of ['inputs', 'engineInputs', 'engineInput']) {
         expect([key, estimateRequiresFieldVerification({ [key]: { ...inputs, pricingMetadata: { manualReviewReasons: ['from_the_request'] } } })]).toEqual([key, false]);
       }
+      // A stored input is not read, whatever it holds.
+      expect(flagged({ engineRequest: { profile: { requiresManualReview: true } } })).toBe(false);
       // Only at the top: the same key inside a result is read like any other.
       expect(flagged({ result: { engineRequest: { profile } } })).toBe(true);
     });
 
-    test('the property summary turf grade counts only when the seed replays a lawn size', () => {
+    test('the property summary turf grade counts only when the seed replays a lawn size', async () => {
       // Every result grades the lot's lawn-size guess, a pest-only quote too.
       // With no replayed lawn size, a new lawn price computes and grades its own.
       const guess = { property: { turfSf: 5200, turfEstimated: true, turfConfidence: 'LOW', turfBasis: 'legacyHardscapeEstimate' } };
-      expect(flagged({ result: guess })).toBe(false);
-      expect(flagged({ result: guess, engineResult: guess })).toBe(false);
-      // A replayed lawn size reaches a new price as a supplied measurement.
-      for (const lawn of [{ lawnSqFt: 5200 }, { turfSf: 5200 }]) {
-        expect(estimateRequiresFieldVerification({ inputs: { ...inputs, ...lawn }, result: guess })).toBe(true);
-        expect(estimateRequiresFieldVerification({ engineInputs: { ...inputs, ...lawn }, engineResult: guess })).toBe(true);
-        // A supplied size the engine graded as supplied is clean.
-        expect(estimateRequiresFieldVerification({ inputs: { ...inputs, ...lawn }, result: { property: { turfConfidence: 'HIGH', turfBasis: 'lawnSqFt' } } })).toBe(false);
+      const capped = { property: { turfSf: 5200, turfConfidence: 'MEDIUM', turfBasis: 'plausibleMaxTurfCap' } };
+      for (const summary of [guess, capped]) {
+        expect(flagged({ result: summary })).toBe(false);
+        expect(flagged({ result: summary, engineResult: summary })).toBe(false);
+        // Replayed, or not stated by the caller: the grade counts.
+        expect(estimateRequiresFieldVerification({ inputs, result: summary }, { replaysLawnSize: true })).toBe(true);
+        expect(estimateRequiresFieldVerification({ inputs, engineResult: summary })).toBe(true);
       }
+      // A supplied size the engine graded as supplied is clean.
+      expect(estimateRequiresFieldVerification({ inputs, result: { property: { turfConfidence: 'HIGH', turfBasis: 'lawnSqFt' } } }, { replaysLawnSize: true })).toBe(false);
       // The summary's other markers count either way.
       expect(flagged({ result: { property: { requiresManualReview: true } } })).toBe(true);
       expect(flagged({ result: { property: { footprint: { fieldVerify: ['squareFootage'] } } } })).toBe(true);
       // A row is never the summary: its turf grade counts with no replayed size.
       expect(flagged({ result: { lineItems: [{ service: 'lawn_care', turfConfidence: 'LOW' }] } })).toBe(true);
+      expect(flagged({ result: { results: { lawnMeta: { turfConfidence: 'LOW' } } } })).toBe(true);
+
+      // The loader passes what it replays: a stored lawn size under either
+      // input name, in each place the inputs are stored.
+      const { loadEstimateSeed } = _private;
+      const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(SEED_HERE);
+      const seedOf = (data) => loadEstimateSeed(pagedEstimates([seedRow('est-1', SEED_HERE, 'accepted', 0, data)]).database, 'cust-1', street);
+      expect(await seedOf({ inputs, result: guess })).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: false });
+      for (const key of ['inputs', 'engineInputs', 'engineInput']) {
+        for (const lawn of [{ lawnSqFt: 5200 }, { turfSf: 5200 }]) {
+          expect([key, await seedOf({ [key]: { ...inputs, ...lawn }, result: guess })])
+            .toEqual([key, expect.objectContaining({ lawnSqFt: 5200, requiresFieldVerification: true })]);
+        }
+        expect([key, await seedOf({ [key]: { ...inputs, lawnSqFt: 5200 }, result: { property: { turfConfidence: 'HIGH', turfBasis: 'lawnSqFt' } } })])
+          .toEqual([key, expect.objectContaining({ lawnSqFt: 5200, requiresFieldVerification: false })]);
+      }
     });
 
     test('an offer on a seed with a marked mapped row is a quote button, and input-side flags still price', async () => {
