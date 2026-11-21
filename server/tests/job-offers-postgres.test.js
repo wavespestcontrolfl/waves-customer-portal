@@ -2047,7 +2047,7 @@ jest.setTimeout(120000);
           expect(mockRaise).not.toHaveBeenCalled();
 
           // A mark closes the bell, in the write.
-          await mark(made, 'driving_record');
+          await mark(made, 'driving_record', true, morning(1, '08:00')());
           bells = await bellsOf(made.app.id);
           expect(bells[0]).toMatchObject({ done_at: expect.any(Date), done_by: 'episodes', resolution: 'A first-days item was marked done' });
           expect(bells[0].metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'checklist_done' });
@@ -2066,6 +2066,51 @@ jest.setTimeout(120000);
           expect(same[0]).toMatchObject({ id: open.id, body: `3 of 4 items are open; next: the driver's license check, was due before ${before}.` });
           expect(same[0].read_at).not.toBeNull();
           expect(await bellsOf(made.app.id)).toHaveLength(2);
+        });
+
+        test('a mark before 7:00 AM settles that day; a second mark of a done item closes nothing', async () => {
+          const made = await hire();
+          expect(await JobOffers.ringDueChecklists(morning(1))).toEqual({ ...NONE, rung: 1 });
+          // The owner marks an item at 6:55 AM the next day: yesterday's bell closes, and that morning does not ring.
+          await mark(made, 'driving_record', true, morning(2, '06:55')());
+          expect(await openBellsOf(made.app.id)).toHaveLength(0);
+          expect((await offerRow(made.offer.id)).checklist.first_days_bell).toBe(shiftDay(signedDay(), 2));
+          mockRaise.mockClear();
+          expect(await JobOffers.ringDueChecklists(morning(2))).toEqual(NONE);
+          expect(mockRaise).not.toHaveBeenCalled();
+          // The morning after rings with what is left.
+          expect(await JobOffers.ringDueChecklists(morning(3))).toEqual({ ...NONE, rung: 1 });
+          const [open] = await openBellsOf(made.app.id);
+          expect(open.body).toMatch(/^3 of 4 items are open; next: the driver's license check, /);
+
+          // A stale card sends "done" again for the item that is already done: the open bell stays, and so does the day.
+          await mark(made, 'driving_record', true, morning(4, '06:00')());
+          expect((await openBellsOf(made.app.id)).map((row) => row.id)).toEqual([open.id]);
+          expect((await offerRow(made.offer.id)).checklist.first_days_bell).toBe(shiftDay(signedDay(), 3));
+          // An undo leaves both as they are too.
+          await mark(made, 'driving_record', false, morning(4, '06:05')());
+          expect((await openBellsOf(made.app.id)).map((row) => row.id)).toEqual([open.id]);
+          expect((await offerRow(made.offer.id)).checklist.first_days_bell).toBe(shiftDay(signedDay(), 3));
+        });
+
+        test('a first day moved later closes the bell of an item that is no longer due, and the new first day rings again', async () => {
+          const made = await hire();
+          for (const key of ['driving_record', 'license', 'workers_comp']) await mark(made, key);
+          expect(await JobOffers.ringDueChecklists(at(made.firstDay, '07:00'))).toEqual({ ...NONE, rung: 1 });
+          const [first] = await openBellsOf(made.app.id);
+          // The owner moves the first day one week later on the Team tab: Form I-9 is not due yet.
+          const later = shiftDay(made.firstDay, 7);
+          await root('technicians').where({ id: made.staffId }).update({ hire_date: later });
+          expect(await JobOffers.ringDueChecklists(at(shiftDay(made.firstDay, 1), '07:00'))).toEqual({ ...NONE, closed: 1 });
+          expect(await openBellsOf(made.app.id)).toHaveLength(0);
+          expect(await root('notifications').where({ id: first.id }).first()).toMatchObject({ done_by: 'episodes', resolution: 'No first-days item is due today' });
+          // The mornings before the new first day are quiet.
+          mockRaise.mockClear();
+          expect(await JobOffers.ringDueChecklists(at(shiftDay(made.firstDay, 2), '07:00'))).toEqual(NONE);
+          expect(mockRaise).not.toHaveBeenCalled();
+          // The new first day: a new bell with the new due day (a Monday + 3 business days = the Thursday).
+          expect(await JobOffers.ringDueChecklists(at(later, '07:00'))).toEqual({ ...NONE, rung: 1 });
+          expect((await openBellsOf(made.app.id))[0].body).toBe(`1 of 4 items is open; next: Form I-9, due ${JobOffers.fmtDay(shiftDay(later, 3))}.`);
         });
 
         test('Form I-9 joins the bell on the first day, and the last mark ends it', async () => {

@@ -20,7 +20,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { dateOnlyAtNoonUtc, dateOnlyString, formatDateOnly, validDateOnly } = require('../utils/date-only');
-const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
+const { addETBusinessDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 const { portalUrl } = require('../utils/portal-url');
 const { hash: canonicalHash } = require('./staff-document-source');
@@ -1706,8 +1706,8 @@ async function makeDueStaffRecords() {
 // hire's contract: the newest signed offer of the application. An item is done when ANY signed offer of the
 // application holds its mark, so a second signature of a reopened application keeps what was done; a write moves the
 // marks to the newest signed offer.
-// job_offers.checklist.first_days_bell: the Eastern day the morning pass last handled the offer, or 'closed' (the
-// pass closed the bell of an application that is no longer Hired).
+// job_offers.checklist.first_days_bell: the Eastern day the bell is settled for (the morning pass handled the offer,
+// or a mark closed the bell that day), or 'closed' (the pass closed the bell of an application no longer Hired).
 const FIRST_DAYS_ITEMS = [
   { key: 'driving_record', label: 'Driving record copy', inBell: 'the driving record copy' },
   { key: 'license', label: "Driver's license check", inBell: "the driver's license check" },
@@ -1719,15 +1719,9 @@ const FIRST_DAYS_BELL_KEY = 'first_days_bell';
 const FIRST_DAYS_BELL_FROM_ET = 7 * 60;
 // One bell for a hire, whichever signed offer is the contract.
 const checklistBellKey = (applicationId) => bellKey('checklist', applicationId);
-// Monday to Friday; a holiday counts, so the day is never later than the rule's.
-const addBusinessDays = (ymd, days) => {
-  let day = ymd;
-  for (let left = days; left > 0;) {
-    day = addStaffWorkDays(day, 1);
-    if (dowOf(day) !== 0 && dowOf(day) !== 6) left -= 1;
-  }
-  return day;
-};
+// Monday to Friday, by the shared rule (datetime-et addETBusinessDays); a holiday counts, so the day is never later
+// than the rule's.
+const addBusinessDays = (ymd, days) => etDateString(addETBusinessDays(parseETDateTime(`${ymd}T12:00:00`), days));
 // The newest signature first, as signedOffersOf reads them.
 const newestSignedFirst = (rows) => rows.filter((row) => row.status === 'accepted')
   .sort((a, b) => (new Date(b.signed_at) - new Date(a.signed_at)) || (a.id < b.id ? 1 : -1));
@@ -1800,8 +1794,10 @@ async function storeFirstDaysMarks(trx, signed, marks, more = {}) {
  * the offer the card showed the checklist on: when the application is no longer Hired, or a newer offer was signed
  * since that read, nothing is written (CHECKLIST_CLOSED). A second mark of a done item keeps the first one.
  *
- * A mark closes the checklist's open bell in the same transaction. While an item is still due, the next morning's
- * pass raises it again with what is left (ringDueChecklists). Undoing a mark leaves the bell to that pass.
+ * A mark of an open item closes the checklist's open bell in the same transaction and settles the bell for that
+ * Eastern day: the owner is at the list, so the day's pass does not ring again (also for a mark made before 7:00 AM).
+ * While an item is still due, the next morning's pass raises the bell with what is left (ringDueChecklists). A
+ * second mark of a done item, and an undo, leave the bell as it is.
  * Returns { firstDays } as the write left it.
  */
 async function setChecklistItem(applicationId, offerId, key, done, actor, now = new Date()) {
@@ -1816,10 +1812,11 @@ async function setChecklistItem(applicationId, offerId, key, done, actor, now = 
         'This checklist is closed: the application is no longer Hired, or a newer offer was signed. Nothing was changed.');
     }
     const marks = { ...held.marks };
-    if (done && !marks[key]) marks[key] = { at: now.toISOString(), by: actor.id, by_name: await actorName(trx, actor) };
+    const newlyDone = done && !marks[key];
+    if (newlyDone) marks[key] = { at: now.toISOString(), by: actor.id, by_name: await actorName(trx, actor) };
     if (!done) delete marks[key];
-    await storeFirstDaysMarks(trx, held.signed, marks);
-    if (done) {
+    await storeFirstDaysMarks(trx, held.signed, marks, newlyDone ? { [FIRST_DAYS_BELL_KEY]: etDateString(now) } : {});
+    if (newlyDone) {
       const all = FIRST_DAYS_ITEMS.every((item) => marks[item.key]);
       await require('./admin-alert-episodes').closeAdminAlertKeys(trx, [checklistBellKey(application.id)], 'checklist_done', {
         now, resolution: all ? 'Every first-days item is marked done' : 'A first-days item was marked done',
@@ -1830,7 +1827,8 @@ async function setChecklistItem(applicationId, offerId, key, done, actor, now = 
 }
 
 // The morning bell of one offer. Locks, in this order: the application row, its signed offers. The clock is read
-// after them. Returns 'rung' (a new bell) | 'closed' (the bell of an application no longer Hired) | null.
+// after them. Returns 'rung' (a new bell) | 'closed' (the bell of an application no longer Hired, or of a hire with
+// no item due that day) | null.
 async function ringChecklist(offerId, clock) {
   return db.transaction(async (trx) => {
     await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(STAFF_LOCK_WAIT_MS)]);
@@ -1856,7 +1854,13 @@ async function ringChecklist(offerId, clock) {
     await storeFirstDaysMarks(trx, held.signed, held.marks, { [FIRST_DAYS_BELL_KEY]: today });
     const open = firstDaysItems(offer, held.marks, held.firstDay).filter((item) => !item.doneAt);
     const due = open.filter((item) => item.ringFrom <= today);
-    if (!due.length) return null;
+    if (!due.length) {
+      // Nothing is due today (the owner moved the first day later): an open bell would keep an old due day.
+      const closed = await require('./admin-alert-episodes').closeAdminAlertKeys(trx, [checklistBellKey(application.id)], 'checklist_done', {
+        now, resolution: 'No first-days item is due today',
+      });
+      return closed ? 'closed' : null;
+    }
     const next = due.reduce((first, item) => (item.dueOn < first.dueOn ? item : first));
     const raised = await raiseBell('checklist', offer, { open: open.length, next, today }, trx);
     return raised && !raised.deduped ? 'rung' : null;
@@ -1869,7 +1873,8 @@ async function ringChecklist(offerId, clock) {
  * items are open and which is next. An open bell is updated with no ring. A bell that the owner closed, or that a mark
  * closed, is raised again the next morning while an item is still due. A catch-up pass within the day: each run takes
  * every hire the day's pass has not handled, so a dropped tick loses nothing. It also closes the bell of an
- * application that is no longer Hired. It sends no one anything.
+ * application that is no longer Hired, and an open bell of a hire with no item due that day (a first day moved
+ * later). It sends no one anything.
  * Returns { rung, closed, failed }; the caller fails the job when failed > 0.
  * clock: the time source, for tests. The scheduler passes none.
  */
