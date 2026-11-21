@@ -355,9 +355,10 @@ fi
 # no_base, diff_too_large, auditors_failed, sha_unreachable, diff_failed (git
 # could not compare the commit with the base), not_reached (anything else).
 #
-# No line at all: a delete-only push, a push the applied-migration guard
-# above blocks (nothing was pushed, no audit ran), and a machine without jq
-# (the lines are built with it).
+# No line at all: a run with no ref update on stdin (an up-to-date push;
+# the hook audits HEAD then, but nothing was pushed), a delete-only push, a
+# push the applied-migration guard above blocks (nothing was pushed, no
+# audit ran), and a machine without jq (the lines are built with it).
 #
 # Each line is one short write to a file opened for append, and no file is
 # ever rewritten, so two worktrees pushing at once cannot lose or split each
@@ -406,6 +407,9 @@ write_round_log() {
   local rc="$1" dir="${CODEX_REVIEW_ROUND_LOG:-}" now="" file="" line="" dests=""
   local i j sha outcome why
   [ "$dir" = "off" ] && return 0
+  # Git also runs this hook with nothing on stdin when every ref is up to
+  # date. The hook then audits HEAD as a courtesy, but nothing was pushed.
+  [ "$ANY_REFS" = "1" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   if [ -z "$dir" ]; then
     dir="$(git rev-parse --git-common-dir 2>/dev/null)" || return 0

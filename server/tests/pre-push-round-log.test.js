@@ -38,22 +38,30 @@ const BLOCKING = JSON.stringify({
 
 let root; let work; let fakeBin; let baseSha; let sha; let markedSha; let orphanSha;
 
+// One environment for every git command and every hook run in this file. It keeps the machine out of the
+// fixture: no global or system git config (a developer's core.hooksPath, diff.external or aliases), and none of
+// git's own GIT_* variables (jest can run inside a git hook, where GIT_DIR points at the real repository).
+function cleanEnv(extra = {}) {
+  const env = {};
+  for (const [key, value] of Object.entries(process.env)) if (!key.startsWith('GIT_')) env[key] = value;
+  return { ...env, GIT_CONFIG_GLOBAL: os.devNull, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', ...extra };
+}
+
 function git(cwd, args) {
   return execFileSync('git', args, {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
+    env: cleanEnv({
       GIT_AUTHOR_NAME: 'round-log-test', GIT_AUTHOR_EMAIL: 'round-log@example.invalid',
       GIT_COMMITTER_NAME: 'round-log-test', GIT_COMMITTER_EMAIL: 'round-log@example.invalid',
-    },
+    }),
   }).trim();
 }
 
 // One hook run, as git would start it. `pushes` = [local ref, sha, destination ref] for each ref of the push;
-// the default is `git push origin feature`.
+// the default is `git push origin feature`. An empty list is git's run for a push with every ref up to date.
 function runHook({ cwd = work, env = {}, pushes } = {}) {
   const tuples = pushes || [['refs/heads/feature', sha, 'refs/heads/feature']];
-  const base = { ...process.env };
+  const base = cleanEnv();
   for (const key of ['SKIP_CODEX_REVIEW', 'CODEX_REVIEW_ROUND_LOG', 'CODEX_REVIEW_BASE', 'CODEX_REVIEW_MAX_DIFF_BYTES']) delete base[key];
   const result = spawnSync('bash', [HOOK, 'origin', 'unused-url'], {
     cwd, encoding: 'utf8',
@@ -94,8 +102,12 @@ beforeAll(() => {
     'printf \'%s\' "$verdict" > "$out"',
     '',
   ].join('\n'), { mode: 0o755 });
-  execFileSync('git', ['init', '-q', '--bare', remote]);
-  execFileSync('git', ['init', '-q', '-b', 'main', work]);
+  git(root, ['init', '-q', '--bare', remote]);
+  git(root, ['init', '-q', '-b', 'main', work]);
+  // No hook of any kind runs for the fixture's own commits and pushes. The cases start the hook under test directly.
+  const noHooks = path.join(root, 'no-hooks');
+  fs.mkdirSync(noHooks);
+  git(work, ['config', 'core.hooksPath', noHooks]);
   git(work, ['remote', 'add', 'origin', remote]);
   fs.mkdirSync(path.join(work, '.github'));
   fs.writeFileSync(path.join(work, '.github', 'codex-review-schema.json'), '{}\n');
@@ -200,6 +212,14 @@ describe('pre-push round log', () => {
     const mixed = runHook({ pushes: [['refs/heads/main', baseSha, 'refs/heads/same-as-main'], ['refs/heads/feature', sha, 'refs/heads/feature']] });
     expect(mixed.status).toBe(0);
     expect(rounds()).toEqual([expect.objectContaining({ ref: 'refs/heads/feature', sha, outcome: 'audited' })]);
+  }, 120000);
+
+  test('a run with no ref update on stdin audits HEAD and logs nothing: nothing was pushed', () => {
+    const run = runHook({ pushes: [] });
+    expect(run.stderr).toContain('auditing HEAD');
+    expect(run.stderr).toContain('clean — push allowed');
+    expect(run.status).toBe(0);
+    expect(monthFiles()).toEqual([]);
   }, 120000);
 
   test('a commit git cannot compare with the base is logged as un-audited, not dropped as "no changes"', () => {
