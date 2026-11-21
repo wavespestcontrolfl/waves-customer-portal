@@ -346,20 +346,17 @@ async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
 
 // The zone a hold's zone stamp names, for the check at a kept hold's write (slot-reservation.js holdKeepsSouthDay).
 // One rule: a far-south stamp (funnelSlugOf, the stop read's own test) is ALWAYS checked, whatever happened to the
-// zone rows while the hold was held; any other stamp never is (null). Among the funneled rows, every one of which
-// names the one consolidated south pool the stop read counts that stamp in: the row with the stamp's slug (the row
-// the hold's list funneled by); else, its row renamed or removed, a row with cities, so the unstamped stops match by
-// city; else any. With no funneled row left, the stamp's funneled slug stands for itself with no cities, so the
-// stamped stops still count.
+// zone rows while the hold was held; any other stamp never is (null). The zone is the funneled row of the stamp's
+// funneled slug: the row the hold's list funneled by (for a legacy compound stamp, its base slug's row). With that
+// row renamed or removed, the slug stands for the whole pool, because every funneled slug names the one consolidated
+// south pool the stop read counts that stamp in: it takes the cities of every funneled row left, so their unstamped
+// stops match by city (none left: no cities, and the stamped stops still count). No row is picked by its order.
 function zoneOfHoldStamp(zones, stamp) {
-  const slug = String(stamp || '').trim().toLowerCase();
-  const base = funnelSlugOf(slug);
+  const base = funnelSlugOf(String(stamp || '').trim().toLowerCase());
   if (!base) return null;
   const pool = zones.filter(isFunnelZone);
-  return pool.find((zone) => zoneSlugOf(zone) === slug)
-    || pool.find((zone) => (zone.cities || []).length)
-    || pool[0]
-    || { id: null, zone_name: base, cities: [] };
+  return pool.find((zone) => zoneSlugOf(zone) === base)
+    || { id: null, zone_name: base, cities: pool.flatMap((zone) => zone.cities || []) };
 }
 
 // The funnel for an offer pool that is not built by the estimate page (the lead assessment link:
@@ -427,6 +424,7 @@ module.exports = {
   dropOtherTruckDays,
   truckMayTakeDate,
   zoneOfHoldStamp,
+  funnelSlugOf,
   offerFunnelView,
   funnelOfferPool,
   funnelZoneRows,
