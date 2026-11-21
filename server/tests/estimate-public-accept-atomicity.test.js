@@ -2587,6 +2587,35 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
       expect(atRetire).toEqual({ inTransaction: true, estimateRowLocked: true });
     });
 
+    test('a staff change that lands after the first read is refused on the locked row, ahead of the consumer notice (codex pre-push P1)', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-20', token: 'tok-restart-20-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer()];
+      const consumerNotice = require('../services/estimate-consumer-notice');
+      // The route's first check passes; the locked one would ask for a signature.
+      const blocks = jest.spyOn(consumerNotice, 'consumerNoticeBlocksAccept').mockResolvedValueOnce(false).mockResolvedValue(true);
+      spies.push(blocks);
+      // Staff turned invoice billing on after the route's first read: the row the accept locks carries it.
+      db.__state.onTable = (table) => {
+        if (table !== 'estimates' || db.__state.txDepth === 0 || storedEstimate().bill_by_invoice) return;
+        storedEstimate().bill_by_invoice = true;
+      };
+      const priorGate = process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
+      process.env.GATE_ESTIMATE_CONSUMER_NOTICE = 'true';
+      try {
+        const res = await putAccept('tok-restart-20-x012345678', body);
+        expect(res.status).toBe(409);
+        expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+        expect(blocks).toHaveBeenCalledTimes(1);
+        // The verified capture the page drops is retired, as on the plan re-check.
+        expect(retire).toHaveBeenCalledWith({ estimate: expect.objectContaining({ id: 'est-restart-20' }), setupIntentId: 'si_cof_9' });
+        expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
+        else process.env.GATE_ESTIMATE_CONSUMER_NOTICE = priorGate;
+      }
+    });
+
     test('a retirement Stripe cannot confirm under that lock answers 503 and accepts nothing (codex pre-push P1)', async () => {
       const body = verifiedCapture();
       resetStore(restartEstimate({ id: 'est-restart-19', token: 'tok-restart-19-x012345678' }));
