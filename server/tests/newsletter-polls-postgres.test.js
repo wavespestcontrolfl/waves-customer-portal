@@ -15,7 +15,7 @@
  *   issue with no poll keeps the old rule.
  * - The Waves Pest Insider (its real type key) reads its own list from its
  *   own issues, and its votes follow the same rule. An unsent Pest Insider
- *   issue a person can still send by hand holds its poll too.
+ *   issue holds its poll while its send row exists.
  * Real Postgres, because these are an ILIKE over the stored bodies, EXISTS
  * and subqueries over the delivery rows, and the vote's row update.
  * Runs in CI's DB-gated step or this worktree's private QA database; every
@@ -43,7 +43,7 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
   } = require('../services/newsletter-quiz');
   const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
   const [P1, P2, P3, P4] = NEWSLETTER_POLL_IDS;
-  const [PI1, PI2, PI3, PI4] = PEST_INSIDER_POLL_IDS;
+  const [PI1, PI2] = PEST_INSIDER_POLL_IDS;
   let database;
   const HOUR = 60 * 60 * 1000;
   const daysAgo = (days) => new Date(Date.now() - days * 24 * HOUR);
@@ -320,10 +320,10 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     expect(await tagsOf()).toEqual(tagsBefore);
   });
 
-  test('an unsent Waves Pest Insider issue a person can still send holds its poll; the flagship rule does not change', async () => {
+  test('an unsent Waves Pest Insider issue holds its poll while its send row exists; the flagship rule does not change', async () => {
     await onlyThisTestsPestInsiderIssues();
-    // The same five issues under each newsletter's own poll ids.
-    const issues = ([a, b, c, d]) => [
+    // The same issues under each newsletter's own poll ids.
+    const issues = ([a, b, c, d, e, f]) => [
       { poll: null, sentAt: daysAgo(28) },
       { poll: null, sentAt: daysAgo(14) },
       // Held: a HOLD reply or Cancel schedule made its send a draft again, and
@@ -331,21 +331,27 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
       { poll: a, status: 'draft', createdAt: daysAgo(20) },
       // Failed before any delivery row was written: a Resume mails its whole audience.
       { poll: b, status: 'failed', createdAt: daysAgo(13) },
-      // Failed with rows a Resume would mail no one from: nothing left to send.
+      // Failed with a row no Resume would mail today. A repaired reader link
+      // could change that, so the poll stays held.
       { poll: c, status: 'failed', createdAt: daysAgo(12), deliveries: [{ status: 'skipped' }] },
       // Queued for its send day.
       { poll: d, status: 'scheduled', createdAt: daysAgo(2) },
+      // Claimed by a worker that has not written its delivery rows yet.
+      { poll: e, status: 'sending', createdAt: daysAgo(1) },
+      // 'sent', but every recipient dropped out before dispatch: it can never go out again.
+      { poll: f, sentAt: daysAgo(3), deliveries: [{ status: 'skipped' }] },
     ];
-    await insertIssues(PEST_INSIDER_TYPE, issues([PI1, PI2, PI3, PI4]));
+    const pi = PEST_INSIDER_POLL_IDS;
+    await insertIssues(PEST_INSIDER_TYPE, issues(pi));
     const history = await newsletterIssuePolls({ newsletterType: PEST_INSIDER_TYPE });
     expect(history.recent).toEqual([null, null]);
-    expect([...history.used].sort()).toEqual([PI1, PI2, PI4].sort());
-    expect(chooseNewsletterPoll(history)).toBe(PI3);
+    expect([...history.used].sort()).toEqual(pi.slice(0, 5).sort());
+    expect(chooseNewsletterPoll(history)).toBe(pi[5]);
 
     // A flagship-rule newsletter: a fresh send goes out only on its own
     // Tuesday, so none of these unsent issues holds a poll.
     const TYPE = newType();
-    await insertIssues(TYPE, issues([P1, P2, P3, P4]));
+    await insertIssues(TYPE, issues(NEWSLETTER_POLL_IDS));
     const flagship = await newsletterIssuePolls({ newsletterType: TYPE });
     expect(flagship.used).toEqual([]);
     expect(chooseNewsletterPoll(flagship)).toBe(P1);

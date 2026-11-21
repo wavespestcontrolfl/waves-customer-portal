@@ -28,9 +28,9 @@
  * planner gives an issue the next poll from the owner's list when neither of the two newest issues
  * readers got had one, so a poll shows in at most every 3rd issue and never in two in a row; none
  * once the list is used up (newsletter-quiz.js chooseNewsletterPoll and newsletterIssuePolls, the
- * Waves Newsletter's own rule). An unsent issue a person can still send (held, or failed before any
- * reader's row was written) keeps its poll, so the next issue never repeats it. A failed read leaves
- * the issue without a poll; it never stops it.
+ * Waves Newsletter's own rule). An unsent issue (held, queued, claimed or failed) keeps its poll while
+ * its send row exists, so the next issue never repeats it. A failed read leaves the issue without a
+ * poll; it never stops it.
  *
  * Calendar dates here are 'YYYY-MM-DD' strings. The date math is the shared ET helpers in
  * utils/datetime-et.js (validCalendarDate, etNthWeekdayOfMonth, addETDays, etDateString);

@@ -582,14 +582,16 @@ async function newsletterIssuePolls({ newsletterType, knex = require('../models/
   const reachedRow = (sub) => { reachedDelivery(deliveryRows(sub)); };
   const resumableRow = () => outstandingEligibleDeliveries('s.id', { database: knex, correlate: true })
     .select(knex.raw('1'));
-  // An unsent Waves Pest Insider issue a person can still send holds its poll
-  // too: a held issue (its send is a draft again), a queued one, and a send
-  // that failed before any delivery row was written (a Resume then mails its
-  // whole planned audience). The sender has no send window on those paths for
-  // this newsletter, so such an issue can go out after a later one. A flagship
-  // issue goes out only on its own Tuesday, so there only a resumable row holds.
-  const sendableByHand = (issue) => issue.whereIn('s.status', ['draft', 'scheduled'])
-    .orWhere((failed) => failed.where('s.status', 'failed').whereNotExists(deliveryRows));
+  // An unsent Waves Pest Insider issue holds its poll while its send row
+  // exists: a held issue (its send is a draft again), a queued one, one a
+  // worker has claimed, and a failed one, whatever its delivery rows say. A
+  // person can send or resume any of them by hand, and the sender has no send
+  // window on those paths for this newsletter, so such an issue can go out
+  // after a later one. A poll held by an issue that never goes out is skipped
+  // until that row is deleted: with six polls, a skipped one is cheaper than a
+  // repeated one. A flagship issue goes out only on its own Tuesday, so there
+  // only a resumable row holds.
+  const UNSENT = ['draft', 'scheduled', 'sending', 'failed'];
   const newest = await issues()
     .whereExists(reachedRow)
     .orderByRaw(`COALESCE(s.sent_at,
@@ -604,7 +606,7 @@ async function newsletterIssuePolls({ newsletterType, knex = require('../models/
   const holding = await issues()
     .where((issue) => {
       issue.whereExists(reachedRow).orWhereExists(resumableRow());
-      if (newsletterType === PEST_INSIDER_TYPE) issue.orWhere(sendableByHand);
+      if (newsletterType === PEST_INSIDER_TYPE) issue.orWhereIn('s.status', UNSENT);
     })
     .where((body) => body.where('s.html_body', 'ilike', `%{{quiz%${POLL_ID_MARK}%`)
       .orWhere('s.text_body', 'ilike', `%{{quiz%${POLL_ID_MARK}%`))
