@@ -309,15 +309,18 @@ async function recordReportAfterPayHold(conn, { visitId, invoiceId, today }) {
   });
 }
 
-// GATE_REPORT_AFTER_PAY (pre-push audit round 8): a close on a payment on the
-// visit's own day needs that payment still standing, on the invoice row the
-// completion holds locked. A payment undone or charged back after the
-// closeout's unlocked reads leaves the visit open (the completion refuses
-// `issued_visit_payment_reversed`, which the retry sweep asks again). Gate
-// off: false, so the close is as before the gate.
-function sameDayPaymentReversed(invoice, { trigger, day, today }) {
-  return trigger === 'paid' && day === today && reportAfterPayLive()
-    && !SETTLED_INVOICE_STATUSES.includes(String(invoice?.status));
+// GATE_REPORT_AFTER_PAY (pre-push audit rounds 8 and 9): a close on a payment
+// needs that payment still standing, on the invoice row the completion holds
+// locked: on the visit's own day, and after it, where the next day's sweep
+// closes a held visit on its payment (round 9). A payment undone or charged
+// back after the closeout's unlocked reads leaves the visit open (the
+// completion refuses `issued_visit_payment_reversed`, which the retry sweep
+// asks again, with the trigger the invoice's state then proves). Every paid
+// rail runs the closeout only once the invoice is settled (a part payment
+// runs none), so an unsettled row here is a payment that is gone. Gate off:
+// false, so the close is as before the gate.
+function paymentReversed(invoice, trigger) {
+  return trigger === 'paid' && reportAfterPayLive() && !SETTLED_INVOICE_STATUSES.includes(String(invoice?.status));
 }
 
 // The completion's read of the hold: the held invoice, linked to the service
@@ -1013,6 +1016,19 @@ function approvedVisitChanged(svc, approved) {
   const live = visitFactsOf(svc);
   return ['serviceType', 'date', 'status', 'updatedAtMs'].some((key) => (approved[key] === undefined ? false : (approved[key] ?? null) !== live[key]));
 }
+// Phase 2b — GATE_REPORT_AFTER_PAY (pre-push audit round 9): before a payment
+// holds a visit, a caller with no approved target of its own (a receipt
+// resend, another pay rail) adopts the payment's stored record_payment pin,
+// as the retry sweep does, because the card's decision for this payment
+// outranks the hold. A card that named another visit, or none, then leaves
+// this visit for a person (the approved-target refusal below), and one that
+// said the visit closes now is kept to it (holdForReport). Never refuses.
+async function adoptPaymentApproval(run) {
+  if (!run.deferred || run.approvedTarget) return null;
+  const stored = await approvedPaidCloseoutTargetFor(run.conn, run.invoice.id);
+  if (stored) Object.assign(run, { approvedTarget: stored.target, approvedVisit: stored.visit || null });
+  return null;
+}
 async function refuseUnapprovedTarget(run) {
   // Not for a proven resume of THIS invoice's own committed attempt: the completion already ran, so the visit no longer reads as the card
   // showed it (completed, newer edit time) and the post-commit work (invoice back-link, tracker, snapshot) must be allowed to finish. The
@@ -1041,9 +1057,14 @@ async function refuseUnapprovedTarget(run) {
 // that is gone). If it finds the payment no longer holds the visit (a bill
 // added, the visit moved or closed, the gate off), the visit closes as with
 // the gate off: the completion re-checks the day, the job timer, the hold and
-// the payment under its own locks.
+// the payment under its own locks. Only a record_payment pin marked
+// `deferred` lets the payment hold its visit: a pin without it is the card's
+// close-now verdict (another bill was on the visit), kept when that bill is
+// voided after the payment (pre-push audit round 9). A main-era pin, which
+// names only a close-now visit, reads the same way.
 async function holdForReport(run) {
   if (!run.deferred) return null;
+  if (run.approvedTarget && run.approvedVisit?.deferred !== true) return null;
   const held = await recordReportAfterPayHold(run.conn, { visitId: run.svc.id, invoiceId: run.invoice.id, today: run.today });
   if (!held) return null;
   const code = held === true ? 'visit_scheduled_today' : held;
@@ -1156,14 +1177,17 @@ async function auditCloseoutFailure(run, err) {
 // 'admin' | 'technician'), used ONLY for the audit identity — see
 // auditCloseoutOutcome and runQuietCloseout. Bounded phases share one
 // `run` context (GitHub r11 P2 #4127): void refusal → target resolution →
-// (GATE_REPORT_AFTER_PAY) the hold → the quiet canonical completion.
+// (GATE_REPORT_AFTER_PAY) the payment's stored approval for a caller with
+// none → the approved-target refusal → (GATE_REPORT_AFTER_PAY) the hold →
+// the quiet canonical completion.
 async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), approvedTarget = null, approvedVisit = null } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
   const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, approvedTarget: approvedTarget || null, approvedVisit: approvedVisit || null, invoice: null, linkedVisitId: null, svc: null, resuming: false, deferred: false, label: null, idempotencyKey: null };
   try {
     if (!(await loadCloseoutInvoice(run))) return { closed: false, reason: 'no_invoice' };
-    const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run)) || (await refuseUnapprovedTarget(run)) || (await holdForReport(run));
+    const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run)) || (await adoptPaymentApproval(run))
+      || (await refuseUnapprovedTarget(run)) || (await holdForReport(run));
     return refused || await runQuietCloseout(run);
   } catch (err) {
     return auditCloseoutFailure(run, err);
@@ -1186,7 +1210,7 @@ module.exports = {
   reportAfterPayWouldHold,
   writeReportAfterPayHold,
   recordReportAfterPayHold,
-  sameDayPaymentReversed,
+  paymentReversed,
   linkReportAfterPayHold,
   reportAfterPayHeldVisitIds,
   REPORT_AFTER_PAY_HOLD_ACTION,

@@ -500,7 +500,7 @@ describe('confirm', () => {
         try {
           const fence = await fenceOf();
           expect(fence.closeoutTarget).toBe('visit-77');
-          expect(fence.closeoutVisit).toEqual({ serviceType: 'Pest Control', date: '2099-01-01', status: 'on_site' });
+          expect(fence.closeoutVisit).toEqual({ serviceType: 'Pest Control', date: '2099-01-01', status: 'on_site', deferred: true });
           await expect(fence(db)).resolves.toBe(true);
           expect(visitJobTimerRunning).not.toHaveBeenCalled();
           // The card's verdict is asked again on the fence's handle (pre-push audit round 5): the carded visit as the card showed it.

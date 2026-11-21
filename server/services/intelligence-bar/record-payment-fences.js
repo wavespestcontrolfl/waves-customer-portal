@@ -108,9 +108,10 @@ function settlementFenceFor(pin) {
   fence.closeoutDeferred = Boolean(pin.closeout?.deferred);
   // The carded visit's facts, pinned with the target and re-asserted by the closeout under the visit's lock. A deferred close pins no
   // edit time: the visit stays with its technician for the rest of its day, so an edit then is expected. A new date, service type or
-  // status still leaves it open.
+  // status still leaves it open. It is marked `deferred`: only such a pin lets the payment's closeout hold the visit, so a close-now card
+  // stays close-now when a bill is voided after the payment (invoice-issued-closeout.js holdForReport; pre-push audit round 9).
   fence.closeoutVisit = pin.closeout
-    ? { serviceType: pin.closeout.serviceType, date: pin.closeout.date, status: pin.closeout.status, ...(pin.closeout.deferred ? {} : { updatedAtMs: pin.closeout.updatedAtMs }) }
+    ? { serviceType: pin.closeout.serviceType, date: pin.closeout.date, status: pin.closeout.status, ...(pin.closeout.deferred ? { deferred: true } : { updatedAtMs: pin.closeout.updatedAtMs }) }
     : null;
   return fence;
 }
