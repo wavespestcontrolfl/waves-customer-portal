@@ -2537,6 +2537,8 @@ function invalidatePricingConfigCache() {
 // It answers { priced: true, value } or { priced: false, reason }
 // ('not_loaded', 'edited', 'rows'): "price again", never a price. Callers
 // that overlap wait in the queue; none of them refuses another.
+// On 'edited' it also marks the shared settings stale again: the end of its
+// refresh marked them fresh, and the edit is not in them.
 // price() must not return a promise: the queue would wait for it, and with
 // it every refresh of the process. What price() throws, the caller gets.
 //
@@ -2547,10 +2549,19 @@ function withSettingsForUnattendedPrice(price) {
     const invalidations = _invalidations;
     const loaded = await _syncConstantsFromDBUnserialized();
     if (loaded !== true) return { priced: false, reason: 'not_loaded' };
-    if (invalidations !== _invalidations) return { priced: false, reason: 'edited' };
+    if (invalidations !== _invalidations) {
+      // The end of the refresh marked the settings fresh. The edit's mark goes back, so that the next caller
+      // of the shared refresh reads the rows again.
+      _lastSync = 0;
+      return { priced: false, reason: 'edited' };
+    }
     if (!standardPestPriceRowsAreComplete()) return { priced: false, reason: 'rows' };
     const value = price();
-    if (value && typeof value.then === 'function') throw new Error('withSettingsForUnattendedPrice: price() must be synchronous');
+    if (value && typeof value.then === 'function') {
+      // The mistake is thrown below. The promise itself may still reject, and nobody else will hear it.
+      value.then(undefined, () => {});
+      throw new Error('withSettingsForUnattendedPrice: price() must be synchronous');
+    }
     return { priced: true, value };
   });
   _syncQueue = run.catch(() => {});

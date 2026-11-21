@@ -985,8 +985,10 @@ describe('the settings for a price nobody watches', () => {
       expect(worker.bridge.needsSync()).toBe(false);
     });
 
-    // The shared cache loses this edit: the end of the refresh marks the settings fresh again.
-    test('an edit that was signaled while the refresh ran, after it read the rows; the next call reads again and prices', async () => {
+    // The end of a refresh marks the settings fresh, and the rows it read do not hold this edit. So the price is
+    // refused, and the shared settings read stale again: a caller of the shared refresh must not price from
+    // them for another minute.
+    test('an edit that was signaled while the refresh ran, after it read the rows: the shared settings read stale again, and the next call reads again and prices', async () => {
       const worker = freshWorker();
       const base = worker.constants.PEST.base;
       const running = pauseAtCatalogRead(appRows(worker, fullRows(worker.constants)));
@@ -997,10 +999,12 @@ describe('the settings for a price nobody watches', () => {
       running.release();
       await expect(mine).resolves.toEqual(refused('edited'));
       expect(price).not.toHaveBeenCalled();
-      expect(worker.bridge.needsSync()).toBe(false);
+      expect(worker.bridge.needsSync()).toBe(true);
       expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
-      appRows(worker, fullRows(worker.constants));
-      await expect(priceOn(worker)).resolves.toEqual(priced(base));
+      appRows(worker, withBase(worker.constants, base + 5));
+      await expect(priceOn(worker)).resolves.toEqual(priced(base + 5));
+      // A price that was given leaves the settings fresh for the shared callers.
+      expect(worker.bridge.needsSync()).toBe(false);
     });
   });
 
@@ -1028,6 +1032,37 @@ describe('the settings for a price nobody watches', () => {
       appRows(worker, fullRows(worker.constants));
       await expect(priceOn(worker, async () => base)).rejects.toThrow('price() must be synchronous');
       await expect(priceOn(worker)).resolves.toEqual(priced(base));
+    });
+
+    // The caller gets the mistake, not the promise. A rejection of that promise with nobody to hear it would
+    // end the process.
+    describe('a promise for an answer that rejects', () => {
+      test('gets a handler from the bridge, which takes the rejection', async () => {
+        const worker = freshWorker();
+        appRows(worker, fullRows(worker.constants));
+        const late = { then: jest.fn() };
+        await expect(priceOn(worker, () => late)).rejects.toThrow('price() must be synchronous');
+        expect(late.then).toHaveBeenCalledTimes(1);
+        const [onValue, onRejection] = late.then.mock.calls[0];
+        expect(onValue).toBeUndefined();
+        expect(() => onRejection(new Error('late fault'))).not.toThrow();
+      });
+
+      test('leaves no rejection unheard in the process', async () => {
+        const worker = freshWorker();
+        appRows(worker, fullRows(worker.constants));
+        const unheard = jest.fn();
+        process.on('unhandledRejection', unheard);
+        try {
+          await expect(priceOn(worker, async () => { throw new Error('late fault'); })).rejects.toThrow('price() must be synchronous');
+        } finally {
+          // The process reports an unheard rejection after the current turn; the listener stays until then.
+          await new Promise((resolve) => { setImmediate(resolve); });
+          await new Promise((resolve) => { setImmediate(resolve); });
+          process.removeListener('unhandledRejection', unheard);
+        }
+        expect(unheard).not.toHaveBeenCalled();
+      });
     });
   });
 });
