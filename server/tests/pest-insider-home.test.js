@@ -118,6 +118,34 @@ describe('loadHomeFacts', () => {
     expect([...facts.keys()]).toEqual([1, 4, 5]);
   });
 
+  test('a stamp with a unit or ZIP but no street must not conflict with the home', async () => {
+    const stamp = (over = {}) => ({ property_id: 'p1', address_line1: null, address_line2: null, city: null, zip: null, estimate_property_id: null, estimate_address: null, estimate_live_draft: null, ...over });
+    const home = { home_line1: '100 Palm Drive', home_line2: 'Apt 3', home_city: 'Bradenton', home_zip: '34202', home_property_id: 'p1' };
+    const { conn } = fakeConn([[
+      row({ subscriber_id: 1, ...home, last_stamps: [stamp({ address_line2: 'Apt 4' })] }),
+      row({ subscriber_id: 2, ...home, last_stamps: [stamp({ address_line2: 'Apt 3' })] }),
+      row({ subscriber_id: 3, ...home, last_stamps: [stamp({ zip: '34999' })] }),
+      row({ subscriber_id: 4, ...home, last_stamps: [stamp({ zip: '34202', city: 'Bradenton' })] }),
+      row({ subscriber_id: 5, ...home, last_stamps: [stamp({ property_id: null, address_line2: 'Unit 9' })] }),
+    ]]);
+    const facts = await loadHomeFacts(conn, [1, 2, 3, 4, 5], NOW);
+    expect([...facts.keys()]).toEqual([2, 4]);
+  });
+
+  test('a commercial property type under any of the portal\'s names has no entry, on the customer or on the saved property', async () => {
+    const home = { home_line1: '100 Palm Drive', home_line2: null, home_city: 'Bradenton', home_zip: '34202', home_property_id: 'p1' };
+    const property = (type) => ({ address_line1: '100 Palm Drive', address_line2: null, city: 'Bradenton', zip: '34202', property_type: type });
+    const { conn } = fakeConn([[
+      row({ subscriber_id: 1, ...home, home_property: property('office') }),
+      row({ subscriber_id: 2, ...home, home_property: property('Warehouse') }),
+      row({ subscriber_id: 3, ...home, property_type: 'storefront', home_property: property(null) }),
+      row({ subscriber_id: 4, ...home, home_property: property('single_family') }),
+      row({ subscriber_id: 5, ...home, home_property: property(null) }),
+    ]]);
+    const facts = await loadHomeFacts(conn, [1, 2, 3, 4, 5], NOW);
+    expect([...facts.keys()]).toEqual([4, 5]);
+  });
+
   test('a live quote-wizard draft cannot place an appointment: with no other location, no entry', async () => {
     const home = { home_line1: '100 Palm Drive', home_line2: null, home_city: 'Bradenton', home_zip: '34202', home_property_id: 'p1' };
     const stamp = (over = {}) => ({ property_id: null, address_line1: null, address_line2: null, city: null, zip: null, estimate_property_id: null, estimate_address: null, estimate_live_draft: false, ...over });
@@ -207,10 +235,12 @@ describe('loadHomeFacts', () => {
     expect(calls[0].sql).toContain('LEFT JOIN estimates e ON e.id = ss.source_estimate_id');
     expect(calls[0].sql).toContain('c.has_multi_home IS NOT TRUE');
     // The mailbox must not be another live customer's own, service-contact or billing address.
-    for (const column of ['o.email', 'o.service_contact_email', 'o.service_contact2_email', 'o.service_contact3_email', 'np.billing_email']) {
-      expect(calls[0].sql).toContain(`TRIM(${column})`);
-    }
+    expect(calls[0].sql).toContain('(VALUES (o.email), (o.service_contact_email), (o.service_contact2_email), (o.service_contact3_email)) AS a(address)');
+    expect(calls[0].sql).toContain('TRIM(np.billing_email)');
     expect(calls[0].sql).toContain('FROM notification_prefs np JOIN customers o ON o.id = np.customer_id');
+    // Computed once per read and joined by equality, not scanned again for each reader.
+    expect(calls[0].sql).toMatch(/^\s*WITH mailbox_owners AS MATERIALIZED \(/);
+    expect(calls[0].sql).toMatch(/NOT EXISTS \(SELECT 1 FROM mailbox_owners w WHERE w\.mailbox_key = [^]*? AND w\.customer_id <> c\.id\)/);
     expect(calls[0].sql).toContain("r.service_data->'reportIdentitySnapshot'->'address'");
     // The outer SELECT returns what the lateral computed (a rule on a column the query does not return never runs).
     expect(calls[0].sql).toContain('t.last_types, t.last_stamps, t.last_frozen,');

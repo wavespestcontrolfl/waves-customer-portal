@@ -98,6 +98,10 @@ function appointmentAtHome(stamp, home, homePropertyId) {
   const elsewhere = (propertyId) => Boolean(propertyId) && String(propertyId) !== homePropertyId;
   if (elsewhere(stamp.property_id)) return false;
   if (String(stamp.address_line1 ?? '').trim()) return addressIsHome(stamp, home);
+  // A stamp with a unit, city or ZIP but no street still names a place: those parts must not
+  // conflict with the home (a stamp for Apt 4 is not a visit to the home's Apt 3).
+  const partial = [stamp.address_line2, stamp.city, stamp.zip].some((part) => String(part ?? '').trim());
+  if (partial && !addressIsHome({ ...stamp, address_line1: home.address_line1 }, home)) return false;
   if (stamp.property_id) return true;
   // A live quote-wizard draft is rewritten for the customer's next quote, at any address, so
   // it cannot say where an older appointment was (recurring-appointment-seeder.js
@@ -135,6 +139,10 @@ function homeFromRow(row, today) {
   // The platform's own commercial test (the residential-only emails read it too).
   const { isCommercialAccount } = require('../self-booking-plan-sync');
   if (isCommercialAccount({ property_type: row.property_type, waveguard_tier: row.waveguard_tier })) return null;
+  // The saved-property residence rule's classifier (customer-properties.js isResidenceProperty):
+  // an office, a warehouse or a storefront is commercial too, whatever its occupancy says.
+  const { normalizePropertyType } = require('../pricing-engine/commercial-helpers');
+  if ([row.property_type, row.home_property?.property_type].some((type) => normalizePropertyType(type) === 'commercial')) return null;
   const lastDate = dateOnlyString(row.last_date);
   if (!lastDate) return null;
   if (dayNumber(today) - dayNumber(lastDate) > MAX_LAST_VISIT_AGE_DAYS) return null;
@@ -175,12 +183,25 @@ function mailboxKeySql(expr) {
 // CUSTOMER_EMAIL_COLUMNS; its fifth, billing_email, is on notification_prefs).
 const OTHER_CUSTOMER_MAILBOX_COLUMNS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
 
+// Every live customer's mailboxes, computed once per read (a correlated scan would key every
+// customer again for each reader; newsletter-sender.js withMailboxCustomers has the same shape).
 const FACTS_SQL = (idList) => `
+WITH mailbox_owners AS MATERIALIZED (
+  SELECT ${mailboxKeySql('a.address')} AS mailbox_key, o.id AS customer_id
+  FROM customers o
+  CROSS JOIN LATERAL (VALUES ${OTHER_CUSTOMER_MAILBOX_COLUMNS.map((column) => `(o.${column})`).join(', ')}) AS a(address)
+  WHERE o.deleted_at IS NULL AND TRIM(COALESCE(a.address, '')) <> ''
+  UNION ALL
+  SELECT ${mailboxKeySql('np.billing_email')} AS mailbox_key, o.id AS customer_id
+  FROM notification_prefs np JOIN customers o ON o.id = np.customer_id
+  WHERE o.deleted_at IS NULL AND TRIM(COALESCE(np.billing_email, '')) <> ''
+)
 SELECT ns.id AS subscriber_id, c.id AS customer_id, c.member_since, c.property_type, c.waveguard_tier,
        LOWER(TRIM(ns.email)) AS reader_address, v.last_date, t.last_types, t.last_stamps, t.last_frozen,
        c.address_line1 AS home_line1, c.address_line2 AS home_line2, c.city AS home_city, c.zip AS home_zip,
        (SELECT p.id FROM customer_properties p WHERE p.customer_id = c.id LIMIT 1) AS home_property_id,
-       (SELECT json_build_object('address_line1', p.address_line1, 'address_line2', p.address_line2, 'city', p.city, 'zip', p.zip)
+       (SELECT json_build_object('address_line1', p.address_line1, 'address_line2', p.address_line2, 'city', p.city, 'zip', p.zip,
+                                 'property_type', p.property_type)
         FROM customer_properties p WHERE p.customer_id = c.id LIMIT 1) AS home_property
 FROM newsletter_subscribers ns
 JOIN customers c ON c.id = ns.customer_id
@@ -207,10 +228,7 @@ JOIN LATERAL (
 WHERE ns.id IN (${idList})
   AND c.deleted_at IS NULL AND c.active IS DISTINCT FROM false
   AND TRIM(COALESCE(c.email, '')) <> '' AND LOWER(TRIM(ns.email)) = LOWER(TRIM(c.email))
-  AND NOT EXISTS (SELECT 1 FROM customers o WHERE o.id <> c.id AND o.deleted_at IS NULL
-                  AND ${mailboxKeySql('c.email')} IN (${OTHER_CUSTOMER_MAILBOX_COLUMNS.map((column) => mailboxKeySql(`o.${column}`)).join(', ')}))
-  AND NOT EXISTS (SELECT 1 FROM notification_prefs np JOIN customers o ON o.id = np.customer_id
-                  WHERE o.id <> c.id AND o.deleted_at IS NULL AND ${mailboxKeySql('np.billing_email')} = ${mailboxKeySql('c.email')})
+  AND NOT EXISTS (SELECT 1 FROM mailbox_owners w WHERE w.mailbox_key = ${mailboxKeySql('c.email')} AND w.customer_id <> c.id)
   AND NOT EXISTS (SELECT 1 FROM customers o WHERE o.id <> c.id AND o.deleted_at IS NULL AND o.active IS DISTINCT FROM false
                   AND COALESCE(o.account_id, o.id) = COALESCE(c.account_id, c.id))
   AND COALESCE(c.contact_role, 'owner') = 'owner'

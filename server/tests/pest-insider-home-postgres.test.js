@@ -330,6 +330,31 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     expect(Object.keys(readers).filter((name) => facts.has(readers[name])).sort()).toEqual(['noAddress', 'same']);
   });
 
+  test('a saved property typed office or warehouse is commercial: no entry, though its occupancy says owner-occupied', async () => {
+    const withProperty = async (propertyType) => {
+      const { c, s } = await eligible();
+      await property(c, { property_type: propertyType });
+      return s;
+    };
+    const office = await withProperty('office');
+    const warehouse = await withProperty('warehouse');
+    const house = await withProperty('single_family');
+    const facts = await loadHomeFacts(db, [office, warehouse, house], NOW);
+    expect([...facts.keys()]).toEqual([house]);
+  });
+
+  test('an appointment stamped with a unit but no street must not name another unit than the home\'s', async () => {
+    const atUnit = async (unit) => {
+      const c = await customer({ address_line2: 'Apt 3' });
+      await visitRecord(c, '2026-11-05', { service_address_line2: unit });
+      return reader(c);
+    };
+    const other = await atUnit('Apt 4');
+    const same = await atUnit('Apt 3');
+    const facts = await loadHomeFacts(db, [other, same], NOW);
+    expect([...facts.keys()]).toEqual([same]);
+  });
+
   test('a customer staff marked multi-home, or one with no street on file, has no entry', async () => {
     // has_multi_home: a second premises that never got a customer_properties row.
     const { s: flagged } = await eligible({ has_multi_home: true });
