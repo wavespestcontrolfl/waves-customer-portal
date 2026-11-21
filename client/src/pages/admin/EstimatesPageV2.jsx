@@ -58,6 +58,7 @@ import PipelineAnalytics, {
 // The Call today rule's one home, shared with the 9 AM push.
 import {
   CALL_OUTCOMES,
+  STILL_DECIDING_HELP,
   isCallableEstimate,
   isCallTodayEstimate,
   lastEngagementMs,
@@ -448,17 +449,26 @@ export function callOutcomesUnreadNote(estimates, filter) {
     ? CALL_OUTCOMES_UNREAD_NOTE
     : "";
 }
+// When a call-list event happened, as a row says it: the time today (ET), the date and time on any other day.
+function callListWhen(stamp, now) {
+  const at = new Date(stamp);
+  const time = formatETTime(at);
+  return etDateString(at) === etDateString(now)
+    ? time
+    : `${formatETDate(at, { month: "short", day: "numeric" })}, ${time}`;
+}
 // A row's newest outcome: "No answer · 9:42 AM · Virginia", with the date when it was not today (ET).
 export function callOutcomeLine(callOutcome, now = new Date()) {
   const label = CALL_OUTCOMES.find((o) => o.key === callOutcome?.outcome)?.label;
   if (!label || !callOutcome.at) return "";
-  const at = new Date(callOutcome.at);
-  const time = formatETTime(at);
-  const when =
-    etDateString(at) === etDateString(now)
-      ? time
-      : `${formatETDate(at, { month: "short", day: "numeric" })}, ${time}`;
-  return [label, when, callOutcome.by].filter(Boolean).join(" · ");
+  return [label, callListWhen(callOutcome.at, now), callOutcome.by].filter(Boolean).join(" · ");
+}
+// What the customer said would help them decide (the estimate page's "Not ready yet?" sheet), as a row says it:
+// "Still deciding: wants to talk to a person first · 9:42 AM". "" for a reason this page does not know.
+export function stillDecidingLine(stillDeciding, now = new Date()) {
+  if (!stillDeciding?.at) return "";
+  const help = Object.hasOwn(STILL_DECIDING_HELP, String(stillDeciding.reason)) ? STILL_DECIDING_HELP[stillDeciding.reason] : null;
+  return help ? `Still deciding: ${help} · ${callListWhen(stillDeciding.at, now)}` : "";
 }
 // The four outcome buttons on a Call today row.
 export function CallOutcomeButtons({ estimate, onPick, saving = false, className }) {
@@ -3055,6 +3065,9 @@ function EstimatePipelineViewV2({
                       {e.lastCallOutcome && (
                         <div>{callOutcomeLine(e.lastCallOutcome)}</div>
                       )}
+                      {stillDecidingLine(e.stillDeciding) && (
+                        <div>{stillDecidingLine(e.stillDeciding)}</div>
+                      )}
                     </div>
                     {/* Actions — flag toggle + primary status action(s) +
                      overflow menu. Secondary tools (toggles, audit, preview,
@@ -4070,6 +4083,11 @@ export function MobileEstimateRow({
           {estimate.lastCallOutcome && (
             <span className="text-ui-body text-ink-tertiary">
               {callOutcomeLine(estimate.lastCallOutcome)}
+            </span>
+          )}
+          {stillDecidingLine(estimate.stillDeciding) && (
+            <span className="text-ui-body text-ink-tertiary">
+              {stillDecidingLine(estimate.stillDeciding)}
             </span>
           )}
           {onCallOutcome && (

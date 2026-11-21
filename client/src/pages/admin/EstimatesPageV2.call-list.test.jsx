@@ -22,6 +22,7 @@ import EstimatesPageV2, {
   HELD_REFRESH_MAX_MS,
   callOutcomeLine,
   callOutcomesUnreadNote,
+  stillDecidingLine,
   useCallOutcomes,
 } from "./EstimatesPageV2";
 
@@ -610,6 +611,38 @@ it("a saved outcome reads: what, when (with the date when not today, ET), who", 
   );
   expect(callOutcomeLine({ outcome: "voicemail", at: "2026-11-20T14:42:00Z" }, now)).toBe("");
   expect(callOutcomeLine(null, now)).toBe("");
+});
+
+// Owner 2026-11-21 (estimate page changes, change 1): what the customer said would help them decide.
+it("a sent reason reads: Still deciding, what would help, when (with the date when not today, ET)", () => {
+  const now = new Date("2026-11-21T18:00:00Z"); // 1:00 PM EST
+  const at = "2026-11-21T14:42:00Z";
+  expect(stillDecidingLine({ reason: "person", at }, now)).toBe("Still deciding: wants to talk to a person first · 9:42 AM");
+  expect(stillDecidingLine({ reason: "price", at }, now)).toBe("Still deciding: wants a lower price · 9:42 AM");
+  expect(stillDecidingLine({ reason: "quotes", at }, now)).toBe("Still deciding: is comparing other quotes · 9:42 AM");
+  expect(stillDecidingLine({ reason: "timing", at }, now)).toBe("Still deciding: says it is not the right time yet · 9:42 AM");
+  expect(stillDecidingLine({ reason: "other", at }, now)).toBe('Still deciding: picked "Something else" · 9:42 AM');
+  expect(stillDecidingLine({ reason: "price", at: "2026-11-19T14:42:00Z" }, now)).toBe(
+    "Still deciding: wants a lower price · Nov 19, 9:42 AM",
+  );
+  // A reason this page does not know, a reason with no time, no reason: no line.
+  expect(stillDecidingLine({ reason: "constructor", at }, now)).toBe("");
+  expect(stillDecidingLine({ reason: "price" }, now)).toBe("");
+  expect(stillDecidingLine(null, now)).toBe("");
+});
+
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) a customer who sent a reason is on Call today at once, with the reason on the row", async (_label, width) => {
+  // "Fresh View" opened the estimate 1 h ago (inside the 2 h wait) and sent a reason 30 minutes ago.
+  listRows = ROWS.map((r) => (r.id === "v-1h" ? { ...r, stillDeciding: { reason: "person", at: ago(HOUR / 2) } } : r));
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h", "v-1h"]));
+  expect(
+    within(rowOf(container, "v-1h")).getByText(/^Still deciding: wants to talk to a person first · /),
+  ).toBeInTheDocument();
+  expect(within(rowOf(container, "v-5h")).queryByText(/^Still deciding/)).not.toBeInTheDocument();
 });
 
 it("a held row leaves once anyone logs an outcome after the call was placed, not before", () => {

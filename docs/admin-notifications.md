@@ -708,7 +708,15 @@ or one called without an answer, so the words never claim nobody has called), an
 today filter. N is that page's own list: `services/estimate-call-today-push.js` takes the rows the page loads (`estimateListQuery` in
 `services/estimate-call-list.js`, the list route's own selection: sent-list rows, newest 2,000, unarchived), then applies `isCallTodayEstimate` from
 `shared/estimate-call-today.cjs` (the one home of the rule; the page imports it too) to rows built by
-`callTodayFields` in `services/estimate-call-list.js` (the same mapping the list route uses). The words carry a count
+`callTodayFields` in `services/estimate-call-list.js` (the same mapping the list route uses). A customer who sent a
+reason under "What would help you decide?" on the estimate page (owner 2026-11-21, estimate page changes, change 1) is
+on the list at once: the rule skips its 2-hour wait for that row and keeps it until a call, a follow-up or an outcome
+is newer than the reason, or 48 hours pass since the customer's last touch. The reason is the day's
+`estimate_customer_still_deciding` `activity_log` row (`metadata.reason`), read in one batch by
+`stillDecidingByEstimateId`; the row shows it as "Still deciding: wants a lower price · 9:42 AM". This list, not the
+`estimate_stuck` bell, is where a promised call waits: it does not depend on the bell category being on, and a later
+booking problem cannot rewrite it. A failed reason read costs only the reasons (the count can be low, never high), so
+the banner still goes out. The words carry a count
 only, never a customer name or phone. With nothing on the list it sends nothing. It is the `estimate_call_today`
 trigger (area Estimates, fyi, expires in 7 days), sent `pushOnly`: no bell row, admin-role phones only, one banner per ET
 day (the send first takes a `sms_send_claims` row `estimate_call_today:<ET date>`; a day missed while the server was down

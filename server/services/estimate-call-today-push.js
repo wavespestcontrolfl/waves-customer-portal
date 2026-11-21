@@ -33,7 +33,7 @@ const { isCallTodayEstimate } = require('../../shared/estimate-call-today.cjs');
 const { undeliveredSelfServeSql } = require('./self-serve-estimates');
 const {
   ESTIMATE_LIST_LIMIT, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId, lastCallOutcomeByEstimateId,
-  callTodayFields,
+  stillDecidingByEstimateId, callTodayFields,
 } = require('./estimate-call-list');
 
 const CLAIM_PREFIX = 'estimate_call_today:';
@@ -73,16 +73,23 @@ async function countCallToday(nowMs) {
   const rows = await candidateRows();
   if (!rows.length) return 0;
   const ids = rows.map((r) => r.id);
-  const [clicked, called, outcomes] = await Promise.all([
+  const [clicked, called, outcomes, deciding] = await Promise.all([
     lastClickedAtById(ids),
     lastCalledAtByEstimateId(db, rows, nowMs),
     lastCallOutcomeByEstimateId(db, ids),
+    // A reason only ADDS a row early (it lifts the 2h wait). A failed read can make the count too low, never too
+    // high, so it costs the field and the banner still goes out, as on the list route.
+    stillDecidingByEstimateId(db, ids).catch((err) => {
+      logger.warn(`[estimate-call-today] still-deciding read failed (${err?.code || 'no code'})`);
+      return new Map();
+    }),
   ]);
   return rows.filter((row) => isCallTodayEstimate(
     callTodayFields(row, {
       lastClickedAt: clicked.get(row.id),
       lastCalledAt: called.get(row.id),
       lastCallOutcome: outcomes.get(row.id),
+      stillDeciding: deciding.get(row.id),
       undeliveredSelfServe: row.undelivered_self_serve,
     }),
     nowMs,

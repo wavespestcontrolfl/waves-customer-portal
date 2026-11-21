@@ -14,10 +14,12 @@ jest.mock('../services/notification-triggers', () => ({
 }));
 const mockLastCalled = jest.fn();
 const mockLastOutcome = jest.fn();
+const mockStillDeciding = jest.fn();
 jest.mock('../services/estimate-call-list', () => ({
   ...jest.requireActual('../services/estimate-call-list'),
   lastCalledAtByEstimateId: (...args) => mockLastCalled(...args),
   lastCallOutcomeByEstimateId: (...args) => mockLastOutcome(...args),
+  stillDecidingByEstimateId: (...args) => mockStillDeciding(...args),
 }));
 
 const logger = require('../services/logger');
@@ -50,6 +52,7 @@ beforeEach(() => {
   claimed = new Set();
   mockLastCalled.mockResolvedValue(new Map());
   mockLastOutcome.mockResolvedValue(new Map());
+  mockStillDeciding.mockResolvedValue(new Map());
   mockDb.raw.mockImplementation((sql, bindings) => {
     if (!bindings) return { raw: sql }; // a select expression (the undelivered self-serve flag)
     const [key] = bindings;
@@ -102,6 +105,29 @@ describe('the count is the page list', () => {
     ]));
     expect(await countCallToday(NOW.getTime())).toBe(2); // older-outcome, none
     expect(mockLastOutcome).toHaveBeenCalledWith(mockDb, ['no-answer', 'call-back', 'older-outcome', 'none']);
+  });
+
+  // Owner 2026-11-21 (estimate page changes, change 1): a customer who said what would help them decide is on the
+  // list at once, and stays until someone answers.
+  test('a reason the customer sent counts the row inside the 2 h wait, until someone answers it', async () => {
+    estimateRows = [row('told', 0.5), row('told-called', 0.5), row('fresh', 0.5), row('told-cold', 72)];
+    mockStillDeciding.mockResolvedValue(new Map([
+      ['told', { reason: 'person', at: ago(0.2) }],
+      ['told-called', { reason: 'price', at: ago(0.4) }],
+      ['told-cold', { reason: 'timing', at: ago(60) }],
+    ]));
+    mockLastCalled.mockResolvedValue(new Map([['told-called', ago(0.1)]]));
+    expect(await countCallToday(NOW.getTime())).toBe(1); // told
+    expect(mockStillDeciding).toHaveBeenCalledWith(mockDb, ['told', 'told-called', 'fresh', 'told-cold']);
+  });
+
+  test('a failed reason read costs only the reasons: the plain count still goes out, and the log carries no error text', async () => {
+    estimateRows = [row('a', 5), row('told', 0.5)];
+    mockStillDeciding.mockRejectedValue(Object.assign(new Error('select from activity_log where estimate_id in (...)'), { code: '57014' }));
+    expect(await countCallToday(NOW.getTime())).toBe(1); // a; told waits out its 2 h like any row
+    expect(logger.warn).toHaveBeenCalledWith('[estimate-call-today] still-deciding read failed (57014)');
+    await runEstimateCallTodayPush({ now: NOW });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
   });
 
   test('a link tap after the last view counts as the last touch', async () => {

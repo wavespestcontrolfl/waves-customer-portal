@@ -14,6 +14,7 @@ jest.mock('../services/estimate-call-list', () => ({
   ...jest.requireActual('../services/estimate-call-list'),
   lastCalledAtByEstimateId: (...args) => mockLastCalled(...args),
   lastCallOutcomeByEstimateId: (...args) => mockLastOutcome(...args),
+  stillDecidingByEstimateId: async () => new Map(),
 }));
 
 const db = require('../models/db');
