@@ -2371,11 +2371,19 @@ async function commitReservation({
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
       throw err;
     }
-    // The technician's shift (GATE_TECH_SHIFT_HOURS) on the same FINAL window: the office may have
+    // The end this visit occupies: the final window, else the held one, else the start plus the stored
+    // length (60 minutes when none). The shift check and the occupancy probes below share it.
+    const probeWindowEnd = windowEnd
+      || row.window_end
+      || (windowStart
+        ? addMinutesToTime(windowStart, Number(row.estimated_duration_minutes) > 0
+          ? Number(row.estimated_duration_minutes)
+          : DEFAULT_DURATION_MINUTES)
+        : null);
+    // The technician's shift (GATE_TECH_SHIFT_HOURS) on that same FINAL block: the office may have
     // changed the hours since the reserve, or the profile lengthened the job past the shift end. Same
     // recovery as the technician re-check above (the customer re-picks a time).
-    if (await shiftExcluding(client, row.technician_id, scheduledDate,
-      holdBlock(windowStart, windowEnd || row.window_end))) {
+    if (await shiftExcluding(client, row.technician_id, scheduledDate, holdBlock(windowStart, probeWindowEnd))) {
       const err = new Error('slot technician is not available');
       err.code = 'SLOT_UNAVAILABLE';
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
@@ -2441,13 +2449,6 @@ async function commitReservation({
     // lapsed keeps includeHolds:false — it has been excluding rivals all
     // along, and counting live holds there would refuse a punctual accept
     // over a hold the reserve path already arbitrated.
-    const probeWindowEnd = windowEnd
-      || row.window_end
-      || (windowStart
-        ? addMinutesToTime(windowStart, Number(row.estimated_duration_minutes) > 0
-          ? Number(row.estimated_duration_minutes)
-          : DEFAULT_DURATION_MINUTES)
-        : null);
     if (scheduledDate && windowStart && probeWindowEnd) {
       const { parseHHMM } = require('./scheduling/window-rules');
       const probeWindowMinutes = parseHHMM(probeWindowEnd) - parseHHMM(windowStart);

@@ -43,7 +43,7 @@
  */
 
 const logger = require('../logger');
-const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('../technician-eligibility');
+const { assertAssignableTechnician } = require('../technician-eligibility');
 
 const EARLIEST_START_MINUTES = 8 * 60; // house rule: no client appointments before 8am ET
 
@@ -420,10 +420,7 @@ async function commitVoiceBooking({
       });
       if (clash.length) return { status: 'slot_taken' };
 
-      // `hours` (GATE_TECH_SHIFT_HOURS): the visit's own block against the technician's shift, the rule the
-      // offer was held to (the /book engine). A refusal books nothing and answers slot_taken (the catch below).
-      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr, workDays: true,
-        hours: { startMin: clockToMinutes(windowStart), endMin: clockToMinutes(endTime) } });
+      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr, workDays: true });
       const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
       // Surface the pending request in the existing admin confirm queue — the
       // same outbound_booking_review card the office already works. Only
@@ -512,13 +509,6 @@ async function commitVoiceBooking({
         + 'this call already holds an open outbound_booking_review card'
       );
       return { status: 'already_requested' };
-    }
-    // Not a failure either: the technician's shift stopped holding this block after the engine's
-    // re-check (the hours changed, or today's clock-in arrived). Nothing was written, and the time
-    // is gone as a taken one is, so the agent looks for fresh times. Every other refusal stays an error.
-    if (err && err.code === NOT_ASSIGNABLE && err.outsideShift) {
-      logger.warn(`[voice-relay-booking] ${dateStr} ${windowStart} refused at the commit for customer ${customerId}: technician ${err.technicianId} outside_shift`);
-      return { status: 'slot_taken' };
     }
     logger.error(`[voice-relay-booking] commit failed for customer ${customerId} on ${dateStr}: ${err.message}`);
     return { status: 'error' };

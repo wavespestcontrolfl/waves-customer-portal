@@ -5826,8 +5826,9 @@ async function createSelfBooking(payload = {}) {
             });
             // Shift hours (GATE_TECH_SHIFT_HOURS): the commit checked the signed block against the
             // technician's shift. The longer block must fit it too. When it does not, the signed slot
-            // stays and the office is told, as for adjacent work. shiftExcluding holds the technician's
-            // row first, so an hours edit waits for this transaction. Gate off: no read.
+            // stays and the office is told, as for adjacent work. A point-in-time read with no row
+            // lock (see shiftExcluding): an hours change that lands after it is the same as one that
+            // lands after this commit. Gate off: no read.
             const pastShift = extensionClashes.length === 0 && Boolean(await shiftExcluding(trx, seriesParentRow.technician_id,
               parentDateStr, { startMin: timeToMin(slot_start), endMin: parentEndMin }));
             if (extensionClashes.length === 0 && !pastShift) {

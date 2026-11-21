@@ -846,14 +846,10 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
         expect(unassigned.answer).toBeNull();
         expect(unassigned.conn).not.toHaveBeenCalled();
       }
-      // On a transaction the technician's row is held FOR SHARE before the hours are read, set hours or not.
-      for (const shiftRows of [[DAY_TECH], []]) {
-        const held = await at('tech-1', TOMORROW, job(8, 18), { shiftRows, transaction: true });
-        expect(held.answer).toBeNull();
-        expect(held.calls.technicians.slice(0, 3)).toEqual([['where', { id: 'tech-1' }], ['forShare'], ['whereNotNull', 'shift_start']]);
+      // The rule takes no lock of its own, on a transaction or off one: the read is a point in time.
+      for (const transaction of [false, true]) {
+        expect((await at('tech-1', TOMORROW, job(8, 18), { transaction })).calls.technicians).not.toContainEqual(['forShare']);
       }
-      // Off a transaction there is nothing to hold.
-      expect((await at('tech-1', TOMORROW, job(8, 18))).calls.technicians).not.toContainEqual(['forShare']);
       delete process.env.GATE_TECH_SHIFT_HOURS;
       for (const transaction of [false, true]) {
         const off = await at('tech-1', TOMORROW, job(17, 19), { transaction });

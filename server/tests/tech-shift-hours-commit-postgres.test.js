@@ -7,7 +7,6 @@
  */
 const { createCapacityDbFixture, describeDb } = require('./helpers/scheduling-capacity-db');
 const { reserveSlot, commitReservation, extendReservation } = require('../services/slot-reservation');
-const { shiftExcluding } = require('../services/technician-eligibility');
 jest.setTimeout(30000);
 
 describeDb('technician shift hours at a commit (PostgreSQL)', () => {
@@ -95,41 +94,25 @@ describeDb('technician shift hours at a commit (PostgreSQL)', () => {
       expect(booked).toMatchObject({ window_start: '10:00:00', window_end: '11:00:00', reservation_expires_at: null });
     });
 
+    test('a hold with no stored end is judged on its stored length, the end the occupancy check uses', async () => {
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      const held = await reserveSlot({ estimateId: first, slotId: f.signedSlot(first, 60, '11:00') });
+      // A legacy hold: no end on the row, and no estimate to resolve a length from at the accept.
+      await f.db('scheduled_services').where({ id: held.scheduledServiceId })
+        .update({ window_end: null, estimated_duration_minutes: 90, source_estimate_id: null });
+      const accept = () => commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId: f.ids.customer });
+      // 11:00 plus 90 minutes ends at 12:30, after the 12:00 shift end.
+      await expect(accept()).rejects.toMatchObject(unavailable);
+      await setShift('08:00', '12:30');
+      expect(await accept()).toMatchObject({ window_start: '11:00:00', window_end: null, reservation_expires_at: null });
+    });
+
     test('gate off: a hold outside the set hours is accepted, as before', async () => {
       const held = await reserveSlot({ estimateId: first, slotId: f.signedSlot(first, 30, '11:00') });
       await setShift('08:00', '11:00');
       delete process.env.GATE_TECH_SHIFT_HOURS;
       const booked = await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId: f.ids.customer });
       expect(booked).toMatchObject({ window_start: '11:00:00', reservation_expires_at: null });
-    });
-  });
-
-  describe('the rule on a transaction (shiftExcluding)', () => {
-    const block = { startMin: 600, endMin: 660 };
-    // A second connection changes the hours. It gives up after 300 ms when the row is held.
-    const editHours = () => f.db.transaction(async (other) => {
-      await other.raw("SET LOCAL lock_timeout = '300ms'");
-      await other('technicians').where({ id: f.ids.technician }).update({ shift_start: '08:15', shift_end: '11:45' });
-    });
-
-    test('it holds the technician row until its transaction ends: an hours edit waits, also for a technician with no set hours', async () => {
-      for (const hours of [['08:00', '12:00'], [null, null]]) {
-        await setShift(...hours);
-        await f.db.transaction(async (trx) => {
-          expect(await shiftExcluding(trx, f.ids.technician, f.date, block)).toBeNull();
-          await expect(editHours()).rejects.toMatchObject({ code: '55P03' });
-        });
-        await editHours();
-        expect(await f.db('technicians').where({ id: f.ids.technician }).first('shift_start', 'shift_end')).toEqual({ shift_start: '08:15:00', shift_end: '11:45:00' });
-      }
-    });
-
-    test('gate off: no row is held, and the hours can change beside the open transaction', async () => {
-      delete process.env.GATE_TECH_SHIFT_HOURS;
-      await f.db.transaction(async (trx) => {
-        expect(await shiftExcluding(trx, f.ids.technician, f.date, block)).toBeNull();
-        await editHours();
-      });
     });
   });
 

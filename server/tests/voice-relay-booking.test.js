@@ -38,7 +38,6 @@ jest.mock('../services/scheduling/line-technician', () => {
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
   serviceLineMapMode: () => (['shadow', 'live'].includes(process.env.GATE_SERVICE_LINE_MAP) ? process.env.GATE_SERVICE_LINE_MAP : 'off'),
-  techShiftHoursLive: () => process.env.GATE_TECH_SHIFT_HOURS === 'true',
 }));
 // ⭐ THE MOCK BELOW IS NOT EVIDENCE THE REAL MODULE EXPORTS ANY OF THIS. It
 // once hid exactly that: `resolveCallBookingPropertyLinkage` lived only under
@@ -527,82 +526,6 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(out).toMatch(/NOT a confirmed appointment/i);
     expect(out).toMatch(/text or call/i);
     expect(out).toMatch(/Do NOT say the time is locked in/i);
-  });
-
-  // GATE_TECH_SHIFT_HOURS at the commit: the visit's own block against the technician's shift
-  // (assertAssignableTechnician `hours`). The /book engine offers only hours inside the shift; the
-  // office may change the hours between the lookup and the commit. The offered visit is 09:00 to 10:00.
-  describe('technician shift hours at the commit', () => {
-    const logger = require('../services/logger');
-    afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
-    // The booking transaction's reads: the technician's row, the set hours and today's clock-ins (none).
-    function techOnShift(shift_start, shift_end) {
-      const reads = (rows) => {
-        const b = makeBuilder(rows);
-        for (const m of ['whereNotNull', 'whereNot', 'groupBy', 'min']) b[m] = jest.fn(() => b);
-        return b;
-      };
-      trxBuilders.technicians = reads([{ id: 't-1', shift_start, shift_end }]);
-      trxBuilders.technicians.first = jest.fn(async () => ({ id: 't-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true }));
-      trxBuilders.time_entries = reads([]);
-      return trxBuilders.technicians;
-    }
-
-    test('a visit inside the shift is booked, at the shift start and the shift end', async () => {
-      process.env.GATE_TECH_SHIFT_HOURS = 'true';
-      const hours = techOnShift('09:00', '10:00');
-      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
-      expect(trxBuilders.scheduled_services.insert).toHaveBeenCalledTimes(1);
-      expect(trxBuilders.scheduled_services.insert.mock.calls[0][0]).toMatchObject({ technician_id: 't-1', window_start: '09:00', window_end: '10:00' });
-      expect(hours.whereIn).toHaveBeenCalledWith('id', ['t-1']);
-      expect(out).toMatch(/NOT a confirmed appointment/i);
-      expect(logger.warn).not.toHaveBeenCalled();
-    });
-
-    test.each([
-      ['starts before the shift', '09:30', '18:00'],
-      ['ends after the shift end', '08:00', '09:59'],
-    ])('a visit that %s is not booked: nothing is written, and the agent is sent for fresh times', async (_case, start, end) => {
-      process.env.GATE_TECH_SHIFT_HOURS = 'true';
-      techOnShift(start, end);
-      const ctx = slotCtx();
-      const out = await executeTool('request_booking', GOOD_INPUT, ctx);
-      // The answer for a time that is gone, not the office-callback failure.
-      expect(out).toMatch(/NOTHING was booked\. Call find_slots again for fresh times/);
-      expect(ctx.toolFailed).not.toBe(true);
-      expect(ctx.bookingRequested()).toBe(false);
-      expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
-      expect(trxBuilders.triage_items.insert).not.toHaveBeenCalled();
-      // The refusal is the shift rule's own, logged as a refusal and not as an error: ids and a fixed
-      // reason, never the technician's name or hours.
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('technician t-1 outside_shift'));
-      expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/Tech One|on shift/);
-      expect(logger.error).not.toHaveBeenCalled();
-      assertNoComms();
-    });
-
-    test.each([
-      ['a technician who is no longer active', (hours) => { hours.first = jest.fn(async () => ({ id: 't-1', name: 'Tech One', employment_status: 'terminated', field_dispatchable: true })); }],
-      ['a failed read of the hours', (hours) => { hours.then = (resolve, reject) => Promise.reject(new Error('hours read failed')).then(resolve, reject); }],
-    ])('%s stays a failure: nothing is booked and the office calls back', async (_case, arrange) => {
-      process.env.GATE_TECH_SHIFT_HOURS = 'true';
-      arrange(techOnShift('08:00', '18:00'));
-      const ctx = slotCtx();
-      const out = await executeTool('request_booking', GOOD_INPUT, ctx);
-      expect(out).toMatch(/could not be placed — NOTHING was booked/);
-      expect(ctx.toolFailed).toBe(true);
-      expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
-      expect(logger.error).toHaveBeenCalled();
-      assertNoComms();
-    });
-
-    test('gate off: the same visit is booked and the hours are not read', async () => {
-      const hours = techOnShift('09:30', '18:00');
-      await executeTool('request_booking', GOOD_INPUT, CTX);
-      expect(trxBuilders.scheduled_services.insert).toHaveBeenCalledTimes(1);
-      expect(hours.whereNotNull).not.toHaveBeenCalled();
-      expect(trxBuilders.time_entries.where).not.toHaveBeenCalled();
-    });
   });
 
   // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow, owner 2026-10-25): the
