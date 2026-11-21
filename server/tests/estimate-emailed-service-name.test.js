@@ -72,8 +72,7 @@ describe('emailedServiceName', () => {
     return {
       status: 'sent',
       payload_snapshot: payload,
-      text_snapshot: `Service: ${shown?.service_summary ?? ''}`,
-      html_snapshot: null,
+      text_snapshot: `Hi Jordan,\nService: ${shown?.service_summary ?? ''}\nProperty: 1 Test Way`,
       ...extra,
     };
   };
@@ -193,19 +192,28 @@ describe('emailedServiceName', () => {
     expect(logged).not.toContain('example.com');
   });
 
-  describe('the stored email must show the summary', () => {
-    test('the words in the text or in the HTML count', async () => {
-      rows = [row({ text_snapshot: null, html_snapshot: '<p>Lawn Care + Pest Control</p>' })];
+  describe('the stored email must show the summary on its Service line', () => {
+    const WRAPPER = 'Waves Pest Control & Lawn Care\nWaves Pest Control, LLC';
+    const pestOnly = { service_interest: 'Pest Control' };
+    const pestPayload = { service_summary: 'Pest Control' };
+
+    test('the exact Service line counts, with spaces around it', async () => {
+      rows = [row({ text_snapshot: `${WRAPPER}\n  Service: Lawn Care + Pest Control  \nProperty: 1 Test Way` })];
       await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
     });
 
-    test('a template version that did not print the summary gives no name', async () => {
-      rows = [row({ text_snapshot: 'Your estimate is ready.', html_snapshot: '<p>Your estimate is ready.</p>' })];
-      await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
+    test('the branded wrapper alone never counts: a template version without the Service row gives no name', async () => {
+      rows = [row({ payload_snapshot: pestPayload, text_snapshot: `${WRAPPER}\nYour estimate is ready.` })];
+      await expect(emailedServiceName(estimate(pestOnly), ONE_TIME)).resolves.toBeNull();
     });
 
-    test('a row with no stored text or HTML gives no name', async () => {
-      rows = [row({ text_snapshot: null, html_snapshot: null })];
+    test('a Service line with more words than the summary does not count', async () => {
+      rows = [row({ payload_snapshot: pestPayload, text_snapshot: 'Service: Pest Control + Termite' })];
+      await expect(emailedServiceName(estimate(pestOnly), ONE_TIME)).resolves.toBeNull();
+    });
+
+    test('a row with no stored text gives no name', async () => {
+      rows = [row({ text_snapshot: null })];
       await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
     });
   });
