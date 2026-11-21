@@ -589,6 +589,9 @@ describe('buildReportCrossSell', () => {
         'lawn meta at the root': { lawnMeta: { customQuoteFlag: true } },
         // A place no list names.
         'a row under an unknown key': { result: { nextShape: { rows: [[{ service: 'pest_control', requiresManualReview: true }]] } } },
+        // Every row of a list is read, not the first one.
+        'a marked row after clean rows': { result: { recurring: { services: [{ service: 'lawn_care' }, { service: 'tree_shrub', pricingConfidence: 'high' }, pestRow] } } },
+        'a marked row in the last of several lists': { result: { lineItems: [{ service: 'lawn_care' }], oneTime: { items: [{ service: 'pest_initial' }], specItems: [{ service: 'trenching' }, pestRow] } } },
       };
       for (const [name, extra] of Object.entries(shapes)) {
         expect([name, flagged(extra)]).toEqual([name, true]);
