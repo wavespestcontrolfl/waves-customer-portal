@@ -215,6 +215,7 @@ class LiveBridge {
     this.sessionStartWall = null; // when session.started arrived
     this.callerRunMs = 0; // how long the caller's frames have held voice in a row
     this.callerSpokeAt = null; // arrival of the caller's latest frame of speech (noteCallerFrame)
+    this.callerRunSince = null; // when the audio of the caller's current run of voiced frames began
     this.callerMs = 0; // caller audio received, and the part of it in frames that hold voice
     this.callerVoicedMs = 0;
     this.awaitingReply = false; // the caller said words the next reply answers
@@ -225,7 +226,7 @@ class LiveBridge {
     this.prevReplyStartWall = null; // ...and the reply before it
     this.replyFirst = false; // the current reply is the first of the call
     this.replyCallerEnd = null; // the caller's last frame of speech before the current reply began to arrive: its delay starts there
-    this.replyCallerSpokeOn = false; // ...and whether the caller spoke on between that arrival and the reply's first voice
+    this.replyCallerSpokeOn = false; // ...and whether speech of the caller that began before the reply's first voice went on after that arrival
     this.replyTimed = false; // caller words belong to the current reply: it answers them
     this.replySample = null; // index of the delay sample the current reply has, in its list
     this.replyOverCaller = false; // the current reply began before the caller had stopped (counted once)
@@ -353,7 +354,9 @@ class LiveBridge {
   // speech: it arms nothing, flushes nothing, marks no reply and moves no
   // delay. The arrival of the latest frame of speech is kept (callerSpokeAt):
   // every rule that needs to know when the caller spoke reads that one time.
-  // It is a time, never audio.
+  // It is a time, never audio. A frame's audio is the 20 ms before the frame
+  // arrived, so a run of voice began one frame length before its first frame
+  // did (callerRunSince).
   // Returns whether the frame holds any sound (OPENING_SOUND_RMS_MIN or more).
   // That level is lower on purpose: speech for timing must be sure, and the
   // opening audio must not lose quiet speech.
@@ -365,15 +368,18 @@ class LiveBridge {
     const ms = audio.length / MULAW_BYTES_PER_MS;
     this.callerMs += ms;
     if (atLevel(CALLER_VOICED_RMS_MIN)) {
+      const now = this.deps.now();
+      if (this.callerRunMs === 0) this.callerRunSince = now - ms;
       this.callerVoicedMs += ms;
       this.callerRunMs += ms;
       if (this.callerRunMs >= CALLER_SPEECH_MIN_MS) {
-        const now = this.deps.now();
         this.callerSpokeAt = now;
-        // The current reply's chunk has arrived and its first voiced sample is
-        // still ahead (silent audio leads the chunk): the caller speaks on, so
-        // that reply did not wait for them.
-        if (this.replyVoiceWall !== null && now < this.replyVoiceWall) {
+        // This speech began before the current reply's first voiced sample and
+        // goes on now that the reply's chunk has arrived: that reply did not
+        // wait for the caller. The run's begin decides, not this frame's
+        // arrival: a run is known as speech only CALLER_SPEECH_MIN_MS after it
+        // began, and that can be after the reply's first voice.
+        if (this.replyVoiceWall !== null && this.callerRunSince < this.replyVoiceWall) {
           this.replyCallerSpokeOn = true;
           this.timeReply();
         }
@@ -580,8 +586,8 @@ class LiveBridge {
 
   // A reply's delay comes from four facts: when its first voiced sample
   // reached the bridge, the caller's last frame of speech before its chunk
-  // arrived, whether the caller spoke on after that arrival, and whether
-  // caller words belong to it (a fragment armed it, or a late fragment names
+  // arrived, whether speech of the caller that began before that sample went
+  // on after that arrival, and whether caller words belong to it (a fragment armed it, or a late fragment names
   // it: noteCallerWords). timeReply derives the sample from them, again
   // whenever one changes, so the order in which they arrive does not matter.
   // The first reply start is the greeting (asked for in session.start): its
@@ -601,11 +607,12 @@ class LiveBridge {
     this.timeReply();
   }
 
-  // The current reply did not wait for the caller: the caller spoke on before
-  // its first voiced sample, or that sample came under CALLER_STOPPED_MIN_MS
-  // after the caller's last speech before the reply's chunk arrived. The model
-  // spoke over the caller, or the line is noisy and the bridge cannot hear the
-  // caller stop.
+  // The current reply did not wait for the caller: speech of the caller that
+  // began before its first voiced sample went on after its chunk arrived
+  // (noteCallerFrame), or that sample came under CALLER_STOPPED_MIN_MS after
+  // the caller's last speech before the chunk arrived. The model spoke over
+  // the caller, or the line is noisy and the bridge cannot hear the caller
+  // stop.
   replyDidNotWait() {
     if (this.replyCallerSpokeOn) return true;
     return this.replyCallerEnd !== null && Math.round(this.replyVoiceWall - this.replyCallerEnd) < CALLER_STOPPED_MIN_MS;

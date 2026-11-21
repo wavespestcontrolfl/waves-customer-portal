@@ -1511,9 +1511,29 @@ describe('reply start on the continuous GPT-Live stream', () => {
         expect(s.turns).toEqual([]);
         expect(s.replies_over_caller).toBe(1);
       }
-      // A new sound is speech once it has run 100 ms. At +4380 that is before the reply's first voice (+4400); at +4400 it is not.
-      expect((await reply(3000, [4280, 4500])).turns).toEqual([]);
-      expect((await reply(3000, [4300, 4500])).turns).toEqual([1400]);
+      // New speech that begins before the reply's first voice (+4400) is speech the reply did not wait for; speech that begins with that voice is not.
+      expect((await reply(3000, [4380, 4600])).turns).toEqual([]);
+      expect((await reply(3000, [4400, 4600])).turns).toEqual([1400]);
+    });
+
+    test("the caller starts again 60 ms before a reply's first voice and speaks on: the reply did not wait, though that sound is known as speech only after the voice began", async () => {
+      const reply = async (again) => {
+        const t = await start({ speech: [[2000, 3000], [again, again + 200]] });
+        delta(t, b64(160)); // greeting
+        quiet(t, 3600);
+        said(t, 'when can you come', 2000, 3000);
+        quiet(t, 400);
+        for (let i = 0; i < 5; i++) t.advance(20); // caller frames of 20 ms, as Twilio sends them
+        delta(t, b64(800)); // the reply's voice at +4100
+        for (let i = 0; i < 12; i++) t.advance(20);
+        return end(t);
+      };
+      const over = await reply(4040); // 60 ms of voice before the reply's voice; 100 ms in a row at +4140
+      expect(over.turns).toEqual([]); // not 1100
+      expect(over.replies_over_caller).toBe(1);
+      const after = await reply(4100); // the caller starts with the reply's voice: a barge-in at the most
+      expect(after.turns).toEqual([1100]);
+      expect(after.replies_over_caller).toBe(0);
     });
 
     // Two end-to-end runs on the live API: the real bridge, a synthetic caller,
