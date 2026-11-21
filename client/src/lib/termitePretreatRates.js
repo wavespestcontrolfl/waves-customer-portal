@@ -9,7 +9,10 @@
 //   - Vertical barrier (trench/rod): 4 gallons per 10 linear feet per foot
 //     of depth.
 // Concentration is each label's standard pre-construction dilution — the
-// tech can overtype it when applying a label-permitted higher rate.
+// tech can overtype it when applying a label-permitted higher rate. A label
+// with a Volume Adjustment Chart (LESCO Crosscheck Plus) puts its stronger
+// dilution on at the chart's reduced volume, so gallons follow the typed
+// concentration for it; every other product keeps the standard volume.
 //
 // Trelona ATBB is a bait system and Bora-Care is a direct wood treatment:
 // neither has a finished-solution soil concentration or a soil gallons
@@ -51,6 +54,10 @@ export const PRETREAT_PRODUCT_RATES = {
     label: 'LESCO Crosscheck Plus',
     kind: 'soil_liquid',
     concentrationPct: '0.060',
+    // Label page 31, Volume Adjustment Chart: the 0.12% dilution goes on at half the labeled volume (0.5 gal per 10 sq ft
+    // horizontal, 2 gal per 10 linear ft vertical), the same active ingredient as the 0.06% volume. The pricing engine
+    // halves its 0.12% trench the same way (server/services/pricing-engine/constants.js labelHalfVolumeOzPerFinishedGallon).
+    volumeAdjustment: { concentrationPct: 0.12, label: '0.12%', volumeFactor: 0.5 },
   },
   'premise 2': {
     label: 'Premise 2',
@@ -78,12 +85,12 @@ export function lookupPretreatProduct(productName) {
   return null;
 }
 
-// "1,500 sq ft" / "220 LF" / "1.5" → 1500 / 220 / 1.5. Returns null when the
-// field is blank or holds no leading number worth trusting.
+// "1,500 sq ft" / "220 LF" / "1.5" / ".5" → 1500 / 220 / 1.5 / 0.5. Returns
+// null when the field is blank or holds no leading number worth trusting.
 function parseMeasure(value) {
   const raw = String(value ?? '').replace(/,/g, '').trim();
   if (!raw) return null;
-  const match = raw.match(/-?\d+(?:\.\d+)?/);
+  const match = raw.match(/-?(?:\d+(?:\.\d+)?|\.\d+)/);
   if (!match) return null;
   const n = Number(match[0]);
   return Number.isFinite(n) && n > 0 ? n : null;
@@ -117,13 +124,18 @@ function formatGallons(value) {
  *   { status: 'not_applicable', kind, note }
  *     — bait / wood-treatment product; concentration & gallons don't apply.
  *   { status: 'ok', concentrationPct, gallons, gallonsText,
- *     horizontalGallons, verticalGallons, assumedDepth, note }
+ *     horizontalGallons, verticalGallons, assumedDepth, volumeAdjusted, note }
  *     — soil liquid. `gallons` is null when neither sq ft nor linear feet
  *       is filled in yet (concentration still applies). `assumedDepth` is
  *       true when linear feet were given without a trench depth and the
- *       0.5-ft label-standard depth was used.
+ *       0.5-ft label-standard depth was used. The returned
+ *       `concentrationPct` is always the label standard (the value the forms
+ *       auto-fill). The `concentrationPct` input is the dilution the form
+ *       holds now: when it is the stronger dilution of the product's Volume
+ *       Adjustment Chart, `volumeAdjusted` is true and the gallons are the
+ *       chart's reduced volume.
  */
-export function computePretreatChemistry({ productName, squareFootage, linearFeet, trenchDepthFt } = {}) {
+export function computePretreatChemistry({ productName, squareFootage, linearFeet, trenchDepthFt, concentrationPct } = {}) {
   const product = lookupPretreatProduct(productName);
   if (!product) return { status: 'unknown_product' };
   if (product.kind !== 'soil_liquid') {
@@ -135,17 +147,23 @@ export function computePretreatChemistry({ productName, squareFootage, linearFee
   const depth = parseDepthFt(trenchDepthFt);
   const assumedDepth = Boolean(lf && !depth);
   const effectiveDepth = depth || DEFAULT_TRENCH_DEPTH_FT;
+  const adjustment = product.volumeAdjustment;
+  const volumeAdjusted = adjustment?.concentrationPct === parseMeasure(concentrationPct);
+  const volumeFactor = volumeAdjusted ? adjustment.volumeFactor : 1;
+  const chartNote = volumeAdjusted ? `, the label's ${adjustment.label} volume adjustment` : '';
 
-  const horizontalGallons = sqFt ? roundGallons(sqFt * HORIZONTAL_GAL_PER_SQFT) : 0;
-  const verticalGallons = lf ? roundGallons(lf * VERTICAL_GAL_PER_LF_PER_FT_DEPTH * effectiveDepth) : 0;
+  const horizontalGallons = sqFt ? roundGallons(sqFt * HORIZONTAL_GAL_PER_SQFT * volumeFactor) : 0;
+  const verticalGallons = lf ? roundGallons(lf * VERTICAL_GAL_PER_LF_PER_FT_DEPTH * effectiveDepth * volumeFactor) : 0;
   const total = horizontalGallons + verticalGallons;
   const gallons = sqFt || lf ? roundGallons(total) : null;
 
   const noteParts = [];
-  if (sqFt) noteParts.push(`${formatGallons(horizontalGallons)} gal horizontal (1 gal / 10 sq ft)`);
+  if (sqFt) {
+    noteParts.push(`${formatGallons(horizontalGallons)} gal horizontal (${formatGallons(10 * HORIZONTAL_GAL_PER_SQFT * volumeFactor)} gal / 10 sq ft${chartNote})`);
+  }
   if (lf) {
     noteParts.push(
-      `${formatGallons(verticalGallons)} gal vertical (4 gal / 10 LF per ft of depth${assumedDepth ? ', assuming the 0.5 ft label-standard depth' : ''})`,
+      `${formatGallons(verticalGallons)} gal vertical (${formatGallons(10 * VERTICAL_GAL_PER_LF_PER_FT_DEPTH * volumeFactor)} gal / 10 LF per ft of depth${chartNote}${assumedDepth ? ', assuming the 0.5 ft label-standard depth' : ''})`,
     );
   }
 
@@ -157,6 +175,7 @@ export function computePretreatChemistry({ productName, squareFootage, linearFee
     horizontalGallons,
     verticalGallons,
     assumedDepth,
+    volumeAdjusted,
     note: noteParts.join(' + '),
   };
 }
