@@ -7019,7 +7019,9 @@ re-read or an edit after the send never changes it until the next such send, and
 the estimate's own context" is the roof read's own rule (`matchesContext`): the estimate's plain read, or the read
 taken for the customer the estimate belongs to now; and a read that names a customer is that customer's alone. So a
 read taken for another customer, while the estimate had no customer or while that customer held it, is never published
-on it. `imageUrl` is the county aerial export URL of the read's own crop, rebuilt by the server from the read's image source
+on it. A points save writes the estimate's customer on a read that names none (`saveTechCount`, under a lock on the
+estimate row), so points confirmed for one customer never pass to a later, different one; points confirmed while the
+estimate had no customer go to the first customer it gets. `imageUrl` is the county aerial export URL of the read's own crop, rebuilt by the server from the read's image source
 and its stored centre (never caller-supplied, no key); `imageYear` is that photo's year. `n` is the 1-based number the page
 prints on the pin and in the list; `x` and `y` are 0-1 fractions of the photo from its top-left corner; `type` is a roof
 entry type or `other`; `label` is the plain name, followed by the staff note when one was saved ("Roof return, front left");

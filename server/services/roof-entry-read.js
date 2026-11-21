@@ -443,7 +443,7 @@ async function assertReferencesExist({ estimateId, customerId }) {
 /**
  * Runs `write(conn, contextKey)` that inserts a row for this context. When the context names an estimate, the write
  * runs in a SHORT transaction that first locks the estimate row FOR SHARE, writes, and commits. The lock does two jobs:
- *   - a hide-or-show save for the estimate (FOR UPDATE on the same row, saveEstimateChoice) never overlaps the insert,
+ *   - a hide-or-show save for the estimate (FOR UPDATE on the same row, saveUnderEstimate) never overlaps the insert,
  *     so the new read starts with the estimate's choice as it stands and the save's write to every read never misses it;
  *   - with a customer supplied too, a customer merge cannot change the estimate until we commit: its customer is
  *     rechecked under the lock, so the check and the insert are atomic.
@@ -729,18 +729,26 @@ const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && 
   && Math.abs(c.lat) <= 90 && Math.abs(c.lng) <= 180;
 
 /**
- * A save that carries the hide-or-show choice. The choice is the estimate's, not one photo's, so in ONE transaction:
- * lock the read's estimate row (FOR UPDATE), run the save, then write the choice to every other read of the estimate.
+ * A save that needs the read's estimate: a points list, or the hide-or-show choice. In ONE transaction it locks the read's
+ * estimate row (FOR UPDATE) first, then saves.
+ *  - Points are confirmed for the customer who holds the estimate now. A read made with the estimate alone names no
+ *    customer, so the list save writes the estimate's customer on it (only when the read names none: a read made for
+ *    another customer is never taken over). A send then never gives these points to a later, different customer
+ *    (estimate-roof-points.js ownRead). An estimate with no customer leaves the read as it is.
+ *  - Hide or show is the estimate's choice, not one photo's: it is written to every other read of the estimate.
  * The lock comes first, so two saves on two reads of one estimate run one after the other (no deadlock on each other's
  * rows), and a read being created for the estimate (FOR SHARE in writeOwned) is either committed before the write to
- * every read or starts after it with the new choice. A read with no estimate keeps the choice to itself.
+ * every read or starts after it with the new choice. A read with no estimate is saved as it is.
  */
-function saveEstimateChoice(id, save, hidden) {
+function saveUnderEstimate(id, save, { points, hidden }) {
   return db.transaction(async (trx) => {
     const target = await trx(TABLE).where({ id }).first('estimate_id');
-    if (target?.estimate_id) await trx('estimates').where({ id: target.estimate_id }).forUpdate().first('id');
-    const saved = await save(trx);
-    if (saved?.estimate_id) await trx(TABLE).where({ estimate_id: saved.estimate_id }).whereNot({ id: saved.id }).update({ hide_on_estimate: hidden });
+    const estimate = target?.estimate_id ? await trx('estimates').where({ id: target.estimate_id }).forUpdate().first('id', 'customer_id') : null;
+    const own = points && estimate?.customer_id ? await trx(TABLE).where({ id }).first('customer_id') : null;
+    const saved = await save(trx, own && !own.customer_id ? { customer_id: estimate.customer_id } : {});
+    if (hidden !== undefined && saved?.estimate_id) {
+      await trx(TABLE).where({ estimate_id: saved.estimate_id }).whereNot({ id: saved.id }).update({ hide_on_estimate: hidden });
+    }
     return saved;
   });
 }
@@ -748,7 +756,7 @@ function saveEstimateChoice(id, save, hidden) {
 /**
  * Save the technician's answer. count / flags as before (flags merged in SQL, so two tabs keep both). hideOnEstimate:
  * staff hid the points from this estimate's customer page (the choice is the estimate's: it is written to every read
- * of the estimate, see saveEstimateChoice). pins: the confirmed points (validateTechPins output), saved
+ * of the estimate, see saveUnderEstimate). pins: the confirmed points (validateTechPins output), saved
  * whole (null clears them). Pins are drawn on the read's crop, so the caller also names the crop centre it drew on
  * ({ lat, lng }, the panel's map point): it must hash to this row's lookup_key, so no other roof's photo can carry these
  * pins, and the rounded centre is stored so the estimate can rebuild the same county crop. A centre that does not match
@@ -793,13 +801,14 @@ async function saveTechCount(id, { count, flags, pins, crop, address, expectedPi
   // saved). The UPDATE only lands while the row still holds exactly that list, so a stale tab cannot erase points another
   // tab saved in between: it throws code 'points_changed' and writes nothing.
   const checked = pins !== undefined && expectedPins !== undefined;
-  const save = async (conn) => {
+  const save = async (conn, more = {}) => {
     let query = conn(TABLE).where(where);
     if (checked) query = query.whereRaw('tech_pins IS NOT DISTINCT FROM ?::jsonb', [expectedPins === null ? null : JSON.stringify(expectedPins)]);
-    const [saved] = await query.update(patch).returning('*');
+    const [saved] = await query.update({ ...patch, ...more }).returning('*');
     return saved;
   };
-  const row = hideOnEstimate === undefined ? await save(db) : await saveEstimateChoice(id, save, patch.hide_on_estimate);
+  const points = Array.isArray(pins);
+  const row = points || hideOnEstimate !== undefined ? await saveUnderEstimate(id, save, { points, hidden: patch.hide_on_estimate }) : await save(db);
   if (row) return publicRead(row);
   if (checked && await db(TABLE).where({ id }).first('id')) {
     throw Object.assign(new Error('The points changed since they were loaded'), { code: 'points_changed' });

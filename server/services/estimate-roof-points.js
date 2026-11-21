@@ -46,9 +46,13 @@ const estimateContext = (estimate) => ({
  * Is this read the estimate's own, so its points and notes may go to whoever holds the estimate now?
  *  - The roof read's own context rule (matchesContext): the estimate's plain row, or the two-part row of the customer the
  *    estimate belongs to now.
- *  - And a read that names a customer is that customer's alone. A plain row read while customer A held the estimate
- *    carries A's id: it is not B's once the estimate goes to B, and it is no one's once the estimate has no customer.
- *    A duplicate merge repoints the read and the estimate together, so the merged customer keeps it.
+ *  - And a read that names a customer is that customer's alone. A plain row carries the id of the customer who held the
+ *    estimate when its points were confirmed (saveTechCount writes it on a read that names none): it is not B's once
+ *    the estimate goes to B, and it is no one's once the estimate has no customer. A duplicate merge repoints the read
+ *    and the estimate together, so the merged customer keeps it.
+ *  - A read that names no customer had its points confirmed while the estimate had none (a lead): they go to the first
+ *    customer the estimate gets. (An estimate gets its first customer at acceptance, a lead link or an add-service
+ *    request; no route moves it from one customer to another.)
  */
 function ownRead(row, estimate) {
   const ctx = estimateContext(estimate);

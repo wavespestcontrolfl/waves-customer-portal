@@ -304,6 +304,35 @@ jest.setTimeout(60000);
       expect(await chosen(null)).toBeUndefined();
     });
 
+    test("points confirmed on a read made with the estimate alone take the estimate's customer, so a later customer never gets them", async () => {
+      const [custA, custB] = [await insertId('customers'), await insertId('customers')];
+      const est = await insertId('estimates', { customer_id: custA });
+      // The request names the estimate only: the read is stored with no customer.
+      const read = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+      const stored = () => database('roof_entry_reads').where({ id: read.id }).first('context_key', 'customer_id');
+      expect(await stored()).toEqual({ context_key: `e:${est}`, customer_id: null });
+      const chosen = async (customerId) => (await newestPointsRead({ id: est, customer_id: customerId }, database))?.id;
+      // Confirming the points writes the customer who holds the estimate now.
+      expect((await savePoints(read, 27.46, 'for A')).customer_id).toBe(custA);
+      expect(await stored()).toEqual({ context_key: `e:${est}`, customer_id: custA });
+      expect(await chosen(custA)).toBe(read.id);
+      expect(await chosen(custB)).toBeUndefined();
+      expect(await chosen(null)).toBeUndefined();
+      // The estimate goes to customer B. A later points save does not take the read over.
+      await database('estimates').where({ id: est }).update({ customer_id: custB });
+      await svc.saveTechCount(read.id, { pins: pinsFor('edited for B'), crop: { lat: 27.46, lng: -82.57 }, address: ADDRESS, expectedPins: pinsFor('for A') });
+      expect((await stored()).customer_id).toBe(custA);
+      expect(await chosen(custB)).toBeUndefined();
+    });
+
+    test("points confirmed while the estimate has no customer go to the first customer it gets", async () => {
+      const est = await insertId('estimates');
+      const read = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+      expect((await savePoints(read, 27.46, 'lead')).customer_id).toBeNull();
+      const cust = await insertId('customers');
+      expect((await newestPointsRead({ id: est, customer_id: cust }, database)).id).toBe(read.id);
+    });
+
     test('a cleared read stays the newest read set, so an older list does not come back; a read never set does not count', async () => {
       const est = await insertId('estimates');
       const older = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;

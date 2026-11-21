@@ -964,7 +964,7 @@ describe('ownership check atomic with the insert', () => {
     await post(home());
     expect(transaction).not.toHaveBeenCalled();
     expect(mockForShare).not.toHaveBeenCalled();
-    // The estimate's hide-or-show choice must not change beside the insert (saveEstimateChoice locks the same row).
+    // The estimate's hide-or-show choice must not change beside the insert (saveUnderEstimate locks the same row).
     await post(home({ estimate_id: EST }));
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(mockForShare).toHaveBeenCalledTimes(1);
@@ -1461,6 +1461,43 @@ describe('saveTechCount pins', () => {
     expect(read.hide_on_estimate).toBe(false);
     expect(mockRows[0].crop_lat).toBe(27.46);
     expect(mockRows[0].crop_lng).toBe(-82.57);
+  });
+
+  it("a points save writes the estimate's customer on a read that names none, under the estimate lock", async () => {
+    // The read was made with the estimate alone, so it names no customer. The estimate belongs to CUST.
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    mockEvents.length = 0;
+    const saved = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
+    expect(saved.customer_id).toBe(CUST);
+    expect(mockRows[0].customer_id).toBe(CUST);
+    // One transaction: the estimate row is locked before the write.
+    expect(mockEvents).toEqual(['tx', 'for-update:estimates', 'update:', 'tx-end']);
+    // The estimate then goes to another customer. A later save never takes the read over: it stays the first customer's.
+    const LATER_OWNER = '99999999-9999-4999-8999-999999999999';
+    mockRefs.estimates = [{ id: EST, customer_id: LATER_OWNER }];
+    await svc.saveTechCount(READ_A, { pins: [PINS[0]], crop: CROP, address: ADDRESS });
+    expect(mockRows[0].customer_id).toBe(CUST);
+    expect(mockRows[0].tech_pins).toBe(JSON.stringify([PINS[0]]));
+  });
+
+  it('a points save leaves the read as it is when the estimate has no customer, and when the read has no estimate', async () => {
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, customer_id: null }];
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
+    expect(mockRows[0].customer_id).toBeUndefined();
+    // A count save or a clear is not a confirmation of points: it writes no customer, even on an owned estimate.
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    await svc.saveTechCount(READ_A, { count: 2 });
+    await svc.saveTechCount(READ_A, { pins: null });
+    await svc.saveTechCount(READ_A, { hideOnEstimate: true });
+    expect(mockRows[0].customer_id).toBeUndefined();
+    // No estimate on the read: nothing to lock and no customer to take.
+    mockRows[0].estimate_id = null;
+    mockEvents.length = 0;
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
+    expect(mockRows[0].customer_id).toBeUndefined();
+    expect(mockEvents).toEqual(['tx', 'update:', 'tx-end']);
   });
 
   it('stores the address the panel sent with the points, never the address on the estimate row', async () => {
