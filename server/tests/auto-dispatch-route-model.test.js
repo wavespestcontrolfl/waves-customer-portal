@@ -301,6 +301,57 @@ describe('routeCost: co-visits vs visit groups', () => {
     expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR]), 5);
     expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(120);
   });
+
+  test('a version-2 allocation is one drive stop with additive member work', () => {
+    const mix = { version: 2, allocatedServiceIds: ['p', 'l'] };
+    const allocation = ['p', 'l'].map((id) => coVisitRow(id, {
+      scheduled_date: '2026-08-06', technician_id: 't1', reservation_service_mix: mix,
+    }));
+    const cost = routeCost(allocation, null);
+    expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR]), 5);
+    expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(120);
+  });
+
+  test('nonadjacent version-2 allocation members retain the physical A -> B -> A route', () => {
+    const mix = { version: 2, allocatedServiceIds: ['p', 'l'] };
+    const allocated = (id, routeOrder) => coVisitRow(id, {
+      scheduled_date: '2026-08-06', technician_id: 't1',
+      reservation_service_mix: mix, route_order: routeOrder,
+    });
+    const between = {
+      id: 'b', geo: NEAR_HQ, lat: NEAR_HQ.lat, lng: NEAR_HQ.lng,
+      window_start: '09:00', window_end: '10:00', route_order: 2,
+      estimated_duration_minutes: 30,
+    };
+    const cost = routeCost([allocated('p', 1), between, allocated('l', 3)], null);
+    expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR, NEAR_HQ, FAR]), 5);
+    expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(180);
+  });
+
+  test('adjacent version-2 allocation members still collapse to one physical stop', () => {
+    const mix = { version: 2, allocatedServiceIds: ['p', 'l'] };
+    const rows = ['p', 'l'].map((id, index) => coVisitRow(id, {
+      scheduled_date: '2026-08-06', technician_id: 't1',
+      reservation_service_mix: mix, route_order: index + 1,
+    }));
+    const after = { id: 'b', geo: NEAR_HQ, window_start: '11:00', route_order: 3 };
+    expect(routeCost([...rows, after], null).driveWithoutMinutes)
+      .toBeCloseTo(chainDriveMinutes([FAR, NEAR_HQ]), 5);
+  });
+
+  test('the mover is inserted before allocation collapse: A -> mover -> A, with both road neighbours', () => {
+    const mix = { version: 2, allocatedServiceIds: ['p', 'l'] };
+    const allocated = (id, routeOrder) => coVisitRow(id, {
+      scheduled_date: '2026-08-06', technician_id: 't1',
+      reservation_service_mix: mix, route_order: routeOrder,
+    });
+    const mover = { id: 'mover', geo: NEAR_HQ, window_start: '09:00', route_order: 2, estimated_duration_minutes: 30 };
+    const cost = routeCost([allocated('p', 1), allocated('l', 3)], mover);
+    expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR]), 5);
+    expect(cost.driveWithMinutes).toBeCloseTo(chainDriveMinutes([FAR, NEAR_HQ, FAR]), 5);
+    expect(cost.neighbours).toEqual({ prev: FAR, stop: NEAR_HQ, next: FAR });
+    expect(cost.routeTimeWithMinutes - cost.driveWithMinutes).toBe(150);
+  });
 });
 
 describe('clusterShare', () => {
@@ -321,6 +372,17 @@ describe('clusterShare', () => {
   test('a mixed day scores the SHARE within the radius, not a stop count', () => {
     const stops = [{ geo: NEAR_HQ, startMin: 540 }, { geo: FAR, startMin: 600 }];
     expect(clusterShare(stops, NEAR_HQ)).toBe(0.5);
+  });
+  test('clustering uses the with-mover sequence when it splits allocation neighbours', () => {
+    const mix = { version: 2, allocatedServiceIds: ['p', 'l'] };
+    const allocated = (id, routeOrder) => ({
+      id, geo: NEAR_HQ, window_start: '09:00', route_order: routeOrder,
+      scheduled_date: '2026-08-06', technician_id: 't1', reservation_service_mix: mix,
+    });
+    const mover = { id: 'mover', geo: NEAR_HQ, window_start: '09:00', route_order: 2 };
+    const stops = [allocated('p', 1), allocated('l', 3), { id: 'far', geo: FAR, window_start: '12:00', route_order: 4 }];
+    expect(clusterShare(stops, NEAR_HQ)).toBe(0.5); // without mover: one A plus far
+    expect(clusterShare(stops, NEAR_HQ, mover)).toBeCloseTo(2 / 3, 5); // with mover: A, mover, A, far
   });
   test('CLUSTER_RADIUS_MILES is a small, documented local radius', () => {
     expect(CLUSTER_RADIUS_MILES).toBeGreaterThan(0);

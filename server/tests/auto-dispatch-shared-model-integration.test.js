@@ -38,6 +38,7 @@ const PREFS = {
   blackout: null, service_category: 'general', raw_snapshot: null,
 };
 const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35 };
+const ELIGIBLE = { is_recurring: true, recurring_parent_id: 'parent-1', status: 'confirmed', customer_active: true };
 
 function stopRow(id, windowStart, windowEnd, lat, lng, { date = '2026-08-11', tech = 't2' } = {}) {
   return {
@@ -46,22 +47,61 @@ function stopRow(id, windowStart, windowEnd, lat, lng, { date = '2026-08-11', te
   };
 }
 
-// Sequenced db mock: call 1 = sibling-date query, call 2 = the current day's
-// OTHER stops (the shared model's loadDayStops; the current placement is read
-// before the candidates are filtered so a visit in overlap can be given its
-// same-day hours), call 3+ = the candidate tech-days' OTHER stops (one batched read).
-function sequencedDb(candidateStops, currentStops) {
-  let call = 0;
-  return () => {
-    call += 1;
-    const n = call;
+// Mirror the date predicate so the test observes the same source and
+// destination rows regardless of which query the evaluator performs first.
+function routeDaysDb(candidateStops, currentStops, technicians = [], source = null) {
+  return (table) => {
+    let dates = [];
+    let techIds = null;
+    let onlyUnassigned = false;
+    let includeUnassigned = false;
+    let timedOnly = false;
+    let excludedIds = new Set();
+    let sourceId = null;
     const c = {};
-    ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
-      .forEach((m) => { c[m] = () => c; });
+    c.where = (field, value) => {
+      if (typeof field === 'function') field.call(c, c);
+      else if (field === 'scheduled_services.technician_id') techIds = [String(value)];
+      else if (field === 'scheduled_services.id') sourceId = String(value);
+      return c;
+    };
+    c.whereIn = (field, values) => {
+      if (field === 'scheduled_services.scheduled_date') dates = values;
+      if (field === 'scheduled_services.technician_id') techIds = values.map(String);
+      return c;
+    };
+    c.whereNull = field => {
+      if (field === 'scheduled_services.technician_id') onlyUnassigned = true;
+      return c;
+    };
+    c.orWhereNull = field => {
+      if (field === 'scheduled_services.technician_id') includeUnassigned = true;
+      return c;
+    };
+    c.whereNotNull = field => {
+      if (field === 'scheduled_services.window_start') timedOnly = true;
+      return c;
+    };
+    c.whereNotIn = (field, values) => {
+      if (field === 'scheduled_services.id') excludedIds = new Set(values.map(String));
+      return c;
+    };
+    ['whereNot', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first', 'andWhere', 'whereRaw']
+      .forEach(m => { c[m] = () => c; });
     c.select = async () => {
-      if (n === 1) return [];
-      if (n === 2) return currentStops;
-      return candidateStops;
+      if (table === 'technicians') return technicians.map(id => ({ id }));
+      if (sourceId) {
+        const row = [...currentStops, ...candidateStops].find(item => String(item.id) === sourceId)
+          || (source && String(source.id) === sourceId
+            ? { ...source, status: 'confirmed', svc_lat: source.lat, svc_lng: source.lng }
+            : null);
+        return row ? [row] : [];
+      }
+      return [...candidateStops, ...currentStops].filter(row => dates.includes(row.scheduled_date)
+        && !excludedIds.has(String(row.id))
+        && (!timedOnly || row.window_start != null)
+        && (onlyUnassigned ? row.technician_id == null
+          : (!techIds || techIds.includes(String(row.technician_id)) || (includeUnassigned && row.technician_id == null))));
     };
     return c;
   };
@@ -80,7 +120,7 @@ function ctxWith(db) {
 }
 
 test('a visit already well placed (tight, clustered current day) does NOT move to a far, empty candidate day', async () => {
-  const SVC = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
+  const SVC = { ...ELIGIBLE, id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
     window_start: '09:00', estimated_duration_minutes: 60, lat: 27.40, lng: -82.50,
     auto_dispatch_change_count: 0 };
   // Current day: two neighbors immediately around the visit, close by (same
@@ -96,7 +136,7 @@ test('a visit already well placed (tight, clustered current day) does NOT move t
       { date: '2026-08-11', technician: { id: 't2', name: 'B' }, start_time: '09:00', end_time: '10:00', detour_minutes: 0, total_drive_minutes: 0, stops_that_day: 0, score: 0 },
     ],
   });
-  const db = sequencedDb([], currentStops); // candidate day has NO other stops
+  const db = routeDaysDb([], currentStops, [], SVC); // candidate day has NO other stops
   const result = await evaluatePlacement(SVC, PREFS, ctxWith(db), CONFIG, '2026-06-20');
 
   expect(result.kind).toBe('no_change');
@@ -104,8 +144,27 @@ test('a visit already well placed (tight, clustered current day) does NOT move t
   expect(result.audit.routeMetrics.model).toBe('shared_v1');
 });
 
+test('ranking uses the identity-read booked window, never the stale windowless scan row', async () => {
+  const stale = { ...ELIGIBLE, id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
+    window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-04',
+    estimated_duration_minutes: 60, lat: 27.40, lng: -82.50, auto_dispatch_change_count: 0 };
+  const live = { ...stale, window_start: '09:00', window_end: '10:00' };
+  const currentStops = [
+    stopRow('n1', '08:00', '09:00', 27.401, -82.501, { date: '2026-08-04', tech: 't1' }),
+    stopRow('n2', '10:00', '11:00', 27.399, -82.499, { date: '2026-08-04', tech: 't1' }),
+  ];
+  findAvailableSlots.mockResolvedValue({
+    slots: [{ date: '2026-08-11', technician: { id: 't2', name: 'B' }, start_time: '09:00', end_time: '10:00',
+      detour_minutes: 0, total_drive_minutes: 0, stops_that_day: 0, score: 0 }],
+  });
+  const result = await evaluatePlacement(stale, PREFS, ctxWith(routeDaysDb([], currentStops, [], live)), CONFIG, '2026-06-20');
+  expect(result.service.window_start).toBe('09:00');
+  expect(result.kind).toBe('no_change');
+  expect(result.reason_code).toBe('NO_SCORE_IMPROVEMENT');
+});
+
 test('a clearly better clustered day wins over a poorly-placed current day', async () => {
-  const SVC = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
+  const SVC = { ...ELIGIBLE, id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
     window_start: '12:00', estimated_duration_minutes: 60, lat: 27.50, lng: -82.50,
     auto_dispatch_change_count: 0 };
   // Current day: the visit's only neighbor is far away (different part of
@@ -123,7 +182,7 @@ test('a clearly better clustered day wins over a poorly-placed current day', asy
       { date: '2026-08-11', technician: { id: 't2', name: 'B' }, start_time: '09:00', end_time: '10:00', detour_minutes: 0, total_drive_minutes: 0, stops_that_day: 2, score: 0 },
     ],
   });
-  const db = sequencedDb(candidateStops, currentStops);
+  const db = routeDaysDb(candidateStops, currentStops, [], SVC);
   const result = await evaluatePlacement(SVC, PREFS, ctxWith(db), CONFIG, '2026-06-20');
 
   expect(result.kind).toBe('move');
@@ -141,7 +200,7 @@ test('a clearly better clustered day wins over a poorly-placed current day', asy
 // empty day — otherwise a well-clustered unassigned visit scores as a lone
 // HQ round trip and any comparable candidate falsely clears the threshold.
 test('an UNASSIGNED visit on a clustered day scores that day, so an equally clustered candidate does not move it', async () => {
-  const SVC = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: null,
+  const SVC = { ...ELIGIBLE, id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: null,
     window_start: '09:00', estimated_duration_minutes: 60, lat: 27.40, lng: -82.50,
     auto_dispatch_change_count: 0 };
   const near = (id, start, end, date, tech) => stopRow(id, start, end, 27.401, -82.501, { date, tech });
@@ -150,21 +209,8 @@ test('an UNASSIGNED visit on a clustered day scores that day, so an equally clus
   findAvailableSlots.mockResolvedValue({
     slots: [{ date: '2026-08-11', technician: { id: 't1', name: 'A' }, start_time: '09:00', end_time: '10:00', detour_minutes: 0, total_drive_minutes: 0, stops_that_day: 2, score: 0 }],
   });
-  // scheduled_services: call 1 = sibling-date query, call 2 = candidate
-  // tech-days, call 3 = the current day. technicians = the one active tech.
-  let ssCall = 0;
-  const db = (table) => {
-    const n = table === 'technicians' ? 0 : (ssCall += 1);
-    const c = {};
-    ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
-      .forEach((m) => { c[m] = () => c; });
-    c.select = async () => {
-      if (n === 0) return [{ id: 't1' }];
-      if (n === 1) return [];
-      return n === 2 ? candidateStops : currentStops;
-    };
-    return c;
-  };
+  const mover = stopRow('s1', '09:00', '10:00', 27.40, -82.50, { date: '2026-08-04', tech: null });
+  const db = routeDaysDb(candidateStops, [mover, ...currentStops], ['t1']);
   const result = await evaluatePlacement(SVC, PREFS, ctxWith(db), CONFIG, '2026-06-20');
 
   expect(result.kind).toBe('no_change');

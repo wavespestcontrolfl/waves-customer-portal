@@ -60,15 +60,28 @@ const slot = (date, start) => ({
 });
 const sameDayCalls = () => findAvailableSlots.mock.calls.map(([opts]) => opts).filter((opts) => opts.everyStepStart);
 
-const SERVICE = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1', window_start: '09:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
+const SERVICE = {
+  id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
+  window_start: '09:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5,
+  is_recurring: true, recurring_parent_id: 'parent-1', customer_active: true,
+};
 const PREFS = { service_category: 'general', blackout: null };
 
 function emptyDb() {
-  const c = {};
-  ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
-    .forEach((m) => { c[m] = () => c; });
-  c.select = async () => [];
-  return () => c;
+  return () => {
+    const c = {};
+    let sourceRead = false;
+    ['whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+      .forEach((m) => { c[m] = () => c; });
+    c.where = (field, value) => {
+      sourceRead ||= field === 'scheduled_services.id' && String(value) === String(SERVICE.id);
+      return c;
+    };
+    c.select = async () => (sourceRead
+      ? [{ ...SERVICE, status: 'confirmed', svc_lat: SERVICE.lat, svc_lng: SERVICE.lng }]
+      : []);
+    return c;
+  };
 }
 
 const ctx = (over = {}) => ({

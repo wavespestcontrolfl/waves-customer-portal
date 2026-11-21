@@ -51,6 +51,7 @@ const { ROAD_LEGS, roadLegsOf } = require('./road-check');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { currentConflict } = require('./current-conflict');
+const { isEligibleForAutoDispatch } = require('./eligibility');
 const { capacityEnabled } = require('../scheduling/policy');
 const dryTime = require('./dry-time');
 const mowingDays = require('./mowing-days');
@@ -90,6 +91,7 @@ const DAY_STOP_COLUMNS = [
   'scheduled_services.route_order',
   'scheduled_services.created_at',
   'scheduled_services.reservation_policy_version',
+  'scheduled_services.reservation_service_mix',
   'scheduled_services.time_window',
   'scheduled_services.window_start',
   'scheduled_services.window_end',
@@ -108,6 +110,7 @@ const DAY_STOP_COLUMNS = [
   'customers.city as customer_city',
   'customers.state as customer_state',
   'customers.zip as customer_zip',
+  'customers.active as customer_active',
   'scheduled_services.lat as svc_lat',
   'scheduled_services.lng as svc_lng',
   'customers.latitude as customer_latitude',
@@ -135,10 +138,13 @@ function rowToDayStop(r) {
     id: r.id,
     visit_id: r.visit_id,
     customer_id: r.customer_id,
+    scheduled_date: r.scheduled_date,
+    technician_id: r.technician_id,
     route_order: r.route_order,
     created_at: r.created_at,
     time_window: r.time_window,
     preserveCapacity: preservesCapacity(r),
+    reservation_service_mix: r.reservation_service_mix,
     // The co-visit merge (isCoVisitPair) reads the stop's coordinates and
     // premise under the canonical column names.
     lat: geo ? geo.lat : null,
@@ -172,7 +178,9 @@ function rowToDayStop(r) {
 // so routeCost must charge their planning minutes with the visit's — on the
 // current placement and every candidate alike — or a grouped visit's route
 // minutes would omit their work (Codex pre-push P1).
-function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order) {
+function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order, placement = {}) {
+  const windowStart = placement.windowStart || service.window_start;
+  const windowEnd = placement.windowEnd || service.window_end;
   return {
     geo,
     startMin,
@@ -180,13 +188,29 @@ function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = 
     id: service.id,
     route_order: routeOrder,
     created_at: service.created_at,
+    time_window: service.time_window,
     visit_id: service.visit_id,
+    customer_id: service.customer_id,
+    scheduled_date: placement.date || service.scheduled_date,
+    technician_id: placement.technicianId ?? service.technician_id,
+    reservation_service_mix: service.reservation_service_mix,
+    lat: geo?.lat ?? null,
+    lng: geo?.lng ?? null,
+    service_address_line1: service.service_address_line1,
+    service_address_line2: service.service_address_line2,
+    service_address_city: service.service_address_city,
+    service_address_zip: service.service_address_zip,
+    customer_address_line1: service.customer_address_line1,
+    customer_address_line2: service.customer_address_line2,
+    customer_city: service.customer_city,
+    customer_state: service.customer_state,
+    customer_zip: service.customer_zip,
     service_type: service.service_type,
     is_recurring: service.is_recurring,
     is_callback: service.is_callback,
     estimated_duration_minutes: service.estimated_duration_minutes,
-    window_start: service.window_start,
-    window_end: service.window_end,
+    window_start: windowStart,
+    window_end: windowEnd,
     preserveCapacity: preservesCapacity(service),
     unitMembers: siblings,
   };
@@ -316,6 +340,7 @@ function skipEvaluation(code, message, cause) {
 // the tapped row — so the evaluation is abandoned (GROUP_CONTEXT_UNAVAILABLE,
 // which the orchestrator records as a no-change skip).
 const GROUP_CONTEXT_UNAVAILABLE = 'GROUP_CONTEXT_UNAVAILABLE';
+const SOURCE_SNAPSHOT_STALE = 'SOURCE_SNAPSHOT_STALE';
 async function loadGroupContext(db, service) {
   const selfId = String(service.id);
   const standalone = { excludeIds: new Set([selfId]), siblings: [], visitWindowStart: null };
@@ -540,14 +565,19 @@ function candidateRouteOrder(service, cand) {
 // active stops.
 function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ) {
   const moved = movedSiblings(siblings, placement, cand);
-  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand)), home);
+  const routeVisit = serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved,
+    candidateRouteOrder(service, cand), {
+      date: cand.date, technicianId: cand.technician_id,
+      windowStart: cand.start_time, windowEnd: cand.end_time,
+    });
+  const cost = routeCost(stops, routeVisit, home);
   return {
     ...cand,
     detour_minutes: cost.detourMinutes,
     total_drive_minutes: cost.driveWithMinutes,
     route_minutes: cost.routeTimeWithMinutes,
     stops_that_day: stops.length + 1,
-    same_area_share: clusterShare(stops, geo),
+    same_area_share: clusterShare(stops, geo, routeVisit),
     model: 'shared_v1',
     [ROAD_LEGS]: roadLegsOf(cost, cand.date, hhmmToMin(cand.start_time)),
   };
@@ -798,20 +828,30 @@ async function readCurrentConflict(service, ctx) {
 // the legacy object is byte-for-byte unchanged.
 async function sharedModelCurrentPlacement(service, geo, ctx, dateStr, category) {
   if (!autoDispatchSharedModelLive()) return {};
-  const { excludeIds, siblings } = await groupContextFor(service, ctx);
+  const { excludeIds, siblings, visitWindowStart } = await groupContextFor(service, ctx);
   const dayTechs = await currentDayTechs(service, ctx, dateStr, category);
-  const days = await Promise.all(dayTechs.map((technicianId) => loadDayStops(ctx.db, { technicianId, dateStr, excludeIds })));
+  const days = await Promise.all(dayTechs.map(technicianId => {
+    if (ctx.sourceDay && (technicianId || null) === (service.technician_id || null)) {
+      return ctx.sourceDay.filter(row => !excludeIds.has(String(row.id)));
+    }
+    return loadDayStops(ctx.db, { technicianId, dateStr, excludeIds });
+  }));
   await loadStartPoints(ctx, dayTechs);
-  const startMin = hhmmToMin(service.window_start) ?? DAY_OPEN;
+  // The unit mover anchors a windowless tapped member on the visit's
+  // canonical start. Current-route scoring must place that same physical stop
+  // there too, rather than inventing an 08:00 stop while candidates use the
+  // visit anchor.
+  const startMin = hhmmToMin(service.window_start) ?? hhmmToMin(visitWindowStart) ?? DAY_OPEN;
   return leastDrive(dayTechs.map((dayTech, i) => {
     const stops = days[i];
     // The unit as it stands: every member at its stored window and route_order
     // (route-model's groupUnit sequences it, as a candidate's is).
-    const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, startMin, siblings), homeFor(ctx, dayTech)) : null;
+    const routeVisit = serviceToRouteStop(service, geo, startMin, siblings);
+    const cost = geo ? routeCost(stops, routeVisit, homeFor(ctx, dayTech)) : null;
     return {
       ...(cost ? { detour_minutes: cost.detourMinutes, total_drive_minutes: cost.driveWithMinutes, route_minutes: cost.routeTimeWithMinutes } : {}),
       stops_that_day: stops.length + 1,
-      same_area_share: clusterShare(stops, geo),
+      same_area_share: clusterShare(stops, geo, routeVisit),
       model: 'shared_v1',
       [ROAD_LEGS]: roadLegsOf(cost, dateStr, startMin),
       ...(service.technician_id ? {} : { day_technician_id: dayTech }),
@@ -1217,18 +1257,88 @@ async function unitTerritory(service, geo, ctx) {
   return { techId: siblingIds.length ? [...named][0] : members[0].techId, coverId: sameCover ? covers[0] : null };
 }
 
+// An identity-only read supplies the mover's current placement fields, even
+// when route-day predicates would omit it; a separate source-day read supplies
+// its neighbours. Candidate discovery, current scoring and candidate scoring
+// then share the same validated mover snapshot.
+async function sourceSnapshot(service, grouped) {
+  // Read the mover by identity, outside the route-day predicates. In
+  // particular, a windowless mover, a cancelled mover, or one staff moved to
+  // another day must still be visible here; falling back to the scan's stale
+  // object can otherwise discover and score candidates with an obsolete pin.
+  const rows = await grouped.db('scheduled_services')
+    .where('scheduled_services.id', service.id)
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    // Anchor every scheduled-service qualification field (window/due date,
+    // change count, lock/exclusion and recurrence rules), not only routing.
+    .select('scheduled_services.*', ...DAY_STOP_COLUMNS, ...DAY_STOP_KEY_COLUMNS);
+  const liveRow = rows && rows[0];
+  if (!liveRow) {
+    throw skipEvaluation(SOURCE_SNAPSHOT_STALE, 'The source visit no longer exists');
+  }
+  // Keep the raw stored coordinates on the service snapshot used by the
+  // pass-2 drift fence. Routing may resolve through customer coordinates,
+  // but that fallback must not masquerade as a scheduled_services edit.
+  const refreshed = {
+    ...service,
+    ...liveRow,
+    lat: liveRow.lat ?? null,
+    lng: liveRow.lng ?? null,
+  };
+  const eligibility = isEligibleForAutoDispatch(refreshed, grouped.eligibilityContext || {});
+  if (!eligibility.eligible) {
+    throw skipEvaluation(SOURCE_SNAPSHOT_STALE,
+      `The source visit is no longer auto-dispatchable (${eligibility.reason_code})`);
+  }
+  const live = {
+    ...rowToDayStop(liveRow),
+    dateStr: toDateStr(liveRow.scheduled_date),
+    technician_id: liveRow.technician_id ?? null,
+  };
+  const sameTechnician = String(live.technician_id ?? '') === String(service.technician_id ?? '');
+  if (!isActiveRouteStop(live)
+    || liveRow.auto_dispatch_locked === true
+    || liveRow.auto_dispatch_excluded === true
+    || live.dateStr !== toDateStr(service.scheduled_date)
+    || !sameTechnician) {
+    throw skipEvaluation(SOURCE_SNAPSHOT_STALE, 'The source visit changed placement or is no longer an active route stop');
+  }
+  if (String(live.visit_id ?? '') !== String(service.visit_id ?? '')) {
+    throw skipEvaluation(SOURCE_SNAPSHOT_STALE, 'The source visit changed visit groups while it was being evaluated');
+  }
+
+  const excludeIds = new Set(grouped.groupContext.excludeIds);
+  excludeIds.delete(String(service.id));
+  const sourceDay = await loadDayStops(grouped.db, {
+    technicianId: service.technician_id, dateStr: toDateStr(service.scheduled_date), excludeIds,
+  });
+  const geo = live.geo;
+  return {
+    service: { ...refreshed, ...live, lat: liveRow.lat ?? null, lng: liveRow.lng ?? null },
+    geo,
+    sourceDay: [live, ...sourceDay.filter(row => String(row.id) !== String(service.id))],
+  };
+}
+
 async function findValidCandidateSlots(service, prefs, baseCtx) {
-  const geo = resolveGeo(service);
-  if (!geo) return { current: null, candidates: [], note: 'no_geo' };
-  // The visit group is read ONCE for this evaluation and shared by the
-  // current placement and every candidate (see withGroupContext).
+  // Read this evaluation's group and day before discovering slots. The mover's
+  // pin and the neighbours that priced its current route come from one read.
+  let geo = resolveGeo(service);
+  const shared = autoDispatchSharedModelLive();
+  if (!shared && !geo) return { current: null, candidates: [], note: 'no_geo' };
   const grouped = await withGroupContext(service, baseCtx);
+  let sourceDay = null;
+  if (shared) {
+    ({ service, geo, sourceDay } = await sourceSnapshot(service, grouped));
+  }
+  if (!geo) return { service, current: null, candidates: [], note: 'no_geo' };
   // Read once: candidate generation, the cap and the current placement all
   // use the same answer. Gate off: null, no read. The territory technician
   // likewise: candidate admission and the current day share one answer.
   const unitTerritoryOf = await unitTerritory(service, geo, grouped);
   const ctx = {
     ...grouped,
+    sourceDay,
     evalConflict: await readCurrentConflict(service, grouped),
     territoryTechId: unitTerritoryOf.techId,
     territoryCoverId: unitTerritoryOf.coverId,
@@ -1243,7 +1353,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   if (dateFrom > dateTo) {
     // Window collapsed (visit sits at the very edge of the horizon) — nothing to do.
     const current = await computeCurrentPlacement(service, prefs, ctx);
-    return { current, candidates: [], drops: null, feasible: 0, search: { date_from: dateFrom, date_to: dateTo, open_starts_by_date: {} }, ...mowingField(mowing) };
+    return { service, current, candidates: [], drops: null, feasible: 0, search: { date_from: dateFrom, date_to: dateTo, open_starts_by_date: {} }, ...mowingField(mowing) };
   }
   const duration = service.estimated_duration_minutes || DEFAULT_DURATION;
   const category = prefs.service_category;
@@ -1333,7 +1443,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   const scored = await rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops);
   const run = { prefs, findTimeArgs, slots, flexRules, hard, geo };
   const withDry = await withDryWindowCandidates(scored, run);
-  return { current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates), ...mowingField(mowing, await mowingShadowCandidates(admitted, run)) };
+  return { service, current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates), ...mowingField(mowing, await mowingShadowCandidates(admitted, run)) };
 }
 
 // The unit's mowing rule (mowing-days.js unitRule): the visit and, when it is
@@ -1379,6 +1489,7 @@ module.exports = {
   SCORE_CAP,
   GROUP_CONTEXT_UNAVAILABLE,
   CURRENT_DAY_TECH_UNRESOLVED,
+  SOURCE_SNAPSHOT_STALE,
   findValidCandidateSlots,
   computeCurrentPlacement,
   territoryTechnicianForVisit,
@@ -1387,7 +1498,7 @@ module.exports = {
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
+    candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext, sourceSnapshot, serviceToRouteStop,
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

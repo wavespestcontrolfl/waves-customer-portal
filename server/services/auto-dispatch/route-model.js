@@ -24,6 +24,7 @@
 const {
   workDuration, currentOrder, effectiveWindowRange, isCoVisitPair, startCoVisitChain, advanceCoVisit,
 } = require('../route-reorder-window-fit');
+const { allocationKey } = require('../scheduling/visit-capacity');
 const { driveMin, haversine, HQ } = require('./geo');
 
 const DEFAULT_DURATION_MINUTES = 60;
@@ -97,7 +98,8 @@ function groupUnit(members) {
  * (route-reorder-window-fit.js currentOrder — Codex r4). Each carries
  * `minutes`, its on-site time. Rows collapse into one physical stop two
  * ways, each with the canonical duration rule:
- *   - a visit_id group (combo lawn+pest, etc.) — groupUnit;
+ *   - a visit_id group or contiguous version-2 capacity-allocation run —
+ *     groupUnit;
  *   - a legacy null-visit_id co-visit — a row adjacent to the previous row
  *     that isCoVisitPair accepts (same customer, promised window, premise and
  *     coordinates) — merged with the co-visit duration rule
@@ -108,9 +110,20 @@ function groupUnit(members) {
 function physicalStops(stops) {
   const units = [];
   const groups = new Map();
-  for (const row of (stops || []).filter(Boolean).map(withSequenceKeys)) {
-    if (row.visit_id == null) { units.push(row); continue; }
-    const key = String(row.visit_id);
+  let previousAllocation = null;
+  let allocationRun = 0;
+  // Capacity allocations are one physical stop only while their members are
+  // adjacent in the order dispatch will actually drive. Staff can reorder a
+  // member between two visits to the same property; in that case A -> B -> A
+  // has two real A legs and must not be flattened to A -> B. Visit groups keep
+  // their established whole-group behavior below.
+  for (const row of currentOrder((stops || []).filter(Boolean).map(withSequenceKeys))) {
+    const allocation = row.visit_id == null ? allocationKey(row) : null;
+    if (allocation !== previousAllocation) allocationRun += 1;
+    previousAllocation = allocation;
+    const key = row.visit_id != null ? `visit:${row.visit_id}`
+      : (allocation ? `allocation:${allocation}:run:${allocationRun}` : null);
+    if (!key) { units.push(row); continue; }
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
@@ -144,8 +157,16 @@ function physicalStops(stops) {
 // stationary group (Codex r5: a sibling with a lower route_order places it).
 function chainWithVisit(sequence, visit) {
   const own = Number.isFinite(visit.startMin) ? { ...visit, window_start: hhmmFromMin(visit.startMin) } : withSequenceKeys(visit);
-  const unit = visit.unitMembers && visit.unitMembers.length ? groupUnit([own, ...visit.unitMembers]) : own;
-  return currentOrder([...sequence, unit]);
+  // Collapse only after the mover is in the raw dispatch sequence. Inserting
+  // a pre-collapsed unit cannot split allocation/co-visit neighbours that the
+  // mover physically separates (A -> mover -> A).
+  const movingUnit = visit.unitMembers && visit.unitMembers.length
+    // The moving visit itself is deliberately one unit. Clear grouping keys
+    // on that already-collapsed unit so physicalStops does not fold it again
+    // and lose its additive member minutes.
+    ? { ...groupUnit([own, ...visit.unitMembers]), visit_id: null, reservation_service_mix: null }
+    : own;
+  return physicalStops([...sequence, movingUnit]);
 }
 
 /**
@@ -179,10 +200,10 @@ function chainWithVisit(sequence, visit) {
  * both ends of every chain, and the first/last neighbour of an end stop.
  */
 function routeCost(otherStops, visit, home = HQ) {
-  const sequence = physicalStops(otherStops);
-  const driveWithoutMinutes = chainDriveMinutes(sequence.map((s) => s.geo), home);
+  const without = physicalStops(otherStops);
+  const driveWithoutMinutes = chainDriveMinutes(without.map((s) => s.geo), home);
   // Every other stop is on-site time, located or not.
-  const otherServiceMinutes = sequence.reduce((sum, s) => sum + s.minutes, 0);
+  const otherServiceMinutes = without.reduce((sum, s) => sum + s.minutes, 0);
   const routeTimeWithoutMinutes = driveWithoutMinutes + otherServiceMinutes;
   if (!visit || !visit.geo) {
     return {
@@ -193,11 +214,11 @@ function routeCost(otherStops, visit, home = HQ) {
       routeTimeWithMinutes: routeTimeWithoutMinutes,
     };
   }
-  const chain = chainWithVisit(sequence, visit);
+  const chain = chainWithVisit(otherStops, visit);
   const driveWithMinutes = chainDriveMinutes(chain.map((s) => s.geo), home);
-  // The moving unit: the visit plus any co-located group members moving with it.
-  const visitMinutes = stopPlanningMinutes(visit) + sumPlanningMinutes(visit.unitMembers);
-  const routeTimeWithMinutes = driveWithMinutes + otherServiceMinutes + visitMinutes;
+  // Build service time from the independently collapsed WITH sequence too:
+  // a mover can split a legacy co-visit/allocation run as well as its drive.
+  const routeTimeWithMinutes = driveWithMinutes + chain.reduce((sum, s) => sum + s.minutes, 0);
   const detourMinutes = Math.max(0, driveWithMinutes - driveWithoutMinutes);
   return {
     driveWithoutMinutes, driveWithMinutes, detourMinutes, routeTimeWithoutMinutes, routeTimeWithMinutes,
@@ -210,7 +231,7 @@ function routeCost(otherStops, visit, home = HQ) {
 // caller can price the same detour on another estimator (road-check.js).
 function neighboursOf(chain, visit, home = HQ) {
   const located = chain.filter((s) => s.geo);
-  const at = located.findIndex((s) => s.id === visit.id || (s.memberIds || []).includes(visit.id));
+  const at = located.findIndex((s) => represents(s, visit));
   if (at < 0) return null;
   return { prev: (located[at - 1] || { geo: home }).geo, stop: located[at].geo, next: (located[at + 1] || { geo: home }).geo };
 }
@@ -227,9 +248,18 @@ function neighboursOf(chain, visit, home = HQ) {
  * it is real work somewhere, and dropping it would read one located
  * neighbour on a day of coordless stops as a fully clustered day.
  */
-function clusterShare(otherStops, geo) {
+function represents(stop, visit) {
+  const id = String(visit.id);
+  return String(stop.id) === id
+    || (stop.memberIds || []).some((memberId) => String(memberId) === id)
+    || (stop.coIds || []).some((memberId) => String(memberId) === id);
+}
+
+function clusterShare(otherStops, geo, visit = null) {
   if (!geo || !otherStops || !otherStops.length) return 0;
-  const stops = physicalStops(otherStops);
+  // Use the same WITH sequence as route cost, then remove the mover's
+  // physical unit. Allocation neighbours remain split when it lies between.
+  const stops = visit ? chainWithVisit(otherStops, visit).filter((stop) => !represents(stop, visit)) : physicalStops(otherStops);
   if (!stops.length) return 0;
   const nearby = stops.filter((s) => s.geo && haversine(s.geo.lat, s.geo.lng, geo.lat, geo.lng) <= CLUSTER_RADIUS_MILES).length;
   return Math.max(0, Math.min(1, nearby / stops.length));

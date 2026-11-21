@@ -33,11 +33,13 @@ jest.mock('../services/rebooker', () => ({
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { openMembers } = require('../services/visit-groups');
 const { probeMoveConflicts } = require('../services/rebooker');
+const { ROAD_LEGS } = require('../services/auto-dispatch/road-check');
 const {
   findValidCandidateSlots,
   computeCurrentPlacement,
+  SOURCE_SNAPSHOT_STALE,
   _internals: {
-    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder,
+    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, sourceSnapshot, serviceToRouteStop,
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
@@ -50,7 +52,11 @@ afterEach(() => {
   if (ORIGINAL_SHARED_GATE === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = ORIGINAL_SHARED_GATE;
 });
 
-const SERVICE = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1', window_start: '09:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
+const SERVICE = {
+  id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
+  window_start: '09:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5,
+  is_recurring: true, recurring_parent_id: 'parent-1', customer_active: true,
+};
 const prefs = { service_category: 'general', blackout: null };
 
 function ctxBase() {
@@ -68,11 +74,18 @@ function ctxBase() {
 // queries) returns []. The SLOT_TAKEN occupancy check no longer touches
 // ctx.db at all — it goes through the mocked rebooker probeMoveConflicts above.
 function emptyDb() {
-  const c = {};
-  ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
-    .forEach((m) => { c[m] = () => c; });
-  c.select = async () => [];
-  return () => c;
+  return () => {
+    const c = {};
+    let sourceRead = false;
+    ['whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+      .forEach((m) => { c[m] = () => c; });
+    c.where = (field, value) => {
+      sourceRead ||= field === 'scheduled_services.id' && String(value) === String(SERVICE.id);
+      return c;
+    };
+    c.select = async () => (sourceRead ? [{ ...SERVICE, status: 'confirmed', svc_lat: SERVICE.lat, svc_lng: SERVICE.lng }] : []);
+    return c;
+  };
 }
 
 // A conflicting row shaped just enough for scheduling/occupancy.js's
@@ -83,6 +96,112 @@ function emptyDb() {
 function conflictRow(windowStart, windowEnd) {
   return { id: 'occupied-1', window_start: windowStart, window_end: windowEnd, estimated_duration_minutes: 60 };
 }
+
+describe('source snapshot drift fence', () => {
+  const liveRow = (extra = {}) => ({
+    ...SERVICE,
+    status: 'confirmed',
+    window_end: '10:00',
+    svc_lat: 27.41,
+    svc_lng: -82.51,
+    lat: null,
+    lng: null,
+    ...extra,
+  });
+  const sourceDb = (row, dayRows = []) => {
+    let read = 0;
+    return () => {
+      read += 1;
+      const c = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((method) => { c[method] = () => c; });
+      c.select = async () => (read === 1 ? (row ? [row] : []) : dayRows);
+      return c;
+    };
+  };
+  const grouped = (db) => ({
+    db,
+    groupContext: { excludeIds: new Set(['s1']), siblings: [], visitWindowStart: '09:00' },
+  });
+
+  test('a windowless mover is read by id and its corrected live pin wins', async () => {
+    const expectedGeo = { lat: 27.42, lng: -82.52 };
+    const row = liveRow({ window_start: null, window_end: null, svc_lat: expectedGeo.lat, svc_lng: expectedGeo.lng });
+    const result = await sourceSnapshot(SERVICE, grouped(sourceDb(row)));
+    expect(result.geo).toEqual(expectedGeo);
+    expect(result.service.window_start).toBeNull();
+    expect(result.sourceDay[0]).toMatchObject({ id: 's1', window_start: null, geo: expectedGeo });
+  });
+
+  test('a live pin removal fails refreshed eligibility before any route scoring', async () => {
+    const row = liveRow({ window_start: null, window_end: null, svc_lat: null, svc_lng: null });
+    await expect(sourceSnapshot(SERVICE, grouped(sourceDb(row))))
+      .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
+  });
+
+  test.each([
+    ['moved to another day', { scheduled_date: '2026-08-05' }],
+    ['moved to another technician', { technician_id: 't2' }],
+    ['cancelled', { status: 'cancelled' }],
+  ])('%s source row fails closed instead of using the scan snapshot', async (_label, change) => {
+    await expect(sourceSnapshot(SERVICE, grouped(sourceDb(liveRow(change)))))
+      .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
+  });
+
+  test('a visit id changed after group loading fails closed before scoring mixed memberships', async () => {
+    await expect(sourceSnapshot({ ...SERVICE, visit_id: 'old' }, grouped(sourceDb(liveRow({ visit_id: 'new' })))))
+      .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
+  });
+
+  test.each(['auto_dispatch_locked', 'auto_dispatch_excluded'])('%s set after the scan fails closed', async (field) => {
+    await expect(sourceSnapshot(SERVICE, grouped(sourceDb(liveRow({ [field]: true })))))
+      .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
+  });
+
+  test('customer fallback coordinates score the route but stay raw-null for the pass-2 drift fence', async () => {
+    const row = liveRow({ svc_lat: null, svc_lng: null, lat: null, lng: null,
+      customer_latitude: 27.43, customer_longitude: -82.53 });
+    const result = await sourceSnapshot(SERVICE, grouped(sourceDb(row)));
+    expect(result.geo).toEqual({ lat: 27.43, lng: -82.53 });
+    expect(result.service).toMatchObject({ lat: null, lng: null,
+      customer_latitude: 27.43, customer_longitude: -82.53 });
+  });
+
+  test.each([
+    ['en_route', { status: 'en_route' }],
+    ['on_site', { status: 'on_site' }],
+    ['non-recurring', { is_recurring: false }],
+    ['parent template', { recurring_parent_id: null }],
+  ])('%s mover fails the refreshed eligibility gate before scoring', async (_label, change) => {
+    await expect(sourceSnapshot(SERVICE, grouped(sourceDb(liveRow(change)))))
+      .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
+  });
+});
+
+test('synthetic mover uses the candidate window and placement identity for duration, co-visits and allocations', () => {
+  const mix = { version: 2, allocatedServiceIds: ['s1', 'peer'] };
+  const service = {
+    ...SERVICE,
+    window_start: '14:00', window_end: '15:00', technician_id: 'old-tech', scheduled_date: '2026-08-04',
+    customer_id: 'same-customer', reservation_service_mix: mix,
+    service_address_line1: '12 Palm Way', service_address_city: 'Bradenton', service_address_zip: '34203',
+  };
+  const moved = serviceToRouteStop(service, { lat: 27.45, lng: -82.45 }, 9 * 60, [], null, {
+    date: '2026-08-06', technicianId: 't1', windowStart: '09:00', windowEnd: '10:00',
+  });
+  expect(moved).toMatchObject({
+    window_start: '09:00', window_end: '10:00', scheduled_date: '2026-08-06', technician_id: 't1',
+    customer_id: 'same-customer', reservation_service_mix: mix,
+    lat: 27.45, lng: -82.45, service_address_line1: '12 Palm Way',
+  });
+  expect(require('../services/auto-dispatch/route-model').stopPlanningMinutes(moved)).toBe(60);
+
+  const peer = { ...moved, id: 'peer', route_order: 1, created_at: '2026-01-01T00:00:00Z' };
+  expect(require('../services/auto-dispatch/route-model').physicalStops([peer, moved])).toHaveLength(1);
+
+  const legacy = { ...peer, id: 'legacy', reservation_service_mix: null, estimated_duration_minutes: null };
+  const legacyMover = { ...moved, reservation_service_mix: null, estimated_duration_minutes: null };
+  expect(require('../services/auto-dispatch/route-model').physicalStops([legacy, legacyMover])).toHaveLength(1);
+});
 
 // The tech-day a batched day-stop row belongs to (the 2026-08-06 / t1 slot
 // most tests use).
@@ -157,24 +276,28 @@ test('gate on: no pre-score cap — every survivor is returned; gate off: the le
   expect(off.candidates.map((c) => c.date)).toEqual(['2026-08-05']);
 });
 
-// Sequenced db mock for a SINGLE candidate: call 1 = sibling-date query
-// (none), call 2 = the batched candidate tech-day stops — `dayStops`, call
-// 3 = computeCurrentPlacement's legacy neighbor query (none), call 4 =
-// computeCurrentPlacement's shared-model loadDayStops (none). The occupancy
-// check goes through the mocked probe, never ctx.db.
+// Return stops for the queried dates. The sibling-date query projects a
+// different set of columns and has no rows in these standalone fixtures.
 function singleCandidateDb(dayStops) {
-  let call = 0;
   return () => {
-    call += 1;
-    const n = call;
     const c = {};
-    ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
-      .forEach((m) => { c[m] = () => c; });
-    c.select = async () => {
-      if (n === 1) return []; // sibling query
-      if (n === 2) return dayStops; // the candidate tech-days' stops (one batched read)
-      return []; // current-placement queries (legacy + shared-model)
+    let dates = [];
+    let timedOnly = false;
+    let sourceRead = false;
+    ['whereNot', 'whereNotIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+      .forEach(m => { c[m] = () => c; });
+    c.where = (field, value) => {
+      sourceRead ||= field === 'scheduled_services.id' && String(value) === String(SERVICE.id);
+      return c;
     };
+    c.whereIn = (field, values) => {
+      if (field === 'scheduled_services.scheduled_date') dates = values;
+      return c;
+    };
+    c.whereNotNull = field => { timedOnly ||= field === 'scheduled_services.window_start'; return c; };
+    c.select = async () => (sourceRead
+      ? [{ ...SERVICE, status: 'confirmed', svc_lat: SERVICE.lat, svc_lng: SERVICE.lng }]
+      : dayStops.filter(row => dates.includes(row.scheduled_date) && (!timedOnly || row.window_start != null)));
     return c;
   };
 }
@@ -229,27 +352,6 @@ test('a day whose only stops are an expired hold + a no_show scores IDENTICALLY 
 // once .whereNotNull('...window_start') is invoked), so a regression that
 // drops that call would make this test fail — not just assert the call
 // shape.
-function windowlessAwareSingleCandidateDb(dayStopsFixture) {
-  let call = 0;
-  return () => {
-    call += 1;
-    const n = call;
-    const c = {};
-    let filteredWindowless = false;
-    ['where', 'whereNot', 'whereNotIn', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
-      .forEach((m) => { c[m] = () => c; });
-    c.whereNotNull = (field) => {
-      if (field === 'scheduled_services.window_start') filteredWindowless = true;
-      return c;
-    };
-    c.select = async () => {
-      if (n === 1) return [];
-      if (n === 2) return filteredWindowless ? dayStopsFixture.filter((r) => r.window_start != null) : dayStopsFixture;
-      return [];
-    };
-    return c;
-  };
-}
 
 test('a day whose only "stop" is a windowless placeholder scores like an empty day (Codex pre-push P1)', async () => {
   process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
@@ -261,14 +363,14 @@ test('a day whose only "stop" is a windowless placeholder scores like an empty d
 
   findAvailableSlots.mockResolvedValue({ slots: [SLOT] });
   const { candidates: withPlaceholder } = await findValidCandidateSlots(
-    SERVICE, prefs, { ...ctxBase(), db: windowlessAwareSingleCandidateDb([placeholderRow]) },
+    SERVICE, prefs, { ...ctxBase(), db: singleCandidateDb([placeholderRow]) },
   );
 
   jest.clearAllMocks();
   probeMoveConflicts.mockResolvedValue({ rows: [], snapshot: [] });
   findAvailableSlots.mockResolvedValue({ slots: [SLOT] });
   const { candidates: empty } = await findValidCandidateSlots(
-    SERVICE, prefs, { ...ctxBase(), db: windowlessAwareSingleCandidateDb([]) },
+    SERVICE, prefs, { ...ctxBase(), db: singleCandidateDb([]) },
   );
 
   expect(withPlaceholder).toHaveLength(1);
@@ -752,6 +854,18 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
     expect(planUnitPlacement(service, { members, visitWindowStart: null }, cand)).toBeNull(); // the writer refuses: no anchor
   });
 
+  test('current scoring anchors a grouped windowless tapped row at the visit start too', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const service = { ...SERVICE, visit_id: 'v1', window_start: null, window_end: null };
+    const groupContext = {
+      excludeIds: new Set(['s1', 'sib1']),
+      siblings: [{ id: 'sib1', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }],
+      visitWindowStart: '09:00',
+    };
+    const current = await computeCurrentPlacement(service, prefs, { ...ctxBase(), db: emptyDb(), groupContext });
+    expect(current[ROAD_LEGS].startMin).toBe(9 * 60);
+  });
+
   // Codex r2 (PRRT_kwDOR3YQi86mQebH): a shifted sibling that fails the admin
   // window rules is refused, not only one crossing midnight.
   test('a sibling whose shifted window breaks the admin window rules rejects the candidate', () => {
@@ -805,21 +919,29 @@ test('openMembers is read exactly once per evaluation; the current placement and
   });
   // A second read would see a different unit (sib2 joined).
   openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]).mockResolvedValue([{ id: 's1' }, { id: 'sib1' }, { id: 'sib2' }]);
+  const grouped = { ...SERVICE, visit_id: 'v1', window_start: '09:00', window_end: '10:00' };
   const dayStopExcludes = [];
   const db = withVisit(() => {
     const c = {};
-    ['where', 'whereIn', 'whereNot', 'whereNotNull', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
+    let sourceRead = false;
+    ['whereIn', 'whereNot', 'whereNotNull', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
+    c.where = (field, value) => {
+      sourceRead ||= field === 'scheduled_services.id' && String(value) === 's1';
+      return c;
+    };
     c.whereNotIn = (field, ids) => { if (field === 'scheduled_services.id') dayStopExcludes.push([...ids].sort()); return c; };
-    c.select = async (...cols) => (cols[0] === 'id' ? [{ id: 'sib1', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 }] : []);
+    c.select = async (...cols) => {
+      if (cols[0] === 'id') return [{ id: 'sib1', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 }];
+      if (sourceRead) return [{ ...grouped, status: 'confirmed', svc_lat: grouped.lat, svc_lng: grouped.lng }];
+      return [];
+    };
     return c;
   });
-  const grouped = { ...SERVICE, visit_id: 'v1', window_start: '09:00', window_end: '10:00' };
-
   await findValidCandidateSlots(grouped, prefs, { ...ctxBase(), db });
   expect(openMembers).toHaveBeenCalledTimes(1);
-  // Both sides' day-stop reads (the candidates' batch and the current day)
-  // exclude the same unit.
-  expect(dayStopExcludes).toEqual([['s1', 'sib1'], ['s1', 'sib1']]);
+  // The source snapshot includes the mover and excludes its sibling. The
+  // candidate-day read excludes the complete moving unit.
+  expect(dayStopExcludes).toEqual([['sib1'], ['s1', 'sib1']]);
   expect([...probeMoveConflicts.mock.calls[0][0].excludeServiceIds].sort()).toEqual(['s1', 'sib1']);
 
   // A later evaluation (the retry re-evaluation) reads the group afresh, once.
@@ -947,6 +1069,70 @@ test('day-stop rows carry route_order/created_at and the co-visit inputs — a l
   const [single] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([coVisit('p')]) }, {});
   expect(pair.route_minutes).toBeCloseTo(single.route_minutes, 5);
   expect(pair.detour_minutes).toBeCloseTo(single.detour_minutes, 5);
+});
+
+test('version-2 allocation members keep one drive stop and additive work in candidate scoring', async () => {
+  const mix = { version: 2, allocatedServiceIds: ['p', 'l'] };
+  const allocated = (id) => ({
+    id, visit_id: null, customer_id: 'c9', status: 'confirmed',
+    window_start: '10:00', window_end: '11:00', estimated_duration_minutes: null,
+    route_order: 1, created_at: '2026-07-01T12:00:00Z', svc_lat: 27.45, svc_lng: -82.45,
+    reservation_service_mix: mix, reservation_policy_version: 2,
+    service_address_line1: '12 Palm Way', service_address_line2: null,
+    service_address_city: 'Bradenton', service_address_zip: '34203', ...SLOT_KEY,
+  });
+  const dbWith = (rows) => () => {
+    const c = {};
+    ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => rows;
+    return c;
+  };
+  const cand = [{ technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }];
+  const service = { id: 's1', estimated_duration_minutes: 60 };
+  const [allocation] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand,
+    { db: dbWith([allocated('p'), allocated('l')]) }, {});
+  const [single] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand,
+    { db: dbWith([allocated('p')]) }, {});
+  expect(allocation.detour_minutes).toBeCloseTo(single.detour_minutes, 5);
+  expect(allocation.route_minutes - single.route_minutes).toBe(60);
+});
+
+test('current and candidate scoring share the mover coordinates from the source-day snapshot', async () => {
+  process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+  const stale = { ...SERVICE, scheduled_date: '2026-08-04', lat: 10, lng: 10 };
+  const fresh = { lat: 27.4, lng: -82.5 };
+  const rows = [{
+    ...stale,
+    status: 'confirmed', window_end: '10:00', svc_lat: fresh.lat, svc_lng: fresh.lng,
+    lat: null, lng: null,
+  }, {
+    id: 'neighbor', customer_id: 'c2', scheduled_date: '2026-08-04', technician_id: 't1',
+    status: 'confirmed', window_start: '11:00', window_end: '12:00', estimated_duration_minutes: 60,
+    svc_lat: 27.45, svc_lng: -82.45,
+  }];
+  const db = () => {
+    const c = {};
+    let excluded = new Set();
+    ['where', 'whereIn', 'whereNot', 'whereNotNull', 'leftJoin', 'whereBetween', 'orderBy'].forEach((m) => { c[m] = () => c; });
+    c.whereNotIn = (field, ids) => {
+      if (field === 'scheduled_services.id') excluded = new Set(ids.map(String));
+      return c;
+    };
+    c.select = async () => rows.filter((row) => !excluded.has(String(row.id)));
+    return c;
+  };
+  findAvailableSlots.mockResolvedValue({ slots: [{ date: '2026-08-05', technician: { id: 't1', name: 'A' },
+    start_time: '09:00', end_time: '10:00', detour_minutes: 2, score: 1 }] });
+  const result = await findValidCandidateSlots(stale, prefs, { ...ctxBase(), db });
+  expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining(fresh));
+  expect(result.current[ROAD_LEGS].stop).toEqual(fresh);
+  expect(result.candidates[0][ROAD_LEGS].stop).toEqual(fresh);
+
+  rows[0] = { ...rows[0], svc_lat: null, svc_lng: null };
+  findAvailableSlots.mockClear();
+  await expect(findValidCandidateSlots(stale, prefs, { ...ctxBase(), db }))
+    .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
+  expect(findAvailableSlots).not.toHaveBeenCalled();
 });
 
 // Codex r1 (PRRT_kwDOR3YQi86mPzgn): the owner planning minutes of the day's
