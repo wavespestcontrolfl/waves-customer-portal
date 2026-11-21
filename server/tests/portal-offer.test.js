@@ -21,6 +21,7 @@ function dbForTables(tables = {}) {
     const rows = tables[table] || [];
     const q = {
       where() { return q; },
+      whereIn() { return q; },
       whereNotIn() { return q; },
       orWhereNull() { return q; },
       leftJoin() { return q; },
@@ -73,15 +74,15 @@ function recurringRows(serviceTypes) {
   }));
 }
 
-function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [] } = {}) {
+function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [], turfProfile = null, estimates = [] } = {}) {
   const scheduled = recurringRows(serviceTypes);
   return dbForTables({
     customers: [customer],
     customer_properties: [],
     scheduled_services: scheduled,
     'scheduled_services as s': scheduled,
-    customer_turf_profiles: [],
-    estimates: [],
+    customer_turf_profiles: turfProfile ? [turfProfile] : [],
+    estimates,
     customer_plan_rates: planRates,
   });
 }
@@ -94,11 +95,16 @@ beforeEach(() => {
 });
 
 describe('buildPortalOffer', () => {
-  test('pest+lawn recurring → the matrix target (tree & shrub) with a fingerprint', async () => {
+  test('pest+lawn recurring → no offer (owner 2026-11-21: the ladder pushes pest and lawn only)', async () => {
     const db = dbFor({ serviceTypes: ['Quarterly Pest Control', 'Lawn Care Program'] });
+    expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('pest recurring → the matrix target (lawn) with a fingerprint', async () => {
+    const db = dbFor({ serviceTypes: ['Quarterly Pest Control'] });
     const offer = await buildPortalOffer('cust-1', db, { propertyLookup: missLookup });
     expect(offer).not.toBeNull();
-    expect(offer.serviceKey).toBe('tree_shrub');
+    expect(offer.serviceKey).toBe('lawn_care');
     expect(offer.relationship).toBe('add');
     expect(['priced', 'quote_cta']).toContain(offer.mode);
     expect(typeof offer.fingerprint).toBe('string');
@@ -167,6 +173,40 @@ describe('buildPortalOffer', () => {
 // the family is fixed by what the photo shows, every other gate is the
 // portal card's.
 describe('buildOfferForFamily', () => {
+  // Moved from the report suite when tree & shrub left the ladder
+  // (2026-11-21): a requested T&S family (My Plan list, photo triage) is now
+  // the only way a T&S offer is built.
+  test('a seeded synthetic zero tree count never prices a tree & shrub offer (codex #3367 PR r10)', async () => {
+    // The v1 lookup adapter stores treeCount: 0 when nothing was observed;
+    // a zero count has no provenance (operator-confirmed vs adapter
+    // synthetic), so neither replaying zero trees nor a phantom density
+    // fallback is safe — the offer demotes to the unpriced CTA.
+    const estimateWith = (features) => [{
+      id: 'est-1',
+      address: '123 Gulf Dr, Sarasota, FL 34236',
+      status: 'accepted',
+      estimate_data: JSON.stringify({
+        engineInputs: {
+          homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+          bedArea: 3000, bedAreaSource: 'explicit', features,
+        },
+      }),
+    }];
+    const run = (features) => buildOfferForFamily('cust-1', dbFor({
+      serviceTypes: ['Quarterly Pest Control', 'Lawn Care Program'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      estimates: estimateWith(features),
+    }), 'tree_shrub', { propertyLookup: missLookup });
+    // Control: the same seed without the zero count prices, so the CTA
+    // below is the zero count's doing and nothing else's.
+    expect((await run({ trees: 'moderate' }))?.mode).toBe('priced');
+    const withSyntheticZero = await run({ trees: 'moderate', treeCount: 0 });
+    expect(withSyntheticZero).not.toBeNull();
+    expect(withSyntheticZero.serviceKey).toBe('tree_shrub');
+    expect(withSyntheticZero.mode).toBe('quote_cta');
+    expect(withSyntheticZero.option).toBeNull();
+  });
+
   test('lawn-only customer asked about tree & shrub → a tree & shrub offer (the ladder would have picked pest)', async () => {
     const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
     expect((await buildPortalOffer('cust-1', db, { propertyLookup: missLookup }))?.serviceKey).toBe('pest_control');
