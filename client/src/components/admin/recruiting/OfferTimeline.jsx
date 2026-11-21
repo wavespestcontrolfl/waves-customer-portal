@@ -336,9 +336,9 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
   // One first-days item, marked done or not done again; the card then re-reads (the timeline gets its row). The
   // write names the checklist's own offer (the hire's newest signed offer), which is not always the card's offer:
   // a later offer that was withdrawn or closed can be the one the card shows.
-  const setItem = (key, done) =>
+  const setItem = (key, done, seenDoneAt) =>
     act(async () => {
-      await setChecklistItem(applicationId, firstDays.offerId, key, done);
+      await setChecklistItem(applicationId, firstDays.offerId, key, done, seenDoneAt);
       await onChanged();
     });
 

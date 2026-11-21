@@ -169,15 +169,15 @@ describe('owner-only actions', () => {
     expect(mockService.reviseOffer).toHaveBeenCalledWith(APP, OFFER, { expectedStatus: 'sent', startDate: '2027-02-01' }, expect.any(Object));
   });
 
-  test('a checklist write passes the item, the done flag as sent, and the owner; its refusal keeps its code', async () => {
+  test('a checklist write passes the item, the done flag as sent, the mark an undo saw, and the owner; its refusal keeps its code', async () => {
     const done = await call(base(`/${OFFER}/checklist/driving_record`), 'POST', { done: true });
     expect(done).toMatchObject({ status: 200, body: { firstDays: { offerId: 'o1' } } });
-    expect(mockService.setChecklistItem).toHaveBeenLastCalledWith(APP, OFFER, 'driving_record', true, expect.objectContaining({ id: 'bbbbbbbb-0000-4000-8000-000000000001', name: 'Test Owner' }));
-    await call(base(`/${OFFER}/checklist/driving_record`), 'POST', { done: false });
-    expect(mockService.setChecklistItem).toHaveBeenLastCalledWith(APP, OFFER, 'driving_record', false, expect.any(Object));
+    expect(mockService.setChecklistItem).toHaveBeenLastCalledWith(APP, OFFER, 'driving_record', true, expect.objectContaining({ id: 'bbbbbbbb-0000-4000-8000-000000000001', name: 'Test Owner' }), { seenDoneAt: undefined });
+    await call(base(`/${OFFER}/checklist/driving_record`), 'POST', { done: false, seenDoneAt: '2026-12-14T15:00:00.000Z' });
+    expect(mockService.setChecklistItem).toHaveBeenLastCalledWith(APP, OFFER, 'driving_record', false, expect.any(Object), { seenDoneAt: '2026-12-14T15:00:00.000Z' });
     // A body with no flag is the service's to refuse: the route never reads it as done.
     await call(base(`/${OFFER}/checklist/driving_record`), 'POST');
-    expect(mockService.setChecklistItem).toHaveBeenLastCalledWith(APP, OFFER, 'driving_record', undefined, expect.any(Object));
+    expect(mockService.setChecklistItem).toHaveBeenLastCalledWith(APP, OFFER, 'driving_record', undefined, expect.any(Object), { seenDoneAt: undefined });
     mockService.setChecklistItem.mockRejectedValueOnce(new OfferError(409, 'CHECKLIST_CLOSED', 'This checklist is closed.'));
     expect(await call(base(`/${OFFER}/checklist/i9`), 'POST', { done: true })).toMatchObject({ status: 409, body: { code: 'CHECKLIST_CLOSED', error: 'This checklist is closed.' } });
   });

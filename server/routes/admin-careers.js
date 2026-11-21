@@ -705,6 +705,7 @@ router.post('/:id/offer/:offerId/revise', requireOwnerAccount, offerHandler('rev
 // One first-days item of a Hired application, marked done or not done again ({ done: true | false }).
 router.post('/:id/offer/:offerId/checklist/:item', requireOwnerAccount, offerHandler('checklist', (req) => JobOffers.setChecklistItem(
   req.params.id, req.params.offerId, req.params.item, req.body && req.body.done, offerActor(req),
+  { seenDoneAt: req.body && req.body.seenDoneAt },
 )));
 
 router.get('/:id/offer/:offerId/signed-copy', offerHandler('signed copy', (req) => JobOffers.signedCopy(req.params.id, req.params.offerId)));

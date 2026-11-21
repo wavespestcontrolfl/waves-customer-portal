@@ -220,10 +220,11 @@ describe("OfferTimeline", () => {
       expect(within(rowOf("Driving record copy")).queryByText(/Due before/)).toBeNull();
 
       fireEvent.click(screen.getByRole("button", { name: "Mark done: Form I-9" }));
-      await waitFor(() => expect(setChecklistItem).toHaveBeenCalledWith("app-1", "offer-1", "i9", true));
+      await waitFor(() => expect(setChecklistItem).toHaveBeenCalledWith("app-1", "offer-1", "i9", true, null));
       await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
       fireEvent.click(screen.getByRole("button", { name: "Undo: Driving record copy" }));
-      await waitFor(() => expect(setChecklistItem).toHaveBeenLastCalledWith("app-1", "offer-1", "driving_record", false));
+      // An undo names the mark the card shows.
+      await waitFor(() => expect(setChecklistItem).toHaveBeenLastCalledWith("app-1", "offer-1", "driving_record", false, "2026-12-14T15:00:00Z"));
       await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(2));
     });
 
@@ -256,7 +257,7 @@ describe("OfferTimeline", () => {
       setChecklistItem.mockResolvedValue({ firstDays: firstDays({ offerId: "offer-9" }) });
       render(card({ offer: record({ status: "withdrawn" }), firstDays: firstDays({ offerId: "offer-9" }) }));
       fireEvent.click(screen.getByRole("button", { name: "Mark done: Form I-9" }));
-      await waitFor(() => expect(setChecklistItem).toHaveBeenCalledWith("app-1", "offer-9", "i9", true));
+      await waitFor(() => expect(setChecklistItem).toHaveBeenCalledWith("app-1", "offer-9", "i9", true, null));
     });
   });
 });

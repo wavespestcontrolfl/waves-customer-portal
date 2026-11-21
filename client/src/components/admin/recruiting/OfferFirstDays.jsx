@@ -27,7 +27,7 @@ export default function OfferFirstDays({ firstDays, busy, canAct, onSet }) {
                 size="sm"
                 variant={item.doneAt ? "ghost" : "secondary"}
                 className="sm:ml-auto sm:shrink-0"
-                onClick={() => onSet(item.key, !item.doneAt)}
+                onClick={() => onSet(item.key, !item.doneAt, item.doneAt)}
                 disabled={busy}
                 aria-label={`${item.doneAt ? "Undo" : "Mark done"}: ${item.label}`}
               >

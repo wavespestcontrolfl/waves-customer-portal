@@ -88,11 +88,13 @@ export function reviseOffer(applicationId, offerId, expectedStatus, startDate) {
   );
 }
 
-// Marks one first-days item done, or not done again (done: false). The answer is the checklist as the write left it.
-export function setChecklistItem(applicationId, offerId, key, done) {
+// Marks one first-days item done, or not done again (done: false). An undo names the mark the card showed
+// (seenDoneAt): the server removes nothing when the item holds a newer mark. The answer is the checklist as the write
+// left it.
+export function setChecklistItem(applicationId, offerId, key, done, seenDoneAt) {
   return offerRequest(
     `/admin/careers/${applicationId}/offer/${offerId}/checklist/${key}`,
-    { method: "POST", body: JSON.stringify({ done }) },
+    { method: "POST", body: JSON.stringify(done ? { done } : { done, seenDoneAt }) },
     (b) => b?.firstDays?.offerId === offerId && Array.isArray(b.firstDays.items),
   );
 }

@@ -1819,7 +1819,9 @@ const forgetChecklistRingKeys = (trx, applicationId, key) => trx('notifications'
 /**
  * Marks one first-days item done, or not done again (done: false). Owner account only (the route). The write names
  * the offer the card showed the checklist on: when the application is no longer Hired, or a newer offer was signed
- * since that read, nothing is written (CHECKLIST_CLOSED). A second mark of a done item keeps the first one.
+ * since that read, nothing is written (CHECKLIST_CLOSED). A second mark of a done item keeps the first one. An undo
+ * names the mark the card showed (seenDoneAt): when the item holds another mark (it was undone and marked again in
+ * another tab), nothing is written (CHECKLIST_CHANGED). An undo of an item that is not done changes nothing.
  *
  * A mark that leaves no item due that day closes the bell in the same transaction. Any other mark of an open item
  * takes the item's ring keys off the row. Every other change of the bell (its words after a mark, a ring for an item
@@ -1828,7 +1830,7 @@ const forgetChecklistRingKeys = (trx, applicationId, key) => trx('notifications'
  * clock: the time source, for tests. It is read after the locks: a write that waited across Eastern midnight marks
  * and closes on the day it ran.
  */
-async function setChecklistItem(applicationId, offerId, key, done, actor, clock = () => new Date()) {
+async function setChecklistItem(applicationId, offerId, key, done, actor, { seenDoneAt = null, clock = () => new Date() } = {}) {
   if (!FIRST_DAYS_ITEMS.some((item) => item.key === key) || typeof done !== 'boolean') {
     throw new OfferError(400, 'INVALID_CHECKLIST_ITEM', 'This is not a first-days item.');
   }
@@ -1841,6 +1843,9 @@ async function setChecklistItem(applicationId, offerId, key, done, actor, clock 
     }
     const now = clock();
     const marks = { ...held.marks };
+    if (!done && marks[key] && marks[key].at !== seenDoneAt) {
+      throw new OfferError(409, 'CHECKLIST_CHANGED', 'This item was marked done again after this page was loaded. Nothing was changed.');
+    }
     const newlyDone = done && !marks[key];
     if (newlyDone) marks[key] = { at: now.toISOString(), by: actor.id, by_name: await actorName(trx, actor) };
     if (!done) delete marks[key];

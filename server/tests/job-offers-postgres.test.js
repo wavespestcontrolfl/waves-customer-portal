@@ -1934,7 +1934,10 @@ jest.setTimeout(120000);
         const bellsOf = (applicationId) => root('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`job-offer-checklist:${applicationId}`]);
         const openBellsOf = (applicationId) => bellsOf(applicationId).whereNull('done_at');
         const checklistOf = async (app) => (await JobOffers.adminPanel(app.id, actor())).firstDays;
-        const mark = (made, key, done = true, now) => JobOffers.setChecklistItem(made.app.id, made.offer.id, key, done, actor(), now && (() => now));
+        // A mark, or an undo of the mark the card shows at that time.
+        const shownDoneAt = async (app, key) => (await checklistOf(app)).items.find((item) => item.key === key).doneAt;
+        const mark = async (made, key, done = true, now) => JobOffers.setChecklistItem(made.app.id, made.offer.id, key, done, actor(),
+          { clock: now && (() => now), seenDoneAt: done ? null : await shownDoneAt(made.app, key) });
         // A signed offer with its staff record: the hire. The default start date is a Monday.
         async function hire() {
           const made = await openOffer();
@@ -2007,9 +2010,16 @@ jest.setTimeout(120000);
           expect((await offerRow(made.offer.id)).checklist.driving_record.at).toBe(when.toISOString());
           expect((await checklistOf(made.app)).items.map((item) => Boolean(item.doneAt))).toEqual([true, false, false, false]);
 
-          expect((await mark(made, 'driving_record', false)).firstDays.items[0]).toMatchObject({ doneAt: null, doneByName: null });
+          // An undo names the mark the card showed. A card that shows an older mark, or none, removes nothing.
+          const write = (done, more) => JobOffers.setChecklistItem(made.app.id, made.offer.id, 'driving_record', done, actor(), more);
+          await expect(write(false, { seenDoneAt: '2026-11-30T15:00:00.000Z' })).rejects.toMatchObject({ status: 409, code: 'CHECKLIST_CHANGED' });
+          await expect(write(false)).rejects.toMatchObject({ status: 409, code: 'CHECKLIST_CHANGED' });
+          expect((await offerRow(made.offer.id)).checklist.driving_record.at).toBe(when.toISOString());
+          expect((await write(false, { seenDoneAt: when.toISOString() })).firstDays.items[0]).toMatchObject({ doneAt: null, doneByName: null });
           row = await offerRow(made.offer.id);
           expect(row.checklist.driving_record).toBeUndefined();
+          // An undo of an item that is not done changes nothing and is not refused.
+          expect((await write(false, { seenDoneAt: when.toISOString() })).firstDays.items[0]).toMatchObject({ doneAt: null });
           expect(row.checklist.staff_record).toMatchObject({ made: true });
           expect(JobOffers.timelineOf(row).map((entry) => entry.kind)).not.toContain('checklist_done');
 
@@ -2020,7 +2030,7 @@ jest.setTimeout(120000);
             if (query.sql.includes('order by "signed_at" desc, "id" desc for update')) readsAtLock = clock.mock.calls.length;
           };
           database.client.on('query', listen);
-          try { await JobOffers.setChecklistItem(made.app.id, made.offer.id, 'driving_record', true, actor(), clock); } finally { database.client.removeListener('query', listen); }
+          try { await JobOffers.setChecklistItem(made.app.id, made.offer.id, 'driving_record', true, actor(), { clock }); } finally { database.client.removeListener('query', listen); }
           expect(readsAtLock).toBe(0);
           expect(clock).toHaveBeenCalledTimes(1);
           expect((await offerRow(made.offer.id)).checklist).toMatchObject({ driving_record: { at: '2026-12-03T05:00:01.000Z' } });
@@ -2247,7 +2257,7 @@ jest.setTimeout(120000);
           expect(older.license).toBeUndefined();
           expect(older.staff_record).toMatchObject({ made: true });
           // A carried mark can be undone. The item is due again: the next run rings the one row.
-          await JobOffers.setChecklistItem(made.app.id, second.id, 'license', false, actor());
+          await JobOffers.setChecklistItem(made.app.id, second.id, 'license', false, actor(), { seenDoneAt: await shownDoneAt(made.app, 'license') });
           expect((await checklistOf(made.app)).items.map((item) => Boolean(item.doneAt))).toEqual([false, false, false, true]);
           expect(await ring(morning(2))).toEqual({ ...NONE, rung: 1 });
           rows = await bellsOf(made.app.id);
