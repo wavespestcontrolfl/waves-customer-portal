@@ -361,6 +361,43 @@ describe('blogHeroSocialImageUrl', () => {
       expect(calls.filter((u) => u === 'https://graph.facebook.com/v25.0/')).toHaveLength(1);
     });
 
+    test('a second post of the same link waits for the read in flight', async () => {
+      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '40';
+      let reads = 0;
+      let readDoneAt = null;
+      const postedAt = [];
+      global.fetch = jest.fn(async (url) => {
+        if (String(url) === 'https://graph.facebook.com/v25.0/') {
+          reads += 1;
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          readDoneAt = Date.now();
+          return { ok: true, json: async () => ({ id: PAGE, updated_time: '2026-11-21T02:06:03+0000' }), text: async () => '' };
+        }
+        postedAt.push(Date.now());
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+      const share = () => social.publishToAll({
+        title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+        imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+        channels: ['facebook'], customContent: { facebook: 'Caption' },
+        noAiImage: true,
+      });
+
+      try {
+        const results = await Promise.all([share(), share()]);
+
+        for (const res of results) {
+          expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+        }
+        expect(reads).toBe(1);
+        expect(postedAt).toHaveLength(2);
+        // Both posts go out after the read AND its wait, never during them.
+        for (const at of postedAt) expect(at - readDoneAt).toBeGreaterThanOrEqual(35);
+      } finally {
+        delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+      }
+    });
+
     test('a failed read is not repeated on the retry', async () => {
       let reads = 0;
       let feedAttempts = 0;

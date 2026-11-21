@@ -1469,18 +1469,12 @@ const FACEBOOK_PREVIEW_SETTLE_MAX_MS = 4000;
 // One read per link per 10 minutes. withRetry may call postToFacebook up to
 // three times for one post, and a photo post may fall back to a link post: a
 // read (and its wait) on every attempt would add up to 30 s to one publish.
-// A failed read counts too, so a retry never repeats a slow one.
+// The map holds the read's promise, so a second post of the same link that
+// arrives while the read or its wait is in flight waits for the same read; it
+// never reaches /feed first. A finished read resolves at once for a retry, and
+// a failed read counts too, so a retry never repeats a slow one.
 const FACEBOOK_PREVIEW_READ_TTL_MS = 10 * 60 * 1000;
-const facebookPreviewReads = new Map(); // link -> time of the last read attempt
-
-function facebookPreviewReadDue(link, now = Date.now()) {
-  for (const [seen, at] of facebookPreviewReads) {
-    if (now - at >= FACEBOOK_PREVIEW_READ_TTL_MS) facebookPreviewReads.delete(seen);
-  }
-  if (facebookPreviewReads.has(link)) return false;
-  facebookPreviewReads.set(link, now);
-  return true;
-}
+const facebookPreviewReads = new Map(); // link -> { at, done: Promise<void> }
 
 function facebookPreviewSettleMs() {
   const raw = process.env.FACEBOOK_PREVIEW_SETTLE_MS;
@@ -1489,8 +1483,8 @@ function facebookPreviewSettleMs() {
   return Math.min(ms, FACEBOOK_PREVIEW_SETTLE_MAX_MS);
 }
 
-async function refreshFacebookLinkPreview(link, token) {
-  if (!facebookPreviewReadDue(link)) return;
+// Never rejects.
+async function readFacebookLinkPreview(link, token) {
   try {
     const res = await fetch('https://graph.facebook.com/v25.0/', {
       method: 'POST',
@@ -1509,6 +1503,18 @@ async function refreshFacebookLinkPreview(link, token) {
   } catch (err) {
     logger.warn(`[social] Facebook link preview refresh failed: ${err.name}`);
   }
+}
+
+function refreshFacebookLinkPreview(link, token) {
+  const now = Date.now();
+  for (const [seen, read] of facebookPreviewReads) {
+    if (now - read.at >= FACEBOOK_PREVIEW_READ_TTL_MS) facebookPreviewReads.delete(seen);
+  }
+  const known = facebookPreviewReads.get(link);
+  if (known) return known.done;
+  const done = readFacebookLinkPreview(link, token);
+  facebookPreviewReads.set(link, { at: now, done });
+  return done;
 }
 
 async function postToFacebook(message, link, imageUrl) {
