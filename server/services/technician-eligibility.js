@@ -16,6 +16,7 @@
 const db = require('../models/db');
 const { dateOnlyString, etDateString, etParts, validCalendarDate } = require('../utils/datetime-et');
 const { STAFF_WORK_DATE_SQL } = require('../utils/staff-time-work-date');
+const { savepointRead } = require('../utils/savepoint-read');
 const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
 
@@ -381,8 +382,10 @@ function storedShift(tech) {
  * Work days, absences and closures stay with their own readers
  * (absentTechDays, blackout dates); this answers only the hours of a day.
  * A failed clock-in read keeps the set hours for today (logged; on a
- * transaction it runs in a savepoint, so the caller's transaction stays
- * usable); a failed read of the hours themselves throws, as absentTechDays does.
+ * transaction it is a queued savepoint read, utils/savepoint-read.js, so the
+ * caller's transaction stays usable: do not call this from inside another
+ * savepointRead on the same transaction, it would wait on its own caller); a
+ * failed read of the hours themselves throws, as absentTechDays does.
  * `technicianIds` narrows the reads (an empty list reads every technician).
  */
 async function loadTechShifts(conn, { technicianIds = null, now = new Date() } = {}) {
@@ -399,8 +402,9 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
   const today = etDateString(now);
   const clockIns = new Map();
   try {
-    // On a transaction the read rides a savepoint (as offDayWarningsFor), so a
-    // failed read can never abort the caller's transaction.
+    // On a transaction this is a queued savepoint read (utils/savepoint-read.js):
+    // a failed read can never abort the caller's transaction, and it never
+    // overlaps another recoverable read on that transaction.
     const read = (c) => c('time_entries')
       .where({ entry_type: 'shift' })
       .whereNot({ status: 'voided' })
@@ -410,9 +414,7 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
       .groupBy('technician_id')
       .select('technician_id')
       .min({ clock_in: 'clock_in' });
-    const rows = conn.isTransaction && typeof conn.transaction === 'function'
-      ? await conn.transaction((sp) => read(sp))
-      : await read(conn);
+    const rows = await savepointRead(conn, read);
     for (const row of rows) {
       const at = row.clock_in instanceof Date ? row.clock_in : new Date(row.clock_in);
       if (Number.isNaN(at.getTime())) continue;

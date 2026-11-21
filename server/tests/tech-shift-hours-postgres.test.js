@@ -1,9 +1,9 @@
 /**
  * GATE_TECH_SHIFT_HOURS (owner 2026-11-19, ad budget rule v2 page item D4) against
- * REAL Postgres: technicians.shift_start / shift_end (migration 20261120213000), the
- * time round trip, the CHECK, and loadTechShifts reading the hours and today's
- * clock-in from time_entries on the Staff work date. A mocked knex proves none of
- * the CHECK, the time type or the Eastern work-date SQL.
+ * REAL Postgres: technicians.shift_start / shift_end (migrations 20261120213000 and
+ * 20261120220000), the time round trip, the two CHECKs, and loadTechShifts reading
+ * the hours and today's clock-in from time_entries on the Staff work date. A mocked
+ * knex proves none of the CHECKs, the time type or the Eastern work-date SQL.
  *
  * Runs in the DB-gated CI step (DATABASE_URL on the migrated waves_test database) or
  * a local scratch Postgres migrated with `knex migrate:latest`; it skips without one.
@@ -112,6 +112,47 @@ postgres('technician shift hours (real Postgres)', () => {
     ])('refuses %s', async (_label, start, end) => {
       await expect(db('technicians').where({ id: noHours.id }).update({ shift_start: start, shift_end: end }))
         .rejects.toMatchObject({ code: '23514', constraint: 'technicians_shift_hours_check' });
+      expect(await db('technicians').where({ id: noHours.id }).first('shift_start', 'shift_end'))
+        .toEqual({ shift_start: null, shift_end: null });
+    });
+
+    // The second CHECK (migration 20261120220000): only what the editor can show. The first CHECK
+    // passes each of these (both set, the end after the start).
+    test.each([
+      ['seconds on the start', '08:00:10', '17:00'],
+      ['seconds on the end', '08:00', '17:00:30'],
+      ['two times inside one minute', '08:00:10', '08:00:50'],
+      ['a fraction of a second', '08:00', '17:00:00.5'],
+      ['an end of 24:00', '08:00', '24:00'],
+    ])('refuses %s: whole minutes below 24:00 only', async (_label, start, end) => {
+      await expect(db('technicians').where({ id: noHours.id }).update({ shift_start: start, shift_end: end }))
+        .rejects.toMatchObject({ code: '23514', constraint: 'technicians_shift_hours_minutes_check' });
+      expect(await db('technicians').where({ id: noHours.id }).first('shift_start', 'shift_end'))
+        .toEqual({ shift_start: null, shift_end: null });
+    });
+
+    test('the first and the last minute of the day are accepted', async () => {
+      const edge = await makeTech('Synthetic Edge', ['00:00', '23:59']);
+      expect(await db('technicians').where({ id: edge.id }).first('shift_start', 'shift_end'))
+        .toEqual({ shift_start: '00:00:00', shift_end: '23:59:00' });
+    });
+
+    test('the whole-minutes migration is idempotent and its down removes only its own CHECK (rolled back here)', async () => {
+      const migration = require('../models/migrations/20261120220000_technician_shift_hours_whole_minutes');
+      const hasCheck = async (conn, name) => !!(await conn('pg_constraint').where({ conname: name }).first('conname'));
+      await expect(migration.up(db)).resolves.toBeUndefined();
+      expect(await hasCheck(db, 'technicians_shift_hours_minutes_check')).toBe(true);
+      const marker = new Error('roll back the DDL');
+      await expect(db.transaction(async (trx) => {
+        await migration.down(trx);
+        expect(await hasCheck(trx, 'technicians_shift_hours_minutes_check')).toBe(false);
+        expect(await hasCheck(trx, 'technicians_shift_hours_check')).toBe(true);
+        await migration.down(trx); // a second down is a no-op
+        // Without it the columns take seconds again.
+        await trx('technicians').where({ id: noHours.id }).update({ shift_start: '08:00:10', shift_end: '08:00:50' });
+        throw marker;
+      })).rejects.toBe(marker);
+      expect(await hasCheck(db, 'technicians_shift_hours_minutes_check')).toBe(true);
       expect(await db('technicians').where({ id: noHours.id }).first('shift_start', 'shift_end'))
         .toEqual({ shift_start: null, shift_end: null });
     });

@@ -530,17 +530,37 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
     expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 960, endMin: 1440, source: 'clock_in' });
   });
 
-  test('inside a transaction the clock-in read rides a savepoint; its failure keeps the set hours', async () => {
+  // The statements the shared savepoint read (utils/savepoint-read.js) sent on the transaction.
+  const savepointStatements = (conn) => conn.raw.mock.calls.map(([sql]) => sql.replace(/fail_soft_[0-9a-f]+/, 'sp'));
+
+  test('inside a transaction the clock-in read is a shared savepoint read, released when it succeeds', async () => {
     gateOn();
-    const trx = shiftConn({ techRows: [DAY_TECH] });
-    const sp = shiftConn({ clockError: new Error('time_entries unavailable') });
-    trx.conn.isTransaction = true;
-    trx.conn.transaction = jest.fn((fn) => fn(sp.conn));
-    const shiftOf = await loadTechShifts(trx.conn, { now: NOW });
-    expect(trx.conn.transaction).toHaveBeenCalledTimes(1);
-    expect(trx.calls.time_entries).toEqual([]);
-    expect(sp.calls.time_entries).toEqual(expect.arrayContaining([['where', { entry_type: 'shift' }]]));
+    const { conn, calls } = shiftConn({ techRows: [DAY_TECH], clockRows: [{ technician_id: 'tech-1', clock_in: new Date('2031-03-04T12:52:00Z') }] });
+    conn.isTransaction = true;
+    conn.raw = jest.fn(async () => undefined);
+    const shiftOf = await loadTechShifts(conn, { now: NOW });
+    expect(savepointStatements(conn)).toEqual(['SAVEPOINT sp', 'RELEASE SAVEPOINT sp']);
+    expect(calls.time_entries).toEqual(expect.arrayContaining([['where', { entry_type: 'shift' }]]));
+    expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 472, endMin: 1072, source: 'clock_in' });
+  });
+
+  test('inside a transaction a failed clock-in read rolls back to its savepoint and keeps the set hours', async () => {
+    gateOn();
+    const { conn } = shiftConn({ techRows: [DAY_TECH], clockError: new Error('time_entries unavailable') });
+    conn.isTransaction = true;
+    conn.raw = jest.fn(async () => undefined);
+    const shiftOf = await loadTechShifts(conn, { now: NOW });
+    expect(savepointStatements(conn)).toEqual(['SAVEPOINT sp', 'ROLLBACK TO SAVEPOINT sp', 'RELEASE SAVEPOINT sp']);
     expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('time_entries unavailable'));
+  });
+
+  test('outside a transaction the clock-in read opens no savepoint', async () => {
+    gateOn();
+    const { conn } = shiftConn({ techRows: [DAY_TECH] });
+    conn.raw = jest.fn(async () => undefined);
+    await loadTechShifts(conn, { now: NOW });
+    expect(conn.raw).not.toHaveBeenCalled();
   });
 
   test('a failed clock-in read keeps the set hours for today and logs it', async () => {
