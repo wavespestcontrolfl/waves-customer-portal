@@ -687,7 +687,7 @@ router.post('/:id/offer', offerHandler('save', async (req) => ({
 })));
 
 router.post('/:id/offer/:offerId/send', requireOwnerAccount, offerHandler('send', (req) => JobOffers.sendOffer(
-  req.params.id, req.params.offerId, offerActor(req), req.body && req.body.draftHash, new Date(), { expectedOut: req.body && req.body.expectedOut },
+  req.params.id, req.params.offerId, offerActor(req), req.body && req.body.draftHash, undefined, { expectedOut: req.body && req.body.expectedOut },
 )));
 
 router.post('/:id/offer/:offerId/withdraw', requireOwnerAccount, offerHandler('withdraw', async (req) => ({

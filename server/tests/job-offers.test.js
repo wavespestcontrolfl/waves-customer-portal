@@ -237,12 +237,15 @@ describe('the public state', () => {
     expect(J.publicStateOf({ status: 'accepted' }, { applicationStatus: 'hired' })).toBe('signed');
   });
 
-  test('a stored expiry reads as a clock expiry does: expired at the offer stage, withdrawn once the application left it', () => {
-    expect(J.publicStateOf({ status: 'expired' }, { ...at('2026-11-28T00:00:00Z'), applicationStatus: 'offer' })).toBe('expired');
-    for (const applicationStatus of ['hired', 'rejected', 'withdrawn', 'interview']) {
-      expect(J.publicStateOf({ status: 'expired' }, { ...at('2026-11-28T00:00:00Z'), applicationStatus })).toBe('withdrawn');
-      expect(J.publicStateOf(sent, { ...at('2026-11-28T00:00:00Z'), applicationStatus })).toBe('withdrawn');
+  test('an offer past its expiry reads expired, stored or not, whatever stage the application is at', () => {
+    for (const applicationStatus of ['offer', 'hired', 'rejected', 'withdrawn', 'interview']) {
+      expect(J.publicStateOf({ status: 'expired' }, { ...at('2026-11-28T00:00:00Z'), applicationStatus })).toBe('expired');
+      expect(J.publicStateOf(sent, { ...at('2026-11-28T00:00:00Z'), applicationStatus })).toBe('expired');
     }
+    // A date request does not expire: it follows the application.
+    const asked = { status: 'date_requested', expires_at: sent.expires_at };
+    expect(J.publicStateOf(asked, { ...at('2026-11-28T00:00:00Z'), applicationStatus: 'offer' })).toBe('date_requested');
+    expect(J.publicStateOf(asked, { ...at('2026-11-28T00:00:00Z'), applicationStatus: 'rejected' })).toBe('withdrawn');
   });
 
   test('closed messages are the owner-approved words, with the main phone', () => {

@@ -353,8 +353,9 @@ const ownerFirstName = (snapshot) => String((snapshot && snapshot.owner && snaps
 
 /**
  * What the applicant's page shows for a row: open | signed | declined | date_requested | expired | withdrawn |
- * superseded, or null for a draft. A sent offer past its expiry reads expired before the 7-day close stores that state
- * and after it; an offer whose application was closed by the owner meanwhile reads withdrawn, expired or not.
+ * superseded, or null for a draft. An offer past its expiry reads expired, before that state is stored and after it,
+ * whatever the application does later: it closed on that date. (The 7-day close, a Send and a stage move each store
+ * it.) An open offer or a date request whose application the owner closed or moved back reads withdrawn.
  */
 function publicStateOf(offer, { now = new Date(), applicationStatus = null } = {}) {
   switch (offer.status) {
@@ -362,15 +363,13 @@ function publicStateOf(offer, { now = new Date(), applicationStatus = null } = {
     case 'declined': return 'declined';
     case 'withdrawn': return 'withdrawn';
     case 'superseded': return 'superseded';
-    case 'expired':
+    case 'expired': return 'expired';
     case 'sent':
     case 'date_requested': {
-      // A live offer belongs to an application sitting at 'offer': closed, or moved back to review or interview, it is
-      // dead. An offer past its expiry reads the same whether or not the 7-day close has stored that state.
+      if (expiredByClock(offer, now)) return 'expired';
+      // A live offer belongs to an application sitting at 'offer': closed, or moved back to review or interview, it is dead.
       if (applicationStatus && applicationStatus !== 'offer') return 'withdrawn';
-      if (offer.status === 'date_requested') return 'date_requested';
-      if (offer.status === 'expired') return 'expired';
-      return offer.expires_at && now.getTime() > new Date(offer.expires_at).getTime() ? 'expired' : 'open';
+      return offer.status === 'date_requested' ? 'date_requested' : 'open';
     }
     default: return null;
   }
@@ -383,7 +382,9 @@ function closedMessage(state, snapshot, offer) {
   return `This offer closed on ${fmtDay(instantToEtDay(offer.expires_at), { year: true })}. Please call ${owner} at ${WAVES_SUPPORT_PHONE_DISPLAY} if you still want the job.`;
 }
 
-// A sent offer past its expiry (the sweep has not flipped the row yet).
+// A sent offer past its expiry whose row does not say so yet. One rule for every reader and writer: such an offer is
+// expired. The 7-day close stores it (closeExpiredOffers); a Send (supersedePrior) or a stage move
+// (closeOffersWithApplication) that comes first stores the same state.
 const expiredByClock = (row, now) => row.status === 'sent' && Boolean(row.expires_at) && now.getTime() > new Date(row.expires_at).getTime();
 
 // ------------------------------------------------------------ admin shape
@@ -807,8 +808,8 @@ function stageMoveClosesOffers(fromStatus, toStatus) {
 
 // The live offers a stamp names: a draft, a date request, and a sent offer not past its expiry. A sent offer past its
 // expiry is left out whether or not the 7-day close has stored that state (closeExpiredOffers): both pages already
-// show it closed, so storing it must not change a stamp the owner read. (A stage move still marks such a row
-// withdrawn, closeOffersWithApplication; no dialog names it, because the applicant no longer holds it.)
+// show it closed, so storing it must not change a stamp the owner read. (A stage move stores such a row's expiry,
+// closeOffersWithApplication; no dialog names it, because the applicant no longer holds it.)
 async function liveOffersOf(knex, applicationId, { lock = false, now = new Date() } = {}) {
   const query = knex('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES);
   const rows = await (lock ? query.forUpdate() : query).select('id', 'status', 'expires_at', 'updated_at');
@@ -840,6 +841,10 @@ async function liveOfferStake(knex, applicationId, now = new Date()) {
 }
 
 async function closeOffersWithApplication(trx, applicationId, actorId, now = new Date()) {
+  // A sent offer already past its expiry closed on that date. The move stores that, as the 7-day close does, so the
+  // applicant's link reads the same whichever of the two came first.
+  await trx('job_offers').where({ application_id: applicationId, status: 'sent' }).where('expires_at', '<', now)
+    .update({ status: 'expired', updated_at: new Date() });
   return trx('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES)
     .update({ status: 'withdrawn', withdrawn_at: now, withdrawn_by: actorId || null, updated_at: new Date() });
 }
@@ -890,20 +895,21 @@ function replacedBySend(out, draft) {
   return out && draft && out.id === draft.supersedes_id ? out.id : null;
 }
 
-// Stores the expiry of a sent offer past its date: the one write for the two paths that store it. The 7-day close also
-// rings the owner (closeIfExpired). A Send that replaces a lapsed offer does not ring: the owner made and sent the new
-// offer on the card that showed the old one closed, so that Send is his answer to it and a bell would ask for it again.
+// Stores the expiry of a sent offer past its date, for the 7-day close and for a Send. The 7-day close also rings the
+// owner (closeIfExpired). A Send over a lapsed offer does not ring: the owner sent the new offer on the card that
+// showed the old one closed, so that Send is his answer to it and a bell would ask for it again.
 const storeExpiry = (trx, offerId) => trx('job_offers').where({ id: offerId }).update({ status: 'expired', updated_at: new Date() });
 
 async function supersedePrior(trx, applicationId, offer, now) {
   const out = await trx('job_offers').where({ application_id: applicationId }).whereIn('status', OUT_STATUSES).forUpdate().first();
   if (!out) return;
-  const replaced = replacedBySend(out, offer);
-  if (!replaced && expiredByClock(out, now)) {
+  // An offer past its expiry is expired, also when this Send is a revision of it drafted while it was open: its link
+  // already reads closed, and the offer read names no offer this Send replaces (sendReplacesId).
+  if (expiredByClock(out, now)) {
     await storeExpiry(trx, out.id);
     return;
   }
-  if (!replaced) {
+  if (!replacedBySend(out, offer)) {
     throw new OfferError(409, 'OFFER_ALREADY_OPEN', 'An offer is already out. Use Revise to make an updated one.', { offerId: out.id });
   }
   await trx('job_offers').where({ id: out.id }).update({ status: 'superseded', superseded_by_id: offer.id, updated_at: new Date() });
@@ -920,10 +926,13 @@ function sentHistoryEntry(application, actor) {
   };
 }
 
-async function commitSend(applicationId, offerId, actor, now, draftHash, expectedOut) {
+async function commitSend(applicationId, offerId, actor, fixedNow, draftHash, expectedOut) {
   return db.transaction(async (trx) => {
     const application = await loadApplication(trx, applicationId, { lock: true });
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
+    // Both rows are locked: the clock is read now, as reviseOffer reads it. A Send that waited for a lock while the
+    // offer out passed its expiry is judged at the instant it writes (the stamp, the offer it replaces, the new expiry).
+    const now = fixedNow || new Date();
     const name = await actorName(trx, actor);
     const { terms, payDayLine } = await assertSendable(trx, application, offer, { now, ownerName: name, draftHash });
     // The owner sends on a read of the offers out now (the offer read's outStamp, which sendOffer requires). An answer, a
@@ -1014,7 +1023,8 @@ const outcomesOf = (comms) => ({
 
 /** POST /:id/offer/:offerId/send */
 // expectedOut: the offer read's outStamp, which the page always sends; null skips the check.
-async function sendOffer(applicationId, offerId, actor, draftHash, now = new Date(), { expectedOut } = {}) {
+// fixedNow: a test's clock. The route passes none, so the clock is read under the locks (commitSend).
+async function sendOffer(applicationId, offerId, actor, draftHash, fixedNow, { expectedOut } = {}) {
   if (typeof draftHash !== 'string' || !draftHash) {
     throw new OfferError(400, 'DRAFT_HASH_REQUIRED', 'Send needs the hash of the preview you reviewed.');
   }
@@ -1023,7 +1033,7 @@ async function sendOffer(applicationId, offerId, actor, draftHash, now = new Dat
   if (typeof expectedOut !== 'string' || !expectedOut) {
     throw new OfferError(400, 'OUT_STAMP_REQUIRED', 'Send needs the offers out you reviewed. Open the offer again, then send.');
   }
-  const committed = await commitSend(applicationId, offerId, actor, now, draftHash, expectedOut);
+  const committed = await commitSend(applicationId, offerId, actor, fixedNow, draftHash, expectedOut);
   const comms = await deliverOfferComms(committed, actor);
   const fresh = await db('job_offers').where({ id: committed.offer.id }).first();
   return { offer: presentOffer(fresh || committed.offer, { sentByName: committed.ownerName, includeUrl: true }), comms };
