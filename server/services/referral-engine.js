@@ -625,6 +625,12 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
     const email = String(promoter?.customer_email || '').trim();
     if (!email || !email.includes('@')) return;
     const EmailTemplateLibrary = require('./email-template-library');
+    // The credited member's account: the automatic-credit switch is on the billing tab of an active account only
+    // (the portal hides it once the account is inactive). Unknown or unreadable = no switch instruction.
+    const memberId = referral?.referrer_customer_id || promoter?.customer_id;
+    const member = destination === 'account_credit' && memberId
+      ? await db('customers').where({ id: memberId }).whereNull('deleted_at').first('active').catch(() => null)
+      : null;
     await EmailTemplateLibrary.sendTemplate({
       templateKey: 'referral.reward_earned',
       to: email,
@@ -635,7 +641,7 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
         // credit (postCreditMovement), not referral balance — the email must
         // point the promoter at the right ledger.
         reward_line: destination === 'account_credit'
-          ? step2.memberCreditEmailLine(rewardDollars)
+          ? step2.memberCreditEmailLine(rewardDollars, { canTurnOnAutomaticCredit: member?.active === true })
           : `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your referral balance.`,
         // CTA points at the ledger the reward actually landed in: account
         // credits live on the billing tab, referral balance on the refer tab.

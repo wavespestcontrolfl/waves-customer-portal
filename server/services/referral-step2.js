@@ -82,9 +82,11 @@ const friendShareClause = (refereeCents, code) => `they'll give you a ${dollars(
 // The friend's part of the member invitation email's reward line (referral.invite), after "you get a $25 referral reward and ".
 const memberInviteFriendClause = (refereeCents) => `they get a ${dollars(refereeCents)} credit after their first plan service`;
 
-// The member's credit email, account-credit destination. Account credit is used only after the customer turns the
-// switch on, so the line says how (true with the gate on or off).
-const memberCreditEmailLine = (rewardDollars) => `Your ${formatDollars(rewardDollars)} referral reward has been added to your Waves account as a credit. To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.`;
+// The member's credit email, account-credit destination (the same line with the gate on or off). Account credit is used
+// on an invoice only after the customer turns the switch on, so the line says how. The billing tab shows that switch on
+// an active account only: any other reader gets the credit sentence alone, never an instruction they cannot follow.
+const memberCreditEmailLine = (rewardDollars, { canTurnOnAutomaticCredit = false } = {}) => `Your ${formatDollars(rewardDollars)} referral reward has been added to your Waves account as a credit.${
+  canTurnOnAutomaticCredit ? ' To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.' : ''}`;
 
 module.exports = {
   STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars,

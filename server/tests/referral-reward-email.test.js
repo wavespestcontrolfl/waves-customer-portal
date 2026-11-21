@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const mockState = { settings: undefined, credits: [], immediate: [], messages: {}, promoters: {}, ledgerCalls: [], referralCalls: [] };
+const mockState = { settings: undefined, credits: [], immediate: [], messages: {}, promoters: {}, customers: {}, ledgerCalls: [], referralCalls: [] };
 function mockBuilder(table) {
   const calls = [];
   const builder = new Proxy({}, {
@@ -26,6 +26,7 @@ function mockBuilder(table) {
           if (table === 'email_messages') return mockState.messages[where.idempotency_key];
           if (table === 'referral_promoters') return mockState.promoters[where.id];
           if (table === 'referral_program_settings') return mockState.settings;
+          if (table === 'customers') return mockState.customers[where.id];
           return undefined;
         };
       }
@@ -66,6 +67,7 @@ beforeEach(() => {
   mockState.immediate = [];
   mockState.messages = {};
   mockState.promoters = { 'pro-1': { id: 'pro-1', first_name: 'Lea', customer_email: 'lea@example.com' } };
+  mockState.customers = { 'cust-lea': { active: true } };
   mockState.ledgerCalls = [];
   mockState.settings = undefined;
 });
@@ -105,6 +107,21 @@ describe('sendDueReferralRewardEmails', () => {
     });
     expect(sent.payload.reward_line).toBe('Your $25 referral reward has been added to your Waves account as a credit. To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.');
     expect(sent.payload.cta_label).toBe('View my account credit');
+  });
+
+  test('a member whose account is inactive or unknown gets the credit sentence alone: the billing tab hides the switch there', async () => {
+    const line = async () => {
+      mockSendTemplate.mockClear();
+      mockState.credits = [credit()];
+      await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
+      return mockSendTemplate.mock.calls[0][0].payload.reward_line;
+    };
+    mockState.customers = { 'cust-lea': { active: false } };
+    expect(await line()).toBe('Your $25 referral reward has been added to your Waves account as a credit.');
+    mockState.customers = {};
+    expect(await line()).toBe('Your $25 referral reward has been added to your Waves account as a credit.');
+    // The button still opens the billing tab, where the credit shows.
+    expect(mockSendTemplate.mock.calls[0][0].payload.cta_label).toBe('View my account credit');
   });
 
   test('before its 9:00 AM a credit waits: posted 10:00 AM, checked 10:15 AM the same day', async () => {
