@@ -42,7 +42,7 @@ const MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024;
 // Upload errors name the caller-supplied image URL (admin publish routes accept
 // any trusted-host URL, query string included); warnings keep the status and
 // reason but never the address.
-const withoutUrls = (msg) => String(msg || '').replace(/https?:\/\/\S+/g, '<url>');
+const withoutUrls = (msg) => String(msg || '').replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>');
 
 // LinkedIn-API specifics — confirmed against Microsoft Learn Posts API docs
 // (defaultMoniker li-lms-2026-06) on 2026-06. LinkedIn sunsets monthly versions,

@@ -306,6 +306,24 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(line).not.toContain('s3cret');
   });
 
+  test('a mixed-case scheme (HTTPS://) on a failed fetch is still kept out of the warning', async () => {
+    const calls = mockRoutes();
+    const shouted = 'HTTPS://cdn.example.com/social-media/x.jpg?sig=s3cret';
+    const realFetch = global.fetch;
+    global.fetch = jest.fn(async (url, opts) => (String(url) === shouted
+      ? { ok: false, status: 403, headers: { get: () => null }, text: async () => '' }
+      : realFetch(url, opts)));
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
+
+    await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: shouted });
+
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('[linkedin] image upload failed'));
+    expect(line).toContain('thumbnail image fetch 403');
+    expect(line).not.toContain('s3cret');
+    expect(line).not.toMatch(/cdn\.example\.com/i);
+    expect(calls.some((c) => c.url.startsWith('https://api.linkedin.com/rest/posts'))).toBe(true);
+  });
+
   test('no imageUrl → no Images API traffic at all (unchanged text+article post)', async () => {
     const calls = mockRoutes();
 
