@@ -19449,7 +19449,9 @@ router.post('/:token/promo-code', stampPromoCodeHeaders, promoCodeLimiter, async
 // soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). body.kind:
 //   'change'         → parks ONE service_requests row + admin bell (note
 //                      required; topics optional chips)
-//   'still_deciding' → one activity_log row, no bell, no request row
+//   'still_deciding' → one activity_log row a day, no request row. With
+//                      body.reason (what would help the customer decide) the
+//                      row takes the reason and the office gets one bell.
 // Neither touches the estimate or messages the customer. Contract mirrors
 // measurement-review: gate + token-format gate + generic 404 (unknown /
 // malformed / ineligible / gate-off indistinguishable) + gate-aware limiter,
@@ -19494,7 +19496,7 @@ router.post('/:token/change-request', softExitLimiter, async (req, res, next) =>
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const result = kind === 'still_deciding'
-      ? await recordEstimateStillDeciding({ estimateToken: req.params.token, callSideBlockedFor })
+      ? await recordEstimateStillDeciding({ estimateToken: req.params.token, reason: req.body?.reason, req, callSideBlockedFor })
       : await createEstimateOfficeRequest({
         estimateToken: req.params.token,
         kind,

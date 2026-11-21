@@ -9240,7 +9240,19 @@ no-enroll-on-read rule, and the PII-in-logs rule as security-critical.)
 customer soft-exit sheet, GATE_ESTIMATE_SOFT_EXIT. `kind:'change'` parks
 ONE `service_requests` row (`requested_service='estimate_change_request'`)
 + an admin bell through the measurement review's shared notify core;
-`kind:'still_deciding'` writes one `activity_log` row and nothing else.
+`kind:'still_deciding'` writes one `activity_log` row per estimate per
+Eastern day and no request row. It takes an optional `reason` (owner 2026-11-21, what
+would help the customer decide: `price`, `person`, `quotes`, `timing` or
+`other`; any other value is a 400 on a valid token only). A reason is saved on
+the day's row (`metadata.reason`, `metadata.reason_at`; the newest one wins,
+and a signal with no reason never clears it) and, after the commit, goes to
+the office on the estimate's one `estimate_stuck` bell
+(`estimate-stuck-alert.js` `noteStillDeciding`, which never throws and skips
+bots, staff browsers and the office network). No reason, no bell. The
+response carries `callPromised: true` only for `person`, when that bell was
+raised and the estimate it read has a phone; only then does the sheet answer
+"We will call you". A silenced category, a failed bell write or a skipped
+browser promises no call.
 `kind:'callback'` instead gates on `GATE_WEBSITE_QUOTE_BOOKING`, requires
 the server's `websiteSelfService` stamp on the locked estimate, and parks
 one `estimate_callback_request` through the same office-request writer and
