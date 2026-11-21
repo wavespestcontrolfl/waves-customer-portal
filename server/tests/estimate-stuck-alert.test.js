@@ -115,27 +115,29 @@ describe('still deciding: what the customer said would help (owner 2026-11-21)',
     await stuck.noteStillDeciding(REQ, EST, 'price');
     const { ringOnRefresh, metadata } = raised()[0].opts;
     const today = metadata.stuckDay;
-    expect(metadata).toMatchObject({ decidingDay: today, decidingReason: 'price' });
+    expect(metadata.decidingDay).toBe(today);
+    expect(metadata).not.toHaveProperty('decidingCallDay');
     // A row a booking problem rang today: the reason still rings.
     expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'stuck' })).toBe(true);
     expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'expired' })).toBe(true);
     // A second reason today is quiet, also after a booking problem rewrote the row in between.
-    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today, decidingReason: 'quotes' })).toBe(false);
-    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'stuck', decidingDay: today, decidingReason: 'person' })).toBe(false);
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today })).toBe(false);
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'stuck', decidingDay: today, decidingCallDay: today })).toBe(false);
     // A new day rings again.
-    expect(ringOnRefresh({}, { stuckDay: '2026-11-04', stuckReason: 'deciding', decidingDay: '2026-11-04', decidingReason: 'price' })).toBe(true);
+    expect(ringOnRefresh({}, { stuckDay: '2026-11-04', stuckReason: 'deciding', decidingDay: '2026-11-04' })).toBe(true);
   });
 
   // The page promises this customer a call, and a ring reopens a row the office had marked done.
-  test('the first request that day to talk to a person rings, also after another reason rang today', async () => {
+  test('the first request that day to talk to a person rings once, also after another reason rang today', async () => {
     await stuck.noteStillDeciding(REQ, EST, 'person');
     const { ringOnRefresh, metadata } = raised()[0].opts;
     const today = metadata.stuckDay;
-    expect(metadata).toMatchObject({ decidingDay: today, decidingReason: 'person' });
-    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today, decidingReason: 'price' })).toBe(true);
+    expect(metadata).toMatchObject({ decidingDay: today, decidingCallDay: today });
+    // Another reason rang today (no call day on the row yet): the request for a person rings.
     expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today })).toBe(true);
-    // The row already says so today: a second request is quiet.
-    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today, decidingReason: 'person' })).toBe(false);
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today, decidingCallDay: '2026-11-04' })).toBe(true);
+    // person, price, person in one day: the row keeps the call day through the price refresh, so the third is quiet.
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today, decidingCallDay: today })).toBe(false);
   });
 
   // The page says "We will call you" on this answer alone, so it is true only when the office was told and can call.

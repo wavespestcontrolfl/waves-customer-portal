@@ -179,6 +179,7 @@ async function raiseStuck(estimateId, kind, whyFor, { now = new Date(), deciding
   if (await categorySilenced()) return { raised: false, reason: 'silenced' };
   const composed = composeStuck(estimate, kind, whyFor(estimate));
   const day = etDateString(now);
+  const asksForCall = kind === 'deciding' && decidingReason === 'person';
   const opts = {
     dedupeKey: `${KEY_PREFIX}${estimate.id}`,
     // The day is the version: the first reason of a new Eastern day refreshes the row even in the same words, and
@@ -187,17 +188,18 @@ async function raiseStuck(estimateId, kind, whyFor, { now = new Date(), deciding
     refreshOnDedupe: true,
     bumpOnRefresh: true,
     // A still-deciding reason keeps its own day (decidingDay): it rings over a row that already rang for a booking
-    // problem today, and once a day itself, whatever the row was rewritten with in between. One more ring: the first
-    // request that day to talk to a person. The page promises that customer a call (noteStillDeciding), and a ring
-    // reopens a row the office had marked done, so the request is never left on a dismissed alert.
+    // problem today, and once a day itself, whatever the row was rewritten with in between. One more ring, with its
+    // own day (decidingCallDay): the first request that day to talk to a person. The page promises that customer a
+    // call (noteStillDeciding), and a ring reopens a row the office had marked done.
     ringOnRefresh: (existing, existingMeta) => (kind === 'deciding'
-      ? existingMeta?.decidingDay !== day || (decidingReason === 'person' && existingMeta?.decidingReason !== 'person')
+      ? existingMeta?.decidingDay !== day || (asksForCall && existingMeta?.decidingCallDay !== day)
       : existingMeta?.stuckDay !== day),
     // triggerKey names the phone banner (bell-banners.js); customerId sits at the top level, where
     // notification-service's test-customer suppression reads it.
     metadata: {
       triggerKey: STUCK_CATEGORY, estimateId: estimate.id, customerId: estimate.customer_id || null,
-      stuckDay: day, stuckReason: kind, ...(kind === 'deciding' ? { decidingDay: day, decidingReason } : {}),
+      stuckDay: day, stuckReason: kind,
+      ...(kind === 'deciding' ? { decidingDay: day } : {}), ...(asksForCall ? { decidingCallDay: day } : {}),
     },
   };
   const result = alertEpisodesLive()

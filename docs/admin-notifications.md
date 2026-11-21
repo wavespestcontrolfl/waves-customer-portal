@@ -743,7 +743,7 @@ number", and then the page promised no call: the page promises it only when `not
 which needs this bell raised), "Is comparing other quotes.", "Says it is not the right time yet." or
 "Picked Something else and gave no detail." This reason also rings over a row that says something else that day, so a
 customer who asked for a call is never hidden behind an earlier stuck alert; a second still-deciding reason that day
-does not ring (`metadata.decidingDay`), except the first request that day to talk to a person (`metadata.decidingReason`):
+does not ring (`metadata.decidingDay`), except the first request that day to talk to a person (`metadata.decidingCallDay`):
 that one rings and reopens a row the office had marked done. A tap with no reason raises nothing. It raises on a live quote with no send stamp too. A ring also sends a
 phone banner with the New lead sound (`bell-banners.js` kind `estimate_stuck`, 7:00 AM to 9:00 PM Eastern). The category
 rings by default and the owner can silence it under Push Settings ("Customers stuck or still deciding on an estimate"); while it is
