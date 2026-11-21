@@ -30,6 +30,7 @@ const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { clearRouteCacheForRequest } = require('../utils/route-cache');
 const { nanpNationalDigits, isValidNanpNumber, nanpPhoneProblem } = require('../utils/phone');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
 const { soldByLive, setEstimateSoldBy, listSellerCandidates, loadSoldByForList, soldByRowFields } = require('../services/estimate-sold-by');
 const {
@@ -5854,8 +5855,27 @@ router.post('/:id/unarchive', async (req, res, next) => {
     if (markers.invalidatedAt) return res.status(409).json({ error: invalidatedMessage });
     if (markers.supersededAt) return res.status(409).json({ error: supersededMessage });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
-    const [updated] = await db('estimates')
-      .where({ id: req.params.id, status: estimate.status })
+    // A customer's own plan quote (plan_restart / plan_start) that a newer
+    // quote of the same kind replaced is permanent as well (#8132 pre-push
+    // r40). The mint archives the quotes it replaces and stamps nothing else,
+    // so Unarchive put the older price, and for a restart the older
+    // cancellation scope, back beside the live quote, with its link working
+    // again. Read as a query, not a stamp: it also covers a quote the office
+    // archived before the customer minted the next one, and every quote
+    // replaced before this check existed. No other writer clears the archive
+    // stamp of such a quote (the quote wizard revives its own drafts only).
+    // An accepted quote is history, is never replaced, and is not held here.
+    // The read and the write share one transaction under the customer-comms
+    // advisory lock, which the mint takes first: a mint in flight has either
+    // committed its replacement, and this read sees it, or it waits here and
+    // then archives this row with the rest of the lineage. The lock is the
+    // pre-read owner's, so the read confirms the owner under it and the write
+    // names it: a customer merge that moved the quote gets the retry message.
+    const replacedMessage = 'Another plan quote for this customer replaced this one, so it cannot be unarchived. The customer can start a new quote from their portal.';
+    const planQuotes = require('../services/cancellation-resolution/restart');
+    const heldByLineage = planQuotes.retiresWithLineage(estimate);
+    const writeUnarchive = (dbh, owner = {}) => dbh('estimates')
+      .where({ id: req.params.id, status: estimate.status, ...owner })
       // Observed-state guard, mirroring the archive route (codex pre-push
       // P1 TOCTOU): a concurrent decline/accept that resolved the archived
       // row owns its disposition — unarchiving from a stale pre-read must
@@ -5887,11 +5907,25 @@ router.post('/:id/unarchive', async (req, res, next) => {
         } : {}),
       })
       .returning('*');
+    let updated = null;
+    let block = null;
+    if (heldByLineage) {
+      block = await db.transaction(async (trx) => {
+        await lockCustomerComms(trx, estimate.customer_id);
+        const reason = await planQuotes.lineageUnarchiveBlock(trx, estimate);
+        if (!reason) [updated] = await writeUnarchive(trx, { customer_id: estimate.customer_id });
+        return reason;
+      });
+      if (block === 'replaced') return res.status(409).json({ error: replacedMessage });
+    } else {
+      [updated] = await writeUnarchive(db);
+    }
     if (!updated) {
       // Zero rows: either a linkage marker (permanent) or a concurrent
       // writer moved the row. Re-read once to say which.
-      const fresh = await db('estimates').where({ id: req.params.id }).first('status', 'archived_at', 'disposition');
-      const changed = fresh && (fresh.status !== estimate.status || !fresh.archived_at || (fresh.disposition || null) !== (estimate.disposition || null));
+      const fresh = await db('estimates').where({ id: req.params.id }).first('status', 'archived_at', 'disposition', 'customer_id');
+      const moved = block === 'moved' || (heldByLineage && !!fresh && fresh.customer_id !== estimate.customer_id);
+      const changed = moved || (fresh && (fresh.status !== estimate.status || !fresh.archived_at || (fresh.disposition || null) !== (estimate.disposition || null)));
       return res.status(409).json({ error: changed ? 'Estimate changed while you were unarchiving it. Refresh and retry.' : invalidatedMessage });
     }
     res.json(updated);
