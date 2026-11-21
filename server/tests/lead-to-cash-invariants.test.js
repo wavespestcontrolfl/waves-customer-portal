@@ -713,6 +713,25 @@ describe('two alerts, not one a day (in the app)', () => {
       sendgrid.sendOne.mockResolvedValueOnce({ ok: false, error: 'refused' });
       expect(await sweep([fails('a'), fails('b')])).toMatchObject({ error: 'send_failed' });
       expect(savedState()).toMatchObject({ items: ['b'] });
+      // The same on the email path (the in-app feed off): a refused send is not a sent report.
+      gateEnvValue.mockReturnValue(false);
+      mockTables.ops_email_send_state = mockChain({ first: null });
+      sendgrid.sendOne.mockResolvedValueOnce({ ok: false, error: 'refused' });
+      expect(await sweep([fails('a')])).toEqual({ error: 'send_failed', results: { a: 1 } });
+      expect(mockTables.ops_email_send_state.insert).not.toHaveBeenCalled();
+    });
+
+    test('the 20-hour send marker paces the whole-report email only: it never stops an in-app run', async () => {
+      // An afternoon rerun posted an alert. The next 06:55 run must still post a new closeout failure: no later run
+      // reads that day again. In the app the run state stops a second copy, so the marker is not read or written.
+      lastRun(['a'], DAY);
+      mockTables.ops_email_send_state = mockChain({ first: { last_sent_at: new Date().toISOString() } });
+      expect(await sweep([fails('a'), closeout(['v1 [x]'])])).toMatchObject({ sent: true });
+      expect(keysPosted()).toEqual([RECORD_KEY]);
+      expect(db).not.toHaveBeenCalledWith('ops_email_send_state');
+      // The email path keeps the marker.
+      gateEnvValue.mockReturnValue(false);
+      expect(await sweep([fails('a')])).toEqual({ skipped: 'recent_send', results: { a: 1 } });
     });
 
     test('the standing alert fails: the record of the same run still posts, and a rerun posts only what is missing', async () => {

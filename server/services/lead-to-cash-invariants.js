@@ -50,7 +50,9 @@
  * run.
  * Rows written before this split are full reports under RECORD_KEY. They get
  * the record treatment: the sweep never touches them.
- * The email path (the in-app feed off) is unchanged: one email a run.
+ * The email path (the in-app feed off) is as before: one email a run with the
+ * whole report, paced by the 20-hour send marker. In the app the run state
+ * decides what is new, so the marker is not read there.
  *
  * Gate: GATE_LEAD_TO_CASH_SWEEP=true (feature-gates `leadToCashInvariantSweep`;
  * kill = unset). Cron: 6:55 ET daily (scheduler.js), after the 6:00 estimate
@@ -675,11 +677,11 @@ async function postInApp(results, context) {
   return { posted: standing.posted || records.posted, errors: [standing.error, records.error].filter(Boolean) };
 }
 
-// The email path is unchanged: one email a run with the whole report, paced
-// by sentRecently(). The seam sends it (the in-app feed is off).
+// The email path: one email a run with the whole report, paced by
+// sentRecently(). The seam sends it (the in-app feed is off).
 async function sendWholeReport(report, { mailer, to }) {
   try {
-    await deliverOpsDigest({
+    await deliver({
       key: RECORD_KEY, subject: report.subject, html: report.html, text: report.text, link: '/admin/invoices',
       sendEmail: emailSender(mailer, to, report),
     });
@@ -718,17 +720,23 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   // FAIL CLOSED: owner/internal inboxes only — a mis-set recipient env skips, never leaks outward.
   const to = sweepEmail();
   if (!isInternalEmailRecipient(to)) return { skipped: 'recipient', results: summary };
-  if (await sentRecently()) return { skipped: 'recent_send', results: summary };
-  const { posted, errors } = inAppEnabled()
+  // The 20-hour send marker paces the whole-report email only: nothing else
+  // stops a second copy there. In the app the run state does that, and the
+  // marker would do harm: after an afternoon rerun that posted, the next
+  // morning's run would skip a new closeout failure, and no later run reads
+  // that day again.
+  const inApp = inAppEnabled();
+  if (!inApp && await sentRecently()) return { skipped: 'recent_send', results: summary };
+  const { posted, errors } = inApp
     ? await postInApp(results, { now, mailer, to })
     : await sendWholeReport(report, { mailer, to });
   for (const err of errors) logger.error(`[l2c-invariants] send failed: ${scrubSentryText(err?.message || err)}`);
-  // One alert of two can fail. The run then reads as failed (job_health), and
-  // the send marker stays unset so a rerun can post what is missing; the run
-  // state stops a second copy of the alert that did post.
+  // One alert of two can fail. The run then reads as failed (job_health). A
+  // rerun posts what is missing; the run state stops a second copy of the
+  // alert that did post.
   if (errors.length) return { error: 'send_failed', results: summary };
   if (!posted) return { skipped: 'no_new_item', results: summary };
-  await stampSendMarker();
+  if (!inApp) await stampSendMarker();
   return { sent: true, violations: report.total, unavailable: report.unavailable, results: summary };
 }
 
