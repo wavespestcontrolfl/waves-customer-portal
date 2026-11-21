@@ -14,7 +14,7 @@
  * never derived from either flag.
  */
 const db = require('../models/db');
-const { dateOnlyString, etDateString, etParts } = require('../utils/datetime-et');
+const { dateOnlyString, etDateString, etParts, validCalendarDate } = require('../utils/datetime-et');
 const { STAFF_WORK_DATE_SQL } = require('../utils/staff-time-work-date');
 const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
@@ -425,8 +425,12 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
   }
   return (technicianId, date) => {
     const shift = shifts.get(String(technicianId));
-    const day = date ? dateOnlyString(date) : null;
-    if (!shift || dayOfWeekOfDate(day) === null) return null;
+    // A Date (a pg DATE read back) or an exact 'YYYY-MM-DD'; anything else, an
+    // invalid Date or a string with a tail included, is no date.
+    const day = date instanceof Date
+      ? (Number.isNaN(date.getTime()) ? null : dateOnlyString(date))
+      : validCalendarDate(date);
+    if (!shift || !day) return null;
     const clockIn = day === today ? clockIns.get(String(technicianId)) : undefined;
     if (clockIn === undefined) return { ...shift, source: 'roster' };
     return { startMin: clockIn, endMin: Math.min(24 * 60, clockIn + (shift.endMin - shift.startMin)), source: 'clock_in' };

@@ -64,6 +64,12 @@ postgres('technician shift hours (real Postgres)', () => {
   }
 
   beforeAll(async () => {
+    // Roster DDL (a rolled-back migration down, a renamed time_entries) and technician rows: only CI's own
+    // database or a task-private QA database, never a shared one.
+    const url = new URL(process.env.DATABASE_URL);
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+    if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     db = require('../models/db');
     eligibility = require('../services/technician-eligibility');
     ({ ACTIVE_WRITE_GENERATION } = require('../constants/staff-time'));
@@ -87,7 +93,7 @@ postgres('technician shift hours (real Postgres)', () => {
   afterAll(async () => {
     if (made.entryIds.length) await db('time_entries').whereIn('id', made.entryIds).del();
     if (made.techIds.length) await db('technicians').whereIn('id', made.techIds).del();
-    await db.destroy();
+    if (db) await db.destroy();
   });
 
   describe('the columns and their CHECK', () => {

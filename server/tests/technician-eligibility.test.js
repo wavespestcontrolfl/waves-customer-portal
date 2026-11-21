@@ -492,6 +492,10 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
     expect(shiftOf('tech-2', TOMORROW)).toBeNull();
     expect(shiftOf('tech-1', 'not-a-date')).toBeNull();
     expect(shiftOf('tech-1', null)).toBeNull();
+    // A tail, an impossible day and an invalid Date are no date (and never throw).
+    expect(shiftOf('tech-1', '2031-03-05junk')).toBeNull();
+    expect(shiftOf('tech-1', '2031-02-30')).toBeNull();
+    expect(shiftOf('tech-1', new Date('not a date'))).toBeNull();
     expect(calls.technicians).toEqual(expect.arrayContaining([
       ['whereNotNull', 'shift_start'], ['whereNotNull', 'shift_end'], ['select', 'id', 'shift_start', 'shift_end'],
     ]));
