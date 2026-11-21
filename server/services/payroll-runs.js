@@ -941,7 +941,10 @@ async function draftRun(input, actor, conn = db) {
       await syncTechRewards(trx, run, actorId);
       const evaluation = await evaluate(trx, run, { lock: true });
       if (!evaluation.checks.length && !evaluation.blocked.length && !evaluation.waiting.length) {
-        throw new PayrollError(409, 'No W-2 hours to pay for that week.');
+        // No run is kept (this rolls back), so there is no screen to list a waiting Tech Rewards line on: the message says
+        // each one, with its reason and the last pay date that can add it. Read before the rollback takes the run row.
+        const waitingRewards = await waitNotes(trx, id);
+        throw new PayrollError(409, ['No W-2 hours to pay for that week.', ...waitingRewards.map((note) => `${note}.`)].join(' '));
       }
       await replaceDraftChecks(trx, id, evaluation.checks);
       await audit(trx, actorId, 'payroll.run_drafted', 'payroll_runs', id, { run_id: id });

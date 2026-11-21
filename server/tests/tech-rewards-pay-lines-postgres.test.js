@@ -124,7 +124,9 @@ postgres('tech rewards pay lines: the December gift', () => {
   const notesOf = async (runId) => (await api('GET', `/runs/${runId}`)).body.run.techRewardsNotes || [];
   // the note for a gift of 2026 that waits: the reason, then the last pay date that can carry it (Dec 18 + 60 days)
   const waits = (name, why) => `December gift for ${name} waits: ${why}. Only a pay run dated Feb 16, 2027 or earlier can add it`;
-  const syncEvents = () => trx('audit_log').where({ action: 'payroll.tech_rewards_lines_synced' }).orderBy('created_at');
+  // Every event of one test has the same created_at (one outer transaction), so a test picks its event by run and by key.
+  const syncEvents = () => trx('audit_log').where({ action: 'payroll.tech_rewards_lines_synced' });
+  const syncEventOf = async (runId, key) => (await syncEvents()).map((e) => e.metadata).filter((m) => m.run_id === runId && key in m);
   const runRow = async (runId) => {
     const row = await trx('payroll_runs').where({ id: runId }).first();
     return { id: row.id, week_start: dateOf(row.week_start), pay_date: dateOf(row.pay_date) };
@@ -493,6 +495,20 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await notesOf(run.id)).toEqual([]);
     });
 
+    it('says what waits when a week has nothing else to pay: no run is kept, and the message carries the note', async () => {
+      const tech = await readyTech('Sample Alpha'); // no hours in the gift week
+      await approvedWeek(tech, '2026-11-02'); // approved, never paid
+      const refused = await api('POST', '/runs', { body: { weekStart: GIFT_WEEK } });
+      expect([refused.status, refused.body.error]).toEqual([409,
+        `No W-2 hours to pay for that week. ${waits('Sample Alpha', 'the week of Nov 2, 2026 is not paid yet')}.`]);
+      expect(await trx('payroll_runs').where({ week_start: GIFT_WEEK })).toHaveLength(0);
+      expect(await linesOf(tech)).toHaveLength(0);
+      // with nothing waiting the message is the one it was
+      delete process.env.GATE_TECH_REWARDS_PAY_LINES;
+      const plain = await api('POST', '/runs', { body: { weekStart: GIFT_WEEK } });
+      expect([plain.status, plain.body.error]).toEqual([409, 'No W-2 hours to pay for that week.']);
+    });
+
     it('keeps ids, a reason code and a week on the run row, never an amount, and shows no note while the gate is off', async () => {
       const tech = await readyTech('Sample Alpha');
       await approvedWeek(tech, '2026-11-02');
@@ -501,11 +517,10 @@ postgres('tech rewards pay lines: the December gift', () => {
       const stored = await trx('payroll_runs').where({ id: run.id }).first('tech_rewards_waits');
       expect(stored.tech_rewards_waits).toEqual([{ technician_id: tech, kind: 'december_gift', source_id: `december_gift:${tech}:2026`, reason: 'week_not_paid', week: '2026-11-02' }]);
       // the audit event holds the same rows and line ids, and no key for an amount
-      const event = (await syncEvents()).at(-1);
-      expect(event.metadata).toEqual({
+      expect(await syncEventOf(run.id, 'waits')).toEqual([{
         run_id: run.id, week_start: GIFT_WEEK, added_line_ids: [], updated_line_ids: [], removed_line_ids: [], skipped: [],
         waits: stored.tech_rewards_waits,
-      });
+      }]);
       delete process.env.GATE_TECH_REWARDS_PAY_LINES;
       expect(await notesOf(run.id)).toEqual([]);
     });
@@ -650,8 +665,8 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(dateOf((await lineOf(alpha)).earned_week_start)).toBe(NEXT_WEEK);
       const reviewed = (await api('GET', `/runs/${later.id}`)).body.run;
       expect([reviewed.status, checkOf(reviewed, alpha).techRewardsCents]).toEqual(['draft', GIFT]);
-      const event = (await syncEvents()).at(-1);
-      expect(event.metadata).toEqual({ run_id: later.id, week_start: NEXT_WEEK, claimed_before_final_line_ids: [(await lineOf(alpha)).id] });
+      expect(await syncEventOf(later.id, 'claimed_before_final_line_ids'))
+        .toEqual([{ run_id: later.id, week_start: NEXT_WEEK, claimed_before_final_line_ids: [(await lineOf(alpha)).id] }]);
       // Bravo is not paid on this run: their gift stays with the Dec 18 draft
       expect(dateOf((await lineOf(bravo)).earned_week_start)).toBe(GIFT_WEEK);
       const final = await finalize(later.id);
@@ -664,6 +679,35 @@ postgres('tech rewards pay lines: the December gift', () => {
       await finalize(earlier.id);
       expect((await linesOf(alpha)).map((l) => l.status)).toEqual(['paid']);
       expect((await linesOf(bravo)).map((l) => l.status)).toEqual(['paid']);
+    });
+
+    it('is released, with a note on the later run, when that run is finalized first and must wait for the earlier week', async () => {
+      const tech = await readyTech('Sample Alpha'); // hours in both weeks
+      await approvedWeek(tech, GIFT_WEEK);
+      await approvedWeek(tech, NEXT_WEEK);
+      const earlier = await draft(GIFT_WEEK); // dated Dec 18: wages and the gift
+      const gift = await lineOf(tech);
+      const later = await draft(NEXT_WEEK); // dated Dec 25: wages, no gift (the Dec 18 draft pays first)
+      expect(await notesOf(later.id)).toEqual([]);
+      // The office finalizes the Dec 25 run first. It cannot take the gift (the week of Dec 7 is not paid), and its check closes
+      // the Dec 18 draft to the technician: the line is released and this run says what the gift waits for.
+      await finalize(later.id);
+      expect(await linesOf(tech)).toHaveLength(0);
+      expect(await notesOf(later.id)).toEqual([waits('Sample Alpha', 'the week of Dec 7, 2026 is not paid yet')]);
+      expect(await syncEventOf(later.id, 'released_before_final_line_ids')).toEqual([{
+        run_id: later.id, week_start: NEXT_WEEK, released_before_final_line_ids: [gift.id],
+        waits: [{ technician_id: tech, kind: 'december_gift', source_id: `december_gift:${tech}:2026`, reason: 'week_not_paid', week: GIFT_WEEK }],
+      }]);
+      // the earlier draft cannot be finalized with this technician's check while the later run is final (the pay run's own rule)
+      const token = (await api('GET', `/runs/${earlier.id}`)).body.run.token;
+      const refused = await api('POST', `/runs/${earlier.id}/finalize`, { body: { token } });
+      expect([refused.status, refused.body.error]).toEqual([409, 'A later pay run is already final. Void it first, then finalize this one.']);
+      // the office voids the later run and pays in order: the gift is on the Dec 18 check, once
+      await voidRun(later.id);
+      await recompute(earlier.id);
+      const final = await finalize(earlier.id);
+      expect(checkOf(final, tech).techRewardsCents).toBe(GIFT);
+      expect((await linesOf(tech)).map((l) => l.status)).toEqual(['paid']);
     });
 
     it('goes by pay date, not by week: the later week with the earlier pay date claims it', async () => {

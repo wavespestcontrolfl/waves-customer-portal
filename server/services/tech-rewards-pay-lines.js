@@ -230,6 +230,16 @@ async function saveWaits(trx, run, waits) {
     .update({ tech_rewards_waits: waits.length ? JSON.stringify(waits.map(waitRow)) : null });
 }
 
+/** Adds waits to the ones the run's sync saved (claimBeforeFinal), one row per line. */
+async function addWaits(trx, run, waits) {
+  const row = await trx('payroll_runs').where({ id: run.id, status: 'draft' }).first('tech_rewards_waits');
+  if (!row) return;
+  const added = waits.map(waitRow);
+  const kept = (Array.isArray(row.tech_rewards_waits) ? row.tech_rewards_waits : [])
+    .filter((old) => !added.some((w) => w.source_id === old.source_id));
+  await trx('payroll_runs').where({ id: run.id, status: 'draft' }).update({ tech_rewards_waits: JSON.stringify([...kept, ...added]) });
+}
+
 async function audit(trx, actorId, run, metadata) {
   await recordAuditEvent({
     trx, critical: true, actor_type: 'admin', actor_id: actorId,
@@ -412,10 +422,41 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {
  * Tech Rewards line that an earlier-dated DRAFT still holds for one of `technicianIds` (the technicians this run pays) could
  * never be paid there once this run is final. Each such line that this run is dated for and ready to pay moves here. Returns
  * the ids moved: the caller works the run out again, and its token check sends the changed numbers back for review, so nothing
- * is paid that the office did not see. An owner dated in another tax year, or one that pays later, keeps its line.
+ * is paid that the office did not see. A line this run is dated for but must wait on (the earlier draft's own week holds the
+ * technician's unpaid wages, say) cannot move: it is released, and the wait goes on this run's row, so the pay run that closed
+ * the earlier draft says which week needs a check and by when. An owner dated in another tax year, or one that pays later,
+ * keeps its line.
  */
 async function claimBeforeFinal(run, trx, technicianIds, { actorId = null } = {}) {
   if (!payLinesOn() || !techRewardsOn() || !technicianIds.length) return [];
+  const moved = [];
+  const released = [];
+  const waits = [];
+  for (const { line, cand, tech } of await linesClosedBy(trx, run, technicianIds)) {
+    const priced = await priceCandidate(trx, cand, tech, run);
+    if (priced.amountCents) {
+      await moveLine(trx, line.id, spanOf(cand.key, run.week_start), priced.amountCents);
+      moved.push(line.id);
+    } else if (priced.wait) {
+      await trx('payroll_pay_lines').where({ id: line.id, status: 'open' }).del();
+      released.push(line.id);
+      waits.push({ technicianId: line.technician_id, kind: line.kind, sourceId: line.source_id, ...priced.wait });
+    }
+  }
+  if (waits.length) await addWaits(trx, run, waits);
+  if (moved.length || released.length) {
+    await audit(trx, actorId, run, {
+      ...(moved.length ? { claimed_before_final_line_ids: moved } : {}),
+      ...(released.length ? { released_before_final_line_ids: released, waits: waits.map(waitRow) } : {}),
+    });
+  }
+  return moved;
+}
+
+// The open lines that `run`, once final, closes to their owner: held for one of `technicianIds` by a DRAFT run of the same tax
+// year that pays before `run` does, for a technician who still gets a line, and of a kind and key `run` is dated for. Locked.
+// [{ line, cand, tech }], by source key.
+async function linesClosedBy(trx, run, technicianIds) {
   const lines = await trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' })
     .whereIn('technician_id', technicianIds).whereNot({ earned_week_start: run.week_start })
     .orderBy('source_id').forUpdate().select(lineColumns(trx));
@@ -427,21 +468,12 @@ async function claimBeforeFinal(run, trx, technicianIds, { actorId = null } = {}
     .whereIn('technicians.id', lines.map((line) => line.technician_id)).forShare()
     .select('technicians.id', trx.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date"))).map((row) => [row.id, row]));
   const due = dueInRun(run.pay_date);
-  const moved = [];
-  for (const line of lines) {
-    const owner = owners.get(line.earned_week_start);
-    const match = SOURCE_ID_RE.exec(line.source_id || '');
-    const tech = techs.get(line.technician_id);
-    const closes = owner && paysFirst(owner, run) && yearOf(owner.pay_date) === yearOf(run.pay_date);
-    if (!closes || !match || !tech || !due.some((d) => d.kind === line.kind && d.key === match[3])) continue;
-    const cand = { kind: line.kind, key: match[3], technicianId: line.technician_id };
-    const priced = await priceCandidate(trx, cand, tech, run);
-    if (!priced.amountCents) continue;
-    await moveLine(trx, line.id, spanOf(cand.key, run.week_start), priced.amountCents);
-    moved.push(line.id);
-  }
-  if (moved.length) await audit(trx, actorId, run, { claimed_before_final_line_ids: moved });
-  return moved;
+  const closedTo = (owner) => Boolean(owner) && paysFirst(owner, run) && yearOf(owner.pay_date) === yearOf(run.pay_date);
+  return lines
+    .map((line) => ({ line, match: SOURCE_ID_RE.exec(line.source_id || ''), tech: techs.get(line.technician_id) }))
+    .filter(({ line, match, tech }) => match && tech && closedTo(owners.get(line.earned_week_start))
+      && due.some((d) => d.kind === line.kind && d.key === match[3]))
+    .map(({ line, match, tech }) => ({ line, tech, cand: { kind: line.kind, key: match[3], technicianId: line.technician_id } }));
 }
 
 /**
