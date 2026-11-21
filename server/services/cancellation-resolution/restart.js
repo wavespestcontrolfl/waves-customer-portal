@@ -720,11 +720,11 @@ async function accountHasOtherProfile(dbh, customer) {
 // plan-free profile beside a member profile would sell a first plan. Any
 // other non-deleted profile counts, active or not, as the proof counts every
 // property row. Plan restart keeps the portal offer's default, as on main.
-// Both modes refuse a first line that names no street (codex pre-push r31
-// P1; streetLineNamesStreet, the address normalizer's own unit grammar):
-// blank with the unit on line 2, only a unit ("Apt 4", "#4", "Apt#4", "4B",
-// "PH1"), a number with no street ("4", "123 Apt#4"), or a unit and the
-// row's own city ("Apt 4, Sarasota, FL 34236"). Its key would name no house.
+// Both modes refuse a first line that names no house on a street (codex
+// pre-push r31 P1; streetLineNamesStreet, the address normalizer's own unit
+// grammar): a line with no house number (blank with the unit on line 2, a
+// unit, a city, a street with no number), or a house number with no street
+// after it ("4", "123 Apt#4", "123 FL 34236"). Its key would name no house.
 async function singlePremisesStreet(dbh, customer, { proof, strict = false } = {}) {
   const linkage = require('../estimate-property-linkage');
   if (!require('../../utils/address-normalizer').streetLineNamesStreet(customer)) return null;

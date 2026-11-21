@@ -2145,8 +2145,9 @@ route or on site after ET midnight) and no annual prepay term covering today, si
 the option with no WaveGuard qualifiers. The account must also still pass the mint's residential and
 premises checks: a stored property type that is not commercial (the mint's stored-type guard,
 `isCommercialProperty`), and one provable premises (`singlePremisesStreet`, strict: not flagged
-multi-home, a primary street with a city or zip on a first address line that names a street (not
-only a unit, a number or the city), at most one property row and that row at the primary street,
+multi-home, a primary street with a city or zip on a first address line that starts with a house
+number and names a street (not only a unit, a number or the city), at most one property row and that
+row at the primary street,
 and no visit whose stamped address, property row or creating estimate names another
 address or cannot be resolved) whose street is both the estimate's own address and the home the mint
 priced (`estimate_data.planStart.premisesKey`), so a move or a second property since the mint refuses,

@@ -1159,9 +1159,9 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(0);
   });
 
-  test('a first line that names no street gets no online restart price: its home key would be the unit alone (codex pre-push r31 P1)', async () => {
+  test('a first line that names no street gets no online restart price: its home key would name no house (codex pre-push r31 P1)', async () => {
     for (const [line1, line2] of [['', 'Apt 4'], ['Apt 4', null], ['#4', null], ['Apt#4', null], ['4B', null], ['PH1', null], ['123 Apt 4', null], ['123 Apt#4', null], ['Bldg 2, Apt 4', null], ['4', null],
-      ['Parrish', null], ['Apt 4, Parrish, FL 34219', null]]) {
+      ['Parrish', null], ['Apt 4, Parrish, FL 34219', null], ['123 Parrish', null], ['Main St', null], ['123 FL 34219', null]]) {
       tables.customers[0] = { ...tables.customers[0], address_line1: line1, address_line2: line2 };
       await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'pricing_unavailable' });
     }
