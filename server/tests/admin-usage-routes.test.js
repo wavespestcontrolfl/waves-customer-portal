@@ -351,14 +351,21 @@ describe('admin usage: POST /track tab build', () => {
 
   // The name is what the tab knew at its last page move; the page view can
   // leave long after it (a tab switch on the same page, after a deploy).
-  test("'never-heard' is kept only while the page view names no server the tab has heard from", async () => {
+  test("'never-heard' is stored under a name of its own while the page view names no server, else as 'current'", async () => {
     const { BOOT } = require('../middleware/portal-build-header');
+    const { RELOAD_BLOCKERS, NO_SERVER_HEARD } = require('../routes/admin-usage');
     setPortalBuildForTests('bbb222bbb222');
     const tab = { build: 'aaa111aaa111', reloadHold: 'never-heard' };
     // The tab still has heard no server: it cannot know it is out of date.
-    await expect(stored(tab)).resolves.toEqual({ stale_build: true, reload_hold: 'never-heard' });
-    await expect(stored({ ...tab, boot: 0 })).resolves.toEqual({ stale_build: true, reload_hold: 'never-heard' });
-    await expect(stored({ ...tab, boot: String(Number(BOOT)), liveBuild: 'not a build' })).resolves.toEqual({ stale_build: true, reload_hold: 'never-heard' });
+    // The stored name is not the one the tab sent, so a row from before this
+    // rule (it holds 'never-heard') never reads as this proof.
+    expect(NO_SERVER_HEARD).toBe('no-server-heard');
+    await expect(stored(tab)).resolves.toEqual({ stale_build: true, reload_hold: 'no-server-heard' });
+    await expect(stored({ ...tab, boot: 0 })).resolves.toEqual({ stale_build: true, reload_hold: 'no-server-heard' });
+    await expect(stored({ ...tab, boot: String(Number(BOOT)), liveBuild: 'not a build' })).resolves.toEqual({ stale_build: true, reload_hold: 'no-server-heard' });
+    // No tab sends the stored name: one that does stores no name.
+    expect(RELOAD_BLOCKERS.has(NO_SERVER_HEARD)).toBe(false);
+    await expect(stored({ ...tab, reloadHold: 'no-server-heard' })).resolves.toEqual({ stale_build: true, reload_hold: null });
     // It has heard one since its move (this server, an older one, or one
     // whose start time did not arrive): the move was by a tab that knew no
     // newer build.

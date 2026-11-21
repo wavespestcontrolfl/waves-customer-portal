@@ -1,8 +1,9 @@
 /**
  * The nightly tab reload check's read, on PostgreSQL: readMissedReloads
- * counts only the stale page views of the last 24 hours with no name,
- * 'never-heard', 'reloaded' or 'reload-missed'. The two columns it reads
- * have their own test (admin-usage-reload-columns-postgres.test.js).
+ * counts only the stale page views since the scheduled time of the run
+ * before it, with no name, 'no-server-heard', 'reloaded' or 'reload-missed'.
+ * The two columns it reads have their own test
+ * (admin-usage-reload-columns-postgres.test.js).
  *
  * Self-skips without DATABASE_URL. It runs in a schema of its own, on a
  * small admin_usage_events it makes itself, so it needs no migrated database
@@ -25,7 +26,9 @@ jest.setTimeout(60000);
 
 (SKIP ? describe.skip : describe)('tab reload check on PostgreSQL', () => {
   const schema = `tab_reload_${randomUUID().replaceAll('-', '')}`;
-  const NOW = new Date('2026-11-21T04:34:00Z');
+  // Nov 1 2026, 11:51:02 PM EST: the run on the night the clocks went back.
+  // The run before it was Oct 31, 11:51 PM EDT, 25 hours earlier.
+  const NOW = new Date('2026-11-02T04:51:02Z');
   const TECH = randomUUID();
   let database;
 
@@ -59,20 +62,24 @@ jest.setTimeout(60000);
     ...fields,
   });
 
-  test('counts the stale page views of the last 24 hours whose name shows a failed reload', async () => {
+  test('counts the stale page views since the run before it whose name shows a failed reload', async () => {
     await database('admin_usage_events').insert([
       view(10, { stale_build: true, reload_hold: null }),
       view(20, { stale_build: true, reload_hold: null }),
-      view(30, { stale_build: true, reload_hold: 'never-heard', page_key: 'dashboard', path: '/admin/dashboard' }),
+      view(30, { stale_build: true, reload_hold: 'no-server-heard', page_key: 'dashboard', path: '/admin/dashboard' }),
       view(40, { stale_build: true, reload_hold: 'reloaded' }),
-      view(45, { stale_build: true, reload_hold: 'reload-missed' }),
+      // In the hour after the run before this one: a fixed 24 hours skips it.
+      view(24 * 60 + 30, { stale_build: true, reload_hold: 'reload-missed' }),
       // Not counted: a rule the owner chose, a current tab (also with a
-      // failed name: the name test is grouped), an unknown build, too old.
+      // failed name: the name test is grouped), an unknown build, the name a
+      // tab sends (a row from before the route stored a name of its own),
+      // and a view from before the run before this one.
       view(50, { stale_build: true, reload_hold: 'field-page' }),
       view(60, { stale_build: false, reload_hold: null }),
       view(70, { stale_build: false, reload_hold: 'reloaded' }),
       view(80, { stale_build: null, reload_hold: null }),
-      view(24 * 60 + 1, { stale_build: true, reload_hold: 'never-heard' }),
+      view(90, { stale_build: true, reload_hold: 'never-heard' }),
+      view(25 * 60 + 1, { stale_build: true, reload_hold: 'no-server-heard' }),
     ]);
 
     const rows = await readMissedReloads({ now: NOW, knex: database });
@@ -81,7 +88,7 @@ jest.setTimeout(60000);
       .map((r) => [r.reload_hold || 'none', r.page_key, r.technician_id, Number(r.views)])
       .sort((a, b) => a.join().localeCompare(b.join()));
     expect(counted).toEqual([
-      ['never-heard', 'dashboard', TECH, 1],
+      ['no-server-heard', 'dashboard', TECH, 1],
       ['none', 'pipeline', TECH, 2],
       ['reload-missed', 'pipeline', TECH, 1],
       ['reloaded', 'pipeline', TECH, 1],

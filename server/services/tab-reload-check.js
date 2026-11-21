@@ -4,14 +4,16 @@
 // keeps it on its build (client/src/lib/portalReload.js; owner 2026-11-19,
 // option A). Each staff page view logs whether the tab's build was out of
 // date and what kept it there (admin_usage_events.stale_build and
-// reload_hold, written by routes/admin-usage.js). This job reads the last 24
-// hours once a night and posts one engineering FIX row to the ops digest
-// when out-of-date page views show a failed reload:
+// reload_hold, written by routes/admin-usage.js). This job reads, once a
+// night, the page views since the scheduled time of the run before it, and
+// posts one engineering FIX row to the ops digest when out-of-date page
+// views show a failed reload:
 // - no name: the move was due a reload, or no move was noted for the page
 //   (components/PortalUpdate.jsx);
-// - 'never-heard': the tab had still heard no server as the page view left,
-//   so it cannot know it is out of date (the route stores the name only
-//   then, routes/admin-usage.js);
+// - 'no-server-heard': the tab had still heard no server as the page view
+//   left, so it cannot know it is out of date. The route stores this name of
+//   its own (routes/admin-usage.js); 'never-heard', the name a tab sends, is
+//   not counted: a row that holds it is older than that rule;
 // - 'reloaded': three reloads for the live build came back on the old one;
 // - 'reload-missed': the page the tab loaded is the tab's own reload for a
 //   newer build, and it came back on the build it left.
@@ -23,21 +25,24 @@
 // in-app feed is off, one email to the internal ops inbox).
 
 const db = require('../models/db');
+const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const { deliverOpsDigest } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 
 const OPS_KEY = 'tab-reload-check';
-const WINDOW_MS = 24 * 60 * 60 * 1000;
-const FAILED_NAMES = ['never-heard', 'reloaded', 'reload-missed'];
+// The job's scheduled time, Eastern (scheduler.js; a test keeps both in step).
+const RUN_AT = '23:51';
+const HALF_DAY_MS = 12 * 60 * 60 * 1000;
+const FAILED_NAMES = ['no-server-heard', 'reloaded', 'reload-missed'];
 const OPS_INBOX = 'contact@wavespestcontrol.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || OPS_INBOX;
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 
 const CAUSES = {
   none: 'the move was due a reload, or no move was noted for the page (client/src/components/PortalUpdate.jsx)',
-  'never-heard': 'the tab had still heard no server as the page view left, so it cannot know it is out of date (client/src/lib/portalVersion.js, server/middleware/portal-build-header.js)',
+  'no-server-heard': 'the tab had still heard no server as the page view left, so it cannot know it is out of date (client/src/lib/portalVersion.js, server/middleware/portal-build-header.js)',
   reloaded: 'three reloads for the live build came back on the old build (client/src/lib/portalReload.js)',
   'reload-missed': "the tab's own reload for a newer build came back on the build it left (client/src/lib/portalReload.js, client/public/sw.js)",
 };
@@ -46,11 +51,25 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// Out-of-date staff page views of the last 24 hours whose name shows a
-// failed reload, counted for each name, page and staff member.
+// Where a run's read starts: the scheduled time of the run before it, in
+// Eastern time. From one run to the next is 23, 24 or 25 hours (the clocks
+// change), so a fixed 24 hours would skip the hour after the last run on the
+// night the clocks go back. It is the latest scheduled time at least half a
+// day old: a run starts a moment after its own.
+function windowStart(now = new Date()) {
+  const scheduled = (daysBack) => parseETDateTime(`${etDateString(addETDays(now, -daysBack))}T${RUN_AT}`);
+  for (const daysBack of [0, 1]) {
+    const at = scheduled(daysBack);
+    if (now.getTime() - at.getTime() >= HALF_DAY_MS) return at;
+  }
+  return scheduled(2);
+}
+
+// Out-of-date staff page views since the run before this one whose name
+// shows a failed reload, counted for each name, page and staff member.
 function readMissedReloads({ now = new Date(), knex = db } = {}) {
   return knex('admin_usage_events')
-    .where('created_at', '>=', new Date(now.getTime() - WINDOW_MS))
+    .where('created_at', '>=', windowStart(now))
     .where('stale_build', true)
     .where((q) => q.whereNull('reload_hold').orWhereIn('reload_hold', FAILED_NAMES))
     .select('reload_hold', 'page_key', 'technician_id')
@@ -79,14 +98,14 @@ function summarize(rows) {
 function composeDigest({ views, people, names, pages }) {
   const s = views === 1 ? '' : 's';
   const who = `${people} staff member${people === 1 ? '' : 's'}`;
-  const lead = `In the last 24 hours, ${views} staff page view${s} by ${who} ran an out-of-date portal build that should have reloaded.`;
+  const lead = `Since the nightly check before this one, ${views} staff page view${s} by ${who} ran an out-of-date portal build that should have reloaded.`;
   const causeLine = ([name, n]) => `${name === 'none' ? 'no name' : name} (${n}): ${CAUSES[name]}`;
   const pageLine = ([page, n]) => `${page}: ${n}`;
   const source = 'Rows: admin_usage_events with stale_build true (routes/admin-usage.js).';
   return {
     subject: `FIX: ${views} staff page view${s} missed a reload to the live portal build`,
     headline: 'System — fix the reload of out-of-date staff tabs',
-    summary: `${views} staff page view${s} in the last 24 h ran an out-of-date build that should have reloaded.`,
+    summary: `${views} staff page view${s} since the last check ran an out-of-date build that should have reloaded.`,
     text: [lead, '', 'By cause:', ...names.map((e) => `- ${causeLine(e)}`), '', 'By page:', ...pages.map((e) => `- ${pageLine(e)}`), '', source].join('\n'),
     html: [
       `<p>${esc(lead)}</p>`,
@@ -150,7 +169,9 @@ async function runTabReloadCheck({ readRows = readMissedReloads, mailer = sendgr
 module.exports = {
   runTabReloadCheck,
   readMissedReloads,
+  windowStart,
   OPS_KEY,
+  RUN_AT,
   FAILED_NAMES,
   _private: { summarize, composeDigest },
 };

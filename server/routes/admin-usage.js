@@ -64,6 +64,10 @@ const RELOAD_BLOCKERS = new Set([
   'schedule-notice', 'tap-to-pay', 'text-attachment', 'text-draft', 'time-clock',
   'visit-step', 'visual-note', 'zone-map',
 ]);
+// Stored, never sent: an out-of-date tab that had still heard no server as
+// its page view left (tabReloadFields). It is not on the list above, so a
+// tab that sends it stores no name.
+const NO_SERVER_HEARD = 'no-server-heard';
 const EVENT_TYPES = new Set(['page_view']);
 
 // Mirror of the client normalizer's ID detection (lib/adminUsage.js). The
@@ -169,8 +173,10 @@ const ET_DAY_SQL = "(created_at AT TIME ZONE 'America/New_York')::date";
 // `liveBuild` are read as the page view leaves. When one is there, the tab
 // has heard a server since: its move was one by a tab that knew no newer
 // build ('current'), and a build that went live after the move is no missed
-// reload. So a stored 'never-heard' is a tab that is out of date and still
-// cannot know it (the nightly check counts it, services/tab-reload-check.js).
+// reload. When neither is there, the tab is out of date and still cannot
+// know it: that is stored as NO_SERVER_HEARD, which the nightly check counts
+// (services/tab-reload-check.js). 'never-heard' itself is never stored: a
+// row that holds it is older than this rule and proves neither.
 function tabReloadFields(build, reloadHold, boot, liveBuild) {
   const served = servedPortalBuild();
   const sameBuild = typeof liveBuild === 'string' && liveBuild.toLowerCase() === served;
@@ -178,7 +184,7 @@ function tabReloadFields(build, reloadHold, boot, liveBuild) {
   const stale = !draining && typeof build === 'string' && BUILD_RE.test(build) && served ? build.toLowerCase() !== served : null;
   const name = stale && RELOAD_BLOCKERS.has(reloadHold) ? reloadHold : null;
   const heard = (typeof boot === 'number' && boot > 0) || (typeof liveBuild === 'string' && BUILD_RE.test(liveBuild));
-  return { stale_build: stale, reload_hold: name === 'never-heard' && heard ? 'current' : name };
+  return { stale_build: stale, reload_hold: name === 'never-heard' ? (heard ? 'current' : NO_SERVER_HEARD) : name };
 }
 
 router.post('/track', async (req, res, next) => {
@@ -339,3 +345,4 @@ module.exports = router;
 module.exports.KNOWN_PAGE_KEYS = KNOWN_PAGE_KEYS;
 // Exposed for the client drift test of the reload blocker names, likewise.
 module.exports.RELOAD_BLOCKERS = RELOAD_BLOCKERS;
+module.exports.NO_SERVER_HEARD = NO_SERVER_HEARD;
