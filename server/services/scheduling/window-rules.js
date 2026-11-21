@@ -191,6 +191,23 @@ function occupancyBlockFor(row) {
   return { start: minutesToHHMM(startMin), end: minutesToHHMM(endMin) };
 }
 
+// A visit row's own block in MINUTES after midnight: the `hours` of the technician shift check
+// (assertAssignableTechnician and shiftExcluding, technician-eligibility.js). Its end is its start
+// plus `minutes` (a length resolved now) when given, else its stored end, else its start plus its
+// stored length (60 minutes when none). The end is never wrapped or clamped at midnight, so a long
+// job late in the day still ends after it starts: a stored end before the start was wrapped when
+// it was written (16:00 to 00:00) and is the next day's. A start that cannot be read gives nulls,
+// and the shift check then leaves the row to the caller's other checks. occupancyBlockFor above
+// is the clock form for the overlap probes (it clamps at 23:59).
+function rowBlockMinutes(row, minutes = null) {
+  const startMin = parseHHMM(row?.window_start);
+  if (startMin == null) return { startMin: null, endMin: null };
+  if (Number(minutes) > 0) return { startMin, endMin: startMin + Number(minutes) };
+  const storedEnd = parseHHMM(row?.window_end);
+  if (storedEnd != null) return { startMin, endMin: storedEnd < startMin ? storedEnd + 1440 : storedEnd };
+  return { startMin, endMin: startMin + (Number(row?.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : 60) };
+}
+
 // Best-effort destination probe for the plan writers' candidate dates: the
 // rows `template`'s own block would overlap on `date`, through the shared
 // tech-blind occupancy check with the admin status set. Probe-only, no lock
@@ -219,6 +236,7 @@ async function seriesCandidateDateClashRows(conn, template, date, {
 module.exports = {
   parseHHMM,
   occupancyBlockFor,
+  rowBlockMinutes,
   seriesCandidateDateClashRows,
   minutesToHHMM,
   assertAdminAppointmentWindow,

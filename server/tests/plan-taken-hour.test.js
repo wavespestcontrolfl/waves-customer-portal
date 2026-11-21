@@ -10,7 +10,7 @@ jest.mock('../services/scheduling/occupancy', () => ({
 }));
 
 const { findConflictingVisits, techScopedConfirmActive } = require('../services/scheduling/occupancy');
-const { occupancyBlockFor, seriesCandidateDateClashRows, ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('../services/scheduling/window-rules');
+const { occupancyBlockFor, rowBlockMinutes, seriesCandidateDateClashRows, ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('../services/scheduling/window-rules');
 const planTakenHour = require('../services/scheduling/plan-taken-hour');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -27,6 +27,28 @@ describe('occupancyBlockFor (moved from admin-schedule.js, same results)', () =>
     [{ window_start: '25:00' }, null],
   ])('%j -> %j', (row, block) => {
     expect(occupancyBlockFor(row)).toEqual(block);
+  });
+});
+
+// The same row in minutes, for the technician shift check (GATE_TECH_SHIFT_HOURS, the `hours`
+// option of assertAssignableTechnician): never wrapped or clamped at midnight.
+describe('rowBlockMinutes (a visit row as the shift check reads it)', () => {
+  const none = { startMin: null, endMin: null };
+  test.each([
+    ['its stored window', { window_start: '09:00', window_end: '10:00' }, undefined, { startMin: 540, endMin: 600 }],
+    ['the stored end before the stored length', { window_start: '09:00:00', window_end: '10:30:00', estimated_duration_minutes: 60 }, undefined, { startMin: 540, endMin: 630 }],
+    ['the stored length when there is no end', { window_start: '09:00', window_end: null, estimated_duration_minutes: 90 }, undefined, { startMin: 540, endMin: 630 }],
+    ['60 minutes when there is no end and no length', { window_start: '9:00', window_end: null }, undefined, { startMin: 540, endMin: 600 }],
+    ['a length resolved now, in place of the stored end and length', { window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }, 150, { startMin: 540, endMin: 690 }],
+    ['a zero length is no length', { window_start: '09:00', window_end: '10:00' }, 0, { startMin: 540, endMin: 600 }],
+    ['a long job late in the day, not wrapped at midnight', { window_start: '16:00', window_end: null, estimated_duration_minutes: 480 }, undefined, { startMin: 960, endMin: 1440 }],
+    ['a stored end that wrapped at midnight, read as the next day', { window_start: '16:00', window_end: '00:00', estimated_duration_minutes: 480 }, undefined, { startMin: 960, endMin: 1440 }],
+    ['an end past midnight, not clamped', { window_start: '23:30', window_end: null, estimated_duration_minutes: 60 }, undefined, { startMin: 1410, endMin: 1470 }],
+    ['no block for a row with no start', { window_start: null, window_end: '10:00' }, undefined, none],
+    ['no block for a start that is not a time', { window_start: '25:00', window_end: '10:00' }, 90, none],
+    ['no block for no row', null, undefined, none],
+  ])('%s', (_case, row, minutes, block) => {
+    expect(rowBlockMinutes(row, minutes)).toEqual(block);
   });
 });
 

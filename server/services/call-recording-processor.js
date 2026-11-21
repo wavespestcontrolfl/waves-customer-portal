@@ -21014,7 +21014,10 @@ const CallRecordingProcessor = {
                       // (dated absences), same check the package helper runs.
                       if (followUpTechId && packageFollowUp) {
                         try {
-                          await require('./technician-eligibility').assertAssignableTechnician(followUpTechId, { conn: sp, date: fuPlan.scheduledDate, workDays: true });
+                          // `hours` (GATE_TECH_SHIFT_HOURS): visit 2's own block. A shift that does
+                          // not hold it seeds visit 2 unassigned, as a day off does.
+                          await require('./technician-eligibility').assertAssignableTechnician(followUpTechId, { conn: sp, date: fuPlan.scheduledDate, workDays: true,
+                            hours: require('./scheduling/window-rules').rowBlockMinutes({ window_start: fuStart, window_end: fuWindowEnd }) });
                         } catch (eligErr) {
                           if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                           logger.warn(`[call-proc] package visit 2 technician ${followUpTechId} not assignable on ${fuPlan.scheduledDate}; seeding unassigned`);
@@ -21337,7 +21340,10 @@ const CallRecordingProcessor = {
                     // changed, leave the reused row unassigned rather than assign.
                     let reuseTechId = reuseCandidateTechId;
                     try {
-                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true });
+                      // `hours` (GATE_TECH_SHIFT_HOURS): the reused row's own block. A shift that
+                      // does not hold it leaves the row unassigned (a windowless row has no block).
+                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true,
+                        hours: require('./scheduling/window-rules').rowBlockMinutes(existing) });
                       // A PICKED technician passed the capability filter on a
                       // plain read; re-read it under the technician share lock
                       // so an Off saved since cannot receive this visit. The line map's
@@ -22176,7 +22182,10 @@ const CallRecordingProcessor = {
                 // triage note already says who was auto-assigned (or nobody).
                 if (insertData.technician_id) {
                   try {
-                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10), workDays: true });
+                    // `hours` (GATE_TECH_SHIFT_HOURS): the new visit's own block. A shift that
+                    // does not hold it books the visit unassigned, as a day off does.
+                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10), workDays: true,
+                      hours: require('./scheduling/window-rules').rowBlockMinutes(insertData) });
                     // A PICKED technician passed the capability filter on a
                     // plain read; re-read it under the technician share lock
                     // so an Off saved since cannot receive this visit. The line map's

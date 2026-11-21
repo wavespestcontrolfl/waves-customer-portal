@@ -456,6 +456,24 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     expect(slice).not.toContain('throw ');
   });
 
+  // GATE_TECH_SHIFT_HOURS (D4 part 3b): each automatic technician check of the after-call booking
+  // passes the visit's own block (window-rules rowBlockMinutes), so a shift that does not hold it
+  // ends as every other refusal there does: the visit is written unassigned.
+  test('the three automatic technician checks pass the visit\'s own block as `hours`', () => {
+    const block = "hours: require\\('\\./scheduling/window-rules'\\)\\.rowBlockMinutes";
+    const visit2 = new RegExp(`assertAssignableTechnician\\(followUpTechId, \\{ conn: sp, date: fuPlan\\.scheduledDate, workDays: true,\\s*${block}\\(\\{ window_start: fuStart, window_end: fuWindowEnd \\}\\) \\}\\);`);
+    const reused = new RegExp(`assertAssignableTechnician\\(reuseTechId, \\{ conn: trx, date: dayRow\\?\\.day, workDays: true,\\s*${block}\\(existing\\) \\}\\);`);
+    const created = new RegExp(`assertAssignableTechnician\\(insertData\\.technician_id, \\{ conn: trx, date: String\\(scheduledDate\\)\\.slice\\(0, 10\\), workDays: true,\\s*${block}\\(insertData\\) \\}\\);`);
+    for (const site of [visit2, reused, created]) expect(src).toMatch(site);
+    // No check of the after-call booking is left without it.
+    expect(src.match(/assertAssignableTechnician\([^)]*workDays: true \}\)/g)).toBeNull();
+    // Each refusal there is recovered as unassigned, whatever its reason.
+    const after = (site, text) => src.slice(src.search(site)).slice(0, 2200).includes(text);
+    expect(after(visit2, 'followUpTechId = null;')).toBe(true);
+    expect(after(reused, 'reuseTechId = null;')).toBe(true);
+    expect(after(created, 'insertData.technician_id = null;')).toBe(true);
+  });
+
   test('owner ruling 2026-09-11: the follow-up child tries the fence for ITS OWN date/tech inside the savepoint, before its insert', () => {
     const seederIdx = src.indexOf('return await trx.transaction(async (sp) => {');
     expect(seederIdx).toBeGreaterThan(-1);

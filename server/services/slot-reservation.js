@@ -183,22 +183,6 @@ function requireKnownBookingWindowConfig(slotIdOrNull) {
 // e.g. "2026-04-29_10-00_7d34c5e6-....1767216000000.90.dGhl..."
 const SLOT_ID_RE = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})_(.+)$/;
 
-// A hold row's own block in minutes after midnight, for the shift check (technician-eligibility.js `hours`).
-// Its end is its start plus `minutes` (the length resolved now) when given, else its stored end, else its
-// start plus its stored length (60 minutes when none): the chain the occupancy checks read a hold by. The
-// end is never wrapped at midnight, so a long job late in the day still ends after it starts. A start that
-// cannot be read is null, and that check then leaves the hold to the others.
-function holdBlock(row, minutes = null) {
-  const { parseHHMM } = require('./scheduling/window-rules');
-  const startMin = parseHHMM(row.window_start);
-  if (startMin == null) return { startMin: null, endMin: null };
-  if (Number(minutes) > 0) return { startMin, endMin: startMin + Number(minutes) };
-  const storedEnd = parseHHMM(row.window_end);
-  // A stored end before the start was wrapped at midnight when it was written (16:00 to 00:00): it is the next day's.
-  if (storedEnd != null) return { startMin, endMin: storedEnd < startMin ? storedEnd + 1440 : storedEnd };
-  return { startMin, endMin: startMin + (Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : DEFAULT_DURATION_MINUTES) };
-}
-
 function parseSlotId(slotId) {
   if (!slotId || typeof slotId !== 'string') return null;
   // Splitting is deliberately lenient here — ENFORCEMENT (presence, expiry,
@@ -2380,11 +2364,12 @@ async function commitReservation({
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
       throw err;
     }
-    // The technician's shift (GATE_TECH_SHIFT_HOURS) on the FINAL block (holdBlock: the length resolved
+    // The technician's shift (GATE_TECH_SHIFT_HOURS) on the FINAL block (rowBlockMinutes: the length resolved
     // above, else the hold's stored end or length, as the occupancy probes below read it): the office may
     // have changed the hours since the reserve, or the profile lengthened the job past the shift end.
     // Same recovery as the technician re-check above (the customer re-picks a time).
-    if (await shiftExcluding(client, row.technician_id, scheduledDate, holdBlock(row, effectiveDurationMinutes))) {
+    const { rowBlockMinutes } = require('./scheduling/window-rules');
+    if (await shiftExcluding(client, row.technician_id, scheduledDate, rowBlockMinutes(row, effectiveDurationMinutes))) {
       const err = new Error('slot technician is not available');
       err.code = 'SLOT_UNAVAILABLE';
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
@@ -3082,7 +3067,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     if (row.technician_id) {
       try {
         await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate, workDays: true,
-          hours: holdBlock(row) });
+          hours: require('./scheduling/window-rules').rowBlockMinutes(row) });
       } catch (eligErr) {
         if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
         const err = new Error('slot technician is not available');
