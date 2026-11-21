@@ -33,10 +33,12 @@ const { deliverOpsDigest, resolveOpsDigest } = require('./ops-digest');
 const OPS_KEY = 'tab-reload-check';
 // The edge of a read, Eastern: one minute before the job's scheduled time
 // (scheduler.js; a test keeps both in step). A page view takes its time from
-// the database as its insert starts. The minute lets that insert end, and
-// covers a database clock a little behind this one. A view whose insert is
-// held up for longer than the minute at the edge is not read (a known limit).
+// the database as its insert starts, so no run reads up to an edge younger
+// than that minute (GRACE_MS): it lets the insert end, and covers a database
+// clock a little behind this one. A view whose insert is held up for longer
+// at the edge is not read (a known limit).
 const EDGE_AT = '23:50';
+const GRACE_MS = 60 * 1000;
 const FAILED_NAMES = ['reloaded', 'reload-missed'];
 // How far a finished run has read (system_settings).
 const MARK_KEY = 'tab_reload_check.read_to';
@@ -55,7 +57,7 @@ function esc(value) {
 }
 
 // What a run reads: from where the last finished run read to (`readTo`, its
-// mark) up to the latest edge that has come (`end`, not included), in
+// mark) up to the latest edge at least GRACE_MS old (`end`, not included), in
 // Eastern time. So each page view is read by one finished run: a night whose
 // run failed is read by the next run, a run by hand included, and nothing is
 // read twice. With no mark the read starts one edge back: 23, 24 or 25 hours
@@ -64,7 +66,7 @@ function esc(value) {
 function readWindow(now = new Date(), readTo = null) {
   const edgeOn = (day) => parseETDateTime(`${etDateString(day)}T${EDGE_AT}`);
   const today = edgeOn(now);
-  const end = today.getTime() <= now.getTime() ? today : edgeOn(addETDays(now, -1));
+  const end = today.getTime() + GRACE_MS <= now.getTime() ? today : edgeOn(addETDays(now, -1));
   const from = readTo || edgeOn(addETDays(end, -1));
   return { start: from.getTime() < end.getTime() ? from : end, end };
 }

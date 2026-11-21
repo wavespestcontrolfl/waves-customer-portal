@@ -213,8 +213,8 @@ describe('runTabReloadCheck', () => {
   });
 });
 
-// A run reads from its mark up to the latest edge that has come: 11:50 PM
-// Eastern, one minute before the job runs. From one edge to the next is 25
+// A run reads from its mark up to the latest edge at least one minute old:
+// 11:50 PM Eastern, one minute before the job runs. From one edge to the next is 25
 // hours on the night the clocks go back and 23 on the night they go forward.
 describe('readWindow', () => {
   const win = (text, readTo) => {
@@ -228,12 +228,15 @@ describe('readWindow', () => {
   test('with no mark, a nightly run reads from the edge of the night before up to its own', () => {
     // Nov 20 2026, 11:51:02 PM EST: up to 11:50:00 PM, not up to now.
     expect(win('2026-11-21T04:51:02Z')).toEqual([NOV_19, NOV_20]);
-    // At the edge to the millisecond, and held up past midnight.
-    expect(win('2026-11-21T04:50:00.000Z')).toEqual([NOV_19, NOV_20]);
+    // At its scheduled time to the millisecond, and held up past midnight.
+    expect(win('2026-11-21T04:51:00.000Z')).toEqual([NOV_19, NOV_20]);
     expect(win('2026-11-21T05:20:00Z')).toEqual([NOV_19, NOV_20]);
-    // By hand the next day, and one millisecond before the next edge.
+    // By hand the next day, up to the last millisecond of the minute after
+    // the next edge: that edge is not a minute old, so a page view of just
+    // before it can still be on its way into the table.
     expect(win('2026-11-21T15:00:00Z')).toEqual([NOV_19, NOV_20]);
-    expect(win('2026-11-22T04:49:59.999Z')).toEqual([NOV_19, NOV_20]);
+    expect(win('2026-11-22T04:50:00.000Z')).toEqual([NOV_19, NOV_20]);
+    expect(win('2026-11-22T04:50:59.999Z')).toEqual([NOV_19, NOV_20]);
   });
 
   test('with no mark, the night the clocks go back is 25 hours and the night they go forward 23', () => {
@@ -252,7 +255,7 @@ describe('readWindow', () => {
     expect(win('2026-11-22T04:51:02Z', '2026-10-01T03:50:00.000Z')).toEqual(['2026-10-01T03:50:00.000Z', NOV_21]);
   });
 
-  test('a mark at or past the latest edge leaves nothing to read', () => {
+  test('a mark at or past the latest edge a minute old leaves nothing to read', () => {
     expect(win('2026-11-21T20:00:00Z', NOV_20)).toEqual([NOV_20, NOV_20]);
     expect(win('2026-11-21T20:00:00Z', NOV_21)).toEqual([NOV_20, NOV_20]);
   });
