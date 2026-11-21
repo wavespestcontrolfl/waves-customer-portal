@@ -8,7 +8,8 @@
  *   - the Technician Terms lookup (ISSUED versions only, never a draft);
  *   - admin operations (panel, save draft, send, withdraw, revise, signed copy);
  *   - public operations (view, text consent, accept, date request, decline);
- *   - the scheduled 7-day close (closeExpiredOffers) and 2-day reminder (sendDueReminders).
+ *   - the scheduled 7-day close (closeExpiredOffers) and 2-day reminder (sendDueReminders);
+ *   - the staff record a signed offer gets (makeStaffRecord, and its catch-up pass makeDueStaffRecords).
  *
  * Every state change is ONE transaction that locks the application row, then the offer row (always in that order),
  * re-reads the status under the lock and refuses a replay with the current state. Comms and bells run AFTER the
@@ -405,6 +406,8 @@ function timelineOf(row, { sentByName = null } = {}) {
   add(row.withdrawn_at, 'withdrawn', 'Offer withdrawn');
   if (row.status === 'superseded') add(row.updated_at, 'superseded', 'Replaced by an updated offer');
   if (row.status === 'expired') add(row.expires_at, 'expired', 'Closed unsigned');
+  const staff = asObject(row.checklist)[STAFF_RECORD_KEY];
+  if (staff) add(staff.at, 'staff_record', staffRecordLabel(staff));
   add(row.activated_at, 'activated', 'Login turned on');
   return items.sort((a, b) => a.at.localeCompare(b.at));
 }
@@ -1223,7 +1226,10 @@ async function acceptOffer(token, { signedName, version, ip, userAgent }) {
     }
     return { body: await signOffer(trx, offer, { name, ip, userAgent, now: found.now }), forBell: offer };
   });
-  if (result.forBell) await bell('signed', result.forBell, null);
+  if (result.forBell) {
+    await bell('signed', result.forBell, null);
+    await staffRecordAfterSigning(result.forBell.id);
+  }
   return result;
 }
 
@@ -1511,6 +1517,151 @@ async function remindClaimed(claimed, result, clock) {
   }
 }
 
+// ------------------------------------------------- the staff record at signing
+
+// What the staff record step stores on the offer (job_offers.checklist.staff_record). It is there = the step ran for
+// this offer, and it never runs a second time.
+//   { at, made: true, pay_step: 'made' | 'refused' | 'none' }   the prospective staff row exists (technician_id)
+//   { at, made: false, reason: 'email_in_use' }                 no row: the owner adds the hire on the Team tab
+const STAFF_RECORD_KEY = 'staff_record';
+// The longest this step waits for a lock (the staff table, the payroll lock). Past it the step fails with nothing
+// written, and the 15-minute pass tries the offer again.
+const STAFF_LOCK_WAIT_MS = 3000;
+// technicians.name and technicians.phone hold this many characters.
+const STAFF_NAME_CHARS = 100;
+const STAFF_PHONE_CHARS = 20;
+
+function staffRecordLabel(staff) {
+  if (!staff.made) return 'Staff record not made: the email is already a staff login';
+  if (staff.pay_step === 'refused') return 'Staff record made, without the pay step';
+  return staff.pay_step === 'made' ? 'Staff record made, with the pay step' : 'Staff record made';
+}
+
+const staffRecordDue = (application, offer) => application.status === 'hired' && offer.status === 'accepted'
+  && !offer.technician_id && !asObject(offer.checklist)[STAFF_RECORD_KEY];
+
+// The pay step of the offer, by the payroll rules (payroll-rate-steps.js createStep, in a savepoint of `trx`), in the
+// name of the owner who sent the offer. A step those rules refuse is 'refused'; any other error is the caller's.
+async function addOfferPayStep(trx, technicianId, offer) {
+  const { createStep } = require('./payroll-rate-steps');
+  const { PayrollError } = require('./payroll-w4');
+  try {
+    await createStep(technicianId, {
+      effectiveOn: ymdOf(offer.step_effective_on), hourlyRate: String(offer.step_rate), note: 'From the signed job offer.',
+    }, offer.sent_by, trx);
+    return 'made';
+  } catch (err) {
+    if (!(err instanceof PayrollError)) throw err;
+    logger.warn(`[job-offers] pay step refused by the payroll rules (offer ${offer.id}, status ${err.status})`);
+    return 'refused';
+  }
+}
+
+/**
+ * A signed offer gets the hire's staff record: a PROSPECTIVE staff row (first day, pay rate, job title, W-2) and, when
+ * the offer has one, the pay rate step. A prospective row signs in nowhere, takes no visit and is on no customer
+ * surface (technician-eligibility.js); the Team tab makes it active. Nothing here sends a message to anyone.
+ *
+ * One transaction, after the signature's own commit, so it never undoes a signature. Locks, in this order: the
+ * application row, the offer row, the payroll lock (only for an offer with a step, and BEFORE the staff table lock:
+ * a pay run holds the payroll lock while it writes a staff row), then the staff table lock every staff identity
+ * writer takes. checklist.staff_record is written in the same transaction as what the step made, so a second call
+ * does nothing, and an error leaves no mark: the 15-minute pass (makeDueStaffRecords) tries that offer again.
+ *
+ * No row is made when the application's email is already a staff login's (another staff row, of any status, or an
+ * owner login address): a bell asks the owner to add the hire by hand. A pay step the payroll rules refuse leaves the
+ * row made, with a bell. Both bells are written in this transaction.
+ *
+ * Returns 'made' | 'refused' | null (nothing to do: not signed, the application is no longer Hired, the step already
+ * ran, or another call holds the rows).
+ */
+async function makeStaffRecord(offerId) {
+  return db.transaction(async (trx) => {
+    const found = await trx('job_offers').where({ id: offerId }).first('application_id');
+    const application = found && await trx('job_applications').where({ id: found.application_id }).forUpdate().skipLocked().first();
+    const offer = application && await trx('job_offers').where({ id: offerId }).forUpdate().skipLocked().first();
+    if (!offer || !staffRecordDue(application, offer)) return null;
+
+    const { canonicalStaffEmail, findStaffByCanonicalEmail, lockStaffIdentityWrites } = require('../utils/staff-identity');
+    const hasStep = offer.step_rate != null && Boolean(offer.step_effective_on);
+    await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(STAFF_LOCK_WAIT_MS)]);
+    if (hasStep) await require('./payroll-lock').lockPayrollMutations(trx);
+    await lockStaffIdentityWrites(trx);
+
+    const at = new Date().toISOString();
+    const store = (staff, more = {}) => trx('job_offers').where({ id: offer.id }).update({
+      ...more, checklist: JSON.stringify({ ...asObject(offer.checklist), [STAFF_RECORD_KEY]: { at, ...staff } }),
+    });
+    const contact = contactOf(application);
+    const email = canonicalStaffEmail(contact.email);
+    const emailTaken = Boolean(email) && (require('./intelligence-bar/ib-access').isFullAccessEmail(email)
+      || Boolean(await findStaffByCanonicalEmail(trx, email)));
+    if (emailTaken) {
+      await store({ made: false, reason: 'email_in_use' });
+      await raiseBell('staff_record', offer, null, trx);
+      return 'refused';
+    }
+
+    const phone = String(contact.phone || '').trim();
+    const [tech] = await trx('technicians').insert({
+      name: String(contact.name || offer.signed_name || '').trim().slice(0, STAFF_NAME_CHARS),
+      // A phone too long for the column is left for the owner to type; an email that is not a valid address also is.
+      phone: phone && phone.length <= STAFF_PHONE_CHARS ? phone : null,
+      email,
+      ...require('./technician-eligibility').employmentPatch('prospective'),
+      field_dispatchable: false,
+      hire_date: ymdOf(offer.start_date),
+      pay_rate: offer.hourly_rate,
+      job_title: offer.job_title,
+      employment_type: 'w2',
+    }).returning('id');
+    // Every hire starts able to take every service, pending review (as a row added on the Team tab does).
+    await require('./technician-capabilities').seedNewHireCapabilities(trx, tech.id);
+    // Ids only: no name, email, phone or pay in the audit row.
+    await require('./audit-log').recordAuditEvent({
+      trx, critical: true, actor_type: 'system', actor_id: null,
+      action: 'staff.prospective_from_offer', resource_type: 'technician', resource_id: tech.id,
+      metadata: { technician_id: tech.id, job_offer_id: offer.id },
+    });
+    const payStep = hasStep ? await addOfferPayStep(trx, tech.id, offer) : 'none';
+    await store({ made: true, pay_step: payStep }, { technician_id: tech.id });
+    if (payStep === 'refused') await raiseBell('pay_step', offer, null, trx);
+    return 'made';
+  });
+}
+
+/** Right after a signature: one try. An error is logged and left to the 15-minute pass; the applicant never sees it. */
+async function staffRecordAfterSigning(offerId) {
+  try {
+    await makeStaffRecord(offerId);
+  } catch (err) {
+    logger.error(`[job-offers] staff record not made at signing (offer ${offerId}), the next pass tries again: ${errTag(err)}`);
+  }
+}
+
+/**
+ * The catch-up pass (scheduler.js, every 15 minutes): every signed offer of a Hired application whose staff record
+ * step has not run. It covers a signature whose own try failed or never ran (a restart between the two commits).
+ * Returns { made, refused, failed }; the caller fails the job when failed > 0.
+ */
+async function makeDueStaffRecords() {
+  const result = { made: 0, refused: 0, failed: 0 };
+  const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
+    .where('o.status', 'accepted').where('a.status', 'hired').whereNull('o.technician_id')
+    .whereRaw(`o.checklist -> '${STAFF_RECORD_KEY}' IS NULL`)
+    .orderBy('o.signed_at').pluck('o.id');
+  for (const id of due) {
+    try {
+      const outcome = await makeStaffRecord(id);
+      if (outcome) result[outcome] += 1;
+    } catch (err) {
+      result.failed += 1;
+      logger.error(`[job-offers] staff record not made (offer ${id}): ${errTag(err)}`);
+    }
+  }
+  return result;
+}
+
 // ------------------------------------------------------------------ bells
 
 const BELLS = {
@@ -1536,6 +1687,16 @@ const BELLS = {
   expired: {
     actions: [(n) => `${n}'s job offer closed unsigned`, (n) => `${n}'s offer closed unsigned`],
     why: (extra) => `It closed ${extra} with no answer; open the application to make a new offer or close it.`,
+    doneWhen: 'offer_reviewed',
+  },
+  staff_record: {
+    actions: [(n) => `${n}'s staff record was not made`],
+    why: () => 'The email on the application is already a staff login, so add this hire on the Team tab by hand.',
+    doneWhen: 'offer_reviewed',
+  },
+  pay_step: {
+    actions: [(n) => `${n}'s pay step was not made`],
+    why: () => 'The staff record is made without the pay step of the offer; add the step on the staff record.',
     doneWhen: 'offer_reviewed',
   },
 };
@@ -1602,5 +1763,7 @@ module.exports = {
   // public
   publicView, setTextConsent, acceptOffer, requestDate, declineOffer,
   // scheduled
-  closeExpiredOffers, sendDueReminders,
+  closeExpiredOffers, sendDueReminders, makeDueStaffRecords,
+  // after signing
+  makeStaffRecord,
 };

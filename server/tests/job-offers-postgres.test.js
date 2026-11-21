@@ -1,6 +1,6 @@
 // The job-offer state machine on a real, migrated PostgreSQL (services/job-offers.js): the Technician Terms lookup
 // (issued versions only), the draft / send / revise / withdraw writers, the public view / consent / sign / date
-// request / decline, and the two partial unique indexes. Every row is written inside ONE root transaction that is
+// request / decline, the staff record a signature makes, and the two partial unique indexes. Every row is written inside ONE root transaction that is
 // rolled back at the end (services reach it through savepoints), so nothing persists. Synthetic people only.
 // Comms and bells are mocked: nothing is sent.
 
@@ -27,6 +27,13 @@ jest.mock('../services/recruiting-comms', () => ({
   ...jest.requireActual('../services/recruiting-comms'),
   sendStageComms: (...args) => mockSendStageComms(...args),
   stageEnabled: (...args) => mockStageEnabled(...args),
+}));
+// The Florida minimum wage a pay step is checked against (payroll-rate-steps.js createStep). The real table ends at
+// the last year on file, so a suite that signs offers 3 months ahead must not depend on it.
+const mockWageFloor = jest.fn(() => 1500n);
+jest.mock('../services/payroll-calc', () => ({
+  ...jest.requireActual('../services/payroll-calc'),
+  floridaMinimumWageCentsFor: (...args) => mockWageFloor(...args),
 }));
 const mockRaise = jest.fn(async () => ({ id: 'bell-1' }));
 jest.mock('../services/admin-alert-compose', () => ({
@@ -101,10 +108,12 @@ jest.setTimeout(120000);
     return sendAsPage(app.id, draft.id, draft.draftHash);
   }
 
+  // Each application has its own email: a signature makes a staff row, and a staff email is held by one row only.
+  const applicantEmail = () => `jordan.rivera.${randomUUID().slice(0, 8)}@example.test`;
   async function newApplication(over = {}) {
     const [row] = await root('job_applications').insert({
       role: 'technician', status: 'reviewed',
-      contact_snapshot: JSON.stringify({ name: 'Jordan Rivera', phone: '(941) 555-0100', email: 'jordan.rivera@example.test' }),
+      contact_snapshot: JSON.stringify({ name: 'Jordan Rivera', phone: '(941) 555-0100', email: applicantEmail() }),
       ...over,
     }).returning('*');
     return row;
@@ -1575,6 +1584,255 @@ jest.setTimeout(120000);
         await expect(sp.transaction((s2) => s2('job_offers').insert({ ...base, status: 'draft' }))).rejects.toMatchObject({ code: '23505' });
         await expect(sp.transaction((s2) => s2('job_offers').insert({ ...base, status: 'date_requested' }))).rejects.toMatchObject({ code: '23505' });
         await expect(sp.transaction((s2) => s2('job_offers').insert({ ...base, status: 'bogus' }))).rejects.toMatchObject({ code: '23514' });
+      });
+    });
+
+    describe('the staff record a signature makes', () => {
+      const offerRow = (id) => root('job_offers').where({ id }).first();
+      const staffRow = (id) => root('technicians').where({ id }).first();
+      const stepsOf = (technicianId) => root('payroll_rate_steps').where({ technician_id: technicianId })
+        .select('hourly_rate', 'created_by', 'applied_at', 'cancelled_at', 'note', root.raw("to_char(effective_on, 'YYYY-MM-DD') as effective_on"));
+      const contactOf = (email, over = {}) => JSON.stringify({ name: 'Jordan Rivera', phone: '(941) 555-0100', email, ...over });
+      // An application with an offer out, and the offer's link.
+      async function openOffer(appOver = {}, draft = {}) {
+        const app = await newApplication(appOver);
+        const saved = await JobOffers.saveDraft(app.id, draft, actor());
+        const { offer } = await sendAsPage(app.id, saved.id, saved.draftHash);
+        return { app, offer, token: (await offerRow(offer.id)).token };
+      }
+      const sign = async (token) => JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version: await shownVersion(token) });
+      // A signed offer whose staff record step has not run: the state a restart between the two commits leaves.
+      async function signedWithoutRecord(appOver, draft) {
+        const made = await openOffer(appOver, draft);
+        await root('job_offers').where({ id: made.offer.id }).update({ status: 'accepted', signed_at: new Date(), signed_name: 'Jordan Rivera' });
+        await root('job_applications').where({ id: made.app.id }).update({ status: 'hired' });
+        return made;
+      }
+      // Every statement `work` runs, in order, with its bindings (the service runs them on nested transactions).
+      async function statementsOf(work) {
+        const seen = [];
+        const listen = (query) => seen.push(`${query.sql} ${JSON.stringify(query.bindings || [])}`);
+        database.client.on('query', listen);
+        try { await work(); } finally { database.client.removeListener('query', listen); }
+        return seen;
+      }
+      const PAYROLL_LOCK = 'payroll.mutation';
+      beforeEach(() => { mockWageFloor.mockClear(); mockRaise.mockClear(); });
+
+      test('signing makes a prospective staff row with the offer\'s first day, pay, title and W-2, and the pay step', async () => {
+        const email = applicantEmail();
+        const { app, offer, token } = await openOffer({ contact_snapshot: contactOf(`  ${email.toUpperCase()} `) });
+        expect((await sign(token)).body).toMatchObject({ state: 'signed' });
+
+        const row = await offerRow(offer.id);
+        expect(row.technician_id).toBeTruthy();
+        expect(row.checklist.staff_record).toEqual({ at: expect.any(String), made: true, pay_step: 'made' });
+        const staff = await root('technicians').where({ id: row.technician_id })
+          .first('*', root.raw("to_char(hire_date, 'YYYY-MM-DD') as first_day"));
+        expect(staff).toMatchObject({
+          name: 'Jordan Rivera', phone: '(941) 555-0100', email, role: 'technician',
+          employment_status: 'prospective', active: false, field_dispatchable: false,
+          first_day: offer.startDate, job_title: 'Pest Control Technician', employment_type: 'w2',
+          password_hash: null,
+        });
+        expect(Number(staff.pay_rate)).toBe(23);
+        // The step is the offer's, in the name of the owner who sent it, and still open.
+        const steps = await stepsOf(staff.id);
+        expect(steps).toEqual([{
+          hourly_rate: '25.00', effective_on: offer.stepEffectiveOn, created_by: owner.id, applied_at: null, cancelled_at: null,
+          note: 'From the signed job offer.',
+        }]);
+        // As a row added on the Team tab: every service, pending review.
+        expect(Number((await root('technician_capabilities').where({ technician_id: staff.id }).count('* as n').first()).n)).toBeGreaterThan(0);
+        // One audit row, ids only.
+        const audit = await root('audit_log').where({ action: 'staff.prospective_from_offer', resource_id: staff.id }).first();
+        expect(audit.metadata).toEqual({ technician_id: staff.id, job_offer_id: offer.id });
+        // The only bell is the signature's.
+        expect(mockRaise.mock.calls.map(([, spec]) => spec.action)).toEqual(['Jordan Rivera signed the job offer']);
+        // The owner's card shows it.
+        const panel = await JobOffers.adminPanel(app.id, actor());
+        expect(panel.current).toMatchObject({ status: 'accepted', technicianId: staff.id });
+        expect(panel.current.timeline.map((t) => t.label)).toContain('Staff record made, with the pay step');
+
+        // The step ran: a replay of the signature, a direct call and the pass each make nothing more.
+        await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera' });
+        expect(await JobOffers.makeStaffRecord(offer.id)).toBeNull();
+        expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 0, refused: 0, failed: 0 });
+        expect(Number((await root('technicians').where({ email }).count('* as n').first()).n)).toBe(1);
+        expect(await stepsOf(staff.id)).toHaveLength(1);
+      });
+
+      test('an offer with no step makes the row and no step, and takes no payroll lock', async () => {
+        const { offer, token } = await openOffer({}, { stepRate: null, stepEffectiveOn: null });
+        const statements = await statementsOf(() => sign(token));
+        expect(statements.some((sql) => sql.includes('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE'))).toBe(true);
+        expect(statements.some((sql) => sql.includes(PAYROLL_LOCK))).toBe(false);
+        const row = await offerRow(offer.id);
+        expect(row.checklist.staff_record).toMatchObject({ made: true, pay_step: 'none' });
+        expect(await stepsOf(row.technician_id)).toEqual([]);
+        expect(mockWageFloor).not.toHaveBeenCalled();
+        expect(JobOffers.timelineOf(row).map((t) => t.label)).toContain('Staff record made');
+      });
+
+      test('an email that is already a staff login makes no row and rings one bell, once', async () => {
+        const email = applicantEmail();
+        await root('technicians').insert({ name: 'Former Tech', email, employment_status: 'inactive', active: false });
+        const { app, offer, token } = await openOffer({ contact_snapshot: contactOf(email.toUpperCase()) });
+        const count = async (table) => Number((await root(table).count('* as n').first()).n);
+        const before = { staff: await count('technicians'), steps: await count('payroll_rate_steps') };
+        expect((await sign(token)).body).toMatchObject({ state: 'signed' }); // the signature stands
+
+        const row = await offerRow(offer.id);
+        expect(row).toMatchObject({ status: 'accepted', technician_id: null });
+        expect(row.checklist.staff_record).toEqual({ at: expect.any(String), made: false, reason: 'email_in_use' });
+        expect({ staff: await count('technicians'), steps: await count('payroll_rate_steps') }).toEqual(before);
+        const bells = mockRaise.mock.calls.filter(([, , opts]) => opts.dedupeKey === `job-offer-staff_record:${offer.id}`);
+        expect(bells).toHaveLength(1);
+        const [category, spec, opts] = bells[0];
+        expect(category).toBe('job_application');
+        expect(spec).toMatchObject({
+          action: "Jordan Rivera's staff record was not made", severity: 'needs-you', who: 'person',
+          why: 'The email on the application is already a staff login, so add this hire on the Team tab by hand.',
+          link: `/admin/recruiting?application=${app.id}`,
+        });
+        expect(typeof opts.trx).toBe('function'); // written with the mark, so the mark never stands without its bell
+        expect(jest.requireActual('../services/admin-alert-compose').composeAdminAlert(spec).headline)
+          .toBe("Leads — Jordan Rivera's staff record was not made");
+        expect(JobOffers.timelineOf(row).map((t) => t.label)).toContain('Staff record not made: the email is already a staff login');
+
+        // The mark is final: the pass does not try this offer again and rings nothing more.
+        mockRaise.mockClear();
+        expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 0, refused: 0, failed: 0 });
+        expect(mockRaise).not.toHaveBeenCalled();
+      });
+
+      test('an owner login address is never given to a new staff row', async () => {
+        const saved = process.env.IB_FULL_ACCESS_EMAILS;
+        const email = applicantEmail();
+        process.env.IB_FULL_ACCESS_EMAILS = email;
+        try {
+          const { offer, token } = await openOffer({ contact_snapshot: contactOf(email) });
+          await sign(token);
+          expect(await offerRow(offer.id)).toMatchObject({ technician_id: null, checklist: { staff_record: { made: false, reason: 'email_in_use' } } });
+          expect(mockRaise.mock.calls.map(([, spec]) => spec.action)).toContain("Jordan Rivera's staff record was not made");
+          expect(await root('technicians').where({ email }).first()).toBeUndefined();
+        } finally {
+          if (saved === undefined) delete process.env.IB_FULL_ACCESS_EMAILS; else process.env.IB_FULL_ACCESS_EMAILS = saved;
+        }
+      });
+
+      test('a pay step the payroll rules refuse leaves the row made, with one bell', async () => {
+        const { offer, token } = await openOffer();
+        mockWageFloor.mockImplementation(() => { throw new Error('No Florida minimum wage on file for that day yet'); });
+        try { await sign(token); } finally { mockWageFloor.mockImplementation(() => 1500n); }
+
+        const row = await offerRow(offer.id);
+        expect(row.technician_id).toBeTruthy();
+        expect(row.checklist.staff_record).toEqual({ at: expect.any(String), made: true, pay_step: 'refused' });
+        expect(await staffRow(row.technician_id)).toMatchObject({ employment_status: 'prospective', employment_type: 'w2' });
+        expect(await stepsOf(row.technician_id)).toEqual([]);
+        const bells = mockRaise.mock.calls.filter(([, , opts]) => opts.dedupeKey === `job-offer-pay_step:${offer.id}`);
+        expect(bells).toHaveLength(1);
+        expect(bells[0][1]).toMatchObject({
+          action: "Jordan Rivera's pay step was not made",
+          why: 'The staff record is made without the pay step of the offer; add the step on the staff record.',
+        });
+        expect(typeof bells[0][2].trx).toBe('function');
+        expect(jest.requireActual('../services/admin-alert-compose').composeAdminAlert(bells[0][1]).headline)
+          .toBe("Leads — Jordan Rivera's pay step was not made");
+        expect(JobOffers.timelineOf(row).map((t) => t.label)).toContain('Staff record made, without the pay step');
+      });
+
+      test('a name or a phone too long for the staff row, and an email that is no address, do not stop the row', async () => {
+        const { offer, token } = await openOffer({
+          contact_snapshot: JSON.stringify({ name: `Jordan ${'R'.repeat(110)}`, phone: '+1 (941) 555-0100 extension 12345', email: 'not an address' }),
+        });
+        await JobOffers.acceptOffer(token, { signedName: `Jordan ${'R'.repeat(110)}`, version: await shownVersion(token) });
+        const row = await offerRow(offer.id);
+        const staff = await staffRow(row.technician_id);
+        expect(staff.name).toBe(`Jordan ${'R'.repeat(93)}`);
+        expect(staff).toMatchObject({ phone: null, email: null, employment_status: 'prospective' });
+      });
+
+      test('an error at signing leaves the signature and no mark; the pass makes the record later', async () => {
+        const { offer, token } = await openOffer();
+        const logger = require('../services/logger');
+        logger.error.mockClear();
+        // The staff record's transaction fails once: the signature's own transaction is the first one, this the second.
+        const real = mockDb;
+        let opened = 0;
+        const stand = (...args) => real(...args);
+        stand.raw = (...args) => real.raw(...args);
+        stand.transaction = (...args) => {
+          opened += 1;
+          if (opened === 2) return Promise.reject(Object.assign(new Error('connection lost'), { code: '08006' }));
+          return real.transaction(...args);
+        };
+        const version = await shownVersion(token);
+        mockDb = stand;
+        let signed;
+        try { signed = await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version }); } finally { mockDb = real; }
+        expect(signed.body).toMatchObject({ state: 'signed' });
+        expect(opened).toBe(2);
+        expect(await offerRow(offer.id)).toMatchObject({ status: 'accepted', technician_id: null });
+        expect((await offerRow(offer.id)).checklist).toEqual({});
+        expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/staff record not made at signing \(offer [0-9a-f-]+\), the next pass tries again: Error 08006/));
+
+        expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 1, refused: 0, failed: 0 });
+        const row = await offerRow(offer.id);
+        expect(row.checklist.staff_record).toMatchObject({ made: true, pay_step: 'made' });
+        expect(await stepsOf(row.technician_id)).toHaveLength(1);
+        expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 0, refused: 0, failed: 0 });
+      });
+
+      test('the pass makes the record of a signature that never tried, counts a failure, and leaves the rest alone', async () => {
+        const unmarked = async (id) => {
+          const row = await offerRow(id);
+          expect(row.technician_id).toBeNull();
+          expect(row.checklist).toEqual({});
+        };
+        const due = await signedWithoutRecord();
+        // Its email is a staff login's, and its bell cannot be written: the whole step fails, mark included.
+        const takenEmail = applicantEmail();
+        await root('technicians').insert({ name: 'Former Tech', email: takenEmail, employment_status: 'inactive', active: false });
+        const broken = await signedWithoutRecord({ contact_snapshot: contactOf(takenEmail) });
+        // Not Hired any more (the owner moved the application back), and an offer still out: neither is the pass's.
+        const moved = await signedWithoutRecord();
+        await root('job_applications').where({ id: moved.app.id }).update({ status: 'interview' });
+        const out = await openOffer();
+        const logger = require('../services/logger');
+        logger.error.mockClear();
+        mockRaise.mockClear();
+
+        mockRaise.mockRejectedValueOnce(new Error('alert store down'));
+        expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 1, refused: 0, failed: 1 });
+        expect(logger.error).toHaveBeenCalledWith(expect.stringContaining(`staff record not made (offer ${broken.offer.id})`));
+        expect((await offerRow(due.offer.id)).checklist.staff_record).toMatchObject({ made: true, pay_step: 'made' });
+        await unmarked(broken.offer.id);
+        await unmarked(moved.offer.id);
+        await unmarked(out.offer.id);
+        expect(await JobOffers.makeStaffRecord(moved.offer.id)).toBeNull();
+        expect(await JobOffers.makeStaffRecord(out.offer.id)).toBeNull();
+        expect(await JobOffers.makeStaffRecord(randomUUID())).toBeNull();
+
+        // The failed one was left due: the next pass refuses it with its bell, and then it is final.
+        mockRaise.mockClear();
+        expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 0, refused: 1, failed: 0 });
+        expect(mockRaise).toHaveBeenCalledTimes(1);
+        expect((await offerRow(broken.offer.id)).checklist.staff_record).toMatchObject({ made: false, reason: 'email_in_use' });
+        expect(await JobOffers.makeDueStaffRecords()).toEqual({ made: 0, refused: 0, failed: 0 });
+      });
+
+      test('the step waits at most 3 seconds for a lock, and takes the payroll lock before the staff table lock', async () => {
+        const { token } = await openOffer();
+        const statements = await statementsOf(() => sign(token));
+        const at = (text) => statements.findIndex((sql) => sql.includes(text));
+        expect(at('lock_timeout')).toBeGreaterThan(-1);
+        expect(statements[at('lock_timeout')]).toContain('["3000"]');
+        expect(at(PAYROLL_LOCK)).toBeGreaterThan(at('lock_timeout'));
+        expect(at('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE')).toBeGreaterThan(at(PAYROLL_LOCK));
+        // The staff row is written only under both locks.
+        expect(at('insert into "technicians"')).toBeGreaterThan(at('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE'));
       });
     });
   });
