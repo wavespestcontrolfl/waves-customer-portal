@@ -1362,10 +1362,8 @@ const maySendAt = (now) => minuteOfDayEt(now) >= REMINDER_DAY_ET.from && minuteO
 // scheduler reads them before its lock. The pass reads them again before it takes an offer: a claim made with a
 // gate off would use up the offer's one attempt on a send that the sender refuses.
 const reminderOn = () => require('./recruiting-comms').stageEnabled('offer_reminder');
-// A channel that reached its provider, or may have.
-const WENT_OUT = ['sent', 'uncertain'];
-// A channel that did not go cleanly for a reason on our side. 'uncertain' is in both lists: the applicant may hold
-// the message, and nobody can say so.
+// A channel that did not go cleanly for a reason on our side: it failed, or its result is not known (the applicant
+// may hold the message, and nobody can say so).
 const NOT_CLEAN = ['failed', 'uncertain'];
 
 // The applicant's yes to a text about this offer: the "Text me about this offer" box on the offer page. It starts
@@ -1453,13 +1451,13 @@ async function deliverReminder({ application, offer, channels }, clock) {
  * none: the owner answers it. A catch-up pass (each run takes every offer that is due); it takes an offer only from
  * 9:00 AM to 5:55 PM Eastern, and no channel's handoff starts after 6:00 PM.
  *
- * Returns { reminded, notSent, failed }. reminded: a text or an email went out or may have (reminder_sent_at is set;
- * the offer timeline reads it). notSent: nothing went out, for a known reason (the offer closed first, the address is
+ * Returns { reminded, notSent, failed }. reminded: a provider took the text or the email (reminder_sent_at is set;
+ * the offer timeline reads it as "Reminder sent", so a result that is not known does not set it). notSent: nothing went out, for a known reason (the offer closed first, the address is
  * suppressed, the applicant opted out, it was 6 PM). failed: a channel failed or its result is not known, a check
  * before a provider could not be read, or the pass threw; the scheduler fails the job. The sender reads the reminder
  * text fail-loud (recruiting-comms triedOnceTextOutcome): a text that did not go is 'failed' unless the rail refused
  * it because of the applicant.
- * One offer can count as reminded and as failed (the email went and the text failed, or a result is not known).
+ * One offer can count as reminded and as failed (the email went, and the text failed or its result is not known).
  * With either gate off the pass takes nothing, also on a direct call.
  * clock: the time source, for tests. The scheduler passes none.
  */
@@ -1488,12 +1486,13 @@ async function sendDueReminders(clock = () => new Date()) {
 // Sends one claimed offer's reminder and counts it. A channel the sender reports as failed or as not known, or a
 // check before a provider that could not be read, fails the pass, also when the other channel went out: the offer is
 // not tried again, so the job's health is the only place the failure shows.
-// reminder_sent_at is written after the send; when that write fails the reminder still went, so it counts as reminded
-// and as a failure.
+// reminder_sent_at is written after the send, and only when a provider took a channel: the timeline must not say
+// "Reminder sent" for a result nobody knows (the claim alone keeps the offer from a second attempt). When that write
+// fails the reminder still went, so it counts as reminded and as a failure.
 async function remindClaimed(claimed, result, clock) {
   const { id } = claimed.offer;
   const comms = await deliverReminder(claimed, clock);
-  const went = WENT_OUT.includes(comms.sms) || WENT_OUT.includes(comms.email);
+  const went = comms.sms === 'sent' || comms.email === 'sent';
   const channelFailed = NOT_CLEAN.includes(comms.sms) || NOT_CLEAN.includes(comms.email) || comms.checkFailed;
   if (channelFailed) {
     result.failed += 1;

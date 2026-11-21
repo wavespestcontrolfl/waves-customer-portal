@@ -1486,17 +1486,24 @@ jest.setTimeout(120000);
         expect(mockSendStageComms).toHaveBeenCalledTimes(1);
       });
 
-      test('a channel whose result is not known counts as a reminder that may have gone, and fails the pass', async () => {
-        // The applicant may hold the message: the timeline says so, nothing is sent again, and the job shows it.
-        const text = await dueOffer();
-        mockSendStageComms.mockResolvedValueOnce({ sms: 'uncertain', email: 'skipped' });
-        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 1, notSent: 0, failed: 1 });
-        expect((await offerRow(text.sent.id)).reminder_sent_at).toBeInstanceOf(Date);
-
-        const email = await dueOffer({ texts: false });
+      test('a channel whose result is not known fails the pass, is not shown as "Reminder sent", and is not tried again', async () => {
+        // The applicant may hold the message and nobody can say so: no timeline entry, a failed job, no second send.
+        const unknown = await dueOffer({ texts: false });
         mockSendStageComms.mockResolvedValueOnce({ sms: 'not_requested', email: 'uncertain' });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 0, notSent: 0, failed: 1 });
+        expect(await offerRow(unknown.sent.id)).toMatchObject({ reminder_claimed_at: expect.any(Date), reminder_sent_at: null });
+        const panel = await JobOffers.adminPanel(unknown.app.id, actor());
+        expect(panel.current.timeline.map((t) => t.kind)).not.toContain('reminded');
+
+        // The email went and the text is not known: reminded by the email, and still a failure for the job.
+        const half = await dueOffer();
+        mockSendStageComms.mockResolvedValueOnce({ sms: 'uncertain', email: 'sent' });
         expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 1, notSent: 0, failed: 1 });
-        expect((await offerRow(email.sent.id)).reminder_sent_at).toBeInstanceOf(Date);
+        expect((await offerRow(half.sent.id)).reminder_sent_at).toBeInstanceOf(Date);
+
+        mockSendStageComms.mockClear();
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockSendStageComms).not.toHaveBeenCalled();
       });
 
       test('the pass does not wait on a row another transaction holds: both locked reads are SKIP LOCKED', async () => {

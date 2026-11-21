@@ -266,6 +266,14 @@ describe('the reminder text', () => {
     }
     // The caller's own check stopped it inside the locked handoff.
     expect((await send('offer_reminder', 'RECRUITING_STALE')).sms).toBe('stale');
+    // Twilio refused the number itself (the rail reports a provider failure with Twilio's code, and no `blocked`):
+    // unsubscribed at the carrier, not a valid number, no route, not mobile. Any other provider failure is ours.
+    const refusedByTwilio = (providerErrorCode) => {
+      sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'PROVIDER_FAILURE', providerErrorCode });
+      return RC.sendStageComms(app, 'offer_reminder', { sms: true, email: false, by: 'system', vars, stillEligible: async () => true });
+    };
+    for (const twilioCode of [21610, '21211', 21612, 21614]) expect((await refusedByTwilio(twilioCode)).sms).toBe('blocked');
+    for (const twilioCode of [21606, 20429, undefined]) expect((await refusedByTwilio(twilioCode)).sms).toBe('failed');
     // The offer text has a person who presses Send again: its outcome is unchanged.
     expect((await send('offer_sent', 'CONSENT_LOOKUP_FAILED')).sms).toBe('blocked');
   });

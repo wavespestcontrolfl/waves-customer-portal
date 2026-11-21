@@ -70,15 +70,19 @@ const isOfferStage = (stage) => OFFER_STAGES.has(stage);
 // would go out later, with no pass to check the applicant's yes to texts again or to record that it went.
 const TRIED_ONCE_STAGES = new Set(['offer_reminder']);
 // Nothing tries such a text again and no person presses Send again, so a text that did not go is read fail-loud. It
-// stays 'blocked' only when the rail refused it because of the applicant (opted out, suppressed, not a mobile line, no
-// consent on record), and it is 'stale' when the caller's own check stopped it. Every other reason is on our side (a
-// store or a template that could not be read, a disabled or broken template, a hold that nothing replays): 'failed',
-// so the caller's job shows it. Other stages keep the outcome they had.
+// is 'blocked' only when the refusal is about the applicant: the rail refused it (opted out, suppressed, not a mobile
+// line, no consent on record), or Twilio refused the number itself (unsubscribed at the carrier, not mobile, not a
+// valid or routable number: the provider's own list). It is 'stale' when the caller's own check stopped it. Every
+// other reason is on our side (a store or a template that could not be read, a disabled or broken template, a hold
+// that nothing replays): 'failed', so the caller's job shows it. Other stages keep the outcome they had.
 const APPLICANT_REFUSAL_CODE = /^(SUPPRESSED_[A-Z_]+|[A-Z_]*OPTED_OUT|NON_MOBILE_SMS_RECIPIENT|NO_CONSENT_RECORD|CONTACT_DECLINED)$/;
-function triedOnceTextOutcome(stage, outcome, code) {
+function triedOnceTextOutcome(stage, outcome, { code, providerErrorCode } = {}) {
   if (!TRIED_ONCE_STAGES.has(stage) || ['sent', 'uncertain', 'stale'].includes(outcome)) return outcome;
   if (code === 'RECRUITING_STALE') return 'stale';
-  return outcome === 'blocked' && APPLICANT_REFUSAL_CODE.test(String(code || '')) ? 'blocked' : 'failed';
+  const { RECIPIENT_TERMINAL_TWILIO_CODES } = require('./messaging/providers/twilio-sms');
+  const numberRefused = providerErrorCode != null && (RECIPIENT_TERMINAL_TWILIO_CODES || []).includes(String(providerErrorCode));
+  const railRefused = outcome === 'blocked' && APPLICANT_REFUSAL_CODE.test(String(code || ''));
+  return numberRefused || railRefused ? 'blocked' : 'failed';
 }
 
 // The gate a stage answers to. The offer text answers to GATE_JOB_OFFERS alone (the flow's own gate); the reminder
@@ -1063,7 +1067,7 @@ async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, 
     sendRes = classifySmsThrow(err);
   }
 
-  let outcome = triedOnceTextOutcome(stage, classifySmsOutcome(sendRes), sendRes.code);
+  let outcome = triedOnceTextOutcome(stage, classifySmsOutcome(sendRes), sendRes);
   if (outcome === 'sent') await retireQueuedInterviewInvites(app, stage);
 
   let deferredLedgerDone = false;
@@ -1114,7 +1118,7 @@ async function runSmsLeg(ctx) {
   }
   // No body: the template is off, or it could not be read (the renderer answers empty for both).
   if (!body) {
-    const outcome = triedOnceTextOutcome(stage, 'skipped', 'template_disabled');
+    const outcome = triedOnceTextOutcome(stage, 'skipped', { code: 'template_disabled' });
     entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome, code: 'template_disabled', body: '', by }));
     return outcome;
   }
@@ -1122,7 +1126,7 @@ async function runSmsLeg(ctx) {
   // The template renderer strips https:// from every link (sms-link-policy), so the rendered body carries the bare form.
   const offerLinkForms = vars.offer_link ? [vars.offer_link, stripSmsUrlScheme(vars.offer_link)] : [];
   if (isOfferStage(stage) && !offerLinkForms.some((link) => body.includes(link))) {
-    const outcome = triedOnceTextOutcome(stage, 'skipped', 'offer_link_missing');
+    const outcome = triedOnceTextOutcome(stage, 'skipped', { code: 'offer_link_missing' });
     entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome, code: 'offer_link_missing', body: '', by }));
     return outcome;
   }
