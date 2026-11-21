@@ -12379,7 +12379,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // against a linkage correction. One order everywhere:
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
-        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status', 'customer_id');
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate()
+          .first('estimate_data', 'status', 'customer_id', 'bill_by_invoice', 'show_one_time_option');
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
@@ -12461,6 +12462,23 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         if (freshLinkData && await staleCallLinkageReason(trx, freshLinkData, { lockCallRow: true, estimateStatus: freshLinkRow?.status })) {
           const err = new Error('Estimate is no longer active');
           err.status = 409;
+          throw err;
+        }
+        // A customer's own plan quote that staff changed, judged again on the row locked above and ahead of the consumer
+        // notice (codex pre-push P1), the order of the route's first read: a change that landed after that read never
+        // turns into a request to sign for a quote the accept refuses. A verified capture the page drops on this 409 is
+        // retired after the rollback, as the plan re-check below does.
+        const lockedQuoteRefusal = require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal({
+          ...estimate, bill_by_invoice: freshLinkRow?.bill_by_invoice, show_one_time_option: freshLinkRow?.show_one_time_option,
+        });
+        if (lockedQuoteRefusal) {
+          if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+            droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+          }
+          const err = new Error(lockedQuoteRefusal.message);
+          err.status = 409;
+          err.code = lockedQuoteRefusal.code;
+          err.isOperational = true;
           throw err;
         }
         // Florida consumer notice at the commit (GATE_ESTIMATE_CONSUMER_NOTICE): the live gate and the notice are judged
