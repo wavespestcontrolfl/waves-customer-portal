@@ -159,6 +159,50 @@ describe('estimate page: first-visit line and Ask Waves link under the price', (
     expect(firstVisitLine(container)).toBeNull();
   });
 
+  // The accept bills the plan's rows less any service-preference credit and plan-credit slice,
+  // and prices a partly itemized bundle another way. In each case below the box's first
+  // application is not proven to be the invoice, so the page states no first-visit total.
+  it('a service-preference credit (the monthly sits below the card price): no line', async () => {
+    const payload = single();
+    // Interior spraying turned off: $10 off each of 4 applications. The plan's monthly drops;
+    // the card's per-application price does not, so the monthly average does not reconcile.
+    const optedOut = payload.pricing.services[0].frequencies.map((f) => ({ ...f, monthly: 35.67, annual: 428 }));
+    const { container } = await renderPage({
+      ...payload,
+      pricing: { ...payload.pricing, services: [{ ...payload.pricing.services[0], frequencies: optedOut }], frequencies: optedOut },
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: ASK_LINK })).toBeInTheDocument());
+    expect(firstVisitLine(container)).toBeNull();
+  });
+
+  it('a plan credit on several services: no line (the accept takes a slice off the first application)', async () => {
+    const payload = multi();
+    const credit = { label: 'Neighbor discount', amount: 120, recurringAmount: 120 };
+    const { container } = await renderPage({
+      ...payload,
+      pricing: {
+        ...payload.pricing,
+        frequencies: payload.pricing.frequencies.map((f) => ({ ...f, monthly: 103.1, annual: 1237.2, manualDiscount: credit })),
+        combinedRecurring: { ...payload.pricing.combinedRecurring, monthlySubtotal: 103.1, annualSubtotal: 1237.2, manualDiscount: credit },
+      },
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: ASK_LINK })).toBeInTheDocument());
+    expect(firstVisitLine(container)).toBeNull();
+  });
+
+  it('a bundle whose plan rows price only one of its services: no line (pest + setup is not the whole bill)', async () => {
+    const payload = multi();
+    const { container } = await renderPage({
+      ...payload,
+      pricing: {
+        ...payload.pricing,
+        frequencies: payload.pricing.frequencies.map((f) => ({ ...f, perServiceTreatments: f.perServiceTreatments.slice(0, 1) })),
+      },
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: ASK_LINK })).toBeInTheDocument());
+    expect(firstVisitLine(container)).toBeNull();
+  });
+
   it('several services: the first bill is every first application plus setup, with no single later price', async () => {
     const { container } = await renderPage(multi());
     await waitFor(() => expect(firstVisitLine(container)).not.toBeNull());

@@ -147,12 +147,28 @@ function payPerApplicationInvoiceParts({ setupFee = null, extraInvoiceRows = [],
 // The first visit's bill as one number, for the line under the price (owner 2026-11-21):
 // the WaveGuard setup fee plus the first application, the two rows and the "Invoice total"
 // the box above the CTA shows once a time is picked. Null unless that box would show exactly
-// those two rows and nothing is billed beside them: a one-time visit, an invoice-mode or
-// site-priced plan, the annual prepay (setup waived), a setup fee with no first-application
-// amount, another up-front row (bait stations, a misting installation), another first-visit
-// fee (`firstVisitFees`: the initial cockroach treatment, which the box does not list) and
-// one-time services billed after completion all get no line, because "application + one-time
-// setup" would not be the whole first bill there.
+// those two rows, nothing is billed beside them, and the first application is proven:
+// - a one-time visit, an invoice-mode or site-priced plan, the annual prepay (setup waived),
+//   a setup fee with no first-application amount: no such bill;
+// - another up-front row (bait stations, a misting installation), another first-visit fee
+//   (`firstVisitFees`: the initial cockroach treatment, which the box does not list) or
+//   one-time services billed after completion: "application + one-time setup" is not all of it;
+// - `cardPerApplicationTotal` is the proof. The accept bills the selected plan's rows less a
+//   service-preference credit and a plan-credit slice, and reads a partly priced bundle
+//   another way, so the box's first application can sit above the real invoice. The page
+//   passes the card prices added up only when its monthly average reconciles them with the
+//   plan's own monthly and no plan credit stands between (null otherwise). The line shows
+//   only when that sum is the box's first application to the cent.
+const sameCents = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.round(a * 100) === Math.round(b * 100);
+
+function firstBillHasOtherCharges({ oneTimeExtrasTotal = 0, firstVisitFees = [] }) {
+  if (Number(oneTimeExtrasTotal) > 0) return true;
+  // The page's own first-visit fee list. With a one-time option on the estimate the breakdown
+  // is the alternate price and oneTimeExtrasTotal reads 0, so this list is checked by itself.
+  return (Array.isArray(firstVisitFees) ? firstVisitFees : [])
+    .some((fee) => fee?.service !== 'waveguard_setup' && Number(fee?.amount) > 0);
+}
+
 export function firstVisitTotalPreview({
   serviceMode,
   paymentPreference,
@@ -163,16 +179,13 @@ export function firstVisitTotalPreview({
   selectedFrequency = null,
   oneTimeExtrasTotal = 0,
   firstVisitFees = [],
+  cardPerApplicationTotal = null,
 } = {}) {
   if (serviceMode === 'one_time' || paymentPreference === 'prepay_annual' || invoiceMode || siteConfirmationHold) return null;
-  if (Number(oneTimeExtrasTotal) > 0) return null;
-  // The page's own first-visit fee list. With a one-time option on the estimate the breakdown
-  // is the alternate price and oneTimeExtrasTotal reads 0, so this list is checked by itself.
-  const otherFirstVisitFee = (Array.isArray(firstVisitFees) ? firstVisitFees : [])
-    .some((fee) => fee?.service !== 'waveguard_setup' && Number(fee?.amount) > 0);
-  if (otherFirstVisitFee) return null;
+  if (firstBillHasOtherCharges({ oneTimeExtrasTotal, firstVisitFees })) return null;
   const { setupAmount, hasWaveGuardSetupRow, upFrontRows, firstVisit } = payPerApplicationInvoiceParts({ setupFee, extraInvoiceRows, selectedFrequency });
   if (!hasWaveGuardSetupRow || upFrontRows.length !== 1 || !(firstVisit > 0)) return null;
+  if (cardPerApplicationTotal == null || !sameCents(Number(cardPerApplicationTotal), firstVisit)) return null;
   return {
     firstApplication: firstVisit,
     setup: setupAmount,

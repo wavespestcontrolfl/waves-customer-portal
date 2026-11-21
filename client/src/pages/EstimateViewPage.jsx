@@ -9706,7 +9706,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // amounts, so the cards above drop their per-service "$X a month" slices (codex #6399 r2).
   const applicationMonths = monthlyAverage ? applicationMonthsBreakdown(monthlyAverage.model) : null;
   // First-visit line under the price: the inputs are the ones the "Reserve your spot" box
-  // gets below, so the line and that box's "Invoice total" are one figure.
+  // gets below, so the line and that box's "Invoice total" are one figure. The monthly
+  // average is the proof the helper asks for: its model exists only when the card prices
+  // add up to the plan's own monthly, and a plan credit shows as `credit`.
+  const averageModel = monthlyAverage?.model || null;
   const firstVisitLine = invoiceOnlyAccept ? null : firstVisitTotalPreview({
     serviceMode,
     paymentPreference,
@@ -9717,13 +9720,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     selectedFrequency: combinedFrequency,
     oneTimeExtrasTotal: oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode),
     firstVisitFees: pricing.firstVisitFees,
+    cardPerApplicationTotal: averageModel && !averageModel.credit
+      ? averageModel.services.reduce((sum, service) => sum + service.perApplication, 0)
+      : null,
   });
-  // "Each visit after that" only where one number is true: a one-service plan whose card
-  // price (the monthly-average model's per-application price) is that first application.
-  const firstVisitLaterAmount = firstVisitLine
-    && monthlyAverage?.model.services.length === 1
-    && !monthlyAverage.model.credit
-    && Math.abs(monthlyAverage.model.services[0].perApplication - firstVisitLine.firstApplication) < 0.005
+  // "Each visit after that" only where one number is true: a one-service plan (the line
+  // exists, so its card price is that first application).
+  const firstVisitLaterAmount = firstVisitLine && averageModel.services.length === 1
     ? firstVisitLine.firstApplication
     : null;
 
