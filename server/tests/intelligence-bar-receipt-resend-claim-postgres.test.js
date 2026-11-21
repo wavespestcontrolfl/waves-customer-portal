@@ -180,6 +180,19 @@ postgres('resend_receipt on real PostgreSQL: the writer\'s final check and the a
       expect(await job()).toMatchObject({ status: 'completed' });
       expect((await invoice()).receipt_sent_at).toBeInstanceOf(Date);
     });
+
+    // The closeout resolves the linked visit again, after the writer's check. The card's own target rides with it, under the
+    // real key the tool pins (closeout_visit), so the closeout itself leaves any other visit open (its own suites prove that).
+    test.each([
+      ['named a visit', VISIT, VISIT.visitId],
+      ['named no visit', null, 'none'],
+    ])('a card that %s: the closeout is handed that target, and no other', async (_label, target, approvedTarget) => {
+      await seed();
+      mockCloseoutTarget.mockResolvedValue(target);
+      const card = await preview();
+      await confirm(card);
+      expect(mockCloseOut.mock.calls).toEqual([[{ invoiceId, trigger: 'paid', actorTechnicianId: 'admin-1', recordHold: false, approvedTarget }]]);
+    });
   });
 
   describe.each([['completed'], ['failed'], [null]])('two concurrent confirmations on a %s automatic job (null = no job): exactly one send (advisory lock)', (status) => {

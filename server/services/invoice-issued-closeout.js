@@ -595,8 +595,11 @@ async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null, i
   return { action: last.action, meta: meta || {} };
 }
 
-// Refusals that only a bar SEND's approval can produce (the card named a different visit). They say nothing about a settled
-// invoice's closeout, which the pin never covers (pinDecisionFor), so the sweep does not let one block a paid retry.
+// A refusal that only a CARD's approval produces (the closeout resolved a visit the card did not name): a bar send's card, a
+// record_payment card's, or a receipt resend's (the name predates the last two). It says what that card approved, not what a
+// settled invoice's own retry may close, so no sweep lets one block a paid retry. A payment's own card still binds its retry,
+// through its pin (pinDecisionFor). A resend writes no pin: the visit its card did not name closes at the next sweep, by the
+// ordinary rule.
 const SEND_ONLY_REFUSAL_CODES = ['approved_target_mismatch'];
 
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
@@ -784,7 +787,8 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       if (prepaidAndNobodyArrived(row)) continue;
       let last;
       try {
-        last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id, trigger });
+        // A receipt resend's card refusal is audited 'paid' on a settled child: read past it, as the invoice sweep does.
+        last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id, trigger, ...(trigger === 'paid' ? { ignoreCodes: SEND_ONLY_REFUSAL_CODES } : {}) });
       } catch (err) {
         logger.error(`[invoice-issued-closeout] statement retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
         continue;
@@ -1027,9 +1031,11 @@ async function resolveCloseoutTarget(run) {
   return { closed: false, reason: resolved.reason, visitId: null };
 }
 
-// An approved target (the Intelligence Bar's send card: the visit id it said would be closed, or 'none'):
-// the closeout runs only for that visit. A different live visit is left open and audited as a refusal that
-// the retry sweeps do not reconsider (a person decides). A send with no approved target is unchanged.
+// An approved target (an Intelligence Bar card: the visit id it said would be closed, or 'none'): the closeout
+// runs only for that visit. A different live visit is left open, audited `approved_target_mismatch`. A send
+// card's and a record_payment card's target bind the retry sweeps too (a person decides). A receipt resend
+// card's does not: the payment is not the resend's, and the sweeps close the visit by their own rule
+// (SEND_ONLY_REFUSAL_CODES). A caller with no approved target is unchanged.
 // The carded visit's facts (a record_payment card pins them): the closeout also runs only for that visit AS THE CARD SHOWED IT, compared
 // here on the resolved row and again by the completion under the visit lock (approvedVisit). A visit edited, rescheduled, reclassified
 // or cancelled since is left open: `approved_visit_changed`, not retried by the sweeps (a person decides; the payment stays recorded).
