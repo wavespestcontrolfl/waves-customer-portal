@@ -2,6 +2,16 @@ const Stripe = require('stripe');
 const config = require('../config');
 const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
+const {
+  usesSettledCardRefundLedger,
+  settledCardRefundsLive,
+  verifySettledCardCharge,
+  listPaymentRefunds,
+  readSinglePaymentRefunds,
+  projectSinglePaymentRefund,
+  refundMetadata,
+  refundIds,
+} = require('./settled-card-refunds');
 const logger = require('./logger');
 const { insertHealthAlert } = require('./health-alert-insert');
 const { lockCustomerPaymentMethods } = require('../utils/payment-method-lock');
@@ -75,6 +85,75 @@ const {
   nextInvoiceStatusAfterFailedPayment,
 } = require('./stripe-invoice-state');
 const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
+
+const SETTLED_CARD_REFUND_LEDGER_VERSION = 1;
+const ADMIN_REFUND_ATTEMPT_VERSION = 1;
+const ADMIN_REFUND_VERSION_META = 'waves_admin_refund_version';
+const ADMIN_REFUND_ATTEMPT_META = 'waves_admin_refund_attempt';
+
+function stripeObjectId(value) {
+  return typeof value === 'string' ? value : value?.id;
+}
+
+function withoutPendingRefund(meta) {
+  const result = { ...meta };
+  for (const key of ['key', 'request', 'base', 'gross', 'surcharge_cents', 'reason', 'at', 'version', 'id', 'charge_id', 'provider_key']) {
+    delete result[`pending_refund_${key}`];
+  }
+  return result;
+}
+
+function pendingAdminRefundIdentity(meta, enteredTag) {
+  if (meta.pending_refund_version == null && meta.pending_refund_id == null) return null;
+  const gross = meta.pending_refund_gross;
+  const amountMatches = meta.pending_refund_request === 'rest'
+    ? gross == null
+    : Number.isSafeInteger(gross) && gross > 0 && String(gross) === meta.pending_refund_request;
+  const frozenSurcharge = meta.pending_refund_surcharge_cents;
+  const surchargeMatches = frozenSurcharge == null
+    || (meta.pending_refund_request === 'rest'
+      && Number.isSafeInteger(frozenSurcharge) && frozenSurcharge >= 0);
+  if (meta.pending_refund_version === ADMIN_REFUND_ATTEMPT_VERSION
+      && typeof meta.pending_refund_id === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(meta.pending_refund_id)
+      && (meta.pending_refund_provider_key == null || meta.pending_refund_provider_key === `refund_card_${meta.pending_refund_id}`)
+      && typeof meta.pending_refund_reason === 'string' && meta.pending_refund_reason.length > 0
+      && meta.pending_refund_base === enteredTag && amountMatches && surchargeMatches) return meta.pending_refund_id;
+  throw new Error('The pending refund attempt identifier is unsupported. Preserve it for reconciliation before retrying.');
+}
+
+// Amount and time alone cannot identify an earlier admin refund. Use the
+// provider's attempt tag or the exact refund ID recorded for that attempt.
+function identifyPendingCardRefund(listed, meta, { attemptId, chargeId, paymentIntentId, grossCents, paidCents }) {
+  const tagged = attemptId
+    ? [...listed.values()].filter((item) => item.metadata?.[ADMIN_REFUND_ATTEMPT_META] === attemptId)
+    : [];
+  if (tagged.length > 1) {
+    throw new Error('Multiple Stripe refunds carry the earlier attempt identifier. Reconcile their refund IDs before submitting another.');
+  }
+  let refund = tagged[0];
+  if (refund) {
+    if (refund.metadata[ADMIN_REFUND_VERSION_META] !== String(ADMIN_REFUND_ATTEMPT_VERSION)) {
+      throw new Error('The Stripe refund attempt identifier has an unsupported version. Reconcile its refund ID before submitting another.');
+    }
+  } else {
+    const last = meta.last_admin_refund;
+    if (last?.key === meta.pending_refund_key && (last.attempt_id ?? null) === attemptId) {
+      refund = listed.get(last.id);
+    }
+    if (!refund || refund.amount !== last.amount_cents) {
+      throw new Error('The expired refund attempt has no exact supported Stripe refund identifier. Preserve it for reconciliation before submitting another.');
+    }
+  }
+  const amountMatches = meta.pending_refund_request === 'rest' ? refund.amount <= paidCents : refund.amount === grossCents;
+  if (!Number.isSafeInteger(refund.amount) || refund.amount <= 0 || !amountMatches) {
+    throw new Error('The identified Stripe refund amount does not match the pending attempt. Reconcile it before submitting another.');
+  }
+  if (stripeObjectId(refund.charge) !== chargeId || stripeObjectId(refund.payment_intent) !== paymentIntentId) {
+    throw new Error('The identified Stripe refund does not belong to the original charge. Reconcile it before submitting another.');
+  }
+  return refund;
+}
 
 // Stripe rejects a payment_method_types narrow when an incompatible
 // PaymentMethod is already attached to the PaymentIntent — e.g. a customer
@@ -3451,6 +3530,8 @@ const StripeService = {
     if (payment.processor !== 'stripe' || !payment.stripe_payment_intent_id) {
       throw new Error('Payment is not a Stripe payment — cannot refund via Stripe');
     }
+    const originalStripeChargeId = payment.stripe_charge_id;
+    const originalStripePaymentIntentId = payment.stripe_payment_intent_id;
 
     // Combined full-balance rows are one SHARE of a single Stripe charge —
     // this per-row refund path prices from payment.amount as if it were the
@@ -3471,6 +3552,9 @@ const StripeService = {
         'This payment is one share of a combined balance charge. Refund the FULL charge from the Stripe dashboard (every included invoice reopens), or issue account credit for a per-invoice adjustment.',
       );
     }
+    const settledLedgerEnrolled = refundRowMeta.settled_card_refund_ledger === SETTLED_CARD_REFUND_LEDGER_VERSION;
+    const useSettledCardLedger = settledLedgerEnrolled
+      || (settledCardRefundsLive() && await usesSettledCardRefundLedger(db, payment));
 
     // An invoice paid partly by hand (a part payment, GATE_PARTIAL_PAYMENTS) was not covered by this one charge: a refund of it here would
     // settle the invoice as refunded while the part stays collected, and the refund math below assumes one payment covered the bill.
@@ -3504,10 +3588,7 @@ const StripeService = {
     // unresolved outcome (network error, DB write failure) and is cleared
     // on completion or on a definitive Stripe rejection, so a retry always
     // replays the ORIGINAL attempt's key.
-    let meta = {};
-    try {
-      meta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
-    } catch { meta = {}; }
+    let meta = refundRowMeta;
 
     // Card-brand rule: a partial refund must return the prorated share of the
     // recorded card surcharge, not just the entered base dollars — the
@@ -3589,15 +3670,129 @@ const StripeService = {
       }
     };
     let idempotencyKey;
+    let replayReason = null;
+    let attemptId = useSettledCardLedger && isReplay ? pendingAdminRefundIdentity(meta, enteredTag) : null;
+    let frozenChargeId = useSettledCardLedger && isReplay ? meta.pending_refund_charge_id : null;
+    let completedRefund;
+    const pendingBalance = String(meta.pending_refund_key || '').match(/_(\d+)(?:_b\d+)?$/);
+    let remainingShareCents = meta.pending_refund_surcharge_cents;
+    let originalRemainingCents = pendingBalance ? paidCents - Number(pendingBalance[1]) : remainingCents;
     const attemptReason = reason || 'requested_by_customer';
     // Bounced attempts leave the amounts untouched (nothing was returned),
     // so a retry after a bounce sees the SAME tag and priorCents — without
     // the bounce-count suffix it would reuse the dead attempt's key and
     // Stripe's idempotency layer would hand back the bounced refund object
     // instead of creating a new refund.
-    const bouncedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
+    const bouncedIds = useSettledCardLedger
+      ? refundIds(meta, 'failed_refund_ids')
+      : (Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : []);
+    const assertLockedSettledEligibility = async (trx, locked, current) => {
+      const enrolled = current.settled_card_refund_ledger === SETTLED_CARD_REFUND_LEDGER_VERSION;
+      if ((!enrolled && !settledCardRefundsLive()) || !await usesSettledCardRefundLedger(trx, locked)) {
+        throw new Error('This payment is no longer eligible for settled-card refund reconciliation. Refresh it before retrying.');
+      }
+    };
+    const assertLockedStripeIdentity = (locked, chargeId) => {
+      if (typeof chargeId !== 'string' || !chargeId
+        || locked.stripe_charge_id !== originalStripeChargeId
+        || locked.stripe_payment_intent_id !== originalStripePaymentIntentId
+        || Math.round(Number(locked.amount) * 100) !== paidCents
+        || chargeId !== originalStripeChargeId) {
+        throw new Error('This payment changed while the refund was starting. Refresh it before retrying.');
+      }
+    };
+    const verifyOriginalCardCharge = () => verifySettledCardCharge(stripe, {
+      chargeId: originalStripeChargeId,
+      paymentIntentId: originalStripePaymentIntentId,
+      expectedAmountCents: paidCents,
+    });
+    const claimExistingSettledAttempt = async () => {
+      // A pending refund can predate enrollment. Prove its charge before
+      // making the card-only behavior survive a gate rollback.
+      if (!settledLedgerEnrolled) await verifyOriginalCardCharge();
+      await db.transaction(async (trx) => {
+        const locked = await trx('payments').where({ id: paymentId }).forUpdate().first();
+        if (!locked) throw new Error('Payment not found');
+        const current = refundMetadata(locked);
+        await assertLockedSettledEligibility(trx, locked, current);
+        const claimedChargeId = current.pending_refund_charge_id || locked.stripe_charge_id;
+        assertLockedStripeIdentity(locked, claimedChargeId);
+        if (current.pending_refund_key !== meta.pending_refund_key
+          || current.pending_refund_id !== meta.pending_refund_id
+          || (settledLedgerEnrolled && current.settled_card_refund_ledger !== SETTLED_CARD_REFUND_LEDGER_VERSION)
+          || (current.pending_refund_base ?? current.pending_refund_request) !== enteredTag
+          || Number(locked.refund_amount || 0) !== priorCents / 100) {
+          throw new Error('This payment changed while the refund was starting. Verify which refund was recorded in Stripe before submitting another.');
+        }
+        const claimed = { ...current, settled_card_refund_ledger: SETTLED_CARD_REFUND_LEDGER_VERSION };
+        if (current.settled_card_refund_ledger !== SETTLED_CARD_REFUND_LEDGER_VERSION) {
+          await trx('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(claimed) });
+        }
+        meta = claimed;
+        attemptId = pendingAdminRefundIdentity(claimed, enteredTag);
+        frozenChargeId = claimedChargeId;
+        remainingShareCents = claimed.pending_refund_surcharge_cents;
+        if (attemptId && claimed.pending_refund_charge_id !== frozenChargeId) {
+          throw new Error('The pending refund attempt is missing its original Stripe charge. Preserve it for reconciliation before retrying.');
+        }
+      });
+    };
     const persistPendingAttempt = async () => {
       idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}${bouncedIds.length ? `_b${bouncedIds.length}` : ''}`;
+      if (useSettledCardLedger) {
+        remainingShareCents = Math.max(0, surchargeCents - alreadyRefundedSurchargeCents);
+        originalRemainingCents = remainingCents;
+        const verified = await verifyOriginalCardCharge();
+        frozenChargeId = verified.id;
+        attemptId = uuidv4();
+        await db.transaction(async (trx) => {
+          const locked = await trx('payments').where({ id: paymentId }).forUpdate().first();
+          if (!locked) throw new Error('Payment not found');
+          const current = refundMetadata(locked);
+          await assertLockedSettledEligibility(trx, locked, current);
+          assertLockedStripeIdentity(locked, frozenChargeId);
+          const last = current.last_admin_refund;
+          if (last?.key === idempotencyKey && !refundIds(current, 'failed_refund_ids').includes(last.id)) {
+            completedRefund = { ...locked, refund_issued_amount: last.amount_cents / 100 };
+            return;
+          }
+          if (current.pending_refund_key === idempotencyKey && !meta.pending_refund_key
+            && (current.pending_refund_base ?? current.pending_refund_request) === enteredTag) {
+            meta = current;
+            attemptId = pendingAdminRefundIdentity(current, enteredTag);
+            frozenChargeId = current.pending_refund_charge_id;
+            assertLockedStripeIdentity(locked, frozenChargeId);
+            remainingShareCents = current.pending_refund_surcharge_cents;
+            replayReason = current.pending_refund_reason || attemptReason;
+            return;
+          }
+          if (current.pending_refund_key !== meta.pending_refund_key
+            || Number(locked.refund_amount || 0) !== priorCents / 100
+            || Number(locked.refunded_surcharge_cents || 0) !== Number(payment.refunded_surcharge_cents || 0)
+            || refundIds(current, 'failed_refund_ids').length !== bouncedIds.length) {
+            throw new Error('This payment changed while the refund was starting. Verify which refund was recorded in Stripe before submitting another.');
+          }
+          const claimed = {
+            ...withoutPendingRefund(current),
+            settled_card_refund_ledger: SETTLED_CARD_REFUND_LEDGER_VERSION,
+            pending_refund_key: idempotencyKey,
+            pending_refund_version: ADMIN_REFUND_ATTEMPT_VERSION,
+            pending_refund_id: attemptId,
+            pending_refund_provider_key: `refund_card_${attemptId}`,
+            pending_refund_charge_id: frozenChargeId,
+            pending_refund_request: requestTag,
+            pending_refund_base: enteredTag,
+            ...(grossCents !== null ? { pending_refund_gross: grossCents } : {}),
+            ...(grossCents === null && surchargeCents > 0
+              ? { pending_refund_surcharge_cents: remainingShareCents } : {}),
+            pending_refund_reason: attemptReason,
+            pending_refund_at: new Date().toISOString(),
+          };
+          await trx('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(claimed) });
+          meta = claimed;
+        });
+        return;
+      }
       await db('payments').where({ id: paymentId }).update({
         metadata: JSON.stringify({
           ...meta,
@@ -3613,6 +3808,8 @@ const StripeService = {
       });
     };
 
+    if (useSettledCardLedger && isReplay) await claimExistingSettledAttempt();
+
     // Stripe guarantees idempotency keys for at least 24h and may prune
     // them after — a blind replay of an older key would execute as a
     // brand-new request and refund twice. Inside a conservative 20h
@@ -3624,16 +3821,22 @@ const StripeService = {
     // rejects a reused key whose parameters differ, so a retry that only
     // changes the reason would wedge on an idempotency error. Legacy
     // markers without a persisted reason fall through to the incoming one.
-    let replayReason = null;
     if (isReplay) {
       const pendingAtMs = Date.parse(meta.pending_refund_at || '') || 0;
-      if (pendingAtMs && (Date.now() - pendingAtMs) <= REPLAY_SAFE_WINDOW_MS) {
+      // Pre-enrollment markers have no UUID/charge pair that can be sent to
+      // Stripe as an exact retry. They always take the read-only reconciliation
+      // path, even inside Stripe's normal idempotency window.
+      const exactSettledReplay = !useSettledCardLedger
+        || (attemptId && meta.pending_refund_charge_id === frozenChargeId && pendingAtMs <= Date.now());
+      if (pendingAtMs && (Date.now() - pendingAtMs) <= REPLAY_SAFE_WINDOW_MS && exactSettledReplay) {
         idempotencyKey = meta.pending_refund_key;
         replayReason = meta.pending_refund_reason || null;
       } else {
         let listed;
         try {
-          listed = await stripe.refunds.list({ payment_intent: payment.stripe_payment_intent_id, limit: 100 });
+          listed = useSettledCardLedger
+            ? await listPaymentRefunds(stripe, { charge: frozenChargeId || originalStripeChargeId })
+            : await stripe.refunds.list({ payment_intent: payment.stripe_payment_intent_id, limit: 100 });
         } catch (listErr) {
           // Fail CLOSED: without seeing Stripe's refunds we can't tell
           // whether the day-old attempt landed, and guessing risks a
@@ -3641,64 +3844,94 @@ const StripeService = {
           logger.error(`[stripe] stale refund-attempt reconcile failed for payment ${paymentId}: ${listErr.message}`);
           throw new Error('Could not verify the earlier refund attempt against Stripe — check the payment in the Stripe dashboard before retrying');
         }
-        // Adopt the original refund if it landed (right amount, created
-        // at/after the attempt) — record it below without re-sending. A
-        // 'rest' attempt has no explicit requestCents, but its attempt-time
-        // amount is recoverable as paid minus the key's prior-cents suffix;
-        // the match is REQUIRED, else any later refund (e.g. a dashboard
-        // partial) would be adopted as the full refund and the true
-        // remainder never sent. An unparseable key can't be reconciled —
-        // no adoption; the fresh 'rest' attempt below is still safe because
-        // Stripe computes the remainder from its own ledger.
-        // Prefer the frozen grossed amount — that is what the original
-        // attempt actually sent to Stripe (legacy markers have no gross and
-        // fall back to the entered amount, which WAS what they sent).
-        let expectedCents = Number.isFinite(Number(meta.pending_refund_gross))
-          ? Number(meta.pending_refund_gross)
-          : requestCents;
-        if (expectedCents === null) {
-          const keyPriorCents = Number((meta.pending_refund_key || '').split('_').pop());
-          expectedCents = (Number.isInteger(keyPriorCents) && keyPriorCents >= 0 && keyPriorCents < paidCents)
-            ? paidCents - keyPriorCents
-            : NaN;
-        }
-        adoptedRefund = (Number.isFinite(expectedCents) && (listed?.data || []).find((r) =>
-          ['succeeded', 'pending'].includes(r.status)
-          && r.amount === expectedCents
-          && (!pendingAtMs || r.created * 1000 >= pendingAtMs - 5 * 60 * 1000))) || null;
-        if (!adoptedRefund) {
-          // The original attempt never landed at Stripe — start over as a
-          // validated fresh attempt against the CURRENT balance. The gross
-          // and tag were forced to the dead attempt's values above (a legacy
-          // marker would resend the UNGROSSED base, shorting the customer
-          // the prorated surcharge); recompute both — a fresh tag also
-          // derives a fresh idempotency key, so the new amount can't wedge
-          // on the stale key's parameter check.
-          grossCents = freshGrossCents;
-          requestTag = grossCents === null ? 'rest' : String(grossCents);
-          assertNewAttemptRefundable();
-          await persistPendingAttempt();
+        if (useSettledCardLedger) {
+          adoptedRefund = identifyPendingCardRefund(listed, meta, {
+            attemptId, chargeId: frozenChargeId, paymentIntentId: originalStripePaymentIntentId, grossCents, paidCents,
+          });
+        } else {
+          // Adopt the original refund if it landed (right amount, created
+          // at/after the attempt) — record it below without re-sending. A
+          // 'rest' attempt has no explicit requestCents, but its attempt-time
+          // amount is recoverable as paid minus the key's prior-cents suffix;
+          // the match is REQUIRED, else any later refund (e.g. a dashboard
+          // partial) would be adopted as the full refund and the true
+          // remainder never sent. An unparseable key can't be reconciled —
+          // no adoption; the fresh 'rest' attempt below is still safe because
+          // Stripe computes the remainder from its own ledger.
+          // Prefer the frozen grossed amount — that is what the original
+          // attempt actually sent to Stripe (legacy markers have no gross and
+          // fall back to the entered amount, which WAS what they sent).
+          let expectedCents = Number.isFinite(Number(meta.pending_refund_gross))
+            ? Number(meta.pending_refund_gross)
+            : requestCents;
+          if (expectedCents === null) {
+            const keyPriorCents = Number((meta.pending_refund_key || '').split('_').pop());
+            expectedCents = (Number.isInteger(keyPriorCents) && keyPriorCents >= 0 && keyPriorCents < paidCents)
+              ? paidCents - keyPriorCents
+              : NaN;
+          }
+          adoptedRefund = (Number.isFinite(expectedCents) && (listed?.data || []).find((r) =>
+            ['succeeded', 'pending'].includes(r.status)
+            && r.amount === expectedCents
+            && (!pendingAtMs || r.created * 1000 >= pendingAtMs - 5 * 60 * 1000))) || null;
+          if (!adoptedRefund) {
+            // The original attempt never landed at Stripe — start over as a
+            // validated fresh attempt against the CURRENT balance. The gross
+            // and tag were forced to the dead attempt's values above (a legacy
+            // marker would resend the UNGROSSED base, shorting the customer
+            // the prorated surcharge); recompute both — a fresh tag also
+            // derives a fresh idempotency key, so the new amount can't wedge
+            // on the stale key's parameter check.
+            grossCents = freshGrossCents;
+            requestTag = grossCents === null ? 'rest' : String(grossCents);
+            assertNewAttemptRefundable();
+            await persistPendingAttempt();
+          }
         }
       }
     } else {
       assertNewAttemptRefundable();
       await persistPendingAttempt();
     }
-    const clearedMeta = { ...meta };
-    delete clearedMeta.pending_refund_key;
-    delete clearedMeta.pending_refund_request;
-    delete clearedMeta.pending_refund_base;
-    delete clearedMeta.pending_refund_gross;
-    delete clearedMeta.pending_refund_reason;
-    delete clearedMeta.pending_refund_at;
+    if (completedRefund) return completedRefund;
+    const attemptKey = idempotencyKey || meta.pending_refund_key;
+    const ownsSettledAttempt = (current) => current.pending_refund_key === attemptKey
+      && (current.pending_refund_id ?? null) === (attemptId ?? null);
+    const clearedMeta = useSettledCardLedger ? withoutPendingRefund(meta) : { ...meta };
+    if (!useSettledCardLedger) {
+      delete clearedMeta.pending_refund_key;
+      delete clearedMeta.pending_refund_request;
+      delete clearedMeta.pending_refund_base;
+      delete clearedMeta.pending_refund_gross;
+      delete clearedMeta.pending_refund_reason;
+      delete clearedMeta.pending_refund_at;
+    }
 
     let refund = adoptedRefund;
+    if (useSettledCardLedger && !refund
+      && (!attemptId || meta.pending_refund_charge_id !== frozenChargeId)) {
+      throw new Error('The pending refund attempt predates exact Stripe refund identifiers. Preserve it for reconciliation before retrying.');
+    }
+    if (useSettledCardLedger && !refund) {
+      // A concurrent caller can join an existing claim after its initial read.
+      const age = Date.now() - Date.parse(meta.pending_refund_at);
+      if (!Number.isFinite(age) || age < 0 || age > REPLAY_SAFE_WINDOW_MS) {
+        throw new Error('The pending refund is outside the safe replay window. Retry to reconcile its exact refund ID.');
+      }
+    }
     try {
       if (!refund) {
         const refundParams = {
-          payment_intent: payment.stripe_payment_intent_id,
           reason: replayReason || attemptReason,
         };
+        if (useSettledCardLedger && attemptId) {
+          refundParams.metadata = {
+            [ADMIN_REFUND_VERSION_META]: String(ADMIN_REFUND_ATTEMPT_VERSION),
+            [ADMIN_REFUND_ATTEMPT_META]: attemptId,
+          };
+        }
+        if (useSettledCardLedger && frozenChargeId) refundParams.charge = frozenChargeId;
+        else refundParams.payment_intent = payment.stripe_payment_intent_id;
         if (grossCents !== null) {
           // Entered base + prorated surcharge share (capped at the remaining
           // balance) — see the gross-up block above.
@@ -3715,7 +3948,10 @@ const StripeService = {
           const parentLock = require('./annual-prepay-renewals').assertParentDecisionLockAlive;
           if (typeof parentLock === 'function') parentLock();
         }
-        refund = await stripe.refunds.create(refundParams, { idempotencyKey });
+        // A new attempt at the same balance can follow a definitive rejection.
+        // Its UUID gives Stripe a fresh key. Replay older claims on their original key.
+        const providerKey = useSettledCardLedger ? (meta.pending_refund_provider_key ?? idempotencyKey) : idempotencyKey;
+        refund = await stripe.refunds.create(refundParams, { idempotencyKey: providerKey });
       }
     } catch (err) {
       // Definitive rejections clear the pending attempt so a corrected
@@ -3724,10 +3960,28 @@ const StripeService = {
       // is safe whether or not the original request landed.
       const definitiveRejection = ['StripeInvalidRequestError', 'StripeCardError'].includes(err?.type);
       if (definitiveRejection) {
-        await db('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(clearedMeta) }).catch(() => {});
+        if (useSettledCardLedger) {
+          await db.transaction(async (trx) => {
+            const row = await trx('payments').where({ id: paymentId }).forUpdate().first();
+            if (!row) return;
+            const current = refundMetadata(row);
+            if (ownsSettledAttempt(current)) {
+              await trx('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(withoutPendingRefund(current)) });
+            }
+          }).catch(() => {});
+        } else {
+          await db('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(clearedMeta) }).catch(() => {});
+        }
       }
       logger.error(`[stripe] Refund failed for payment ${paymentId}: ${err.message}`);
       throw new Error('Refund processing failed');
+    }
+    if (useSettledCardLedger && attemptId
+      && (stripeObjectId(refund?.charge) !== frozenChargeId
+        || stripeObjectId(refund?.payment_intent) !== originalStripePaymentIntentId
+        || refund?.metadata?.[ADMIN_REFUND_VERSION_META] !== String(ADMIN_REFUND_ATTEMPT_VERSION)
+        || refund?.metadata?.[ADMIN_REFUND_ATTEMPT_META] !== attemptId)) {
+      throw new Error(`Stripe returned refund ${refund?.id || '(unknown)'}, but its exact attempt metadata or charge did not match. Re-running while this attempt remains pending is safe.`);
     }
 
     // From here the money HAS moved. The cumulative refunded total comes
@@ -3738,8 +3992,22 @@ const StripeService = {
     // prior 40 + 40 = 80), and misses dashboard-side partials this table
     // never saw.
     const refundAmountDollars = refund.amount / 100;
+    let settledSnapshot = null;
+    if (useSettledCardLedger) {
+      try {
+        settledSnapshot = await readSinglePaymentRefunds(stripe, {
+          chargeId: frozenChargeId || originalStripeChargeId,
+          paymentIntentId: originalStripePaymentIntentId,
+        });
+      } catch (historyErr) {
+        logger.error(`[stripe] refund ${refund.id} for payment ${paymentId} needs settled-card ledger reconciliation: ${historyErr.message}`);
+        throw new Error(`Refund ${refund.id} WAS issued at Stripe but its individual refund history could not be verified. Re-running the same refund is safe while this attempt remains pending.`);
+      }
+    }
     let totalRefundedCents;
-    if (requestCents === null) {
+    if (settledSnapshot) {
+      totalRefundedCents = settledSnapshot.totalCents;
+    } else if (requestCents === null) {
       // Omitted amount empties the remaining balance — fully refunded by
       // definition.
       totalRefundedCents = paidCents;
@@ -3751,7 +4019,7 @@ const StripeService = {
       totalRefundedCents = priorCents + refund.amount;
     }
     try {
-      if (refund.charge) {
+      if (!settledSnapshot && refund.charge) {
         const charge = await stripe.charges.retrieve(refund.charge);
         if (Number.isFinite(Number(charge?.amount_refunded))) {
           totalRefundedCents = Number(charge.amount_refunded);
@@ -3760,20 +4028,22 @@ const StripeService = {
     } catch (chargeErr) {
       logger.warn(`[stripe] refund cumulative lookup failed for payment ${paymentId} (falling back to local accumulation): ${chargeErr.message}`);
     }
-    const isFullRefund = totalRefundedCents >= paidCents;
+    let isFullRefund = totalRefundedCents >= paidCents;
 
     // LIVE metadata read — the charge.refunded / refund.failed webhooks may
     // have written stamps or bounce fences while this attempt was in flight,
     // and clearedMeta is a pre-call snapshot that would otherwise erase them.
     let liveMeta = null;
-    try {
-      const liveRow = await db('payments').where({ id: paymentId }).first('metadata');
+    if (!useSettledCardLedger) {
       try {
-        liveMeta = liveRow?.metadata ? (typeof liveRow.metadata === 'string' ? JSON.parse(liveRow.metadata) : liveRow.metadata) : {};
-      } catch { liveMeta = {}; }
-    } catch (liveErr) {
-      logger.warn(`[stripe] live metadata read failed for payment ${paymentId}: ${liveErr.message}`);
-      liveMeta = null; // unknown — fall back to the loaded snapshot below
+        const liveRow = await db('payments').where({ id: paymentId }).first('metadata');
+        try {
+          liveMeta = liveRow?.metadata ? (typeof liveRow.metadata === 'string' ? JSON.parse(liveRow.metadata) : liveRow.metadata) : {};
+        } catch { liveMeta = {}; }
+      } catch (liveErr) {
+        logger.warn(`[stripe] live metadata read failed for payment ${paymentId}: ${liveErr.message}`);
+        liveMeta = null; // unknown — fall back to the loaded snapshot below
+      }
     }
 
     // A refund whose FAILURE was already recorded must never be stamped as
@@ -3785,7 +4055,7 @@ const StripeService = {
     // fenced, so the event replay is a no-op). Abort: clear the pending
     // marker (the next attempt derives a fresh bounce-suffixed key) and
     // tell the operator the truth.
-    const bounceFence = new Set([
+    const bounceFence = useSettledCardLedger ? new Set() : new Set([
       ...bouncedIds,
       ...(liveMeta && Array.isArray(liveMeta.failed_refund_ids) ? liveMeta.failed_refund_ids : []),
     ]);
@@ -3812,7 +4082,69 @@ const StripeService = {
     if (mergedStamps.size) clearedMeta.stamped_refund_ids = [...mergedStamps];
 
     // The ledger write itself — called inside the gated transaction below.
+    let settledExisting = null;
+    let settledStampError = null;
     const stampRefundOnPayment = async (trx) => {
+      if (useSettledCardLedger) {
+        const row = await trx('payments').where({ id: paymentId }).forUpdate().first();
+        if (!row) throw new Error('Payment not found');
+        const current = refundMetadata(row);
+        await assertLockedSettledEligibility(trx, row, current);
+        if (!ownsSettledAttempt(current)) {
+          if (refundIds(current, 'stamped_refund_ids').includes(refund.id) || row.stripe_refund_id === refund.id) {
+            settledExisting = row;
+            return;
+          }
+          throw new Error('The payment refund attempt changed before its ledger stamp');
+        }
+        const ledger = projectSinglePaymentRefund(row, settledSnapshot, refund.id);
+        if (ledger.bounced) {
+          if (ledger.fenced) {
+            await trx('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(withoutPendingRefund(current)) });
+          }
+          settledStampError = new Error('This refund attempt already bounced at the bank — no money was returned. Re-run the refund to start a fresh attempt.');
+          return;
+        }
+        if (ledger.refundCents !== refund.amount) throw new Error('Stripe refund amount changed during reconciliation');
+        const nextMeta = withoutPendingRefund(ledger.metadata);
+        nextMeta.last_admin_refund = { key: attemptKey, attempt_id: attemptId, id: refund.id, amount_cents: ledger.refundCents };
+        const stamp = {
+          status: ledger.isFull ? 'refunded' : row.status,
+          refund_amount: ledger.totalCents / 100,
+          refund_status: settledSnapshot.refunds.get(ledger.latestRefundId).status,
+          stripe_refund_id: ledger.latestRefundId,
+          metadata: JSON.stringify(nextMeta),
+          updated_at: new Date(),
+        };
+        if (surchargeCents > 0) {
+          const priorGross = Math.round(Number(row.refund_amount || 0) * 100);
+          const priorShare = Number(row.refunded_surcharge_cents || 0);
+          const otherGross = ledger.totalCents - ledger.refundCents;
+          const otherShare = otherGross === priorGross
+            ? priorShare
+            : Math.round((otherGross * surchargeCents) / paidCents);
+          let thisShare = Math.max(0, ledger.refundCents - (requestCents || 0));
+          if (requestCents === null) {
+            thisShare = ledger.refundCents === originalRemainingCents && remainingShareCents != null
+              ? Number(remainingShareCents)
+              : Math.round((ledger.refundCents * surchargeCents) / paidCents);
+          }
+          // If the webhook stamped this same refund first, priorGross and
+          // priorShare already include it. Otherwise combine the surviving
+          // refunds with this attempt's frozen share exactly once.
+          const returned = Math.max(
+            priorGross === ledger.totalCents ? priorShare : 0,
+            otherShare + thisShare,
+          );
+          stamp.refunded_surcharge_cents = ledger.isFull
+            ? surchargeCents
+            : Math.min(surchargeCents, returned);
+        }
+        await trx('payments').where({ id: paymentId }).update(stamp);
+        totalRefundedCents = ledger.totalCents;
+        isFullRefund = ledger.isFull;
+        return;
+      }
       await trx('payments')
         .where({ id: paymentId })
         .update({
@@ -3859,6 +4191,8 @@ const StripeService = {
       logger.error(`[stripe] CRITICAL: refund ${refund.id} ($${refundAmountDollars}) issued for payment ${paymentId} but the payments-row update failed: ${dbErr.message}`);
       throw new Error(`Refund ${refund.id} WAS issued at Stripe but recording it failed. Re-running the same refund is safe — it will not refund twice, only sync the records.`);
     }
+    if (settledStampError) throw settledStampError;
+    if (settledExisting) return { ...settledExisting, refund_issued_amount: refundAmountDollars };
 
     // Side effects past this point never mask the successful refund as
     // "Refund processing failed" — each degrades on its own.

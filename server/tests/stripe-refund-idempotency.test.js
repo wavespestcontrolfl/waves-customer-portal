@@ -28,6 +28,12 @@ describe('StripeService.refund', () => {
   let updatePayments;
   let mockGateForCharge;
   let mockSessionGate;
+  let mockSettledCardRefundsLive;
+  let mockUsesSettledCardRefundLedger;
+  let mockVerifySettledCardCharge;
+  let mockListPaymentRefunds;
+  let mockReadSinglePaymentRefunds;
+  let mockProjectSinglePaymentRefund;
 
   function loadService() {
      
@@ -46,7 +52,10 @@ describe('StripeService.refund', () => {
       refund_amount: null,
       status: 'paid',
     };
-    updatePayments = jest.fn().mockResolvedValue(1);
+    updatePayments = jest.fn(async (patch) => {
+      Object.assign(paymentRow, patch);
+      return 1;
+    });
     mockGateForCharge = jest.fn(async () => []);
     mockSessionGate = jest.fn(async (_keys, fn) => fn());
 
@@ -57,12 +66,16 @@ describe('StripeService.refund', () => {
           status: 'succeeded',
           amount: params.amount != null ? params.amount : Math.round(parseFloat(paymentRow.amount) * 100) - Math.round(parseFloat(paymentRow.refund_amount || 0) * 100),
           created: 1780000000,
+          charge: params.charge,
+          payment_intent: 'pi_abc',
+          metadata: params.metadata || {},
         })),
       },
     };
 
     const paymentsQuery = {
       where: jest.fn(() => paymentsQuery),
+      forUpdate: jest.fn(() => paymentsQuery),
       first: jest.fn(async () => paymentRow),
       update: updatePayments,
     };
@@ -85,6 +98,52 @@ describe('StripeService.refund', () => {
     }));
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../models/db', () => dbMock);
+    mockSettledCardRefundsLive = jest.fn(() => false);
+    mockUsesSettledCardRefundLedger = jest.fn(async () => false);
+    mockVerifySettledCardCharge = jest.fn(async () => ({
+      id: 'ch_abc', payment_intent: 'pi_abc', paid: true, captured: true, status: 'succeeded',
+      amount: 10000, amount_captured: 10000, amount_refunded: 0, refunded: false,
+      payment_method_details: { type: 'card' },
+    }));
+    mockListPaymentRefunds = jest.fn(async () => new Map());
+    mockReadSinglePaymentRefunds = jest.fn(async () => {
+      const created = await Promise.all(stripeClient.refunds.create.mock.results
+        .filter((result) => result.type === 'return')
+        .map((result) => result.value));
+      const refunds = new Map(created.map((refund) => [refund.id, refund]));
+      const totalCents = created.filter((refund) => ['succeeded', 'pending', 'requires_action'].includes(refund.status))
+        .reduce((sum, refund) => sum + refund.amount, 0);
+      return {
+        chargeId: 'ch_abc', paymentIntentId: 'pi_abc', refunds,
+        activeIds: [...refunds.keys()], totalCents, capturedCents: 10000,
+        chargeRefunded: totalCents === 10000,
+      };
+    });
+    mockProjectSinglePaymentRefund = jest.fn((row, snapshot, refundId) => {
+      const rowMeta = row.metadata ? JSON.parse(row.metadata) : {};
+      const subject = snapshot.refunds.get(refundId);
+      return {
+        bounced: false,
+        totalCents: snapshot.totalCents,
+        isFull: snapshot.totalCents === 10000,
+        latestRefundId: snapshot.activeIds[0],
+        refundCents: subject.amount,
+        metadata: { ...rowMeta, settled_card_refund_ledger: 1, stamped_refund_ids: [...snapshot.activeIds] },
+      };
+    });
+    jest.doMock('../services/settled-card-refunds', () => ({
+      settledCardRefundsLive: mockSettledCardRefundsLive,
+      usesSettledCardRefundLedger: mockUsesSettledCardRefundLedger,
+      verifySettledCardCharge: mockVerifySettledCardCharge,
+      listPaymentRefunds: mockListPaymentRefunds,
+      readSinglePaymentRefunds: mockReadSinglePaymentRefunds,
+      projectSinglePaymentRefund: mockProjectSinglePaymentRefund,
+      refundMetadata: (row) => {
+        const value = row?.metadata;
+        return value ? (typeof value === 'string' ? JSON.parse(value) : value) : {};
+      },
+      refundIds: (meta, key) => meta[key] || [],
+    }));
     jest.doMock('../services/payment-lifecycle-email', () => ({
       sendRefundIssued: jest.fn(async () => undefined),
     }));
@@ -347,6 +406,7 @@ describe('StripeService.refund', () => {
 
     // Definitive rejection: marker cleared (persist + clear writes).
     updatePayments.mockClear();
+    delete paymentRow.metadata;
     const rejection = new Error('No such payment_intent');
     rejection.type = 'StripeInvalidRequestError';
     stripeClient.refunds.create.mockRejectedValueOnce(rejection);
@@ -646,6 +706,370 @@ describe('StripeService.refund', () => {
     expect(opts.idempotencyKey).toBe('refund_pay_pay-1_5145_0');
     // No pending re-persist — the only update is the final record+clear.
     expect(updatePayments).toHaveBeenCalledTimes(1);
+  });
+
+  describe('settled-card exact refund ledger', () => {
+    const attemptId = '11111111-1111-4111-8111-111111111111';
+
+    function eligibleCard() {
+      paymentRow.stripe_charge_id = 'ch_abc';
+      paymentRow.payment_method_type = 'card';
+      mockSettledCardRefundsLive.mockReturnValue(true);
+      mockUsesSettledCardRefundLedger.mockResolvedValue(true);
+    }
+
+    function pendingAttempt(overrides = {}) {
+      return {
+        settled_card_refund_ledger: 1,
+        pending_refund_key: 'refund_pay_pay-1_4000_0',
+        pending_refund_version: 1,
+        pending_refund_id: attemptId,
+        pending_refund_charge_id: 'ch_abc',
+        pending_refund_request: '4000',
+        pending_refund_base: '4000',
+        pending_refund_gross: 4000,
+        pending_refund_reason: 'requested_by_customer',
+        pending_refund_at: new Date().toISOString(),
+        ...overrides,
+      };
+    }
+
+    test('new eligible refund verifies and freezes the original charge before creating money', async () => {
+      eligibleCard();
+
+      await loadService().refund('pay-1', { amount: 40 });
+
+      expect(mockVerifySettledCardCharge).toHaveBeenCalledWith(stripeClient, {
+        chargeId: 'ch_abc', paymentIntentId: 'pi_abc', expectedAmountCents: 10000,
+      });
+      const [params, options] = stripeClient.refunds.create.mock.calls[0];
+      expect(params).toEqual(expect.objectContaining({ charge: 'ch_abc', amount: 4000 }));
+      expect(params.payment_intent).toBeUndefined();
+      expect(params.metadata).toEqual({
+        waves_admin_refund_version: '1',
+        waves_admin_refund_attempt: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      });
+      expect(options.idempotencyKey).toBe(`refund_card_${params.metadata.waves_admin_refund_attempt}`);
+      expect(mockVerifySettledCardCharge.mock.invocationCallOrder[0])
+        .toBeLessThan(stripeClient.refunds.create.mock.invocationCallOrder[0]);
+      const claim = JSON.parse(updatePayments.mock.calls[0][0].metadata);
+      expect(claim).toEqual(expect.objectContaining({
+        settled_card_refund_ledger: 1,
+        pending_refund_version: 1,
+        pending_refund_charge_id: 'ch_abc',
+        pending_refund_provider_key: options.idempotencyKey,
+      }));
+      const stamped = JSON.parse(updatePayments.mock.calls[1][0].metadata);
+      expect(stamped.settled_card_refund_ledger).toBe(1);
+      expect(stamped.pending_refund_key).toBeUndefined();
+      expect(stamped.pending_refund_provider_key).toBeUndefined();
+      expect(mockUsesSettledCardRefundLedger).toHaveBeenCalledTimes(3);
+    });
+
+    test('a new attempt after a definitive rejection uses a fresh Stripe key at the same balance', async () => {
+      eligibleCard();
+      const rejection = Object.assign(new Error('issuer declined the refund'), { type: 'StripeCardError' });
+      stripeClient.refunds.create.mockRejectedValue(rejection);
+      const service = loadService();
+      await expect(service.refund('pay-1', { amount: 40 })).rejects.toThrow('Refund processing failed');
+      await expect(service.refund('pay-1', { amount: 40 })).rejects.toThrow('Refund processing failed');
+
+      const keys = stripeClient.refunds.create.mock.calls.map(([params, options]) => {
+        expect(options.idempotencyKey).toBe(`refund_card_${params.metadata.waves_admin_refund_attempt}`);
+        return options.idempotencyKey;
+      });
+      expect(new Set(keys).size).toBe(2);
+    });
+
+    test('a late rejection from the previous UUID preserves the new attempt at the same balance', async () => {
+      eligibleCard();
+      stripeClient.refunds.create.mockImplementationOnce(async () => {
+        const claim = JSON.parse(paymentRow.metadata);
+        paymentRow.metadata = JSON.stringify({
+          ...claim,
+          pending_refund_id: attemptId,
+          pending_refund_provider_key: `refund_card_${attemptId}`,
+        });
+        throw Object.assign(new Error('issuer declined the refund'), { type: 'StripeCardError' });
+      });
+      await expect(loadService().refund('pay-1', { amount: 40 })).rejects.toThrow('Refund processing failed');
+
+      expect(JSON.parse(paymentRow.metadata)).toMatchObject({
+        pending_refund_id: attemptId,
+        pending_refund_key: 'refund_pay_pay-1_4000_0',
+        pending_refund_provider_key: `refund_card_${attemptId}`,
+      });
+    });
+
+    test('durable enrollment continues an exact replay after the live gate turns off', async () => {
+      eligibleCard();
+      mockSettledCardRefundsLive.mockReturnValue(false);
+      paymentRow.metadata = JSON.stringify(pendingAttempt());
+
+      await loadService().refund('pay-1', { amount: 40 });
+
+      expect(mockVerifySettledCardCharge).not.toHaveBeenCalled();
+      const [params, options] = stripeClient.refunds.create.mock.calls[0];
+      expect(params).toEqual(expect.objectContaining({
+        charge: 'ch_abc',
+        metadata: {
+          waves_admin_refund_version: '1',
+          waves_admin_refund_attempt: attemptId,
+        },
+      }));
+      expect(options.idempotencyKey).toBe('refund_pay_pay-1_4000_0');
+    });
+
+    test('gate-on but ineligible payment keeps the legacy PI parameters and metadata', async () => {
+      mockSettledCardRefundsLive.mockReturnValue(true);
+      mockUsesSettledCardRefundLedger.mockResolvedValue(false);
+
+      await loadService().refund('pay-1', { amount: 40 });
+
+      const [params] = stripeClient.refunds.create.mock.calls[0];
+      expect(params).toEqual(expect.objectContaining({ payment_intent: 'pi_abc', amount: 4000 }));
+      expect(params.charge).toBeUndefined();
+      expect(params.metadata).toBeUndefined();
+      expect(JSON.parse(updatePayments.mock.calls[0][0].metadata).settled_card_refund_ledger).toBeUndefined();
+      expect(mockReadSinglePaymentRefunds).not.toHaveBeenCalled();
+    });
+
+    test('aged enrolled attempt adopts only its exact tagged refund from the original charge', async () => {
+      eligibleCard();
+      paymentRow.metadata = JSON.stringify(pendingAttempt({
+        pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+      }));
+      const refund = {
+        id: 're_exact', status: 'succeeded', amount: 4000, charge: 'ch_abc', payment_intent: 'pi_abc',
+        metadata: { waves_admin_refund_version: '1', waves_admin_refund_attempt: attemptId },
+      };
+      const refunds = new Map([[refund.id, refund]]);
+      mockListPaymentRefunds.mockResolvedValue(refunds);
+      mockReadSinglePaymentRefunds.mockResolvedValue({
+        chargeId: 'ch_abc', paymentIntentId: 'pi_abc', refunds,
+        activeIds: ['re_exact'], totalCents: 4000, capturedCents: 10000, chargeRefunded: false,
+      });
+
+      await loadService().refund('pay-1', { amount: 40 });
+
+      expect(mockListPaymentRefunds).toHaveBeenCalledWith(stripeClient, { charge: 'ch_abc' });
+      expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+      expect(updatePayments).toHaveBeenLastCalledWith(expect.objectContaining({
+        refund_amount: 40, stripe_refund_id: 're_exact',
+      }));
+    });
+
+    test('aged enrolled attempt with no exact identity fails closed before new money', async () => {
+      eligibleCard();
+      paymentRow.metadata = JSON.stringify(pendingAttempt({
+        pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+      }));
+
+      await expect(loadService().refund('pay-1', { amount: 40 }))
+        .rejects.toThrow(/no exact supported Stripe refund identifier/i);
+      expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+      expect(JSON.parse(paymentRow.metadata).pending_refund_id).toBe(attemptId);
+    });
+
+    test('an expired UUID cannot adopt the last recorded refund for another attempt at the same balance', async () => {
+      eligibleCard();
+      const lastRefund = { id: 're_earlier', amount: 4000, charge: 'ch_abc', payment_intent: 'pi_abc' };
+      paymentRow.metadata = JSON.stringify(pendingAttempt({
+        pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+        last_admin_refund: {
+          key: 'refund_pay_pay-1_4000_0', attempt_id: '22222222-2222-4222-8222-222222222222',
+          id: lastRefund.id, amount_cents: lastRefund.amount,
+        },
+      }));
+      mockListPaymentRefunds.mockResolvedValue(new Map([[lastRefund.id, lastRefund]]));
+
+      await expect(loadService().refund('pay-1', { amount: 40 })).rejects.toThrow(/no exact supported Stripe refund identifier/i);
+      expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+      expect(JSON.parse(paymentRow.metadata).pending_refund_id).toBe(attemptId);
+    });
+
+    test('a recent pre-UUID attempt is read-only and cannot issue a new refund', async () => {
+      eligibleCard();
+      paymentRow.metadata = JSON.stringify({
+        pending_refund_key: 'refund_pay_pay-1_4000_0',
+        pending_refund_request: '4000',
+        pending_refund_base: '4000',
+        pending_refund_gross: 4000,
+        pending_refund_reason: 'requested_by_customer',
+        pending_refund_at: new Date().toISOString(),
+      });
+
+      await expect(loadService().refund('pay-1', { amount: 40 }))
+        .rejects.toThrow(/no exact supported Stripe refund identifier/i);
+      expect(mockVerifySettledCardCharge).toHaveBeenCalledWith(stripeClient, {
+        chargeId: 'ch_abc', paymentIntentId: 'pi_abc', expectedAmountCents: 10000,
+      });
+      expect(JSON.parse(paymentRow.metadata)).toMatchObject({
+        settled_card_refund_ledger: 1, pending_refund_key: 'refund_pay_pay-1_4000_0',
+      });
+      expect(mockListPaymentRefunds).toHaveBeenCalledWith(stripeClient, { charge: 'ch_abc' });
+      expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+    });
+
+    test('a tagged refund from a different charge is never adopted', async () => {
+      eligibleCard();
+      paymentRow.metadata = JSON.stringify(pendingAttempt({
+        pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+      }));
+      mockListPaymentRefunds.mockResolvedValue(new Map([['re_wrong', {
+        id: 're_wrong', status: 'succeeded', amount: 4000,
+        charge: 'ch_other', payment_intent: 'pi_abc',
+        metadata: { waves_admin_refund_version: '1', waves_admin_refund_attempt: attemptId },
+      }]]));
+
+      await expect(loadService().refund('pay-1', { amount: 40 }))
+        .rejects.toThrow(/does not belong to the original charge/i);
+      expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+      expect(updatePayments).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['stripe_payment_intent_id', 'pi_changed'],
+      ['amount', '99.00'],
+    ])('a change to the locked %s stops the verified charge from being refunded', async (field, value) => {
+      eligibleCard();
+      mockVerifySettledCardCharge.mockImplementationOnce(async () => {
+        paymentRow[field] = value;
+        return {
+          id: 'ch_abc', payment_intent: 'pi_abc', paid: true, captured: true, status: 'succeeded',
+          amount: 10000, amount_captured: 10000,
+          payment_method_details: { type: 'card' },
+        };
+      });
+
+      await expect(loadService().refund('pay-1', { amount: 40 }))
+        .rejects.toThrow(/payment changed while the refund was starting/i);
+      expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+    });
+
+    test('a provider response with different attempt metadata stays pending for reconciliation', async () => {
+      eligibleCard();
+      stripeClient.refunds.create.mockImplementationOnce(async (params) => ({
+        id: 're_mismatch', status: 'succeeded', amount: params.amount,
+        charge: params.charge, payment_intent: 'pi_abc',
+        metadata: { ...params.metadata, waves_admin_refund_attempt: '22222222-2222-4222-8222-222222222222' },
+      }));
+
+      await expect(loadService().refund('pay-1', { amount: 40 }))
+        .rejects.toThrow(/exact attempt metadata or charge did not match/i);
+      expect(updatePayments).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(paymentRow.metadata).pending_refund_key).toBe('refund_pay_pay-1_4000_0');
+      expect(mockReadSinglePaymentRefunds).not.toHaveBeenCalled();
+    });
+
+    test('a rest attempt freezes its remaining surcharge if another refund bounces first', async () => {
+      eligibleCard();
+      paymentRow.amount = '102.90';
+      paymentRow.refund_amount = '51.45';
+      paymentRow.surcharge_amount_cents = 290;
+      paymentRow.refunded_surcharge_cents = 145;
+      mockVerifySettledCardCharge.mockResolvedValueOnce({
+        id: 'ch_abc', payment_intent: 'pi_abc', paid: true, captured: true, status: 'succeeded',
+        amount: 10290, amount_captured: 10290,
+        payment_method_details: { type: 'card' },
+      });
+      mockReadSinglePaymentRefunds.mockImplementationOnce(async () => {
+        const refund = await stripeClient.refunds.create.mock.results[0].value;
+        // The earlier 5145-cent refund bounced after this amount-omitted
+        // request was accepted, leaving this refund as a partial by itself.
+        paymentRow.refund_amount = null;
+        paymentRow.refunded_surcharge_cents = 0;
+        const refunds = new Map([[refund.id, refund]]);
+        return {
+          chargeId: 'ch_abc', paymentIntentId: 'pi_abc', refunds,
+          activeIds: [refund.id], totalCents: 5145, capturedCents: 10290, chargeRefunded: false,
+        };
+      });
+      mockProjectSinglePaymentRefund.mockImplementationOnce((row, snapshot, refundId) => ({
+        bounced: false,
+        totalCents: snapshot.totalCents,
+        isFull: false,
+        latestRefundId: refundId,
+        refundCents: snapshot.refunds.get(refundId).amount,
+        metadata: {
+          ...JSON.parse(row.metadata),
+          settled_card_refund_ledger: 1,
+          stamped_refund_ids: [refundId],
+        },
+      }));
+
+      await loadService().refund('pay-1');
+
+      expect(stripeClient.refunds.create.mock.calls[0][0].amount).toBeUndefined();
+      expect(JSON.parse(updatePayments.mock.calls[0][0].metadata).pending_refund_surcharge_cents).toBe(145);
+      expect(updatePayments).toHaveBeenLastCalledWith(expect.objectContaining({
+        refund_amount: 51.45,
+        refunded_surcharge_cents: 145,
+      }));
+    });
+
+    test('the settled stamp does not add surcharge twice when its webhook stamped first', async () => {
+      eligibleCard();
+      paymentRow.amount = '102.90';
+      paymentRow.surcharge_amount_cents = 290;
+      mockVerifySettledCardCharge.mockResolvedValueOnce({
+        id: 'ch_abc', payment_intent: 'pi_abc', paid: true, captured: true, status: 'succeeded',
+        amount: 10290, amount_captured: 10290,
+        payment_method_details: { type: 'card' },
+      });
+      mockReadSinglePaymentRefunds.mockImplementationOnce(async () => {
+        const refund = await stripeClient.refunds.create.mock.results[0].value;
+        const pending = JSON.parse(paymentRow.metadata);
+        paymentRow.refund_amount = '51.45';
+        paymentRow.refunded_surcharge_cents = 145;
+        paymentRow.stripe_refund_id = refund.id;
+        paymentRow.metadata = JSON.stringify({ ...pending, stamped_refund_ids: [refund.id] });
+        const refunds = new Map([[refund.id, refund]]);
+        return {
+          chargeId: 'ch_abc', paymentIntentId: 'pi_abc', refunds,
+          activeIds: [refund.id], totalCents: 5145, capturedCents: 10290, chargeRefunded: false,
+        };
+      });
+      mockProjectSinglePaymentRefund.mockImplementationOnce((row, snapshot, refundId) => ({
+        bounced: false,
+        totalCents: snapshot.totalCents,
+        isFull: false,
+        latestRefundId: refundId,
+        refundCents: snapshot.refunds.get(refundId).amount,
+        metadata: { ...JSON.parse(row.metadata), settled_card_refund_ledger: 1 },
+      }));
+
+      await loadService().refund('pay-1', { amount: 50 });
+
+      expect(updatePayments).toHaveBeenLastCalledWith(expect.objectContaining({
+        refund_amount: 51.45,
+        refunded_surcharge_cents: 145,
+      }));
+    });
+
+    test('same concurrent amount joins the locked claim; a different amount fails before Stripe', async () => {
+      eligibleCard();
+      const concurrent = pendingAttempt();
+      mockVerifySettledCardCharge.mockImplementationOnce(async () => {
+        paymentRow.metadata = JSON.stringify(concurrent);
+        return { id: 'ch_abc' };
+      });
+
+      await loadService().refund('pay-1', { amount: 40 });
+      expect(stripeClient.refunds.create.mock.calls[0][0]).toEqual(expect.objectContaining({
+        charge: 'ch_abc', metadata: expect.objectContaining({ waves_admin_refund_attempt: attemptId }),
+      }));
+
+      jest.resetModules();
+      updatePayments.mockClear();
+      stripeClient.refunds.create.mockClear();
+      paymentRow.metadata = JSON.stringify(pendingAttempt({
+        pending_refund_key: 'refund_pay_pay-1_2500_0',
+        pending_refund_request: '2500', pending_refund_base: '2500', pending_refund_gross: 2500,
+      }));
+      await expect(loadService().refund('pay-1', { amount: 40 })).rejects.toThrow(/unresolved refund attempt/i);
+      expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+    });
   });
 
   // B03: the annual-prepay claw-back must read the invoice AFTER the

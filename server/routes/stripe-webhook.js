@@ -36,6 +36,13 @@ const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCu
 const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
+const {
+  projectAmbiguousCardRefund,
+  readSinglePaymentRefunds,
+  projectSinglePaymentRefund,
+  settledCardRefundsLive,
+  usesSettledCardRefundLedger,
+} = require('../services/settled-card-refunds');
 const INVOICE_TERMINAL_PAYMENT_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES.filter(s => s !== 'processing');
 const OBSERVABLE_SETUP_INTENT_BRANCHES = new Set([
   'estimate_card_hold',
@@ -3348,11 +3355,15 @@ async function resolveRefundIdForCharge(charge) {
   const allMatch = matchRefundToSnapshot([...history].reverse(), snapshotCents);
 
   if (liveMatch && allMatch && liveMatch.id !== allMatch.id) {
-    throw new Error(
+    const ambiguous = new Error(
       `charge.refunded for ${charge.id}: snapshot of ${snapshotCents} cents is ambiguous — `
       + `live history points at ${liveMatch.id} but full history points at ${allMatch.id}; `
       + 'refusing to guess which refund this event describes',
     );
+    ambiguous.code = 'STRIPE_REFUND_SNAPSHOT_AMBIGUOUS';
+    ambiguous.liveRefundId = liveMatch.id;
+    ambiguous.historicalRefundId = allMatch.id;
+    throw ambiguous;
   }
 
   const match = liveMatch || allMatch;
@@ -3383,7 +3394,39 @@ async function handleChargeRefunded(charge) {
   const chargeId = charge.id;
   logger.info(`[stripe-webhook] Charge refunded: ${chargeId}`);
 
-  const resolved = await resolveRefundIdForCharge(charge);
+  let ambiguousSettledCardRefund = null;
+  let resolved;
+  try {
+    resolved = await resolveRefundIdForCharge(charge);
+  } catch (err) {
+    if (err?.code !== 'STRIPE_REFUND_SNAPSHOT_AMBIGUOUS') throw err;
+
+    // The ordinary resolver cannot identify which historical event this
+    // unexpanded snapshot describes. Only the opted-in, exact one-payment card
+    // lane may recover: take a fresh canonical provider reading now, before any
+    // lock or refund side effect. The locked projection later proves that the
+    // historical candidate really failed and was durably fenced before it lets
+    // the verified active replacement own a receipt.
+    const candidate = charge.metadata?.purpose === 'appointment_card_no_show_fee'
+      ? null
+      : await db('payments').where({ stripe_charge_id: chargeId }).first();
+    if (!candidate || !await usesSettledCardRefundLedger(db, candidate)) throw err;
+    const stripe = getStripe();
+    if (!stripe) throw err;
+    const snapshot = await readSinglePaymentRefunds(stripe, {
+      chargeId,
+      paymentIntentId: charge.payment_intent || candidate.stripe_payment_intent_id || null,
+    });
+    const receiptRefund = snapshot.refunds.get(err.liveRefundId);
+    if (!receiptRefund) throw err;
+    ambiguousSettledCardRefund = {
+      row: candidate,
+      snapshot,
+      liveRefundId: err.liveRefundId,
+      historicalRefundId: err.historicalRefundId,
+    };
+    resolved = { refundId: err.liveRefundId, refund: receiptRefund };
+  }
   const latestRefund = (Array.isArray(charge.refunds?.data) ? charge.refunds.data[0] : null)
     || resolved.refund;
   const refundId = resolved.refundId;
@@ -3402,12 +3445,14 @@ async function handleChargeRefunded(charge) {
   // echo of a refund it already stamped (a partial remainder refund must not
   // flip a legitimately credited row); refundId lets it refuse a refund
   // whose failure was already recorded (bounce-before-creation).
-  const { handleDepositChargeReversed } = require('../services/estimate-deposits');
-  const depositReversal = await handleDepositChargeReversed(charge.payment_intent, 'charge.refunded', {
-    amountRefundedCents: Number(charge.amount_refunded) > 0 ? Number(charge.amount_refunded) : null,
-    refundId,
-  });
-  if (depositReversal.handled) return;
+  if (!ambiguousSettledCardRefund) {
+    const { handleDepositChargeReversed } = require('../services/estimate-deposits');
+    const depositReversal = await handleDepositChargeReversed(charge.payment_intent, 'charge.refunded', {
+      amountRefundedCents: Number(charge.amount_refunded) > 0 ? Number(charge.amount_refunded) : null,
+      refundId,
+    });
+    if (depositReversal.handled) return;
+  }
 
   // Out-of-order bounce guard: Stripe can deliver refund.failed BEFORE this
   // creation event. handleRefundFailed records the bounced id in the
@@ -3621,6 +3666,30 @@ async function handleChargeRefunded(charge) {
     return; // statement refund fully handled; no homeowner refund-email path
   }
 
+  // Opted-in, settled card payments reconcile from Stripe's complete current
+  // refund ledger. Reuse the exact-charge row already read for the statement
+  // fork above: with the gate off, an unenrolled/non-card refund keeps the old
+  // query and transaction shape. ACH, pre-settlement/charge-less rows and every
+  // special rail keep the established event-shaped path below. Provider I/O
+  // happens before the money transaction.
+  const settledCardRefundGateLive = settledCardRefundsLive();
+  let settledCardRefundMatch = ambiguousSettledCardRefund?.row || null;
+  let settledCardRefundSnapshot = ambiguousSettledCardRefund?.snapshot || null;
+  if (!settledCardRefundMatch
+    && charge.metadata?.purpose !== 'appointment_card_no_show_fee'
+    && preRefundRow
+    && await usesSettledCardRefundLedger(db, preRefundRow)) {
+    settledCardRefundMatch = preRefundRow;
+  }
+  if (settledCardRefundMatch && !settledCardRefundSnapshot) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error(`Stripe client unavailable — cannot reconcile settled-card refunds for charge ${chargeId}`);
+    settledCardRefundSnapshot = await readSinglePaymentRefunds(stripe, {
+      chargeId,
+      paymentIntentId: charge.payment_intent || settledCardRefundMatch.stripe_payment_intent_id || null,
+    });
+  }
+
   // Generic (homeowner invoice) refund. Atomic + durable: the payment refund stamp
   // and the account-credit restore commit together or not at all; a failure BUBBLES
   // to the route handler (→ HTTP 500) so Stripe RETRIES the event rather than acking
@@ -3628,6 +3697,14 @@ async function handleChargeRefunded(charge) {
   // stripe_charge_id, and returnAppliedCreditOnRefund re-reads credit_applied under a
   // row lock, so a replayed event is a no-op once the credit is back on the balance.
   let feeRefundFencedInLock = false;
+  let settledCardRefundBounced = false;
+  let receiptRefundId = refundId;
+  let genericRefundAmountDollars = refundAmountDollars;
+  let genericRefundDate = refundDate;
+  let genericRefundReason = refundReason;
+  let genericCumulativeRefundAmountDollars = cumulativeRefundAmountDollars;
+  let genericIsFullRefund = isFullRefund;
+  let suppressGenericRefundNotification = false;
   // Full refunds that terminalized an invoice paid partly by hand (single or combined): the office is told after commit (alertMixedRefund).
   const mixedRefunds = [];
   const refundedPayment = await db.transaction(async (trx) => {
@@ -3692,12 +3769,17 @@ async function handleChargeRefunded(charge) {
     // invoice reopened, applied credit returned); a PARTIAL refund cannot
     // be attributed to a share from the charge alone — record it for the
     // operator and touch nothing.
+    let genericChargeRows = [];
     {
       let combinedRows = await trx('payments').where({ stripe_charge_id: chargeId });
+      genericChargeRows = combinedRows;
       const rowMeta = (row) => {
         try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
       };
       if (combinedRows.some((r) => rowMeta(r).combined_payment)) {
+        if (settledCardRefundMatch) {
+          throw new Error(`Payment rows changed to the combined lane while reconciling settled-card charge ${chargeId}; retry`);
+        }
         // Serialize with refund.failed's combined unwind (codex r12 P1):
         // both combined-row paths take this per-charge lock, rows are
         // RE-READ under it, and the bounce fences are re-checked — a
@@ -3994,9 +4076,74 @@ async function handleChargeRefunded(charge) {
         }
       }
     }
-    await trx('payments')
-      .where({ stripe_charge_id: chargeId })
-      .update({
+    let pmt;
+    if (settledCardRefundMatch && settledCardRefundSnapshot) {
+      const lockedRows = await trx('payments')
+        .where({ stripe_charge_id: chargeId })
+        .forUpdate();
+      if (lockedRows.length !== 1 || lockedRows[0].id !== settledCardRefundMatch.id) {
+        throw new Error(`Payment set changed while reconciling settled-card charge ${chargeId}; retry with a fresh provider snapshot`);
+      }
+      const lockedPayment = lockedRows[0];
+      if (!await usesSettledCardRefundLedger(trx, lockedPayment)) {
+        throw new Error(`Payment ${lockedPayment.id} is no longer eligible for settled-card refund reconciliation; retry`);
+      }
+      const projection = ambiguousSettledCardRefund
+        ? projectAmbiguousCardRefund(lockedPayment, settledCardRefundSnapshot, {
+            liveRefundId: ambiguousSettledCardRefund.liveRefundId,
+            historicalRefundId: ambiguousSettledCardRefund.historicalRefundId,
+          })
+        : projectSinglePaymentRefund(lockedPayment, settledCardRefundSnapshot, refundId);
+      if (projection.bounced) {
+        settledCardRefundBounced = true;
+        logger.warn(`[stripe-webhook] settled-card refund ${refundId} is failed/canceled or fenced — canonical ledger left unchanged`);
+        return null;
+      }
+      if (ambiguousSettledCardRefund) {
+        receiptRefundId = projection.receiptRefund.id;
+        genericRefundDate = projection.receiptRefund.created
+          ? new Date(projection.receiptRefund.created * 1000)
+          : refundDate;
+        genericRefundReason = projection.receiptRefund.reason || refundReason;
+        // This delivery cannot be attributed to one historical creation
+        // event, so do not emit a second event-scoped office notification.
+        // The active replacement still gets its exact, deduped customer
+        // receipt below.
+        suppressGenericRefundNotification = true;
+      }
+      genericRefundAmountDollars = projection.refundCents / 100;
+      genericCumulativeRefundAmountDollars = projection.totalCents / 100;
+      genericIsFullRefund = projection.isFull;
+      await trx('payments').where({ id: lockedPayment.id }).update({
+        status: projection.isFull ? 'refunded' : lockedPayment.status,
+        refund_amount: genericCumulativeRefundAmountDollars,
+        refund_status: projection.isFull ? 'full' : 'partial',
+        stripe_refund_id: projection.latestRefundId,
+        metadata: JSON.stringify(projection.metadata),
+        // The ledger's refund time (Codex #4971 r6 P1: the termite renewal's
+        // late-paid alert dates a parent's revocation by it).
+        updated_at: trx.fn.now(),
+      });
+      pmt = await trx('payments').where({ id: lockedPayment.id }).first();
+    } else {
+      let legacyRows = genericChargeRows;
+      if (settledCardRefundGateLive) {
+        // The outer routing read can race settlement. With enrollment live,
+        // lock the exact current set, re-run eligibility on each selected row,
+        // and scope the legacy writer to those ids. A newly eligible ordinary
+        // card row must retry through the provider snapshot path; an insert
+        // after this read cannot be caught by the legacy UPDATE.
+        legacyRows = await trx('payments')
+          .where({ stripe_charge_id: chargeId })
+          .forUpdate();
+        for (const row of legacyRows) {
+          if (charge.metadata?.purpose !== 'appointment_card_no_show_fee'
+            && await usesSettledCardRefundLedger(trx, row)) {
+            throw new Error(`Settled-card payment ${row.id} appeared while reconciling charge ${chargeId}; retry with a canonical snapshot`);
+          }
+        }
+      }
+      const legacyPatch = {
         status: isFullRefund ? 'refunded' : 'paid',
         refund_amount: cumulativeRefundAmountDollars,
         refund_status: isFullRefund ? 'full' : 'partial',
@@ -4004,13 +4151,25 @@ async function handleChargeRefunded(charge) {
         // The ledger's refund time (Codex #4971 r6 P1: the termite renewal's
         // late-paid alert dates a parent's revocation by it).
         updated_at: trx.fn.now(),
-      });
-    const pmt = await trx('payments').where({ stripe_charge_id: chargeId }).first();
+      };
+      if (settledCardRefundGateLive) {
+        const legacyIds = legacyRows.map((row) => row.id).filter(Boolean);
+        if (legacyIds.length) {
+          await trx('payments').whereIn('id', legacyIds).update(legacyPatch);
+          pmt = await trx('payments').where({ id: legacyIds[0] }).first();
+        }
+      } else {
+        await trx('payments')
+          .where({ stripe_charge_id: chargeId })
+          .update(legacyPatch);
+        pmt = await trx('payments').where({ stripe_charge_id: chargeId }).first();
+      }
+    }
     let result = pmt;
     // Record this refund id as STAMPED (see metadataWithStampedRefund) so a
     // later bounce of it stays attributable even after newer stamps
     // overwrite stripe_refund_id.
-    if (pmt && refundId) {
+    if (!settledCardRefundSnapshot && pmt && refundId) {
       await trx('payments').where({ id: pmt.id }).update({
         metadata: JSON.stringify(metadataWithStampedRefund(pmt.metadata, refundId)),
       });
@@ -4028,14 +4187,14 @@ async function handleChargeRefunded(charge) {
       if (trkSurcharge > 0 && trkPaidCents > 0) {
         const proportional = Math.min(
           trkSurcharge,
-          Math.round((Math.round(cumulativeRefundAmountDollars * 100) * trkSurcharge) / trkPaidCents),
+          Math.round((Math.round(genericCumulativeRefundAmountDollars * 100) * trkSurcharge) / trkPaidCents),
         );
         if (proportional > (Number(pmt.refunded_surcharge_cents) || 0)) {
           await trx('payments').where({ id: pmt.id }).update({ refunded_surcharge_cents: proportional });
         }
       }
     }
-    if (isFullRefund) {
+    if (genericIsFullRefund) {
       // Resolve the invoice from every available link (PI, metadata.invoice_id,
       // charge.payment_intent, invoices.stripe_charge_id) — a reconciled
       // charge-only payment has no PI, so a PI-only lookup would skip the restore
@@ -4103,7 +4262,7 @@ async function handleChargeRefunded(charge) {
   // A fence discovered under the lock means the refund BOUNCED — nothing
   // was stamped, and no refund email/notification may fire for money
   // Stripe kept (the refund.failed handler already notified the office).
-  if (feeRefundFencedInLock) return;
+  if (feeRefundFencedInLock || settledCardRefundBounced) return;
   for (const mixed of mixedRefunds) await alertMixedRefund(mixed, { chargeId, refundId });
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
@@ -4117,24 +4276,26 @@ async function handleChargeRefunded(charge) {
       // now throws rather than yield an unresolved id, so this is a standing
       // invariant guard rather than a live path: keep it, so reintroducing a
       // charge-id fallback takes a deliberate edit.
-      refundId: refundId || null,
-      refundAmount: refundAmountDollars,
-      refundDate,
-      refundReason,
+      refundId: receiptRefundId || null,
+      refundAmount: genericRefundAmountDollars,
+      refundDate: genericRefundDate,
+      refundReason: genericRefundReason,
     }).catch((emailErr) => {
       logger.warn(`[stripe-webhook] Refund issued email failed for charge ${chargeId}: ${emailErr.message}`);
     });
   }
 
   // Notify admin bell + push of refund
-  try {
-    await triggerNotification('payment_refunded', {
-      amount: refundAmountDollars,
-      isFullRefund,
-      invoiceId: refundedPayment?.invoice_id || null,
-    });
-  } catch (e) {
-    logger.warn(`[stripe-webhook] refund triggerNotification failed: ${e.message}`);
+  if (!suppressGenericRefundNotification) {
+    try {
+      await triggerNotification('payment_refunded', {
+        amount: genericRefundAmountDollars,
+        isFullRefund: genericIsFullRefund,
+        invoiceId: refundedPayment?.invoice_id || null,
+      });
+    } catch (e) {
+      logger.warn(`[stripe-webhook] refund triggerNotification failed: ${e.message}`);
+    }
   }
 
   // Annual-prepay claw-back after a full refund — CRITICAL lifecycle
@@ -4144,7 +4305,7 @@ async function handleChargeRefunded(charge) {
   // Stripe redelivers; the refund stamps above are idempotent on replay.
   {
     const refundSyncAnchor = await db('payments').where({ stripe_charge_id: chargeId }).first();
-    if (isFullRefund && refundSyncAnchor) {
+    if (genericIsFullRefund && refundSyncAnchor) {
       // A combined charge refunds N per-invoice rows — the annual-prepay
       // sync must see EVERY refunded share, not the arbitrary first row
       // (codex r4 P1: a prepay invoice elsewhere in the allocation would
