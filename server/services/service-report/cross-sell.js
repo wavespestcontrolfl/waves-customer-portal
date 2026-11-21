@@ -664,16 +664,35 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   return seed;
 }
 
+const CACHE_ONLY_FLAGS = Object.freeze({ cacheOnly: true, persist: false });
+const STRICT_CACHE_ONLY_FLAGS = Object.freeze({ ...CACHE_ONLY_FLAGS, strictCacheReads: true });
+
+// The cache-only lookup, in the two forms below. One call of the lookup in
+// this file: lookup-callers.js declares one. Lazy-required — property-lookup-v2
+// is heavy and cyclic-prone.
+async function runCacheOnlyLookup(address, flags) {
+  const { performPropertyLookup } = require('../../routes/property-lookup-v2');
+  // Scope decision: lookup-callers.js (report_cross_sell: customer report, cache-only).
+  const { lookupOptionsFor } = require('../property-lookup/lookup-callers');
+  return performPropertyLookup(address, lookupOptionsFor('report_cross_sell', flags));
+}
+
 // Default property lookup for the offer price: CACHE-ONLY. The live lookup
 // pipeline (geocode + satellite + AI vision, 60s budget) must never run
 // inside a report view; a cached row is adopted, a miss prices from the
 // stored profile alone and the card degrades to the CTA when that isn't
-// enough. Lazy-required — property-lookup-v2 is heavy and cyclic-prone.
+// enough.
 async function cacheOnlyPropertyLookup(address) {
-  const { performPropertyLookup } = require('../../routes/property-lookup-v2');
-  // Scope decision: lookup-callers.js (report_cross_sell: customer report, cache-only).
-  const { lookupOptionsFor } = require('../property-lookup/lookup-callers');
-  return performPropertyLookup(address, lookupOptionsFor('report_cross_sell', { cacheOnly: true, persist: false }));
+  return runCacheOnlyLookup(address, CACHE_ONLY_FLAGS);
+}
+
+// The plan start offer's lookup (buildStartOffer): the same cache-only read,
+// with a failed cache or correction read THROWN (LOOKUP_CACHE_READ_FAILED).
+// The default form answers a failed correction read as "no corrections" and
+// serves the cached home without them. A report view may degrade that way,
+// with a person looking at it. A job that prices alone must stop instead.
+async function strictCacheOnlyPropertyLookup(address) {
+  return runCacheOnlyLookup(address, STRICT_CACHE_ONLY_FLAGS);
 }
 
 // buildReportCrossSell(service, database) → crossSell payload | null.
@@ -1347,7 +1366,7 @@ async function resolvePortalOfferTarget(database, customerId, customer, primaryS
 // route leaves the draft pending with a 503.
 // Returns { result, propertySeed, correctionsUnapplied } to hand to the
 // outcome stage, or null for every fail-closed/refused exit this stage owns.
-async function resolvePortalOfferPricingResult({ database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError }) {
+async function resolvePortalOfferPricingResult({ database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError, strictPriceSettings = false }) {
   // Best-effort seed — a failed estimate read must not kill the card, it
   // just prices without the seed (and likely degrades to the CTA).
   let propertySeed = null;
@@ -1384,6 +1403,10 @@ async function resolvePortalOfferPricingResult({ database, customerId, customer,
     db: database,
     propertyLookup: trackedPropertyLookup,
     propertySeed,
+    // The pricer's strict option (buildStartOffer alone asks for it): the
+    // account must be free to start a plan, the price settings are loaded for
+    // this one call, and a price marked for a hand check is withheld.
+    strictPriceSettings,
   });
 
   let correctionsUnapplied = false;
@@ -1543,11 +1566,102 @@ async function buildPortalPurchaseBasis(customerId, database, opts = {}) {
   }
 }
 
+// The start offer follows ONE visit and prices the primary home, so that
+// visit must be at the primary home. Same proof as the report card
+// (resolveVisitPropertyScope): a stamp or a link that resolves must name the
+// primary premises. One that cannot be resolved is NOT proof, and the
+// account-level proof skips such a row, so it fails closed here. A visit with
+// no stamp and no link proves nothing either way, so the ACCOUNT must be
+// proven single-premises, in the strict form of that proof (unresolvedFails):
+// resolvePortalOfferPremises ran its default form, which skips another visit
+// whose link cannot be resolved, and that visit could be at a second home.
+// A failed read throws, by buildStartOffer's contract.
+async function visitIsAtPrimaryPremises(database, customer, visitId, primaryStreet) {
+  const visit = await database('scheduled_services').where({ id: visitId, customer_id: customer.id })
+    .first('service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+      'property_id', 'source_estimate_id');
+  if (!visit) return false;
+  const scopeProofs = require('./visit-property-scope');
+  let lookupFailed = false;
+  const scope = await scopeProofs.resolveVisitPropertyScope(visit, database, { onLookupFailure: () => { lookupFailed = true; } });
+  if (lookupFailed) throw Object.assign(new Error('visit premises read failed'), { code: 'PREMISES_LOOKUP_FAILED' });
+  if (scope.hasEvidence) return scopeProofs.sameResolvedProperty(scope.key, primaryStreet);
+  return scopeProofs.customerHasOnlyPrimaryPremises(database, customer.id, customer, primaryStreet, { unresolvedFails: true });
+}
+
+// The plan a start offer may price: the pricer's strict option prices pest
+// control only (it reads no turf profile, and the standard pest price is the
+// one whose settings rows it proves).
+const START_OFFER_FAMILIES = Object.freeze(['pest_control']);
+// The pricer's refusal of the account (PLAN_START_BLOCKED, the shared proof
+// in plan-start-eligibility.js), as the reason this function answers.
+const START_OFFER_REASON_OF_BLOCKER = Object.freeze({ has_plan: 'has_plan', commercial: 'premises', not_live: 'premises' });
+
+// buildStartOffer(customerId, database, targetKey, { visitId }) → { option, reason }.
+// The one-time job to plan offer's price (owner 2026-11-19): the standard
+// plan of ONE family (START_OFFER_FAMILIES) for a customer who has NO plan.
+// composePortalOffer answers null for that customer on purpose (its card ADDS
+// a service to a plan), so this runs the same stages with the pricer's strict
+// option (strictPriceSettings in customer-pricing-ai.js). The pricer then
+// asks the shared proof whether the account may start a plan, prices on
+// price settings it loads for this one call, and withholds a price that is
+// marked for a hand check. Same premises proof, estimate seed and demotions
+// as every other offer surface.
+// `option` is the full quoted option for a priced answer, else null with the
+// `reason` the app could not offer or price it:
+//   'premises'   not a live, residential, single-premises account, or the
+//                visit is not provably at the primary home;
+//   'has_plan'   the customer already holds a plan;
+//   'not_priced' the home has no standard price the app may show alone.
+// `visitId` is the visit the offer follows, and it is REQUIRED: the price is
+// for the primary home, so that visit must be at the primary home
+// (visitIsAtPrimaryPremises). WHICH visit earns an offer (a completed
+// one-time pest job, its age, no later visit) is the sender's rule, not this
+// function's: it prices for any visit of the customer at that home.
+// A priced answer is always the family's STANDARD plan (PREFERRED_OPTION_IDS):
+// the offer names one plan, so pickOption's fallbacks (another cadence, the
+// first option) are 'not_priced' here, never a price under the wrong name.
+// THROWS on a failed read: the caller is a job that tries again, and an
+// outage must never read as "this home cannot be priced". That covers the
+// lookup (the default is the strict cache-only form, so a failed cache read
+// is not a miss and a failed correction read is not "no corrections"), the
+// staff-correction probe, the proof's reads and the price settings
+// (PRICING_CONFIG_UNAVAILABLE).
+// `database` must not be a transaction: the pricer's strict option refuses
+// one (it loads the price settings on the app's own connection).
+async function buildStartOffer(customerId, database, targetKey, { propertyLookup = strictCacheOnlyPropertyLookup, visitId = null } = {}) {
+  if (!customerId || !database || !visitId || !START_OFFER_FAMILIES.includes(targetKey)) {
+    throw new Error('buildStartOffer: a customer, a database, a start offer family and the visit the offer follows are required');
+  }
+  const premises = await resolvePortalOfferPremises(database, customerId);
+  if (!premises) return { option: null, reason: 'premises' };
+  const { customer, primaryStreet } = premises;
+  if (!(await visitIsAtPrimaryPremises(database, customer, visitId, primaryStreet))) return { option: null, reason: 'premises' };
+  let pricing;
+  try {
+    pricing = await resolvePortalOfferPricingResult({
+      database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError: true, strictPriceSettings: true,
+    });
+  } catch (err) {
+    const reason = err?.code === 'PLAN_START_BLOCKED' ? START_OFFER_REASON_OF_BLOCKER[err.blocker] : null;
+    if (!reason) throw err;
+    return { option: null, reason };
+  }
+  if (!pricing || pricing.refusal) return { option: null, reason: 'not_priced' };
+  // A customer who reaches the price holds no plan, so nothing is owned.
+  const { option } = composePricedOfferBasis({
+    ...pricing, targetKey, ownedKeys: [], evidencedOwnedKeys: [], customer, primaryStreet,
+  });
+  const standardPlan = option && option.id === PREFERRED_OPTION_IDS[targetKey];
+  return standardPlan ? { option, reason: null } : { option: null, reason: 'not_priced' };
+}
+
 module.exports = {
   buildReportCrossSell,
   buildPortalOffer,
   buildOfferForFamily,
   buildPortalPurchaseBasis,
+  buildStartOffer,
   // The families a customer may choose to add: the My Plan "Add a service"
   // list walks it, and a one-tap purchase accepts no family outside it.
   PURCHASE_FAMILIES,

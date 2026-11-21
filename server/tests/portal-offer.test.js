@@ -9,7 +9,10 @@ jest.mock('../services/property-lookup/lookup-cache', () => ({
   hasVerifiedOverrides: jest.fn(async () => false),
 }));
 
-const { buildPortalOffer, buildOfferForFamily } = require('../services/service-report/cross-sell');
+// The lookup itself is never run here: a test passes its own, or reads the options the default one is called with.
+jest.mock('../routes/property-lookup-v2', () => ({ performPropertyLookup: jest.fn(async () => null) }));
+
+const { buildPortalOffer, buildOfferForFamily, buildStartOffer } = require('../services/service-report/cross-sell');
 const { hasVerifiedOverrides } = require('../services/property-lookup/lookup-cache');
 
 const FUTURE_SCHEDULED_DATE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
@@ -22,6 +25,7 @@ function dbForTables(tables = {}) {
     const q = {
       where() { return q; },
       whereNotIn() { return q; },
+      whereIn() { return q; },
       orWhereNull() { return q; },
       leftJoin() { return q; },
       orderBy() { return q; },
@@ -73,7 +77,7 @@ function recurringRows(serviceTypes) {
   }));
 }
 
-function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [] } = {}) {
+function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [], tables = {} } = {}) {
   const scheduled = recurringRows(serviceTypes);
   return dbForTables({
     customers: [customer],
@@ -83,6 +87,7 @@ function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [] } = {}
     customer_turf_profiles: [],
     estimates: [],
     customer_plan_rates: planRates,
+    ...tables,
   });
 }
 
@@ -282,5 +287,316 @@ describe('buildOfferForFamily', () => {
   test('an unknown family → null', async () => {
     const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
     expect(await buildOfferForFamily('cust-1', db, 'mosquito', { propertyLookup: missLookup })).toBeNull();
+  });
+});
+
+// buildStartOffer — the one-time job to plan offer's price (owner 2026-11-19): the same stages for a customer
+// who has NO plan, on the pricer's strict option. The portal entry points keep their "owns nothing → no offer"
+// answer (pinned above); this one is the only way to price a plan for that customer, so its answers are pinned
+// here. The strict rules have their own suite (customer-pricing-ai.test.js, strictPriceSettings) and so has the
+// shared proof (plan-start-eligibility.test.js). Here the proof's two answers and the bridge's operation are
+// spies, and the tests pin what THIS function does with them. The engine is the real one.
+describe('buildStartOffer', () => {
+  const proof = require('../services/plan-start-eligibility');
+  const bridge = require('../services/pricing-engine/db-bridge');
+  const pricer = require('../services/customer-pricing-ai');
+  // A saved lookup the real engine prices from (the report suite's own shape).
+  const SAVED = { enriched: { homeSqFt: 2400, lotSqFt: 8000, stories: 1 }, propertyRecord: {} };
+  const savedLookup = async () => SAVED;
+  // The visit the offer follows. Bare: no stamp and no link, so the single-premises proof decides.
+  const VISIT = { id: 'visit-1' };
+  // The one-time customer the offer is for: no tier and no rate on the account (the suite's fixture is a member).
+  const NO_PLAN = { waveguard_tier: null, monthly_rate: null };
+  const noPlanDb = ({ customer = {}, visits = [VISIT], tables = {} } = {}) => dbFor({
+    customer: CUSTOMER({ ...NO_PLAN, ...customer }),
+    tables: { scheduled_services: visits, ...tables },
+  });
+  const start = (db = noPlanDb(), options = {}) => buildStartOffer('cust-1', db, 'pest_control', { propertyLookup: savedLookup, visitId: VISIT.id, ...options });
+  const PRICED = { reason: null, option: { id: 'pest-quarterly' } };
+  const refused = (reason) => ({ option: null, reason });
+
+  let accountBlocker;
+  let propertyBlocker;
+  let ownSettings;
+  beforeEach(() => {
+    accountBlocker = jest.spyOn(proof, 'planStartBlocker').mockResolvedValue(null);
+    propertyBlocker = jest.spyOn(proof, 'resolvedPropertyTypeBlocker').mockResolvedValue(null);
+    ownSettings = jest.spyOn(bridge, 'withSettingsForUnattendedPrice').mockImplementation(async (price) => ({ priced: true, value: price() }));
+  });
+  afterEach(() => { accountBlocker.mockRestore(); propertyBlocker.mockRestore(); ownSettings.mockRestore(); });
+
+  test('a customer with no plan gets the standard pest plan, priced by the real engine on the strict option', async () => {
+    const db = noPlanDb();
+    const { option, reason } = await start(db);
+    expect(reason).toBeNull();
+    expect(option.id).toBe('pest-quarterly');
+    expect(option.perVisit).toBeGreaterThan(0);
+    // The fee the offer removes: a customer with no recurring service is priced as new.
+    expect(option.setupFee).toBeGreaterThan(0);
+    // The FULL quoted option (server-only), not the card payload that carries perVisit alone.
+    expect(option.annual).toBeGreaterThan(0);
+    // The strict option: the shared proof was asked about this account, and the engine ran inside the bridge's
+    // one operation (its own refresh of the price settings).
+    expect(accountBlocker).toHaveBeenCalledWith(db, 'cust-1');
+    expect(ownSettings).toHaveBeenCalledTimes(1);
+  });
+
+  test('the cards a person looks at do not ask for the strict option', async () => {
+    const spy = jest.spyOn(pricer, 'buildCustomerPricingResponse');
+    try {
+      await buildPortalOffer('cust-1', dbFor({ serviceTypes: ['Quarterly Pest Control', 'Lawn Care Program'] }), { propertyLookup: savedLookup });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][0].strictPriceSettings).toBe(false);
+      spy.mockClear();
+      await start();
+      expect(spy.mock.calls[0][0].strictPriceSettings).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(accountBlocker).toHaveBeenCalledTimes(1);
+  });
+
+  // The pricer refuses the account with PLAN_START_BLOCKED and the proof's answer. This function owns the
+  // reason the job reads: a plan is 'has_plan'; an account that is not a live home is 'premises'.
+  describe("the proof's answer about the account", () => {
+    test.each([
+      ['has_plan', 'has_plan'],
+      ['commercial', 'premises'],
+      ['not_live', 'premises'],
+    ])('%s is the reason %s, and nothing is priced', async (blocker, reason) => {
+      accountBlocker.mockResolvedValue(blocker);
+      expect(await start()).toEqual(refused(reason));
+      expect(ownSettings).not.toHaveBeenCalled();
+    });
+
+    test("its answer about the resolved property type is 'premises'", async () => {
+      propertyBlocker.mockResolvedValue('commercial');
+      expect(await start()).toEqual(refused('premises'));
+      expect(ownSettings).not.toHaveBeenCalled();
+    });
+
+    test('an answer this function has no reason for is thrown, never read as a reason or as a price', async () => {
+      accountBlocker.mockResolvedValue('a_new_answer');
+      await expect(start()).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'a_new_answer' });
+    });
+
+    test('a failed read of the proof is thrown', async () => {
+      accountBlocker.mockRejectedValue(new Error('proof down'));
+      await expect(start()).rejects.toThrow('proof down');
+    });
+
+    // The reason table is for the pricer's refusal of the account alone. Another error is an outage, also when
+    // it happens to carry a blocker.
+    test('an error of another code that names a blocker is thrown, never read as a reason', async () => {
+      const spy = jest.spyOn(pricer, 'buildCustomerPricingResponse');
+      try {
+        spy.mockRejectedValueOnce(Object.assign(new Error('not a refusal'), { code: 'SOMETHING_ELSE', blocker: 'has_plan' }));
+        await expect(start()).rejects.toMatchObject({ code: 'SOMETHING_ELSE' });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  test('a home with no saved lookup is not priced (no price on profile facts alone)', async () => {
+    expect(await start(noPlanDb(), { propertyLookup: missLookup })).toEqual(refused('not_priced'));
+  });
+
+  // The strict option of the pricer does not ask whether a lookup that missed left a staff correction of a
+  // measurement unapplied. The pricing stage this function calls does (hasVerifiedOverrides), and the price
+  // that an accepted estimate's measurements would give is then withheld.
+  describe('a home priced from an accepted estimate (the lookup missed)', () => {
+    const seeded = () => noPlanDb({
+      tables: {
+        estimates: [{
+          id: 'est-1', address: '123 Gulf Dr, Sarasota, FL 34236', status: 'accepted',
+          estimate_data: JSON.stringify({ engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup' } }),
+        }],
+      },
+    });
+
+    test('is priced when no staff correction is on file', async () => {
+      expect(await start(seeded(), { propertyLookup: missLookup })).toMatchObject(PRICED);
+      expect(hasVerifiedOverrides).toHaveBeenCalledTimes(1);
+    });
+
+    test('is not priced when a staff correction is on file', async () => {
+      hasVerifiedOverrides.mockImplementation(async () => true);
+      expect(await start(seeded(), { propertyLookup: missLookup })).toEqual(refused('not_priced'));
+    });
+
+    test('a failed read of the corrections is thrown', async () => {
+      hasVerifiedOverrides.mockImplementation(async () => { throw new Error('probe down'); });
+      await expect(start(seeded(), { propertyLookup: missLookup })).rejects.toThrow('probe down');
+    });
+  });
+
+  // The start offer prices with nobody watching, so its default lookup asks for strict reads: a failed cache or
+  // correction read is thrown (the default form serves the cached home without its corrections). The cards a
+  // person looks at keep the default reads.
+  describe('the lookup the start offer runs by default', () => {
+    const { performPropertyLookup } = require('../routes/property-lookup-v2');
+    afterEach(() => { performPropertyLookup.mockReset(); performPropertyLookup.mockImplementation(async () => null); });
+
+    test('is cache-only, stores nothing and asks for strict reads', async () => {
+      performPropertyLookup.mockResolvedValue(SAVED);
+      expect(await buildStartOffer('cust-1', noPlanDb(), 'pest_control', { visitId: VISIT.id })).toMatchObject(PRICED);
+      expect(performPropertyLookup).toHaveBeenCalled();
+      for (const [, options] of performPropertyLookup.mock.calls) {
+        expect(options).toEqual({ cacheOnly: true, persist: false, strictCacheReads: true });
+      }
+    });
+
+    test('the portal card keeps the default reads', async () => {
+      performPropertyLookup.mockResolvedValue(SAVED);
+      await buildPortalOffer('cust-1', dbFor({ serviceTypes: ['Quarterly Pest Control', 'Lawn Care Program'] }));
+      expect(performPropertyLookup).toHaveBeenCalled();
+      for (const [, options] of performPropertyLookup.mock.calls) expect(options).toEqual({ cacheOnly: true, persist: false });
+    });
+
+    test('a failed cache or correction read is thrown: never a miss, never a price', async () => {
+      performPropertyLookup.mockRejectedValue(Object.assign(new Error('property lookup verified override read failed'), { code: 'LOOKUP_CACHE_READ_FAILED' }));
+      await expect(buildStartOffer('cust-1', noPlanDb(), 'pest_control', { visitId: VISIT.id })).rejects.toMatchObject({ code: 'LOOKUP_CACHE_READ_FAILED' });
+    });
+  });
+
+  // The offer follows one visit and prices the primary home. The account-level proof skips a visit whose link
+  // cannot be resolved, so without this proof such a job could earn a price for a home it was not at.
+  describe('the visit the offer follows must be at the home the price is for', () => {
+    const scopeModule = require('../services/service-report/visit-property-scope');
+    const linkage = require('../services/estimate-property-linkage');
+    // The fixture customer's home, stamped on the visit as dispatch stamps it.
+    const AT_HOME = { service_address_line1: '123 Gulf Dr', service_address_city: 'Sarasota', service_address_zip: '34236' };
+    const follow = (visits) => start(noPlanDb({ visits }));
+    // The resolver's answer for a visit that carries a link (the fake database has no promise chain to resolve one).
+    const withScope = async (answer, body) => {
+      const spy = jest.spyOn(scopeModule, 'resolveVisitPropertyScope').mockImplementationOnce(answer);
+      try { return await body(); } finally { spy.mockRestore(); }
+    };
+
+    test.each([
+      ['a visit stamped at the primary home', AT_HOME],
+      ['a visit with no stamp and no link (the single-premises proof stands)', {}],
+    ])('%s is priced', async (_label, visit) => {
+      expect(await follow([{ ...VISIT, ...visit }])).toMatchObject(PRICED);
+    });
+
+    test('a visit stamped at another home is refused', async () => {
+      const elsewhere = { service_address_line1: '9 Other St', service_address_city: 'Venice', service_address_zip: '34285' };
+      expect(await follow([{ ...VISIT, ...elsewhere }])).toEqual(refused('premises'));
+      expect(accountBlocker).not.toHaveBeenCalled();
+    });
+
+    // The account-level proof skips another visit whose link cannot be resolved. For a job that carries no
+    // proof of its own, that visit could be at a second home: the strict form of the proof decides.
+    test('a visit with no stamp and no link is refused when another visit of the account has a link that cannot be resolved', async () => {
+      const db = noPlanDb({ visits: [VISIT, { id: 'visit-2', source_estimate_id: 'est-gone' }] });
+      const strict = jest.spyOn(scopeModule, 'customerHasOnlyPrimaryPremises');
+      try {
+        expect(await start(db)).toEqual(refused('premises'));
+        expect(strict).toHaveBeenCalledWith(db, 'cust-1', expect.objectContaining({ id: 'cust-1' }), expect.anything(), { unresolvedFails: true });
+      } finally {
+        strict.mockRestore();
+      }
+    });
+
+    test("a visit that is not this customer's is refused", async () => {
+      expect(await follow([])).toEqual(refused('premises'));
+    });
+
+    // Without the visit nothing proves which home the offer is about. So the visit is required, and its
+    // absence is never a price.
+    test.each([[undefined], [null], ['']])('a call with no visit (%p) is a programming error, never a price', async (visitId) => {
+      await expect(start(noPlanDb(), { visitId })).rejects.toThrow('the visit the offer follows');
+    });
+
+    test.each([
+      ['a link that cannot be resolved (an estimate with no address)', { key: null, hasEvidence: true }],
+      ['a link that resolves to another home', { key: linkage.normalizedStampedStreet('9 Other St', null, 'Venice', '34285'), hasEvidence: true }],
+    ])('%s is refused, never priced at the primary home', async (_label, scope) => {
+      const answer = await withScope(async () => scope, () => follow([{ ...VISIT, source_estimate_id: 'est-1' }]));
+      expect(answer).toEqual(refused('premises'));
+    });
+
+    test('a failed read of the link throws: an outage is never read as "another home"', async () => {
+      const failing = async (_row, _db, { onLookupFailure }) => { onLookupFailure(); return { key: null, hasEvidence: true }; };
+      await expect(withScope(failing, () => follow([{ ...VISIT, source_estimate_id: 'est-1' }]))).rejects.toMatchObject({ code: 'PREMISES_LOOKUP_FAILED' });
+    });
+  });
+
+  test('an inactive, multi-home or address-less account is refused on the premises proof, before the pricer is asked', async () => {
+    for (const customer of [{ active: false }, { has_multi_home: true }, { address_line1: null, city: null, zip: null }]) {
+      expect(await start(noPlanDb({ customer }))).toEqual(refused('premises'));
+    }
+    expect(accountBlocker).not.toHaveBeenCalled();
+  });
+
+  test("another cadence is never priced under the standard plan's name (pickOption's fallback is refused)", async () => {
+    const spy = jest.spyOn(pricer, 'buildCustomerPricingResponse');
+    try {
+      spy.mockResolvedValueOnce({
+        ok: true, alreadyIncluded: [], currentServiceKeys: [], property: {},
+        options: [{ id: 'pest-bimonthly', serviceKey: 'pest_control', label: 'Bi-monthly pest control', perVisit: 80, setupFee: 99, confidence: 'high' }],
+      });
+      expect(await start()).toEqual(refused('not_priced'));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // The pricing stage's own refusals. With the strict option the pricer refuses these accounts first
+  // (PLAN_START_BLOCKED), so each one is a second line: the answer is never a price, and never a crash.
+  test.each([
+    ['the pricer answers nothing', null],
+    ['the pricer finds the family already active', { ok: true, options: [], alreadyIncluded: ['pest_control'], currentServiceKeys: [] }],
+    ['the priced property resolves as a business', {
+      ok: true, alreadyIncluded: [], currentServiceKeys: [], property: { propertyType: 'commercial' },
+      options: [{ id: 'pest-quarterly', serviceKey: 'pest_control', label: 'Quarterly pest control', perVisit: 80, setupFee: 99, confidence: 'high' }],
+    }],
+  ])('%s: not priced', async (_label, answer) => {
+    const spy = jest.spyOn(pricer, 'buildCustomerPricingResponse');
+    try {
+      spy.mockResolvedValueOnce(answer);
+      expect(await start()).toEqual(refused('not_priced'));
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  describe('an outage is thrown: a job must never read it as "this home cannot be priced"', () => {
+    test('the lookup', async () => {
+      await expect(start(noPlanDb(), { propertyLookup: async () => { throw new Error('lookup down'); } })).rejects.toThrow('lookup down');
+    });
+
+    test.each([
+      ['not_loaded'], ['edited'], ['rows'],
+    ])('the price settings (%s)', async (reason) => {
+      ownSettings.mockImplementation(async () => ({ priced: false, reason }));
+      await expect(start()).rejects.toMatchObject({ code: 'PRICING_CONFIG_UNAVAILABLE' });
+    });
+
+    test("the pricer's own read of the current services", async () => {
+      const spy = jest.spyOn(pricer, 'buildCustomerPricingResponse');
+      try {
+        spy.mockResolvedValueOnce({ ok: false, code: 'PRICING_UNAVAILABLE' });
+        await expect(start()).rejects.toMatchObject({ code: 'PRICING_UNAVAILABLE' });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  // The pricer's strict option prices pest control only: it reads no turf profile, and the standard pest price
+  // is the one whose settings rows it proves. Lawn care and tree & shrub are ladder families for the cards, and
+  // they are refused here before any read.
+  test.each([['lawn_care'], ['tree_shrub'], ['mosquito'], [undefined]])('family %p is refused: the start offer prices the pest plan only', async (family) => {
+    await expect(buildStartOffer('cust-1', noPlanDb(), family, { propertyLookup: savedLookup, visitId: VISIT.id })).rejects.toThrow('a start offer family');
+  });
+
+  test('a missing customer or database is a programming error', async () => {
+    const options = { propertyLookup: savedLookup, visitId: VISIT.id };
+    await expect(buildStartOffer(null, noPlanDb(), 'pest_control', options)).rejects.toThrow('buildStartOffer');
+    await expect(buildStartOffer('cust-1', null, 'pest_control', options)).rejects.toThrow('buildStartOffer');
   });
 });
