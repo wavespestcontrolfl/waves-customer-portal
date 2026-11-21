@@ -1221,22 +1221,34 @@ async function maybeSyncPricingEngine(db, { strict = false } = {}) {
 //    carries code PLAN_START_BLOCKED and the blocker, so a caller can tell
 //    the customer's state from its own mistake. A failed read of the shared
 //    answer throws as it is: an outage is never "this account has no plan".
+//    The shared answer reads the account's records. The property the engine
+//    prices is resolved after it, and a lookup or an estimate seed can name a
+//    type the account row does not carry. The engine prices a commercial
+//    property by its commercial rules, from settings the bridge has no answer
+//    for. So the resolved property is asked too, by the engine's own rule
+//    (assertStrictPriceProperty), with the blocker 'commercial'.
 // 2. The refresh (strictPriceSettingsRefresh). A refresh that is due and
 //    does not succeed throws PRICING_CONFIG_UNAVAILABLE. A refresh that is
 //    RUNNING is waited for: it may have changed part of the settings
 //    already, and the bridge runs one refresh at a time, so the one asked for
 //    here starts after the running one and loads the settings again.
-// 3. The rows (assertStrictPriceRows), asked AFTER the engine priced and in
-//    the same turn, with no await in between. A refresh answers true when
-//    pricing_config holds any row at all; for a row or a field that is
-//    missing the engine keeps what it had (the in-code default on a cold
-//    start, an earlier value on a warm process). The bridge's answer
-//    (standardPestPriceRowsAreComplete) is yes when the rows of the last good
-//    refresh carried every input of the standard pest price and no refresh
-//    is running now. Asked in the turn the engine priced, a yes holds for
-//    the prices just computed: a refresh begins with a database read, so
-//    none can change the settings inside one turn. A refresh that started
-//    since reads as no, and the price is thrown away.
+// 3. The settings the engine priced from (assertStrictPriceSettingsHeld),
+//    asked AFTER the engine priced and in the same turn, with no await in
+//    between. Two questions.
+//    The rows: a refresh answers true when pricing_config holds any row at
+//    all; for a row or a field that is missing the engine keeps what it had
+//    (the in-code default on a cold start, an earlier value on a warm
+//    process). The bridge's answer (standardPestPriceRowsAreComplete) is yes
+//    when the rows of the last good refresh carried every input of the
+//    standard pest price and no refresh is running now.
+//    Still fresh: an edit of the price settings marks them stale at once
+//    (invalidatePricingConfigCache) and leaves the rows answer as it was. An
+//    edit that lands after rule 2 read "fresh" and before the engine priced
+//    would pass the rows question alone, so the same question rule 2 asked
+//    (needsSync) is asked again here.
+//    Asked in the turn the engine priced, two yeses hold for the prices just
+//    computed: a refresh begins with a database read, so none can change the
+//    settings inside one turn. Anything else throws the price away.
 function priceSettingsUnavailable(message) {
   return Object.assign(new Error(message), { code: 'PRICING_CONFIG_UNAVAILABLE' });
 }
@@ -1255,10 +1267,22 @@ async function strictPriceSettingsRefresh(db) {
 function assertStrictPriceCall(db, customer) {
   if (!db || !customer?.id) throw new Error('strictPriceSettings needs a database handle and a customer id');
 }
-function assertStrictPriceRows() {
+function assertStrictPriceSettingsHeld() {
   if (!require('./pricing-engine/db-bridge').standardPestPriceRowsAreComplete()) {
     throw priceSettingsUnavailable('the pest price settings are not complete in their rows, or a refresh is running');
   }
+  if (pricingEngine.needsSync && pricingEngine.needsSync()) {
+    throw priceSettingsUnavailable('the price settings went stale while the price was computed');
+  }
+}
+function planStartBlocked(blocker) {
+  return Object.assign(new Error(`strictPriceSettings: the account may not start a plan (${blocker})`), { code: 'PLAN_START_BLOCKED', blocker });
+}
+// The property the engine is about to price, by the engine's own rule for a
+// commercial property (generateEstimate asks isCommercialProperty of the same
+// input and then prices by its commercial rules).
+function assertStrictPriceProperty(propertyInput) {
+  if (require('./pricing-engine/commercial-helpers').isCommercialProperty(propertyInput)) throw planStartBlocked('commercial');
 }
 // Throws for a strict request the pricer must not price. `ownedSet` is the
 // pricer's own read of the recurring services at the priced property.
@@ -1269,9 +1293,7 @@ async function assertStrictPriceAccount(db, customer, ownedSet, servicesToPrice)
   }
   const blocker = (await require('./plan-start-eligibility').planStartBlocker(db, customer.id))
     || (ownedSet.size ? 'has_plan' : null);
-  if (blocker) {
-    throw Object.assign(new Error(`strictPriceSettings: the account may not start a plan (${blocker})`), { code: 'PLAN_START_BLOCKED', blocker });
-  }
+  if (blocker) throw planStartBlocked(blocker);
 }
 
 // Repeatable purchases: quotable even for a current customer, because they are
@@ -1409,6 +1431,7 @@ async function buildCustomerPricingResponse({
     propertyLookup: lookupCanInformPricing ? lookupFn : null,
     propertySeed,
   });
+  if (strictPriceSettings) assertStrictPriceProperty(propertyContext.propertyInput);
 
   // Measured AFTER the exclusion: an owned service missing a measurement must
   // not short-circuit the request into PROPERTY_DETAILS_NEEDED — we are not
@@ -1519,7 +1542,7 @@ async function buildCustomerPricingResponse({
   }
   // Same turn as the engine calls above: nothing between the refresh and
   // this line awaits (rule 3 above strictPriceSettingsRefresh).
-  if (strictPriceSettings) assertStrictPriceRows();
+  if (strictPriceSettings) assertStrictPriceSettingsHeld();
 
   // A mixed prompt ("upgrade my lawn care and add mosquito") must not lose the
   // owned half just because the new half priced (codex r1 P2).

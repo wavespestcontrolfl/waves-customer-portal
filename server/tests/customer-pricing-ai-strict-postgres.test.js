@@ -158,6 +158,18 @@ postgres('strictPriceSettings of the customer pricer (live Postgres)', () => {
       expect(propertyLookup).not.toHaveBeenCalled();
     });
 
+    // The shared answer reads the account's records and clears this one. The lookup then names a business: the
+    // engine would price it by its commercial rules, so strict refuses it before the refresh.
+    test('an account with no property type that the lookup resolves as a business: strict refuses it as a business', async () => {
+      const worker = freshWorker();
+      const customer = await seedCustomer();
+      const propertyLookup = jest.fn(async () => ({ enriched: { ...SAVED_LOOKUP.enriched, propertyType: 'commercial', aiConfidence: 85 }, propertyRecord: {} }));
+      await expect(ask(worker, customer, { strictPriceSettings: true, propertyLookup })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'commercial' });
+      expect(propertyLookup).toHaveBeenCalledTimes(1);
+      // No refresh ran on this worker.
+      expect(worker.bridge.needsSync()).toBe(true);
+    });
+
     test('the account is priced once the visit that blocked it is gone', async () => {
       const worker = freshWorker();
       const customer = await seedCustomer();
