@@ -152,10 +152,12 @@ describe('owner-only actions', () => {
     expect(ok.status).toBe(200);
   });
 
-  test('send passes the preview hash from the body', async () => {
-    const res = await call(base(`/${OFFER}/send`), 'POST', { draftHash: 'abc123' });
+  test('send passes the preview hash and the read\'s out stamp from the body', async () => {
+    const res = await call(base(`/${OFFER}/send`), 'POST', { draftHash: 'abc123', expectedOut: 'stamp-1' });
     expect(res.body.comms.sms.outcome).toBe('sent');
-    expect(mockService.sendOffer).toHaveBeenCalledWith(APP, OFFER, expect.objectContaining({ name: 'Test Owner' }), 'abc123');
+    expect(mockService.sendOffer).toHaveBeenCalledWith(
+      APP, OFFER, expect.objectContaining({ name: 'Test Owner' }), 'abc123', expect.any(Date), { expectedOut: 'stamp-1' },
+    );
   });
 
   test('revise passes the expected status and the optional start date', async () => {

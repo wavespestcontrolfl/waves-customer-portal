@@ -57,16 +57,22 @@ const DAY_KEYS = Object.freeze(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 // The sprinkler timer on file (property_preferences.irrigation_controller_brand / _model / _app): one list for the
 // customer card, the staff form, the validator and the staff count. Keys are stored; labels are display text.
 // A timer is not a watering input: nothing here enters a plan or a derived figure.
-const CONTROLLER_BRANDS = Object.freeze({ hunter: 'Hunter', rain_bird: 'Rain Bird', other: 'Another brand' });
+// The brands are the ones with a Waves guide (wavespestcontrol.com/sprinkler-timers/), then "Another brand".
+const CONTROLLER_BRANDS = Object.freeze({
+  hunter: 'Hunter', rain_bird: 'Rain Bird', orbit_bhyve: 'Orbit B-hyve', rachio: 'Rachio', other: 'Another brand',
+});
 // Asked for Hunter only: the model decides whether the timer can go on Hunter's Hydrawise phone app.
 const CONTROLLER_MODELS = Object.freeze({ x2: 'X2', x_core: 'X-Core', pro_c: 'Pro-C', hydrawise: 'Hydrawise touchscreen' });
 // Whether the customer runs the timer from its maker's phone app. 'unknown' is the customer's "Not sure".
 const CONTROLLER_APP_ANSWERS = Object.freeze({ yes: 'Yes', no: 'No', unknown: 'Not sure' });
-// The phone-app question exists only for a timer whose maker has a phone app for it: a Rain Bird, or a Hunter
-// model that can go on Hydrawise. One rule for the customer card, the staff form and the server.
+// The phone-app question exists only for a timer whose maker has a phone app for it: a Rain Bird, an Orbit B-hyve,
+// a Rachio, or a Hunter model that can go on Hydrawise. A B-hyve or a Rachio is run from its app, but the app may
+// never have been set up, so the answer still says something. One rule for the customer card, the staff form and
+// the server.
+const CONTROLLER_APP_BRANDS = Object.freeze(['rain_bird', 'orbit_bhyve', 'rachio']);
 const CONTROLLER_APP_MODELS = Object.freeze(['x2', 'pro_c', 'hydrawise']);
 function controllerAsksAboutApp(brand, model) {
-  return brand === 'rain_bird' || (brand === 'hunter' && CONTROLLER_APP_MODELS.includes(model));
+  return CONTROLLER_APP_BRANDS.includes(brand) || (brand === 'hunter' && CONTROLLER_APP_MODELS.includes(model));
 }
 
 const MAX_RUN_MINUTES = 240;

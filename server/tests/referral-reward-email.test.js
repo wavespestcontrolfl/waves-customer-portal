@@ -82,6 +82,13 @@ describe('nextRewardEmailAt: the next 9:00 AM ET at or after the credit', () => 
 });
 
 describe('sendDueReferralRewardEmails', () => {
+  test('a credit with cents says the posted cents: $25.50, never $26', async () => {
+    mockState.credits = [credit({ credit_dollars: '25.50' })];
+    await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
+    const sent = mockSendTemplate.mock.calls[0][0];
+    expect(sent.payload.reward_line).toBe('Your $25.50 referral reward has been added to your account as a credit — it applies automatically to your next invoice.');
+  });
+
   test('a credit from yesterday afternoon sends one email at 9:00 AM: the referrer, account-credit wording, keyed by referral', async () => {
     mockState.credits = [credit()];
     const out = await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });

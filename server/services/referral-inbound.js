@@ -29,6 +29,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const engine = require('./referral-engine');
+const { isEnabled } = require('../config/feature-gates');
 const { MEMBERSHIP_TIER_SQL } = require('./billing-lane');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { isPromoterPhoneCollision } = require('./referral-errors');
@@ -199,6 +200,20 @@ function performedRecurringVisits(conn) {
     )`, [NOT_PERFORMED_OUTCOMES]);
 }
 
+// The rule staff read on a card, a preview only: a read that fails leaves it unknown (null; the prompts then say
+// credits follow the program settings) so one failed read never rejects the list or stops the bell sweep. The posting
+// transaction stays strict (referral-engine liveSettingsOrThrow).
+async function previewTerms(conn, memberId) {
+  try {
+    // In a savepoint (a nested transaction): a SQL error in the preview rolls back to it and leaves the caller's
+    // transaction usable, so the bell row still writes.
+    return await conn.transaction((sp) => engine.step2TermsFor(sp, memberId));
+  } catch (err) {
+    logger.warn(`[referral-inbound] rule preview unavailable: ${err.code || err.message}`);
+    return null;
+  }
+}
+
 // The likely referrers for one referee's evidence, as the Queue shows them, and
 // whether the link code belongs to the referee's own household.
 async function suggestionsFor(conn, customer, evidence) {
@@ -282,8 +297,11 @@ async function listInboundReferrals(conn = db, { customerId = null } = {}) {
     .map((r) => r.customer_id));
 
   const items = [];
+  const step2On = isEnabled('referralStep2');
   for (const { customer, evidence } of open) {
     const { suggestions, selfReferral } = await suggestionsFor(conn, customer, evidence);
+    // GATE_REFERRAL_STEP2: the effective rule and the likely referrer's standing, for the Queue and the bell prompts.
+    const terms = step2On ? await previewTerms(conn, sureReferrerOf({ suggestions, selfReferral })?.customerId || null) : undefined;
     items.push({
       customerId: customer.id,
       name: fullName(customer),
@@ -295,6 +313,7 @@ async function listInboundReferrals(conn = db, { customerId = null } = {}) {
       evidence,
       selfReferral,
       suggestions,
+      ...(terms !== undefined ? { terms } : {}),
     });
   }
   return items;
@@ -434,7 +453,8 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
   // transaction; its credit step below can find only a plan visit that
   // completed while the confirm ran (that visit's own credit found no referral
   // yet), so the visit's credit is not lost.
-  const result = { referralId: referral.id, converted: deferredOnly, creditsNow: false, credited: null, error: null };
+  // `step2`: GATE_REFERRAL_STEP2 is on, so the amounts vary and the Queue words them from `credited`.
+  const result = { referralId: referral.id, converted: deferredOnly, creditsNow: false, credited: null, error: null, ...(isEnabled('referralStep2') ? { step2: true } : {}) };
   if (!deferredOnly) {
     try {
       const conversion = await engine.convertReferral(referral.id, {
@@ -456,10 +476,13 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
     .orderBy('ss.id', 'asc')
     .first('ss.id');
   result.creditsNow = Boolean(firstVisit);
-  if (firstVisit && settings.require_service_completion) {
+  // GATE_REFERRAL_STEP2 defers every conversion to the first paid service (referral-engine convertReferral).
+  if (firstVisit && (settings.require_service_completion || isEnabled('referralStep2'))) {
     try {
       const credit = await engine.creditReferralOnFirstService({ customerId, serviceId: firstVisit.id });
-      result.credited = credit ? { referrerDollars: credit.referrerDollars, refereeDollars: credit.refereeDollars } : null;
+      result.credited = credit
+        ? { referrerDollars: credit.referrerDollars, refereeDollars: credit.refereeDollars, ...(credit.referrerReason ? { referrerReason: credit.referrerReason } : {}) }
+        : null;
     } catch (err) {
       logger.warn(`[referral-inbound] credit failed for referral ${referral.id}: ${err.code || err.message}`);
       result.error = 'credit_failed';
@@ -489,6 +512,7 @@ module.exports = {
   CODE_RE,
   customerForCode,
   sameHousehold,
+  previewTerms,
   listInboundReferrals,
   sureReferrerOf,
   confirmInboundReferral,

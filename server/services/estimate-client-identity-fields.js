@@ -18,6 +18,8 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'treeShrubPricingKnobs',
   'termitePricingKnobs',
   'mistingPricingKnobs',
+  'preSlabTermiticidePricingKnobs',
+  'trenchingTermiticidePricingKnobs',
   'areaAddOnPricingKnobs',
   'palmAnnualRounding',
   'commercialFloorsArmedServices',

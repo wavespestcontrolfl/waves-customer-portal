@@ -259,7 +259,7 @@ const {
   selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   pricePestControlUnitBand, priceOneTimePestUnitBand, unitBandQuoteRequiredLine,
-  priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
+  priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor, normalizePreSlabTermiticideProduct,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching, priceAreaAddOnList, assertAreaAddOnHostVisit,
   pricePlugging, pluggingAreaRequiredLine, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
@@ -293,6 +293,22 @@ function serviceSelected(value) {
 
 function serviceOptions(value) {
   return value && typeof value === 'object' ? value : {};
+}
+
+// A replayed quote keeps the container cost its stored pre-slab row priced with (input.preSlabTermiticidePricingKnobs, set by
+// the server replay paths from estimate-tree-shrub-knob-replay), for the product that row quoted only, on either pricer: the
+// legacy wrapper (services.preSlabTermidor) resolves its product as a legacy payload, as pricePreSlabTermidor does. A cost set
+// on the service itself still wins.
+function withPreSlabReplayCost(options, knobs, legacyWrapper = false) {
+  if (!knobs || typeof knobs !== 'object') return options;
+  const { productKey } = legacyWrapper
+    ? normalizePreSlabTermiticideProduct(options.productKey || 'termidor_sc', { legacyPayload: true })
+    : normalizePreSlabTermiticideProduct(options.productKey, { legacyPayload: !!options.legacyPayload });
+  if (productKey !== knobs.productKey) return options;
+  const replayed = { ...options };
+  if (!(Number(options.customContainerCost) > 0)) replayed.customContainerCost = knobs.containerCost;
+  if (!(Number(options.customContainerOz) > 0)) replayed.customContainerOz = knobs.containerOz;
+  return replayed;
 }
 
 function uniqueStrings(values = []) {
@@ -2022,7 +2038,8 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.trenching && !useCommercialManualQuote(services.trenching, 'pest_control', { scopedOneTime: true })) {
-    const result = priceTrenching(property, serviceOptions(services.trenching));
+    // A replayed trench quote keeps its stored product surcharge (input.trenchingTermiticidePricingKnobs, server-owned).
+    const result = priceTrenching(property, serviceOptions(services.trenching), input.trenchingTermiticidePricingKnobs);
     lineItems.push(result);
   }
   if (services.germanRoach && !useCommercialManualQuote(services.germanRoach, 'pest_control')) {
@@ -2109,8 +2126,9 @@ function generateEstimate(input) {
   const legacyPreSlabService = services.preSlabTermidor || services.pre_slab_termidor;
   const preSlabService = canonicalPreSlabService || legacyPreSlabService;
   if (preSlabService && !useCommercialManualQuote(preSlabService, 'pest_control', { scopedOneTime: true })) {
-    const preSlabOptions = serviceOptions(preSlabService);
-    const result = legacyPreSlabService && !canonicalPreSlabService
+    const legacyWrapper = Boolean(legacyPreSlabService && !canonicalPreSlabService);
+    const preSlabOptions = withPreSlabReplayCost(serviceOptions(preSlabService), input.preSlabTermiticidePricingKnobs, legacyWrapper);
+    const result = legacyWrapper
       ? pricePreSlabTermidor(property, preSlabOptions)
       : pricePreSlabTermiticide(property, preSlabOptions);
     lineItems.push(result);

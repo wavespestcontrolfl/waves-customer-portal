@@ -400,6 +400,112 @@ describe("Reviews workspace foundation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
     fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
     expect(await screen.findByText("No monthly cap")).toBeInTheDocument();
+
+    // A failed policy load shows Unavailable, never "No monthly cap".
+    cleanup();
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const path = String(url);
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) return response({ error: "Synthetic policy failure" }, 503);
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No monthly cap")).toBeNull();
+  }, 30000);
+
+  it("the cap card says Unavailable when a refresh fails after a successful load", async () => {
+    let failing = false;
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const path = String(url);
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) {
+        return failing
+          ? response({ error: "Synthetic refresh failure" }, 503)
+          : response({ summary: { confirmedGoogleReviews: 1 }, payouts: [], leaderboard: [], policy: { enabled: true, amountCents: 1500, monthlyCapCount: 15 } });
+      }
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("15 reviews a month")).toBeInTheDocument();
+    failing = true;
+    await act(async () => refresh.callback());
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("15 reviews a month")).toBeNull();
+  }, 30000);
+
+  it("a queue-only failure still shows the real cap; an incentives failure shows Unavailable", async () => {
+    const mount = async (queueStatus, incentivesStatus) => {
+      vi.stubGlobal("fetch", vi.fn(async (url) => {
+        const path = String(url);
+        if (path.includes("/admin/reviews/incentives/attribution-queue?")) {
+          return queueStatus === 200 ? response({ items: [] }) : response({ error: "Synthetic queue failure" }, queueStatus);
+        }
+        if (path.includes("/admin/reviews/incentives?")) {
+          return incentivesStatus === 200
+            ? response({ summary: { confirmedGoogleReviews: 1 }, payouts: [], leaderboard: [], policy: { enabled: true, amountCents: 1500, monthlyCapCount: 15 } })
+            : response({ error: "Synthetic incentives failure" }, incentivesStatus);
+        }
+        if (path.includes("/admin/reviews")) {
+          return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      }));
+      render(<ReviewsPage />);
+      await screen.findByText("No reviews match your filters");
+      fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+      fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    };
+    await mount(503, 200);
+    expect(await screen.findByText("15 reviews a month")).toBeInTheDocument();
+    cleanup();
+    await mount(200, 503);
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("15 reviews a month")).toBeNull();
+  }, 30000);
+
+  it("a successful Run Attribution replaces a failed or old cap on the card", async () => {
+    let incentivesOk = false;
+    let syncCap = 15;
+    const dashboard = (cap) => ({ summary: { confirmedGoogleReviews: 1 }, payouts: [], leaderboard: [], policy: { enabled: true, amountCents: 1500, monthlyCapCount: cap } });
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      const path = String(url);
+      if (options.method === "POST" && path.includes("/admin/reviews/incentives/sync")) return response(dashboard(syncCap));
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) {
+        return incentivesOk ? response(dashboard(15)) : response({ error: "Synthetic policy failure" }, 503);
+      }
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    // A successful sync response carries the policy: the card shows the cap.
+    fireEvent.click(await screen.findByRole("button", { name: /Run Attribution/ }));
+    expect(await screen.findByText("15 reviews a month")).toBeInTheDocument();
+    // A changed cap in the next sync response replaces the old one.
+    syncCap = 10;
+    fireEvent.click(screen.getByRole("button", { name: /Run Attribution/ }));
+    expect(await screen.findByText("10 reviews a month")).toBeInTheDocument();
+    expect(screen.queryByText("15 reviews a month")).toBeNull();
+    incentivesOk = true;
   }, 30000);
 
   it("Mark Pending Paid sends only the pending ids the button was enabled from, never over-cap rows", async () => {

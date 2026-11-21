@@ -25,6 +25,8 @@ const {
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 const { computeSendRates, ratesFromTotals } = require('../services/newsletter-analytics');
 const { newsletterAutoSendLive } = require('../config/feature-gates');
+const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
+const { moveIssueForSend } = require('../services/pest-insider/schedule');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -499,6 +501,15 @@ router.delete('/sends/:id', async (req, res, next) => {
       const calendarIds = await trx('newsletter_calendar')
         .where({ send_id: req.params.id })
         .pluck('id');
+      // A planned Waves Pest Insider issue whose draft is deleted is held, so
+      // the planner never drafts or proofs it again. Before the delete: the
+      // delete clears the row's send_id (ON DELETE SET NULL).
+      if (send.newsletter_type === PEST_INSIDER_TYPE) {
+        // The send row first, then the issue row: the proof step's queueing takes them in that
+        // order too, so a delete as an FYI copy finishes waits for it instead of deadlocking.
+        await trx('newsletter_sends').where({ id: req.params.id }).forUpdate().first('id');
+        await moveIssueForSend(req.params.id, ['drafted', 'scheduled'], 'held', { reason: 'Draft deleted in History', database: trx });
+      }
       const deleted = await trx('newsletter_sends')
         .where({ id: req.params.id, status: 'draft' })
         .del();
@@ -578,31 +589,43 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
     if (send.status !== 'scheduled') return res.status(400).json({ error: 'not scheduled' });
-    const cancelled = await db('newsletter_sends').where({ id: send.id, status: 'scheduled' }).update({
-      status: 'draft',
-      scheduled_for: null,
-      // Cancelling an approved schedule invalidates the approval (same as
-      // the PATCH and scheduler reverts): the draft must be re-proofed —
-      // stale fields would both block a fresh proof (the claim requires
-      // NULL proof_sent_at) and let a re-schedule ride the old approval.
-      proof_token: null,
-      proof_sent_at: null,
-      proof_approved_at: null,
-      proof_refused_at: null,
-      updated_at: new Date(),
+    // One transaction: the send's return to draft, its calendar week and its planned issue's hold
+    // commit together (the send row first, the order the queueing locks them in). A failed write
+    // never leaves an issue queued under a draft that a retry would call "not scheduled".
+    const cancelled = await db.transaction(async (trx) => {
+      const reverted = await trx('newsletter_sends').where({ id: send.id, status: 'scheduled' }).update({
+        status: 'draft',
+        scheduled_for: null,
+        // Cancelling an approved schedule invalidates the approval (same as
+        // the PATCH and scheduler reverts): the draft must be re-proofed —
+        // stale fields would both block a fresh proof (the claim requires
+        // NULL proof_sent_at) and let a re-schedule ride the old approval.
+        proof_token: null,
+        proof_sent_at: null,
+        proof_approved_at: null,
+        proof_refused_at: null,
+        updated_at: new Date(),
+      });
+      if (!reverted) return false;
+      // Roll the linked calendar row back to 'drafted' to match the send. With
+      // GATE_NEWSLETTER_AUTO_SEND on, or for an issue the switch queued
+      // (approved with no approving email) even if it is off now, Cancel
+      // schedule skips the week instead: a 'drafted' week gets a fresh proof
+      // from the 4:30 AM catch-up, and that proof would queue the issue again
+      // (owner 2026-10-30, option A).
+      const autoQueued = Boolean(send.proof_approved_at) && !send.proof_approval_email_id;
+      await trx('newsletter_calendar').where({ send_id: send.id }).update({
+        status: (autoQueued || newsletterAutoSendLive()) ? 'skipped' : 'drafted',
+        updated_at: new Date(),
+      });
+      // A planned Waves Pest Insider issue is held, like a skipped week: the
+      // planner never proofs or queues it again.
+      if (send.newsletter_type === PEST_INSIDER_TYPE) {
+        await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'held', { reason: 'Cancel schedule in History', database: trx });
+      }
+      return true;
     });
     if (!cancelled) return res.status(409).json({ error: 'scheduled send was already claimed; it was not cancelled' });
-    // Roll the linked calendar row back to 'drafted' to match the send. With
-    // GATE_NEWSLETTER_AUTO_SEND on, or for an issue the switch queued
-    // (approved with no approving email) even if it is off now, Cancel
-    // schedule skips the week instead: a 'drafted' week gets a fresh proof
-    // from the 4:30 AM catch-up, and that proof would queue the issue again
-    // (owner 2026-10-30, option A).
-    const autoQueued = Boolean(send.proof_approved_at) && !send.proof_approval_email_id;
-    await db('newsletter_calendar').where({ send_id: send.id }).update({
-      status: (autoQueued || newsletterAutoSendLive()) ? 'skipped' : 'drafted',
-      updated_at: new Date(),
-    });
     const updated = await db('newsletter_sends').where({ id: send.id }).first();
     res.json({ success: true, send: updated });
   } catch (err) { next(err); }

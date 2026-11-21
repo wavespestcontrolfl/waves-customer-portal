@@ -259,6 +259,7 @@ const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-star
 const { ensureCustomerAccount } = require('./admin-customers');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const { applyContactNormalization } = require('../utils/intake-normalize');
+const { loadLeadReachStats } = require('../services/lead-reach-stats');
 
 // Median of an array of numbers (minutes), or null when empty. Robust to the
 // multi-day response-time outliers that skew a mean.
@@ -347,6 +348,17 @@ router.get('/analytics/overview', async (req, res, next) => {
       : null;
     const medianResponseTime = medianMinutes(respondedMinutes);
 
+    // The median above only sees leads someone recorded a response for, so a lead nobody
+    // contacted drops out of it. Beside it, the same cohort judged by real person contact
+    // (services/lead-reach-stats.js). A secondary figure: a failure leaves it null and never
+    // fails the overview.
+    let leadReach = null;
+    try {
+      leadReach = await loadLeadReachStats(leads);
+    } catch (err) {
+      logger.warn('[leads] reach stats unavailable', { code: err?.code || 'unknown' });
+    }
+
     // Speed to Lead: how long leads still awaiting their first response have
     // been waiting, right now. Distinct from avgResponseTime (the historical
     // first-contact -> first-response gap on leads we DID respond to).
@@ -417,7 +429,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     res.json({
       total, won, lost, active, conversionRate,
       avgResponseTime, medianResponseTime, recentMedianResponseTime,
-      avgSpeedToLead, openUnansweredCount,
+      avgSpeedToLead, openUnansweredCount, leadReach,
       speedToLeadSince: SPEED_TO_LEAD_FRESH_START ? SPEED_TO_LEAD_FRESH_START.toISOString() : null,
       costTotal: Math.round(costTotal * 100) / 100,
       revenue: Math.round(revenue * 100) / 100, cpa, roi,

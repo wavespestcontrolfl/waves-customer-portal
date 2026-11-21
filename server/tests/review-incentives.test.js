@@ -1609,4 +1609,15 @@ describe('monthly cap policy (owner 2026-11-20 D4)', () => {
     await expect(ReviewIncentives.getPolicyStrict(storedRow({ amountCents: {} })))
       .rejects.toMatchObject({ code: 'review_policy_malformed' });
   });
+
+  test('the save-only cutoff parser stores an unambiguous instant and refuses the rest', () => {
+    const { parseProgramCutoffForSave: parse } = ReviewIncentives.__private;
+    expect(parse('2026-07-01')).toBe('2026-07-01T04:00:00.000Z');
+    expect(parse('2026-03-01')).toBe('2026-03-01T05:00:00.000Z');
+    expect(parse('2026-11-19T23:30:15.743Z')).toBe('2026-11-19T23:30:15.743Z');
+    expect(parse('2026-03-01T10:00:00-05:00')).toBe('2026-03-01T15:00:00.000Z');
+    for (const bad of ['2026-02-31', '2026-11-01T09:00:00', '2026-03-01T00:00', '2026-03-01T25:00:00Z', '2026-03-01T10:00:00+25:00', 'junk', 5, {}, null]) {
+      expect([String(bad), parse(bad)]).toEqual([String(bad), null]);
+    }
+  });
 });

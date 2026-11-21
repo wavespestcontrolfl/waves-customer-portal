@@ -226,7 +226,7 @@ async function recordLiveOwnerReplyRemoved(reviewId, fresh) {
   // claim, so no sync writes concurrently; a "[DRAFT]" is never touched).
   await db('google_reviews').where({ id: reviewId, review_reply: fresh.review_reply }).whereNull('missing_since')
     .update(fields)
-    .catch((e) => logger.warn(`[review-reply] live owner reply removal record failed for ${reviewId}: ${e.message}`));
+    .catch((e) => logger.warn(`[review-reply] live owner reply removal record failed for ${reviewId}: ${require('../notification-service').safeErrorSummary(e)}`));
 }
 
 function updatedCount(updated) {
@@ -285,7 +285,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         metadata: JSON.stringify({ source: actor.type, reviewId, ...(auditMeta || {}), ...extra }),
       });
     } catch (err) {
-      logger.warn(`[review-reply] audit insert failed: ${err.message}`);
+      logger.warn(`[review-reply] audit insert failed for ${reviewId}: ${require('../notification-service').safeErrorSummary(err)}`);
     }
   };
 
@@ -626,15 +626,17 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // landed reply and the sync's restore both do. Until that sync the card
       // shows this attempt, and the older draft never reads as a person's own
       // words that Post now publishes as written.
-      if (isDraftReply(allowOverwrite ? review.review_reply : prePutState.slot)) Object.assign(uncertain, { review_reply: null, reply_updated_at: null });
+      if (isDraftReply(prePutState.slot)) Object.assign(uncertain, { review_reply: null, reply_updated_at: null });
     }
     const q = db('google_reviews').where({ id: reviewId });
     if (allowOverwrite) {
       // Human / IB-edit publishers: the row may be never-queued (NULL) or
       // skipped/manual_reply with a real prior reply — CAS on the reply
-      // slot exactly as this attempt observed it, so a sync that already
-      // reconciled a newer reply is left alone.
-      if (review.review_reply == null) q.whereNull('review_reply'); else q.where('review_reply', review.review_reply);
+      // slot exactly as this attempt observed it inside its claim (the slot
+      // the pre-PUT fence compared), so a sync that already reconciled a
+      // newer reply is left alone, and a runner draft stored before the
+      // claim gives way to the attempt.
+      if (prePutState.slot == null) q.whereNull('review_reply'); else q.where('review_reply', prePutState.slot);
     } else if (ibAttempt) {
       // An Intelligence Bar submission may answer any unanswered review,
       // whatever its pipeline status (never queued, skipped, retracted, a
@@ -770,14 +772,18 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     // TTL expires, and the caller parks the row for a person to reconcile.
     outcome.abandonClaim();
     abandoned = true;
-    logger.error(`[review-reply] Google accepted the reply for ${reviewId} but local persistence failed: ${err.message}`);
+    // Our own error carries fixed text. A DB error's message echoes the SQL
+    // with its bound values (here the reply text), so only its code goes to
+    // the log, the row and the answer (AGENTS.md: no PII in logs).
+    const cause = err instanceof ReviewReplyError ? err.message : require('../notification-service').safeErrorSummary(err);
+    logger.error(`[review-reply] Google accepted the reply for ${reviewId} but local persistence failed: ${cause}`);
     // Best effort for EVERY caller (manual route, IB, runner): take the row
     // out of the automatic lane so an expired claim cannot let the cron
     // reclaim it and replace the live reply. The runner adds its bell.
     await db('google_reviews').where({ id: reviewId })
-      .update({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_error: String(err.message || '').slice(0, 1000), auto_reply_claimed_until: null })
-      .catch((e2) => logger.error(`[review-reply] persist_failed park also failed for ${reviewId}: ${e2.message}`));
-    throw new ReviewReplyError(CODES.PERSIST_FAILED, `Reply is live on Google but was not recorded locally (${err.message}) — reconcile by hand.`, { status: 500, cause: err });
+      .update({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_error: String(cause).slice(0, 1000), auto_reply_claimed_until: null })
+      .catch((e2) => logger.error(`[review-reply] persist_failed park also failed for ${reviewId}: ${require('../notification-service').safeErrorSummary(e2)}`));
+    throw new ReviewReplyError(CODES.PERSIST_FAILED, `Reply is live on Google but was not recorded locally (${cause}) — reconcile by hand.`, { status: 500, cause: err });
   } finally {
     if (!abandoned) await outcome.releaseClaim();
   }
@@ -847,7 +853,7 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
           .update(liveReply
             ? { review_reply: liveReply, reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString(), auto_reply_status: 'skipped', auto_reply_reason: 'edited_on_google' }
             : { review_reply: null, reply_updated_at: null, auto_reply_status: 'retracted', auto_reply_reason: 'removed_on_google' })
-          .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
+          .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${require('../notification-service').safeErrorSummary(e)}`));
         throw new ReviewReplyError(CODES.STALE, liveReply
           ? 'The reply on Google differs from the one shown here (edited in Google) — reload and check the current reply.'
           : 'There is no reply on Google to retract — reload.', { status: 409 });
@@ -891,8 +897,9 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
       // invites a repeat DELETE.
       outcome.abandonClaim();
       abandoned = true;
-      logger.error(`[review-reply] reply deleted on Google for ${reviewId} but local clear failed: ${err.message}`);
-      throw new ReviewReplyError(CODES.PERSIST_FAILED, `The reply was deleted on Google but the local record was not updated (${err.message}) — reload and reconcile by hand.`, { status: 500, cause: err });
+      const cause = require('../notification-service').safeErrorSummary(err);
+      logger.error(`[review-reply] reply deleted on Google for ${reviewId} but local clear failed: ${cause}`);
+      throw new ReviewReplyError(CODES.PERSIST_FAILED, `The reply was deleted on Google but the local record was not updated (${cause}) — reload and reconcile by hand.`, { status: 500, cause: err });
     }
     try {
       await db('activity_log').insert({
@@ -902,7 +909,7 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
         metadata: JSON.stringify({ source: actor?.type || 'admin', reviewId, ...(auditMeta || {}) }),
       });
     } catch (err) {
-      logger.warn(`[review-reply] audit insert failed: ${err.message}`);
+      logger.warn(`[review-reply] audit insert failed for ${reviewId}: ${require('../notification-service').safeErrorSummary(err)}`);
     }
     return { googleDeleted: true, reviewId };
   } finally {

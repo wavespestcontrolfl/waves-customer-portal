@@ -1110,6 +1110,35 @@ describe('ownership lifecycle evidence', () => {
     }), 'cust-past');
     expect(owned).toEqual([]);
   });
+
+  // An included follow-up is the $0 second visit of a one-time job. No writer saves one with the recurring flag;
+  // if a row ever carries both, it is still not a recurring service the customer owns, so its family is quoted.
+  test('an included follow-up that carries the recurring flag is not ownership evidence, and its family is still quoted', async () => {
+    const loadOwned = loadOwnedGated();
+    const followUp = {
+      id: 'svc-fu', service_type: 'Quarterly Pest Control', scheduled_date: futureDate,
+      status: 'confirmed', is_recurring: true, followup_included: true,
+    };
+    const mk = (rows) => dbForTables({
+      customers: [{ id: 'cust-fu', active: true, waveguard_tier: null, monthly_rate: null }],
+      scheduled_services: rows,
+    });
+    expect(await loadOwned(mk([followUp]), 'cust-fu')).toEqual([]);
+    expect(await loadOwned(mk([{ ...followUp, followup_included: false }]), 'cust-fu')).toEqual(['pest_control']);
+
+    const quote = (rows) => buildCustomerPricingResponse({
+      db: mk(rows),
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-fu', waveguard_tier: null, monthly_rate: null }),
+    });
+    const quoted = await quote([followUp]);
+    expect(quoted.alreadyIncluded).toEqual([]);
+    expect(quoted.options.some((option) => option.serviceKey === 'pest_control')).toBe(true);
+    const owned = await quote([{ ...followUp, followup_included: false }]);
+    expect(owned.alreadyIncluded).toContain('Pest Control');
+    expect(owned.options).toEqual([]);
+  });
 });
 
 // Codex #3253 r4: rodent ownership = bait-monitoring products only; owned-only
@@ -2111,6 +2140,262 @@ describe('r9: field-confident tree counts, story evidence, authoritative types, 
     // provider calls to produce the same PROPERTY_DETAILS_NEEDED answer.
     expect(lookedUp).toBe(false);
     expect(result.code).toBe('PROPERTY_DETAILS_NEEDED');
+  });
+});
+
+describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
+  const restart = require('../services/cancellation-resolution/restart');
+  const ask = (customer, db = null, prompt = 'I am interested in adding lawn care', includePlanStartHint = true) => buildCustomerPricingResponse({
+    db,
+    propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+    prompt,
+    customer,
+    includePlanStartHint,
+  });
+  // A plain account: no plan membership on the row (propertyCustomer defaults to a Bronze member).
+  const plain = (overrides = {}) => propertyCustomer({
+    id: 'cust-lead', active: true, pipeline_stage: 'new_lead', waveguard_tier: null, monthly_rate: null, ...overrides,
+  });
+  const crossSell = require('../services/service-report/cross-sell');
+  const realPremisesProof = crossSell.customerHasOnlyPrimaryPremises;
+  let owns;
+  let premises;
+  let otherProfile;
+  let seed;
+  beforeEach(() => {
+    // The accepted-estimate seed the mint prices with: none on file unless a test says so.
+    seed = jest.spyOn(crossSell, 'loadEstimateSeed').mockResolvedValue(null);
+    owns = jest.spyOn(restart, 'ownsAnyRecurringService').mockResolvedValue(false);
+    // The strict proof's account read (another profile on the account); plan-start.test.js runs it on rows.
+    otherProfile = jest.spyOn(restart, 'accountHasOtherProfile').mockResolvedValue(false);
+    // The mint's single-premises proof, at its home (cross-sell); the street checks run for real.
+    premises = jest.spyOn(crossSell, 'customerHasOnlyPrimaryPremises').mockResolvedValue(true);
+  });
+  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; owns.mockRestore(); premises.mockRestore(); otherProfile.mockRestore(); seed.mockRestore(); });
+
+  test('absent unless the caller asks: the report cross-sell and portal-offer answers run no plan-start reads (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain(), null, undefined, false);
+    expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in result).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+    expect(premises).not.toHaveBeenCalled();
+    expect(seed).not.toHaveBeenCalled();
+  });
+
+  test('a turf profile that cannot be read: no lawn button, as the mint refuses that price; the lawn is still priced (codex pre-push P0)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const turfReadFails = (table) => {
+      const q = dbForTables({})(table);
+      if (table === 'customer_turf_profiles') q.first = () => Promise.reject(new Error('pg down'));
+      return q;
+    };
+    // The same answer with a readable (absent) profile offers the button.
+    expect((await ask(plain(), dbForTables({}))).planStart?.optionIds?.length).toBeGreaterThan(0);
+    const result = await ask(plain(), turfReadFails);
+    expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in result).toBe(false);
+    // A pest price reads no turf facts, so its button stays.
+    const pest = await buildCustomerPricingResponse({
+      db: turfReadFails,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, lotSqFt: 7000, stories: 1 } }),
+      prompt: 'I am interested in adding pest control',
+      customer: plain(),
+      includePlanStartHint: true,
+    });
+    expect(pest.planStart).toEqual({ optionIds: ['pest-quarterly'] });
+  });
+
+  test('applies the mint\'s seed checks: no button for a price the mint would refuse (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    // The seed is read at the street the strict premises proof returned.
+    expect((await ask(plain())).planStart?.optionIds?.length).toBeGreaterThan(0);
+    expect(seed).toHaveBeenCalledWith(null, 'cust-lead', expect.stringMatching(/^1/));
+    // An accepted estimate there carried its own field-verification markers: no option books.
+    seed.mockResolvedValue({ requiresFieldVerification: true });
+    expect('planStart' in await ask(plain())).toBe(false);
+    // An ambiguous zero tree count refuses only a Tree & Shrub price.
+    seed.mockResolvedValue({ zeroTreeCountAmbiguous: true });
+    expect((await ask(plain())).planStart?.optionIds?.length).toBeGreaterThan(0);
+    const trees = await ask(plain(), null, 'I am interested in adding tree and shrub care');
+    expect(trees.options.some((o) => o.serviceKey === 'tree_shrub')).toBe(true);
+    expect('planStart' in trees).toBe(false);
+    // An unreadable seed fails closed, as the mint does.
+    seed.mockRejectedValue(new Error('seed read failed'));
+    expect('planStart' in await ask(plain())).toBe(false);
+  });
+
+  test('lists the options the route can book, only when the gate is on and the account has no plan', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain());
+    expect(result.ok).toBe(true);
+    const bookable = result.options.filter((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview && o.confidence !== 'low').map((o) => o.id);
+    expect(bookable.length).toBeGreaterThan(0);
+    expect(result.planStart).toEqual({ optionIds: bookable });
+    // The account-wide read (rodent and commercial rows, prepay terms) runs only for a plain account.
+    expect(owns).toHaveBeenCalledWith(null, 'cust-lead');
+    // The strict proof, as the mint runs it: an unresolvable visit link fails it (codex pre-push P1).
+    expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ id: 'cust-lead' }), expect.any(String), { unresolvedFails: true });
+    expect(otherProfile).toHaveBeenCalledWith(null, expect.objectContaining({ id: 'cust-lead' }));
+  });
+
+  test('absent for an account with another profile: the strict proof reads the whole account (codex pre-push r16 P0)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    otherProfile.mockResolvedValue(true);
+    expect('planStart' in await ask(plain())).toBe(false);
+    otherProfile.mockRejectedValue(new Error('pg down'));
+    expect('planStart' in await ask(plain())).toBe(false);
+  });
+
+  test('absent for a multi-home account: the mint prices only an account on one provable premises (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    premises.mockImplementation(realPremisesProof);
+    expect('planStart' in await ask(plain({ has_multi_home: true }))).toBe(false);
+    expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ has_multi_home: true }), expect.any(String), { unresolvedFails: true });
+  });
+
+  test('absent when the premises proof says no or fails, or the account has no street with a city or zip', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    premises.mockResolvedValueOnce(false);
+    expect('planStart' in await ask(plain())).toBe(false);
+    premises.mockRejectedValueOnce(new Error('pg down'));
+    expect('planStart' in await ask(plain())).toBe(false);
+    premises.mockClear();
+    for (const street of [{ address_line1: null }, { city: null, zip: null }]) {
+      const result = await ask(plain(street));
+      // Still priced: only the street check turns booking off.
+      expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+      expect('planStart' in result).toBe(false);
+    }
+    expect(premises).not.toHaveBeenCalled();
+  });
+
+  test('absent for an address the mint refuses: with no city, a unit line such as "Building 2" reads back as the city (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain({ address_line2: 'Building 2', city: null }));
+    // Still priced: only the address check turns booking off.
+    expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in result).toBe(false);
+    // A unit line the parser knows reads back as the same home and keeps the button.
+    expect((await ask(plain({ address_line2: 'Apt 4', city: null }))).planStart?.optionIds?.length).toBeGreaterThan(0);
+  });
+
+  test('never lists a mosquito option: a mosquito-only plan adds a setup fee its line does not declare', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain(), null, 'I am interested in adding mosquito service');
+    expect(result.options.some((o) => o.serviceKey === 'mosquito' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect((result.planStart?.optionIds || []).filter((id) => id.startsWith('mosquito'))).toEqual([]);
+  });
+
+  test('never lists a low-confidence option, even with no manual-review flag: the mint refuses that line (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const engine = require('../services/pricing-engine');
+    const real = engine.generateEstimate;
+    // Today's engine answer with one field changed: every line graded LOW (any case), no review flag.
+    const spy = jest.spyOn(engine, 'generateEstimate').mockImplementation((...args) => {
+      const estimate = real(...args);
+      for (const line of estimate?.lineItems || []) if (line) line.pricingConfidence = 'LOW';
+      return estimate;
+    });
+    try {
+      const result = await ask(plain());
+      expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview && o.confidence === 'LOW')).toBe(true);
+      expect('planStart' in result).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test.each([
+    ['a heuristic turf basis at medium confidence', (line) => { line.turfBasis = 'plausibleMaxTurfCap'; line.pricingConfidence = 'medium'; }],
+    ['a measurement the line still needs', (line) => { line.requiresMeasurement = true; }],
+  ])('never lists an option the mint\'s review check refuses, with no manual-review flag on the card: %s (codex pre-push P1)', async (_label, mark) => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const engine = require('../services/pricing-engine');
+    const real = engine.generateEstimate;
+    const spy = jest.spyOn(engine, 'generateEstimate').mockImplementation((...args) => {
+      const estimate = real(...args);
+      for (const line of estimate?.lineItems || []) if (line) mark(line);
+      return estimate;
+    });
+    try {
+      const result = await ask(plain());
+      expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview && o.confidence !== 'low')).toBe(true);
+      expect('planStart' in result).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('absent for an account stored as commercial, even when a trusted lookup prices it residential: the mint refuses it (codex pre-push P0)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const askWith = (customer) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, propertyType: 'single_family' } }),
+      prompt: 'I am interested in adding lawn care',
+      customer,
+      includePlanStartHint: true,
+    });
+    expect((await askWith(plain())).planStart?.optionIds?.length).toBeGreaterThan(0);
+    const commercial = await askWith(plain({ property_type: 'commercial' }));
+    expect(commercial.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in commercial).toBe(false);
+  });
+
+  test('absent when the gate is off, so the pricing answer is byte-identical to today', async () => {
+    const result = await ask(plain());
+    expect('planStart' in result).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+  });
+
+  test('absent for a member (a current or owned recurring service), a member by the row, and a churned account', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const member = propertyCustomer({ id: 'cust-member', active: true, pipeline_stage: 'active_customer' });
+    const owned = await ask(member, activePlanDb(member.id, ['Quarterly Pest Control']));
+    expect(owned.ok).toBe(true);
+    expect('planStart' in owned).toBe(false);
+    for (const membership of [{ waveguard_tier: 'Silver' }, { billing_mode: 'annual_prepay' }, { monthly_rate: 45 }]) {
+      expect('planStart' in await ask(plain(membership))).toBe(false);
+    }
+    const churned = await ask(plain({ id: 'cust-gone', active: false, pipeline_stage: 'churned' }));
+    expect('planStart' in churned).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+  });
+
+  test('absent when a row the pricing loaders skip (rodent, commercial) or a prepay term owns a plan, or the read fails', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    owns.mockResolvedValueOnce(true);
+    expect('planStart' in await ask(plain())).toBe(false);
+    owns.mockRejectedValueOnce(new Error('pg down'));
+    expect('planStart' in await ask(plain())).toBe(false);
+  });
+
+  test('pest offers quarterly only: the estimate page opens a pest estimate on quarterly', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    // Full property facts, so every pest option prices without a review marker.
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, lotSqFt: 7000, stories: 1 } }),
+      prompt: 'I am interested in adding pest control',
+      customer: plain(),
+      includePlanStartHint: true,
+    });
+    const priced = result.options.filter((o) => o.monthly > 0 && !o.manualReview).map((o) => o.id);
+    expect(priced).toEqual(['pest-quarterly', 'pest-bimonthly', 'pest-monthly']);
+    expect(result.planStart).toEqual({ optionIds: ['pest-quarterly'] });
+  });
+
+  test('absent for an account whose active flag is NULL (customer auth reads it as inactive)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    expect('planStart' in await ask(plain({ active: null }))).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+  });
+
+  test('a service the route cannot book (rodent bait) is never offered', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain(), null, 'Can you add rodent bait stations?');
+    expect(result.options.every((o) => o.serviceKey === 'rodent_bait')).toBe(true);
+    expect('planStart' in result).toBe(false);
   });
 });
 

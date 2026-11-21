@@ -136,6 +136,24 @@ async function subscribeOrResubscribe(params = {}) {
   return subscribeOrResubscribeOnce(params, { retried: false });
 }
 
+// The address rule every signup applies: null when the address is usable,
+// else the coded error subscribeOrResubscribe throws. The public subscribe
+// route also calls it before its bot check, so a malformed address gets the
+// same 400 whether or not the bot check would drop the request.
+// Only a string is an address: anything else (a JSON array or object from the
+// public form) is refused here, never stringified, so it cannot throw.
+function signupEmailError(email, { strict = true } = {}) {
+  if (!email) return Object.assign(new Error('email required'), { code: 'EMAIL_REQUIRED' });
+  if (typeof email !== 'string') {
+    return Object.assign(new Error(strict ? 'valid email required' : 'email required'), { code: 'INVALID_EMAIL' });
+  }
+  const lc = email.trim().toLowerCase();
+  if (strict ? !EMAIL_RE.test(lc) : !lc.includes('@')) {
+    return Object.assign(new Error(strict ? 'valid email required' : 'email required'), { code: 'INVALID_EMAIL' });
+  }
+  return null;
+}
+
 async function subscribeOrResubscribeOnce({
   email,
   firstName = null,
@@ -161,24 +179,9 @@ async function subscribeOrResubscribeOnce({
   dbh = null,
 } = {}, { retried } = {}) {
   const conn = dbh || db;
-  if (!email) {
-    const err = new Error('email required');
-    err.code = 'EMAIL_REQUIRED';
-    throw err;
-  }
+  const emailError = signupEmailError(email, { strict });
+  if (emailError) throw emailError;
   const lc = String(email).trim().toLowerCase();
-
-  if (strict) {
-    if (!EMAIL_RE.test(lc)) {
-      const err = new Error('valid email required');
-      err.code = 'INVALID_EMAIL';
-      throw err;
-    }
-  } else if (!lc.includes('@')) {
-    const err = new Error('email required');
-    err.code = 'INVALID_EMAIL';
-    throw err;
-  }
 
   const existing = await conn('newsletter_subscribers').where({ email: lc }).first();
 
@@ -888,4 +891,4 @@ async function relinkArchivedLinkedSubscribers(conn = db) {
   });
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS, CONFIRM_RESEND_COOLDOWN_MS, whereOptOutNeedsWrite, hasLiveConfirmation, WAITLIST_SOURCE, sanitizeWaitlistTags, applyWaitlistTags };
+module.exports = { subscribeOrResubscribe, signupEmailError, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS, CONFIRM_RESEND_COOLDOWN_MS, whereOptOutNeedsWrite, hasLiveConfirmation, WAITLIST_SOURCE, sanitizeWaitlistTags, applyWaitlistTags };

@@ -72,6 +72,9 @@ test('a new visit (prospective: an estimate\'s first visit) is tried at every pl
   // Before the first stop and between stops, where the saved order (above) offers only the end of the route.
   expect(result.routeFits.map(fit => fit.windowStart)).toEqual(expect.arrayContaining(['08:00', '14:00', '17:00']));
   expect(result.note).toBe('Fits place the new visit where the staff finder would. They do not book it or create a booking hold.');
+  // Each fit says when the visit ends on the modeled route: its arrival plus its minutes on site.
+  const min = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+  for (const fit of result.routeFits) expect(min(fit.estimatedDeparture) - min(fit.estimatedArrival)).toBe(60);
 });
 
 test('active holds and unassigned timed visits remain occupancy; the candidate excludes only itself', () => {

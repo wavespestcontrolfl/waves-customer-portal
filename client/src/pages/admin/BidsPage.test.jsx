@@ -23,6 +23,11 @@ vi.mock("./BuilderProspectsPage", () => ({
     return <div data-testid="builders" data-embedded={String(Boolean(embedded))}>builders</div>;
   },
 }));
+vi.mock("./RestaurantProspectsPage", () => ({
+  default: function RestaurantsStub({ embedded }) {
+    return <div data-testid="restaurants" data-embedded={String(Boolean(embedded))}>restaurants</div>;
+  },
+}));
 
 import BidsPage from "./BidsPage";
 import AdminTabRedirect from "../../components/admin/AdminTabRedirect";
@@ -122,4 +127,16 @@ it("switching to Builders sets ?tab=builders, and an unknown tab falls back to O
   fireEvent.click(screen.getByRole("button", { name: "Builders" }));
   expect(new URLSearchParams(screen.getByTestId("where").textContent.split("?")[1]).get("tab")).toBe("builders");
   expect(screen.getByTestId("builders")).toBeInTheDocument();
+});
+
+it("opens the Restaurants tab for ?tab=restaurants; switching to it sets the param", () => {
+  renderAt("/admin/bids?tab=restaurants");
+  expect(screen.getByTestId("restaurants")).toHaveAttribute("data-embedded", "true");
+  expect(screen.queryByTestId("builders")).toBeNull();
+  expect(screen.getByRole("button", { name: "Restaurants" })).toHaveAttribute("aria-current", "page");
+  fireEvent.click(screen.getByRole("button", { name: "Builders" }));
+  expect(screen.getByTestId("builders")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Restaurants" }));
+  expect(new URLSearchParams(screen.getByTestId("where").textContent.split("?")[1]).get("tab")).toBe("restaurants");
+  expect(screen.getByTestId("restaurants")).toBeInTheDocument();
 });

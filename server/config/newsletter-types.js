@@ -78,9 +78,10 @@ const NEWSLETTER_TYPES = {
     key: 'pest-insider-monthly',
     label: 'Pest Insider (Monthly)',
     flagship: false,
-    cadence: 'monthly',
-    // Auto-drafts the first Tuesday of the month at 7am ET (scheduler.js).
-    defaultSendDay: 'Tuesday',
+    // Twice a month: the 1st and 3rd Thursday at 7:00 AM ET. The planner
+    // (services/pest-insider/schedule.js) builds each issue the Wednesday before.
+    cadence: 'twice-monthly',
+    defaultSendDay: 'Thursday',
     voiceProfile: 'waves_phase_3_local',
     coverage: null,
     // The humor-sandwich structure from the shipped Beehiiv "Pest Watch"
@@ -92,11 +93,14 @@ const NEWSLETTER_TYPES = {
     // is the defense when the model slips anyway).
     claimValidation: true,
     sourceRequirements: null,
+    // With GATE_PEST_INSIDER_AUTO_SEND on, a planned issue sends itself after
+    // an FYI copy to the owner (a HOLD reply skips it). With it off, an issue
+    // still waits for an APPROVED reply.
     autonomy: {
       aiDraftAllowed: true,
       autoScheduleAllowed: true,
-      autoSendAllowed: false,
-      humanApprovalRequired: true,
+      autoSendAllowed: true,
+      humanApprovalRequired: false,
     },
   },
 

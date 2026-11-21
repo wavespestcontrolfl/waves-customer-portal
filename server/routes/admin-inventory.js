@@ -4162,6 +4162,10 @@ router._test = {
 // catalog through this instead of writing best_price by hand.
 router.recalcBestPrice = recalcBestPrice;
 router.approvedPerOzFields = approvedPerOzFields;
+// What approving a review-queue event writes onto its quote besides the
+// snapshot's price, so a data fix can tell what a pending event would put
+// back (migration 20261119020000).
+router.snapshotPricingFields = snapshotPricingFields;
 // The ONE atomic legacy-approval writer (claim pending → vendor price →
 // history → canonical recalc, one transaction) — the Intelligence Bar
 // approve_price tool reuses it instead of re-implementing the sequence.

@@ -29,6 +29,7 @@ jest.mock('../services/service-report/pdf-events', () => ({
 const fs = require('fs');
 const path = require('path');
 const { renderReportPdf, renderServiceReportV1Pdf, reportPdfReadySelector } = require('../services/service-report/pdf');
+const { reportNoteRenderState } = require('../services/service-report/technician-report-copy');
 
 const ENV_KEYS = ['GATE_REPORT_WRITER_RULES', 'PDF_RENDERER', 'CF_ACCOUNT_ID', 'CF_BROWSER_RENDERING_TOKEN'];
 const savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -59,22 +60,22 @@ function cloudflareFetch() {
 describe('a service report PDF prints only a page built in its own writer-rules state', () => {
   test('the ready selector names the state the key is computed under', () => {
     process.env.GATE_REPORT_WRITER_RULES = 'true';
-    expect(reportPdfReadySelector()).toBe('.service-report-v1[data-writer-rules="on"]');
+    expect(reportPdfReadySelector()).toBe('.service-report-v1[data-writer-rules="on"][data-report-note="none"]');
     process.env.GATE_REPORT_WRITER_RULES = 'false';
-    expect(reportPdfReadySelector()).toBe('.service-report-v1[data-writer-rules="off"]');
+    expect(reportPdfReadySelector()).toBe('.service-report-v1[data-writer-rules="off"][data-report-note="none"]');
   });
 
   test('a service report render waits for that selector, with either provider', async () => {
     process.env.GATE_REPORT_WRITER_RULES = 'true';
     process.env.PDF_RENDERER = 'playwright';
     await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1' });
-    expect(mockPage.waitForSelector).toHaveBeenCalledWith('.service-report-v1[data-writer-rules="on"]', { timeout: 10000 });
+    expect(mockPage.waitForSelector).toHaveBeenCalledWith('.service-report-v1[data-writer-rules="on"][data-report-note="none"]', { timeout: 10000 });
 
     process.env.GATE_REPORT_WRITER_RULES = 'false';
     const calls = cloudflareFetch();
     await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1' });
     expect(calls).toHaveLength(1);
-    expect(calls[0].waitForSelector).toEqual({ selector: '.service-report-v1[data-writer-rules="off"]', visible: true, timeout: 10000 });
+    expect(calls[0].waitForSelector).toEqual({ selector: '.service-report-v1[data-writer-rules="off"][data-report-note="none"]', visible: true, timeout: 10000 });
   });
 
   test('a page that never shows the state fails the render', async () => {
@@ -85,16 +86,16 @@ describe('a service report PDF prints only a page built in its own writer-rules 
     expect(mockPage.pdf).not.toHaveBeenCalled();
   });
 
-  test('a record whose render does not depend on the switch waits for the root alone, with either provider', async () => {
+  test('a record whose render does not depend on the switch waits for the root without that state, with either provider', async () => {
     process.env.GATE_REPORT_WRITER_RULES = 'true';
-    expect(reportPdfReadySelector(false)).toBe('.service-report-v1');
+    expect(reportPdfReadySelector(false)).toBe('.service-report-v1[data-report-note="none"]');
     process.env.PDF_RENDERER = 'playwright';
     await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1', dependsOnWriterRules: false });
-    expect(mockPage.waitForSelector).toHaveBeenCalledWith('.service-report-v1', { timeout: 10000 });
+    expect(mockPage.waitForSelector).toHaveBeenCalledWith('.service-report-v1[data-report-note="none"]', { timeout: 10000 });
 
     const calls = cloudflareFetch();
     await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1', dependsOnWriterRules: false });
-    expect(calls[0].waitForSelector).toEqual({ selector: '.service-report-v1', visible: true, timeout: 10000 });
+    expect(calls[0].waitForSelector).toEqual({ selector: '.service-report-v1[data-report-note="none"]', visible: true, timeout: 10000 });
   });
 
   test('both render callers pass the flag from the record they key the render on', () => {
@@ -103,6 +104,7 @@ describe('a service report PDF prints only a page built in its own writer-rules 
       const calls = source.split('renderServiceReportV1Pdf(data, {').slice(1).map((rest) => rest.slice(0, rest.indexOf('});')));
       expect(calls).toHaveLength(1);
       expect(calls[0]).toContain('dependsOnWriterRules: reportDependsOnWriterRules(service),');
+      expect(calls[0]).toContain('reportNoteState: reportNoteRenderState(service, data),');
     });
   });
 
@@ -114,4 +116,87 @@ describe('a service report PDF prints only a page built in its own writer-rules 
 
   // The page side (the PDF document's root carries the state, in both
   // states) is a DOM test: client/src/pages/ServiceReportDocument.test.jsx.
+});
+
+// A record that carries the technician's own note keys its PDF with `-rn`
+// (summaryCopySignature). A page bundle or server from before the note reader
+// would print it with the legacy recap and merged note lines, so the render
+// also waits for the root showing the note state of its own build: such a
+// page never shows it, the render times out and nothing is stored (pre-push
+// P1 on 0bc664ed4d and 5b51753cd0). A shown note's state names the digest of
+// the signed note, so a page built from another read of the record never
+// matches either (pre-push P1 on c020cecb69), and a PDF keyed with no note
+// never prints a page that shows a note state (pre-push P1 on 685c3266d4). It
+// waits for 'none', so it never prints a page from before the note reader,
+// which shows no state at all (pre-push audit round 29 on 6eb2461183).
+describe("a note record's PDF prints only a page built in its own note state", () => {
+  const digestOf = (text) => require('crypto').createHash('sha256').update(text).digest('hex').slice(0, 8);
+
+  test('the ready selector adds the note state, with or without the writer-rules state', () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    expect(reportPdfReadySelector(true, 'shown:1a2b3c4d')).toBe('.service-report-v1[data-writer-rules="on"][data-report-note="shown:1a2b3c4d"]');
+    expect(reportPdfReadySelector(false, 'withheld')).toBe('.service-report-v1[data-report-note="withheld"]');
+    expect(reportPdfReadySelector(false, null)).toBe('.service-report-v1[data-report-note="none"]');
+  });
+
+  test('a note record render waits for that selector, with either provider', async () => {
+    process.env.PDF_RENDERER = 'playwright';
+    await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1', dependsOnWriterRules: false, reportNoteState: 'withheld' });
+    expect(mockPage.waitForSelector).toHaveBeenCalledWith('.service-report-v1[data-report-note="withheld"]', { timeout: 10000 });
+
+    const calls = cloudflareFetch();
+    await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1', dependsOnWriterRules: false, reportNoteState: 'shown:1a2b3c4d' });
+    expect(calls[0].waitForSelector).toEqual({ selector: '.service-report-v1[data-report-note="shown:1a2b3c4d"]', visible: true, timeout: 10000 });
+  });
+
+  test("the note state follows the record and the caller's own build", () => {
+    const note = JSON.stringify({ reportNote: { v: 1, text: 'I treated the perimeter.', source: 'cleaned' } });
+    const signed = 'I treated the perimeter. — Jordan';
+    expect(reportNoteRenderState({ structured_notes: note }, { summaryIsOwnNote: true, summary: signed })).toBe(`shown:${digestOf(signed)}`);
+    expect(reportNoteRenderState({ structured_notes: note }, { summary: 'Your routine service is complete.' })).toBe('withheld');
+    // Stored notes that cannot be read count as a note, and no note prints.
+    expect(reportNoteRenderState({ structured_notes: ['[Found] raw line'] }, {})).toBe('withheld');
+    // Every other record names 'none', which its page shows too.
+    expect(reportNoteRenderState({ structured_notes: JSON.stringify({ observations: [] }) }, { summaryIsOwnNote: true })).toBe('none');
+    expect(reportNoteRenderState({}, {})).toBe('none');
+  });
+
+  test('two different accepted notes, or one note signed by two names, never share a state', () => {
+    const note = JSON.stringify({ reportNote: { v: 1, text: 'I treated the perimeter.', source: 'cleaned' } });
+    const states = ['I treated the perimeter. — Jordan', 'I treated the lanai and the garage. — Jordan', 'I treated the perimeter. — Casey']
+      .map((summary) => reportNoteRenderState({ structured_notes: note }, { summaryIsOwnNote: true, summary }));
+    expect(new Set(states).size).toBe(3);
+    // So a page another read built never shows the selector the caller waits for.
+    expect(new Set(states.map((state) => reportPdfReadySelector(false, state))).size).toBe(3);
+  });
+
+  test('a record that gains a note between the two reads never prints under the key without one, nor the reverse; a page from before the note reader never prints', () => {
+    // Real selector matching on the root the PDF document renders.
+    const { JSDOM } = require('jsdom');
+    const root = (attrs = '') => new JSDOM(`<div class="service-report-v1"${attrs}></div>`).window.document.querySelector('div');
+    const none = root(' data-report-note="none"');
+    const shown = root(' data-report-note="shown:1a2b3c4d"');
+    const withheld = root(' data-report-note="withheld"');
+    // A page bundle from before the note reader shows no note state. In a
+    // rolling deploy it may load a record that gained a note after the caller
+    // read it, so no wait accepts it (pre-push audit round 29).
+    const old = root();
+    // Keyed with no note: only a page that shows 'none'.
+    expect(none.matches(reportPdfReadySelector(false, null))).toBe(true);
+    expect(old.matches(reportPdfReadySelector(false, null))).toBe(false);
+    expect(shown.matches(reportPdfReadySelector(false, null))).toBe(false);
+    expect(withheld.matches(reportPdfReadySelector(false, null))).toBe(false);
+    // Keyed with a shown note: only that note's page.
+    expect(shown.matches(reportPdfReadySelector(false, 'shown:1a2b3c4d'))).toBe(true);
+    expect(root(' data-report-note="shown:9f8e7d6c"').matches(reportPdfReadySelector(false, 'shown:1a2b3c4d'))).toBe(false);
+    [old, none].forEach((page) => {
+      expect(page.matches(reportPdfReadySelector(false, 'shown:1a2b3c4d'))).toBe(false);
+      expect(page.matches(reportPdfReadySelector(false, 'withheld'))).toBe(false);
+    });
+    // With the writer-rules state as well.
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    expect(root(' data-writer-rules="on" data-report-note="none"').matches(reportPdfReadySelector(true, null))).toBe(true);
+    expect(root(' data-writer-rules="on"').matches(reportPdfReadySelector(true, null))).toBe(false);
+    expect(root(' data-writer-rules="on" data-report-note="shown:1a2b3c4d"').matches(reportPdfReadySelector(true, null))).toBe(false);
+  });
 });

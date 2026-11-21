@@ -22,7 +22,7 @@ const crypto = require('crypto');
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { referralInboundBellLive } = require('../config/feature-gates');
+const { referralInboundBellLive, isEnabled } = require('../config/feature-gates');
 const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS, MAX_BUTTON_LABEL_CHARS } = require('./admin-alert-compose');
 const { fitAction, shortDateET, tidyName } = require('./admin-alert-names');
 const episodes = require('./admin-alert-episodes');
@@ -70,6 +70,14 @@ function confirmBlock(card, sure, { milestone, deferred }) {
   return null;
 }
 
+// GATE_REFERRAL_STEP2: the credit varies (a member at the yearly limit gets none), so the
+// card states the rule instead of a flat $25 each. Gate off: the flat words below, unchanged.
+const { formatDollars } = require('./referral-step2');
+const step2Live = () => (typeof isEnabled === 'function' ? isEnabled('referralStep2') : false);
+// The card's effective rule (referral-inbound.js attaches `terms` from the live settings and the member's standing).
+const termsText = (card) => card.terms?.text || 'Credits follow the program settings';
+const termsShort = (card) => card.terms?.short || 'credits follow the program settings';
+
 const fitWhy = (candidates) => candidates.find((text) => text.length <= MAX_WHY_CHARS)
   || cutAtWord(candidates[candidates.length - 1], MAX_WHY_CHARS);
 
@@ -92,9 +100,11 @@ function whyOf(card, sure, block) {
     self: 'mark it not a referral',
     no_sure_referrer: 'pick the referrer in the Queue',
     reward_not_deferred: 'rewards pay at once now, so confirm in the Queue',
-    first_visit_done: 'a visit is done, so confirm in the Queue for $25 each now',
+    first_visit_done: step2Live()
+      ? 'a visit is done, so confirm in the Queue to post the credits now'
+      : 'a visit is done, so confirm in the Queue for $25 each now',
     milestone: 'it earns a milestone bonus, so confirm in the Queue',
-  }[block] || '$25 each after the first plan visit';
+  }[block] || (step2Live() ? termsShort(card) : '$25 each after the first plan visit');
   const day = shortDateET(card.createdAt);
   return fitWhy([...(day ? [`Came in ${day} ${how}; ${next}.`] : []), `Came in ${how}; ${next}.`]);
 }
@@ -108,14 +118,17 @@ function confirmLabel(referrerName) {
   return short && short.length <= MAX_BUTTON_LABEL_CHARS ? short : 'Confirm the referrer';
 }
 
-function buttonsOf(name, sure, block) {
+function buttonsOf(name, sure, block, card = {}) {
   const items = [];
   if (!block) {
     const referrer = tidyName(sure.name);
     items.push({
       id: 'confirm',
       label: confirmLabel(sure.name),
-      prompt: fitWhy([
+      prompt: fitWhy(step2Live() ? [
+        `Make ${referrer} the referrer of ${name} (${termsShort(card)})?`,
+        `Make ${referrer} the referrer of ${name}?`,
+      ] : [
         `Make ${referrer} the referrer of ${name}, with $25 each after the first plan visit?`,
         `Make ${referrer} the referrer of ${name}?`,
       ]),
@@ -128,6 +141,15 @@ function buttonsOf(name, sure, block) {
     prompt: fitWhy([`Remove ${name} from the referral list for good?`, 'Remove this customer from the referral list for good?']),
   });
   return { kind: BUTTON_KIND, items };
+}
+
+// What a confirm does, in words: the credits at the first plan visit and the thank-you email. Under GATE_REFERRAL_STEP2
+// the rule comes from the card's terms, and a member at the yearly limit gets no credit, so no thank-you email follows.
+function confirmCredits(card, first) {
+  const step2 = step2Live();
+  const credits = step2 ? `${termsText(card)}, at ${first}'s first completed plan visit` : `Both accounts get the $25 credit at ${first}'s first completed plan visit`;
+  const thanks = step2 && card.terms?.atCap ? '' : ', and the referrer then gets one thank-you email at the next 9:00 AM ET';
+  return `${credits}${thanks}`;
 }
 
 // The full text behind "Show full text": the card as the Queue shows it, and what each answer does.
@@ -144,11 +166,13 @@ function detailOf(card, name, sure, block) {
   else if (sure) lines.push(`Likely referrer: ${tidyName(sure.name)}, ${sure.viaCode ? 'the owner of the link code' : 'the one customer with that first and last name'}.`);
   else lines.push('No single customer matches, so pick the referrer in Referrals → Queue.');
   if (!block) {
-    lines.push(`Confirm makes ${tidyName(sure.name)} the referrer. Both accounts get the $25 credit at ${first}'s first completed plan visit, and the referrer then gets one thank-you email at the next 9:00 AM ET. Nothing is sent and no money moves at the tap.`);
+    lines.push(`Confirm makes ${tidyName(sure.name)} the referrer. ${confirmCredits(card, first)}. Nothing is sent and no money moves at the tap.`);
   } else if (block === 'reward_not_deferred') {
     lines.push('The referral program pays rewards at once now, so a confirm pays and sends the reward text and email. Confirm in Referrals → Queue.');
   } else if (block === 'first_visit_done') {
-    lines.push(`${first} already had a plan visit, so a confirm posts both $25 credits at once. Confirm in Referrals → Queue.`);
+    lines.push(step2Live()
+      ? `${first} already had a plan visit, so a confirm posts the credits at once (${termsText(card)}). Confirm in Referrals → Queue.`
+      : `${first} already had a plan visit, so a confirm posts both $25 credits at once. Confirm in Referrals → Queue.`);
   } else if (block === 'milestone') {
     lines.push(`This would be ${tidyName(sure.name)}'s milestone referral, which pays a bonus and sends a text at once. Confirm in Referrals → Queue.`);
   }
@@ -172,7 +196,7 @@ function composeCard(card, { milestone = false, deferred = true } = {}) {
       subject: { type: 'customer', id: String(card.customerId) },
       doneWhen: 'referral_answered',
       who: 'person',
-      buttons: buttonsOf(name, sure, block),
+      buttons: buttonsOf(name, sure, block, card),
     },
     detail: detailOf(card, name, sure, block),
   };
@@ -246,7 +270,8 @@ async function syncReferralInboundBells({ now = new Date() } = {}) {
   // Every listed card, plus every open row: a row whose card is gone (or past the list's first 50) is read alone.
   const ids = new Set(open.map((key) => key.slice(KEY_PREFIX.length)).filter((id) => UUID_RE.test(id)));
   for (const card of await inbound.listInboundReferrals(db)) ids.add(String(card.customerId));
-  const deferred = (await engine.getSettings()).require_service_completion === true;
+  // GATE_REFERRAL_STEP2 defers every conversion (referral-engine convertReferral), so the card is confirmable.
+  const deferred = (await engine.getSettings()).require_service_completion === true || (isEnabled ? isEnabled('referralStep2') : false);
   for (const customerId of ids) {
     try {
       tally[await syncCard(customerId, { now, deferred })] += 1;
@@ -290,7 +315,12 @@ const STEPS = {
     }
     const result = await inbound.confirmInboundReferral({ customerId, referrerCustomerId: String(sure.customerId), reviewedBy, deferredOnly: true });
     // credited: a plan visit finished while the confirm ran, and its credit (owed by that visit) posted.
-    const after = result.credited ? 'Both $25 credits posted for the plan visit that just finished.' : '$25 each after the first plan visit.';
+    let after = result.credited ? 'Both $25 credits posted for the plan visit that just finished.' : '$25 each after the first plan visit.';
+    if (step2Live()) {
+      after = result.credited
+        ? `${formatDollars(result.credited.referrerDollars)} credited to the member and ${formatDollars(result.credited.refereeDollars)} to the friend for the plan visit that just finished.`
+        : `${termsText(card)}.`;
+    }
     return { ok: true, message: `${tidyName(sure.name)} is confirmed as ${name}'s referrer. ${after}`, resolution: CLOSE_RESOLUTIONS.confirmed };
   },
 };

@@ -7,6 +7,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
+const { isEnabled } = require('../config/feature-gates');
 const inbound = require('../services/referral-inbound');
 const { form1099ThresholdCents } = require('../services/form-1099-threshold');
 
@@ -28,7 +29,7 @@ router.get('/stats', async (req, res, next) => {
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status IN ('pending','contacted','estimated','sms_failed')) as pending"),
         db.raw("COUNT(*) FILTER (WHERE (status = 'signed_up' OR status = 'credited') AND referrer_reward_status IS DISTINCT FROM 'superseded') as converted"),
-        db.raw("COALESCE(SUM(CASE WHEN referrer_reward_status IN ('earned','paid') THEN referrer_reward_amount ELSE 0 END), 0) as total_rewards"),
+        db.raw("COALESCE(SUM(CASE WHEN referrer_reward_status IN ('earned','paid') THEN COALESCE(referrer_credit_cents / 100.0, referrer_reward_amount) ELSE 0 END), 0) as total_rewards"),
         db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN converted_monthly_value ELSE 0 END), 0) as total_monthly_value"),
       ).first(),
       db('referral_payouts').select(
@@ -173,7 +174,8 @@ router.get('/inbound', async (req, res, next) => {
     const items = await inbound.listInboundReferrals();
     // `enabled` stays in the answer only for an installed app shell still running a build that reads it
     // (the service worker keeps old builds); the current page ignores it.
-    res.json({ enabled: true, items });
+    // `step2`: GATE_REFERRAL_STEP2 is on, so the confirm prompts state the Step 2 rule instead of a flat $25.
+    res.json({ enabled: true, items, ...(isEnabled('referralStep2') ? { step2: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -429,7 +431,8 @@ router.post('/payouts/:id/request', async (req, res, next) => {
 router.get('/settings', async (req, res, next) => {
   try {
     const settings = await engine.getSettings();
-    res.json({ settings });
+    // `step2`: GATE_REFERRAL_STEP2 is on, so the Settings tab shows the four Step 2 member numbers.
+    res.json({ settings, ...(isEnabled('referralStep2') ? { step2: true } : {}) });
   } catch (err) { next(err); }
 });
 

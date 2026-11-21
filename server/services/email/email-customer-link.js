@@ -92,6 +92,19 @@ async function threadSendReachesCustomer(conn, row, customerId, asOf) {
   return !others;
 }
 
+// The recipients of a send, only when they are all known: null for a row with nothing to link on, or
+// with Cc/Bcc never captured. Shared by emailCustomerLink and every batched reader of the same
+// rule, so the guard has one definition.
+function capturedRecipients(row) {
+  // A send may name its customer only in Cc or Bcc (an empty To).
+  if (!row?.gmail_thread_id && !row?.to_address && !row?.cc_address && !row?.bcc_address) return null;
+  // Cc/Bcc never captured (a row synced before capture existed, or a caller
+  // that did not select them): who else the send reached is unknown, so it
+  // never links to a customer. A captured "no Cc/Bcc" is '', not NULL.
+  if (row.cc_address == null || row.bcc_address == null) return null;
+  return recipientAddresses(row);
+}
+
 // The linkage with its reason: { customerId, namesNoCustomer }. customerId is
 // the one customer the send links to, else null. namesNoCustomer is true only
 // when the send provably names no customer: its Cc and Bcc were captured, no
@@ -101,12 +114,7 @@ async function threadSendReachesCustomer(conn, row, customerId, asOf) {
 // reach, recipients naming two customers), never "nobody's".
 async function emailCustomerLink(conn, row, { asOf } = {}) {
   const unsettled = { customerId: null, namesNoCustomer: false };
-  // A send may name its customer only in Cc or Bcc (an empty To).
-  if (!row?.gmail_thread_id && !row?.to_address && !row?.cc_address && !row?.bcc_address) return unsettled;
-  // Cc/Bcc never captured (a row synced before capture existed, or a caller
-  // that did not select them): who else the send reached is unknown, so it
-  // never links to a customer. A captured "no Cc/Bcc" is '', not NULL.
-  if (row.cc_address == null || row.bcc_address == null) return unsettled;
+  if (!capturedRecipients(row)) return unsettled;
   if (row.gmail_thread_id) {
     const threadCustomers = await conn('emails')
       .where({ gmail_thread_id: row.gmail_thread_id })
@@ -132,4 +140,4 @@ async function emailCustomerLink(conn, row, { asOf } = {}) {
   return { customerId: null, namesNoCustomer: distinct.length === 0 };
 }
 
-module.exports = { personSentFilter, emailCustomerLink, extractEmailAddresses };
+module.exports = { personSentFilter, emailCustomerLink, extractEmailAddresses, capturedRecipients };

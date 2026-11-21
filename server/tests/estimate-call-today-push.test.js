@@ -13,9 +13,11 @@ jest.mock('../services/notification-triggers', () => ({
   triggerNotification: (...args) => mockTrigger(...args),
 }));
 const mockLastCalled = jest.fn();
+const mockLastOutcome = jest.fn();
 jest.mock('../services/estimate-call-list', () => ({
   ...jest.requireActual('../services/estimate-call-list'),
   lastCalledAtByEstimateId: (...args) => mockLastCalled(...args),
+  lastCallOutcomeByEstimateId: (...args) => mockLastOutcome(...args),
 }));
 
 const logger = require('../services/logger');
@@ -47,6 +49,7 @@ beforeEach(() => {
   releaseFails = false;
   claimed = new Set();
   mockLastCalled.mockResolvedValue(new Map());
+  mockLastOutcome.mockResolvedValue(new Map());
   mockDb.raw.mockImplementation((sql, bindings) => {
     if (!bindings) return { raw: sql }; // a select expression (the undelivered self-serve flag)
     const [key] = bindings;
@@ -87,6 +90,18 @@ describe('the count is the page list', () => {
     ];
     mockLastCalled.mockResolvedValue(new Map([['called', ago(1)]]));
     expect(await countCallToday(NOW.getTime())).toBe(3); // a, b, stale-followup
+  });
+
+  // Owner 2026-11-20 (D1 A): every outcome tapped on a row takes it off the list until the customer touches it again.
+  test('a call outcome logged after the last touch takes the row off; one logged before it does not', async () => {
+    estimateRows = [row('no-answer', 6), row('call-back', 6), row('older-outcome', 6), row('none', 6)];
+    mockLastOutcome.mockResolvedValue(new Map([
+      ['no-answer', { outcome: 'no_answer', at: ago(1), by: 'Virginia' }],
+      ['call-back', { outcome: 'call_back', at: ago(5), by: null }],
+      ['older-outcome', { outcome: 'booked', at: ago(30), by: 'Adam' }],
+    ]));
+    expect(await countCallToday(NOW.getTime())).toBe(2); // older-outcome, none
+    expect(mockLastOutcome).toHaveBeenCalledWith(mockDb, ['no-answer', 'call-back', 'older-outcome', 'none']);
   });
 
   test('a link tap after the last view counts as the last touch', async () => {
@@ -213,6 +228,13 @@ describe('the banner', () => {
     await expect(runEstimateCallTodayPush({ now: NOW })).resolves.toEqual({ count: 0, sent: false, error: 'count_failed' });
     expect(mockTrigger).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] count failed (ECONNRESET)');
+  });
+
+  test('a failed call outcome read sends nothing too: the count would be too high', async () => {
+    estimateRows = [row('a', 5)];
+    mockLastOutcome.mockRejectedValue(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }));
+    await expect(runEstimateCallTodayPush({ now: NOW })).resolves.toEqual({ count: 0, sent: false, error: 'count_failed' });
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   test('a failed read without a driver code never logs the error text (it can carry customer phones)', async () => {

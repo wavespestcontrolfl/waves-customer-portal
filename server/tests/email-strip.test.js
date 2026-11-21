@@ -1,6 +1,6 @@
 'use strict';
 
-const { ownReplySubject, stripQuotedAndSignature, decodeEntities } = require('../services/email/email-strip');
+const { ownReplySubject, stripQuotedAndSignature, decodeEntities, isForwardSubject } = require('../services/email/email-strip');
 
 describe('stripQuotedAndSignature', () => {
   test('cuts a Gmail-style "On ... wrote:" quote header and everything after it', () => {
@@ -124,5 +124,14 @@ describe('ownReplySubject', () => {
     }
     expect(ownReplySubject('AW: Please cancel service', ['Please cancel service'])).toBe('');
     expect(ownReplySubject('R: Please cancel service', ['Please cancel service'])).toBe('');
+  });
+});
+
+describe('isForwardSubject', () => {
+  test('a message is a forward only when its own first prefix is one; a reply to a forward is a reply', () => {
+    for (const subject of ['Fwd: FYI: [PROOF-ab12cd34] x', 'FW: x', 'fwd[2]: x', 'WG: x', 'TR: x']) expect(isForwardSubject(subject)).toBe(true);
+    for (const subject of ['Re: Fwd: FYI: [PROOF-ab12cd34] x', 'Re: FYI: [PROOF-ab12cd34] x', 'FYI: [PROOF-ab12cd34] Fwd: x', 'Forward this to the office please', '', null]) {
+      expect(isForwardSubject(subject)).toBe(false);
+    }
   });
 });

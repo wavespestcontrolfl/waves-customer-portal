@@ -9,9 +9,11 @@ jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn()
 jest.mock('../services/admin-unread', () => ({ getUnreadCountForAdmin: jest.fn(async () => ({ count: 0, at: Date.now() })) }));
 jest.mock('../services/notification-bell-policy', () => ({ isBellPolicyEnabled: () => false }));
 const mockLastCalled = jest.fn();
+const mockLastOutcome = jest.fn();
 jest.mock('../services/estimate-call-list', () => ({
   ...jest.requireActual('../services/estimate-call-list'),
   lastCalledAtByEstimateId: (...args) => mockLastCalled(...args),
+  lastCallOutcomeByEstimateId: (...args) => mockLastOutcome(...args),
 }));
 
 const db = require('../models/db');
@@ -33,6 +35,7 @@ beforeEach(() => {
   claimed = new Set();
   admins = async () => [{ id: 'admin-1', role: 'admin' }];
   mockLastCalled.mockResolvedValue(new Map());
+  mockLastOutcome.mockResolvedValue(new Map());
   PushService.sendToAdminUsers.mockResolvedValue({ subscriptions: 1, sent: 1, expired: 0, failed: 0, skipped: 0, results: [] });
   db.raw = jest.fn((sql, bindings) => {
     if (!bindings) return { raw: sql }; // a select expression (the undelivered self-serve flag)

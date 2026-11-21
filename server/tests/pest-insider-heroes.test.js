@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
-  HEROES, HERO_DESIGN, HERO_DIR, HERO_BASE_URL, ART_DIR, HERO_MOTION_DESIGN, HERO_ART_LEFT, MOTION_KINDS, MOTION_COLORS, heroFor, validateHeroes,
+  HEROES, HERO_DESIGN, HERO_DIR, HERO_BASE_URL, ART_DIR, HERO_LOGO, HERO_MOTION_DESIGN, HERO_ART_LEFT, MOTION_KINDS, MOTION_COLORS, heroFor, validateHeroes,
 } = require('../services/pest-insider/heroes');
 const { cardFor, WAVES_COLORS } = require('../services/pest-insider/cards');
 const { motionSvg, MOTION_FRAMES } = require('../../ops/agents/pest-insider-motion');
@@ -63,9 +63,10 @@ describe('the top picture list', () => {
     }
   });
 
-  test('its file name is the hash of everything drawn on it, so a new title, tag or art gets a new file', () => {
+  test('its file name is the hash of everything drawn on it, so a new title, tag, art or logo gets a new file', () => {
     for (const [id, h] of Object.entries(HEROES)) {
-      const drawn = { design: HERO_DESIGN, title: h.title, tag: h.tag, kicker: h.kicker, art: h.art };
+      expect(h.logo).toBe(HERO_LOGO.sha16);
+      const drawn = { design: HERO_DESIGN, title: h.title, tag: h.tag, kicker: h.kicker, art: h.art, logo: h.logo };
       const hash = crypto.createHash('sha256').update(JSON.stringify(drawn)).digest('hex').slice(0, 10);
       expect(h.file).toBe(`${id.toLowerCase()}-${hash}.jpg`);
       expect(h.url).toBe(`${HERO_BASE_URL}${h.file}`);
@@ -80,7 +81,7 @@ describe('the top picture list', () => {
   test("a moving picture's GIF is named by the picture and its motion: new motion gets a new GIF, and the still keeps its name", () => {
     expect(MOVING.length).toBeGreaterThan(0);
     for (const [id, h] of MOVING) {
-      const drawn = { design: HERO_DESIGN, title: h.title, tag: h.tag, kicker: h.kicker, art: h.art };
+      const drawn = { design: HERO_DESIGN, title: h.title, tag: h.tag, kicker: h.kicker, art: h.art, logo: HERO_LOGO.sha16 };
       expect(h.gifFile).toBe(`${id.toLowerCase()}-${hash10({ ...drawn, motion: h.motion, motionDesign: HERO_MOTION_DESIGN })}.gif`);
       expect(h.gifUrl).toBe(`${HERO_BASE_URL}${h.gifFile}`);
       expect(Object.isFrozen(h.motion)).toBe(true);
@@ -127,6 +128,56 @@ describe('the top picture list', () => {
       // every frame decodes: a file cut short by a failed write does not
       await expect(sharp(gif, { animated: true }).raw().toBuffer()).resolves.toBeInstanceOf(Buffer);
     }
+  }, 60000);
+
+  test('every still and every GIF shows the Waves Lawn & Pest logo in its bottom-right corner, over the art and the motion', async () => {
+    const sharp = require('sharp');
+    // the logo is the Waves logo file the emails use, whole, and its hash names every picture
+    const bytes = fs.readFileSync(path.join(ROOT, HERO_LOGO.file));
+    expect([HERO_LOGO.file, sha16(bytes), HERO_DESIGN]).toEqual(['client/public/waves-logo.png', HERO_LOGO.sha16, 2]);
+    // The logo as the drawing places it: the file trimmed to its visible edge,
+    // HERO_LOGO.height tall at 2x, HERO_LOGO.margin in from the corner.
+    const raw = await sharp(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    let [left, top, right, bottom] = [raw.info.width, raw.info.height, -1, -1];
+    for (let n = 0; n < raw.info.width * raw.info.height; n += 1) {
+      if (raw.data[n * 4 + 3] > 8) {
+        const x = n % raw.info.width; const y = Math.floor(n / raw.info.width);
+        left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y);
+      }
+    }
+    const logo = await sharp(bytes).extract({ left, top, width: right - left + 1, height: bottom - top + 1 })
+      .resize({ height: HERO_LOGO.height * 2 }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const { width, height } = logo.info;
+    const corner = { left: 1164 - width - HERO_LOGO.margin * 2, top: 652 - height - HERO_LOGO.margin * 2, width, height };
+    // How far a picture's corner is from the logo: the mean difference per color over the logo's solid pixels.
+    // Measured 11-20: 16 for a JPEG, 5 to 6 for a GIF frame, 82 to 126 for the same corner without the logo.
+    const distance = (pixels) => {
+      let sum = 0; let count = 0;
+      for (let n = 0; n < width * height; n += 1) {
+        if (logo.data[n * 4 + 3] === 255) {
+          for (let c = 0; c < 3; c += 1) sum += Math.abs(pixels[n * 3 + c] - logo.data[n * 4 + c]);
+          count += 3;
+        }
+      }
+      return Math.round(sum / count);
+    };
+    const near = (d) => d < 40;
+    const dir = path.join(ROOT, HERO_DIR);
+    for (const [id, hero] of Object.entries(HEROES)) {
+      const d = distance(await sharp(path.join(dir, hero.file)).extract(corner).removeAlpha().raw().toBuffer());
+      expect({ id, d, logo: near(d) }).toEqual({ id, d, logo: true });
+    }
+    // the first and last frames: the logo is drawn after the motion, so the motion never covers it
+    for (const [id, hero] of MOVING) {
+      const gif = fs.readFileSync(path.join(dir, hero.gifFile));
+      for (const page of [0, MOTION_FRAMES - 1]) {
+        const d = distance(await sharp(gif, { page }).extract(corner).removeAlpha().raw().toBuffer());
+        expect({ id, page, d, logo: near(d) }).toEqual({ id, page, d, logo: true });
+      }
+    }
+    // and the check can fail: the art alone, with no logo drawn on it, is far from the logo
+    const art = distance(await sharp(path.join(ROOT, ART_DIR, HEROES.T03.artFile)).extract(corner).removeAlpha().raw().toBuffer());
+    expect({ art, logo: near(art) }).toEqual({ art, logo: false });
   }, 60000);
 
   test('motion is drawn over the art only, right of the title panel, in Waves colors, for every kind', () => {

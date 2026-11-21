@@ -710,6 +710,75 @@ describe('automation runner suppression guardrails', () => {
   });
 });
 
+describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
+  const engine = require('../services/referral-engine');
+  const gates = require('../config/feature-gates').gates;
+  let savedGate;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    db.fn = { now: jest.fn(() => 'NOW()') };
+    savedGate = gates.referralStep2;
+    gates.referralStep2 = true;
+  });
+  afterEach(() => { gates.referralStep2 = savedGate; jest.restoreAllMocks(); });
+
+  function nudgeQueues({ sendUpdate = chain(), enrollmentUpdate = chain() } = {}) {
+    const enrollment = {
+      id: 'enrollment-n', template_key: 'referral_nudge', customer_id: 'cust-n', status: 'active',
+      current_step: 0, email: 'member@example.com', first_name: 'Sam', last_name: 'Member',
+      enrolled_at: new Date('2026-11-01T12:00:00Z'), metadata: {},
+    };
+    setDbQueues({
+      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
+      automation_templates: [chain({ first: { key: 'referral_nudge', name: 'Referral Nudge', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Share Waves, {{first_name}}',
+        html_body: '<p>Share it.</p>', text_body: 'Share it.', from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-n' }] }), sendUpdate],
+      email_suppressions: [chain({ result: [] })],
+    });
+    return { sendUpdate, enrollmentUpdate };
+  }
+
+  test('a member who reached the yearly limit is cancelled, not sent', async () => {
+    jest.spyOn(engine, 'referralOfferDecision').mockResolvedValue({ gateOn: true, skip: false, atLimit: true, reason: 'at the yearly limit' });
+    const { sendUpdate, enrollmentUpdate } = nudgeQueues();
+    await expect(sendStep('enrollment-n')).resolves.toEqual({ sent: false, blocked: true, reason: 'The member reached the yearly referral credit limit' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked' }));
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'cancelled', metadata: { sql: expect.stringContaining('{cancel_reason}'), bindings: [JSON.stringify('referral_yearly_limit')] },
+    }));
+  });
+
+  test('unreadable program settings, or a paused program, defer the send: the enrollment is never cancelled', async () => {
+    for (const reason of ['settings unavailable', 'program paused']) {
+      jest.spyOn(engine, 'referralOfferDecision').mockResolvedValue({ gateOn: true, skip: true, atLimit: false, reason });
+      const { enrollmentUpdate } = nudgeQueues();
+      await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: false, deferred: true });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ next_send_at: expect.any(Date) }));
+      expect(enrollmentUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
+    }
+  });
+
+  test('a member under the limit still gets it, and the gate off never checks', async () => {
+    const spy = jest.spyOn(engine, 'referralOfferDecision').mockResolvedValue({ gateOn: true, skip: false, atLimit: false });
+    nudgeQueues();
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-nudge' });
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // Gate off: the real decision answers at once, reading nothing and promising nothing.
+    spy.mockRestore();
+    gates.referralStep2 = false;
+    await expect(engine.referralOfferDecision(db, 'cust-n')).resolves.toEqual({ gateOn: false, skip: false, atLimit: false });
+    nudgeQueues();
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-nudge-2' });
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+  });
+});
+
 describe('automation runner prep sequence delivery stamp', () => {
   beforeEach(() => {
     jest.clearAllMocks();

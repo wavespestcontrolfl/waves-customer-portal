@@ -258,3 +258,29 @@ describe('POST / — staff booking from a Bill-by-invoice proposal that is not w
     expect(inserts).toHaveLength(1);
   });
 });
+
+// The same preflight refuses an open portal plan-start quote (GATE_PORTAL_PLAN_START, codex pre-push P0): only the
+// customer's own accept re-checks that the account still has no plan, and the accept-on-book handler keeps a booking
+// whose accept fails, so the refusal must come before any visit row exists.
+describe('POST / — staff booking from a portal plan-start quote', () => {
+  const planStartRow = (status) => estimateRow({
+    status, source: 'plan_start', bill_by_invoice: false, onetime_total: 0, estimate_data: { planStart: { families: ['pest_control'] } },
+  });
+
+  test.each(['sent', 'viewed'])('a %s plan-start quote is refused with 409 plan_start_self_serve and writes no visit', async (status) => {
+    linkedEstimate = planStartRow(status);
+    const res = await post(body());
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('plan_start_self_serve');
+    expect(res.body.error).toMatch(/Only the customer can accept this portal plan-start quote/);
+    expect(inserts).toEqual([]);
+  });
+
+  test('one the customer already accepted books', async () => {
+    linkedEstimate = planStartRow('accepted');
+    const res = await post(body());
+    expect(res.body.code).not.toBe('plan_start_self_serve');
+    expect(res.status).toBe(201);
+    expect(inserts).toHaveLength(1);
+  });
+});
