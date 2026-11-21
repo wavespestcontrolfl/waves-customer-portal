@@ -50,13 +50,19 @@ const neutralizeHomeTokens = (content) => String(content || '').split(HOME_TEXT_
 // service name recorded on that day. Exactly one line across the whole set is that line;
 // none, or more than one, has none: the block prints no label then. The classifier reads
 // a service name only to pick a line; the name itself is never kept or shown.
+// The classifier's rodent rule is the bare text "rat", which also sits inside "Core Aeration"
+// and "Integrated Pest Management". A reader sees this label, so the rodent answer stands only
+// for a name with a rodent word of its own.
+const RODENT_WORD = /\b(?:rodents?|rats?|mouse|mice)\b/i;
 function serviceLineOf(types) {
   const { linesFromScheduledServices } = require('../newsletter-audience-profiles');
   const lines = new Set();
   for (const name of Array.isArray(types) ? types : [types]) {
     // The helper skips terminal statuses (a finished visit is not live coverage),
     // so the row is handed over as a live recurring one: only its text is read.
-    for (const line of linesFromScheduledServices([{ service_type: name, status: 'confirmed', is_recurring: true }]).lines) lines.add(line);
+    for (const line of linesFromScheduledServices([{ service_type: name, status: 'confirmed', is_recurring: true }]).lines) {
+      if (line !== 'rodent' || RODENT_WORD.test(String(name ?? ''))) lines.add(line);
+    }
   }
   return lines.size === 1 ? [...lines][0] : null;
 }
@@ -79,13 +85,19 @@ function addressIsHome(address, home, { inheritUnit = true } = {}) {
   const { streetKey } = require('../customer-properties');
   const named = String(address.address_line1 ?? '').trim();
   if (named && !(streetKey(named) && streetKey(home.address_line1))) return false;
-  if (named && !inheritUnit) {
+  // An address with a unit, city or ZIP and no street still names a place: those parts are
+  // compared on the home's own street (a saved property, a frozen report address and an
+  // appointment stamp alike). An address with no part at all says nothing.
+  const partial = !named && [address.address_line2, address.city, address.zip].some((part) => String(part ?? '').trim());
+  if (!named && !partial) return true;
+  const located = named ? address : { ...address, address_line1: home.address_line1 };
+  if (!inheritUnit) {
     const stamp = (a) => ({ service_address_line1: a.address_line1, service_address_line2: a.address_line2, service_address_city: a.city, service_address_zip: a.zip });
-    return !premiseStampConflicts(stamp(address), stamp(home));
+    return !premiseStampConflicts(stamp(located), stamp(home));
   }
   return visitAtCustomerHome({
-    service_address_line1: address.address_line1, service_address_line2: address.address_line2,
-    service_address_city: address.city, service_address_zip: address.zip,
+    service_address_line1: located.address_line1, service_address_line2: located.address_line2,
+    service_address_city: located.city, service_address_zip: located.zip,
     address_line1: home.address_line1, address_line2: home.address_line2, city: home.city, zip: home.zip,
   });
 }
@@ -98,10 +110,9 @@ function appointmentAtHome(stamp, home, homePropertyId) {
   const elsewhere = (propertyId) => Boolean(propertyId) && String(propertyId) !== homePropertyId;
   if (elsewhere(stamp.property_id)) return false;
   if (String(stamp.address_line1 ?? '').trim()) return addressIsHome(stamp, home);
-  // A stamp with a unit, city or ZIP but no street still names a place: those parts must not
-  // conflict with the home (a stamp for Apt 4 is not a visit to the home's Apt 3).
-  const partial = [stamp.address_line2, stamp.city, stamp.zip].some((part) => String(part ?? '').trim());
-  if (partial && !addressIsHome({ ...stamp, address_line1: home.address_line1 }, home)) return false;
+  // A stamp with a unit, city or ZIP but no street still names a place (addressIsHome): a
+  // stamp for Apt 4 is not a visit to the home's Apt 3.
+  if (!addressIsHome(stamp, home)) return false;
   if (stamp.property_id) return true;
   // A live quote-wizard draft is rewritten for the customer's next quote, at any address, so
   // it cannot say where an older appointment was (recurring-appointment-seeder.js

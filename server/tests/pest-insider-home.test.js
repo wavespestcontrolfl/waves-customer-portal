@@ -25,7 +25,18 @@ describe('serviceLineOf', () => {
     [['Palm Injection'], 'tree_shrub'],
     [['Commercial Pest Control'], 'pest'],
     [['Quarterly Pest Control', 'Pest Control Follow-up'], 'pest'],
+    // The classifier reads "rat" inside other words as rodent; the label needs a rodent word of its own.
+    [['Lawn Aeration'], 'lawn'],
+    [['Integrated Pest Management'], 'pest'],
+    [['Rat Trapping'], 'rodent'],
+    [['Rodent Control Service'], 'rodent'],
+    [['Mice Exclusion'], 'rodent'],
   ])('%j -> %s', (types, line) => expect(serviceLineOf(types)).toBe(line));
+
+  test('"Core Aeration" is not a rodent service: no label', () => {
+    expect(serviceLineOf(['Core Aeration'])).toBeNull();
+    expect(serviceLineOf(['Preparation Visit'])).toBeNull();
+  });
 
   test.each([
     [null], [undefined], [[]], [['']], [['Spring special']], [['Lawn and Pest Combo']],
@@ -144,6 +155,22 @@ describe('loadHomeFacts', () => {
     ]]);
     const facts = await loadHomeFacts(conn, [1, 2, 3, 4, 5], NOW);
     expect([...facts.keys()]).toEqual([4, 5]);
+  });
+
+  test('a saved property or a frozen report address with a unit or ZIP and no street must not conflict with the home', async () => {
+    const home = { home_line1: '100 Palm Drive', home_line2: 'Apt 3', home_city: 'Bradenton', home_zip: '34202', home_property_id: 'p1' };
+    const property = (over = {}) => ({ address_line1: null, address_line2: null, city: null, zip: null, property_type: null, ...over });
+    const { conn } = fakeConn([[
+      row({ subscriber_id: 1, ...home, home_property: property({ zip: '34999' }) }),
+      row({ subscriber_id: 2, ...home, home_property: property({ address_line2: 'Apt 4' }) }),
+      row({ subscriber_id: 3, ...home, home_property: property({ zip: '34202', city: 'Bradenton' }) }),
+      row({ subscriber_id: 4, ...home, home_property: property(), last_frozen: [{ line1: null, line2: null, city: 'Bradenton', zip: '34999' }] }),
+      row({ subscriber_id: 5, ...home, home_property: property(), last_frozen: [{ line1: null, line2: 'Apt 4', city: null, zip: null }] }),
+      row({ subscriber_id: 6, ...home, home_property: property(), last_frozen: [{ line1: null, line2: 'Apt 3', city: 'Bradenton', zip: '34202' }] }),
+      row({ subscriber_id: 7, ...home, home_property: property(), last_frozen: [{ line1: null, line2: null, city: null, zip: null }] }),
+    ]]);
+    const facts = await loadHomeFacts(conn, [1, 2, 3, 4, 5, 6, 7], NOW);
+    expect([...facts.keys()]).toEqual([3, 6, 7]);
   });
 
   test('a live quote-wizard draft cannot place an appointment: with no other location, no entry', async () => {

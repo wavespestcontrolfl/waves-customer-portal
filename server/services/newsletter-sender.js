@@ -1398,6 +1398,12 @@ async function sendCampaign(sendId, opts = {}) {
       // The block is dark with its gate: an issue a person sends or resumes by hand while
       // GATE_PEST_INSIDER_AUTO_SEND is off carries none. Read per batch, so turning the gate
       // off stops the block from the next batch on.
+      // No lock is held from this read to the SendGrid handoff, by the rule of this sender
+      // (owner 2026-09-28 and 2026-09-29, #5165: a mailbox is judged at send time by state; the
+      // locks added to live paths were reverted). The batch's own eligibility re-check above
+      // (holdout, the customers behind the mailbox) stands on the same footing. A customer who
+      // takes this mailbox inside that moment changes nothing a send one second earlier would
+      // not have sent: the block states the visit of the customer whose own address it is.
       const homeFacts = homePlanned && pestInsiderAutoSendLive() ? await loadHomeFactsSafe(chunkToSend.map((s) => s.id), send.id) : null;
       const recipients = chunkToSend.map((s) => {
         const attemptToken = attemptTokenBySub.get(s.id);
