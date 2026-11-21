@@ -71,6 +71,14 @@ postgres('plan mint cap (live Postgres pool)', () => {
       return { open, opened };
     };
 
+    // A broken guard must fail this test, not hang it (#8256 pre-push r4): no wait here is without an end,
+    // and each holder is let go in a finally, so no connection stays pinned when an assertion fails.
+    const within = (promise, ms = 5000) => {
+      let timer;
+      const late = new Promise((_resolve, reject) => { timer = setTimeout(reject, ms, new Error(`no answer within ${ms} ms`)); });
+      return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+    };
+
     // A cron job runs: it pins its lock's connection and reads on the other one.
     const jobIn = gate();
     const jobEnd = gate();
@@ -78,16 +86,19 @@ postgres('plan mint cap (live Postgres pool)', () => {
       await read();
       jobIn.open();
       await jobEnd.opened;
-      await read();
       return 'swept';
     }, { recordHealth: false, waitForSlot: true });
-    await jobIn.opened;
-    // A mint now would pin the second connection. It is refused at once and opens no transaction.
-    const work = jest.fn(async () => 'never');
-    await expect(mintTransaction(db, work)).rejects.toMatchObject({ restartUnavailable: true, code: 'busy' });
-    expect(work).not.toHaveBeenCalled();
-    jobEnd.open();
-    await expect(job).resolves.toBe('swept');
+    try {
+      await within(Promise.race([jobIn.opened, job]));
+      // A mint now would pin the second connection. It is refused at once and opens no transaction.
+      const work = jest.fn(async () => 'never');
+      await expect(mintTransaction(db, work)).rejects.toMatchObject({ restartUnavailable: true, code: 'busy' });
+      expect(work).not.toHaveBeenCalled();
+    } finally {
+      jobEnd.open();
+      await within(job).catch(() => {});
+    }
+    await expect(within(job)).resolves.toBe('swept');
 
     // A mint runs: it pins its transaction's connection and reads on the other one. A cron tick waits its turn.
     const mintIn = gate();
@@ -97,22 +108,25 @@ postgres('plan mint cap (live Postgres pool)', () => {
       await read();
       mintIn.open();
       await mintEnd.opened;
-      await read();
       return 'minted';
     });
-    await mintIn.opened;
     let tickRan = false;
-    const tick = runExclusive('plan-mint-pool-test-tick', async () => {
-      tickRan = true;
-      await read();
-      return 'swept';
-    }, { recordHealth: false, waitForSlot: true });
-    // The pool still has its second connection free, and the tick has not started.
-    await read();
-    expect(tickRan).toBe(false);
-    mintEnd.open();
-    await expect(minting).resolves.toBe('minted');
-    await expect(tick).resolves.toBe('swept');
+    let tick;
+    try {
+      await within(Promise.race([mintIn.opened, minting]));
+      tick = runExclusive('plan-mint-pool-test-tick', async () => {
+        tickRan = true;
+        return 'swept';
+      }, { recordHealth: false, waitForSlot: true });
+      // The pool still has its second connection free, and the tick has not started.
+      await within(read());
+      expect(tickRan).toBe(false);
+    } finally {
+      mintEnd.open();
+      await within(Promise.allSettled([minting, tick])).catch(() => {});
+    }
+    await expect(within(minting)).resolves.toBe('minted');
+    await expect(within(tick)).resolves.toBe('swept');
   });
 
 });
