@@ -155,7 +155,8 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     ['an inactive customer', { active: false }],
     ['a commercial property type', { property_type: 'commercial' }],
     ['a business property type', { property_type: 'business' }],
-    ['the commercial tier', { waveguard_tier: 'commercial' }],
+    // The tier's stored spelling (customers_waveguard_tier_check allows 'Commercial', capitalized).
+    ['the commercial tier', { waveguard_tier: 'Commercial' }],
   ])('%s has no entry', async (_label, over) => {
     const { s } = await eligible(over);
     expect((await loadHomeFacts(db, [s], NOW)).size).toBe(0);
@@ -200,6 +201,8 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     const root = await eligible();
     const rootReader = root.s;
     expect((await loadHomeFacts(db, [rootReader], NOW)).has(rootReader)).toBe(true);
+    // customers.account_id references customer_accounts(id): the root's own id needs an account row.
+    await db('customer_accounts').insert({ id: root.c, first_name: 'Synthetic' });
     await customer({ account_id: root.c });
     expect((await loadHomeFacts(db, [rootReader], NOW)).has(rootReader)).toBe(false);
   });

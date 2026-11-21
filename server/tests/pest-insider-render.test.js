@@ -571,13 +571,17 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
       .toEqual({ substitutions: { [HOME_TOKEN]: '', [HOME_TEXT_TOKEN]: '' }, rejected: true });
   });
 
-  test('the token helpers find and remove both tokens, in any letter case, and leave everything else', () => {
+  test('only the two exact spellings are tokens: a variant is not detected and not stripped, so it stays visible', () => {
     expect(hasHomeToken('a {{pi-home}} b')).toBe(true);
     expect(hasHomeToken('a {{pi-home-text}} b')).toBe(true);
-    expect(hasHomeToken('a {{PI-HOME}} b')).toBe(true);
-    expect(hasHomeToken('a {{pi-homes}} {{pi}} {{quiz:x}}')).toBe(false);
+    // SendGrid fills only the two exact literals: any other spelling must never be hidden.
+    for (const variant of ['{{PI-HOME}}', '{{Pi-Home-Text}}', '{{ pi-home }}', '{{pi-home }}', '{{ pi-home-text}}', '{{pi-homes}}', '{{pi}}', '{{quiz:x}}', '{pi-home}', '{{pi-home}']) {
+      expect(hasHomeToken(`a ${variant} b`)).toBe(false);
+      expect(neutralizeHomeTokens(`a ${variant} b`)).toBe(`a ${variant} b`);
+    }
     expect(hasHomeToken(null)).toBe(false);
-    expect(neutralizeHomeTokens('a {{pi-home}}b{{pi-home-text}}{{ PI-Home }} c')).toBe('a b c');
+    expect(neutralizeHomeTokens('a {{pi-home}}b{{pi-home-text}}{{ PI-Home }} c')).toBe('a b{{ PI-Home }} c');
+    expect(neutralizeHomeTokens('{{pi-home}}{{pi-home-text}}{{pi-home}}')).toBe('');
     expect(neutralizeHomeTokens(null)).toBe('');
     // Repeated calls keep working (no sticky regex state).
     for (let i = 0; i < 3; i += 1) expect(hasHomeToken('{{pi-home}}')).toBe(true);

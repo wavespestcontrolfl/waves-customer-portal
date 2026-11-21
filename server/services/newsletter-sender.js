@@ -468,29 +468,31 @@ async function loadPersonalizationContext(subscribers) {
 }
 
 /**
- * A Waves Pest Insider issue's "Your home" block, per reader (pest-insider/home.js,
- * render.js). The facts are read by subscriber id, from the database's current link
- * and address: a read that fails logs one warning and adds nothing, so those readers
- * get '' and the send goes out. A reader read again (relinked at dispatch) loses its
- * old entry first. Never throws.
+ * A Waves Pest Insider issue's "Your home" facts for the readers ONE chunk is about
+ * to mail (pest-insider/home.js, render.js): read per chunk, after that chunk's
+ * eligibility re-check and relink adoption, so the link, the address on file and the
+ * household are the database's at dispatch. A read that fails logs one warning and
+ * gives an empty Map, so that chunk's readers get '' and the send goes on. Never throws.
  */
-async function loadHomeFactsSafe(subscriberIds, sendId, into = new Map()) {
-  for (const id of subscriberIds) into.delete(id);
+async function loadHomeFactsSafe(subscriberIds, sendId) {
   try {
-    for (const [id, home] of await loadHomeFacts(db, subscriberIds)) into.set(id, home);
+    return await loadHomeFacts(db, subscriberIds);
   } catch (err) {
-    logger.warn(`[newsletter] send ${sendId} "Your home" facts load failed, no reader gets the block: ${err.message}`);
+    logger.warn(`[newsletter] send ${sendId} "Your home" facts load failed, no reader of this batch gets the block: ${err.message}`);
+    return new Map();
   }
-  return into;
 }
 
 // A reader's block needs all of: a planned audience; facts whose customer is the
-// reader's current link (as adopted at the per-chunk re-check); and the sender's own
-// list of the customers behind the reader's mailbox holding that customer and no one
-// else (a shared mailbox, or an unreadable one, shows nothing).
-function homeReaderIsUnambiguous(planned, home, customerId, mailboxCustomerIds) {
+// reader's current link (as adopted at the per-chunk re-check); facts read for the very
+// address the batch is about to mail; and the sender's own list of the customers behind
+// the reader's mailbox holding that customer and no one else (a shared mailbox, or an
+// unreadable one, shows nothing).
+function homeReaderIsUnambiguous(planned, home, subscriber, mailboxCustomerIds) {
+  const customerId = subscriber.customer_id;
   if (!planned || !home || !customerId) return false;
   if (String(home.customerId) !== String(customerId)) return false;
+  if (!home.address || String(subscriber.email ?? '').trim().toLowerCase() !== home.address) return false;
   return Array.isArray(mailboxCustomerIds) && mailboxCustomerIds.length > 0
     && mailboxCustomerIds.every((id) => String(id) === String(customerId));
 }
@@ -498,7 +500,7 @@ function homeReaderIsUnambiguous(planned, home, customerId, mailboxCustomerIds) 
 // The substitutions for both home tokens, one reader at a time. A reader's
 // block must pass the send check (render.js homeBlockErrors); one that fails,
 // or a check that throws, leaves that reader '' and is counted in `state`.
-function makeHomeSubstitutions(facts, planned) {
+function makeHomeSubstitutions(planned) {
   const { homeSubstitutions, homeBlockErrors } = require('./pest-insider/render');
   const verdicts = new Map();
   const state = { rejected: 0 };
@@ -514,9 +516,10 @@ function makeHomeSubstitutions(facts, planned) {
   };
   return {
     state,
-    forReader(subscriber, mailboxCustomerIds) {
-      const home = facts.get(subscriber.id);
-      const shown = homeReaderIsUnambiguous(planned, home, subscriber.customer_id, mailboxCustomerIds) ? home : null;
+    // `facts` are the chunk's own, read after its re-check.
+    forReader(subscriber, facts, mailboxCustomerIds) {
+      const home = facts?.get(subscriber.id);
+      const shown = homeReaderIsUnambiguous(planned, home, subscriber, mailboxCustomerIds) ? home : null;
       const { substitutions, rejected } = homeSubstitutions(shown, { errorsOf });
       if (rejected) state.rejected += 1;
       return substitutions;
@@ -1275,8 +1278,7 @@ async function sendCampaign(sendId, opts = {}) {
   // Only a send with a planned audience (every Pest Insider issue) shows a block: a token
   // pasted into another newsletter gets '' for every reader.
   const homePlanned = homeEnabled && sendHoldout(send.segment_filter) !== null;
-  const homeFacts = homePlanned ? await loadHomeFactsSafe(subscribersToSend.map((s) => s.id), send.id) : new Map();
-  const homeSubs = homeEnabled ? makeHomeSubstitutions(homeFacts, homePlanned) : null;
+  const homeSubs = homeEnabled ? makeHomeSubstitutions(homePlanned) : null;
   // Event click-tracking tokens ({{evclick:<eventId>}}): substituted per
   // recipient with the tracking redirect carrying their engagement_token —
   // same substitution mechanics as the quiz/feedback tokens. The direct
@@ -1385,13 +1387,14 @@ async function sendCampaign(sendId, opts = {}) {
             personalizationByCustomer.set(customerId, ctx);
           }
         }
-        // A relinked reader's facts are read again for its new link; the old entry goes first.
-        if (homePlanned) await loadHomeFactsSafe(relinkedSubs.map((s) => s.id), send.id, homeFacts);
         logger.info(`[newsletter] send ${send.id} refreshed ${relinkedSubs.length} recipient link(s) relinked between selection and dispatch (archive relink)`);
       }
 
       // The customers behind each reader's mailbox, as this chunk's re-check read them.
       const mailboxBySub = new Map(freshRows.map((r) => [r.id, r.mailbox_customer_ids]));
+      // The "Your home" facts, read now for exactly the readers this batch mails: after the
+      // eligibility re-check and the relink adoption, before the personalizations are built.
+      const homeFacts = homePlanned ? await loadHomeFactsSafe(chunkToSend.map((s) => s.id), send.id) : null;
       const recipients = chunkToSend.map((s) => {
         const attemptToken = attemptTokenBySub.get(s.id);
         const pctx = s.customer_id ? personalizationByCustomer.get(s.customer_id) : null;
@@ -1415,7 +1418,7 @@ async function sendCampaign(sendId, opts = {}) {
             ...(quizEnabled ? buildQuizSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
             ...(feedbackEnabled ? buildFeedbackSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
             ...(evclickEnabled ? buildEvclickSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token, urlById: evclickUrlById }) : {}),
-            ...(homeEnabled ? homeSubs.forReader(s, mailboxBySub.get(s.id)) : {}),
+            ...(homeEnabled ? homeSubs.forReader(s, homeFacts, mailboxBySub.get(s.id)) : {}),
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row

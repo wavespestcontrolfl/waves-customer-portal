@@ -39,7 +39,7 @@ describe('serviceLineOf', () => {
 
 describe('loadHomeFacts', () => {
   const row = (over = {}) => ({
-    subscriber_id: 11, customer_id: 'c1', member_since: new Date('2024-03-05T00:00:00Z'), property_type: 'single_family', waveguard_tier: 'Silver',
+    subscriber_id: 11, customer_id: 'c1', reader_address: 'reader@example.invalid', member_since: new Date('2024-03-05T00:00:00Z'), property_type: 'single_family', waveguard_tier: 'Silver',
     last_date: new Date('2026-11-10T00:00:00Z'), last_types: ['Quarterly Pest Control'], ...over,
   });
 
@@ -49,8 +49,8 @@ describe('loadHomeFacts', () => {
       row({ subscriber_id: 12, customer_id: 'c2', last_date: '2026-10-01', member_since: null, last_types: ['Gate code 4821 Mary'] }),
     ]]);
     const facts = await loadHomeFacts(conn, [11, 12], NOW);
-    expect(facts.get(11)).toEqual({ customerId: 'c1', lastVisit: { date: '2026-11-10', line: 'pest' }, sinceDate: '2024-03-05' });
-    expect(facts.get(12)).toEqual({ customerId: 'c2', lastVisit: { date: '2026-10-01', line: null }, sinceDate: null });
+    expect(facts.get(11)).toEqual({ customerId: 'c1', address: 'reader@example.invalid', lastVisit: { date: '2026-11-10', line: 'pest' }, sinceDate: '2024-03-05' });
+    expect(facts.get(12)).toEqual({ customerId: 'c2', address: 'reader@example.invalid', lastVisit: { date: '2026-10-01', line: null }, sinceDate: null });
     expect(JSON.stringify([...facts])).not.toMatch(/4821|Mary|Quarterly/);
     expect(JSON.stringify([...facts])).not.toMatch(/visit_?count|count/i);
   });
@@ -66,10 +66,11 @@ describe('loadHomeFacts', () => {
     const { conn } = fakeConn([[
       row({ subscriber_id: 1, property_type: 'commercial' }),
       row({ subscriber_id: 2, property_type: 'Business' }),
-      row({ subscriber_id: 3, waveguard_tier: 'commercial' }),
+      row({ subscriber_id: 3, waveguard_tier: 'Commercial' }),
+      row({ subscriber_id: 5, waveguard_tier: 'commercial' }),
       row({ subscriber_id: 4 }),
     ]]);
-    expect([...(await loadHomeFacts(conn, [1, 2, 3, 4], NOW)).keys()]).toEqual([4]);
+    expect([...(await loadHomeFacts(conn, [1, 2, 3, 4, 5], NOW)).keys()]).toEqual([4]);
   });
 
   test('a last visit more than 365 days before now has no entry; exactly 365 days still does', async () => {
@@ -92,6 +93,7 @@ describe('loadHomeFacts', () => {
     expect(calls[0].sql).toContain('WHERE ns.id IN (?, ?)');
     expect(calls[0].sql).toContain("COALESCE(r.status, 'completed') = 'completed'");
     expect(calls[0].sql).toContain('FROM service_records r');
+    expect(calls[0].sql).toContain('LOWER(TRIM(ns.email)) AS reader_address');
     expect(calls[0].sql).not.toContain('scheduled_services');
     expect(calls[0].sql).toMatch(/LOWER\(TRIM\(ns\.email\)\) = LOWER\(TRIM\(c\.email\)\)/);
     expect(calls[0].sql).toMatch(/COALESCE\(o\.account_id, o\.id\) = COALESCE\(c\.account_id, c\.id\)/);
@@ -123,9 +125,12 @@ describe('loadHomeFacts', () => {
   });
 });
 
-test('the tokens', () => {
+test('the tokens are the two exact lowercase literals and nothing else', () => {
   expect(HOME_TOKEN).toBe('{{pi-home}}');
   expect(HOME_TEXT_TOKEN).toBe('{{pi-home-text}}');
   expect(hasHomeToken(`x ${HOME_TOKEN}`)).toBe(true);
+  expect(hasHomeToken(`x ${HOME_TEXT_TOKEN}`)).toBe(true);
   expect(neutralizeHomeTokens(`a${HOME_TOKEN}b${HOME_TEXT_TOKEN}c`)).toBe('abc');
+  expect(hasHomeToken('{{ PI-Home }}')).toBe(false);
+  expect(neutralizeHomeTokens('a {{ PI-Home }} {{PI-HOME-TEXT}} b')).toBe('a {{ PI-Home }} {{PI-HOME-TEXT}} b');
 });

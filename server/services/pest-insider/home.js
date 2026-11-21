@@ -31,12 +31,18 @@ const MAX_LAST_VISIT_AGE_DAYS = 365;
 const CHUNK = 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const HOME_TOKEN_PATTERN = /\{\{\s*pi-home(?:-text)?\s*\}\}/gi;
-
-const hasHomeToken = (content) => new RegExp(HOME_TOKEN_PATTERN.source, 'i').test(String(content || ''));
+// The two exact spellings are the only tokens, case-sensitive, no inner spaces. A SendGrid
+// substitution is a literal match, so a spelling the sender cannot fill (`{{ PI-Home }}`)
+// must never be hidden by a preview or the send check: it stays visible as plain text on
+// every surface instead of being mailed as a raw placeholder after a clean-looking proof.
+const hasHomeToken = (content) => {
+  const text = String(content || '');
+  return text.includes(HOME_TOKEN) || text.includes(HOME_TEXT_TOKEN);
+};
 
 // Both tokens removed; what is left is the issue exactly as it reads with no block.
-const neutralizeHomeTokens = (content) => String(content || '').replace(HOME_TOKEN_PATTERN, '');
+// (Neither token is a prefix of the other: `{{pi-home}}` needs its closing braces.)
+const neutralizeHomeTokens = (content) => String(content || '').split(HOME_TEXT_TOKEN).join('').split(HOME_TOKEN).join('');
 
 // The service line of a visit day, from the platform's one classifier (the estimator's
 // serviceKeysFromText through newsletter-audience-profiles' linesFromScheduledServices,
@@ -71,6 +77,8 @@ function homeFromRow(row, today) {
   if (dayNumber(today) - dayNumber(lastDate) > MAX_LAST_VISIT_AGE_DAYS) return null;
   return {
     customerId: row.customer_id,
+    // The address these facts were read for: the sender mails a block only to this address.
+    address: String(row.reader_address ?? '').trim().toLowerCase(),
     lastVisit: { date: lastDate, line: serviceLineOf(row.last_types) },
     // "Member since": the Waves app's own date (customers.member_since), not the first
     // record, which begins in August 2025 for customers who joined before.
@@ -86,7 +94,7 @@ function homeFromRow(row, today) {
 // purpose: that home's payer can be another person.
 const FACTS_SQL = (idList) => `
 SELECT ns.id AS subscriber_id, c.id AS customer_id, c.member_since, c.property_type, c.waveguard_tier,
-       v.last_date, t.last_types
+       LOWER(TRIM(ns.email)) AS reader_address, v.last_date, t.last_types
 FROM newsletter_subscribers ns
 JOIN customers c ON c.id = ns.customer_id
 JOIN LATERAL (
@@ -115,7 +123,7 @@ WHERE ns.id IN (${idList})
  * One batched read of the readers' current customers' finished visits, from
  * service_records (what the Waves app shows as the customer's visits: status
  * 'completed' or NULL, dated on or before today in Eastern time).
- * Returns Map<subscriberId, { customerId, lastVisit: { date, line }, sinceDate }>.
+ * Returns Map<subscriberId, { customerId, address, lastVisit: { date, line }, sinceDate }>.
  * The link and the address are the database's now. A reader whose customer is
  * archived or inactive, shares its address or account with another customer, has
  * several saved properties or a rental, family or commercial one, or whose last
