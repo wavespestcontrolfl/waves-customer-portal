@@ -3925,7 +3925,8 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
         {step === 'deciding' ? (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '14px 0' }}>
             {SOFT_EXIT_DECIDING_REASONS.map(({ key, label }) => (
-              <button key={key} type="button" onClick={() => setHelp(key)} aria-pressed={help === key} style={softExitChipStyle(help === key)}>
+              // Locked while Send is in flight: the request already carries the picked reason.
+              <button key={key} type="button" onClick={() => setHelp(key)} disabled={submitting} aria-pressed={help === key} style={softExitChipStyle(help === key)}>
                 {label}
               </button>
             ))}

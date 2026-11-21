@@ -122,6 +122,21 @@ describe('SoftExitSheet', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
   });
 
+  it('while Send is in flight the picked reason is locked; a failed Send unlocks it', async () => {
+    await openDecidingStep();
+    let answer;
+    fetchMock.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'A lower price' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Sending…' })).toBeDisabled());
+    for (const { label } of SOFT_EXIT_DECIDING_REASONS) expect(screen.getByRole('button', { name: label })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeDisabled();
+    answer({ ok: false, json: async () => ({}) });
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    for (const { label } of SOFT_EXIT_DECIDING_REASONS) expect(screen.getByRole('button', { name: label })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'A lower price' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('Skip after a reason that failed to send closes with the general words and no error', async () => {
     await openDecidingStep();
     fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({}) });
