@@ -646,6 +646,16 @@ describe('mintPlanStartEstimate', () => {
       await expect(mint({}, realAddress)).resolves.toMatchObject({ reused: false });
     });
 
+    test('a first line with no house number is priced by hand: its home key would name no house (codex pre-push r31 P1)', async () => {
+      // The real stored address, so the read-back check alone cannot refuse these.
+      const realAddress = { pricingAi: { ...deps().pricingAi, addressForCustomer: require('../services/customer-pricing-ai').addressForCustomer } };
+      for (const [line1, line2] of [['', 'Apt 4'], ['Apt 4', null], ['#4', null], ['Apt#4', null], ['Apt # AB', null], ['4B', null], ['PH1', null], ['4', null], ['Parrish', null],
+        ['Main St', null], ['59th Ave E', null], ['5th Floor', null], ['PO Box 123', null]]) {
+        tables.customers = [{ ...LEAD, address_line1: line1, address_line2: line2 }];
+        await refused('pricing_unavailable', {}, realAddress);
+      }
+    });
+
     test('another profile on the account is priced by hand: the strict premises proof reads the whole account (codex pre-push r16 P0)', async () => {
       // Each property of a multi-property account is its own customers row, member or not, active or not.
       tables.customers = [{ ...LEAD, account_id: 'acct-1' }, { ...CUSTOMER, id: 'cust-2', account_id: 'acct-1', waveguard_tier: 'Gold' }];
@@ -1116,6 +1126,12 @@ describe('assertPlanStartAcceptEligible', () => {
       tables.customers = [{ ...LEAD, account_id: 'acct-1' }, { ...CUSTOMER, id: 'cust-2', account_id: 'acct-1' }];
     }],
     ['has no street with a city or zip', () => { tables.customers = [{ ...LEAD, city: null, zip: null }]; }],
+    ['names only a unit on its first line, with the quote stored at that unit (codex pre-push r31 P1)', () => {
+      tables.customers = [{ ...LEAD, address_line1: '', address_line2: 'Apt 4' }];
+      tables.estimates[0].address = 'Apt 4, Parrish, FL 34219';
+      const premisesKey = require('../services/estimate-property-linkage').normalizedStampedStreet('', 'Apt 4', 'Parrish', '34219');
+      tables.estimates[0].estimate_data = JSON.stringify({ planStart: { families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly', premisesKey } });
+    }],
     ['has an estimate with no stored address', () => { delete tables.estimates[0].address; }],
     ['has a quote stored without the home it was priced for', () => {
       tables.estimates[0].estimate_data = JSON.stringify({ planStart: { families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly' } });

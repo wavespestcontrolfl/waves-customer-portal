@@ -1159,6 +1159,20 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(0);
   });
 
+  test('a first line with no house number gets no online restart price: its home key would name no house (codex pre-push r31 P1)', async () => {
+    for (const [line1, line2] of [['', 'Apt 4'], ['Apt 4', null], ['#4', null], ['Apt#4', null], ['Apt # AB', null], ['4B', null], ['PH1', null], ['Bldg 2, Apt 4', null], ['4', null],
+      ['Parrish', null], ['Apt 4, Parrish, FL 34219', null], ['Main St', null], ['59th Ave E', null], ['5th Floor', null], ['PO Box 123', null]]) {
+      tables.customers[0] = { ...tables.customers[0], address_line1: line1, address_line2: line2 };
+      await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    }
+    expect(tables.estimates).toHaveLength(0);
+    expect(recompute).not.toHaveBeenCalled();
+    // A unit-first line carries its house number behind the unit.
+    tables.customers[0] = { ...tables.customers[0], address_line1: 'Unit 4, 1 Main St', address_line2: null };
+    const minted = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(minted.url).toEqual(expect.any(String));
+  });
+
   test('a restart keeps main\'s premises proof: an unresolvable visit link or another profile on the account is not a second premises (plan start alone runs the strict one)', async () => {
     // Another profile on the account: the strict proof refuses it (codex pre-push r16 P0); a restart, as on main, does not read it.
     tables.customers.push({ ...CUSTOMER, id: 'cust-2', account_id: 'cust-1' });

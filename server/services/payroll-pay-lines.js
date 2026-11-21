@@ -30,13 +30,19 @@ const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The kinds an admin can add by hand. The Tech Rewards Plan kinds (season bonus, stay bonus, December gift) are never added or
+// removed by hand: the pay run works them out, and a hand-made one would pay a bonus the plan never earned.
 const KINDS = ['review_bonus', 'commission', 'health_allowance', 'hsa_employer'];
+const TECH_REWARD_KINDS = ['season_bonus', 'stay_bonus', 'december_gift'];
 const STATUSES = ['open', 'paid', 'voided'];
 const KIND_WORDS = {
   review_bonus: 'Review bonus',
   commission: 'Commission',
   health_allowance: 'Health allowance',
   hsa_employer: 'HSA from Waves',
+  season_bonus: 'Season bonus',
+  stay_bonus: 'Stay bonus',
+  december_gift: 'December gift',
 };
 const MAX_NOTE = 500;
 const MAX_AMOUNT_CENTS = 10000000;
@@ -202,6 +208,9 @@ async function deletePayLine(id, actor, conn = db) {
   await conn.transaction(async (trx) => {
     const line = await trx('payroll_pay_lines').where({ id }).forUpdate().first('id', 'status', 'kind', 'technician_id');
     if (!line) throw new PayrollError(404, 'Pay line not found.');
+    if (TECH_REWARD_KINDS.includes(line.kind)) {
+      throw new PayrollError(409, 'The pay run works this line out by itself. It cannot be removed here.');
+    }
     if (line.status !== 'open') throw new PayrollError(409, 'Only a pay line that is not paid yet can be removed. Void its pay run first.');
     await trx('payroll_pay_lines').where({ id }).del();
     await recordAuditEvent({
@@ -365,11 +374,16 @@ function totalsOf(lines) {
     commissionCents: sum('commission'),
     healthAllowanceCents: sum('health_allowance'),
     hsaEmployerCents: sum('hsa_employer'),
+    // Only a check that holds such a line carries the key, so any other check is exactly what it was.
+    ...(lines.some((line) => TECH_REWARD_KINDS.includes(line.kind))
+      ? { techRewardsCents: TECH_REWARD_KINDS.reduce((total, kind) => total + sum(kind), 0) }
+      : {}),
   };
 }
 
 module.exports = {
   KINDS,
+  TECH_REWARD_KINDS,
   KIND_WORDS,
   payLinesOn,
   listPayLines,

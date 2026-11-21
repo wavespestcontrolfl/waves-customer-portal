@@ -2729,7 +2729,8 @@ router.get('/protocol-health', async (req, res, next) => {
       .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
       .select('service_product_usage.*', 'products_catalog.name as product_name',
         'products_catalog.best_price', 'products_catalog.cost_per_unit',
-        'products_catalog.cost_unit', 'products_catalog.unit_size_oz')
+        'products_catalog.cost_unit', 'products_catalog.unit_size_oz',
+        'products_catalog.container_size', 'products_catalog.inventory_unit')
       .orderBy('service_type');
 
     const servicesByLine = {};
@@ -2799,7 +2800,7 @@ router.get('/service-usage', async (req, res, next) => {
       .select('service_product_usage.*', 'products_catalog.name as product_name',
         'products_catalog.best_price', 'products_catalog.best_vendor',
         'products_catalog.container_size', 'products_catalog.cost_per_unit',
-        'products_catalog.cost_unit', 'products_catalog.unit_size_oz')
+        'products_catalog.cost_unit', 'products_catalog.unit_size_oz', 'products_catalog.inventory_unit')
       .orderBy('service_type');
 
     // Group by service type
