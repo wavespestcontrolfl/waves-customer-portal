@@ -226,7 +226,9 @@ function flushPendingBeacon() {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify(body),
+    // Read as it goes out: an answer from a newer server during the settle
+    // wait counts (routes/admin-usage.js).
+    body: JSON.stringify({ ...body, boot: heardServerBoot() || undefined }),
   }).catch(() => {});
 }
 
@@ -402,7 +404,6 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
       tab: tab || undefined,
       source,
       build: loadedBuild() || undefined,
-      boot: heardServerBoot() || undefined,
       reloadHold: moveBlockerFor(pathname) || undefined,
     },
   };

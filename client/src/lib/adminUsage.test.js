@@ -160,10 +160,11 @@ describe('trackAdminPageView', () => {
       trackAdminPageView({ pathname: '/admin/pipeline', search: '' });
       settle();
       expect(lastBody()).toEqual({ pageKey: 'pipeline', path: '/admin/pipeline', source: 'load', build: 'aaa111aaa111', reloadHold: 'card-payment' });
-      // Once a server's answer counts, its start time goes too. Another page,
-      // and a page whose move was due a reload, carry no name.
-      noteServerAnswer(new Headers({ 'X-Portal-Build': 'bbb222bbb222', 'X-Portal-Boot': '1700000000000' }));
+      // Once a server's answer counts, its start time goes too, read as the
+      // beacon goes out. Another page, and a page whose move was due a
+      // reload, carry no name.
       trackAdminPageView({ pathname: '/admin/dashboard', search: '' });
+      noteServerAnswer(new Headers({ 'X-Portal-Build': 'bbb222bbb222', 'X-Portal-Boot': '1700000000000' }));
       settle();
       expect(lastBody()).toEqual({ pageKey: 'dashboard', path: '/admin/dashboard', source: 'in-app', build: 'aaa111aaa111', boot: 1700000000000 });
       noteMoveOutcome('/admin/customers', null);

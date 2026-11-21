@@ -105,9 +105,11 @@ export function noteMoveOutcome(pathname, blocker) {
 }
 
 // The note when the latest move opened `pathname`, as the router reads it,
-// else null.
+// else null. Trailing slashes do not count, as for the router: it opens
+// /admin/settings/ as Settings, and Settings reports /admin/settings.
 export function moveBlockerFor(pathname) {
-  return moveOutcome.pathname !== null && routerPath(moveOutcome.pathname) === routerPath(pathname)
+  const page = (path) => routerPath(path).replace(/\/+$/, '');
+  return moveOutcome.pathname !== null && page(moveOutcome.pathname) === page(pathname)
     ? moveOutcome.blocker
     : null;
 }

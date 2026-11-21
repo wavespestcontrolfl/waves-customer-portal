@@ -117,6 +117,13 @@ describe('the move note for the usage beacon', () => {
     expect(moveBlockerFor('/admin/pipeline')).toBe('card-payment');
     expect(moveBlockerFor('/%61dmin/Pipeline')).toBe('card-payment');
     expect(moveBlockerFor('/admin/dashboard')).toBeNull();
+    // Trailing slashes do not count: Settings reports /admin/settings when the
+    // router opened /admin/settings/.
+    noteMoveOutcome('/admin/settings/', 'card-payment');
+    expect(moveBlockerFor('/admin/settings')).toBe('card-payment');
+    noteMoveOutcome('/admin/settings', 'card-payment');
+    expect(moveBlockerFor('/admin/settings//')).toBe('card-payment');
+    expect(moveBlockerFor('/admin/settings/general')).toBeNull();
     noteMoveOutcome('/admin/dashboard', null);
     expect(moveBlockerFor('/admin/dashboard')).toBeNull();
     expect(moveBlockerFor('/admin/pipeline')).toBeNull();
