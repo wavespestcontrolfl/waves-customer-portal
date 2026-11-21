@@ -38,7 +38,7 @@
  *      or rewrites it. One posts when a moving-window check has a finding
  *      that the last run did not have, so a 14-day window does not post 14
  *      copies and a finding that cleared and came back posts again. It
- *      lists every finding that is new.
+ *      lists the new findings only, every one of them.
  * A moving-window check that could not run is present state (it cannot run
  * NOW), so it stands in the standing list until it runs again. The exception
  * is a check that reads a new window on each run (yesterday's closeouts):
@@ -47,7 +47,9 @@
  * state that is missing, cannot be read, or was not written by the last
  * daily run never hides a finding: it posts. The state moves forward only
  * for an alert the feed holds, so a failed write is tried again on the next
- * run.
+ * run. And the standing list trusts the state only while the feed's newest
+ * standing alert is the one the state names and no clean run closed it, so a
+ * failed state write cannot hide a check behind an alert that is gone.
  * Rows written before this split are full reports under RECORD_KEY. They get
  * the record treatment: the sweep never touches them.
  * The email path (the in-app feed off) is as before: one email a run with the
@@ -66,7 +68,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { deliverOpsDigest, inAppEnabled } = require('./ops-digest');
+const { deliverOpsDigest, inAppEnabled, CATEGORY: DIGEST_CATEGORY } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
@@ -455,9 +457,10 @@ function failingItems(results) {
   return results.filter((r) => !r.ok).map((r) => (r.unavailable ? `${r.key}:unavailable` : r.key)).sort();
 }
 
-// The last run, from the run state: { items, alertedAt, seen }.
+// The last run, from the run state: { items, alertedAt, alertId, seen }.
 //   items     the standing checks that failed (failingItems)
 //   alertedAt the time of the last standing alert the feed holds, or null
+//   alertId   that alert's row id (see feedHoldsAlert)
 //   seen      for each failing moving-window check, its findings (itemHashes)
 // null when there is none, it cannot be read, or the last daily run did not
 // write it (STATE_FRESH_MS). The callers then post: a state fault never hides
@@ -476,6 +479,7 @@ async function readRunState(now) {
     return {
       items: state.items.map(String),
       alertedAt: Number.isFinite(Date.parse(state.alertedAt)) ? state.alertedAt : null,
+      alertId: state.alertId ? String(state.alertId) : null,
       seen: Object.fromEntries(Object.entries(seen).filter(([, hashes]) => Array.isArray(hashes)).map(([key, hashes]) => [key, hashes.map(String)])),
     };
   } catch (err) {
@@ -484,17 +488,39 @@ async function readRunState(now) {
   }
 }
 
-// Returns true when the state is saved. It never throws.
-async function writeRunState(now, { items, alertedAt, seen }) {
+// It never throws. A failed write cannot hide a finding (feedHoldsAlert, the
+// STATE_FRESH_MS rule); the cost is a possible second copy of an alert.
+async function writeRunState(now, { items, alertedAt, alertId, seen }) {
   try {
-    const value = JSON.stringify({ runAt: now.toISOString(), items, alertedAt: alertedAt || null, seen: seen || {} });
+    const value = JSON.stringify({ runAt: now.toISOString(), items, alertedAt: alertedAt || null, alertId: alertId || null, seen: seen || {} });
     await db('system_settings')
-      .insert({ key: RUN_STATE_KEY, value, category: 'ops_digest', description: 'Lead-to-cash sweep: what the last run found (failing standing checks, time of the last standing alert, moving-window findings as hashes)' })
+      .insert({ key: RUN_STATE_KEY, value, category: 'ops_digest', description: 'Lead-to-cash sweep: what the last run found (failing standing checks, the last standing alert, moving-window findings as hashes)' })
       .onConflict('key')
       .merge({ value, updated_at: new Date() });
-    return true;
   } catch (err) {
     logger.warn(`[l2c-invariants] run-state write failed (${err.message}) — the next run may post again`);
+  }
+}
+
+// True when the feed's newest standing alert is the one the run state names
+// and no clean run closed it. The alert row and the run state are two writes.
+// When the second one fails, the state is about an alert that was replaced or
+// closed; without this test it could keep a failing check quiet while no open
+// alert shows it. An alert a PERSON closed still counts: that is a decision,
+// and the weekly alert brings the list back. A feed read that fails = false.
+async function feedHoldsAlert(alertId) {
+  if (!alertId) return false;
+  try {
+    const newest = await db('notifications')
+      .where({ recipient_type: 'admin', category: DIGEST_CATEGORY })
+      .whereRaw("metadata->>'opsKey' = ?", [STANDING_KEY])
+      .orderBy('created_at', 'desc')
+      .first('id', 'metadata');
+    if (!newest || String(newest.id) !== String(alertId)) return false;
+    const meta = typeof newest.metadata === 'string' ? JSON.parse(newest.metadata) : (newest.metadata || {});
+    return meta.resolved !== true;
+  } catch (err) {
+    logger.warn(`[l2c-invariants] standing-alert read failed (${err.message}) — posting`);
     return false;
   }
 }
@@ -538,19 +564,21 @@ function hasNewItem(hashes, seen) {
 // Which alert a result belongs to (see the header): true = a record.
 const isRecordResult = (r) => r.moving && !(r.unavailable && !r.freshEachRun);
 
-// A failing check as a record shows it: EVERY finding the last run did not
-// have, first and with no cap, so a finding is never marked as seen without
-// being listed. The findings already posted fill what is left of SAMPLE_IDS.
-function newFindingsFirst(r, seen, now) {
-  if (r.ok || r.unavailable) return r;
-  // No key for each id: the new ones cannot be told apart, so every id shows.
-  if (r.ids.length !== r.itemKeys.length) return { ...r, sample: r.ids, truncated: r.listCapped };
+// One moving-window check as a record shows it: its NEW findings only (the
+// ones the last run did not have), every one, with no cap. So the record's
+// count and ids are what made it, and no finding is marked as seen without
+// being listed. null = the check fails with nothing new: it is not in this
+// record (its earlier record stands).
+function newFindingsOf(r, seen, now) {
+  if (r.ok) return r;
+  if (!hasNewItem(itemHashes(r, now), seen)) return null;
+  // Without one key for each id, or with a list that does not name every
+  // finding, the new ids cannot be told apart: the check shows as it stands.
+  if (r.unavailable || r.listCapped || !r.ids.length || r.ids.length !== r.itemKeys.length) return { ...r, sample: r.ids, truncated: r.listCapped };
   const known = new Set(Array.isArray(seen) ? seen : []);
-  const fresh = [];
-  const old = [];
-  r.ids.forEach((id, i) => (known.has(itemHash(r, r.itemKeys[i], now)) ? old : fresh).push(id));
-  const sample = [...fresh, ...old.slice(0, Math.max(0, SAMPLE_IDS - fresh.length))];
-  return { ...r, sample, truncated: r.listCapped || sample.length < r.ids.length };
+  const fresh = r.ids.filter((id, i) => !known.has(itemHash(r, r.itemKeys[i], now)));
+  const postedBefore = r.ids.length - fresh.length;
+  return { ...r, count: fresh.length, sample: fresh, truncated: false, detail: postedBefore ? { ...(r.detail || {}), postedBefore } : r.detail };
 }
 
 const emailSender = (mailer, to, report) => () => mailer.sendOne({
@@ -559,52 +587,58 @@ const emailSender = (mailer, to, report) => () => mailer.sendOne({
   categories: ['ops', 'lead-to-cash-invariants'], suppressErrorLog: true,
 });
 
-// One alert through the digest seam. 'in_app' = the feed holds the row.
-// 'email' = the feed write failed and the seam's fallback email went out.
-// An alert that reached nobody throws.
+// One alert through the digest seam. channel 'in_app' = the feed holds the
+// row `id`. 'email' = the feed write failed and the seam's fallback email
+// went out. An alert that reached nobody throws.
 async function deliver(options) {
   const out = await deliverOpsDigest(options);
   if (out?.ok === false) throw new Error(out.error || 'send failed');
-  return out?.channel === 'in_app' ? 'in_app' : 'email';
+  return out?.channel === 'in_app' ? { channel: 'in_app', id: out.id || null } : { channel: 'email', id: null };
 }
 
-// The standing list. Returns { posted, clean, error, items, alertedAt }: the
-// last two are what the run state keeps. It never throws, so a failure here cannot
-// stop the records of the same run.
+// The standing list. Returns { posted, error, items, alertedAt, alertId }: the
+// last three are what the run state keeps. It never throws, so a failure
+// here cannot stop the records of the same run.
 async function postStandingList(standing, state, { now, mailer, to }) {
   const items = failingItems(standing);
-  const alertedAt = state?.alertedAt || null;
-  // An empty list: the caller closes the open alert (closeStandingAlert), and
-  // the next failing check is new. A moving-window failure in this run does
-  // not matter here: it is a record.
-  if (!items.length) return { posted: false, clean: true, items: [], alertedAt: null };
-  if (nothingNew(state, items, now)) {
+  if (!items.length) {
+    // Every standing check ran and passed, so the open standing alert is
+    // fixed. A moving-window failure in this run does not matter here (it is
+    // a record), and retireIfClean names the standing key only, so it can
+    // never close a record. It never throws. If the state write after this
+    // fails, the state names an alert that is closed: feedHoldsAlert then
+    // makes the next failing run post.
+    await retireIfClean(STANDING_KEY);
+    return { posted: false, items: [], alertedAt: null, alertId: null };
+  }
+  const kept = { alertedAt: state?.alertedAt || null, alertId: state?.alertId || null };
+  if (nothingNew(state, items, now) && await feedHoldsAlert(state.alertId)) {
     logger.info(`[l2c-invariants] standing list: no new item since the last alert (${state.alertedAt}) — not posted again`);
-    return { posted: false, items, alertedAt };
+    return { posted: false, items, ...kept };
   }
   // What the state keeps when the feed did not get the alert: the checks that
   // failed before and still fail. A new item stays new for the next run.
   const known = new Set(state?.items || []);
-  const unposted = { items: items.filter((item) => known.has(item)), alertedAt };
+  const unposted = { items: items.filter((item) => known.has(item)), ...kept };
   const report = composeReport(standing, {
     now,
     title: 'lead-to-cash standing list',
     note: 'Standing list: one open alert. A new one replaces it when a check newly fails, or after a week. A clean run closes it.',
   });
   try {
-    const channel = await deliver({
+    const sent = await deliver({
       key: STANDING_KEY,
       subject: report.subject,
       html: report.html,
       text: report.text,
       link: '/admin/invoices',
-      fallOff: true, // retired by closeStandingAlert, or replaced by the next standing alert
+      fallOff: true, // retired by retireIfClean above, or replaced by the next standing alert
       supersedePrior: true,
       sendEmail: emailSender(mailer, to, report),
     });
     // After the fallback email the feed holds no standing alert: the state
     // stays, so the next run writes it.
-    return channel === 'in_app' ? { posted: true, items, alertedAt: now.toISOString() } : { posted: true, ...unposted };
+    return sent.channel === 'in_app' ? { posted: true, items, alertedAt: now.toISOString(), alertId: sent.id } : { posted: true, ...unposted };
   } catch (error) {
     return { posted: false, error, ...unposted };
   }
@@ -626,12 +660,14 @@ async function postRecords(moving, notRun, state, { now, mailer, to }) {
   // What the state keeps when the feed did not get the record: the findings
   // posted before that still stand. A new finding stays new for the next run.
   const unposted = { ...kept, ...Object.fromEntries(failing.map((r) => [r.key, current[r.key].filter((hash) => (before[r.key] || []).includes(hash))])) };
-  const report = composeReport(moving.map((r) => newFindingsFirst(r, before[r.key], now)), {
+  const shown = moving.map((r) => newFindingsOf(r, before[r.key], now));
+  const unchanged = moving.filter((r, i) => !shown[i]).map((r) => `${r.key} (${r.unavailable ? 'could not run' : r.count})`);
+  const report = composeReport(shown.filter(Boolean), {
     now,
-    note: 'Record: in each list, the findings that the last run did not have come first.',
+    note: `Record: new findings only.${unchanged.length ? ` Not in this record, no new finding (the earlier record stands): ${unchanged.join(', ')}.` : ''}`,
   });
   try {
-    const channel = await deliver({
+    const sent = await deliver({
       key: RECORD_KEY,
       subject: report.subject,
       html: report.html,
@@ -647,24 +683,10 @@ async function postRecords(moving, notRun, state, { now, mailer, to }) {
     // the next run writes its record. A closeout day cannot be written later
     // (the next run reads another day): there the email is the record, as it
     // was before this split.
-    return { posted: true, seen: channel === 'in_app' ? current : unposted };
+    return { posted: true, seen: sent.channel === 'in_app' ? current : unposted };
   } catch (error) {
     return { posted: false, error, seen: unposted };
   }
-}
-
-// Every standing check ran and passed, so the open standing alert is fixed.
-// It closes only after the run state says the list is empty: with a state
-// that still names a check, a close here would let that check come back
-// unseen on the next run. Not closed today = closed by the next clean run.
-// retireIfClean names the standing key only, so it can never close a record,
-// and it never throws.
-async function closeStandingAlert(stateSaved) {
-  if (!stateSaved) {
-    logger.warn('[l2c-invariants] the run state was not saved — the standing alert stays open until the next clean run');
-    return;
-  }
-  await retireIfClean(STANDING_KEY);
 }
 
 // In the app: both alerts, each tried by itself, then one write of the run state.
@@ -672,8 +694,7 @@ async function postInApp(results, context) {
   const state = await readRunState(context.now);
   const standing = await postStandingList(results.filter((r) => !isRecordResult(r)), state, context);
   const records = await postRecords(results.filter(isRecordResult), results.filter((r) => r.moving && !isRecordResult(r)), state, context);
-  const saved = await writeRunState(context.now, { items: standing.items, alertedAt: standing.alertedAt, seen: records.seen });
-  if (standing.clean) await closeStandingAlert(saved);
+  await writeRunState(context.now, { items: standing.items, alertedAt: standing.alertedAt, alertId: standing.alertId, seen: records.seen });
   return { posted: standing.posted || records.posted, errors: [standing.error, records.error].filter(Boolean) };
 }
 
@@ -696,7 +717,8 @@ async function sendWholeReport(report, { mailer, to }) {
 // yesterday only, and a clean later window does not prove older failures
 // (including license facts) were fixed.
 async function recordCleanRun(now) {
-  await closeStandingAlert(await writeRunState(now, { items: [], alertedAt: null, seen: {} }));
+  await retireIfClean(STANDING_KEY);
+  await writeRunState(now, { items: [], alertedAt: null, alertId: null, seen: {} });
 }
 
 /**
@@ -744,7 +766,7 @@ module.exports = {
   runLeadToCashInvariantSweep,
   DETECTORS,
   _private: {
-    runDetectors, composeReport, sentRecently, stampSendMarker, failingItems, nothingNew, itemHashes, hasNewItem, readRunState, writeRunState,
+    runDetectors, composeReport, sentRecently, stampSendMarker, failingItems, nothingNew, feedHoldsAlert, itemHashes, hasNewItem, readRunState, writeRunState,
     SEND_MARKER_KEY, RECORD_KEY, STANDING_KEY, RUN_STATE_KEY, REPEAT_AFTER_MS, STATE_FRESH_MS, SAMPLE_IDS, CLOSEOUT_VISIT_CAP,
   },
 };

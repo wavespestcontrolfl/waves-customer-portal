@@ -328,15 +328,20 @@ describe('two alerts, not one a day (in the app)', () => {
   const welcome = (ids, extra) => moving('new_plan_without_welcome', ids, extra);
   const posts = () => NotificationService.notifyAdmin.mock.calls.map(([, title, , options]) => ({ title, ...options }));
   const keysPosted = () => posts().map((post) => post.metadata.opsKey);
-  // The run state the sweep reads (undefined = no row). It also clears the 20 h send marker.
+  // The newest standing alert in the feed (null = none).
+  const setFeed = (alert) => { mockTables.notifications = mockChain({ first: alert }); };
+  // The run state the sweep reads (undefined = no row), and the feed that goes with it: the standing alert the
+  // state names is the newest one and is open. It also clears the 20 h send marker.
   const setState = (state) => {
     mockTables.ops_email_send_state = mockChain({ first: null });
     mockTables.system_settings = mockChain({ first: state === undefined ? null : { value: JSON.stringify(state) } });
+    setFeed(state?.alertId ? { id: state.alertId, metadata: { opsKey: STANDING_KEY } } : null);
   };
   // The state yesterday's run wrote: the failing standing checks, how long ago the standing alert posted, the findings.
   const lastRun = (items, alertedAgoMs, seen = {}) => setState(items === undefined ? undefined : {
     runAt: new Date(NOW.getTime() - DAY).toISOString(),
-    items, alertedAt: alertedAgoMs == null ? null : new Date(NOW.getTime() - alertedAgoMs).toISOString(), seen,
+    items, alertedAt: alertedAgoMs == null ? null : new Date(NOW.getTime() - alertedAgoMs).toISOString(),
+    alertId: alertedAgoMs == null ? null : 'alert-1', seen,
   });
   const savedState = () => {
     const call = mockTables.system_settings.insert.mock.calls.at(-1);
@@ -393,7 +398,7 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(mockTables.notifications.whereRaw).toHaveBeenCalledWith("metadata->>'opsKey' = ?", [STANDING_KEY]);
       expect(mockTables.notifications.whereRaw).not.toHaveBeenCalledWith("metadata->>'opsKey' = ?", [RECORD_KEY]);
       expect(mockTables.notifications.update).toHaveBeenCalledTimes(1);
-      expect(savedState()).toEqual({ key: RUN_STATE_KEY, runAt: NOW.toISOString(), items: ['a'], alertedAt: NOW.toISOString(), seen: {} });
+      expect(savedState()).toEqual({ key: RUN_STATE_KEY, runAt: NOW.toISOString(), items: ['a'], alertedAt: NOW.toISOString(), alertId: 'row-1', seen: {} });
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
     });
 
@@ -403,7 +408,7 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(posts()).toHaveLength(0);
       expect(resolve).not.toHaveBeenCalled(); // the list still stands: nothing is closed
       expect(mockTables.ops_email_send_state.insert).not.toHaveBeenCalled();
-      expect(savedState()).toEqual({ key: RUN_STATE_KEY, runAt: NOW.toISOString(), items: ['b'], alertedAt: new Date(NOW.getTime() - DAY).toISOString(), seen: {} });
+      expect(savedState()).toEqual({ key: RUN_STATE_KEY, runAt: NOW.toISOString(), items: ['b'], alertedAt: new Date(NOW.getTime() - DAY).toISOString(), alertId: 'alert-1', seen: {} });
     });
 
     test('a check that was not failing on the last run posts a new alert', async () => {
@@ -454,12 +459,12 @@ describe('two alerts, not one a day (in the app)', () => {
     test('only the last daily run counts: a state an older run wrote never hides a finding', async () => {
       // Yesterday's run did not save its state (a failed write, a missed run, a day on the email path). What is left
       // says `b` failed and was posted two days ago. It no longer says what the feed shows, so the alert posts.
-      const written = (agoMs) => setState({ runAt: new Date(NOW.getTime() - agoMs).toISOString(), items: ['b'], alertedAt: new Date(NOW.getTime() - agoMs).toISOString(), seen: {} });
+      const written = (agoMs) => setState({ runAt: new Date(NOW.getTime() - agoMs).toISOString(), items: ['b'], alertedAt: new Date(NOW.getTime() - agoMs).toISOString(), alertId: 'alert-1', seen: {} });
       written(2 * DAY);
       expect(await sweep([fails('b')])).toMatchObject({ sent: true });
       written(25 * 60 * 60 * 1000); // a clock change: 25 hours between two daily runs
       expect(await sweep([fails('b')])).toMatchObject({ skipped: 'no_new_item' });
-      setState({ items: ['b'], alertedAt: new Date(NOW.getTime() - DAY).toISOString(), seen: {} }); // no run time at all
+      setState({ items: ['b'], alertedAt: new Date(NOW.getTime() - DAY).toISOString(), alertId: 'alert-1', seen: {} }); // no run time at all
       expect(await sweep([fails('b')])).toMatchObject({ sent: true });
       expect(STATE_FRESH_MS).toBeGreaterThan(25 * 60 * 60 * 1000);
       expect(STATE_FRESH_MS).toBeLessThan(2 * DAY - 60 * 60 * 1000);
@@ -475,27 +480,39 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(await sweep([ok('a'), ok('b')])).toEqual({ skipped: 'clean', results: { a: 0, b: 0 } });
       expect(resolve).toHaveBeenCalledTimes(1);
       expect(resolve).toHaveBeenCalledWith({ key: STANDING_KEY, source: null, resolvedBy: `${STANDING_KEY}:clean-run` });
-      expect(savedState()).toEqual({ key: RUN_STATE_KEY, runAt: NOW.toISOString(), items: [], alertedAt: null, seen: {} });
+      expect(savedState()).toEqual({ key: RUN_STATE_KEY, runAt: NOW.toISOString(), items: [], alertedAt: null, alertId: null, seen: {} });
       expect(posts()).toHaveLength(0);
     });
 
-    test('the standing alert closes only after the run state says the list is empty', async () => {
-      // If the close went first and the state write failed, the state would still name `b`: the same check failing on
-      // the next run would read as "not new" while its only alert is closed.
-      const stateWriteFails = () => { mockTables.system_settings.merge = jest.fn(async () => { throw new Error('deadlock detected'); }); };
+    test('the run state counts only while the feed holds the alert it names', async () => {
+      // The alert row and the run state are two writes. When the state write fails, the state is about an alert that
+      // was replaced or closed, and must not keep a failing check quiet.
+      const unchanged = () => sweep([fails('b')]);
       lastRun(['b'], DAY);
-      stateWriteFails();
-      expect(await sweep([ok('a'), ok('b')])).toEqual({ skipped: 'clean', results: { a: 0, b: 0 } });
-      expect(resolve).not.toHaveBeenCalled();
-      // The same with a moving-window failure beside the clean standing checks.
+      expect(await unchanged()).toMatchObject({ skipped: 'no_new_item' }); // the alert the state names is the newest, open
+      // A newer standing alert replaced it (and that run's state write failed).
       lastRun(['b'], DAY);
-      stateWriteFails();
-      expect(await sweep([ok('b'), welcome(['c1'])])).toMatchObject({ sent: true });
-      expect(resolve).not.toHaveBeenCalled();
-      // The next clean run saves the state and closes the alert.
+      setFeed({ id: 'alert-2', metadata: { opsKey: STANDING_KEY } });
+      expect(await unchanged()).toMatchObject({ sent: true });
+      // A clean run closed it (and that run's state write failed): the same check failing again must post.
       lastRun(['b'], DAY);
-      expect(await sweep([ok('a'), ok('b')])).toMatchObject({ skipped: 'clean' });
-      expect(resolve).toHaveBeenCalledTimes(1);
+      setFeed({ id: 'alert-1', metadata: JSON.stringify({ opsKey: STANDING_KEY, resolved: true, resolvedBy: `${STANDING_KEY}:clean-run` }) });
+      expect(await unchanged()).toMatchObject({ sent: true });
+      // The feed holds no standing alert, or cannot be read.
+      lastRun(['b'], DAY);
+      setFeed(null);
+      expect(await unchanged()).toMatchObject({ sent: true });
+      lastRun(['b'], DAY);
+      mockTables.notifications.first = jest.fn(async () => { throw new Error('connection terminated'); });
+      expect(await unchanged()).toMatchObject({ sent: true });
+      expect(posts()).toHaveLength(4);
+      // A person closed the alert: that is a decision. It stays quiet until the weekly alert.
+      lastRun(['b'], DAY);
+      setFeed({ id: 'alert-1', done_at: NOW.toISOString(), metadata: { opsKey: STANDING_KEY } });
+      expect(await unchanged()).toMatchObject({ skipped: 'no_new_item' });
+      // The read asks for the newest row of the standing key only.
+      expect(mockTables.notifications.whereRaw).toHaveBeenCalledWith("metadata->>'opsKey' = ?", [STANDING_KEY]);
+      expect(mockTables.notifications.orderBy).toHaveBeenCalledWith('created_at', 'desc');
     });
 
     test('the feed write fails and the fallback email goes out: the state stays, so the next run writes the alert', async () => {
@@ -585,27 +602,53 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(posts()).toHaveLength(3);
     });
 
-    test('every finding counts, and the record shows the new one first', async () => {
+    test('every finding counts, and a record shows the new findings only', async () => {
       const many = (length, last) => [...Array.from({ length }, (_, i) => `c${String(i).padStart(4, '0')}`), last];
       lastRun([], DAY);
       await sweep([welcome(many(SAMPLE_IDS, 'zz-first'))]);
       // The first record: 26 findings, all new. Every one is listed, so none is marked as seen without being shown.
+      expect(posts()[0].detail).toContain('FAIL new_plan_without_welcome — 26:');
       expect(posts()[0].detail).toContain(`c${String(SAMPLE_IDS - 1).padStart(4, '0')}, zz-first`);
       expect(posts()[0].detail).not.toContain('more');
       carry();
       // Same count, same first SAMPLE_IDS ids: only the finding past the display sample changed.
-      expect(await sweep([welcome(many(SAMPLE_IDS, 'zz-second'))], after(1))).toMatchObject({ sent: true });
+      expect(await sweep([welcome(many(SAMPLE_IDS, 'zz-second'))], after(1))).toMatchObject({ sent: true, violations: 26 });
       expect(posts()).toHaveLength(2);
-      expect(posts()[1].detail).toContain('     zz-second, c0000, c0001');
-      expect(posts()[1].detail).toContain('… +1 more');
-      expect(posts()[1].detail).toContain('Record: in each list, the findings that the last run did not have come first.');
+      expect(posts()[1].metadata.subject).toMatch(/^FIX: lead-to-cash invariants — 1 violation across 1 check \(/);
+      expect(posts()[1].detail).toContain('FAIL new_plan_without_welcome — 1:');
+      expect(posts()[1].detail).toContain(`postedBefore=${SAMPLE_IDS}`);
+      expect(posts()[1].detail).toContain('\n     zz-second\n');
+      expect(posts()[1].detail).not.toContain('c0000');
+      expect(posts()[1].detail).toContain('Record: new findings only.');
       // No cap on the findings the state keeps: a same-count swap at the far end of a long list is seen too.
       carry();
       await sweep([welcome(many(900, 'zz-first'))], after(2));
       carry();
       expect(await sweep([welcome(many(900, 'zz-second'))], after(3))).toMatchObject({ sent: true });
-      expect(posts()[3].detail).toContain('     zz-second, c0000');
+      expect(posts()[3].detail).toContain('\n     zz-second\n');
+      expect(posts()[3].detail).toContain('postedBefore=900');
       expect(savedState().seen.new_plan_without_welcome).toHaveLength(901);
+    });
+
+    test('a record names what made it: a check with nothing new is not in it', async () => {
+      lastRun([], DAY);
+      await sweep([welcome(['c1', 'c2']), closeout([])]);
+      carry();
+      // The day after: a closeout failure. The two welcome findings stand unchanged.
+      expect(await sweep([welcome(['c1', 'c2']), closeout(['v9 [license_current]'])], after(1))).toMatchObject({ sent: true, violations: 3 });
+      const record = posts()[1];
+      expect(record.metadata.subject).toMatch(/^FIX: lead-to-cash invariants — 1 violation across 1 check \(/);
+      expect(record.detail).toContain('FAIL closeout_failed_facts — 1:');
+      expect(record.detail).toContain('v9 [license_current]');
+      expect(record.detail).not.toContain('FAIL new_plan_without_welcome');
+      expect(record.detail).not.toContain('OK   new_plan_without_welcome'); // it still fails: it must not read as clean
+      expect(record.detail).not.toContain('c1');
+      expect(record.detail).toContain('Record: new findings only. Not in this record, no new finding (the earlier record stands): new_plan_without_welcome (2).');
+      // A list that cannot name its new findings (the check returned a part of it) shows as it stands.
+      carry();
+      await sweep([welcome(['c1'], { out: { count: 40, truncated: true } })], after(2));
+      expect(posts()[2].detail).toContain('FAIL new_plan_without_welcome — 40:');
+      expect(posts()[2].detail).toContain('c1 … +39 more');
     });
 
     test('the closeout check reads a new day on each run: the same failure on two days is two records', async () => {
@@ -651,7 +694,8 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(keysPosted()).toEqual([RECORD_KEY, STANDING_KEY]);
       // A finding that arrived while it was down is new.
       expect(await daily(7, 7, [ok('a'), welcome(['c1', 'c2'])])).toEqual(['sent']);
-      expect(posts()[2].detail).toContain('     c2, c1');
+      expect(posts()[2].detail).toContain('FAIL new_plan_without_welcome — 1:');
+      expect(posts()[2].detail).toContain('\n     c2\n');
     });
 
     test('a ghost lane is one record while it stands, whatever its visit count; cleared and back = a new record', async () => {
@@ -701,7 +745,7 @@ describe('two alerts, not one a day (in the app)', () => {
       lastRun(['b'], DAY);
       sendFails();
       expect(await sweep([fails('a'), fails('b')])).toEqual({ error: 'send_failed', results: { a: 1, b: 1 } });
-      expect(savedState()).toEqual({ key: RUN_STATE_KEY, runAt: NOW.toISOString(), items: ['b'], alertedAt: new Date(NOW.getTime() - DAY).toISOString(), seen: {} });
+      expect(savedState()).toEqual({ key: RUN_STATE_KEY, runAt: NOW.toISOString(), items: ['b'], alertedAt: new Date(NOW.getTime() - DAY).toISOString(), alertId: 'alert-1', seen: {} });
       expect(mockTables.ops_email_send_state.insert).not.toHaveBeenCalled();
       carry();
       expect(await sweep([fails('a'), fails('b')])).toMatchObject({ sent: true });
