@@ -785,6 +785,7 @@ describe('buildReportCrossSell', () => {
       const { lineNeedsReviewBeforeExactPrice } = require('../services/estimator-engine/draft-builder');
       const { engineResultNeedsReview } = require('../services/cancellation-resolution/restart');
       const check = (data) => estimateRequiresFieldVerification(data, { replaysLawnSize: false });
+      const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
       // A vision turf figure the lookup clamped to the parcel: it keeps its
       // MEDIUM grade and its basis, and carries the clamp as a flag.
       const capped = { estimatedTurfSf: 2500, turfCappedToParcel: true };
@@ -837,6 +838,12 @@ describe('buildReportCrossSell', () => {
           // that left the slim one behind): the full result is current and
           // keeps the list, so the read is exact again (pre-push r8).
           expect([name, check(quote(services, turf).withResult)]).toEqual([name, engineResultNeedsReview(full)]);
+          // A staff save: the mapped result and its raw twin. The mapped
+          // result alone reads as the raw one does, so the twin behind it
+          // holds nothing the check needs (pre-push r9).
+          const mapped = mapV1ToLegacyShape(full);
+          expect([name, check({ engineInputs: stored.engineInput, result: mapped })]).toEqual([name, engineResultNeedsReview(full)]);
+          expect([name, check({ engineInputs: stored.engineInput, result: mapped, engineResult: full })]).toEqual([name, engineResultNeedsReview(full)]);
           graded[name] = engineResultNeedsReview(full);
         }
       }
@@ -877,42 +884,68 @@ describe('buildReportCrossSell', () => {
       expect(check({ result: { fieldVerify: [], lineItems: [{ service: 'lawn_care', turfFlags: ['FIELD_VERIFY_TURF_SQFT'] }] } })).toBe(true);
       expect(check({ result: { fieldVerify: [], lineItems: [{ service: 'lawn_care', turfFlags: [] }] } })).toBe(false);
 
-      // Which result is current is storedEstimateContainer's rule, and the
-      // slim rule is about the current one (pre-push r8).
+      // Which result is the estimate's price is storedEstimateContainer's
+      // rule. When it picks a `result` that keeps the engine's list, the
+      // `engineResult` behind it is not read (pre-push r8, r9).
       const pricedSlim = { summary: {}, lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 45, annual: 540 }] };
       const pricedFull = { fieldVerify: [], lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 45, annual: 540 }] };
       const { storedEstimateContainer } = require('../services/estimate-result-container');
-      const behind = (result, slim = pricedSlim, extra = {}) => ({ inputs, result, engineResult: slim, ...extra });
-      // A current `result` that keeps the list: the slim one behind it is
-      // not a marker; a `result` with no list cannot stand in for it.
+      const behind = (result, other = pricedSlim, extra = {}) => ({ inputs, result, engineResult: other, ...extra });
       expect(storedEstimateContainer(behind(pricedFull))).toBe(pricedFull);
+      // A slim result behind it is not a marker; a `result` with no list
+      // cannot stand in for it.
       expect(check(behind(pricedFull))).toBe(false);
       expect(check(behind({ lineItems: pricedFull.lineItems }))).toBe(true);
       expect(check(behind({ fieldVerify: 'none', lineItems: pricedFull.lineItems }))).toBe(true);
-      // A marker in the current result still counts, and so does a marker
-      // left on the slim rows.
-      expect(check(behind({ fieldVerify: ['TURF_CAPPED_TO_PARCEL'], lineItems: pricedFull.lineItems }))).toBe(true);
-      expect(check(behind(pricedFull, { summary: {}, lineItems: [{ ...pricedSlim.lineItems[0], pricingConfidence: 'LOW' }] }))).toBe(true);
-      // The slim one's summary is read as a result with a list: its turf
-      // flags count only with a replayed lawn size.
-      const slimWithFlags = { ...pricedSlim, property: { turfFlags: ['FIELD_VERIFY_TURF_SQFT'] } };
-      expect(check(behind(pricedFull, slimWithFlags))).toBe(false);
-      expect(estimateRequiresFieldVerification(behind(pricedFull, slimWithFlags), { replaysLawnSize: true })).toBe(true);
-      expect(check({ inputs, engineResult: slimWithFlags })).toBe(true);
-      // A `result` that prices nothing beside a priced slim result is not
-      // current, so the slim one counts. After a server reprice (the row's
-      // authority, or the one frozen in the blob at the price lock) the
-      // `result` is current even when it prices nothing.
+      // Nothing behind it is read: a marked row, a verify list, turf flags,
+      // with a replayed lawn size too.
+      const stale = [
+        { summary: {}, lineItems: [{ ...pricedSlim.lineItems[0], pricingConfidence: 'LOW' }] },
+        { fieldVerify: ['TURF_CAPPED_TO_PARCEL'], lineItems: pricedFull.lineItems },
+        { fieldVerify: [], lineItems: [{ service: 'tree_shrub', treeCountSource: 'default_zero' }] },
+        { ...pricedSlim, property: { turfFlags: ['FIELD_VERIFY_TURF_SQFT'] } },
+      ];
+      for (const [at, other] of stale.entries()) {
+        expect([at, check({ inputs, engineResult: other })]).toEqual([at, true]);
+        expect([at, check(behind(pricedFull, other))]).toEqual([at, false]);
+        expect([at, estimateRequiresFieldVerification(behind(pricedFull, other), { replaysLawnSize: true })]).toEqual([at, false]);
+      }
+      // A marker in the current result counts, whatever sits behind it.
+      for (const other of [pricedSlim, pricedFull, ...stale]) {
+        expect(check(behind({ fieldVerify: ['TURF_CAPPED_TO_PARCEL'], lineItems: pricedFull.lineItems }, other))).toBe(true);
+        expect(check(behind({ fieldVerify: [], lineItems: [{ ...pricedFull.lineItems[0], requiresManualReview: true }] }, other))).toBe(true);
+      }
+      // The r9 audit's case, with the real engine and mapper: a Tree & Shrub
+      // quote priced on a default of zero trees, then repriced by staff with
+      // a counted figure. The earlier raw result is left behind.
+      const treeRequest = (treeShrub) => ({ ...inputs, propertyType: 'Single Family', estimatedTurfSf: 2500, features: {}, services: { treeShrub } });
+      const guessedTrees = generateEstimate(treeRequest({}));
+      const countedTrees = generateEstimate(treeRequest({ treeCount: 4 }));
+      expect([engineResultNeedsReview(guessedTrees), engineResultNeedsReview(countedTrees)]).toEqual([true, false]);
+      const corrected = { engineInputs: treeRequest({ treeCount: 4 }), result: mapV1ToLegacyShape(countedTrees), engineResult: guessedTrees };
+      expect(storedEstimateContainer(corrected, { pricingAuthority: 'SERVER' })).toBe(corrected.result);
+      expect(estimateRequiresFieldVerification(corrected, { replaysLawnSize: false, pricingAuthority: 'SERVER' })).toBe(false);
+      // The other way round: the current result is the guessed one.
+      const regressed = { engineInputs: treeRequest({}), result: mapV1ToLegacyShape(guessedTrees), engineResult: countedTrees };
+      expect(estimateRequiresFieldVerification(regressed, { replaysLawnSize: false, pricingAuthority: 'SERVER' })).toBe(true);
+      // A `result` that prices nothing beside a priced `engineResult` is not
+      // current: both are read, so the slim one counts and so does a marker
+      // in that `result`. After a server reprice (the row's authority, or the
+      // one frozen in the blob at the price lock) the `result` is current
+      // even when it prices nothing.
       const pricesNothing = { fieldVerify: [], lineItems: [] };
       expect(storedEstimateContainer(behind(pricesNothing))).toBe(pricedSlim);
       expect(check(behind(pricesNothing))).toBe(true);
+      expect(check(behind(pricesNothing, pricedFull))).toBe(false);
+      expect(check(behind({ ...pricesNothing, quoteRequiredItems: [{ service: 'bed_bug', quoteRequired: true }] }, pricedFull))).toBe(true);
       expect(estimateRequiresFieldVerification(behind(pricesNothing), { replaysLawnSize: false, pricingAuthority: 'SERVER' })).toBe(false);
       expect(estimateRequiresFieldVerification(behind(pricesNothing), { replaysLawnSize: false, pricingAuthority: 'LOCKED' })).toBe(true);
       expect(check(behind(pricesNothing, pricedSlim, { pricingAuthorityAtLock: 'SERVER' }))).toBe(false);
-      // Only the root's own pair has a current one: a slim result deeper in
-      // the blob counts, beside any `result`.
+      // Only the root's own pair has a current one: a slim result anywhere
+      // else counts, under the current result too.
       expect(check({ inputs, result: pricedFull, estimatorEngine: { result: pricedFull, engineResult: pricedSlim } })).toBe(true);
-      expect(check({ inputs, result: pricedFull, engineResult: { fieldVerify: [], engineResult: pricedSlim } })).toBe(true);
+      expect(check({ inputs, result: { ...pricedFull, engineResult: pricedSlim }, engineResult: pricedFull })).toBe(true);
+      expect(check({ inputs, result: { ...pricedFull, engineResult: pricedFull }, engineResult: pricedSlim })).toBe(false);
 
       // Through the loader: the wizard's request holds no lawn size to replay.
       const { loadEstimateSeed } = _private;
