@@ -81,7 +81,7 @@ describe('source contracts', () => {
     expect(source).toMatch(/async function deliver\(s, claim, stillHeld\) \{\s*await runCloseout\(s, stillHeld\);[\s\S]{0,300}await runEmailLeg\(s, claim, stillHeld\);[\s\S]{0,200}await runTextLeg\(s, claim, stillHeld\)/);
     // The claim is taken before anything else, and the closeout is the paid trigger.
     expect(source).toMatch(/async function acquireClaim\(s, stillHeld\) \{[\s\S]{0,900}claimReceiptJobForOperatorSend\(s\.id, \{ sawUnsent: s\.sawUnsent \?\? !s\.invoice\.receipt_sent_at, requirePaid: true \}\)/);
-    expect(source).toMatch(/async function runCloseout\(s, stillHeld\) \{[\s\S]{0,400}closeOutVisitForIssuedInvoice\(\{ invoiceId: s\.id, trigger: 'paid', actorTechnicianId: s\.actorTechnicianId \}\)/);
+    expect(source).toMatch(/async function runCloseout\(s, stillHeld\) \{[\s\S]{0,400}closeOutVisitForIssuedInvoice\(\{ invoiceId: s\.id, trigger: 'paid', actorTechnicianId: s\.actorTechnicianId, recordHold: false \}\)/);
   });
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
@@ -145,7 +145,7 @@ describe('source contracts', () => {
     expect(rowsAt).toBeGreaterThan(gateAt);
     const invoices = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
     const batch = invoices.slice(invoices.indexOf("router.post('/batch/send-receipts'"), invoices.indexOf("router.post('/:id/send-receipt'"));
-    const retryAt = batch.indexOf("closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null })");
+    const retryAt = batch.indexOf("closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null, recordHold: false })");
     expect(retryAt).toBeGreaterThan(batch.indexOf("skipped.push({ invoiceId, reason: `status=${invoice.status}` })"));
     expect(retryAt).toBeLessThan(batch.indexOf('sendReceiptEmail(invoiceId)'));
   });
@@ -653,16 +653,20 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
   // Round 9: the same after the visit's day, where the next day's sweep
   // closes a held visit on its payment: a payment undone since the sweep
   // read it (here back to an unsent draft) leaves the visit open too.
-  test('report after pay: the locked recheck refuses a close on a payment undone since the closeout read it, on the visit day and after it; gate off it closes as before', async () => {
+  // Round 11: a payment undone and made again is gone as well. The locked
+  // row is settled, but by another payment than the one the closeout loaded
+  // (`paidAtMs`): refused, and the closeout of the payment the row carries
+  // closes the visit.
+  test('report after pay: the locked recheck refuses a close on a payment undone, or replaced by another, since the closeout read it, on the visit day and after it; gate off it closes as before', async () => {
     const saved = process.env.GATE_REPORT_AFTER_PAY;
     process.env.GATE_REPORT_AFTER_PAY = 'true';
     try {
       const { completeScheduledService } = require('../services/complete-scheduled-service');
-      const request = (fx) => completeScheduledService({
+      const request = (fx, carried = {}) => completeScheduledService({
         serviceId: fx.serviceId, idempotencyKey: randomUUID(),
         body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true },
         actor: { techRole: 'admin', technicianId: null, technician: null },
-        issuedInvoiceCloseout: { invoiceId: fx.invoiceId, trigger: 'paid' },
+        issuedInvoiceCloseout: { invoiceId: fx.invoiceId, trigger: 'paid', ...carried },
       });
       const sameDay = await fixture({ serviceType: 'Fixture Quarterly Pest Control Service', day: etDateString() });
       // A second bill keeps the visit unheld, so the payment's closeout goes on to the completion; the payment is then undone.
@@ -675,11 +679,20 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
       const pastDay = await fixture({ serviceType: 'Fixture Quarterly Pest Control Service', customer: { phone: '+12025550124' } });
       await mockPg('scheduled_services').where({ id: pastDay.serviceId }).update({ status: 'on_site', arrived_at: new Date(Date.now() - 86400000) });
       await mockPg('invoices').where({ id: pastDay.invoiceId }).update({ status: 'draft', sent_at: null });
-      for (const fx of [sameDay, pastDay]) {
-        expect(await request(fx)).toMatchObject({ status: 409, body: { code: 'issued_visit_payment_reversed' } });
+      // Yesterday's arrived visit again, its payment undone and made again since the closeout loaded the invoice.
+      const repaid = await fixture({ serviceType: 'Fixture Quarterly Pest Control Service', customer: { phone: '+12025550125' } });
+      await mockPg('scheduled_services').where({ id: repaid.serviceId }).update({ status: 'on_site', arrived_at: new Date(Date.now() - 86400000) });
+      const loadedPaidAt = new Date(Date.now() - 7200000);
+      const lockedPaidAt = new Date(Date.now() - 3600000);
+      await mockPg('invoices').where({ id: repaid.invoiceId }).update({ status: 'paid', paid_at: lockedPaidAt });
+      for (const [fx, carried] of [[sameDay, {}], [pastDay, {}], [repaid, { paidAtMs: loadedPaidAt.getTime() }]]) {
+        expect(await request(fx, carried)).toMatchObject({ status: 409, body: { code: 'issued_visit_payment_reversed' } });
         expect((await mockPg('scheduled_services').where({ id: fx.serviceId }).first()).status).toBe('on_site');
         expect(await mockPg('service_records').where({ scheduled_service_id: fx.serviceId })).toHaveLength(0);
       }
+      // The closeout of the payment the row carries closes the visit.
+      expect(await request(repaid, { paidAtMs: lockedPaidAt.getTime() })).toMatchObject({ status: 200, body: { success: true } });
+      expect((await mockPg('scheduled_services').where({ id: repaid.serviceId }).first()).status).toBe('completed');
       // Gate off: the same closes complete both visits, as before the gate.
       delete process.env.GATE_REPORT_AFTER_PAY;
       for (const fx of [sameDay, pastDay]) {

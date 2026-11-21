@@ -15,10 +15,7 @@
  *           settlement builds the invoice notes from the locked row and the paid UPDATE writes no other unpinned column;
  *         - the ET day is not the day the card showed (midnight passed), or the visit the card said the payment would complete has
  *           been edited since (edit time, scheduled date, service type) or is gone, or a technician started its job timer since (the
- *           closeout's own visitJobTimerRunning: a running timer leaves the visit open, so the promised closeout would not happen;
- *           not for a close deferred past the visit's day by GATE_REPORT_AFTER_PAY, which the retry sweep runs and checks then), or
- *           a bill was added on that visit or voided since, so GATE_REPORT_AFTER_PAY would hold a visit the card said closes now,
- *           or close one the card said stays open today;
+ *           closeout's own visitJobTimerRunning: a running timer leaves the visit open, so the promised closeout would not happen);
  *         - an annual-prepay term resolves to the invoice (its tag, its visit's term as the anchor, or a term whose
  *           prepay_invoice_id is this invoice): those settle a prepaid term and stay on the Invoices page.
  *       A lookup that throws aborts the settlement: nothing is recorded (fail closed).
@@ -27,7 +24,6 @@
  *       expectedAmountCents, which for a part is the card's pinned amount owed (never the part): it must equal owedCentsSeen.
  *       The function also carries `closeoutTarget` (the visit the card said the payment would complete, or 'none') and `closeoutVisit`
  *       (that visit's facts as the card showed them): the settlement pins both and the closeout re-asserts the facts under the visit's lock.
- *       `closeoutDeferred` (GATE_REPORT_AFTER_PAY): the card said the visit stays open today; the settlement records the hold.
  */
 const { etDateString } = require('../../utils/datetime-et');
 
@@ -41,7 +37,6 @@ const DRIFT_TEXT = 'The invoice changed after the confirmation card was shown �
 const DATE_TEXT = 'The day changed after the confirmation card was shown, so the payment would be recorded as of a different day — nothing was recorded';
 const VISIT_TEXT = 'The linked visit changed after the confirmation card was shown — nothing was recorded';
 const TIMER_TEXT = 'A technician started the visit timer since this card; try again after the visit — nothing was recorded';
-const BILLS_TEXT = 'A bill on the linked visit was added or voided after the confirmation card was shown, so the visit would not close as the card said — nothing was recorded';
 const ANNUAL_TEXT = 'This is an annual-plan invoice — nothing was recorded. Record the payment from the Invoices page.';
 
 const drift = (message) => Object.assign(new Error(message), { statusCode: 409, isOperational: true, drift: true });
@@ -88,31 +83,15 @@ function settlementFenceFor(pin) {
     // The ledger row and the invoice note are stamped with the ET day the settlement runs on: never a different day than the card's.
     if (pin.paymentDate !== etDateString()) throw drift(DATE_TEXT);
     if (pin.closeout && !(await closeoutVisitUnchanged(database, pin.closeout))) throw drift(VISIT_TEXT);
-    // GATE_REPORT_AFTER_PAY (pre-push audit round 5): the card's same-day verdict, asked again on this handle. A bill added on the
-    // visit since the card would close it at once, though the card said it stays open today; one voided since would hold it, though the
-    // card said it closes now (reportAfterPayWouldHold, the question the payment's closeout asks again when it records the hold; false
-    // with the gate off).
-    if (pin.closeout && Boolean(pin.closeout.deferred) !== await require('../invoice-issued-closeout').reportAfterPayWouldHold(database, {
-      visit: { id: pin.closeout.visitId, status: pin.closeout.status, scheduled_date: pin.closeout.date }, invoice: row, today: etDateString(),
-    })) throw drift(BILLS_TEXT);
     // A job timer started after the card leaves no mark on the visit row, yet the closeout leaves a visit with a running timer open: the
-    // promised closeout would silently not happen. The closeout's own predicate, on the same handle. Not for a deferred close
-    // (GATE_REPORT_AFTER_PAY): it runs after the visit's day, and the retry sweep checks the timer then.
-    if (pin.closeout && !pin.closeout.deferred && await require('../invoice-issued-closeout').visitJobTimerRunning(database, pin.closeout.visitId)) throw drift(TIMER_TEXT);
+    // promised closeout would silently not happen. The closeout's own predicate, on the same handle.
+    if (pin.closeout && await require('../invoice-issued-closeout').visitJobTimerRunning(database, pin.closeout.visitId)) throw drift(TIMER_TEXT);
     if (await annualTermExists(database, row)) throw drift(ANNUAL_TEXT);
     return true;
   };
   fence.closeoutTarget = pin.closeoutTarget;
-  // GATE_REPORT_AFTER_PAY (pre-push audit round 8): the card said the visit stays open today, and the run under the lock asked that
-  // verdict again, so the settlement records the hold in its own transaction (invoice-manual-payment.js).
-  fence.closeoutDeferred = Boolean(pin.closeout?.deferred);
-  // The carded visit's facts, pinned with the target and re-asserted by the closeout under the visit's lock. A deferred close pins no
-  // edit time: the visit stays with its technician for the rest of its day, so an edit then is expected. A new date, service type or
-  // status still leaves it open. It is marked `deferred`: only such a pin lets the payment's closeout hold the visit, so a close-now card
-  // stays close-now when a bill is voided after the payment (invoice-issued-closeout.js approvalForbidsHold; pre-push audit rounds 9-10).
-  fence.closeoutVisit = pin.closeout
-    ? { serviceType: pin.closeout.serviceType, date: pin.closeout.date, status: pin.closeout.status, ...(pin.closeout.deferred ? { deferred: true } : { updatedAtMs: pin.closeout.updatedAtMs }) }
-    : null;
+  // The carded visit's facts, pinned with the target and re-asserted by the closeout under the visit's lock.
+  fence.closeoutVisit = pin.closeout ? { serviceType: pin.closeout.serviceType, date: pin.closeout.date, status: pin.closeout.status, updatedAtMs: pin.closeout.updatedAtMs } : null;
   return fence;
 }
 

@@ -233,11 +233,12 @@ async function invoiceRefusal(invoice, dueCents, amountCents, { part = false } =
   return null;
 }
 
-// The visit the paid closeout would complete (null = none); a probe that cannot read refuses (fail closed). With
-// GATE_REPORT_AFTER_PAY on, a visit paid on its own day is named too, marked `deferred`: the card discloses and pins its later close.
+// The visit the paid closeout would complete (null = none); a probe that cannot read refuses (fail closed).
+// noHold (GATE_REPORT_AFTER_PAY): the payment this card records carries the card's pin, and a pinned payment never holds its visit
+// for the report, so the probe names the visit that payment closes now, as with the gate off.
 async function closeoutProbe(invoice) {
   try {
-    return { closeout: await require('../invoice-issued-closeout').issuedCloseoutTarget(invoice, { trigger: 'paid', includeDeferred: true }) };
+    return { closeout: await require('../invoice-issued-closeout').issuedCloseoutTarget(invoice, { trigger: 'paid', noHold: true }) };
   } catch {
     return { error: refusal('The bar could not check whether this payment would also complete a linked visit, so it was not offered. Record the payment from the Invoices page.', 'effects_check_failed', { invoice_id: invoice.id }) };
   }
@@ -280,12 +281,7 @@ function planEffects({ invoice, dueCents, method, reference, note, closeout }) {
       : []),
     { kind: 'operational', text: 'A billing pause on the account that was waiting for a payment can clear.' },
   ];
-  if (closeout?.deferred) {
-    // GATE_REPORT_AFTER_PAY (owner 2026-11-19): paid on its own day, the visit stays with its technician, who completes it. The
-    // daily retry sweep completes it once that day has passed, and only this visit: the payment pins it. The words promise no report:
-    // a visit whose completion sends none (internal-only, delivery off) is held the same way (pre-push audit P1).
-    effects.push({ kind: 'operational', text: `The linked visit (${closeout.serviceType || 'visit'} on ${closeout.date}) stays open today for its technician to complete. If it is still open after today, the daily closeout check completes it quietly: creates its service record; no completion text, report, review request or charge.` });
-  } else if (closeout) {
+  if (closeout) {
     effects.push({ kind: 'operational', text: closeout.resuming
       ? `Also finishes a closeout already started for the linked visit (${closeout.serviceType || 'visit'} on ${closeout.date}); no completion text, report, review request or charge.`
       : `Also completes the linked visit (${closeout.serviceType || 'visit'} on ${closeout.date}) quietly: creates its service record; no completion text, report, review request or charge.` });
@@ -300,7 +296,7 @@ function planEffects({ invoice, dueCents, method, reference, note, closeout }) {
 // Everything the card approves: a change in any of it is drift.
 // The visit the closeout would complete, as the card read it (null = none).
 const closeoutPin = (closeout) => (closeout
-  ? { visitId: closeout.visitId, serviceType: closeout.serviceType || null, date: closeout.date || null, status: closeout.status ?? null, updatedAtMs: msOf(closeout.updatedAt), resuming: closeout.resuming === true, ...(closeout.deferred ? { deferred: true } : {}) }
+  ? { visitId: closeout.visitId, serviceType: closeout.serviceType || null, date: closeout.date || null, status: closeout.status ?? null, updatedAtMs: msOf(closeout.updatedAt), resuming: closeout.resuming === true }
   : null);
 
 function versionOf({ invoice, dueCents, partCents, input, closeout, paymentDate, body }) {
@@ -324,8 +320,6 @@ function versionOf({ invoice, dueCents, partCents, input, closeout, paymentDate,
     closeout_visit: closeout?.visitId || null,
     // The visit's own facts (edit time, scheduled date, service type): a visit edited after the card is drift.
     closeout_facts: closeout ? digest(closeoutPin(closeout)) : null,
-    // A close that waits for the visit's day to pass (GATE_REPORT_AFTER_PAY): the result reports it as promised, not as a failure.
-    ...(closeout?.deferred ? { closeout_deferred: true } : {}),
     payment_date: paymentDate,
     body: digest(body),
   };
@@ -405,14 +399,10 @@ async function actorOf(actionContext) {
 }
 
 // What happened to the linked-visit closeout the card promised (null = none was promised). The payment is recorded either way.
-// deferred: the card said the visit stays open today for its technician to complete, so the closeout's same-day refusal keeps that promise.
-function closeoutReport(promisedVisitId, closeout, { deferred = false } = {}) {
+function closeoutReport(promisedVisitId, closeout) {
   if (!promisedVisitId) return null;
   if (closeout?.closed) return { state: 'completed', note: 'The linked visit was closed.' };
   const reason = closeout?.reason || 'not_completed';
-  if (deferred && reason === 'visit_scheduled_today') {
-    return { state: 'deferred', note: 'The linked visit stays open today for its technician to complete; if it is still open after today, the daily closeout check completes it.' };
-  }
   if (['approved_visit_changed', 'approved_target_mismatch'].includes(reason)) {
     return { state: 'skipped_visit_changed', note: 'The visit changed since the card; the payment is recorded, close the visit from its page.' };
   }
@@ -451,7 +441,7 @@ async function commitRecord(input, actionContext) {
     return { ...base, outcome_unknown: true, code: 'record_unverified',
       error: 'The Invoices page answered, but the invoice does not read as paid. Check the invoice before trying again.' };
   }
-  const visitCloseout = closeoutReport(plan._version.closeout_visit, json.closeout, { deferred: plan._version.closeout_deferred === true });
+  const visitCloseout = closeoutReport(plan._version.closeout_visit, json.closeout);
   logger.info(`[intelligence-bar:record-payment] recorded ${plan.method} payment on invoice ${plan.invoice_id}`);
   return {
     ...base, success: true, status: 'paid', method: plan.method, amount: plan.balance_due, sent_to_customer: false,

@@ -415,10 +415,10 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     }
   });
 
-  // Pre-push audit round 8: the record_payment card said the visit stays open today, and its payment commits before the payment's
-  // closeout runs. The hold is recorded with the payment, in the settlement transaction, so a bill the office adds before that
-  // closeout runs changes nothing: the closeout leaves the visit open, and the technician's completion completes on the payment.
-  test('report after pay: the record_payment card\'s deferred close is held with the payment: a bill added before the payment\'s closeout runs leaves the visit open, and the completion completes on the payment', async () => {
+  // Pre-push audit rounds 8-11: a payment the record_payment card approved holds nothing. The card names an immediate close (its
+  // probe's noHold), the settlement pins that with the payment, and the payment's closeout completes the visit at once, as with the
+  // gate off. The real settlement, pin, closeout and completion run here.
+  test('report after pay: a payment recorded through the record_payment card closes the arrived visit at once, as with the gate off, and records no hold', async () => {
     const saved = process.env.GATE_REPORT_AFTER_PAY;
     process.env.GATE_REPORT_AFTER_PAY = 'true';
     const { chargeInvoiceWithSavedCard } = require('../services/stripe');
@@ -431,42 +431,40 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     const closesBefore = gates.invoiceIssuedClosesVisit;
     gates.invoiceIssuedClosesVisit = true;
     const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
-    let laterId = null;
     try {
       const today = etDateString(new Date());
       await arrive(f, new Date(Date.now() - 1800000));
-      // The card: the payment would hold the visit, so it names a close deferred past the visit's day, pinned as the card does.
+      // Any other payment of this invoice would hold the visit, so a probe that reads one names no close today. The card's
+      // payment closes it now: the card names the visit and pins it, as on main.
       const shown = await mockPg('invoices').where({ id: f.invoiceId }).first();
-      const target = await closeout.issuedCloseoutTarget(shown, { conn: mockPg, today, includeDeferred: true });
-      expect(target).toMatchObject({ visitId: f.serviceId, deferred: true });
+      expect(await closeout.issuedCloseoutTarget(shown, { conn: mockPg, today })).toBeNull();
+      const target = await closeout.issuedCloseoutTarget(shown, { conn: mockPg, today, noHold: true });
+      expect(target).toMatchObject({ visitId: f.serviceId, status: 'on_site', resuming: false });
       const msOf = (value) => (value ? new Date(value).getTime() : null);
       const fence = settlementFenceFor({ invoiceId: shown.id, status: shown.status, updatedAtMs: msOf(shown.updated_at), columns: pinnedColumnsOf(shown),
         closeoutTarget: target.visitId, paymentDate: today,
-        closeout: { visitId: target.visitId, serviceType: target.serviceType || null, date: target.date || null, status: target.status ?? null, updatedAtMs: msOf(target.updatedAt), resuming: false, deferred: true } });
-      expect(fence.closeoutDeferred).toBe(true);
-      // The payment commits; its closeout has not run yet.
-      const ran = jest.spyOn(closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValueOnce({ closed: false, reason: 'error' });
+        closeout: { visitId: target.visitId, serviceType: target.serviceType || null, date: target.date || null, status: target.status ?? null, updatedAtMs: msOf(target.updatedAt), resuming: false } });
+      // The payment, then its closeout with the card's target, as the card's confirmation runs them.
+      const ran = jest.spyOn(closeout, 'closeOutVisitForIssuedInvoice');
       await recordManualPayment(f.invoiceId, { method: 'check', reference: '1042', recordedBy: 'Fixture Office', sendReceipt: false,
         expectedAmountCents: PRICE * 100, settlementFence: fence, requireSelfPay: true });
       expect(ran).toHaveBeenCalledTimes(1);
-      expect(await closeout.reportAfterPayHold(mockPg, f.serviceId)).toMatchObject({ id: f.invoiceId, status: 'paid' });
-      // The office adds a bill, then the payment's closeout runs: the visit stays open, as the card said.
-      laterId = await laterBill(f, new Date());
-      expect(await closeout.closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', approvedTarget: fence.closeoutTarget, approvedVisit: fence.closeoutVisit }))
-        .toMatchObject({ closed: false, reason: 'visit_scheduled_today', visitId: f.serviceId });
-      expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first('status')).status).toBe('on_site');
-      // The technician completes on the payment: the later bill stays the office's.
-      expect((await complete(f, {})).status).toBe(200);
+      expect(ran).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: f.invoiceId, trigger: 'paid', approvedTarget: f.serviceId, approvedVisit: fence.closeoutVisit }));
+      expect(await ran.mock.results[0].value).toMatchObject({ closed: true, visitId: f.serviceId });
+      expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first('status')).status).toBe('completed');
+      // The pin is on file with the payment. No hold was recorded: not by the settlement, not by the closeout.
+      expect(await closeout.pinDecisionFor(mockPg, { invoice_id: f.invoiceId }, 'paid')).toMatchObject({ action: 'honor', target: f.serviceId });
+      expect(await mockPg('audit_log').where({ action: closeout.REPORT_AFTER_PAY_HOLD_ACTION, resource_id: f.serviceId })).toHaveLength(0);
+      // The quiet close: the paid invoice is the record's invoice; no completion text, no charge.
       const record = await mockPg('service_records').where({ customer_id: f.customerId }).first('id');
-      const byId = Object.fromEntries((await invoicesOf(f)).map((row) => [row.id, row]));
-      expect(byId[f.invoiceId]).toMatchObject({ status: 'paid', service_record_id: record.id });
-      expect(byId[laterId]).toMatchObject({ status: 'draft', service_record_id: null });
-      expect(textsWithPayLink()).toEqual([]);
+      expect(await mockPg('invoices').where({ id: f.invoiceId }).first()).toMatchObject({ status: 'paid', service_record_id: record.id });
+      expect(await invoicesOf(f)).toHaveLength(1);
+      expect(completionTexts()).toEqual([]);
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     } finally {
       gates.invoiceIssuedClosesVisit = closesBefore;
       if (saved === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = saved;
-      await mockPg('audit_log').whereIn('resource_id', [f.invoiceId, f.customerId, ...(laterId ? [laterId] : [])]).del().catch(() => {});
+      await mockPg('audit_log').whereIn('resource_id', [f.invoiceId, f.customerId]).del().catch(() => {});
       await mockPg('activity_log').where({ customer_id: f.customerId }).del().catch(() => {});
       await mockPg('invoice_followup_sequences').where({ customer_id: f.customerId }).del().catch(() => {});
       await mockPg('payments').where({ customer_id: f.customerId }).del().catch(() => {});

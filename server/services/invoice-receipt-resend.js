@@ -151,10 +151,12 @@ async function verifyApproved(s, claim) {
 // GATE_INVOICE_ISSUED_CLOSES_VISIT): the operator's "resend receipt" is the reachable
 // retry for a payment-triggered closeout that did not finish (pre-push P1). Runs once,
 // ahead of BOTH legs, so an email-only resend retries too; a completed visit refuses quietly.
+// GATE_REPORT_AFTER_PAY: a resend retries a close and records no hold (`recordHold: false`), so it
+// does what its card's preview read: a visit the payment holds, or would hold, stays open today.
 async function runCloseout(s, stillHeld) {
   if (!stillHeld('before_closeout')) return;
   const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
-  s.closeout = await closeOutVisitForIssuedInvoice({ invoiceId: s.id, trigger: 'paid', actorTechnicianId: s.actorTechnicianId });
+  s.closeout = await closeOutVisitForIssuedInvoice({ invoiceId: s.id, trigger: 'paid', actorTechnicianId: s.actorTechnicianId, recordHold: false });
 }
 
 // Before each delivery leg: the approval re-check first (it awaits database reads), then lock

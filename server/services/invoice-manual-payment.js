@@ -44,8 +44,7 @@
  * written as a pin inside the settlement transaction and handed to the closeout as its approved target and visit, so a visit that became
  * closable after the card, or was edited, rescheduled, reclassified or cancelled since, is left open (the closeout re-asserts the facts
  * under the visit's lock), on the first run and on every retry. The payment stays recorded; the result carries `closeout`. It throws its own 409 refusals (`drift: true`); the fence is handed the LOCKED
- * invoice row as its second argument when it runs under the lock. `closeoutDeferred` (GATE_REPORT_AFTER_PAY): the card said the visit
- * stays open today, so the hold is recorded in the settlement transaction, beside the pin.
+ * invoice row as its second argument when it runs under the lock.
  *
  * requireSelfPay (optional, both Zelle notice paths): the caller matched the
  * invoice as an OPEN SELF-PAY invoice (no payer, no statement, live payer
@@ -560,13 +559,6 @@ async function recordManualPayment(id, {
     if (!row) return null;
     // The card's closeout target as a pin, in this transaction: it commits with the payment or not at all.
     await require('./invoice-issued-closeout').recordApprovedPaidCloseoutTarget(id, approvedCloseoutTarget, { conn: trx, actorTechnicianId: recordedByTechnicianId, approvedVisit: approvedCloseoutVisit });
-    // GATE_REPORT_AFTER_PAY (pre-push audit round 8): a close the card deferred past the visit's day is held with the payment, in this
-    // transaction. The fence asked the card's verdict again under the invoice and visit row locks held here, and a bill added to the
-    // visit waits on the visit row, so it lands after the hold. The visit then stays open today, as the card said, whichever runs
-    // first: the payment's closeout or the technician's completion.
-    if (settlementFence?.closeoutDeferred && row.scheduled_service_id) {
-      await require('./invoice-issued-closeout').writeReportAfterPayHold(trx, { visitId: row.scheduled_service_id, invoiceId: id, today: etDateString() });
-    }
 
     // Payments-ledger row so revenue dashboards (admin-dashboard, monthly
     // reports) sum manual cash/check/Zelle alongside Stripe collections.
