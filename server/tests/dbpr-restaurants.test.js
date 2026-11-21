@@ -277,8 +277,11 @@ describe('namesFirstVisit', () => {
     expect(['Routine - Food', 'Complaint - Food', 'Licensing - Food'].map((type) => svc.namesFirstVisit(type))).toEqual([true, true, true]);
     const later = ['Callback - Food', 'Call Back - Food', 'call-back', 'Follow-up', 'Follow Up - Food', 'Re-inspection', 'Reinspection'];
     expect(later.map((type) => svc.namesFirstVisit(type))).toEqual(later.map(() => false));
-    // A word split by a tag (htmlText makes the tag a space) still names a later visit.
-    const split = ['Callba ck - Food', 'Call Ba ck - Food', 'Fol low-up', 'Follow-u p - Food', 'Re-inspec tion', 'Rein spection'];
+    // A word split by a line break (htmlText makes it a space), a joiner or another character a browser draws as
+    // nothing (a variation selector, a grapheme joiner, a vowel separator, a tag character) still names a later visit.
+    const split = ['Callba ck - Food', 'Call Ba ck - Food', 'Fol low-up', 'Follow-u p - Food', 'Re-inspec tion', 'Rein spection',
+      'Callba\u200dck - Food', 'Re\u200cinspection', 'Callba\ufe0fck - Food', 'Rein\u034fspection', 'Fol\u180elow-up',
+      'Callba\u{e0020}ck - Food'];
     expect(split.map((type) => svc.namesFirstVisit(type))).toEqual(split.map(() => false));
     const none = ['', '   ', null, undefined, 7];
     expect(none.map((type) => svc.namesFirstVisit(type))).toEqual(none.map(() => false));
@@ -335,7 +338,8 @@ describe('parseInspectionReport', () => {
   test('finding text is capped, and a NUL character never reaches it', () => {
     const page = (note) => reportPage(`<tr><td>35A-02-8</td><td>${note}</td></tr>`);
     expect(parse(page('x'.repeat(2000))).findings[0].text).toHaveLength(400);
-    expect(parse(page('ROACH\0ES')).findings[0].text).toBe('ROACH ES');
+    // A browser drops a NUL in text, so the stored finding is the word the page shows.
+    expect(parse(page('ROACH\0ES')).findings[0].text).toBe('ROACHES');
     // A 35 row with no observation text cannot answer: a code alone is not a finding.
     expect(parse(page('&nbsp;'), { violation35: 1 })).toBeNull();
     expect(parse(reportPage('<tr><td>35B-03-4</td><td></td></tr>'), { violation35: 1 })).toBeNull();
@@ -546,11 +550,19 @@ describe('parseInspectionReport', () => {
     const read = (rows) => parse(reportPage(rows, '10/20/2026'), { violation35: 1, visitDate: '2026-10-20' });
     const row = (text) => `<tr><td>35A-02-8</td><td>&nbsp;</td><td>${text}</td></tr>`;
     expect(read(row('High Priority - Live roaches under the sink.'))).toMatchObject({ pestEvidence: true });
-    // A tag inside a word, in the code's place or not, still reads as the same text.
+    // An inline tag inside a word reads as a browser shows it: one word.
     expect(read(row('High Priority - Live ro<wbr>aches under the sink.'))).toMatchObject({ pestEvidence: true });
-    // A label split by a tag, anywhere in it: the row cannot be tied to a visit, so no answer.
+    // A label with an inline tag inside reads whole: a follow-up's citation is not the first visit's, the initial one is.
     for (const label of ['From follow-up inspec<wbr>tion 2026-11-10:', 'Fr<b>om</b> follow-up inspection 2026-11-10:',
-      'From fol<span>low-up</span> inspection 2026-11-10:', 'From follow-<wbr>up inspection 2026-11-10:', 'From initial in<wbr>spection :']) {
+      'From fol<span>low-up</span> inspection 2026-11-10:', 'From follow-<wbr>up inspection 2026-11-10:']) {
+      expect(read(row(`High Priority - - ${label} Live roaches under the sink.`))).toBeNull();
+    }
+    expect(read(row('High Priority - - From initial in<wbr>spection : Live roaches under the sink.'))).toMatchObject({ pestEvidence: true });
+    // A line break, a joiner or another character a browser draws as nothing inside a label parts it: the label does
+    // not read, so the row cannot be tied to a visit.
+    for (const label of ['From follow-up inspec<br>tion 2026-11-10:', 'From initial in<br>spection :',
+      'From follow-up inspec&zwj;tion 2026-11-10:', 'From initial in&zwnj;spection :',
+      'From follow-up inspec&#xfe0f;tion 2026-11-10:', 'From initial in&#xe0020;spection :']) {
       expect(read(row(`High Priority - - ${label} Live roaches under the sink.`))).toBeNull();
     }
   });
@@ -585,16 +597,22 @@ describe('parseInspectionReport', () => {
     expect(read(row('High Priority - Live ro&#8203;aches.')).findings).toEqual([{ code: '35A-02-8', text: 'High Priority - Live roaches.' }]);
   });
 
-  test('a quoted attribute value holding "<" or ">" gives no answer: a tag would end inside it', () => {
+  test('the page is read as a browser reads its markup: a quoted ">" stays in its value, a script hides its rows, a template gives no answer', () => {
     const read = (html) => parse(html, { violation35: 1, visitDate: '2026-10-21' });
     const real = fixture('report-35b.html');
     const cell = '<td>Basic - Outer openings not protected with self-closing doors. Observed back door propped open. **Warning**</td>';
+    const nextRow = '<tr><td><u>25-06-4</u>';
     expect(real).toContain(cell);
-    expect(read(real)).toEqual({ pestEvidence: false, findings: [] });
-    expect(read(real.replace(cell, '<td title="count > 1"></td>'))).toBeNull();
-    expect(read(real.replace(cell, `<td><font title="<tr>">${cell.slice(4)}`))).toBeNull();
-    // Quotes without one, and an "=" inside a value, still read.
-    expect(read(real.replace(cell, `<td><a href="#x=1==" title='a "b"'>${cell.slice(4)}`))).toEqual({ pestEvidence: false, findings: [] });
+    expect(real).toContain(nextRow);
+    const noPests = { pestEvidence: false, findings: [] };
+    expect(read(real)).toEqual(noPests);
+    expect(read(real.replace(cell, `<td title="count > 1">${cell.slice(4)}`))).toEqual(noPests);
+    expect(read(real.replace(cell, `<td><font title="<tr>">${cell.slice(4)}`))).toEqual(noPests);
+    // A 35A row inside a script closed by "</script >" is script text to a browser, not a row.
+    const row35A = '<tr><td><u>35A-02-8</u></td><td>Live roaches.</td></tr>';
+    expect(read(real.replace(nextRow, `<script>"${row35A}"</script >${nextRow}`))).toEqual(noPests);
+    // A browser shows no template either, and the state's pages hold none: the page cannot answer.
+    expect(read(real.replace(nextRow, `<template>${row35A}</template>${nextRow}`))).toBeNull();
   });
 
   test('a page answers only for the visit whose date its inspection table gives', () => {
@@ -629,10 +647,11 @@ describe('parseInspectionReport', () => {
     // A blank inspection type, or no type column: no answer.
     expect(read(reportPage(rows, '10/20/2026').replace('Routine - Food', ''), '2026-10-20')).toBeNull();
     expect(read(reportPage(rows, '10/20/2026').replace('<td>Inspection Type</td>', '<td>Kind</td>'), '2026-10-20')).toBeNull();
-    // A tag inside the type's words, in the real layout: still a callback's page, so no answer.
+    // A tag inside the type's words (inline, or a line break), in the real layout: still a callback's page, so no answer.
     const splitType = fixture('report-35a.html').replace('<td>Routine - Food</td>', '<td>Callba<wbr>ck - Food</td>');
     expect(splitType).toContain('Callba<wbr>ck');
     expect(parse(splitType, { visitDate: '2026-10-20' })).toBeNull();
+    expect(parse(splitType.replace('Callba<wbr>ck', 'Callba<br>ck'), { visitDate: '2026-10-20' })).toBeNull();
     // The fixtures carry the real layout.
     expect(parse(fixture('report-35a.html'), { visitDate: '2026-10-20' })).toMatchObject({ pestEvidence: true });
     expect(parse(fixture('report-35b.html'), { violation35: 1, visitDate: '2026-10-21' })).toEqual({ pestEvidence: false, findings: [] });

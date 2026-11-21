@@ -33,7 +33,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
-const { decodeHTML } = require('entities');
+const { plainPage, htmlText } = require('./plain-html');
 const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
 const { etDateString, etCalendarDaysUntil } = require('../../utils/datetime-et');
@@ -292,33 +292,34 @@ function parseLicenseRows(rows, kind, counts = {}, today = null) {
 // An inspection type that names a later visit ("Callback - Food", "Follow-up", "Re-inspection"): not a first visit.
 const CALLBACK_TYPE_RE = /call\W{0,3}back|follow\W{0,3}up|re\W{0,3}inspect/i;
 
+// A text with every space and every default-ignorable code point taken out (a joiner, a variation selector, a tag
+// character: characters a browser draws as nothing, which htmlText keeps), so a line break or such a character
+// inside a word ("Callba<br>ck", "Callba&zwj;ck") cannot hide it from a test that reads the text so.
+const compact = (text) => text.replace(/[\s\p{Default_Ignorable_Code_Point}]+/gu, '');
+
 // Whether a report page's own inspection type names a first visit: given, and naming no callback, follow-up or
 // re-inspection. The page has the last word on that, not the files: the state can relabel a visit between files.
-// The type is tested with every space taken out, so a tag inside a word ("Callba<wbr>ck", which htmlText makes a
-// space) cannot hide a callback. Joined words can only add a match ("Structure Inspection"), which gives no answer.
+// The type is tested compact, so a line break or a character a browser draws as nothing inside a word ("Callba<br>ck")
+// cannot hide a callback. Joined words can only add a match ("Structure Inspection"), which gives no answer.
 function namesFirstVisit(inspectionType) {
   return typeof inspectionType === 'string' && inspectionType.trim() !== ''
-    && !CALLBACK_TYPE_RE.test(inspectionType.replace(/\s+/g, ''));
+    && !CALLBACK_TYPE_RE.test(compact(inspectionType));
 }
 
 // ── Report page (pure) ──────────────────────────────────────────
 
 // The state office's street address closes every whole page.
 const PAGE_FOOTER_RE = /2601 Blair Stone Road/;
+// The tags the state's report pages use (the pages saved on 2026-11-19), with the other table parts the reader
+// handles (tbody, thead, tfoot, th) and two inline tags (span, wbr). plainPage refuses a page with any other tag.
+const REPORT_TAGS = new Set(['a', 'b', 'body', 'br', 'center', 'div', 'font', 'form', 'head', 'html', 'img', 'li',
+  'option', 'p', 'span', 'strong', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul', 'wbr']);
 const VIOLATION_CODE_RE = /^\d\d[A-Z]?-\d\d-\d$/;
-// A cell (td or th; group 1), or a row or table tag (group 2 names it). HTML lets a page leave out </td> and </tr>,
+// On the page plainPage rebuilt (tags without attributes): a cell (td or th; group 1), or a row or table tag (group 2
+// names it). HTML lets a page leave out </td> and </tr>,
 // and the state's pages do, so a cell runs to the next table tag (a cell, a row or a table, start or end), as a
 // browser closes it, and any row or table tag ends the row. A cell that holds a table gives only its text before it.
 const CELL_OR_ROW_END_RE = /<t[dh]\b[^>]*>((?:(?!<\/?(?:t[dhr]|table|tbody|thead|tfoot)\b)[\s\S])*)|<\/?(tr|table|tbody|thead|tfoot)\b[^>]*>/gi;
-// A tag as a browser's tokenizer ends it: at the first ">" outside a quoted attribute value (quoted after "=", running
-// to its closing quote, or to the page end without one). Each step matches one way only, so no page can make it slow.
-const TAG_RE = /<[A-Za-z/!?](?:[^>"'=]|=\s*"[^"]*(?:"|$)|=\s*'[^']*(?:'|$)|=(?!\s*["'])|["'])*(?:>|$)/g;
-// One step of a tag read left to right: a quoted attribute value (group 1), or any other character.
-const TAG_STEP_RE = /=\s*("[^"]*(?:"|$)|'[^']*(?:'|$))|[\s\S]/g;
-// Whether a quoted attribute value holds "<" or ">" (title="count > 1"). The cell and tag patterns end a tag at its
-// first ">" and a cell at the next table tag, as a page without such a value reads, so such a page cannot answer.
-const angleInQuotedValue = (page) => [...page.matchAll(TAG_RE)]
-  .some(([tag]) => [...tag.matchAll(TAG_STEP_RE)].some((step) => /[<>]/.test(step[1] || '')));
 // The row that heads the violations table names two columns, "Violation" and "Observation", with blank spacer cells
 // around them. Returns the Violation column's position in the row, or -1 for any other row.
 function violationsColumn(cells) {
@@ -327,25 +328,13 @@ function violationsColumn(cells) {
   return cells.findIndex((cell) => /^violation$/i.test(cell));
 }
 
-// Tags out (as a browser reads them: "<" then a letter, "/", "!" or "?", so "Observed < 5 roaches" keeps its "<"),
-// every character reference decoded (named or numeric: "&nbsp;", "&#45;", "&#x2D;"), invisible format characters
-// (Unicode Cf: a soft hyphen, a zero-width space) taken out as a browser hides them, so "Callba&shy;ck" reads as
-// "Callback", and NUL characters and runs of white space made one space.
-function htmlText(html) {
-  return decodeHTML(String(html || '').replace(/<[A-Za-z/!?][^>]*>/g, ' '))
-    .replace(/\p{Cf}/gu, '')
-    .replaceAll('\0', ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 // A follow-up report lists each violation of the inspection with every visit's note, labelled, oldest first:
 // "High Priority - - From initial inspection : ... - From follow-up inspection 2026-09-03: ...".
 const VISIT_NOTE_RE = /(?:-\s*)?From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
 // Any mention of a visit label, read by VISIT_NOTE_RE or not: any case, and any separator inside "follow-up",
-// "call back" or "re-inspection" (a dash of another kind). It reads the row's text with every space taken out, so a
-// tag inside a word ("inspec<wbr>tion", which htmlText makes a space) cannot hide one. A row where the two counts
-// differ cannot be read.
+// "call back" or "re-inspection" (a dash of another kind). It reads the row's text compact, so a line break or a
+// character a browser draws as nothing inside a word ("inspec<br>tion", "inspec&zwj;tion") cannot hide one. A row
+// where the two counts differ cannot be read.
 const VISIT_LABEL_RE = /from(?:initial|follow\W{0,3}up|call\W{0,3}back|re\W{0,3})inspection/gi;
 // Whether the inspection table's visit row is the read visit's, as a first visit: its date reads (and is visitDate
 // when given), and its inspection type names a first visit (namesFirstVisit, the rule saveReport checks too).
@@ -359,7 +348,7 @@ function isFirstVisitRow(visit, visitDate) {
 // read (another date form, other case): such a row cannot be tied to a visit.
 function visitNotes(text) {
   const marks = [...text.matchAll(VISIT_NOTE_RE)];
-  if ((text.replace(/\s+/g, '').match(VISIT_LABEL_RE) || []).length !== marks.length) return { unreadable: true };
+  if ((compact(text).match(VISIT_LABEL_RE) || []).length !== marks.length) return { unreadable: true };
   if (!marks.length) return { routine: true };
   const ends = marks.map((mark, i) => (i + 1 < marks.length ? marks[i + 1].index : text.length));
   // A label with no observation after it ("From initial inspection : - From follow-up …") cannot be read.
@@ -449,7 +438,8 @@ function readReportTables(page) {
  * Report page HTML -> { inspectionType, pestEvidence, findings: [{ code, text }] }, or null when the page cannot
  * answer. No answer is a failed read, retried later, never "no pests". inspectionType is the page's own visit row's
  * type, which saveReport checks again. The page answers only when:
- * - no quoted attribute value holds "<" or ">" (the tags would not end where a browser ends them);
+ * - its markup rebuilds (plainPage): every tag is one the state's pages use, and the page ends inside no tag, comment
+ *   or script. The tables are read on the rebuilt page, so they hold the tags and the text a browser reads;
  * - it is whole: the state office footer follows its violations table, so an error page, a page cut short (inside
  *   that table or after it) or a page with the footer text only above the table gives no answer;
  * - it is one first visit's: its inspection table lists one visit, whose date reads (and is visitDate when given)
@@ -474,8 +464,8 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   // Only an inspection's first visit gets an answer. The list shows pests only, and the first visit's own row answers
   // for the inspection; a sighting first cited at a callback is not read.
   if (visitNumber !== 1) return null;
-  const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
-  if (angleInQuotedValue(page)) return null;
+  const page = plainPage(html, REPORT_TAGS);
+  if (page === null) return null;
   const whole = htmlText(page);
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
   const { entries, unreadable, visits, violationsEnd } = readReportTables(page);
