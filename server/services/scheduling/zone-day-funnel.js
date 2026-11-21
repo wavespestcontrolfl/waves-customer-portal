@@ -184,9 +184,15 @@ const FALLTHROUGH_ZONE_STAMP = 'lakewood_ranch';
 function slugMatchesZone(rowZone, zoneSlug) {
   if (!zoneSlug) return false;
   if (rowZone === zoneSlug || rowZone.startsWith(`${zoneSlug}_`)) return true;
+  return !!funnelSlugOf(rowZone) && !!funnelSlugOf(zoneSlug);
+}
+
+// The funneled slug a zone stamp belongs to, or null when it is not a far-south stamp: the slug itself, or the
+// funneled slug a legacy backfill compound starts with ('venice_north_port' -> 'venice').
+function funnelSlugOf(stamp) {
   const slugs = funnelZoneSlugs();
-  const inFunnel = (s) => slugs.has(s) || [...slugs].some((f) => s.startsWith(`${f}_`));
-  return inFunnel(rowZone) && inFunnel(zoneSlug);
+  if (slugs.has(stamp)) return stamp;
+  return [...slugs].find((slug) => stamp.startsWith(`${slug}_`)) || null;
 }
 
 function rowMatchesZone(row, estimateZone, zoneSlug, zoneCities) {
@@ -339,20 +345,21 @@ async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
 }
 
 // The zone a hold's zone stamp names, for the check at a kept hold's write (slot-reservation.js holdKeepsSouthDay).
-// The row with that slug: the row the hold's list funneled by. When no row carries the stamp any more (its zone was
-// renamed or removed while the hold was held), a funneled row the stamp matches by the stop read's own rule
-// (slugMatchesZone: every funneled slug names the one consolidated south pool), because the stop read still counts
-// the hold as that pool's stop; a row with cities first, so the unstamped stops match by city. When no funneled row
-// is left either, a funneled stamp stands for itself with no cities, so the stamped stops still count. Else null: the
-// stamp is not a far-south one. So a far-south stamp is always checked, whatever happened to the zone rows.
+// One rule: a far-south stamp (funnelSlugOf, the stop read's own test) is ALWAYS checked, whatever happened to the
+// zone rows while the hold was held; any other stamp never is (null). Among the funneled rows, every one of which
+// names the one consolidated south pool the stop read counts that stamp in: the row with the stamp's slug (the row
+// the hold's list funneled by); else, its row renamed or removed, a row with cities, so the unstamped stops match by
+// city; else any. With no funneled row left, the stamp's funneled slug stands for itself with no cities, so the
+// stamped stops still count.
 function zoneOfHoldStamp(zones, stamp) {
   const slug = String(stamp || '').trim().toLowerCase();
-  if (!slug) return null;
-  const own = zones.find((zone) => zoneSlugOf(zone) === slug);
-  if (own) return own;
-  const pool = zones.filter((zone) => isFunnelZone(zone) && slugMatchesZone(slug, zoneSlugOf(zone)));
-  if (pool.length) return pool.find((zone) => (zone.cities || []).length) || pool[0];
-  return funnelZoneSlugs().has(slug) ? { id: null, zone_name: slug, cities: [] } : null;
+  const base = funnelSlugOf(slug);
+  if (!base) return null;
+  const pool = zones.filter(isFunnelZone);
+  return pool.find((zone) => zoneSlugOf(zone) === slug)
+    || pool.find((zone) => (zone.cities || []).length)
+    || pool[0]
+    || { id: null, zone_name: base, cities: [] };
 }
 
 // The funnel for an offer pool that is not built by the estimate page (the lead assessment link:
