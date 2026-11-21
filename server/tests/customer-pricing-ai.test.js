@@ -2576,21 +2576,25 @@ describe('strictPriceSettings', () => {
   const pricingEngine = require('../services/pricing-engine');
   const bridge = require('../services/pricing-engine/db-bridge');
   const proof = require('../services/plan-start-eligibility');
+  // The bridge's two answers for a price nobody watches (its own suite proves what a ticket means:
+  // pricing-engine-pest-price-rows.test.js). The default path asks neither; it uses the shared refresh.
+  const TICKET = Object.freeze({ applies: 1, invalidations: 0 });
+  let loadSettings;
+  let settingsHeld;
   let needsSync;
   let sync;
-  let rowsComplete;
   let blocker;
   beforeEach(() => {
+    loadSettings = jest.spyOn(bridge, 'loadSettingsForUnattendedPrice').mockResolvedValue(TICKET);
+    settingsHeld = jest.spyOn(bridge, 'settingsHeldForUnattendedPrice').mockReturnValue(true);
     needsSync = jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false);
-    // A refresh that succeeds leaves the settings fresh, as the bridge's own does.
-    sync = jest.spyOn(pricingEngine, 'syncConstantsFromDB').mockImplementation(async () => { needsSync.mockReturnValue(false); return true; });
-    rowsComplete = jest.spyOn(bridge, 'standardPestPriceRowsAreComplete').mockReturnValue(true);
+    sync = jest.spyOn(pricingEngine, 'syncConstantsFromDB').mockResolvedValue(true);
     blocker = jest.spyOn(proof, 'planStartBlocker').mockResolvedValue(null);
   });
-  afterEach(() => { [needsSync, sync, rowsComplete, blocker].forEach((spy) => spy.mockRestore()); });
+  afterEach(() => { [loadSettings, settingsHeld, needsSync, sync, blocker].forEach((spy) => spy.mockRestore()); });
 
   const customer = propertyCustomer({ id: 'cust-strict', waveguard_tier: null, monthly_rate: null });
-  // A handle the bridge could refresh from (the refresh itself is the spy above).
+  // A handle the default path could refresh from (the refresh itself is the spy above).
   const refreshable = (tables = { customers: [customer], scheduled_services: [] }) => Object.assign(dbForTables(tables), { schema: { hasTable: async () => false } });
   // A home the engine prices with no review marker: its size and its story count are both known.
   const price = (extra = {}) => buildCustomerPricingResponse({
@@ -2622,15 +2626,14 @@ describe('strictPriceSettings', () => {
   });
 
   describe('the account', () => {
-    test.each(['not_live', 'commercial', 'has_plan'])('an account the shared answer blocks (%s) is refused before any property lookup or refresh', async (reason) => {
+    test.each(['not_live', 'commercial', 'has_plan'])('an account the shared answer blocks (%s) is refused before any property lookup or load of the settings', async (reason) => {
       blocker.mockResolvedValue(reason);
-      needsSync.mockReturnValue(true);
       const db = refreshable();
       const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
       await expect(strict({ db, propertyLookup })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: reason });
       expect(blocker).toHaveBeenCalledWith(db, customer.id);
       expect(propertyLookup).not.toHaveBeenCalled();
-      expect(sync).not.toHaveBeenCalled();
+      expect(loadSettings).not.toHaveBeenCalled();
     });
 
     test('a failed read of the shared answer throws as it is: an outage is never "this account has no plan"', async () => {
@@ -2656,26 +2659,24 @@ describe('strictPriceSettings', () => {
     // The shared answer reads the account's records. The property the engine prices is resolved after it, and
     // an estimate seed (or a lookup) can name a type the account row does not carry. The engine prices a
     // commercial property by its commercial rules, which the bridge's answer does not cover.
-    test.each(['commercial', 'office', 'warehouse'])('a property that the estimate seed resolves as %s is refused as a business, before the refresh and the engine', async (propertyType) => {
-      needsSync.mockReturnValue(true);
+    test.each(['commercial', 'office', 'warehouse'])('a property that the estimate seed resolves as %s is refused as a business, before the settings are loaded and the engine prices', async (propertyType) => {
       const engine = jest.spyOn(pricingEngine, 'generateEstimate');
       try {
         await expect(strict({ propertySeed: { propertyType } })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'commercial' });
-        expect(sync).not.toHaveBeenCalled();
+        expect(loadSettings).not.toHaveBeenCalled();
         expect(engine).not.toHaveBeenCalled();
       } finally {
         engine.mockRestore();
       }
     });
 
-    test('a property that the lookup resolves as a business is refused too, after the lookup and before the refresh and the engine', async () => {
-      needsSync.mockReturnValue(true);
+    test('a property that the lookup resolves as a business is refused too, after the lookup and before the settings are loaded and the engine prices', async () => {
       const engine = jest.spyOn(pricingEngine, 'generateEstimate');
       const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200, propertyType: 'commercial', aiConfidence: 85 } }));
       try {
         await expect(strict({ propertyLookup })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'commercial' });
         expect(propertyLookup).toHaveBeenCalledTimes(1);
-        expect(sync).not.toHaveBeenCalled();
+        expect(loadSettings).not.toHaveBeenCalled();
         expect(engine).not.toHaveBeenCalled();
       } finally {
         engine.mockRestore();
@@ -2719,13 +2720,12 @@ describe('strictPriceSettings', () => {
     test.each([
       ['lawn care', 'I am interested in adding lawn care'],
       ['pest control with mosquito', 'I am interested in adding pest control and mosquito service'],
-    ])('a strict request for %s is a mistake of the caller, refused before any read of the account, lookup or refresh', async (_label, prompt) => {
-      needsSync.mockReturnValue(true);
+    ])('a strict request for %s is a mistake of the caller, refused before any read of the account, lookup or load of the settings', async (_label, prompt) => {
       const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
       await expect(strict({ prompt, propertyLookup })).rejects.toThrow('strictPriceSettings prices pest control only');
       expect(blocker).not.toHaveBeenCalled();
       expect(propertyLookup).not.toHaveBeenCalled();
-      expect(sync).not.toHaveBeenCalled();
+      expect(loadSettings).not.toHaveBeenCalled();
     });
 
     test('the same request without strict is priced', async () => {
@@ -2734,15 +2734,16 @@ describe('strictPriceSettings', () => {
     });
   });
 
-  // The bridge keeps the settings for a minute, and an edit marks them stale only in the process that made it:
-  // another server process would price from the earlier value. So every strict call refreshes, also when the
-  // settings read fresh. The default refreshes only when the settings are due, as before.
-  describe('the refresh of the price settings before the engine prices', () => {
-    test('default: a refresh that is due and fails still prices, from the values the engine had', async () => {
+  // The default shares the bridge's cache and answers a failed refresh with what the engine had. Strict asks the
+  // bridge for a refresh of its own and gets a ticket. The pricer asks nothing else of the cache.
+  describe('the settings, loaded for this call', () => {
+    test('default: a refresh that is due and fails still prices, from the values the engine had, and asks the bridge for no ticket', async () => {
       needsSync.mockReturnValue(true);
       sync.mockResolvedValue(false);
       expectPriced(await price());
       expect(sync).toHaveBeenCalledTimes(1);
+      expect(loadSettings).not.toHaveBeenCalled();
+      expect(settingsHeld).not.toHaveBeenCalled();
     });
 
     test('default: settings that read fresh are not loaded again', async () => {
@@ -2750,26 +2751,29 @@ describe('strictPriceSettings', () => {
       expect(sync).not.toHaveBeenCalled();
     });
 
-    test.each([['read fresh', false], ['are due', true]])('strict: settings that %s are loaded again, once, from the handle the caller passed', async (_label, due) => {
+    test.each([['read fresh', false], ['are due', true]])('strict: asks the bridge for a refresh of its own, once and with no handle, also when the shared settings %s', async (_label, due) => {
       needsSync.mockReturnValue(due);
-      const db = refreshable();
-      expectPriced(await strict({ db }));
-      expect(sync).toHaveBeenCalledTimes(1);
-      expect(sync).toHaveBeenCalledWith(db);
-    });
-
-    test.each([[false], [undefined], [null]])('strict: a refresh that answers %p throws, never a price, also when the settings read fresh', async (answer) => {
-      sync.mockResolvedValue(answer);
-      await expect(strict()).rejects.toMatchObject({ ...UNAVAILABLE, message: 'live price settings could not be loaded' });
-      expect(rowsComplete).not.toHaveBeenCalled();
-    });
-
-    test('strict: a handle the bridge cannot refresh from throws; the default prices', async () => {
-      needsSync.mockReturnValue(true);
-      const db = dbForTables({ customers: [customer], scheduled_services: [] });
-      await expect(strict({ db })).rejects.toMatchObject(UNAVAILABLE);
-      expectPriced(await price({ db }));
+      expectPriced(await strict());
+      expect(loadSettings).toHaveBeenCalledTimes(1);
+      expect(loadSettings).toHaveBeenCalledWith();
       expect(sync).not.toHaveBeenCalled();
+    });
+
+    test.each([[null], [undefined], [false]])('strict: no ticket (%p) throws before the engine prices, never a price', async (answer) => {
+      loadSettings.mockResolvedValue(answer);
+      const engine = jest.spyOn(pricingEngine, 'generateEstimate');
+      try {
+        await expect(strict()).rejects.toMatchObject({ ...UNAVAILABLE, message: 'live price settings could not be loaded' });
+        expect(engine).not.toHaveBeenCalled();
+        expect(settingsHeld).not.toHaveBeenCalled();
+      } finally {
+        engine.mockRestore();
+      }
+    });
+
+    test('strict: a refresh that throws is thrown as it is', async () => {
+      loadSettings.mockRejectedValue(new Error('pool is down'));
+      await expect(strict()).rejects.toThrow('pool is down');
     });
   });
 
@@ -2827,20 +2831,17 @@ describe('strictPriceSettings', () => {
         ['has a line priced from a footprint the engine guessed', onEveryLine({ footprintWasDefaulted: true })],
       ])('an engine result that %s: strict returns no option, and the settings are still asked', async (_label, mark) => {
         expectPriced(await strict());
-        rowsComplete.mockClear();
+        settingsHeld.mockClear();
         engine.mockImplementation((...args) => mark(priceForReal(...args)));
         expect(await strict()).toMatchObject({ ok: true, options: [] });
-        expect(rowsComplete).toHaveBeenCalledTimes(1);
+        expect(settingsHeld).toHaveBeenCalledTimes(1);
         expectPriced(await price());
       });
     });
   });
 
-  // A refresh answers true when pricing_config holds any row at all. For a row or a field that is missing, the
-  // engine keeps what it had. The bridge's answer is yes when the rows of the last good refresh were complete
-  // and no refresh is running now, so strict asks it after the engine priced and in the same turn, and asks
-  // again whether the settings are still fresh.
-  describe('the settings the engine priced from', () => {
+  // Asked after the engine priced: are the settings still the ones of that ticket, and the rows' own.
+  describe('the settings, still the ones the engine priced from', () => {
     let engine;
     let priceForReal;
     beforeEach(() => {
@@ -2849,46 +2850,28 @@ describe('strictPriceSettings', () => {
     });
     afterEach(() => { engine.mockRestore(); });
 
-    test('strict: rows that are not complete throw, and the answer is read after the refresh and after the engine priced', async () => {
+    test('strict: asks about the ticket it was given, once, after the last engine call', async () => {
       const order = [];
-      sync.mockImplementation(async () => { order.push('refresh'); return true; });
+      loadSettings.mockImplementation(async () => { order.push('load'); return TICKET; });
       engine.mockImplementation((...args) => { order.push('engine'); return priceForReal(...args); });
-      rowsComplete.mockImplementation(() => { order.push('rows'); return false; });
-      await expect(strict()).rejects.toMatchObject(UNAVAILABLE);
-      expect(order[0]).toBe('refresh');
-      expect(order[order.length - 1]).toBe('rows');
-      expect(order.filter((step) => step === 'rows')).toHaveLength(1);
+      settingsHeld.mockImplementation(() => { order.push('held'); return true; });
+      expectPriced(await strict());
+      expect(settingsHeld).toHaveBeenCalledTimes(1);
+      // The very ticket of this call's own refresh, not one that looks like it.
+      expect(settingsHeld.mock.calls[0][0]).toBe(TICKET);
+      expect(order[0]).toBe('load');
+      expect(order[order.length - 1]).toBe('held');
       expect(order.slice(1, -1).length).toBeGreaterThan(0);
       expect(order.slice(1, -1).every((step) => step === 'engine')).toBe(true);
     });
 
-    // A refresh begins with a database read, so it cannot change the settings inside one turn. Anything that
-    // waits (a promise that settles) between the last engine call and the questions would let one in. Here a
-    // step queued by the engine call turns both answers to no: the pricer must have asked before that step ran.
-    test('strict: both questions are asked in the same turn as the engine priced, with no wait in between', async () => {
-      engine.mockImplementation((...args) => {
-        Promise.resolve().then(() => { rowsComplete.mockReturnValue(false); needsSync.mockReturnValue(true); });
-        return priceForReal(...args);
-      });
-      expectPriced(await strict());
-      expect(rowsComplete).toHaveBeenCalledTimes(1);
-      expect(rowsComplete()).toBe(false);
-      expect(needsSync()).toBe(true);
-    });
-
-    // An edit of the price settings in this process marks them stale at once and leaves the rows answer as it was.
-    test('strict: settings that an edit marked stale after the refresh loaded them throw; the default prices', async () => {
-      sync.mockImplementation(async () => { needsSync.mockReturnValue(true); return true; });
-      await expect(strict()).rejects.toMatchObject({ ...UNAVAILABLE, message: 'the price settings went stale while the price was computed' });
-      expect(sync).toHaveBeenCalledTimes(1);
+    test('strict: settings that did not hold throw the price away; the default prices and does not ask', async () => {
+      settingsHeld.mockReturnValue(false);
+      await expect(strict()).rejects.toMatchObject(UNAVAILABLE);
       expect(engine).toHaveBeenCalled();
+      expect(settingsHeld).toHaveBeenCalledTimes(1);
       expectPriced(await price());
-    });
-
-    test('the default does not ask for the rows and prices as before', async () => {
-      rowsComplete.mockReturnValue(false);
-      expectPriced(await price());
-      expect(rowsComplete).not.toHaveBeenCalled();
+      expect(settingsHeld).toHaveBeenCalledTimes(1);
     });
   });
 });

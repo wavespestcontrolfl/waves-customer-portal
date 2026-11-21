@@ -9,11 +9,24 @@
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
-// Every read of a strict price must run on the handle the caller gives (here: the test's transaction), so the
-// app's own connection refuses every use in this suite.
+// The app's own connection. A strict price loads the price settings there, in a refresh of its own (committed
+// rows in production, never the caller's transaction). In this suite that connection answers from the test's
+// transaction, and only for the tables a refresh reads, so a test can change a row and roll it back. Every
+// other read of a strict price must run on the handle the caller gives: any other use of the connection throws.
+let mockSettingsHandle = null;
+const mockSettingsTables = ['pricing_config', 'lawn_pricing_brackets', 'services', 'products_catalog', 'vendor_pricing'];
 jest.mock('../models/db', () => {
-  const refuse = () => { throw new Error('a read used the app connection, not the handle the caller gave'); };
-  return new Proxy(refuse, { get: (_target, key) => (typeof key === 'symbol' || key === 'then' || key === '__esModule' ? undefined : refuse) });
+  const refuse = (what) => { throw new Error(`a read of ${what} used the app connection, not the handle the caller gave`); };
+  const read = (table, ...rest) => (mockSettingsTables.includes(String(table).trim().split(/\s+/)[0])
+    ? mockSettingsHandle(table, ...rest)
+    : refuse(table));
+  return new Proxy(read, {
+    get: (_target, key) => {
+      if (typeof key === 'symbol' || key === 'then' || key === '__esModule') return undefined;
+      if (key === 'schema') return mockSettingsHandle.schema;
+      return () => refuse(String(key));
+    },
+  });
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -63,9 +76,11 @@ postgres('strictPriceSettings of the customer pricer (live Postgres)', () => {
   beforeEach(async () => {
     logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     trx = await database.transaction();
+    mockSettingsHandle = trx;
   });
 
   afterEach(async () => {
+    mockSettingsHandle = null;
     await trx.rollback();
     logSpy.mockRestore();
   });
@@ -113,8 +128,9 @@ postgres('strictPriceSettings of the customer pricer (live Postgres)', () => {
     expect(worker.bridge.needsSync()).toBe(false);
   });
 
-  // The bridge keeps the settings for a minute, and an edit marks them stale only in the process that made it.
-  // Here the row changes with no word to this worker's bridge, as an edit that another server process made.
+  // The bridge keeps the shared settings for a minute, and an edit marks them stale only in the process that
+  // made it. Here the row changes with no word to this worker's bridge, as an edit that another server process
+  // made. Strict loads the settings for its own call.
   test('a base price that another server process changed: the default answers the earlier price while the settings read fresh, strict loads the row again', async () => {
     const worker = freshWorker();
     const customer = await seedCustomer();

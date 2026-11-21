@@ -782,6 +782,9 @@ function syncBedBugPricingConfig(bedBugConfig) {
 
 let _lastSync = 0;
 const SYNC_INTERVAL = 60_000; // 1 minute cache
+// Counted for settingsHeldForUnattendedPrice (near the end of this file).
+let _invalidations = 0; // every invalidatePricingConfigCache()
+let _applies = 0; // every refresh that began to change the constants
 
 // Are the rows of the standard pest price complete?
 // A sync keeps what the engine had for a row or a field that is missing: the
@@ -1254,6 +1257,8 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
     }
     if (Object.keys(config).length === 0) return false;
+    // From here on this run changes the constants (settingsHeldForUnattendedPrice counts it).
+    _applies += 1;
     constantsSnapshot = snapshotPricingConstants();
     mistingProvenanceSnapshot = require('./mosquito-misting-config').snapshotMistingRefillProvenance();
 
@@ -2503,6 +2508,54 @@ function needsSync() {
 
 function invalidatePricingConfigCache() {
   _lastSync = 0;
+  _invalidations += 1;
+}
+
+// ── The settings for a price nobody watches ─────────────────────────────
+// (customer-pricing-ai's strictPriceSettings: the plan offer after a
+// one-time job.)
+// The engine prices from this process's constants, and they are shared:
+// callers wait for one refresh, which reads on the handle of whoever asked
+// first, and the constants then stay for a minute. An edit marks them stale
+// only in the process that made it, and a refresh that ends after an edit
+// overwrites that mark. For a card a person reads, that is fine. A caller
+// that prices with nobody watching must know that the constants the engine
+// read are the committed rows, loaded for its own call. The two functions
+// below are that one answer; the caller asks nothing else of the cache.
+//
+// loadSettingsForUnattendedPrice() runs a refresh of its own, after any that
+// is queued. It is never shared with another caller's refresh, and it reads
+// on the app's connection, never on the caller's handle: a transaction can
+// hold an edit of the settings that never commits, and what a refresh reads
+// goes into the constants every caller prices from. It answers a ticket, or
+// null when the refresh failed.
+//
+// settingsHeldForUnattendedPrice(ticket), asked after the engine priced, is
+// yes when the constants are still that refresh's and are the rows' own:
+//   - no refresh began to change the constants since (_applies), and none is
+//     running now;
+//   - no edit of the settings was signaled in this process since the moment
+//     before that refresh read the rows (_invalidations);
+//   - the rows carried every input of the standard pest price
+//     (standardPestPriceRowsAreComplete).
+// A no means "price again", never a price.
+//
+// Not covered, by design: an edit that another process commits after the
+// refresh read the rows. The price is the one that was true at that read.
+function loadSettingsForUnattendedPrice() {
+  const run = _syncQueue.then(async () => {
+    const invalidations = _invalidations;
+    const loaded = await _syncConstantsFromDBUnserialized();
+    return loaded === true ? Object.freeze({ applies: _applies, invalidations }) : null;
+  });
+  _syncQueue = run.catch(() => {});
+  return run;
+}
+function settingsHeldForUnattendedPrice(ticket) {
+  return Boolean(ticket)
+    && ticket.applies === _applies
+    && ticket.invalidations === _invalidations
+    && standardPestPriceRowsAreComplete();
 }
 
 module.exports = {
@@ -2513,6 +2566,8 @@ module.exports = {
   needsSync,
   invalidatePricingConfigCache,
   standardPestPriceRowsAreComplete,
+  loadSettingsForUnattendedPrice,
+  settingsHeldForUnattendedPrice,
   validatePestPricingConfig,
   assertValidPestPricingConfig,
 };

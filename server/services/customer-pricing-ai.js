@@ -1193,12 +1193,7 @@ function buildQuoteOption({
 }
 
 // The refresh of the engine's price settings, right before the engine prices.
-// Default: best-effort, the code as it was. The bridge answers a failed
-// refresh with the values it had (the code defaults on a cold start), and a
-// card a person reads may show a price from those.
-// strict (strictPriceSettings): see strictPriceSettingsRefresh.
-async function maybeSyncPricingEngine(db, { strict = false } = {}) {
-  if (strict) return strictPriceSettingsRefresh(db);
+async function maybeSyncPricingEngine(db) {
   if (!db || !db.schema || typeof db.schema.hasTable !== 'function') return;
   if (pricingEngine.needsSync && pricingEngine.needsSync()) {
     await pricingEngine.syncConstantsFromDB(db);
@@ -1227,33 +1222,25 @@ async function maybeSyncPricingEngine(db, { strict = false } = {}) {
 //    property by its commercial rules, from settings the bridge has no answer
 //    for. So the resolved property is asked too, by the engine's own rule
 //    (assertStrictPriceProperty), with the blocker 'commercial'.
-// 2. The refresh (strictPriceSettingsRefresh). Every strict call refreshes,
-//    also when the settings read fresh, and a refresh that does not succeed
-//    throws PRICING_CONFIG_UNAVAILABLE. The bridge keeps the settings for a
-//    minute, and an edit marks them stale only in the process that made it:
-//    another server process would price from the earlier value for up to a
-//    minute. The bridge runs one refresh at a time and starts the one asked
-//    for here after any that is running, so its read of the rows begins
-//    after this call asked. Nothing between the refresh and the engine
-//    awaits. An edit that another process commits after that read is not
-//    seen: the price is the one that was true at the read.
-// 3. The settings the engine priced from (assertStrictPriceSettingsHeld),
-//    asked AFTER the engine priced and in the same turn, with no await in
-//    between. Two questions.
-//    The rows: a refresh answers true when pricing_config holds any row at
-//    all; for a row or a field that is missing the engine keeps what it had
-//    (the in-code default on a cold start, an earlier value on a warm
-//    process). The bridge's answer (standardPestPriceRowsAreComplete) is yes
-//    when the rows of the last good refresh carried every input of the
-//    standard pest price and no refresh is running now.
-//    Still fresh: an edit of the price settings in this process marks them
-//    stale at once (invalidatePricingConfigCache) and leaves the rows answer
-//    as it was. An edit that lands after the refresh of rule 2 and before
-//    the engine priced would pass the rows question alone, so strict asks
-//    whether the settings still read fresh (needsSync).
-//    Asked in the turn the engine priced, two yeses hold for the prices just
-//    computed: a refresh begins with a database read, so none can change the
-//    settings inside one turn. Anything else throws the price away.
+// 2. The settings, loaded for this call (strictPriceSettingsTicket). The
+//    default answers a failed refresh with the values the engine had (the
+//    in-code defaults on a cold start), and it shares the bridge's cache:
+//    one minute old at most, loaded on the handle of whoever asked first,
+//    and stale only in the process an edit was made in. Strict asks the
+//    bridge for a refresh of its own, from committed rows
+//    (loadSettingsForUnattendedPrice), and gets a ticket. No ticket throws
+//    PRICING_CONFIG_UNAVAILABLE.
+// 3. The settings, still the ones the engine priced from
+//    (assertStrictPriceSettingsHeld), asked AFTER the engine priced. The
+//    bridge answers for that ticket (settingsHeldForUnattendedPrice): no
+//    other refresh began to change the settings, none is running, no edit
+//    was signaled in this process since before the refresh read the rows,
+//    and the rows carried every input of the standard pest price (a refresh
+//    answers true when pricing_config holds any row at all; for a row or a
+//    field that is missing the engine keeps what it had). A no throws the
+//    price away, with PRICING_CONFIG_UNAVAILABLE. The whole question of
+//    "are these the rows' prices" is the bridge's: the pricer asks nothing
+//    else of the cache.
 // 4. The hand check (in the option loop). An option whose engine result
 //    needs a hand check is not returned. The test is the one the plan-start
 //    mint refuses on (engineResultNeedsReview: a review marker on a line, a
@@ -1263,10 +1250,10 @@ async function maybeSyncPricingEngine(db, { strict = false } = {}) {
 function priceSettingsUnavailable(message) {
   return Object.assign(new Error(message), { code: 'PRICING_CONFIG_UNAVAILABLE' });
 }
-async function strictPriceSettingsRefresh(db) {
-  const canSync = Boolean(db && db.schema && typeof db.schema.hasTable === 'function');
-  const synced = canSync ? await pricingEngine.syncConstantsFromDB(db) : false;
-  if (synced !== true) throw priceSettingsUnavailable('live price settings could not be loaded');
+async function strictPriceSettingsTicket() {
+  const ticket = await require('./pricing-engine/db-bridge').loadSettingsForUnattendedPrice();
+  if (!ticket) throw priceSettingsUnavailable('live price settings could not be loaded');
+  return ticket;
 }
 // strict reads the customer's current services and the account's records.
 // Without a handle or a customer id the first would read as "none": a
@@ -1274,12 +1261,9 @@ async function strictPriceSettingsRefresh(db) {
 function assertStrictPriceCall(db, customer) {
   if (!db || !customer?.id) throw new Error('strictPriceSettings needs a database handle and a customer id');
 }
-function assertStrictPriceSettingsHeld() {
-  if (!require('./pricing-engine/db-bridge').standardPestPriceRowsAreComplete()) {
-    throw priceSettingsUnavailable('the pest price settings are not complete in their rows, or a refresh is running');
-  }
-  if (pricingEngine.needsSync && pricingEngine.needsSync()) {
-    throw priceSettingsUnavailable('the price settings went stale while the price was computed');
+function assertStrictPriceSettingsHeld(ticket) {
+  if (!require('./pricing-engine/db-bridge').settingsHeldForUnattendedPrice(ticket)) {
+    throw priceSettingsUnavailable('the price settings changed while the price was computed, or the pest price rows are not complete');
   }
 }
 function planStartBlocked(blocker) {
@@ -1328,7 +1312,7 @@ async function buildCustomerPricingResponse({
   // pest plan's price for an account that may start a plan, from price
   // settings that are loaded and are the rows' own. It throws where the
   // default answers from what the engine had (the four rules above
-  // strictPriceSettingsRefresh). No caller passes it yet.
+  // strictPriceSettingsTicket). No caller passes it yet.
   strictPriceSettings = false,
 }) {
   const text = String(prompt || '').trim();
@@ -1462,7 +1446,7 @@ async function buildCustomerPricingResponse({
     };
   }
 
-  await maybeSyncPricingEngine(db, { strict: strictPriceSettings });
+  const settingsTicket = strictPriceSettings ? await strictPriceSettingsTicket() : await maybeSyncPricingEngine(db);
 
   const context = {
     grassType: propertyContext.grassType,
@@ -1549,9 +1533,8 @@ async function buildCustomerPricingResponse({
       }
     }
   }
-  // Same turn as the engine calls above: nothing between the refresh and
-  // this line awaits (rule 3 above strictPriceSettingsRefresh).
-  if (strictPriceSettings) assertStrictPriceSettingsHeld();
+  // After the last engine call (rule 3 above strictPriceSettingsTicket).
+  if (strictPriceSettings) assertStrictPriceSettingsHeld(settingsTicket);
 
   // A mixed prompt ("upgrade my lawn care and add mosquito") must not lose the
   // owned half just because the new half priced (codex r1 P2).
