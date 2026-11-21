@@ -17,7 +17,7 @@
 // it is 'current' or 'never-heard': the tab knew no newer build at its move.
 // A healthy tab sends 'never-heard' for a move made before its first server
 // answer, so one such view proves no failure, and it is not counted. The row
-// retires itself on the first clean run (ops-digest-fall-off.js).
+// retires itself on the first clean run.
 //
 // Read-only for the business: it writes no business record, texts or emails
 // no customer, and calls no paid API. Its writes are the ops digest row (or,
@@ -28,20 +28,17 @@ const db = require('../models/db');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
-const { deliverOpsDigest } = require('./ops-digest');
-const { retireIfClean } = require('./ops-digest-fall-off');
+const { deliverOpsDigest, resolveOpsDigest } = require('./ops-digest');
 
 const OPS_KEY = 'tab-reload-check';
-// The edge of a read, Eastern: one minute before the job's scheduled time,
-// 11:51 PM. A page view takes its time from the database as its insert
-// starts. After that minute a view of before the edge is in the table, also
-// when that clock is a little behind this one.
+// The edge of a read, Eastern: one minute before the job's scheduled time
+// (scheduler.js; a test keeps both in step). A page view takes its time from
+// the database as its insert starts. After that minute a view of before the
+// edge is in the table, also when that clock is a little behind this one.
 const EDGE_AT = '23:50';
 const FAILED_NAMES = ['reloaded', 'reload-missed'];
-// How far a finished run has read (system_settings), and the most a run goes
-// back for runs that did not finish.
+// How far a finished run has read (system_settings).
 const MARK_KEY = 'tab_reload_check.read_to';
-const MAX_NIGHTS = 7;
 const OPS_INBOX = 'contact@wavespestcontrol.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || OPS_INBOX;
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
@@ -61,16 +58,14 @@ function esc(value) {
 // Eastern time. So each page view is read by one finished run: a night whose
 // run failed is read by the next run, a run by hand included, and nothing is
 // read twice. With no mark the read starts one edge back: 23, 24 or 25 hours
-// (the clocks change), never a fixed 24. It never starts more than
-// MAX_NIGHTS back. `start` equals `end` when a finished run has read this
-// far already.
+// (the clocks change), never a fixed 24. `start` equals `end` when a
+// finished run has read this far already.
 function readWindow(now = new Date(), readTo = null) {
   const edgeOn = (day) => parseETDateTime(`${etDateString(day)}T${EDGE_AT}`);
   const today = edgeOn(now);
   const end = today.getTime() <= now.getTime() ? today : edgeOn(addETDays(now, -1));
   const from = readTo || edgeOn(addETDays(end, -1));
-  const oldest = edgeOn(addETDays(end, -MAX_NIGHTS));
-  return { start: new Date(Math.max(Math.min(from.getTime(), end.getTime()), oldest.getTime())), end };
+  return { start: from.getTime() < end.getTime() ? from : end, end };
 }
 
 // The mark: the `end` of the last window a run finished. An unreadable value
@@ -143,7 +138,7 @@ function composeDigest({ views, people, names, pages }) {
 function postDigest(found, mailer) {
   const composed = composeDigest(found);
   return deliverOpsDigest({
-    fallOff: true, // retired by retireIfClean on the first clean night
+    fallOff: true, // retired on the first clean run (retireRow)
     key: OPS_KEY,
     subject: composed.subject,
     headline: composed.headline,
@@ -180,6 +175,11 @@ function postDigest(found, mailer) {
   });
 }
 
+// Retires the standing row, as ops-digest-fall-off.js does for the other
+// checks. That helper hides a write that failed; here it throws, so the run
+// fails, the mark stays and the next run retires the row.
+const retireRow = () => resolveOpsDigest({ key: OPS_KEY, source: null, resolvedBy: `${OPS_KEY}:clean-run`, throwOnError: true });
+
 /**
  * One run. When the read throws, this throws too, so runExclusive records a
  * failed run and the standing row stays: a check that did not run proves
@@ -187,13 +187,16 @@ function postDigest(found, mailer) {
  * or the finding delivered. Returns { views, delivery?, upToDate? }.
  */
 async function runTabReloadCheck({ readRows = readMissedReloads, mailer = sendgrid, now = new Date(), markStore = marks } = {}) {
-  const { start, end } = readWindow(now, await markStore.get());
+  const readTo = await markStore.get();
+  const { start, end } = readWindow(now, readTo);
   // A finished run has read up to this edge: nothing to add, and no reason
   // to retire the row it left.
   if (start.getTime() >= end.getTime()) return { views: 0, upToDate: true };
+  // The first run keeps its start: when it fails, the next run reads from it.
+  if (!readTo) await markStore.set(start);
   const found = summarize(await readRows({ start, end }));
   if (!found.views) {
-    await retireIfClean(OPS_KEY);
+    await retireRow();
     await markStore.set(end);
     return { views: 0 };
   }
