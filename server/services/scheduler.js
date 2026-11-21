@@ -8339,6 +8339,14 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Ad budget adjustment failed: ${err.message}`);
     }
+    // Ads follow the route, step 1 (record only, $0): writes down each technician's areas, room and ZIP list.
+    // Its own try, so a failed budget run still records and a failed record never touches the budget run. It
+    // changes no budget, campaign, visit or message and makes no Google Ads call. See ads/route-areas.js.
+    try {
+      await runExclusive('ads-route-areas', () => require('./ads/route-areas').recordRouteAreas());
+    } catch (err) {
+      logger.error(`Ad route-areas record failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
