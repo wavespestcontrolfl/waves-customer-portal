@@ -205,6 +205,18 @@ describe('buildRouteAreas: one technician', () => {
     expect(dayOf(rec, T1, WEEKDAYS[1])).toMatchObject({ shift_min: 480, shift_source: 'roster' });
     expect(dayOf(rec, T2, WEEKDAYS[0])).toMatchObject({ shift_min: 120, shift_source: 'default', open_min: 40, room: false });
     expect(dayOf(rec, T2, WEEKDAYS[1])).toMatchObject({ shift_min: 600, shift_source: 'default' });
+
+    // The route check measures inside the default day: a technician with his own hours stays on the minute total.
+    const routeCheck = {
+      at: '2026-11-23T20:30:00.000Z',
+      days: [
+        { date: WEEKDAYS[1], technicianId: T1, slots: 3, stops: 0, skip: null },
+        { date: WEEKDAYS[1], technicianId: T2, slots: 3, stops: 0, skip: null },
+      ],
+    };
+    const measured = buildRouteAreas(input({ techIds: [T1, T2], nowMin: 16 * 60, techShifts, routeCheck }));
+    expect(dayOf(measured, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'minutes', route_slots: 3 });
+    expect(dayOf(measured, T2, WEEKDAYS[1])).toMatchObject({ room_basis: 'route_check', route_slots: 3 });
   });
 
   test('today before the shift starts keeps the whole shift; mid-shift counts the rest', () => {

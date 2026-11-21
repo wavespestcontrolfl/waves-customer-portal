@@ -20,7 +20,8 @@
  *                the day is as the route check saw it: the same number of stops for the technician, no stop row
  *                of that date changed since its run, and no unassigned work (the route check skips such a day). A
  *                booking or a move since then puts the day on `minutes`. So does a day where the two stop counts
- *                differ by their grouping (the route check counts one visit in two separate windows as two stops).
+ *                differ by their grouping (the route check counts one visit in two separate windows as two stops),
+ *                and a technician with his own shift hours (the route check measures inside the default day).
  *   minutes      today, and a date the route check did not measure (no fresh run, or a day it skips): the open
  *                minutes of the day hold one more job with its drive (close-gaps SLOT_MIN). This is a daily total,
  *                so it is a ceiling: the route check does not measure today (its room depends on where the van is).
@@ -186,7 +187,10 @@ function techDay(input, ctx, techId, date) {
   // every technician, so another technician's new stop can take this one's opening.
   const seen = date === input.dates[0] ? undefined : ctx.routeDays.get(`${techId}:${date}`);
   const changedSince = input.stops.some((s) => s.date === date && s.changedAt && s.changedAt > ctx.routeAt);
-  const measured = seen !== undefined && seen.stops === mine.length && unassigned.stops_left === 0 && !changedSince;
+  // The route check measures inside the default working day. A technician with his own shift hours stays on the
+  // minute total, which uses them: an opening after his day ends is not his room.
+  const ownShift = shiftOf(input, techId, date) !== input.shift;
+  const measured = seen !== undefined && seen.stops === mine.length && unassigned.stops_left === 0 && !changedSince && !ownShift;
   const room = staffed && openStops >= 1 && (measured ? seen.slots >= 1 : openMin >= input.slotMin);
   const { areas, unmapped } = areasOfStops(mine, ctx.maps.areaOfZip);
   const zipPart = zipRule({ staffed, room, stopCount: mine.length, areas, techId }, ctx.maps, input.territory);
