@@ -418,15 +418,14 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
 
     // A Waves Newsletter poll answer counts only from an issue that showed
     // that poll, and an issue that showed a poll takes answers only to the
-    // quizzes it showed: an older issue's token must not record a poll its
-    // reader never saw, and a hand-made link must not overwrite a poll vote
-    // (or add service tags) with another quiz's answer. An issue with no poll
-    // keeps the old rule. The public route answers the same either way.
+    // quizzes it showed (quizzesInIssue, the rule the poll history reads
+    // too): an older issue's token must not record a poll its reader never
+    // saw, and a hand-made link must not overwrite a poll vote (or add
+    // service tags) with another quiz's answer. An issue with no poll keeps
+    // the old rule. The public route answers the same either way.
     const answeredQuiz = quizId || DEFAULT_QUIZ_ID;
-    const issue = await db('newsletter_sends').where({ id: delivery.send_id }).first('html_body', 'text_body');
-    const bodies = `${issue?.html_body || ''}\n${issue?.text_body || ''}`;
-    if ((isNewsletterPoll(answeredQuiz) || pollInBody(bodies))
-      && !parseQuizTokens(bodies).some((shown) => shown.quizId === answeredQuiz)) {
+    const shown = quizzesInIssue(await db('newsletter_sends').where({ id: delivery.send_id }).first('html_body', 'text_body'));
+    if ((isNewsletterPoll(answeredQuiz) || shown.some(isNewsletterPoll)) && !shown.includes(answeredQuiz)) {
       return { ok: false, reason: 'not-in-issue' };
     }
 
@@ -474,19 +473,31 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
   }
 }
 
-// The first Waves Newsletter poll a body carries, or null.
-function pollInBody(content) {
-  const found = parseQuizTokens(content).find((t) => isNewsletterPoll(t.quizId));
-  return found ? found.quizId : null;
+/**
+ * The quizzes an issue shows, each part read by its own token form, as the
+ * public route contract reads them: {{quiz:<id>}} in html_body and
+ * {{quiz-text:<id>}} in text_body, in any letter case (parseQuizTokens).
+ */
+function quizzesInIssue(issue) {
+  return [
+    ...parseQuizTokens(issue?.html_body).filter((token) => !token.isText),
+    ...parseQuizTokens(issue?.text_body).filter((token) => token.isText),
+  ].map((token) => token.quizId);
+}
+
+// The Waves Newsletter poll an issue shows, or null.
+function pollInIssue(issue) {
+  return quizzesInIssue(issue).find(isNewsletterPoll) || null;
 }
 
 /**
  * The poll for the next Waves Newsletter issue, or null. `recent` lists the
- * newest POLL_ISSUE_GAP sent issues (newest first), each as the poll its body
- * carried or null; `used` lists every poll a sent issue has carried. No poll
- * when one of the recent issues had one, so a poll shows in at most every 3rd
- * issue and never in two in a row. Otherwise the first poll in the owner's
- * order that no sent issue used; none once the list is used up.
+ * newest POLL_ISSUE_GAP issues readers got (newest first), each as the poll
+ * it showed or null; `used` lists every poll an issue holds
+ * (newsletterIssuePolls). No poll when one of the recent issues had one, so a
+ * poll shows in at most every 3rd issue and never in two in a row. Otherwise
+ * the first poll in the owner's order that no issue holds; none once the list
+ * is used up.
  */
 function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
   if (recent.slice(0, POLL_ISSUE_GAP).some(Boolean)) return null;
@@ -494,12 +505,10 @@ function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
   return NEWSLETTER_POLL_IDS.find((id) => !taken.has(id)) || null;
 }
 
-// A delivery row with any success signal: the signals newsletter-sender.js
-// hasDeliverySuccessSignal reads.
 /**
- * Reads what chooseNewsletterPoll needs from the issues of one newsletter type
- * that readers got: the polls of the newest POLL_ISSUE_GAP such issues, and
- * every poll such an issue carried. An issue counts when one of its delivery
+ * Reads what chooseNewsletterPoll needs from the issues of one newsletter
+ * type: the polls of the newest POLL_ISSUE_GAP issues that readers got, and
+ * every poll an issue holds. An issue reached readers when one of its delivery
  * rows reached its reader by the sender's own rule (newsletter-sender.js
  * reachedDelivery), whatever the issue's status: a send its deadline stopped,
  * or one the stale-claim recovery ended, is 'failed' although its first
@@ -508,33 +517,36 @@ function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
  * recipient_count is no proof either way: a worker that stopped after a
  * batch leaves it at 0).
  * Sent bodies keep their quiz tokens (the per-reader buttons are SendGrid
- * substitutions), so a token in html_body or text_body is the record.
+ * substitutions), so the tokens in html_body and text_body are the record,
+ * read part by part (pollInIssue).
  * An issue's time is its sent_at, else the earliest time any of its delivery
  * rows records (a worker that failed after a batch leaves sent_at empty, a
  * lost SendGrid answer leaves a row's sent_at empty while the webhook still
  * stamps the delivery, and a resume clears scheduled_for), else its schedule,
  * else its draft time.
  *
- * An issue no reader got yet never counts. The autopilot drafts a week's issue
- * on its Monday, and last week's unsent issue can no longer go out by then: an
- * approval needs the issue's own Tuesday still ahead (newsletter-proof.js
- * resolveFlagshipCalendarContext), and the sender delivers a flagship issue
- * only on its own Tuesday at 6:00 AM ET (newsletter-sender.js,
- * isCurrentFlagshipTarget + isFlagshipDeliveryWindow).
+ * An issue no reader got yet still holds its poll while a Resume could mail
+ * it (a retryable delivery row): sendCampaign skips the Tuesday window for a
+ * resume of existing rows, so that issue can go out after a later one. Its
+ * poll is never chosen again, and is skipped if the issue is never resumed.
+ * Any other unsent issue holds nothing: a fresh send of a flagship issue goes
+ * out only on its own Tuesday at 6:00 AM ET (newsletter-sender.js
+ * isCurrentFlagshipTarget + isFlagshipDeliveryWindow), and its approval needs
+ * that Tuesday still ahead (newsletter-proof.js resolveFlagshipCalendarContext),
+ * so last week's unsent issue cannot follow this week's.
  */
 async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
   // Loaded here, not at the top: newsletter-sender.js loads this module first.
-  const { reachedDelivery } = require('./newsletter-sender');
-  const reached = () => knex('newsletter_sends as s')
-    .where('s.newsletter_type', newsletterType)
-    .whereExists(function deliveredRow() {
-      // reachedDelivery's unqualified columns are d's: SQL resolves a name in
-      // the innermost FROM first, before the outer newsletter_sends row.
-      reachedDelivery(this.select(knex.raw('1')).from('newsletter_send_deliveries as d')
-        .whereRaw('d.send_id = s.id'));
-    });
-  const pollOf = (row) => pollInBody(`${row.html_body || ''}\n${row.text_body || ''}`);
-  const newest = await reached()
+  const { reachedDelivery, applyRetryableDeliveryFilter } = require('./newsletter-sender');
+  const issues = () => knex('newsletter_sends as s').where('s.newsletter_type', newsletterType);
+  const deliveryRows = (sub) => sub.select(knex.raw('1'))
+    .from('newsletter_send_deliveries as d').whereRaw('d.send_id = s.id');
+  // reachedDelivery's unqualified columns are d's: SQL resolves a name in the
+  // innermost FROM first, before the outer newsletter_sends row.
+  const reachedRow = (sub) => { reachedDelivery(deliveryRows(sub)); };
+  const resumableRow = (sub) => { applyRetryableDeliveryFilter(deliveryRows(sub), 'd'); };
+  const newest = await issues()
+    .whereExists(reachedRow)
     .orderByRaw(`COALESCE(s.sent_at,
       (SELECT LEAST(MIN(f.sent_at), MIN(f.delivered_at), MIN(f.opened_at), MIN(f.clicked_at),
           MIN(f.complained_at), MIN(f.unsubscribed_at))
@@ -543,13 +555,14 @@ async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
     .limit(POLL_ISSUE_GAP)
     .select('s.html_body', 's.text_body');
   // ILIKE: the sender reads quiz tokens in any letter case (parseQuizTokens).
-  const withPoll = await reached()
+  const holding = await issues()
+    .where((issue) => issue.whereExists(reachedRow).orWhereExists(resumableRow))
     .where((body) => body.where('s.html_body', 'ilike', `%{{quiz:${NEWSLETTER_POLL_PREFIX}%`)
       .orWhere('s.text_body', 'ilike', `%{{quiz-text:${NEWSLETTER_POLL_PREFIX}%`))
     .select('s.html_body', 's.text_body');
   return {
-    recent: newest.map(pollOf),
-    used: withPoll.map(pollOf).filter(Boolean),
+    recent: newest.map(pollInIssue),
+    used: holding.map(pollInIssue).filter(Boolean),
   };
 }
 
@@ -557,7 +570,7 @@ module.exports = {
   NEWSLETTER_POLL_IDS,
   POLL_ISSUE_GAP,
   isNewsletterPoll,
-  pollInBody,
+  pollInIssue,
   chooseNewsletterPoll,
   newsletterIssuePolls,
   QUIZ_HTML_TOKEN,

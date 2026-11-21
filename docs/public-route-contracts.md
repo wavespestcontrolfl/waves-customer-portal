@@ -4911,8 +4911,9 @@ reaction keys validated against the server-side config allowlists
 (newsletter-quiz.js / newsletter-feedback.js); a Waves Newsletter poll
 answer (an `nl-poll-*` quiz id) is written only when the token's own send
 carried that poll (`{{quiz:<id>}}` in its html_body or `{{quiz-text:<id>}}`
-in its text_body), and a send that carried a poll takes answers only to the
-quizzes it carried, so an older issue's token can neither record a poll its
+in its text_body, each part read by its own token form), and a send that
+carried a poll takes answers only to the quizzes it carried, read the same
+way, so an older issue's token can neither record a poll its
 reader never saw nor overwrite that row's earlier answer, and a hand-made
 link cannot replace a poll vote or add service tags with another quiz's
 answer; a send with no poll keeps the old rule (any configured quiz); on a

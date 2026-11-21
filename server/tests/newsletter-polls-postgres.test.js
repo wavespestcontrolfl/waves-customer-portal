@@ -1,19 +1,19 @@
 /**
  * Waves Newsletter polls against real Postgres:
- * - newsletterIssuePolls reads one newsletter type's poll history from the
- *   issues readers got: the polls of the newest two, and every poll such an
- *   issue carried, in either body part and any letter case, by the sender's
- *   own reach rule. A
- *   'failed' send that reached readers before it stopped counts, and so does
- *   one whose only proof is a reader's spam report; a draft, a send that
- *   reached no reader (a 'sent' one whose recipients all dropped out, or whose
- *   every message hard-bounced) and another type's issue never count. An
- *   issue with no send time sorts by its first delivery.
- * - recordQuizResponse records a poll vote only from an issue that carried
- *   that poll; an issue that carried a poll takes no other quiz's answer; an
+ * - newsletterIssuePolls reads one newsletter type's poll history: the polls
+ *   of the newest two issues readers got (by the sender's own reach rule),
+ *   and every poll such an issue, or an unsent one a Resume could still mail,
+ *   holds. Each body part is read by its own token form, in any letter case.
+ *   A 'failed' send that reached readers before it stopped counts, and so
+ *   does one whose only proof is a reader's spam report; a draft, a send that
+ *   reached no reader (a 'sent' one whose recipients all dropped out, or
+ *   whose every message hard-bounced) and another type's issue never count.
+ *   An issue with no send time sorts by its first delivery stamp.
+ * - recordQuizResponse records a poll vote only from an issue that showed
+ *   that poll; an issue that showed a poll takes no other quiz's answer; an
  *   issue with no poll keeps the old rule.
- * Real Postgres, because these are a LIKE over the stored bodies, an EXISTS
- * and a subquery over the delivery rows, and the vote's row update.
+ * Real Postgres, because these are an ILIKE over the stored bodies, EXISTS
+ * and subqueries over the delivery rows, and the vote's row update.
  * Runs in CI's DB-gated step or this worktree's private QA database; every
  * test runs in one transaction that is rolled back, so no row stays.
  */
@@ -46,12 +46,15 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
   // Inserts issues and their delivery rows; returns each issue's delivery rows
   // ({ id, engagement_token }) in order. A 'sent' issue gets one delivered row
   // unless it lists its own. textOnly puts the poll in the plain-text part only;
-  // upperCase writes its tokens in capitals, which the sender also reads.
+  // upperCase writes its tokens in capitals, which the sender also reads;
+  // wrongPart puts each part's token in the other part's form.
   async function insertIssues(type, rows) {
     const inserted = await db('newsletter_sends').insert(rows.map((row) => ({
       subject: 'Synthetic poll issue',
-      html_body: `<p>Synthetic</p>${row.poll && !row.textOnly ? `{{${row.upperCase ? 'QUIZ' : 'quiz'}:${row.poll}}}` : ''}<p>End</p>`,
-      text_body: row.poll ? `Synthetic\n{{${row.upperCase ? 'QUIZ-TEXT' : 'quiz-text'}:${row.poll}}}` : 'Synthetic',
+      html_body: `<p>Synthetic</p>${row.poll && !row.textOnly
+        ? `{{${row.upperCase ? 'QUIZ' : 'quiz'}${row.wrongPart ? '-text' : ''}:${row.poll}}}` : ''}<p>End</p>`,
+      text_body: row.poll
+        ? `Synthetic\n{{${row.upperCase ? 'QUIZ' : 'quiz'}${row.wrongPart ? '' : '-text'}:${row.poll}}}` : 'Synthetic',
       auto_share_social: false,
       newsletter_type: row.type || type,
       status: row.status || 'sent',
@@ -116,9 +119,10 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
       // Its deadline stopped it after the first batch: 'failed', yet readers got P2.
       { poll: P2, status: 'failed', sentAt: daysAgo(14), deliveries: [{ status: 'sent', sentAt: daysAgo(14) }, { status: 'queued' }] },
       { poll: null, sentAt: daysAgo(7) },
-      // None of these reached a reader of this newsletter.
+      // None of these reached a reader of this newsletter, and none can be resumed.
       { poll: P3, status: 'draft' },
-      { poll: P4, status: 'failed', sentAt: daysAgo(3), deliveries: [{ status: 'failed' }] },
+      // SendGrid dropped its only message (its unsubscribe list): nothing left to mail.
+      { poll: P4, status: 'failed', sentAt: daysAgo(3), deliveries: [{ status: 'unsubscribed' }] },
       // 'sent', but every recipient dropped out before dispatch. The issue row
       // reads 'sent' with a send time; only its delivery row says no one got it.
       { poll: P4, sentAt: daysAgo(2), deliveries: [{ status: 'skipped' }] },
@@ -132,7 +136,8 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
 
     // A second issue without a poll opens the gap: the next poll is P3, even
     // though a draft and another newsletter type carried it, and P4 stays
-    // unused because no reader got either issue that carried it.
+    // unused because no reader got either issue that carried it and neither
+    // can be resumed.
     await insertIssues(TYPE, [{ poll: null, sentAt: new Date(Date.now() - HOUR) }]);
     const later = await newsletterIssuePolls({ newsletterType: TYPE });
     expect(later.recent).toEqual([null, null]);
@@ -171,6 +176,31 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     expect(history.recent).toEqual([null, P2]);
     expect([...history.used].sort()).toEqual([P1, P2].sort());
     expect(chooseNewsletterPoll(history)).toBeNull();
+  });
+
+  test('an unsent issue a Resume could still mail holds its poll; one with nothing left to mail does not', async () => {
+    const TYPE = newType();
+    await insertIssues(TYPE, [
+      { poll: null, sentAt: daysAgo(21) },
+      { poll: null, sentAt: daysAgo(14) },
+      // Failed before SendGrid took any message; its rows are still retryable,
+      // and a Resume may mail them after the next issue.
+      { poll: P1, status: 'failed', createdAt: daysAgo(8), deliveries: [{ status: 'queued' }, { status: 'failed' }] },
+      // Failed with no row a Resume would mail: it can never go out.
+      { poll: P3, status: 'failed', createdAt: daysAgo(9), deliveries: [{ status: 'skipped' }] },
+    ]);
+    const history = await newsletterIssuePolls({ newsletterType: TYPE });
+    expect(history.recent).toEqual([null, null]);
+    expect(history.used).toEqual([P1]);
+    expect(chooseNewsletterPoll(history)).toBe(P2);
+  });
+
+  test('a poll token in the other part\'s form is not a poll the issue showed', async () => {
+    const TYPE = newType();
+    const [[row]] = await insertIssues(TYPE, [{ poll: P1, wrongPart: true, sentAt: daysAgo(7) }]);
+    expect(await newsletterIssuePolls({ newsletterType: TYPE })).toEqual({ recent: [null], used: [] });
+    await expect(recordQuizResponse({ token: row.engagement_token, quizId: P1, answerKey: 'beach' }))
+      .resolves.toEqual({ ok: false, reason: 'not-in-issue' });
   });
 
   test('the sender\'s reach rule decides: a hard-bounced issue does not count; a reader\'s spam report does', async () => {

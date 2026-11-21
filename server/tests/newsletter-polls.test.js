@@ -32,7 +32,7 @@ jest.mock('../services/newsletter-event-selection', () => ({
 
 const db = require('../models/db');
 const {
-  NEWSLETTER_POLL_IDS, POLL_ISSUE_GAP, QUIZ_TOKEN_PATTERN, getQuiz, chooseNewsletterPoll, pollInBody,
+  NEWSLETTER_POLL_IDS, POLL_ISSUE_GAP, QUIZ_TOKEN_PATTERN, getQuiz, chooseNewsletterPoll, pollInIssue,
   hasQuizToken, buildQuizSubstitutions, neutralizeQuizTokens,
 } = require('../services/newsletter-quiz');
 const {
@@ -104,10 +104,13 @@ describe('Waves Newsletter polls', () => {
     expect(chooseNewsletterPoll(history)).toBe(want);
   });
 
-  test('pollInBody finds the poll token and ignores the other quizzes', () => {
-    expect(pollInBody(`<p>Hi</p>{{quiz:${P2}}}<p>Bye</p>`)).toBe(P2);
-    expect(pollInBody('{{quiz}} {{quiz:lawn-headache-v1}} {{quiz:stay-subscribed-v1}}')).toBeNull();
-    expect(pollInBody(null)).toBeNull();
+  test('pollInIssue reads each part by its own token form and ignores the other quizzes', () => {
+    expect(pollInIssue({ html_body: `<p>Hi</p>{{quiz:${P2}}}<p>Bye</p>`, text_body: 'Hi' })).toBe(P2);
+    expect(pollInIssue({ html_body: '<p>Hi</p>', text_body: `Hi\n{{QUIZ-TEXT:${P2}}}` })).toBe(P2);
+    // A token in the other part's form is not a poll the issue showed.
+    expect(pollInIssue({ html_body: `{{quiz-text:${P2}}}`, text_body: `{{quiz:${P2}}}` })).toBeNull();
+    expect(pollInIssue({ html_body: '{{quiz}} {{quiz:lawn-headache-v1}} {{quiz:stay-subscribed-v1}}', text_body: '' })).toBeNull();
+    expect(pollInIssue(null)).toBeNull();
   });
 
   test('the flagship carries the poll once, after the closing and before the sign-off, in both parts', async () => {
