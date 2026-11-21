@@ -388,41 +388,24 @@ function positiveOrNull(value) {
 // (website-quote-publication.js), so a quote the customer accepted online is
 // read as the engine graded it.
 //
-// WHICH result is the estimate's price (pre-push r8 to r10). An estimate can
-// hold a `result` and an `engineResult`: the mapped result and its raw twin
-// from one pricing run (a staff save), the engine's full result beside the
-// wizard's slim one (a quote-required wizard quote), or a `result` that a
-// revision or a server reprice rewrote, with the earlier `engineResult` left
-// behind. estimate-result-container.js holds the rule for the two, and the
-// check follows it as far as it is certain:
-//   - after a SERVER reprice (the row's pricing_authority, or the one the
-//     blob froze at the price lock) `result` is the authority and the whole
-//     other container is a leftover: a row there is a removed or repriced
-//     service, never an extra. When that `result` keeps the engine's list,
-//     the `engineResult` behind it is not read: a marker on a row that staff
-//     have since corrected is not a marker of the price, and a slim result
-//     there has nothing left to vouch for. Nothing is lost for a raw twin:
-//     the mapped result carries every marker of the raw rows (the test runs
-//     the real engine and the real mapper; on 2026-11-21 no production
-//     seed's verdict depended on the twin).
-//   - with any other authority both are read. The `engineResult` can then
-//     hold a service priced only there, which resolveEstimateLines keeps as
-//     a line of the estimate. Telling such a row from a stale one takes the
-//     pricing audit's line merge, and the check does not rebuild it: a stale
-//     row there keeps the quote button, as it does on main.
+// BOTH results are read when an estimate holds a `result` and an
+// `engineResult` (pre-push r8 to r11 on this branch). A staff save stores the
+// mapped result and its raw twin from the same pricing run
+// (admin-estimate-persistence.js: "the RAW server engine result rides along
+// with its mapped twin"), and the mapped one does not carry every marker: an
+// oversize one-time lawn row keeps its customQuoteFlag on the raw row only.
+// So the check does not pick one of the two as the estimate's price. Two
+// narrower readings were built and dropped: reading only the result that
+// estimate-result-container.js calls current lost that flag, and reading
+// the other one for a service priced only there needs the pricing audit's
+// line merge. The cost of reading both is on the safe side: an older
+// estimate whose `engineResult` was left behind by a revision keeps the
+// quote button for a marker on a row since corrected, as it does on main,
+// and a slim `engineResult` beside a full `result` counts. On 2026-11-21
+// no production seed's verdict depended on which of the two is read.
 const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
-const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';
 
-// The `engineResult` a server reprice left behind `result`, when that result
-// keeps the engine's list; null in every other case.
-function resultBehindServerReprice(estData, pricingAuthority) {
-  const { result, engineResult } = estData;
-  if (!isKeyed(result) || !Array.isArray(result.fieldVerify) || !isKeyed(engineResult)) return null;
-  const { storedEstimateServerPriced } = require('../estimate-result-container');
-  return storedEstimateServerPriced(estData, pricingAuthority) ? engineResult : null;
-}
-
-function estimateRequiresFieldVerification(estData, { replaysLawnSize = true, pricingAuthority = null } = {}) {
+function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } = {}) {
   if (!estData || typeof estData !== 'object') return false;
   const { lineNeedsReviewBeforeExactPrice } = require('../estimator-engine/draft-builder');
   const listsCodes = (list) => Array.isArray(list) && list.length > 0;
@@ -447,10 +430,8 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true, pr
     || (turfCounts && listsCodes(c.turfFlags))
     || lineNeedsReviewBeforeExactPrice(asRow(c), { turfGrade: turfCounts });
   const turfSummaryCounts = (result) => replaysLawnSize || !Array.isArray(result.fieldVerify);
+  const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';
   const servicePicks = (node, key, value) => node === estData && key === 'services' && isKeyed(value);
-  const leftBehind = resultBehindServerReprice(estData, pricingAuthority);
-  const notRead = (node, key, child) => SEED_INPUT_KEYS.has(key) || servicePicks(node, key, child)
-    || (leftBehind !== null && child === leftBehind);
   const slimResult = (key, value) => key === 'engineResult' && isKeyed(value) && !Array.isArray(value.fieldVerify);
   // The stored JSON is a finite tree, so the walk needs no depth limit; a
   // limit would be a place where a marker reads as clean.
@@ -464,7 +445,7 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true, pr
     }
     if (markedForReview(node, turfCounts)) return true;
     for (const [childKey, child] of Object.entries(node)) {
-      if (notRead(node, childKey, child)) continue;
+      if (SEED_INPUT_KEYS.has(childKey) || servicePicks(node, childKey, child)) continue;
       if (slimResult(childKey, child)) return true;
       pending.push({ node: child, turfCounts: childKey !== 'property' || turfSummaryCounts(node) });
     }
@@ -556,7 +537,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     const bodies = await database('estimates')
       .whereIn('id', batch.map((row) => row.id))
       .where({ customer_id: customerId, status: 'accepted' })
-      .select('id', 'address', 'estimate_data', 'pricing_authority');
+      .select('id', 'address', 'estimate_data');
     const bodyById = new Map(bodies.map((body) => [body.id, body]));
     // The batch's bodies in the listed order, so the first surviving row is
     // the most recently accepted same-property estimate; a row that left the
@@ -573,7 +554,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
       // service picks must not stop the scan before an older same-premises
       // estimate with measurements, whose review markers then apply.
       if (![inputs.homeSqFt, inputs.lotSqFt, inputs.lawnSqFt, inputs.turfSf, inputs.bedArea, inputs.stories].some(positiveOrNull)) continue;
-      pick = { inputs, estData, pricingAuthority: body.pricing_authority };
+      pick = { inputs, estData };
       break;
     }
   }
@@ -657,7 +638,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // must not be replayed into an exact price for a different service,
     // which would be graded high-confidence on inputs that were never
     // qualified. Demotes to the quote CTA; the offer itself still renders.
-    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData, { replaysLawnSize: seedLawnSqFt != null, pricingAuthority: pick.pricingAuthority }),
+    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData, { replaysLawnSize: seedLawnSqFt != null }),
     propertyType: cleanString(inputs.propertyType),
     yearBuilt: positiveOrNull(inputs.yearBuilt),
     constructionMaterial: cleanString(inputs.constructionMaterial),
