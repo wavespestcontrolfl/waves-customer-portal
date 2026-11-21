@@ -763,6 +763,33 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Jun 29, 2026 is not paid yet')]);
     });
 
+    it('waits when a later final pay run already used the time-off bank of the technician, so a gift alone never blocks the run', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      // Alpha and Charlie have a time-off bank and no hours this week: only the gift makes a check for them.
+      const alpha = await readyTech('Sample Alpha', { pto_hours_per_year: '80.00' });
+      const charlie = await readyTech('Sample Charlie', { pto_hours_per_year: '80.00' });
+      const bravo = await readyTech('Sample Bravo');
+      await approvedWeek(bravo, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect([checkOf(run, alpha).techRewardsCents, checkOf(run, charlie).techRewardsCents]).toEqual([GIFT, GIFT]);
+      // A later week is already final, and its run left time off of Alpha unpaid from the bank, with no check. A check of
+      // Charlie in the next tax year is final too, and it read the bank (the year-to-date guard does not see another year).
+      // Finalize refuses a run that holds a check of either now (the bank's order guards), so both gifts wait and the run
+      // keeps its other check.
+      const later = addDays(GIFT_WEEK, 7);
+      await trx('payroll_runs').insert({
+        week_start: later, pay_date: addDays(later, 11), status: 'finalized',
+        unpaid_time_off: JSON.stringify([{ technicianId: alpha, name: 'Sample Alpha', hours: '8.00', reason: 'Sample reason.' }]),
+      });
+      await paidWeek(charlie, '2027-01-04', { pto_earned_minutes: '92.40' });
+      const again = await recompute(run.id);
+      expect([checkOf(again, alpha), checkOf(again, charlie)]).toEqual([undefined, undefined]);
+      expect([await linesOf(alpha), await linesOf(charlie)]).toEqual([[], []]);
+      const why = 'a later pay run that is already final used their time-off bank, so this pay run cannot hold a paycheck for them';
+      expect((await notesOf(run.id)).sort()).toEqual([waits('Sample Alpha', why), waits('Sample Charlie', why)]);
+      expect((await finalize(run.id)).checks.map((c) => c.technicianId)).toEqual([bravo]);
+    });
+
     it('waits when no paycheck can be worked out for the technician, so a gift alone never blocks the run', async () => {
       const alpha = await readyTech('Sample Alpha', { pay_rate: null }); // no pay rate, and no hours this week
       const bravo = await readyTech('Sample Bravo');

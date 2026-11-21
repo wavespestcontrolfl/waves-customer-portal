@@ -369,8 +369,12 @@ function ptoBankSignature(row) {
   if (!('pto_bank' in row) && typeof row.calc_snapshot === 'string') {
     try { bank = JSON.parse(row.calc_snapshot).ptoBank; } catch { bank = null; }
   }
-  return ['earnedMinutes', 'earlyIllnessMinutes', 'unpaidMinutes', 'unpaidRuleMinutes', 'unpaidBeforeHireMinutes', 'beforeMinutes', 'afterMinutes']
+  const figures = ['earnedMinutes', 'earlyIllnessMinutes', 'unpaidMinutes', 'unpaidRuleMinutes', 'unpaidBeforeHireMinutes', 'beforeMinutes', 'afterMinutes']
     .map((key) => Number((bank || {})[key] || 0).toFixed(2));
+  // What the bank paid on each date. A day off moved inside the week can keep every total and still change
+  // these, and pay earned by date reads them (tech-rewards-scoreboard.js readGross).
+  const paidDays = ((bank || {}).paidDays || []).map((day) => `${day.workDate}=${Number(day.minutes || 0).toFixed(2)}`).sort();
+  return [...figures, paidDays.join(',')];
 }
 
 // The unpaid time off list in the token (payroll-time-off-bank.js applyBank): who, how much and why.

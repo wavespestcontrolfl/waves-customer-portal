@@ -699,6 +699,7 @@ describe('Staff active timer serialization', () => {
       { table: 'time_entry_daily_summary', label: 'approvedDay', firstValue: undefined },
       { table: 'payroll_checks', label: 'paidWeek', firstValue: undefined },
       { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
+      { table: 'payroll_runs as r', label: 'closedWeek', firstValue: undefined },
       { table: 'time_weekly_summary', label: 'approvedWeek', firstValue: undefined },
       { table: 'time_entries', label: 'entryUpdate', returningValue: [saved] },
       { table: 'time_entries', label: 'dailyEntries', thenValue: [saved] },
@@ -769,6 +770,7 @@ describe('Staff active timer serialization', () => {
       },
       { table: 'payroll_checks', label: 'paidWeek', firstValue: undefined },
       { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
+      { table: 'payroll_runs as r', label: 'closedWeek', firstValue: undefined },
       {
         table: 'time_weekly_summary',
         label: 'weekState',
@@ -796,13 +798,13 @@ describe('Staff active timer serialization', () => {
       edited_by: 'admin-1',
     });
 
-    expect(specs[6].updatePayload).toMatchObject({
+    expect(specs[7].updatePayload).toMatchObject({
       approval_status: 'pending',
       approved_by: null,
       approved_at: null,
       approval_notes: null,
     });
-    expect(specs[8].updatePayload.status).toBe('pending');
+    expect(specs[9].updatePayload.status).toBe('pending');
     expectOrdered(events, [
       'entryUpdate.update',
       'remainingDispute.first',
@@ -997,9 +999,8 @@ describe('Admin adds a missed shift', () => {
     ...overrides,
   });
   // Query order inside the transaction: week lock (raw), the shared payroll lock
-  // (raw), technician lock, the same day / paid check / paid line / week guards an
-  // edit runs, with the closed-week read a new shift adds, the overlap check, then
-  // the insert.
+  // (raw), technician lock, the same day / paid check / paid line / closed week /
+  // week guards an edit of a shift runs, the overlap check, then the insert.
   const guardSpecs = (guards = {}) => {
     const { overlap, day, paid, line, closed, week } = guards;
     const technician = 'technician' in guards ? guards.technician : { id: TECH, active: true };

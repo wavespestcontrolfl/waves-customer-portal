@@ -492,10 +492,11 @@ describe('The open pay run stays the one the owner picked', () => {
     await afterTheOldReadLands(held);
   });
 
-  it('does not read the draft again while the owner waits for another run, and keeps reading it after a read that failed', async () => {
+  it('does not read the draft again while the owner waits for another run, reads that run once more when it answers, and keeps reading the draft after a read that failed', async () => {
     let hours = 80;
     let releaseTechnicians;
     let releaseSecond;
+    let secondReads = 0;
     let secondFails = false;
     const original = adminFetch.getMockImplementation();
     const firstReads = () => calls.filter(c => c.path === '/admin/payroll/runs/run-1').length;
@@ -511,6 +512,7 @@ describe('The open pay run stays the one the owner picked', () => {
       if (path === '/admin/payroll/runs/run-1') { calls.push({ path, method }); return reply({ run: DRAFT }); }
       if (path === '/admin/payroll/runs/run-2') {
         if (secondFails) return reply({ error: 'Pay run not found.' }, false, 404);
+        secondReads += 1;
         return new Promise(resolve => { releaseSecond = () => resolve(reply({ run: { ...RUN, ...OTHER } })); });
       }
       if (path === '/admin/payroll/technicians/tech-a/pto-allowance') hours = 96;
@@ -529,9 +531,15 @@ describe('The open pay run stays the one the owner picked', () => {
     await waitFor(() => expect(releaseSecond).toBeTypeOf('function'));
     await act(async () => { releaseTechnicians(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
     expect(firstReads()).toBe(before);
+    // The read of the other run started before the settings change landed, so its answer can be from before
+    // the change: it is not shown, and the run is read once more.
+    await act(async () => { releaseSecond(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    expect(secondReads).toBe(2);
+    expect(screen.queryByLabelText(SECOND)).toBeNull();
     await act(async () => { releaseSecond(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
     expect(screen.getByLabelText(SECOND)).toBeInTheDocument();
     expect(screen.queryByLabelText(FIRST)).toBeNull();
+    expect(secondReads).toBe(2);
 
     // Back on the draft, a read of the other run fails. The draft stays, and a change still reads it again.
     fireEvent.click(screen.getByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
@@ -619,6 +627,42 @@ describe('The open pay run stays the one the owner picked', () => {
     expect(screen.queryByLabelText(FIRST)).toBeNull();
   });
 
+  it('reads a run once more when a finalize of another run ended while that run was being read', async () => {
+    const held = { finalize: null, second: null, secondReads: 0 };
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs' && method === 'GET') return reply({ runs: LIST });
+      if (path === '/admin/payroll/runs/run-1/finalize' && method === 'POST') {
+        return new Promise(resolve => { held.finalize = () => resolve(reply({ run: { ...DRAFT, status: 'finalized' } })); });
+      }
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: DRAFT });
+      if (path === '/admin/payroll/runs/run-2') {
+        held.secondReads += 1;
+        if (held.secondReads > 1) return reply({ run: { ...RUN, ...OTHER } });
+        return new Promise(resolve => { held.second = () => resolve(reply({ run: { ...RUN, ...OTHER } })); });
+      }
+      return original(path, options);
+    });
+    const land = release => act(async () => { release(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finalize' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, finalize' }));
+    await waitFor(() => expect(held.finalize).toBeTypeOf('function'));
+    // The owner opens the other run. Its read starts before the finalize is done and answers after it.
+    fireEvent.click(screen.getByRole('button', { name: 'Open pay run for Oct 5, 2026 to Oct 11, 2026' }));
+    await waitFor(() => expect(held.second).toBeTypeOf('function'));
+    await land(held.finalize);
+    expect(held.secondReads).toBe(1);
+    expect(screen.getByLabelText(FIRST)).toBeInTheDocument();
+    await land(held.second);
+    // That answer can be from before the finalize: the run is read once more, then shown.
+    expect(await screen.findByLabelText(SECOND)).toBeInTheDocument();
+    expect(held.secondReads).toBe(2);
+    expect(screen.queryByLabelText(FIRST)).toBeNull();
+  });
+
   // A new pay run whose answer is held back until release() runs.
   const holdTheNewRun = () => {
     const NEW = { ...DRAFT, id: 'run-9', weekStart: '2026-09-28', weekEnd: '2026-10-04', payDate: '2026-10-09' };
@@ -633,10 +677,12 @@ describe('The open pay run stays the one the owner picked', () => {
       }
       if (path === '/admin/payroll/runs/run-1') { calls.push({ path, method }); return reply({ run: DRAFT }); }
       if (path === '/admin/payroll/runs/run-2') return reply({ run: { ...RUN, ...OTHER } });
+      if (path === '/admin/payroll/runs/run-9') { calls.push({ path, method }); return reply({ run: NEW }); }
       return original(path, options);
     });
     return held;
   };
+  const newReads = () => calls.filter(c => c.path === '/admin/payroll/runs/run-9').length;
   const NEWEST = 'Pay run for Sep 28, 2026 to Oct 4, 2026';
   const release = held => act(async () => { held.release(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
 
@@ -650,9 +696,10 @@ describe('The open pay run stays the one the owner picked', () => {
     await release(held);
     expect(screen.getByLabelText(SECOND)).toBeInTheDocument();
     expect(screen.queryByLabelText(NEWEST)).toBeNull();
+    expect(newReads()).toBe(0);
   });
 
-  it('does not read the shown run again while a new pay run is being made, and then shows the new run', async () => {
+  it('does not read the shown run again while a new pay run is being made, then shows the new run and reads it once more', async () => {
     const held = holdTheNewRun();
     const firstReads = () => calls.filter(c => c.path === '/admin/payroll/runs/run-1').length;
     render(<PayrollSettings />);
@@ -670,6 +717,9 @@ describe('The open pay run stays the one the owner picked', () => {
     await release(held);
     expect(await screen.findByLabelText(NEWEST)).toBeInTheDocument();
     expect(screen.queryByLabelText(FIRST)).toBeNull();
+    // The time-off change ended while the run was being made, so its answer can lack it: one more read.
+    await waitFor(() => expect(newReads()).toBe(1));
+    expect(screen.getByLabelText(NEWEST)).toBeInTheDocument();
   });
 
   it('keeps a new pay run when the older read of the draft answers last', async () => {

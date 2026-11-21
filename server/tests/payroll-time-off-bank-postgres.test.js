@@ -362,7 +362,7 @@ postgres('payroll time-off bank', () => {
       expect([nothing.status, nothing.body.error]).toEqual([409, 'No W-2 hours to pay for that week.']);
     });
 
-    it('lets no hours enter the week of a final pay run for a W-2 employee, with or without a check on it', async () => {
+    it('lets no shift hours enter or change in the week of a final pay run for a W-2 employee, with or without a check on it', async () => {
       const id = await tech('Sample Alpha', { hours: '80' });
       const other = await tech('Sample Bravo');
       const contractor = await tech('Sample Contractor', { employment_type: '1099' });
@@ -393,12 +393,21 @@ postgres('payroll time-off bank', () => {
       await expect(timeTracking.adminEditEntry(later.id, {
         clock_in: `${addDays(W1, 3)}T14:00:00Z`, clock_out: `${addDays(W1, 3)}T22:00:00Z`, edit_reason: 'Wrong day', edited_by: ADMIN_ID,
       })).rejects.toMatchObject(CLOSED);
-      // An entry that already sits in the week stays open to a technician the run did not pay, as before.
-      const inside = randomUUID();
-      await trx('time_entries').insert({
-        id: inside, technician_id: other, entry_type: 'shift', status: 'completed', approval_status: 'pending',
-        clock_in: `${addDays(W1, 4)}T14:00:00Z`, clock_out: `${addDays(W1, 4)}T22:00:00Z`, duration_minutes: 480,
-      });
+      // Shift hours inside the week cannot change either: the times of a shift, and an entry turned into a shift.
+      const [inside, job] = [randomUUID(), randomUUID()];
+      await trx('time_entries').insert([
+        { id: inside, technician_id: other, entry_type: 'shift', status: 'completed', approval_status: 'pending',
+          clock_in: `${addDays(W1, 4)}T14:00:00Z`, clock_out: `${addDays(W1, 4)}T22:00:00Z`, duration_minutes: 480 },
+        { id: job, technician_id: other, entry_type: 'job', status: 'completed', approval_status: 'pending',
+          clock_in: `${addDays(W1, 5)}T14:00:00Z`, clock_out: `${addDays(W1, 5)}T15:00:00Z`, duration_minutes: 60 },
+      ]);
+      await expect(timeTracking.adminEditEntry(inside, { clock_out: `${addDays(W1, 4)}T23:00:00Z`, edit_reason: 'Stayed late', edited_by: ADMIN_ID }))
+        .rejects.toMatchObject(CLOSED);
+      await expect(timeTracking.adminEditEntry(job, { entry_type: 'shift', edit_reason: 'Wrong type', edited_by: ADMIN_ID })).rejects.toMatchObject(CLOSED);
+      // What adds no payable hours stays open to a technician the run did not pay, as before: a change of an
+      // entry that is not a shift, and a void.
+      await timeTracking.adminEditEntry(job, { notes: 'Sample note', edit_reason: 'Note', edited_by: ADMIN_ID });
+      expect(await trx('time_entries').where({ id: job }).first('entry_type', 'notes')).toEqual({ entry_type: 'job', notes: 'Sample note' });
       await expect(timeTracking.voidEntry(inside, { reason: 'Duplicate', voided_by: ADMIN_ID })).resolves.toMatchObject({ status: 'voided' });
       // Hours approved after the close cannot be unlocked either.
       await worked(id, W1);
@@ -670,6 +679,23 @@ postgres('payroll time-off bank', () => {
       const fresh = (await api('GET', `/runs/${created.id}`)).body.run;
       expect(byName(fresh, 'Sample Alpha')).toMatchObject({ ptoHours: '7.69', grossCents: 82918 });
       expect(byName(fresh, 'Sample Alpha').timeOffBank).toMatchObject({ usedHours: '7.69', unpaidHours: '4.31' });
+    });
+
+    it('makes a draft stale when a paid day off moves to another date of the week: every total is the same, the dates the bank paid are not', async () => {
+      const id = await tech('Sample Alpha', { hours: '400' });
+      await fullWeek(id, W1);
+      await worked(id, W2, 30);
+      await offDay(id, addDays(W2, 1), 4);
+      const created = (await draft(W2)).body.run;
+      expect(byName(created, 'Sample Alpha').timeOffBank).toMatchObject({ usedHours: '4.00', unpaidHours: '0.00' });
+      await trx('payroll_time_off').where({ technician_id: id }).update({ work_date: addDays(W2, 2) });
+      // Pay earned by date (the Tech Rewards season bonus base) reads the dates, so the owner reviews the run again.
+      expect((await api('GET', `/runs/${created.id}`)).body.run.stale).toBe(true);
+      const old = await api('POST', `/runs/${created.id}/finalize`, { body: { token: created.token } });
+      expect([old.status, old.body.error]).toEqual([409, 'Hours or settings changed. Review the new numbers.']);
+      const stored = await trx('payroll_checks').where({ run_id: created.id }).first('calc_snapshot');
+      expect(stored.calc_snapshot.ptoBank.paidDays).toEqual([{ workDate: addDays(W2, 2), minutes: 240 }]);
+      expect((await finalize(created.id)).status).toBe(200);
     });
 
     it('asks for a new review when time off with no check changes after the draft was viewed', async () => {

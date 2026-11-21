@@ -622,10 +622,12 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
   // Only the newest read sets the open run. An older read that answers last (a reload after a setting was
   // saved, a slow network) must not put another run back under the Finalize and Void buttons.
   // `shown` is the run on screen. `wanted` is the run the owner last asked for: it differs from `shown`
-  // only while that read is on its way.
+  // only while that read is on its way. `readAgain` is set when something a run depends on changed while
+  // such a read was on its way: its answer can be from before the change, so it is read once more.
   const newestOpen = useRef(0);
   const shown = useRef(null);
   const wanted = useRef(null);
+  const readAgain = useRef(false);
   const show = useCallback((next) => {
     shown.current = next.id; wanted.current = next.id;
     setRun(next);
@@ -635,8 +637,12 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
     newestOpen.current += 1;
     const mine = newestOpen.current;
     try {
-      const data = await call(`/runs/${id}`);
-      if (mine !== newestOpen.current) return;
+      let data;
+      do {
+        readAgain.current = false;
+        data = await call(`/runs/${id}`);
+        if (mine !== newestOpen.current) return;
+      } while (readAgain.current);
       show(data.run); setError('');
     } catch (failure) {
       if (mine !== newestOpen.current) return;
@@ -645,23 +651,27 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
     }
     loadList();
   }, [call, loadList, show]);
-  // Read the run on screen again after something it depends on changed. Not while the owner waits for
-  // another run: that read would be dropped for this one, and the first run would stay under the buttons.
-  const refreshShown = useCallback(() => {
-    if (shown.current && wanted.current === shown.current) open(shown.current);
+  // Something a run depends on changed (time off, a yearly-hours setting, another run finalized or voided).
+  // The run on screen is read again now. While the owner waits for another run or a new one, that read is
+  // not started: it would be dropped for this one, and the first run would stay under the buttons. The run
+  // they wait for is read once more when it answers (readAgain). Returns the read it started, or null.
+  const refresh = useCallback(() => {
+    if (shown.current && wanted.current === shown.current) return open(shown.current);
+    readAgain.current = true;
+    return null;
   }, [open]);
 
   // A recompute, a finalize or a void answers for the run it started on. Read that run again only while it
   // is still the run the owner wants: an answer that arrives after they opened another run must not put the
   // first run back under the buttons. That answer can still have changed a time-off bank or a pay line, and
-  // the run on screen can have read them before it: the panels reload (settledElsewhere), and the run on
-  // screen is read again, so a draft shows as out of date. The list reloads either way.
+  // the run the owner looks at or waits for can have read them before it: the panels reload
+  // (settledElsewhere) and that run is read again, so a draft shows as out of date. The list reloads either way.
   const [settledElsewhere, setSettledElsewhere] = useState(0);
   const changed = useCallback((id) => {
     if (wanted.current === id) return open(id);
     setSettledElsewhere(count => count + 1);
-    return shown.current && wanted.current === shown.current ? open(shown.current) : loadList();
-  }, [open, loadList]);
+    return refresh() || loadList();
+  }, [open, loadList, refresh]);
 
   // A yearly-hours setting changes what an open draft would pay. Read the run again, so a draft shows as
   // out of date and Finalize waits for a Recompute.
@@ -669,8 +679,8 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
   useEffect(() => {
     if (bankKeySeen.current === bankKey) return;
     bankKeySeen.current = bankKey;
-    refreshShown();
-  }, [bankKey, refreshShown]);
+    refresh();
+  }, [bankKey, refresh]);
 
   function pickWeek(event) {
     setWeek(event.target.value);
@@ -682,12 +692,17 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
     setBusy(true); setError(''); setMessage('');
     // The owner asks for a new run. It becomes the open run when it answers, unless they picked another
     // run meanwhile. Until then no refresh may read the shown run again: that read would take its place.
+    // A change that ended while the run was being made can be missing from its answer: read it once more.
     wanted.current = NEW_RUN;
     newestOpen.current += 1;
     const mine = newestOpen.current;
+    readAgain.current = false;
     try {
       const data = await call('/runs', { method: 'POST', body: { weekStart: week, payDate } });
-      if (mine === newestOpen.current) show(data.run);
+      if (mine === newestOpen.current) {
+        show(data.run);
+        if (readAgain.current) open(data.run.id);
+      }
       loadList();
     } catch (failure) {
       if (mine === newestOpen.current) wanted.current = shown.current;
@@ -728,7 +743,7 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
       // A finalize adds to and takes from the time-off banks, a void undoes that, and a yearly-hours setting
       // (bankKey, from the settings table) turns a bank on or off: reload the balances on each.
       refreshKey={`${run ? `${run.id}:${run.status}` : ''}|${bankKey}|${settledElsewhere}`}
-      onChanged={refreshShown}
+      onChanged={refresh}
     />
 
     <PayLinesPanel
@@ -736,7 +751,7 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
       // A finalize pays the open lines and a void reopens them: reload when the run's status changes, and
       // when a finalize or a void of another run ends (settledElsewhere).
       refreshKey={`${run ? `${run.id}:${run.status}` : ''}|${settledElsewhere}`}
-      onChanged={refreshShown}
+      onChanged={refresh}
     />
 
     {runs && runs.length === 0 && <p className="m-0">No pay runs yet.</p>}

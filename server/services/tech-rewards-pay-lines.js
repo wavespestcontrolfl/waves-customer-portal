@@ -215,6 +215,9 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
  * Why the gift cannot go on this run for the technician, as { reason, week }, or null when it can:
  *   later_check_final   a later check of theirs in the tax year is already final: finalize refuses a run that holds a check
  *                       of theirs, so a gift here would hold the whole run (week is null)
+ *   later_bank_use_final  they have a time-off bank, and a later final run already read it or left their time off unpaid from
+ *                       it, with or without a check, in any year: finalize refuses a run that holds a check of theirs for
+ *                       that too (payroll-runs.js finalizeRun), so a gift here would hold the whole run (week is null)
  *   week_not_paid       a week before the run's own, from the start of its span on, holds work and has no finalized check
  *   week_needs_review   the pay run's own line guards would hold a check for an earlier week of its span
  *   no_paycheck         no check can be worked out for the technician on this run (week is null)
@@ -231,6 +234,12 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
  */
 async function waitOf(trx, run, technicianId, span) {
   if (await payrollRuns().laterFinalCheckExists(trx, run, [technicianId])) return { reason: 'later_check_final', week: null };
+  // The check the gift needs would hold the bank of a technician who has one (GATE_PAYROLL_TIME_OFF), also a check for the
+  // gift alone. Finalize asks the bank's own order guards of every such check, so the gift waits for the same answer.
+  const banked = timeOffOn() ? [...(await timeOffBank.bankTechnicians(trx, [technicianId])).keys()] : [];
+  if (await timeOffBank.laterBankCheckExists(trx, run, banked) || await timeOffBank.laterUnpaidDecisionExists(trx, run, banked)) {
+    return { reason: 'later_bank_use_final', week: null };
+  }
   const beforeRun = addStaffWorkDays(run.week_start, -1);
   const earlier = { coversFrom: span.coversFrom, coversTo: beforeRun };
   if (earlier.coversFrom <= earlier.coversTo) {
@@ -280,6 +289,7 @@ const WAIT_WORDS = {
   week_needs_review: (w) => `the week of ${dayLabel(w.week)} has a timesheet to approve or an automatic clock-out to review`,
   no_paycheck: () => 'no paycheck can be worked out for them on this pay run (check their pay rate, and the tax tables for the pay date)',
   later_check_final: () => 'a later paycheck of theirs is already final, so this pay run cannot hold one for them',
+  later_bank_use_final: () => 'a later pay run that is already final used their time-off bank, so this pay run cannot hold a paycheck for them',
   hire_date_missing: () => 'their hire date is not on file, so the pay run cannot tell whether they were hired by the gift date',
   pay_week_too_early: (w) => `this pay run pays an earlier week than the week of ${dayLabel(w.week)}, the last week the gift covers`,
   other_gift_line: () => 'a December gift line that the pay run did not write is already on file for them, so check that line first',

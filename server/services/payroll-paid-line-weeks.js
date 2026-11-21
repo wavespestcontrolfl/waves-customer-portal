@@ -12,8 +12,8 @@
  * Not behind the gate: a paid line keeps its weeks closed if the gate is turned off
  * later. No requires, so time tracking does not load the pay run code.
  *
- * The same guards ask finalRunClosesWeeks: no hours enter a week that has a finalized
- * pay run, also for a W-2 employee who has no check on it.
+ * The same guards ask finalRunClosesWeeks: no shift hours enter or change in a week
+ * that has a finalized pay run, also for a W-2 employee who has no check on it.
  */
 
 /**
@@ -44,7 +44,7 @@ async function paidLineCoveringWeeks(trx, technicianId, weekStarts) {
  * technician needs no check on the run. A run can close a week with no paycheck at
  * all (time off a time-off bank did not pay), or with none for this technician. A
  * contractor's hours are not paid by a pay run and stay open. Time tracking asks for
- * the weeks a new or moved shift enters; the timesheet unlock asks for its week.
+ * the week the result of a change is a shift in; the timesheet unlock asks for its week.
  */
 async function finalRunClosesWeeks(trx, technicianId, weekStarts) {
   if (!weekStarts.length) return false;
