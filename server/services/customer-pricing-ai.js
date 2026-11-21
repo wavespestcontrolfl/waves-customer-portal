@@ -1208,9 +1208,9 @@ async function maybeSyncPricingEngine(db, { strict = false } = {}) {
 // strictPriceSettings (opt-in, for a caller that prices with nobody watching:
 // the plan offer after a one-time job). It is the price of the standard pest
 // plan for an account that may start a plan, from price settings that are
-// loaded and are the rows' own. Three rules. No caller passes it yet.
+// loaded and are the rows' own. Four rules. No caller passes it yet.
 //
-// 1. The account (strictPriceAccountBlocker). The bridge can say "from the
+// 1. The account (assertStrictPriceAccount). The bridge can say "from the
 //    rows" for the standard pest price only, and only for a customer who has
 //    no other service: the engine prices the qualifying services a customer
 //    has now too (the current plan, each option's plan total and its tier),
@@ -1227,11 +1227,16 @@ async function maybeSyncPricingEngine(db, { strict = false } = {}) {
 //    property by its commercial rules, from settings the bridge has no answer
 //    for. So the resolved property is asked too, by the engine's own rule
 //    (assertStrictPriceProperty), with the blocker 'commercial'.
-// 2. The refresh (strictPriceSettingsRefresh). A refresh that is due and
-//    does not succeed throws PRICING_CONFIG_UNAVAILABLE. A refresh that is
-//    RUNNING is waited for: it may have changed part of the settings
-//    already, and the bridge runs one refresh at a time, so the one asked for
-//    here starts after the running one and loads the settings again.
+// 2. The refresh (strictPriceSettingsRefresh). Every strict call refreshes,
+//    also when the settings read fresh, and a refresh that does not succeed
+//    throws PRICING_CONFIG_UNAVAILABLE. The bridge keeps the settings for a
+//    minute, and an edit marks them stale only in the process that made it:
+//    another server process would price from the earlier value for up to a
+//    minute. The bridge runs one refresh at a time and starts the one asked
+//    for here after any that is running, so its read of the rows begins
+//    after this call asked. Nothing between the refresh and the engine
+//    awaits. An edit that another process commits after that read is not
+//    seen: the price is the one that was true at the read.
 // 3. The settings the engine priced from (assertStrictPriceSettingsHeld),
 //    asked AFTER the engine priced and in the same turn, with no await in
 //    between. Two questions.
@@ -1241,25 +1246,27 @@ async function maybeSyncPricingEngine(db, { strict = false } = {}) {
 //    process). The bridge's answer (standardPestPriceRowsAreComplete) is yes
 //    when the rows of the last good refresh carried every input of the
 //    standard pest price and no refresh is running now.
-//    Still fresh: an edit of the price settings marks them stale at once
-//    (invalidatePricingConfigCache) and leaves the rows answer as it was. An
-//    edit that lands after rule 2 read "fresh" and before the engine priced
-//    would pass the rows question alone, so the same question rule 2 asked
-//    (needsSync) is asked again here.
+//    Still fresh: an edit of the price settings in this process marks them
+//    stale at once (invalidatePricingConfigCache) and leaves the rows answer
+//    as it was. An edit that lands after the refresh of rule 2 and before
+//    the engine priced would pass the rows question alone, so strict asks
+//    whether the settings still read fresh (needsSync).
 //    Asked in the turn the engine priced, two yeses hold for the prices just
 //    computed: a refresh begins with a database read, so none can change the
 //    settings inside one turn. Anything else throws the price away.
+// 4. The hand check (in the option loop). An option whose engine result
+//    needs a hand check is not returned. The test is the one the plan-start
+//    mint refuses on (engineResultNeedsReview: a review marker on a line, a
+//    footprint the engine guessed, low confidence, field verification). The
+//    default returns such an option with manualReview: true, for a card a
+//    person reads. With nobody watching, it must not go out as a price.
 function priceSettingsUnavailable(message) {
   return Object.assign(new Error(message), { code: 'PRICING_CONFIG_UNAVAILABLE' });
 }
 async function strictPriceSettingsRefresh(db) {
-  const bridge = require('./pricing-engine/db-bridge');
   const canSync = Boolean(db && db.schema && typeof db.schema.hasTable === 'function');
-  const due = Boolean(pricingEngine.needsSync && pricingEngine.needsSync());
-  if (due || bridge.isSyncInFlight()) {
-    const synced = canSync ? await pricingEngine.syncConstantsFromDB(db) : false;
-    if (synced !== true) throw priceSettingsUnavailable('live price settings could not be loaded');
-  }
+  const synced = canSync ? await pricingEngine.syncConstantsFromDB(db) : false;
+  if (synced !== true) throw priceSettingsUnavailable('live price settings could not be loaded');
 }
 // strict reads the customer's current services and the account's records.
 // Without a handle or a customer id the first would read as "none": a
@@ -1320,7 +1327,7 @@ async function buildCustomerPricingResponse({
   // Opt-in ONLY (a caller that prices with nobody watching): the standard
   // pest plan's price for an account that may start a plan, from price
   // settings that are loaded and are the rows' own. It throws where the
-  // default answers from what the engine had (the three rules above
+  // default answers from what the engine had (the four rules above
   // strictPriceSettingsRefresh). No caller passes it yet.
   strictPriceSettings = false,
 }) {
@@ -1492,6 +1499,8 @@ async function buildCustomerPricingResponse({
         recurringCustomer: currentServiceKeys.length > 0,
         services: targetServices,
       });
+      // strict: a price the engine marked for a hand check is not a price for a caller nobody watches (rule 4).
+      if (strictPriceSettings && require('./cancellation-resolution/restart').engineResultNeedsReview(estimate)) continue;
       const quoted = buildQuoteOption({
         option,
         estimate,

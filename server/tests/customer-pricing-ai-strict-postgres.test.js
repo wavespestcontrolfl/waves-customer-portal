@@ -2,8 +2,9 @@
 // unit suite (customer-pricing-ai.test.js) puts a spy in place of the bridge and of the shared answer. This one
 // runs the REAL pricer, the REAL bridge on the pricing_config rows of the migrated schema, and the REAL
 // planStartBlocker on real account rows. It proves what only the database can: a one-time customer is priced
-// from the seeded rows, a row that loses a value refuses the price while the default still answers, and an
-// account that is not live, is a business or holds a plan is refused by the shared answer.
+// from the seeded rows, a row that another server process changed is read again, a row that loses a value
+// refuses the price while the default still answers, and an account that is not live, is a business or holds
+// a plan is refused by the shared answer.
 // No network, no spend. All names and addresses are synthetic.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
@@ -110,6 +111,27 @@ postgres('strictPriceSettings of the customer pricer (live Postgres)', () => {
     expect(result.currentServices).toEqual([]);
     expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
     expect(worker.bridge.needsSync()).toBe(false);
+  });
+
+  // The bridge keeps the settings for a minute, and an edit marks them stale only in the process that made it.
+  // Here the row changes with no word to this worker's bridge, as an edit that another server process made.
+  test('a base price that another server process changed: the default answers the earlier price while the settings read fresh, strict loads the row again', async () => {
+    const worker = freshWorker();
+    const customer = await seedCustomer();
+    const before = await strict(worker, customer);
+    expectPriced(before);
+    const base = worker.constants.PEST.base;
+
+    await trx.raw("UPDATE pricing_config SET data = jsonb_set(data, '{base}', to_jsonb((data->>'base')::numeric + 50)) WHERE config_key = ?", ['pest_base']);
+    expect(worker.bridge.needsSync()).toBe(false);
+    const early = await ask(worker, customer);
+    expect(worker.constants.PEST.base).toBe(base);
+    expect(early.options.map((option) => option.monthly)).toEqual(before.options.map((option) => option.monthly));
+
+    const after = await strict(worker, customer);
+    expect(worker.constants.PEST.base).toBeCloseTo(base + 50, 2);
+    expect(after.options.map((option) => option.id)).toEqual(before.options.map((option) => option.id));
+    after.options.forEach((option, index) => expect(option.monthly).toBeGreaterThan(before.options[index].monthly));
   });
 
   test('after the base row is removed the engine still holds the earlier base price: the default prices from it, strict throws, and the row put back prices again', async () => {
