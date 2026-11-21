@@ -326,6 +326,21 @@ describe('sendEstimateNow: roof points frozen at send', () => {
     expect(store).toEqual({});
   });
 
+  test('an estimate whose address is blank or only punctuation gets no copy, whatever the points name', async () => {
+    for (const [estimateAddress, pointsAddress] of [['   ', '12 Synthetic Way, Bradenton, FL 34203'], [' - ', ' - '], ['.', '   ']]) {
+      const blank = estimateRow({ address: estimateAddress });
+      db.mockImplementation((table) => {
+        if (table === 'roof_entry_reads') return readsBuilder();
+        if (table === 'estimate_roof_points') return pointsBuilder();
+        return makeBuilder(blank);
+      });
+      reads = [read({ points_address: pointsAddress })];
+      const result = await router.sendEstimateNow(blank, 'email');
+      expect(result.sent).toBe(true);
+      expect(store).toEqual({});
+    }
+  });
+
   test('a send with no real provider handoff (a deduplicated email) leaves the copy alone', async () => {
     reads = [read()];
     await router.sendEstimateNow(estimateRow(), 'email');

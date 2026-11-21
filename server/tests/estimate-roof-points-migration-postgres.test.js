@@ -1,32 +1,48 @@
-// estimate_roof_points (tech-confirmed roof points frozen at send, owner ruling 2026-11-20): the table, its one-row-per-estimate
-// key, the cascade from the estimate, SET NULL from the read, and a reversible, idempotent migration, proven on a real
-// PostgreSQL in a disposable schema (skipped without APP_TEST_DATABASE_URL, run for real in CI).
+const SKIP = !process.env.DATABASE_URL;
+// CI's DB-gated pass runs this against PostgreSQL. estimate_roof_points (tech-confirmed roof points frozen at send, owner
+// ruling 2026-11-20): the table, its one-row-per-estimate key, the cascade from the estimate, SET NULL from the read, the
+// required handoff time, and a reversible, idempotent migration. Everything runs in a unique schema (with minimal
+// estimates and roof_entry_reads tables for the foreign keys) that is dropped afterwards.
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const migration = require('../models/migrations/20261120210000_estimate_roof_points');
 
-const connection = process.env.APP_TEST_DATABASE_URL;
-const postgres = connection ? describe : describe.skip;
 const schema = `estimate_roof_points_${randomUUID().replaceAll('-', '')}`;
 const TABLE = 'estimate_roof_points';
 const SENT = '2026-11-20T16:00:00.000Z';
 const SNAPSHOT = { imageUrl: 'https://example.test/aerial.jpg', imageYear: 2025, pins: [{ n: 1, x: 0.25, y: 0.4, type: 'other', label: 'Entry point', action: 'seal' }] };
 
-postgres('estimate_roof_points (PostgreSQL)', () => {
-  let admin;
+jest.setTimeout(60000);
+(SKIP ? describe.skip : describe)('estimate_roof_points (PostgreSQL)', () => {
   let app;
   const estimateA = randomUUID();
   const estimateB = randomUUID();
   const readA = randomUUID();
 
   beforeAll(async () => {
-    const target = new URL(connection);
-    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
-    const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
-    if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
-    admin = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
-    await admin.schema.createSchema(schema);
-    app = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 1 } });
+    const target = new URL(process.env.DATABASE_URL);
+    const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname)
+      && target.pathname === '/waves_test';
+    const worktreeId = String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '');
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1' && /^[a-f0-9]{32}$/.test(worktreeId)
+      && target.pathname === `/waves_qa_${worktreeId}`;
+    if (!ci && !ownedQA) throw new Error('Use the isolated CI database or this worktree\'s private QA database');
+    // The driver copies every query parameter of a connection string into its settings, so the pool gets the parts
+    // checked above, never the URL text.
+    if (target.search) throw new Error('DATABASE_URL must not carry query parameters');
+    app = knex({
+      client: 'pg',
+      connection: {
+        host: target.hostname,
+        port: target.port ? Number(target.port) : undefined,
+        user: decodeURIComponent(target.username) || undefined,
+        password: decodeURIComponent(target.password) || undefined,
+        database: target.pathname.slice(1),
+      },
+      searchPath: [schema],
+      pool: { min: 0, max: 1 },
+    });
+    await app.raw('CREATE SCHEMA ??', [schema]);
     await app.schema.createTable('estimates', (t) => { t.uuid('id').primary(); });
     await app.schema.createTable('roof_entry_reads', (t) => { t.uuid('id').primary(); });
     await app('estimates').insert([{ id: estimateA }, { id: estimateB }]);
@@ -35,9 +51,9 @@ postgres('estimate_roof_points (PostgreSQL)', () => {
   });
 
   afterAll(async () => {
-    if (admin) await admin.raw(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    if (app) await app.destroy();
-    if (admin) await admin.destroy();
+    if (!app) return;
+    await app.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [schema]);
+    await app.destroy();
   });
 
   test('a row holds the read id, the address, the handoff time and the snapshot as jsonb, with frozen_at defaulted', async () => {

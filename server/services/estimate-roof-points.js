@@ -21,7 +21,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { customerPointsFromRow } = require('./roof-entry-read');
-const { sameProperty } = require('./misting-layout-validate');
+const { addressKey } = require('./misting-layout-validate');
 
 const TABLE = 'estimate_roof_points';
 const READS = 'roof_entry_reads';
@@ -48,8 +48,13 @@ function newestPointsRead(estimateId, knex, columns = []) {
     .first(...columns);
 }
 
-// Both sides must name an address: with one missing nothing proves the roof is this home's, so nothing is shown.
-const sameHome = (a, b) => Boolean(a && b) && sameProperty(a, b);
+// The misting layout's address comparison (addressKey: case, spacing, punctuation and a trailing ZIP or state are
+// ignored), but both sides must name an address. With one missing, blank or only punctuation nothing proves the roof
+// is this home's, so nothing is shown.
+function sameHome(a, b) {
+  const key = addressKey(a);
+  return Boolean(key) && key === addressKey(b);
+}
 
 const timeMs = (v) => (v ? new Date(v).getTime() : NaN);
 

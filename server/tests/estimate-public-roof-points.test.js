@@ -105,8 +105,9 @@ async function withServer(fn) {
 }
 const getText = (baseUrl, query = '') => fetch(`${baseUrl}/estimates/roofpointstoken/data${query}`).then((r) => r.text());
 
-// The two time-stamped fields differ between any two requests (the row's own expiry is built from the clock).
-const VOLATILE = ['.estimate.expiresAt', '.meta.generatedAt'];
+// These fields differ between any two requests: the row's own expiry and the answer's time stamp are built from the
+// clock, and the ask token is signed per request with a one-second time stamp.
+const VOLATILE = ['.estimate.expiresAt', '.estimate.askToken', '.meta.generatedAt'];
 function diffPaths(a, b, path = '') {
   if (a && b && typeof a === 'object' && typeof b === 'object') {
     return [...new Set([...Object.keys(a), ...Object.keys(b)])].flatMap((k) => diffPaths(a[k], b[k], `${path}.${k}`));

@@ -261,6 +261,7 @@ module.exports = {
   MAX_NOZZLES,
   validateLayoutPayload,
   looksLikePng,
+  addressKey,
   sameProperty,
   operationalError,
   feetPerPixel,

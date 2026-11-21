@@ -131,11 +131,17 @@ describe('roofPointsDocBlock', () => {
     expect((await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).roofPoints).toEqual(SNAPSHOT);
   });
 
-  test('the estimate moved to another address since the send: {}; so does a missing address on either side', async () => {
+  test('the estimate moved to another address since the send: {}; so does a missing or blank address on either side', async () => {
     const knex = fakeKnex({ point: point(), reads: [frozenRead()] });
     expect(await roofPointsDocBlock(est({ address: '99 Other Road, Sarasota, FL 34232' }), { knex })).toEqual({});
     expect(await roofPointsDocBlock(est({ address: null }), { knex })).toEqual({});
     expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point({ address: null }), reads: [frozenRead()] }) })).toEqual({});
+    // Spaces or punctuation alone name no home, on either side or on both.
+    for (const blank of ['   ', ' - ', '.,']) {
+      expect(await roofPointsDocBlock(est({ address: blank }), { knex })).toEqual({});
+      expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point({ address: blank }), reads: [frozenRead()] }) })).toEqual({});
+      expect(await roofPointsDocBlock(est({ address: blank }), { knex: fakeKnex({ point: point({ address: ' - ' }), reads: [frozenRead()] }) })).toEqual({});
+    }
     // Case, spacing, punctuation and a trailing ZIP or state do not make it another home.
     expect((await roofPointsDocBlock(est({ address: '12 synthetic way,  Bradenton FL' }), { knex })).roofPoints).toEqual(SNAPSHOT);
   });
