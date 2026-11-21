@@ -37,7 +37,12 @@
  *      again. A record is an immutable row. The sweep never closes, replaces
  *      or rewrites it. One posts when a moving-window check has a finding
  *      that the last run did not have, so a 14-day window does not post 14
- *      copies and a finding that cleared and came back posts again.
+ *      copies and a finding that cleared and came back posts again. It
+ *      lists every finding that is new.
+ * A moving-window check that could not run is present state (it cannot run
+ * NOW), so it stands in the standing list until it runs again. The exception
+ * is a check that reads a new window on each run (yesterday's closeouts):
+ * the window it missed never comes back, so each missed run is a record.
  * The run state (one system_settings row) holds what the last run found. A
  * state that is missing, cannot be read, or was not written by the last
  * daily run never hides a finding: it posts. The state moves forward only
@@ -441,6 +446,9 @@ async function stampSendMarker() {
 
 // What an alert is about: one item for each check that failed or could not
 // run. Counts are left out on purpose (a higher count alone is not news).
+// "Could not run" and "failed" are two items on purpose: when a check runs
+// again and fails, the open alert still says it could not run, so a new alert
+// replaces it.
 function failingItems(results) {
   return results.filter((r) => !r.ok).map((r) => (r.unavailable ? `${r.key}:unavailable` : r.key)).sort();
 }
@@ -525,15 +533,22 @@ function hasNewItem(hashes, seen) {
   return hashes.some((hash) => !known.has(hash));
 }
 
-// A failing check as a record shows it: the findings the last run did not
-// have come first, so the SAMPLE_IDS shown always hold what made the record.
+// Which alert a result belongs to (see the header): true = a record.
+const isRecordResult = (r) => r.moving && !(r.unavailable && !r.freshEachRun);
+
+// A failing check as a record shows it: EVERY finding the last run did not
+// have, first and with no cap, so a finding is never marked as seen without
+// being listed. The findings already posted fill what is left of SAMPLE_IDS.
 function newFindingsFirst(r, seen, now) {
-  if (r.ok || r.unavailable || r.ids.length !== r.itemKeys.length) return r;
+  if (r.ok || r.unavailable) return r;
+  // No key for each id: the new ones cannot be told apart, so every id shows.
+  if (r.ids.length !== r.itemKeys.length) return { ...r, sample: r.ids, truncated: r.listCapped };
   const known = new Set(Array.isArray(seen) ? seen : []);
   const fresh = [];
   const old = [];
   r.ids.forEach((id, i) => (known.has(itemHash(r, r.itemKeys[i], now)) ? old : fresh).push(id));
-  return { ...r, sample: [...fresh, ...old].slice(0, SAMPLE_IDS) };
+  const sample = [...fresh, ...old.slice(0, Math.max(0, SAMPLE_IDS - fresh.length))];
+  return { ...r, sample, truncated: r.listCapped || sample.length < r.ids.length };
 }
 
 const emailSender = (mailer, to, report) => () => mailer.sendOne({
@@ -594,17 +609,21 @@ async function postStandingList(standing, state, { now, mailer, to }) {
 }
 
 // The records. Returns { posted, error, seen }: `seen` is what the run state
-// keeps. It never throws.
-async function postRecords(moving, state, { now, mailer, to }) {
+// keeps. It never throws. `notRun` = the moving-window checks that stand in
+// the standing list on this run because they could not run: they saw nothing,
+// so the findings they had stay known and do not post again when they run
+// again.
+async function postRecords(moving, notRun, state, { now, mailer, to }) {
   const failing = moving.filter((r) => !r.ok);
   const before = state?.seen || {};
-  const current = Object.fromEntries(failing.map((r) => [r.key, itemHashes(r, now)]));
+  const kept = Object.fromEntries(notRun.filter((r) => Array.isArray(before[r.key])).map((r) => [r.key, before[r.key]]));
+  const current = { ...kept, ...Object.fromEntries(failing.map((r) => [r.key, itemHashes(r, now)])) };
   // A finding that left is dropped here, so the same finding posts again if
   // it comes back.
   if (!failing.some((r) => hasNewItem(current[r.key], before[r.key]))) return { posted: false, seen: current };
   // What the state keeps when the feed did not get the record: the findings
   // posted before that still stand. A new finding stays new for the next run.
-  const unposted = Object.fromEntries(failing.map((r) => [r.key, current[r.key].filter((hash) => (before[r.key] || []).includes(hash))]));
+  const unposted = { ...kept, ...Object.fromEntries(failing.map((r) => [r.key, current[r.key].filter((hash) => (before[r.key] || []).includes(hash))])) };
   const report = composeReport(moving.map((r) => newFindingsFirst(r, before[r.key], now)), {
     now,
     note: 'Record: in each list, the findings that the last run did not have come first.',
@@ -622,6 +641,10 @@ async function postRecords(moving, state, { now, mailer, to }) {
       // its IDs) with today's OK line.
       sendEmail: emailSender(mailer, to, report),
     });
+    // After the fallback email a finding of a standing window stays new, so
+    // the next run writes its record. A closeout day cannot be written later
+    // (the next run reads another day): there the email is the record, as it
+    // was before this split.
     return { posted: true, seen: channel === 'in_app' ? current : unposted };
   } catch (error) {
     return { posted: false, error, seen: unposted };
@@ -645,8 +668,8 @@ async function closeStandingAlert(stateSaved) {
 // In the app: both alerts, each tried by itself, then one write of the run state.
 async function postInApp(results, context) {
   const state = await readRunState(context.now);
-  const standing = await postStandingList(results.filter((r) => !r.moving), state, context);
-  const records = await postRecords(results.filter((r) => r.moving), state, context);
+  const standing = await postStandingList(results.filter((r) => !isRecordResult(r)), state, context);
+  const records = await postRecords(results.filter(isRecordResult), results.filter((r) => r.moving && !isRecordResult(r)), state, context);
   const saved = await writeRunState(context.now, { items: standing.items, alertedAt: standing.alertedAt, seen: records.seen });
   if (standing.clean) await closeStandingAlert(saved);
   return { posted: standing.posted || records.posted, errors: [standing.error, records.error].filter(Boolean) };

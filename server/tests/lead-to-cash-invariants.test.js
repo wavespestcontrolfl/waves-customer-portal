@@ -589,7 +589,9 @@ describe('two alerts, not one a day (in the app)', () => {
       const many = (length, last) => [...Array.from({ length }, (_, i) => `c${String(i).padStart(4, '0')}`), last];
       lastRun([], DAY);
       await sweep([welcome(many(SAMPLE_IDS, 'zz-first'))]);
-      expect(posts()[0].detail).not.toContain('zz-first'); // the first record: every finding is new, the sample is the first 25
+      // The first record: 26 findings, all new. Every one is listed, so none is marked as seen without being shown.
+      expect(posts()[0].detail).toContain(`c${String(SAMPLE_IDS - 1).padStart(4, '0')}, zz-first`);
+      expect(posts()[0].detail).not.toContain('more');
       carry();
       // Same count, same first SAMPLE_IDS ids: only the finding past the display sample changed.
       expect(await sweep([welcome(many(SAMPLE_IDS, 'zz-second'))], after(1))).toMatchObject({ sent: true });
@@ -613,7 +615,8 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(await sweep([closeout(['v1 [x]'])])).toMatchObject({ skipped: 'no_new_item' }); // a rerun on the same day
       carry();
       expect(await sweep([closeout(['v1 [x]'])], after(1))).toMatchObject({ sent: true });
-      // "Could not run" on two days is two records too; on a check with a standing window it is one.
+      // "Could not run" on two days is two records too: the day it missed never comes back. A check with a standing
+      // window that cannot run is one item on the standing list (the next test).
       const down = (key, extra) => ({ ...det(key, async () => { throw new Error('x'); }), moving: true, ...extra });
       carry();
       expect(await sweep([down('closeout_failed_facts', { freshEachRun: true })], after(2))).toMatchObject({ sent: true });
@@ -624,6 +627,31 @@ describe('two alerts, not one a day (in the app)', () => {
       carry();
       expect(await sweep([down('new_plan_without_welcome')], after(5))).toMatchObject({ skipped: 'no_new_item' });
       expect(posts()).toHaveLength(5);
+    });
+
+    test('a check with a standing window that cannot run joins the standing list, and its known findings stay known', async () => {
+      const down = { ...det('new_plan_without_welcome', async () => { throw new Error('x'); }), moving: true };
+      lastRun([], DAY);
+      await sweep([ok('a'), welcome(['c1'])]);
+      expect(keysPosted()).toEqual([RECORD_KEY]);
+      const known = savedState().seen.new_plan_without_welcome;
+      resolve.mockClear(); // day 0 had a clean standing list, which closes the standing alert
+      // Day 1: it cannot run. That is present state: one pinned standing alert, no record, the finding stays known.
+      expect(await daily(1, 1, [ok('a'), down])).toEqual(['sent']);
+      expect(keysPosted()).toEqual([RECORD_KEY, STANDING_KEY]);
+      expect(posts()[1].detail).toContain('??   new_plan_without_welcome — could not run');
+      expect(posts()[1].metadata).toMatchObject({ fallOff: true });
+      expect(savedState()).toMatchObject({ items: ['new_plan_without_welcome:unavailable'], seen: { new_plan_without_welcome: known } });
+      // Days 2 to 5: still down. Nothing posts again, and the list is not clean while the check cannot run.
+      expect(new Set(await daily(2, 5, [ok('a'), down]))).toEqual(new Set(['no_new_item']));
+      expect(resolve).not.toHaveBeenCalled();
+      // Day 6: it runs again with the same finding. No second record, and the standing alert closes.
+      expect(await daily(6, 6, [ok('a'), welcome(['c1'])])).toEqual(['no_new_item']);
+      expect(resolve).toHaveBeenCalledWith({ key: STANDING_KEY, source: null, resolvedBy: `${STANDING_KEY}:clean-run` });
+      expect(keysPosted()).toEqual([RECORD_KEY, STANDING_KEY]);
+      // A finding that arrived while it was down is new.
+      expect(await daily(7, 7, [ok('a'), welcome(['c1', 'c2'])])).toEqual(['sent']);
+      expect(posts()[2].detail).toContain('     c2, c1');
     });
 
     test('a ghost lane is one record while it stands, whatever its visit count; cleared and back = a new record', async () => {
