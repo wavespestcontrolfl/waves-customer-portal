@@ -371,11 +371,11 @@ const factsSayCommercial = (node) => node.occupancyClass === 'commercial' || COM
 //   ('staff_confirmed_business' is the one an answer stamps).
 // The listing itself (businessIdentity, serviceScopeSuggestion) is not read.
 // A listing only suggests (the owner ruling that module carries): a home
-// business at the number of a house is still a house. So the scan of a
-// payload does not go into the listing (LISTING_NAME below): the name of the
-// listed business can carry the word, and a name is what the rule for a
-// service line reads. (The suggestion is one of two plain words, 'suite' or
-// 'building', and no rule reads those.)
+// business at the number of a house is still a house. So a payload is read
+// without the listing (LISTING_NAME below): the name of the listed business
+// can carry the word, and a name is what the rule for a service line reads.
+// (The suggestion is one of two plain words, 'suite' or 'building', and no
+// rule reads those.)
 function lookupSaysBusiness(node) {
   const { SCOPE, normalizeOccupancyAnswer } = require('./property-lookup/business-scope');
   const answer = normalizeOccupancyAnswer(node.occupancyAnswer);
@@ -497,31 +497,44 @@ function nodeSaysCommercial(node, managed) {
 // 'commercial_' is also the name of a service pick that was not taken, and
 // of the lawn area the price card keeps for any lawn quote
 // (measuredBasisAnchor.commercial_lawn).
-// Not read at all: the listing of a business at the address, as the lookup
-// keeps it on a profile (lookupSaysBusiness above gives the reason). No rule
-// and no text under that name counts.
-// Nor the marketing attribution of a web submission, under the six names the
-// intakes save it (lead-webhook.js, public-quote.js,
-// public-property-lookup.js, booking-preferred-time.js,
-// public-lawn-assessment.js, lead-unverified-hold.js): the tags of the link
-// the visitor came by (utm), its click ids (clickIds), the page before and
-// the page landed on (referrer, landing_url), the object an intake keeps
-// them in (attribution), and the proof of the lead's source the server makes
-// from them (source_evidence). A campaign named 'commercial_pest' names an
-// advertisement, and the label of a source is no service line: neither says
-// what the premises of the visitor is. The scan does not go into those
-// names. The same text under any other name (a picked service key) is a
-// mark.
 const COMMERCIAL_KEY_PREFIX = 'commercial_';
-const LISTING_NAME = 'businessIdentity';
-const ATTRIBUTION_NAMES = Object.freeze(['attribution', 'utm', 'clickIds', 'source_evidence', 'referrer', 'landing_url']);
-const UNREAD_NAMES = Object.freeze([LISTING_NAME, ...ATTRIBUTION_NAMES]);
 function payloadSaysCommercial(value, managed) {
   if (typeof value === 'string') return value.trim().toLowerCase().startsWith(COMMERCIAL_KEY_PREFIX);
   if (!value || typeof value !== 'object') return false;
   if (Array.isArray(value)) return value.some((item) => payloadSaysCommercial(item, managed));
-  return nodeSaysCommercial(value, managed)
-    || Object.entries(value).some(([name, item]) => !UNREAD_NAMES.includes(name) && payloadSaysCommercial(item, managed));
+  return nodeSaysCommercial(value, managed) || Object.values(value).some((item) => payloadSaysCommercial(item, managed));
+}
+
+// The part of a payload that NO rule reads, under seven names, at any depth:
+// - the listing of a business at the address, as the lookup keeps it on a
+//   profile (lookupSaysBusiness above gives the reason);
+// - the marketing attribution of a web submission, under the six names the
+//   intakes save it (lead-webhook.js, public-quote.js,
+//   public-property-lookup.js, booking-preferred-time.js,
+//   public-lawn-assessment.js, lead-unverified-hold.js): the tags of the link
+//   the visitor came by (utm), its click ids (clickIds), the page before and
+//   the page landed on (referrer, landing_url), the object an intake keeps
+//   them in (attribution), and the proof of the lead's source the server
+//   makes from them (source_evidence). A campaign named 'commercial_pest'
+//   names an advertisement, and the label of a source is no service line:
+//   neither says what the premises of the visitor is. And the quote page
+//   saves the tags as the browser sent them (public-quote.js keeps
+//   attribution.utm whole), so a link can put any name there: a category, a
+//   toggle, a relationship.
+// So a payload is cut ONCE, before any rule sees it (readablePayload below):
+// the proof's own scan, the manager lookup and each of the app's classifiers
+// get the same cut payload. A rule that got the whole payload would read a
+// mark in a link's tags (the save's scan reads a category at any depth). The
+// same text under any other name (a picked service key) is a mark.
+const LISTING_NAME = 'businessIdentity';
+const ATTRIBUTION_NAMES = Object.freeze(['attribution', 'utm', 'clickIds', 'source_evidence', 'referrer', 'landing_url']);
+const UNREAD_NAMES = Object.freeze([LISTING_NAME, ...ATTRIBUTION_NAMES]);
+function withoutUnreadNames(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(withoutUnreadNames);
+  return Object.fromEntries(Object.entries(value)
+    .filter(([name]) => !UNREAD_NAMES.includes(name))
+    .map(([name, item]) => [name, withoutUnreadNames(item)]));
 }
 
 // A value of a JSONB column, as the driver returns it. PostgreSQL checks a
@@ -550,6 +563,9 @@ function jsonText(raw, what) {
     throw new Error(`planStartBlocker could not read ${what}`);
   }
 }
+// The payload of an estimate or a lead as every rule reads it: the value of
+// the column, less the names no rule reads.
+const readablePayload = (raw) => withoutUnreadNames(jsonbValue(raw));
 const asObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
 // Does one object of a JSON value, at any depth, pass the test?
 function someObject(value, test) {
@@ -585,10 +601,9 @@ function someText(value, test) {
 // - the classifier of the accept and slot routes
 //   (isCommercialAutoAcceptEstimate): commercial service rows;
 // - a mark on any object of the payload (nodeSaysCommercial above), or a text
-//   in it that starts with 'commercial_' (payloadSaysCommercial), outside the
-//   listing and the marketing attribution a payload keeps. A type in the
-//   payload is asked with a manager where the account has one, or where an
-//   object of the payload names one (hasManager);
+//   in it that starts with 'commercial_' (payloadSaysCommercial). A type in
+//   the payload is asked with a manager where the account has one, or where
+//   an object of the payload names one (hasManager);
 // - the reader the pipeline shows an estimate's service lines with
 //   (inferEstimateServiceLines in estimate-service-lines.js): a line whose
 //   key starts with 'commercial_'. For an estimate with no service line it
@@ -604,6 +619,8 @@ function someText(value, test) {
 // mark it reads is read here (the toggle, the category, a subtype, a risk
 // type, a commercial property type, the tier column, a commercial service
 // key, a proposal).
+// Every rule for the payload reads it less the listing and the marketing
+// attribution it keeps (readablePayload).
 function isCommercialEstimateRow(estimate, managed) {
   if (String(estimate.category || '').trim().toUpperCase() === 'COMMERCIAL') return true;
   const { isCommercialAccount } = require('./self-booking-plan-sync');
@@ -612,7 +629,7 @@ function isCommercialEstimateRow(estimate, managed) {
   // The payload (a jsonb column). One that is not an object or a list (a
   // text, a number) carries no structured mark: only the rule for a text can
   // read it, and the columns above still answer.
-  const payload = jsonbValue(estimate.estimate_data);
+  const payload = readablePayload(estimate.estimate_data);
   return require('./estimate-proposal').isCommercialProposalData(payload)
     || require('./estimate-delivery-options').isCommercialEstimateData(payload)
     || require('./estimate-commercial-identity').isCommercialAutoAcceptEstimate({ estimate_data: payload })
@@ -655,16 +672,16 @@ async function hasCommercialEstimate(database, customerId, managed) {
 //   (isCommercialEstimateData). It keeps the same fields (isCommercial,
 //   category, commercialSubtype, propertyType), and a web form keeps the
 //   service label in it too (service_interest). A web form also keeps the
-//   marketing attribution of the submission there: that part is not read
-//   (ATTRIBUTION_NAMES above). The intake's own commercial verdict reads the
-//   words and the service of the submission, never its campaign
-//   (lead-estimate-automation.js), and it is in the two flags above.
+//   marketing attribution of the submission there: no rule reads that part,
+//   the save's scan neither (readablePayload). The intake's own commercial
+//   verdict reads the words and the service of the submission, never its
+//   campaign (lead-estimate-automation.js), and it is in the two flags above.
 function isCommercialLeadRow(lead, managed) {
   const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
   if (lead.is_commercial === true || lead.is_residential === false) return true;
   if (isCommercialLabel(lead.service_interest) || isCommercialServiceRow({ service_key: lead.service_key })) return true;
   if (isCommercialAccount({ waveguard_tier: lead.waveguard_tier })) return true;
-  const payload = jsonbValue(lead.extracted_data);
+  const payload = readablePayload(lead.extracted_data);
   return payloadSaysCommercial(payload, hasManager(payload, managed)) || require('./estimate-delivery-options').isCommercialEstimateData(payload);
 }
 
@@ -765,6 +782,15 @@ async function hasCommercialContract(database, customerId) {
 // what it wrote to a lead (metadata.lead_prior_state and lead_written_state:
 // the restore record of a call that is linked again). The lead itself is
 // read.
+// The extraction is a verdict only where it passed its schema
+// (v2_extraction_status = 'valid'). The call processor also keeps the output
+// of a model that FAILED the schema, for the audit of the failure
+// ('schema_failed'), and the app's readers take the extraction at 'valid'
+// alone (call-intelligence.js, call-commitments.js, call-last-name-lookup.js,
+// the processor itself). So an extraction at any other status is not read.
+// The call's other three records are read at every status: the first format,
+// the triage's decision and the address check. (The processor makes the last
+// two from a valid extraction alone, so a failed one leaves no flag there.)
 // - The app's rule for an extraction that typed the premises commercial
 //   (commercialCategoryConflict in estimator-engine/unit-scope-model.js): a
 //   commercial property type, any commercial subtype, an HOA common area, the
@@ -819,8 +845,9 @@ function isBusinessAddress(addressCheck) {
   const use = asObject(asObject(addressCheck).addressUse);
   return use.business === true && use.residential === false;
 }
+const VALID_EXTRACTION = 'valid';
 function isCommercialCallRow(call, managed) {
-  const extraction = asObject(jsonbValue(call.ai_extraction_enriched));
+  const extraction = call.v2_extraction_status === VALID_EXTRACTION ? asObject(jsonbValue(call.ai_extraction_enriched)) : {};
   const validation = jsonbValue(call.ai_validation);
   const firstFormat = asObject(jsonText(call.ai_extraction, "a call's first extraction"));
   const addressCheck = jsonbValue(call.ai_address_validation);
@@ -840,7 +867,7 @@ function isCommercialCallRow(call, managed) {
 // the only commercial mark of more live accounts than any other record.)
 async function hasCommercialCall(database, customerId, managed) {
   const calls = await database('call_log').where({ customer_id: customerId })
-    .select('ai_extraction', 'ai_extraction_enriched', 'ai_validation', 'ai_address_validation');
+    .select('ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'ai_validation', 'ai_address_validation');
   return calls.some((call) => isCommercialCallRow(call, managed));
 }
 

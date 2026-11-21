@@ -808,6 +808,31 @@ describe('planStartBlocker', () => {
         expect(await blocker(withEstimates([ESTIMATE(), kept({ pickedServices: ['commercial_pest'] })]))).toBe('commercial');
       });
 
+      // The payload is cut ONCE, before any rule reads it: the proof's own scan, the manager lookup and each of
+      // the app's classifiers get it less the seven names no rule reads. The quote page saves the tags of a link
+      // as the browser sent them, so a link can put any name there. Each mark below is one the save's scan
+      // (isCommercialEstimateData) reads at any depth.
+      const LINK_MARKS = Object.entries({ category: 'commercial', isCommercial: true, commercialEstimatedPricing: true, commercialSubtype: 'office', propertyType: 'commercial', service: 'commercial_pest' });
+      const UNREAD = [['attribution'], ['utm'], ['clickIds'], ['source_evidence'], ['referrer'], ['landing_url'], ['businessIdentity']];
+      test.each(UNREAD)("no mark of the save's scan under the name %s of an estimate payload is read, at the root, far down or in a list", async (name) => {
+        const kept = (payload) => ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Single Family' }, ...payload } });
+        const answers = [];
+        for (const [mark, value] of LINK_MARKS) {
+          const under = { [name]: { [mark]: value, deeper: [{ [mark]: value }] } };
+          answers.push([mark, await blocker(withEstimates([kept(under), kept({ intake: [farDown(under)] }), ESTIMATE({ estimate_data: [under] }), ESTIMATE()]))]);
+          // The same mark under another name counts.
+          answers.push([`${mark} under another name`, await blocker(withEstimates([ESTIMATE(), kept({ intake: { [mark]: value } })]))]);
+        }
+        expect(answers).toEqual(LINK_MARKS.flatMap(([mark]) => [[mark, null], [`${mark} under another name`, 'commercial']]));
+      });
+
+      test('a manager named under a name no rule reads is no manager of the estimate', async () => {
+        const condo = (more) => ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Condo' }, ...more } });
+        const inLink = { utm: { customerRelationship: 'property_manager' }, attribution: { caller: { relationship_to_property: 'property_manager' } }, businessIdentity: { customerRelationship: 'property_manager' } };
+        expect(await blocker(withEstimates([condo(inLink), ESTIMATE()]))).toBeNull();
+        expect(await blocker(withEstimates([ESTIMATE(), condo({ unitScope: { customerRelationship: 'property_manager' } })]))).toBe('commercial');
+      });
+
       test.each([['bedbugOccupancyType'], ['occupancyType'], ['occupancy_type'], ['occupancy'], ['service_address_occupancy']])('a hotel under the name %s is a mark, and a single-family home under it is none', async (name) => {
         const kept = (value) => ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Single Family' }, job: { [name]: value } } });
         expect(await blocker(withEstimates([ESTIMATE(), kept('hotel')]))).toBe('commercial');
@@ -1081,6 +1106,32 @@ describe('planStartBlocker', () => {
         expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, selectedServices: [AD.campaign] } })]))).toBe('commercial');
         expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, picked: { key: AD.campaign } } })]))).toBe('commercial');
         expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, isCommercial: 'YES' } })]))).toBe('commercial');
+      });
+
+      // The quote page saves the tags of a link as the browser sent them (attribution.utm, whole), so a link can
+      // put any name there. The payload is cut once, before any rule reads it: the save's scan and the manager
+      // lookup get no more of a link than the proof's own scan does. Each mark below is one the save's scan
+      // (isCommercialEstimateData) reads at any depth.
+      const LINK_MARKS = Object.entries({ category: 'commercial', isCommercial: true, commercialEstimatedPricing: true, commercialSubtype: 'office', propertyType: 'commercial', service: 'commercial_pest' });
+      const UNREAD = [['attribution'], ['utm'], ['clickIds'], ['source_evidence'], ['referrer'], ['landing_url'], ['businessIdentity']];
+      test.each(UNREAD)("no mark of the save's scan under the name %s of a lead payload is read, at the root, far down or in a list", async (name) => {
+        const kept = (payload) => LEAD({ extracted_data: { stage: 'quote_calculated', service_interest: 'Pest Control', ...payload } });
+        const deep = (mark) => Array.from({ length: 20 }).reduce((inner) => ({ next: [inner] }), mark);
+        const answers = [];
+        for (const [mark, value] of LINK_MARKS) {
+          const under = { [name]: { [mark]: value, deeper: [{ [mark]: value }] } };
+          answers.push([mark, await blocker(withLeads([kept(under), kept({ enriched: [deep(under)] }), LEAD({ extracted_data: [under] }), LEAD()]))]);
+          // The same mark under another name counts.
+          answers.push([`${mark} under another name`, await blocker(withLeads([LEAD(), kept({ enriched: { [mark]: value } })]))]);
+        }
+        expect(answers).toEqual(LINK_MARKS.flatMap(([mark]) => [[mark, null], [`${mark} under another name`, 'commercial']]));
+      });
+
+      test('a manager named in the tags of a link is no manager of the lead', async () => {
+        const condo = (more) => LEAD({ extracted_data: { isCommercial: false, propertyType: 'Condo', ...more } });
+        const inLink = { utm: { customerRelationship: 'property_manager' }, attribution: { caller: { relationship_to_property: 'property_manager' } }, businessIdentity: { customerRelationship: 'property_manager' } };
+        expect(await blocker(withLeads([condo(inLink), LEAD()]))).toBeNull();
+        expect(await blocker(withLeads([LEAD(), condo({ caller: { relationship_to_property: 'property_manager' } })]))).toBe('commercial');
       });
 
       // The rule belongs to the quiz module. The proof asks it, so a new answer that means a business is followed.
@@ -1365,6 +1416,7 @@ describe('planStartBlocker', () => {
       const CALL = (change = {}) => ({
         ai_extraction: JSON.stringify({ requested_service: 'Quarterly pest control', call_summary: 'Asked about ants in the kitchen.' }),
         ai_extraction_enriched: HOME_EXTRACTION,
+        v2_extraction_status: 'valid',
         ai_validation: { routing: { flags: ['quote_promised'], appointment_blocking_flags: [] } },
         ai_address_validation: { status: 'validated_accept', granularity: 'PREMISE', addressUse: { business: false, residential: true, poBox: false } },
         ...change,
@@ -1586,6 +1638,45 @@ describe('planStartBlocker', () => {
         ["a call's address check", { ai_address_validation: 'not checked' }],
       ])('%s that is one text carries no mark: not commercial', async (_what, change) => {
         expect(await blocker(withCalls([CALL(), CALL(change)]))).toBeNull();
+      });
+
+      // The call processor keeps the output of a model that FAILED the extraction schema, for the audit of the
+      // failure. The app's readers take an extraction at the status 'valid' alone, and so does the proof: every
+      // mark of the extraction rule, in one extraction that is not valid, is no mark.
+      const REJECTED = extraction({
+        property: {
+          property_type: 'commercial', commercial_subtype: 'office', service_address_occupancy: 'commercial', hoa_common_area_service: true,
+          additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: 'commercial', property_type: 'commercial' }],
+        },
+        caller: { relationship_to_property: 'property_manager' },
+        service_request: { primary_service_category: 'pest_general', specific_service_name: 'Commercial Pest Control' },
+        commercial_signals: { business_name: 'Synthetic Bakery' },
+        triage_flags: ['commercial_requires_quote', 'hoa_common_area_requires_approval'],
+      });
+      test.each([['schema_failed'], ['parse_failed'], ['Valid'], ['valid '], [''], [null], [undefined]])('an extraction at the status %j is not read: not commercial', async (v2_extraction_status) => {
+        expect(await blocker(withCalls([CALL({ ...REJECTED, v2_extraction_status }), CALL()]))).toBeNull();
+        // The same extraction at the status 'valid' is a mark.
+        expect(await blocker(withCalls([CALL(), CALL({ ...REJECTED, v2_extraction_status: 'valid' })]))).toBe('commercial');
+      });
+
+      // The manager an extraction names counts for the other records of the call only where the extraction is
+      // read: a condo in the first format, beside a rejected extraction that names a manager, stays a home.
+      test('the manager a rejected extraction names is no manager of the call', async () => {
+        const condoInFirstFormat = JSON.stringify({ requested_service: 'Pest control', additional_properties: [{ address_line1: '12 Example Test Way', occupancy: 'rental_investment', property_type: 'condo' }] });
+        const managed = (v2_extraction_status) => CALL({ ai_extraction: condoInFirstFormat, ...extraction({ caller: { relationship_to_property: 'property_manager' } }), v2_extraction_status });
+        expect(await blocker(withCalls([managed('schema_failed'), CALL()]))).toBeNull();
+        expect(await blocker(withCalls([CALL(), managed('valid')]))).toBe('commercial');
+      });
+
+      // The call's other three records do not hang on the status of the extraction.
+      test.each([
+        ['the first format', { ai_extraction: JSON.stringify({ requested_service: 'Commercial pest control' }) }],
+        ["the triage's decision", { ai_validation: { extraction_status: 'schema_failed', routing: { flags: ['commercial_requires_quote'] } } }],
+        ['the address check', { ai_address_validation: { status: 'validated_accept', addressUse: { business: true, residential: false } } }],
+      ])('a mark in %s of a call whose extraction failed its schema: commercial', async (_what, change) => {
+        const failed = { ai_extraction_enriched: HOME_EXTRACTION, v2_extraction_status: 'schema_failed' };
+        expect(await blocker(withCalls([CALL(), CALL({ ...failed, ...change })]))).toBe('commercial');
+        expect(await blocker(withCalls([CALL(failed), CALL()]))).toBeNull();
       });
 
       // The first format is serialized JSON in a TEXT column. A text there that is not JSON is a failed read,

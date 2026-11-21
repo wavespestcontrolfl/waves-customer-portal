@@ -144,8 +144,10 @@ postgres('planStartBlocker (live Postgres)', () => {
 
   // A call of the account (call_log): by default a call about a home, as the call system saves it. The first
   // format of the extraction is JSON text in a text column; the other verdicts and the address check are jsonb.
+  // The extraction passed its schema (v2_extraction_status 'valid'), as the app's readers require.
   // `customer` null: a call no account was matched to.
   const HOME_CALL = {
+    v2_extraction_status: 'valid',
     ai_extraction: { requested_service: 'Quarterly pest control', call_summary: 'Asked about ants in the kitchen.' },
     ai_extraction_enriched: {
       property: { property_type: 'single_family', commercial_subtype: null, service_address_occupancy: 'owner_occupied', hoa_common_area_service: false },
@@ -163,7 +165,7 @@ postgres('planStartBlocker (live Postgres)', () => {
     const [row] = await trx('call_log').insert({
       customer_id: customer ? customer.id : null, ai_extraction: json(call.ai_extraction),
       ai_extraction_enriched: json(call.ai_extraction_enriched), ai_validation: json(call.ai_validation),
-      ai_address_validation: json(call.ai_address_validation),
+      ai_address_validation: json(call.ai_address_validation), v2_extraction_status: call.v2_extraction_status,
     }).returning('*');
     return row;
   }
@@ -917,6 +919,29 @@ postgres('planStartBlocker (live Postgres)', () => {
       expect(call.ai_extraction_enriched).toEqual(HOME_CALL.ai_extraction_enriched);
       expect(call.ai_validation).toEqual(HOME_CALL.ai_validation);
       expect(call.ai_address_validation).toEqual(HOME_CALL.ai_address_validation);
+      expect(call.v2_extraction_status).toBe('valid');
+    });
+
+    // The call processor keeps the output of a model that failed the extraction schema, for the audit of the
+    // failure, and the column takes a NULL. The read carries the status, and an extraction that is not 'valid'
+    // is not read. The call's other records are.
+    test.each([['schema_failed'], ['parse_failed'], [null]])('a commercial extraction at the status %j, beside a call about a home: not commercial', async (v2_extraction_status) => {
+      const rejected = { ...enriched({ property: { property_type: 'commercial', commercial_subtype: 'office' }, commercial_signals: { business_name: 'Synthetic Bakery' } }), v2_extraction_status };
+      expect(await blockerFor(async (customer) => {
+        await seedCall(customer, rejected);
+        await seedCall(customer);
+      })).toBeNull();
+      expect(await blockerFor(async (customer) => {
+        await seedCall(customer);
+        await seedCall(customer, { ...rejected, v2_extraction_status: 'valid' });
+      })).toBe('commercial');
+    });
+
+    test('a commercial service in the first format of a call whose extraction failed its schema: commercial', async () => {
+      expect(await blockerFor(async (customer) => {
+        await seedCall(customer);
+        await seedCall(customer, { v2_extraction_status: 'schema_failed', ai_extraction: { requested_service: 'Commercial pest control' } });
+      })).toBe('commercial');
     });
 
     test.each([
