@@ -34,6 +34,7 @@ const db = require('../models/db');
 const { estimateGreetingFirstName } = require('../utils/greeting-first-name');
 const logger = require('./logger');
 const { isEnabled, estimateEmailConsultationOfferLive } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
 const { estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 // A pricing-authority block is TEMPORARY (the operator re-saves the row
 // through the engine), so the job is deferred — never made terminal — and
@@ -867,6 +868,12 @@ async function processDueBatch(now = new Date()) {
         await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
         continue;
       }
+      // GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME: the service the delivery email named
+      // (owner 2026-11-21). Gate off = no read; no proof = today's label.
+      const emailedName = typeof featureGates.estimateFollowupServiceNameLive === 'function'
+        && featureGates.estimateFollowupServiceNameLive()
+        ? await require('./estimate-emailed-service-name').emailedServiceName(est)
+        : null;
       const sendOutcome = {};
       const ok = await followupShared.sendDualChannel(est, {
         email: {
@@ -880,6 +887,7 @@ async function processDueBatch(now = new Date()) {
           // (same ET formatting as the extension email).
           payload: followupShared.estimateEmailPayload(est, firstName, emailUrl, {
             ...followupEmailVars(est),
+            ...(typeof emailedName === 'string' ? { service_label: emailedName } : {}),
             estimate_accept_url: acceptUrl,
             ...(isGoneQuiet ? { consultation_url: consultationUrl } : {}),
             ...(expiringLifecycle ? {

@@ -81,6 +81,7 @@
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_ESTIMATE_TWO_HOUR_EMAIL_STOPS=true (owner 2026-11-21: with the gate on, the 2-hour "estimate_sent" email (step 0) is not sent and its enrollment ends when the estimate is archived, declined, accepted, expired, void or past its expiry, when the estimate opted out of follow-ups, or when the customer replied by text or email since the send that enrolled them; it sends no new message and changes no words; a wrong stop ends an enrollment for good, so this is the off switch; off = every email and stop exactly as today)
  *   GATE_ESTIMATE_DUE_FIRST_VISIT=true (owner 2026-11-06 "walk all": an estimate-accept invoice is due on the day of the first booked visit linked to the accept, when that day is after today, and its reminder cadence starts on that due date; off = due on the accept day, reminders count from the send)
+ *   GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME=true (owner 2026-11-21: the estimate follow-up emails from the engagement engine name the service the estimate delivery email already named. The stored delivery email's service summary must be exactly Pest Control, Lawn Care, or both, and must still equal what the estimate infers now; then the follow-up says pest control, lawn care, or lawn care and pest control where it said home protection or service quote. Every other word, subject, audience, cap and spacing is unchanged, and any other summary keeps today's label. Read at call time via estimateFollowupServiceNameLive(), strict 'true', dark by default; the owner flips it because it changes words in a customer email; off = byte-identical to today with no extra read)
  *   GATE_CALL_PROMISE_AI_NO_CUSTOMER=true (owner 2026-11-05, "A, AI": the call-promise AI check also judges an open Waves promise on a call with NO customer record (a job candidate, a vendor, a prospect not yet on file), by the caller's phone identity: texts and calls both ways, same checker, same guards (admissible witness, evidence-hash cache, later-human-text hold, model budgets). A number that is one of ours, a carrier sentinel, or on more than one customer record is skipped. At most 10 model calls per Eastern day for these promises across the watchdog pass and the Owed-queue pass (about $0.05 a day expected), newest call first. Read at call time via callPromiseAiNoCustomerLive(), strict 'true', dark by default; off = exactly today's behavior. Staff can Reopen from the Owed tab. Sends nothing to anyone.)
  *   GATE_TECH_LOGIN_PRIVACY=true (owner 2026-10-25, second technician: a login with the technician role sees only its own customers' alerts and promises. Customer-text bells and pushes (sms_reply, reschedule intent, voicemail callback, service report and completion text failures, Twilio failures, job complete, follow-up bells) reach a technician only when the customer is on that technician's route (the same rule the Communications routes use); an alert with no customer keeps today's routing. The Promises tab feeds (proposals, open commitments, auto-closed) list only own-customer rows and closing, dismissing or reopening another customer's promise answers 404. The customer-deleted-account push goes to admin-role staff only. A technician socket joins a room of its own (tech:<id>) instead of the office-wide dispatch:admins room and hears only ids-and-status pings about its own visits; GET /dispatch/weather/tomorrow answers a technician 403; POST /dispatch/slot-check refuses a visit or technician that is not the caller's. Admin and office logins see everything as before. Read at call time via techLoginPrivacyLive(), strict 'true', dark by default; off = byte-identical to before; sends nothing to a customer.)
  *   GATE_ESTIMATE_SLOT_ONE_PER_HOUR=true (owner 2026-10-25, second technician: the estimate time picker lists ONE opening for each date and start time, not one per technician. Of the openings sharing a start the picker keeps the one it sorts first (route-optimal, then the shortest detour to a nearby job, then the slot id); the kept opening is a complete reservable slot with its own technician and hold. The "Only N openings" count and every cut of the list follow the collapsed list, so a repeated time no longer pushes other times out. Same list the page, its search, the fresh recheck, one-tap purchase and the estimate-time text drafts read. Reserve and accept are unchanged. Read at call time via estimateSlotOnePerHourLive(), strict 'true', dark by default; off = byte-identical to before; sends nothing to a customer by itself.)
@@ -3138,6 +3139,11 @@ const gates = {
   // Read at call time via estimateDueFirstVisitLive(); this map entry is for
   // logGateStatus only. STRICT opt-in. Enable with GATE_ESTIMATE_DUE_FIRST_VISIT=true.
   estimateDueFirstVisit: process.env.GATE_ESTIMATE_DUE_FIRST_VISIT === 'true',
+
+  // Estimate follow-up emails name the service the delivery email named (owner 2026-11-21). Ships DARK: exactly 'true'.
+  // This entry is for logGateStatus only: estimate-engagement-engine.js reads GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME at call time
+  // via estimateFollowupServiceNameLive(). Kill switch: unset.
+  estimateFollowupServiceName: process.env.GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME === 'true',
 
   // Send-time "lead with one service": when a NEW residential customer's
   // estimate carries EXACTLY two recurring lines (the non-lead one removable),
@@ -6582,6 +6588,14 @@ function estimateDueFirstVisitLive() {
   return process.env.GATE_ESTIMATE_DUE_FIRST_VISIT === 'true';
 }
 
+// GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME read at CALL time, strict `=== 'true'`, dark (owner 2026-11-21).
+// On, the engagement engine's follow-up emails take service_label from the stored delivery email's service summary
+// (estimate-emailed-service-name.js), only for Pest Control, Lawn Care or both, and only while the estimate still infers
+// that same summary. Off = no read and no change.
+function estimateFollowupServiceNameLive() {
+  return process.env.GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME === 'true';
+}
+
 function estimateConsultationOfferLive() {
   return process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true';
 }
@@ -8773,6 +8787,8 @@ module.exports.sprayRainRulesMode = sprayRainRulesMode;
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_ESTIMATE_DUE_FIRST_VISIT reader, on its own line so gate PRs never conflict.
 module.exports.estimateDueFirstVisitLive = estimateDueFirstVisitLive;
+// GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME reader, on its own line so gate PRs never conflict.
+module.exports.estimateFollowupServiceNameLive = estimateFollowupServiceNameLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
 module.exports.lawnV13Live = lawnV13Live;
 // GATE_LAWN_BERMUDA_REMOVAL reader, on its own line so gate PRs never conflict.
