@@ -1290,7 +1290,7 @@ ${noteLines.join('\n')}
   return parts.join('\n\n');
 }
 
-async function assembleBeehiivNewsletter(draft) {
+async function assembleBeehiivNewsletter(draft, { pollQuizId = null } = {}) {
   const parts = [];
   const events = draft.events || [];
 
@@ -1549,6 +1549,17 @@ async function assembleBeehiivNewsletter(draft) {
     }
   }
 
+  // ── Quick poll ── at most every 3rd issue (newsletter-quiz.js
+  // chooseNewsletterPoll, owner-approved list 2026-11-20). The token becomes
+  // each reader's own answer buttons at send time and an inert copy on the
+  // archive and the owner's Monday copy. An unknown id adds nothing.
+  const poll = issuePoll(pollQuizId);
+  if (poll) {
+    parts.push(sectionSpacer);
+    parts.push(`<h2 class="dm-chip" style="${sectionHeadingStyle(events.length + 2)}">🗳️ <strong><em>Quick poll</em></strong></h2>`);
+    parts.push(`{{quiz:${poll}}}`);
+  }
+
   // ── Sign-off ──
   parts.push(`<p style="margin:20px 0 4px 0;font-size:15px;line-height:1.6;"><strong>Catch you out there this week.</strong></p>`);
   const signoffText = draft.signoff || '— The Waves Team';
@@ -1603,7 +1614,14 @@ function stripMd(text) {
     .trim();
 }
 
-function buildFlagshipTextBody(draft) {
+// The issue's poll id when it is one of the Waves Newsletter polls, else null.
+function issuePoll(pollQuizId) {
+  // require here, as in stripPersonalizationTokens: newsletter-quiz requires db.
+  const { isNewsletterPoll } = require('./newsletter-quiz');
+  return pollQuizId && isNewsletterPoll(pollQuizId) ? pollQuizId : null;
+}
+
+function buildFlagshipTextBody(draft, { pollQuizId = null } = {}) {
   const out = [];
   if (draft.greeting) out.push(stripMd(greetingWithNameToken(draft.greeting)));
   if (draft.introText) out.push(stripMd(draft.introText));
@@ -1665,6 +1683,8 @@ function buildFlagshipTextBody(draft) {
   if (checklist.length) {
     out.push(checklist.map((c) => `[ ] ${stripMd(c)}`).join('\n'));
   }
+  const poll = issuePoll(pollQuizId);
+  if (poll) out.push(`== Quick poll ==\n{{quiz-text:${poll}}}`);
   out.push(stripMd(draft.signoff || '— The Waves Team'));
   if (draft.ps) {
     const psText = psBodyText(draft.ps);
@@ -1706,6 +1726,7 @@ const NEWSLETTER_WRITE_TIMEOUT_MS = 10 * 60 * 1000;
  * @param {boolean} [opts.includeCTA] - Whether to include CTA
  * @param {string|Date} [opts.issueReference] - Issue Tuesday/target used for event policy windows
  * @param {import('knex').Knex.Transaction} [opts.trx] - Optional Knex transaction
+ * @param {string|null} [opts.pollQuizId] - the issue's poll (flagship only)
  * @param {string} [opts.effort] - Anthropic effort override for the
  *   newsletterWriter policy's primary leg (default: the policy's own 'max').
  *   No caller passes it since the admin composer was removed.
@@ -1732,6 +1753,9 @@ async function createNewsletterDraft({
   // that passed 'high' were removed (owner 2026-10-30).
   effort,
   timeoutMs = NEWSLETTER_WRITE_TIMEOUT_MS,
+  // The issue's Waves Newsletter poll (newsletter-quiz.js chooseNewsletterPoll),
+  // or null. Only the weekly autopilot passes one; only the flagship shows it.
+  pollQuizId = null,
 }) {
   // Refused before any paid generation: the save at the end would refuse it.
   // persist=false still writes the copy.
@@ -1947,7 +1971,7 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     // Owner reversal 2026-07-28 (late evening): the flagship keeps the
     // Beehiiv-formula renderer + comedic devices. assembleWavesNewsletter
     // (the compact format) is retained, unused by the pipeline.
-    draft.htmlBody = await assembleBeehiivNewsletter(draft);
+    draft.htmlBody = await assembleBeehiivNewsletter(draft, { pollQuizId: typeConfig?.flagship ? pollQuizId : null });
   } else if (typeConfig?.flagship) {
     // Flagship drafts must come through the locked structured-events path.
     // If the model returned no events (e.g. the legacy `sections` shape, or
@@ -1968,13 +1992,15 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     }).filter(Boolean).join('\n\n');
   }
 
-  if (!draft.textBody && draft.events?.length && typeConfig?.flagship) {
+  if (draft.events?.length && typeConfig?.flagship) {
     // Structured plain-text alternative (owner-accepted critique
     // 2026-07-29): real sections, event names, dates, prices, and full
     // destination urls — not tag-stripped HTML collapsed into one
     // paragraph. Direct event urls on purpose: text-only clients get no
-    // per-recipient substitution pass for evclick tokens.
-    draft.textBody = buildFlagshipTextBody(draft);
+    // per-recipient substitution pass for evclick tokens. Always built from
+    // the locked draft: a textBody the writer added on its own (the prompt
+    // asks for none) would skip the factual lock and the issue's poll.
+    draft.textBody = buildFlagshipTextBody(draft, { pollQuizId });
   }
   if (!draft.textBody && draft.htmlBody) {
     draft.textBody = decodeEscapedEntities(draft.htmlBody.replace(/<[^>]+>/g, ''))

@@ -94,6 +94,23 @@ describe('public newsletter quiz landing copy (per-quiz)', () => {
     });
   });
 
+  test('a Waves Newsletter poll vote confirms the answer and thanks the reader with no booking pitch', async () => {
+    await withServer(async (baseUrl) => {
+      const url = `${baseUrl}/api/public/newsletter/quiz/${TOKEN}/nl-poll-weekend-v1/out-to-eat`;
+      const confirm = await (await fetch(url)).text();
+      expect(confirm).toContain('You picked <strong>Out to eat</strong>');
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: '',
+      });
+      const html = await r.text();
+      expect(r.status).toBe(200);
+      expect(html).toContain('Your vote is in. See you in the next Waves Newsletter.');
+      expect(html).not.toMatch(/\/book\b|Book a|free check/);
+    });
+  });
+
   test('POST thank-you keeps lawn copy for the lawn quiz', async () => {
     await withServer(async (baseUrl) => {
       const r = await fetch(`${baseUrl}/api/public/newsletter/quiz/${TOKEN}/lawn-headache-v1/weeds`, {
