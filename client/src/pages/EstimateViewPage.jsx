@@ -3979,6 +3979,9 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
 // price of a one-service plan; a plan with several services bills different months
 // differently, so it gets no "each visit after that" sentence. The link goes down to the
 // Ask Waves box, which sits at the end of the page.
+// The sentence is the owner-approved one, word for word (decision page, 2026-11-21). "First
+// visit" and "Each visit after that" name bills; the unit on every price stays "per
+// application" (AGENTS.md). Change these words only on the owner's word.
 export function PriceFollowUps({ firstVisit = null, laterVisit = null, severalServices = false, onAsk = null }) {
   if (!firstVisit && !onAsk) return null;
   return (
@@ -9713,6 +9716,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     extraInvoiceRows: rodentSetupInvoiceRows,
     selectedFrequency: combinedFrequency,
     oneTimeExtrasTotal: oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode),
+    firstVisitFees: pricing.firstVisitFees,
   });
   // "Each visit after that" only where one number is true: a one-service plan whose card
   // price (the monthly-average model's per-application price) is that first application.

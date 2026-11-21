@@ -669,8 +669,16 @@ describe('firstVisitTotalPreview', () => {
     ['no setup fee (first visit costs what every visit costs)', { setupFee: null }],
     ['another up-front row beside the setup fee', { extraInvoiceRows: [{ label: 'Bait Station Setup', amount: 250 }] }],
     ['one-time services billed after completion', { oneTimeExtrasTotal: 150 }],
+    ['another first-visit fee (initial cockroach treatment)', {
+      firstVisitFees: [setupFee, { service: 'pest_initial_roach', amount: 150, label: 'Cockroach Treatment Service' }],
+    }],
     ['monthly-billed plan with no first-application amount', { selectedFrequency: { billingFrequencyKey: 'monthly', monthly: 45 } }],
   ])('returns null for %s', (_label, override) => {
     expect(firstVisitTotalPreview({ ...base, ...override })).toBeNull();
+  });
+
+  it('keeps the line when the first-visit fee list holds only the setup fee (or a zero fee)', () => {
+    const firstVisitFees = [setupFee, { service: 'pest_initial_roach', amount: 0 }];
+    expect(firstVisitTotalPreview({ ...base, firstVisitFees })).toEqual({ firstApplication: 98, setup: 99, total: 197 });
   });
 });

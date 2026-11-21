@@ -149,9 +149,10 @@ function payPerApplicationInvoiceParts({ setupFee = null, extraInvoiceRows = [],
 // the box above the CTA shows once a time is picked. Null unless that box would show exactly
 // those two rows and nothing is billed beside them: a one-time visit, an invoice-mode or
 // site-priced plan, the annual prepay (setup waived), a setup fee with no first-application
-// amount, another up-front row (bait stations, a misting installation) and one-time services
-// billed after completion all get no line, because "application + one-time setup" would not
-// be the whole first bill there.
+// amount, another up-front row (bait stations, a misting installation), another first-visit
+// fee (`firstVisitFees`: the initial cockroach treatment, which the box does not list) and
+// one-time services billed after completion all get no line, because "application + one-time
+// setup" would not be the whole first bill there.
 export function firstVisitTotalPreview({
   serviceMode,
   paymentPreference,
@@ -161,9 +162,15 @@ export function firstVisitTotalPreview({
   extraInvoiceRows = [],
   selectedFrequency = null,
   oneTimeExtrasTotal = 0,
+  firstVisitFees = [],
 } = {}) {
   if (serviceMode === 'one_time' || paymentPreference === 'prepay_annual' || invoiceMode || siteConfirmationHold) return null;
   if (Number(oneTimeExtrasTotal) > 0) return null;
+  // The page's own first-visit fee list. With a one-time option on the estimate the breakdown
+  // is the alternate price and oneTimeExtrasTotal reads 0, so this list is checked by itself.
+  const otherFirstVisitFee = (Array.isArray(firstVisitFees) ? firstVisitFees : [])
+    .some((fee) => fee?.service !== 'waveguard_setup' && Number(fee?.amount) > 0);
+  if (otherFirstVisitFee) return null;
   const { setupAmount, hasWaveGuardSetupRow, upFrontRows, firstVisit } = payPerApplicationInvoiceParts({ setupFee, extraInvoiceRows, selectedFrequency });
   if (!hasWaveGuardSetupRow || upFrontRows.length !== 1 || !(firstVisit > 0)) return null;
   return {

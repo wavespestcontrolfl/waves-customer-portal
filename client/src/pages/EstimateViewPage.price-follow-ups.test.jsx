@@ -141,6 +141,24 @@ describe('estimate page: first-visit line and Ask Waves link under the price', (
     expect(firstVisitLine(container)).toBeNull();
   });
 
+  it('another first-visit fee (initial cockroach treatment): no line, because setup + application is not the whole bill', async () => {
+    // The estimate also offers a one-time visit, so the breakdown reads as the alternate price
+    // and the "billed after completion" total is 0; only the first-visit fee list shows the fee.
+    const payload = single();
+    const roachFee = { service: 'pest_initial_roach', amount: 150, label: 'Cockroach Treatment Service', waivedWithPrepay: false };
+    const { container } = await renderPage({
+      ...payload,
+      estimate: { ...payload.estimate, showOneTimeOption: true },
+      pricing: {
+        ...payload.pricing,
+        firstVisitFees: [setupFee, roachFee],
+        oneTimeBreakdown: { total: 249, items: [...setupBreakdown.items, { service: 'pest_initial_roach', label: roachFee.label, amount: 150, kind: 'charge' }] },
+      },
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: ASK_LINK })).toBeInTheDocument());
+    expect(firstVisitLine(container)).toBeNull();
+  });
+
   it('several services: the first bill is every first application plus setup, with no single later price', async () => {
     const { container } = await renderPage(multi());
     await waitFor(() => expect(firstVisitLine(container)).not.toBeNull());
