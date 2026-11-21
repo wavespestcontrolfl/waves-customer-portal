@@ -486,20 +486,26 @@ function nodeSaysCommercial(node, managed) {
 // Every object of the payload, at any depth. (The app's own scan stops 12
 // levels down. This one has no limit: a mark it does not reach would read as
 // a home.)
-// And every TEXT in it, under any name or in a list, that starts with
-// 'commercial_'. That is the prefix of the app's commercial service keys
-// ('commercial_pest'), scopes ('commercial_suite') and review reasons
+// And every TEXT in it, under any name or in a list, that IS a key with the
+// prefix 'commercial_'. That is the prefix of the app's commercial service
+// keys ('commercial_pest'), scopes ('commercial_suite') and review reasons
 // ('commercial_risk_type_review'), and a payload also keeps such a key where
 // no rule above looks: a list of picked keys, a field of another name. It is
 // the value half of the broadest rule the app has for a saved estimate (the
 // termite agreement's classifier searches the payload text for
-// '"commercial_'). The other half is not read: a NAME that starts with
-// 'commercial_' is also the name of a service pick that was not taken, and
-// of the lawn area the price card keeps for any lawn quote
-// (measuredBasisAnchor.commercial_lawn).
+// '"commercial_'), narrowed to a key: one word of letters, digits and '_',
+// with ':' (the estimator's 'commercial_subtype:office'). Every such key in
+// the app's code has that shape. A payload also keeps contact details (a call
+// saves the email of a second contact in a lead payload), and an email like
+// commercial_accounts@example.test starts with the prefix and is no key. Nor
+// is a web address or a sentence.
+// The other half is not read: a NAME that starts with 'commercial_' is also
+// the name of a service pick that was not taken, and of the lawn area the
+// price card keeps for any lawn quote (measuredBasisAnchor.commercial_lawn).
 const COMMERCIAL_KEY_PREFIX = 'commercial_';
+const COMMERCIAL_KEY = /^commercial_[a-z0-9_:]*$/;
 function payloadSaysCommercial(value, managed) {
-  if (typeof value === 'string') return value.trim().toLowerCase().startsWith(COMMERCIAL_KEY_PREFIX);
+  if (typeof value === 'string') return COMMERCIAL_KEY.test(value.trim().toLowerCase());
   if (!value || typeof value !== 'object') return false;
   if (Array.isArray(value)) return value.some((item) => payloadSaysCommercial(item, managed));
   return nodeSaysCommercial(value, managed) || Object.values(value).some((item) => payloadSaysCommercial(item, managed));
@@ -610,7 +616,12 @@ function someText(value, test) {
 //   sorts the label, the label's copies in the payload and the notes by the
 //   app's text patterns. (The label and its copies are also read on every
 //   estimate, by the rule for a label: the reader answers with the service
-//   lines first, where the estimate has one.)
+//   lines first, where the estimate has one.) The reader looks for a
+//   RECURRING line there. An estimate for a one-time job keeps its priced
+//   line as a one-time item, so the reader would sort its notes too, and
+//   notes are free text ("No commercial service" carries the word). So the
+//   notes go to the reader only for an estimate with no line of either kind
+//   (oneTimeServicesFromData, the reader's own list of one-time lines).
 // Not the termite agreement's classifier itself (isCommercialEstimate in
 // termite-program-agreement.js). It is broad on purpose, and three of its
 // rules read homes: it parks a duplex, a condo and a townhome; it reads a
@@ -634,8 +645,13 @@ function isCommercialEstimateRow(estimate, managed) {
     || require('./estimate-delivery-options').isCommercialEstimateData(payload)
     || require('./estimate-commercial-identity').isCommercialAutoAcceptEstimate({ estimate_data: payload })
     || payloadSaysCommercial(payload, hasManager(payload, managed))
-    || require('./estimate-service-lines').inferEstimateServiceLines({ ...estimate, estimate_data: payload })
-      .some((line) => String(line.key || '').startsWith(COMMERCIAL_KEY_PREFIX));
+    || commercialServiceLine(estimate, payload);
+}
+function commercialServiceLine(estimate, payload) {
+  const { inferEstimateServiceLines, oneTimeServicesFromData } = require('./estimate-service-lines');
+  const notes = oneTimeServicesFromData(payload).length ? null : estimate.notes;
+  return inferEstimateServiceLines({ ...estimate, estimate_data: payload, notes })
+    .some((line) => String(line.key || '').startsWith(COMMERCIAL_KEY_PREFIX));
 }
 
 // EVERY estimate of the account counts, whatever its status: a won one (the

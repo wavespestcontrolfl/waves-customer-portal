@@ -547,6 +547,20 @@ postgres('planStartBlocker (live Postgres)', () => {
       })).toBeNull();
     });
 
+    // The notes of an estimate for a one-time job are free text. The reader of service lines would sort them
+    // (it looks for a recurring line), so the proof does not hand them over where the estimate has a one-time line.
+    test('notes with the word on an estimate that has a one-time line are not commercial, and the reader gets no notes', async () => {
+      const owner = require('../services/estimate-service-lines');
+      const spy = jest.spyOn(owner, 'inferEstimateServiceLines');
+      const estimate_data = { result: { oneTime: { items: [{ service: 'pest_onetime', name: 'One-Time Pest Control', price: 150 }] } } };
+      try {
+        expect(await blockerFor((customer) => seedEstimate(customer, { notes: 'Pest treatment for the house. No commercial service.', estimate_data }))).toBeNull();
+        expect(spy).toHaveBeenCalledWith(expect.objectContaining({ notes: null, estimate_data }));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     // The estimator keeps its own verdict on the premises with a draft (estimatorEngine.propertyFactsV2). The
     // category column keeps its default, and nothing else in the payload says commercial.
     const FACTS = (facts) => ({ estimatorEngine: { propertyFactsV2: { version: 2, shadow: true, facts: { propertySubtype: 'single_family', ...facts } } } });
@@ -845,6 +859,9 @@ postgres('planStartBlocker (live Postgres)', () => {
           referrer: 'commercial_pest',
           landing_url: 'commercial_pest',
         }),
+      }],
+      ["a lead that keeps the email of a second contact, and the email starts with the prefix", {
+        extracted_data: JSON.stringify({ stage: 'call_processed', secondary_contact: { name: 'Synthetic Contact', email: 'commercial_accounts@example.test', relationship: 'billing' } }),
       }],
       ['a lead that keeps a home occupancy of a main address on a property in an association', {
         extracted_data: JSON.stringify({ additional_properties: [{ address_line1: '12 Example Test Way', property_type: 'single_family', service_address_occupancy: 'seasonal', hoa_common_area_service: false, hoa_community_flag: true }] }),

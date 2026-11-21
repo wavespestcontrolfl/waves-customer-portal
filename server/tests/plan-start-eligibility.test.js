@@ -592,6 +592,10 @@ describe('planStartBlocker', () => {
         ['no service label and no notes', ESTIMATE({ service_interest: null, notes: null })],
         // The app's reader sorts the notes only when the estimate has no service line: the lines answer first.
         ['notes with the word on an estimate that has home service lines', ESTIMATE({ notes: 'Pest plan for the house. Not a commercial account.' })],
+        // A text is a key only where it is one word of a key's characters. A payload keeps contact details too.
+        ['contact details that start with the prefix', ESTIMATE({ estimate_data: {
+          inputs: { isCommercial: 'NO', propertyType: 'Single Family' }, customer: { email: 'commercial_accounts@example.test' }, sentTo: [' Commercial_Billing@example.test '], site: 'commercial_pest.example.test/quote',
+        } })],
         // Home services under the names that keep a service label, and the word under a name that keeps none.
         ['home service labels in the payload', ESTIMATE({ estimate_data: {
           inputs: { isCommercial: 'NO', leadServiceInterest: 'Quarterly Pest Control' }, engineInputs: { serviceInterest: 'Pest Control + Lawn Care' },
@@ -806,6 +810,31 @@ describe('planStartBlocker', () => {
         const kept = (more) => ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Single Family' }, intake: { ...intake, ...more } } });
         expect(await blocker(withEstimates([kept({}), ESTIMATE({ estimate_data: farDown(intake) }), ESTIMATE()]))).toBeNull();
         expect(await blocker(withEstimates([ESTIMATE(), kept({ pickedServices: ['commercial_pest'] })]))).toBe('commercial');
+      });
+
+      // The reader of service lines looks for a RECURRING line before it sorts the notes. An estimate for a
+      // one-time job keeps its priced line as a one-time item, under one of the six lists the reader takes such
+      // lines from. Its notes are free text, and they are not sorted either.
+      const HOUSE_NOTES = 'Pest treatment for the house. No commercial service.';
+      const ONE_TIME = { service: 'pest_onetime', name: 'One-Time Pest Control', price: 150 };
+      test.each([
+        ['result.oneTime.items', { result: { oneTime: { items: [ONE_TIME] } } }],
+        ['result.oneTime.specItems', { result: { oneTime: { specItems: [ONE_TIME] } } }],
+        ['result.specItems', { result: { specItems: [ONE_TIME] } }],
+        ['engineResult.oneTime.items', { engineResult: { oneTime: { items: [ONE_TIME] } } }],
+        ['engineResult.oneTime.specItems', { engineResult: { oneTime: { specItems: [ONE_TIME] } } }],
+        ['engineResult.specItems', { engineResult: { specItems: [ONE_TIME] } }],
+      ])('the notes of an estimate with a one-time line under %s are not sorted: not commercial', async (_list, estimate_data) => {
+        // The app's reader itself sorts these notes as a commercial line: the proof keeps them from it.
+        const { inferEstimateServiceLines } = require('../services/estimate-service-lines');
+        expect(inferEstimateServiceLines({ notes: HOUSE_NOTES, estimate_data }).map((line) => line.key)).toContain('commercial_pest');
+        expect(await blocker(withEstimates([ESTIMATE({ notes: HOUSE_NOTES, estimate_data }), ESTIMATE()]))).toBeNull();
+      });
+
+      test('the same notes are sorted on an estimate with no line of either kind, and a commercial one-time line is a mark', async () => {
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ notes: HOUSE_NOTES, estimate_data: {} })]))).toBe('commercial');
+        const commercialJob = { result: { oneTime: { items: [{ service: 'commercial_pest', name: 'One-Time Service', price: 150 }] } } };
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ notes: 'Ants in the kitchen.', estimate_data: commercialJob })]))).toBe('commercial');
       });
 
       // The payload is cut ONCE, before any rule reads it: the proof's own scan, the manager lookup and each of
@@ -1106,6 +1135,23 @@ describe('planStartBlocker', () => {
         expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, selectedServices: [AD.campaign] } })]))).toBe('commercial');
         expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, picked: { key: AD.campaign } } })]))).toBe('commercial');
         expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, isCommercial: 'YES' } })]))).toBe('commercial');
+      });
+
+      // The text rule reads a KEY: one word of letters, digits and '_', with ':'. A lead payload also keeps contact
+      // details (a call saves the email of a second contact), and an email with the prefix is no key.
+      test.each([
+        ['the email of a second contact', { secondary_contact: { name: 'Synthetic Contact', email: 'commercial_accounts@example.test', relationship: 'billing' } }],
+        ['an email in a list, in capitals and with spaces around it', { emails: [' Commercial_Billing@Example.Test '] }],
+        ['a web address', { website: 'commercial_pest.example.test/quote' }],
+        ['a sentence', { memo: 'commercial_pest was asked about, for a friend' }],
+        ['a file name', { attachment: 'commercial_invoice.pdf' }],
+        ['a path', { page: 'commercial_pest/quote' }],
+      ])('%s that starts with the prefix is no key: not commercial', async (_what, more) => {
+        expect(await blocker(withLeads([LEAD({ extracted_data: { stage: 'call_processed', ...more } }), LEAD()]))).toBeNull();
+      });
+
+      test.each([['commercial_pest'], [' Commercial_Pest '], ['commercial_risk_type_review'], ['commercial_subtype:office'], ['commercial_tier_2'], ['commercial_']])('the key %j under a name no rule knows is a mark', async (key) => {
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { stage: 'call_processed', secondary_contact: { email: 'accounts@example.test' }, picked: [{ code: key }] } })]))).toBe('commercial');
       });
 
       // The quote page saves the tags of a link as the browser sent them (attribution.utm, whole), so a link can
