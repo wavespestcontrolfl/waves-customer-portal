@@ -6425,7 +6425,10 @@ gets the Lakewood Ranch profile (office id `bradenton`). **Not an open
 redirect**: the target is ONLY a `googleReviewUrl` from `config/locations.js`;
 nothing in the request names it, and a throw anywhere still 302s to the
 Lakewood Ranch form. `Cache-Control: private, no-store`, `noindex`,
-`Referrer-Policy: no-referrer` on every status (set before the limiter).
+`Referrer-Policy: no-referrer` on every response this router sends: the 302
+and its limiter's 429 (set before the limiter). A response the app stack
+sends before the router (a CORS preflight, a body-parser 400) is the app's
+generic one: it comes from no location header and carries no review target.
 Mounts OUTSIDE the `/api/` limiter with its own 120/min per-key limiter (the
 `/l` budget); over the limit is a plain 429. **Privacy**: the route never logs,
 stores or forwards latitude, longitude, region or country. Its only record is
