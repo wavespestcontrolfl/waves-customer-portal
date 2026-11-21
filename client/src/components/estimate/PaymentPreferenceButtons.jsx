@@ -153,6 +153,8 @@ function payPerApplicationInvoiceParts({ setupFee = null, extraInvoiceRows = [],
 // - another up-front row (bait stations, a misting installation), another first-visit fee
 //   (`firstVisitFees`: the initial cockroach treatment, which the box does not list) or
 //   one-time services billed after completion: "application + one-time setup" is not all of it;
+// - `creditApplies`: the page knows of a credit the accept takes off this bill (a required
+//   booking deposit, an applied promo or referral code, a declared plan credit);
 // - `cardPerApplicationTotal` is the proof. The accept bills the selected plan's rows less a
 //   service-preference credit and a plan-credit slice, and reads a partly priced bundle
 //   another way, so the box's first application can sit above the real invoice. The page
@@ -161,8 +163,9 @@ function payPerApplicationInvoiceParts({ setupFee = null, extraInvoiceRows = [],
 //   only when that sum is the box's first application to the cent.
 const sameCents = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.round(a * 100) === Math.round(b * 100);
 
-function firstBillHasOtherCharges({ oneTimeExtrasTotal = 0, firstVisitFees = [] }) {
-  if (Number(oneTimeExtrasTotal) > 0) return true;
+// Anything that makes "application + one-time setup" not the whole first bill.
+function firstBillHasOtherLines({ oneTimeExtrasTotal = 0, firstVisitFees = [], creditApplies = false }) {
+  if (creditApplies || Number(oneTimeExtrasTotal) > 0) return true;
   // The page's own first-visit fee list. With a one-time option on the estimate the breakdown
   // is the alternate price and oneTimeExtrasTotal reads 0, so this list is checked by itself.
   return (Array.isArray(firstVisitFees) ? firstVisitFees : [])
@@ -172,17 +175,18 @@ function firstBillHasOtherCharges({ oneTimeExtrasTotal = 0, firstVisitFees = [] 
 export function firstVisitTotalPreview({
   serviceMode,
   paymentPreference,
-  invoiceMode = false,
-  siteConfirmationHold = false,
-  setupFee = null,
-  extraInvoiceRows = [],
-  selectedFrequency = null,
-  oneTimeExtrasTotal = 0,
-  firstVisitFees = [],
-  cardPerApplicationTotal = null,
+  invoiceMode,
+  siteConfirmationHold,
+  setupFee,
+  extraInvoiceRows,
+  selectedFrequency,
+  oneTimeExtrasTotal,
+  firstVisitFees,
+  creditApplies,
+  cardPerApplicationTotal,
 } = {}) {
   if (serviceMode === 'one_time' || paymentPreference === 'prepay_annual' || invoiceMode || siteConfirmationHold) return null;
-  if (firstBillHasOtherCharges({ oneTimeExtrasTotal, firstVisitFees })) return null;
+  if (firstBillHasOtherLines({ oneTimeExtrasTotal, firstVisitFees, creditApplies })) return null;
   const { setupAmount, hasWaveGuardSetupRow, upFrontRows, firstVisit } = payPerApplicationInvoiceParts({ setupFee, extraInvoiceRows, selectedFrequency });
   if (!hasWaveGuardSetupRow || upFrontRows.length !== 1 || !(firstVisit > 0)) return null;
   if (cardPerApplicationTotal == null || !sameCents(Number(cardPerApplicationTotal), firstVisit)) return null;

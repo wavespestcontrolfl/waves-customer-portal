@@ -9710,6 +9710,17 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // average is the proof the helper asks for: its model exists only when the card prices
   // add up to the plan's own monthly, and a plan credit shows as `credit`.
   const averageModel = monthlyAverage?.model || null;
+  // Credits the accept takes off the first invoice, which the box does not show: the booking
+  // deposit, a promo or referral code entered on this estimate, and a declared plan credit
+  // (checked on every place the payload can carry one, not through the average: its rounding
+  // band would let a very small credit pass).
+  const firstBillCreditApplies = data?.depositPolicy?.required === true
+    || !!data?.promoCode?.applied
+    || [
+      selectedCombo?.manualDiscount, combinedFrequency?.manualDiscount,
+      pricing?.combinedRecurring?.manualDiscount, pricing?.manualDiscount,
+      ...services.filter((s) => s?.isRecurring).flatMap((s) => (s.frequencies || []).map((f) => f?.manualDiscount)),
+    ].some((credit) => Number(credit?.amount) > 0 || manualDiscountMonthlyAmount(credit) > 0);
   const firstVisitLine = invoiceOnlyAccept ? null : firstVisitTotalPreview({
     serviceMode,
     paymentPreference,
@@ -9720,6 +9731,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     selectedFrequency: combinedFrequency,
     oneTimeExtrasTotal: oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode),
     firstVisitFees: pricing.firstVisitFees,
+    creditApplies: firstBillCreditApplies,
     cardPerApplicationTotal: averageModel && !averageModel.credit
       ? averageModel.services.reduce((sum, service) => sum + service.perApplication, 0)
       : null,

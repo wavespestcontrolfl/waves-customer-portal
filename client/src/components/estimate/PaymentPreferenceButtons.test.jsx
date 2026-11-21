@@ -675,7 +675,8 @@ describe('firstVisitTotalPreview', () => {
       firstVisitFees: [setupFee, { service: 'pest_initial_roach', amount: 150, label: 'Cockroach Treatment Service' }],
     }],
     ['monthly-billed plan with no first-application amount', { selectedFrequency: { billingFrequencyKey: 'monthly', monthly: 45 } }],
-    ['no proven card total (a plan credit, a preference credit or no monthly average)', { cardPerApplicationTotal: null }],
+    ['a credit the accept takes off the first bill (deposit, promo or referral code, plan credit)', { creditApplies: true }],
+    ['no proven card total (a preference credit or no monthly average)', { cardPerApplicationTotal: null }],
     ['a card total that is not the box amount (a credit in the cards, or price rows that miss a service)', { cardPerApplicationTotal: 88 }],
     ['a card total that is not a number', { cardPerApplicationTotal: 'n/a' }],
   ])('returns null for %s', (_label, override) => {

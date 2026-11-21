@@ -190,6 +190,32 @@ describe('estimate page: first-visit line and Ask Waves link under the price', (
     expect(firstVisitLine(container)).toBeNull();
   });
 
+  it('a plan credit small enough to sit inside the average\'s rounding band: still no line', async () => {
+    // $0.48 a year = 4 cents a month: the monthly average reconciles and shows no credit row,
+    // but the accept still takes a slice off the first application.
+    const payload = multi();
+    const credit = { label: 'Courtesy credit', amount: 0.48, recurringAmount: 0.48 };
+    const { container } = await renderPage({
+      ...payload,
+      pricing: {
+        ...payload.pricing,
+        frequencies: payload.pricing.frequencies.map((f) => ({ ...f, monthly: 113.06, annual: 1356.72, manualDiscount: credit })),
+        combinedRecurring: { ...payload.pricing.combinedRecurring, monthlySubtotal: 113.06, annualSubtotal: 1356.72, manualDiscount: credit },
+      },
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: ASK_LINK })).toBeInTheDocument());
+    expect(firstVisitLine(container)).toBeNull();
+  });
+
+  it.each([
+    ['a required booking deposit (credited against the first invoice)', { depositPolicy: { enforced: true, required: true, recurringAmount: 49, oneTimeAmount: 49 } }],
+    ['a promo or referral code applied on this estimate', { promoCode: { canEnter: false, applied: { code: 'NEIGHBOR', credited: false } } }],
+  ])('%s: no line', async (_label, extra) => {
+    const { container } = await renderPage({ ...single(), ...extra });
+    await waitFor(() => expect(screen.getByRole('button', { name: ASK_LINK })).toBeInTheDocument());
+    expect(firstVisitLine(container)).toBeNull();
+  });
+
   it('a bundle whose plan rows price only one of its services: no line (pest + setup is not the whole bill)', async () => {
     const payload = multi();
     const { container } = await renderPage({
