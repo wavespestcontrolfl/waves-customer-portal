@@ -1929,7 +1929,7 @@ jest.setTimeout(120000);
         const bellsOf = (applicationId) => root('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`job-offer-checklist:${applicationId}`]);
         const openBellsOf = (applicationId) => bellsOf(applicationId).whereNull('done_at');
         const checklistOf = async (app) => (await JobOffers.adminPanel(app.id, actor())).firstDays;
-        const mark = (made, key, done = true, now) => JobOffers.setChecklistItem(made.app.id, made.offer.id, key, done, actor(), now);
+        const mark = (made, key, done = true, now) => JobOffers.setChecklistItem(made.app.id, made.offer.id, key, done, actor(), now && (() => now));
         // A signed offer with its staff record: the hire. The default start date is a Monday.
         async function hire() {
           const made = await openOffer();
@@ -2010,6 +2010,18 @@ jest.setTimeout(120000);
           expect(row.checklist.driving_record).toBeUndefined();
           expect(row.checklist.staff_record).toMatchObject({ made: true });
           expect(JobOffers.timelineOf(row).map((entry) => entry.kind)).not.toContain('checklist_done');
+
+          // The time of a mark is read after its locks: a write that waited across midnight settles the day it ran on.
+          const clock = jest.fn(() => new Date('2026-12-03T05:00:01.000Z'));
+          let readsAtLock = null;
+          const listen = (query) => {
+            if (query.sql.includes('order by "signed_at" desc, "id" desc for update')) readsAtLock = clock.mock.calls.length;
+          };
+          database.client.on('query', listen);
+          try { await JobOffers.setChecklistItem(made.app.id, made.offer.id, 'driving_record', true, actor(), clock); } finally { database.client.removeListener('query', listen); }
+          expect(readsAtLock).toBe(0);
+          expect(clock).toHaveBeenCalledTimes(1);
+          expect((await offerRow(made.offer.id)).checklist).toMatchObject({ driving_record: { at: '2026-12-03T05:00:01.000Z' }, first_days_bell: '2026-12-03' });
         });
 
         test('a write is refused for an unknown item, another application\'s offer and an application no longer Hired', async () => {
@@ -2185,6 +2197,26 @@ jest.setTimeout(120000);
           // Hired again: the items are due again.
           await root('job_applications').where({ id: made.app.id }).update({ status: 'hired' });
           expect(await JobOffers.ringDueChecklists(morning(5))).toEqual({ ...NONE, rung: 1 });
+          // Out of Hired at night: the cleanup does not wait for 7:00 AM.
+          await root('job_applications').where({ id: made.app.id }).update({ status: 'rejected' });
+          expect(await JobOffers.ringDueChecklists(morning(6, '01:00'))).toEqual({ ...NONE, closed: 1 });
+          expect(await openBellsOf(made.app.id)).toHaveLength(0);
+        });
+
+        test('an open bell follows a replacement offer: the same words, the newer offer, no second ring', async () => {
+          const made = await hire();
+          expect(await JobOffers.ringDueChecklists(morning(1))).toEqual({ ...NONE, rung: 1 });
+          const [open] = await openBellsOf(made.app.id);
+          expect(open.metadata).toMatchObject({ offerId: made.offer.id });
+          await root('notifications').where({ id: open.id }).update({ read_at: new Date() });
+          const second = await signAgain(made, { hourlyRate: 24 });
+          expect(await JobOffers.ringDueChecklists(morning(2))).toEqual(NONE);
+          const same = await openBellsOf(made.app.id);
+          expect(same).toHaveLength(1);
+          expect(same[0]).toMatchObject({ id: open.id, title: open.title, body: open.body });
+          expect(same[0].metadata).toMatchObject({ offerId: second.id });
+          expect(same[0].read_at).not.toBeNull();
+          expect(await bellsOf(made.app.id)).toHaveLength(1);
         });
 
         test('a second signature keeps the marks: the checklist and its one bell move to the newer offer', async () => {

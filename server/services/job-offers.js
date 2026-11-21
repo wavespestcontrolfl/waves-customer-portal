@@ -1799,8 +1799,10 @@ async function storeFirstDaysMarks(trx, signed, marks, more = {}) {
  * While an item is still due, the next morning's pass raises the bell with what is left (ringDueChecklists). A
  * second mark of a done item, and an undo, leave the bell as it is.
  * Returns { firstDays } as the write left it.
+ * clock: the time source, for tests. It is read after the locks: a write that waited across Eastern midnight marks,
+ * closes and settles on the day it ran.
  */
-async function setChecklistItem(applicationId, offerId, key, done, actor, now = new Date()) {
+async function setChecklistItem(applicationId, offerId, key, done, actor, clock = () => new Date()) {
   if (!FIRST_DAYS_ITEMS.some((item) => item.key === key) || typeof done !== 'boolean') {
     throw new OfferError(400, 'INVALID_CHECKLIST_ITEM', 'This is not a first-days item.');
   }
@@ -1811,6 +1813,7 @@ async function setChecklistItem(applicationId, offerId, key, done, actor, now = 
       throw new OfferError(409, 'CHECKLIST_CLOSED',
         'This checklist is closed: the application is no longer Hired, or a newer offer was signed. Nothing was changed.');
     }
+    const now = clock();
     const marks = { ...held.marks };
     const newlyDone = done && !marks[key];
     if (newlyDone) marks[key] = { at: now.toISOString(), by: actor.id, by_name: await actorName(trx, actor) };
@@ -1875,7 +1878,7 @@ async function ringChecklist(offerId, clock) {
 
 /**
  * The morning bell of the first-days checklist (scheduler.js, the 15-minute job offer tick; GATE_JOB_OFFERS). From
- * 7:00 AM Eastern, once a day for each hire: while an item is due, the owner has ONE open bell that says how many
+ * 7:00 AM Eastern to midnight, once a day for each hire: while an item is due, the owner has ONE open bell that says how many
  * items are open and which is next. An open bell is updated with no ring. A bell that the owner closed, or that a mark
  * closed, is raised again the next morning while an item is still due. A catch-up pass within the day: each run takes
  * every hire the day's pass has not handled, so a dropped tick loses nothing. It also closes the bell of an
@@ -1887,17 +1890,18 @@ async function ringChecklist(offerId, clock) {
 async function ringDueChecklists(clock = () => new Date()) {
   const result = { rung: 0, closed: 0, failed: 0 };
   const now = clock();
-  if (minuteOfDayEt(now) < FIRST_DAYS_BELL_FROM_ET) return result;
+  // Bells wait for 7:00 AM Eastern. The cleanup for an application that left Hired runs in every tick, also at night.
+  const ringing = minuteOfDayEt(now) >= FIRST_DAYS_BELL_FROM_ET;
   const handled = `o.checklist ->> '${FIRST_DAYS_BELL_KEY}'`;
   const allDone = FIRST_DAYS_ITEMS.map((item) => `o.checklist -> '${item.key}' IS NOT NULL`).join(' AND ');
   // A Hired application's newest signed offer with an item not marked on it, once a day. Or an offer the pass handled
   // before whose application is no longer Hired: its bell closes once, in the next tick (also on the day it rang).
   const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
     .where('o.status', 'accepted')
-    .whereRaw(`((a.status = 'hired' AND ${handled} IS DISTINCT FROM ? AND NOT (${allDone}) AND NOT EXISTS (
+    .whereRaw(`((?::boolean AND a.status = 'hired' AND ${handled} IS DISTINCT FROM ? AND NOT (${allDone}) AND NOT EXISTS (
         SELECT 1 FROM job_offers n WHERE n.application_id = o.application_id AND n.status = 'accepted'
           AND (n.signed_at, n.id) > (o.signed_at, o.id)))
-      OR (a.status <> 'hired' AND ${handled} IS NOT NULL AND ${handled} <> 'closed'))`, [etDateString(now)])
+      OR (a.status <> 'hired' AND ${handled} IS NOT NULL AND ${handled} <> 'closed'))`, [ringing, etDateString(now)])
     .orderBy('o.signed_at').pluck('o.id');
   for (const id of due) {
     try {
@@ -2001,7 +2005,9 @@ async function raiseBell(kind, offer, extra, trx = null) {
     bell: true,
     dedupeKey: spec.keyOf ? spec.keyOf(offer) : bellKey(kind, offer.id),
     metadata: { applicationId: offer.application_id, offerId: offer.id },
-    ...(spec.standing || {}),
+    // A standing bell follows the offer it is raised for: a replacement offer with the same words still updates the
+    // open row (its offer id), with no ring.
+    ...(spec.standing ? { ...spec.standing, dedupeVersion: offer.id } : {}),
     ...(trx ? { trx } : {}),
   });
 }
