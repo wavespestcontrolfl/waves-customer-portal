@@ -2,8 +2,10 @@
  * Waves Newsletter polls (owner 2026-11-20: the NL1-NL10 list, "other than
  * that looks good"): the list itself, the every-3rd-issue chooser, where the
  * flagship puts the poll, what a reader and the archive see, and SendGrid's
- * per-reader size cap. The sent-issue query (newsletterIssuePolls) runs
- * against real Postgres in newsletter-polls-postgres.test.js.
+ * per-reader size cap. The Waves Pest Insider's own list (PI1-PI6, approved
+ * the same day) on the same chooser. The sent-issue query
+ * (newsletterIssuePolls) runs against real Postgres in
+ * newsletter-polls-postgres.test.js.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
@@ -32,8 +34,8 @@ jest.mock('../services/newsletter-event-selection', () => ({
 
 const db = require('../models/db');
 const {
-  NEWSLETTER_POLL_IDS, POLL_ISSUE_GAP, QUIZ_TOKEN_PATTERN, getQuiz, chooseNewsletterPoll, pollInIssue,
-  hasQuizToken, buildQuizSubstitutions, neutralizeQuizTokens,
+  NEWSLETTER_POLL_IDS, PEST_INSIDER_POLL_IDS, POLL_ID_MARK, POLL_ISSUE_GAP, QUIZ_TOKEN_PATTERN, getQuiz,
+  chooseNewsletterPoll, pollInIssue, hasQuizToken, buildQuizSubstitutions, neutralizeQuizTokens,
 } = require('../services/newsletter-quiz');
 const {
   assembleBeehiivNewsletter, buildFlagshipTextBody, createNewsletterDraft, GREETING_NAME_TOKEN, CITY_TOKEN, GRASS_TYPE_TOKEN,
@@ -221,5 +223,53 @@ describe('Waves Newsletter polls', () => {
         .reduce((n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(String(v)), 0);
       expect(bytes).toBeLessThan(10000);
     }
+  });
+});
+
+describe('Waves Pest Insider polls', () => {
+  const [PI1, PI2] = PEST_INSIDER_POLL_IDS;
+
+  test('the polls are the PI1-PI6 list the owner approved on 2026-11-20, in his order, on the Waves Newsletter poll rules', () => {
+    expect(PEST_INSIDER_POLL_IDS.map((id) => {
+      const quiz = getQuiz(id);
+      return `${quiz.question} ${quiz.answers.map((a) => a.label).join(' · ')}`;
+    })).toEqual([
+      'Which pest bugs you most this month? Ants · Roaches · Mosquitoes · Spiders',
+      'Lizards on the lanai: friend or foe? Friend · Foe · Depends · What lizards?',
+      'Spider in the house. What happens next? Cup and card · Leave it be · Shoe · Move out',
+      'Biggest Florida bug surprise? Palmetto bugs · Lovebugs · Fire ants · No-see-ums',
+      'Best smell in a Florida yard? Orange blossom · Cut grass · Jasmine · Rain coming',
+      'Who gets the mosquito bites at your house? Me, always · Everyone · Not me · Nobody',
+    ]);
+    for (const id of [...NEWSLETTER_POLL_IDS, ...PEST_INSIDER_POLL_IDS]) {
+      const quiz = getQuiz(id);
+      expect(new RegExp(QUIZ_TOKEN_PATTERN).exec(`{{quiz:${id}}}`)[2]).toBe(id);
+      // The history query's prefilter finds a poll only by this mark.
+      expect(id).toContain(POLL_ID_MARK);
+      expect(quiz.answers.every((a) => a.tags.length === 0 && /^[a-z0-9-]+$/.test(a.key))).toBe(true);
+      expect(quiz.landingCtaSuppressed).toBe(true);
+      expect(quiz.emailCta).toBe('Tap one, then confirm. Just for fun.');
+    }
+    // Each thank-you page names its own newsletter.
+    expect(getQuiz(PI1).landingLine).toBe('Your vote is in. See you in the next Waves Pest Insider.');
+    expect(getQuiz(P1).landingLine).toBe('Your vote is in. See you in the next Waves Newsletter.');
+  });
+
+  test('over 20 issues: a poll in every 3rd issue, each Pest Insider poll once in the owner\'s order, then none', () => {
+    const sent = [];
+    for (let issue = 0; issue < 20; issue += 1) {
+      const recent = sent.slice(-POLL_ISSUE_GAP).reverse();
+      sent.push(chooseNewsletterPoll({ recent, used: sent.filter(Boolean), ids: PEST_INSIDER_POLL_IDS }));
+    }
+    expect(sent.flatMap((poll, issue) => (poll ? [issue] : []))).toEqual([0, 3, 6, 9, 12, 15]);
+    expect(sent.filter(Boolean)).toEqual([...PEST_INSIDER_POLL_IDS]);
+  });
+
+  test("each newsletter reads only its own list: a Pest Insider issue's poll is never a Waves Newsletter poll, or the other way round", () => {
+    const issue = { html_body: `{{quiz:${P1}}} {{quiz:${PI2}}}`, text_body: '' };
+    expect(pollInIssue(issue, PEST_INSIDER_POLL_IDS)).toBe(PI2);
+    expect(pollInIssue(issue)).toBe(P1);
+    expect(pollInIssue({ html_body: `{{quiz:${PI1}}}`, text_body: '' })).toBeNull();
+    expect(chooseNewsletterPoll({ recent: [], used: [P1, P2], ids: PEST_INSIDER_POLL_IDS })).toBe(PI1);
   });
 });

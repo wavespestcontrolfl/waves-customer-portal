@@ -11,6 +11,7 @@ const { factById } = require('../services/pest-insider/facts');
 const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 const { bodyIsDarkAware } = require('../services/email-template');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
+const { PEST_INSIDER_POLL_IDS, NEWSLETTER_POLL_IDS, neutralizeQuizTokens } = require('../services/newsletter-quiz');
 
 // A reviewed post URL (posts.js): the only kind of blog link the body carries.
 const [POST] = [...POST_URLS];
@@ -310,10 +311,38 @@ describe('renderIssue', () => {
       home: { lastVisit: { date: '2026-11-04', areas: ['lanai'] } },
       greeting: 'Hey Mary',
       sources: ['Side gate #1234'],
+      poll: PEST_INSIDER_POLL_IDS[0],
+      pollQuizId: '{{unsubscribe_url}}',
     });
     const plain = renderIssue(BASE);
     expect(withCallerInput.html_body).toBe(plain.html_body);
     expect(withCallerInput.text_body).toBe(plain.text_body);
+  });
+
+  test('a Waves Pest Insider poll goes after "What\'s this?", once in each part, and a reader\'s tool block after it', () => {
+    const poll = PEST_INSIDER_POLL_IDS[1];
+    const r = renderIssue({ ...BASE, pollQuizId: poll });
+    const html = r.html_body;
+    expect(html.split(`{{quiz:${poll}}}`)).toHaveLength(2);
+    expect(html.indexOf(`{{quiz:${poll}}}`)).toBeGreaterThan(html.indexOf('Aedes Mosquito'));
+    expect(html.indexOf(`{{quiz:${poll}}}`)).toBeLessThan(html.indexOf('Catch you next time.'));
+    expect(html).toContain('<strong><em>Quick poll</em></strong>');
+    // The band stands alone: no small label over it, as in the Waves Newsletter.
+    expect(html).toContain('<div class="dm-text">\n<h2 class="dm-chip"');
+    expect(renderIssue(BASE).html_body).not.toContain('<div class="dm-text">\n<h2 class="dm-chip"');
+    expect(r.text_body).toContain(`\n\nQUICK POLL\n{{quiz-text:${poll}}}\n\n${SIGNOFF_TEXT}`);
+    // The tool is added per reader before the sign-off, so after the poll.
+    const withTool = withToolBlock(r, toolById('acurite-glass-rain-gauge'));
+    expect(withTool.html_body.indexOf('A tool we&#39;d use')).toBeGreaterThan(withTool.html_body.indexOf(`{{quiz:${poll}}}`));
+    // The archive and the FYI copy show the question and answers with no vote link.
+    const archive = neutralizeQuizTokens(html);
+    expect(archive).toContain('Lizards on the lanai: friend or foe?');
+    expect(archive).toContain('What lizards?');
+    expect(archive).not.toMatch(/\/api\/public\/newsletter\/quiz|\{\{quiz/);
+    // Any other id adds nothing: the same body as no poll.
+    for (const other of [NEWSLETTER_POLL_IDS[0], 'pest-pressure-v1', 'pi-poll-unknown-v1', null, 7]) {
+      expect(renderIssue({ ...BASE, pollQuizId: other })).toEqual(renderIssue(BASE));
+    }
   });
 
   test('all text is escaped', () => {

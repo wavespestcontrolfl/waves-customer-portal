@@ -5013,8 +5013,9 @@ per-recipient uuid `engagement_token` (newsletter_send_deliveries) — GET
 renders a confirm page only and the delivery-row write happens on a
 deliberate POST form submission (scanner-safe, mirrors confirm), answer/
 reaction keys validated against the server-side config allowlists
-(newsletter-quiz.js / newsletter-feedback.js); a Waves Newsletter poll
-answer (an `nl-poll-*` quiz id) is written only when the token's own send
+(newsletter-quiz.js / newsletter-feedback.js); a poll answer (a Waves
+Newsletter `nl-poll-*` or Waves Pest Insider `pi-poll-*` quiz id) is
+written only when the token's own send
 carried that poll (a `{{quiz:<id>}}` or `{{quiz-text:<id>}}` token in either
 body part: the tokens the sender renders as vote links), and a send that
 carried a poll takes answers only to the quizzes it carried, read the same
