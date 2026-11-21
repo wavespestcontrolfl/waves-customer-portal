@@ -115,7 +115,7 @@ postgres('plan start offer price (live Postgres)', () => {
     return row;
   }
   // The visit the offer follows: the customer's completed one-time job. Bare, it carries no address stamp and no
-  // link, so the single-premises proof of the account decides (its strict form).
+  // link. The strict single-premises proof of the account reads every job the test seeds.
   async function seedJob(customer, change = {}) {
     const [job] = await trx('scheduled_services').insert({
       customer_id: customer.id, scheduled_date: day(-5), service_type: 'One-Time Pest Control', status: 'completed',
@@ -204,6 +204,20 @@ postgres('plan start offer price (live Postgres)', () => {
       });
       expect(await price(worker, customer, elsewhere)).toEqual(refused('premises'));
       // The second address also makes the account a two-premises one: the first job is no longer priced.
+      expect(await price(worker, customer, atHome)).toEqual(refused('premises'));
+    });
+
+    // The other visit's link names an estimate with no address: it could be at a second home. The account
+    // proof of the cards skips such a row. The start offer runs the strict form, on every job.
+    test('a job stamped at the home is refused when another visit of the account has a link that cannot be resolved', async () => {
+      const worker = freshWorker();
+      const customer = await seedCustomer();
+      const atHome = await seedJob(customer, {
+        service_address_line1: customer.address_line1, service_address_city: customer.city, service_address_zip: customer.zip,
+      });
+      expect(await price(worker, customer, atHome)).toMatchObject(PRICED);
+      const [estimate] = await trx('estimates').insert({ customer_id: customer.id, token: `test-${hex(16)}`, status: 'draft', address: null }).returning('id');
+      await seedJob(customer, { scheduled_date: day(-40), source_estimate_id: estimate.id });
       expect(await price(worker, customer, atHome)).toEqual(refused('premises'));
     });
   });

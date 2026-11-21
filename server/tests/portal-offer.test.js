@@ -462,65 +462,69 @@ describe('buildStartOffer', () => {
 
   // The offer follows one visit and prices the primary home. The account-level proof skips a visit whose link
   // cannot be resolved, so without this proof such a job could earn a price for a home it was not at.
-  describe('the visit the offer follows must be at the home the price is for', () => {
-    const scopeModule = require('../services/service-report/visit-property-scope');
-    const linkage = require('../services/estimate-property-linkage');
-    // The fixture customer's home, stamped on the visit as dispatch stamps it.
+  // The price is for the primary home. The start offer runs the account's single-premises proof in its strict
+  // form, and that proof reads every visit of the account: the visit the offer follows, and every other one.
+  describe('every visit of the account must be at the home the price is for', () => {
+    // The fixture customer's home, stamped on the visit as dispatch stamps it, and as an estimate names it.
     const AT_HOME = { service_address_line1: '123 Gulf Dr', service_address_city: 'Sarasota', service_address_zip: '34236' };
-    const follow = (visits) => start(noPlanDb({ visits }));
-    // The resolver's answer for a visit that carries a link (the fake database has no promise chain to resolve one).
-    const withScope = async (answer, body) => {
-      const spy = jest.spyOn(scopeModule, 'resolveVisitPropertyScope').mockImplementationOnce(answer);
-      try { return await body(); } finally { spy.mockRestore(); }
-    };
+    const ELSEWHERE = { service_address_line1: '9 Other St', service_address_city: 'Venice', service_address_zip: '34285' };
+    const LINKED = { source_estimate_id: 'est-1' };
+    const estimateAt = (address) => ({ estimates: [{ id: 'est-1', address }] });
+    const follow = (visits, tables) => start(noPlanDb({ visits, tables }));
 
     test.each([
-      ['a visit stamped at the primary home', AT_HOME],
-      ['a visit with no stamp and no link (the single-premises proof stands)', {}],
-    ])('%s is priced', async (_label, visit) => {
-      expect(await follow([{ ...VISIT, ...visit }])).toMatchObject(PRICED);
+      ['a visit stamped at the primary home', AT_HOME, undefined],
+      ['a visit with no stamp and no link', {}, undefined],
+      ['a visit whose estimate names the primary home', LINKED, estimateAt('123 Gulf Dr, Sarasota, FL 34236')],
+    ])('%s is priced', async (_label, visit, tables) => {
+      expect(await follow([{ ...VISIT, ...visit }], tables)).toMatchObject(PRICED);
     });
 
-    test('a visit stamped at another home is refused', async () => {
-      const elsewhere = { service_address_line1: '9 Other St', service_address_city: 'Venice', service_address_zip: '34285' };
-      expect(await follow([{ ...VISIT, ...elsewhere }])).toEqual(refused('premises'));
+    test.each([
+      ['a visit stamped at another home', ELSEWHERE, undefined],
+      ['a visit whose estimate names another home', LINKED, estimateAt('9 Other St, Venice, FL 34285')],
+      ['a visit whose estimate has no address (a link that cannot be resolved)', LINKED, estimateAt(null)],
+      ['a visit whose estimate is not on file (a link that cannot be resolved)', LINKED, undefined],
+    ])('%s is refused, never priced at the primary home', async (_label, visit, tables) => {
+      expect(await follow([{ ...VISIT, ...visit }], tables)).toEqual(refused('premises'));
       expect(accountBlocker).not.toHaveBeenCalled();
     });
 
-    // The account-level proof skips another visit whose link cannot be resolved. For a job that carries no
-    // proof of its own, that visit could be at a second home: the strict form of the proof decides.
-    test('a visit with no stamp and no link is refused when another visit of the account has a link that cannot be resolved', async () => {
-      const db = noPlanDb({ visits: [VISIT, { id: 'visit-2', source_estimate_id: 'est-gone' }] });
-      const strict = jest.spyOn(scopeModule, 'customerHasOnlyPrimaryPremises');
-      try {
-        expect(await start(db)).toEqual(refused('premises'));
-        expect(strict).toHaveBeenCalledWith(db, 'cust-1', expect.objectContaining({ id: 'cust-1' }), expect.anything(), { unresolvedFails: true });
-      } finally {
-        strict.mockRestore();
-      }
+    // Another visit of the account whose link cannot be resolved could be at a second home. So the account is
+    // refused: also when the visit the offer follows is stamped at the primary home.
+    const UNRESOLVED_LINK = { id: 'visit-2', source_estimate_id: 'est-gone' };
+    test.each([
+      ['a visit with no stamp and no link', {}],
+      ['a visit stamped at the primary home', AT_HOME],
+    ])('%s is refused when another visit of the account has a link that cannot be resolved', async (_label, visit) => {
+      expect(await follow([{ ...VISIT, ...visit }, UNRESOLVED_LINK])).toEqual(refused('premises'));
+      expect(accountBlocker).not.toHaveBeenCalled();
+    });
+
+    // The cards keep the default form of that proof, as before: a person looks at a card.
+    test('the same visit does not take the portal card away', async () => {
+      const services = ['Quarterly Pest Control', 'Lawn Care Program'];
+      const member = dbFor({ serviceTypes: services, tables: { scheduled_services: [...recurringRows(services), UNRESOLVED_LINK] } });
+      const card = await buildPortalOffer('cust-1', member, { propertyLookup: missLookup });
+      expect(card).not.toBeNull();
+      expect(card.serviceKey).toBe((await buildPortalOffer('cust-1', dbFor({ serviceTypes: services }), { propertyLookup: missLookup })).serviceKey);
+    });
+
+    test('a failed read of a link throws: an outage is never read as "another home"', async () => {
+      const db = noPlanDb({ visits: [{ ...VISIT, ...LINKED }] });
+      const failing = (table) => { if (table === 'estimates') throw new Error('estimates down'); return db(table); };
+      failing.schema = db.schema;
+      await expect(start(failing)).rejects.toThrow('estimates down');
     });
 
     test("a visit that is not this customer's is refused", async () => {
       expect(await follow([])).toEqual(refused('premises'));
     });
 
-    // Without the visit nothing proves which home the offer is about. So the visit is required, and its
-    // absence is never a price.
+    // Without the visit nothing says which job the offer follows. So the visit is required, and its absence
+    // is never a price.
     test.each([[undefined], [null], ['']])('a call with no visit (%p) is a programming error, never a price', async (visitId) => {
       await expect(start(noPlanDb(), { visitId })).rejects.toThrow('the visit the offer follows');
-    });
-
-    test.each([
-      ['a link that cannot be resolved (an estimate with no address)', { key: null, hasEvidence: true }],
-      ['a link that resolves to another home', { key: linkage.normalizedStampedStreet('9 Other St', null, 'Venice', '34285'), hasEvidence: true }],
-    ])('%s is refused, never priced at the primary home', async (_label, scope) => {
-      const answer = await withScope(async () => scope, () => follow([{ ...VISIT, source_estimate_id: 'est-1' }]));
-      expect(answer).toEqual(refused('premises'));
-    });
-
-    test('a failed read of the link throws: an outage is never read as "another home"', async () => {
-      const failing = async (_row, _db, { onLookupFailure }) => { onLookupFailure(); return { key: null, hasEvidence: true }; };
-      await expect(withScope(failing, () => follow([{ ...VISIT, source_estimate_id: 'est-1' }]))).rejects.toMatchObject({ code: 'PREMISES_LOOKUP_FAILED' });
     });
   });
 

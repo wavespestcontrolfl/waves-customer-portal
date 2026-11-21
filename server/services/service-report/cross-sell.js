@@ -1272,7 +1272,10 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
 // customer row = property). Returns { customer, primaryStreet } once the
 // customer is live, residential, and provably single-premises, or null on
 // any failure.
-async function resolvePortalOfferPremises(database, customerId) {
+// unresolvedFails (buildStartOffer alone asks for it): the strict form of the
+// single-premises proof. A visit whose link cannot be resolved might be at a
+// second home, and it then fails the proof. The cards keep the default form.
+async function resolvePortalOfferPremises(database, customerId, { unresolvedFails = false } = {}) {
   const customer = await database('customers').where({ id: customerId }).first();
   if (!customer || customer.active === false || customer.deleted_at) return null;
 
@@ -1288,7 +1291,7 @@ async function resolvePortalOfferPremises(database, customerId) {
   );
   if (!primaryStreet) return null;
   if (linkage.scopeKeyLacksLocality(primaryStreet)) return null;
-  if (!(await customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet))) {
+  if (!(await customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet, { unresolvedFails }))) {
     return null;
   }
 
@@ -1566,32 +1569,20 @@ async function buildPortalPurchaseBasis(customerId, database, opts = {}) {
   }
 }
 
-// The start offer follows ONE visit and prices the primary home, so that
-// visit must be at the primary home. Same proof as the report card
-// (resolveVisitPropertyScope): a stamp or a link that resolves must name the
-// primary premises. One that cannot be resolved is NOT proof, and the
-// account-level proof skips such a row, so it fails closed here. A visit with
-// no stamp and no link proves nothing either way, so the ACCOUNT must be
-// proven single-premises, in the strict form of that proof (unresolvedFails):
-// resolvePortalOfferPremises ran its default form, which skips another visit
-// whose link cannot be resolved, and that visit could be at a second home.
-// A failed read throws, by buildStartOffer's contract.
-async function visitIsAtPrimaryPremises(database, customer, visitId, primaryStreet) {
-  const visit = await database('scheduled_services').where({ id: visitId, customer_id: customer.id })
-    .first('service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
-      'property_id', 'source_estimate_id');
-  if (!visit) return false;
-  const scopeProofs = require('./visit-property-scope');
-  let lookupFailed = false;
-  const scope = await scopeProofs.resolveVisitPropertyScope(visit, database, { onLookupFailure: () => { lookupFailed = true; } });
-  if (lookupFailed) throw Object.assign(new Error('visit premises read failed'), { code: 'PREMISES_LOOKUP_FAILED' });
-  if (scope.hasEvidence) return scopeProofs.sameResolvedProperty(scope.key, primaryStreet);
-  return scopeProofs.customerHasOnlyPrimaryPremises(database, customer.id, customer, primaryStreet, { unresolvedFails: true });
+// The start offer follows ONE visit, and that visit must be this customer's.
+// Where the visit was needs no second proof: the caller has proven the
+// ACCOUNT single-premises in the strict form (resolvePortalOfferPremises,
+// unresolvedFails), and that proof reads every visit of the account. A stamp
+// or a link that names another home fails it, and so does a link that cannot
+// be resolved. A failed read throws, by buildStartOffer's contract.
+async function visitIsOfCustomer(database, customerId, visitId) {
+  const visit = await database('scheduled_services').where({ id: visitId, customer_id: customerId }).first('id');
+  return Boolean(visit);
 }
 
 // The plan a start offer may price: the pricer's strict option prices pest
-// control only (it reads no turf profile, and the standard pest price is the
-// one whose settings rows it proves).
+// control only (the standard pest price is the one whose settings rows it
+// proves).
 const START_OFFER_FAMILIES = Object.freeze(['pest_control']);
 // The pricer's refusal of the account (PLAN_START_BLOCKED, the shared proof
 // in plan-start-eligibility.js), as the reason this function answers.
@@ -1609,15 +1600,18 @@ const START_OFFER_REASON_OF_BLOCKER = Object.freeze({ has_plan: 'has_plan', comm
 // as every other offer surface.
 // `option` is the full quoted option for a priced answer, else null with the
 // `reason` the app could not offer or price it:
-//   'premises'   not a live, residential, single-premises account, or the
-//                visit is not provably at the primary home;
+//   'premises'   not a live, residential account that is proven
+//                single-premises in the strict form (any visit at another
+//                home, or with a link that cannot be resolved, fails it), or
+//                the visit is not this customer's;
 //   'has_plan'   the customer already holds a plan;
 //   'not_priced' the home has no standard price the app may show alone.
-// `visitId` is the visit the offer follows, and it is REQUIRED: the price is
-// for the primary home, so that visit must be at the primary home
-// (visitIsAtPrimaryPremises). WHICH visit earns an offer (a completed
-// one-time pest job, its age, no later visit) is the sender's rule, not this
-// function's: it prices for any visit of the customer at that home.
+// `visitId` is the visit the offer follows, and it is REQUIRED: it must be a
+// visit of this customer (visitIsOfCustomer). The price is for the primary
+// home, and the strict account proof shows that every visit of the account
+// is there. WHICH visit earns an offer (a completed one-time pest job, its
+// age, no later visit) is the sender's rule, not this function's: it prices
+// for any visit of the customer.
 // A priced answer is always the family's STANDARD plan (PREFERRED_OPTION_IDS):
 // the offer names one plan, so pickOption's fallbacks (another cadence, the
 // first option) are 'not_priced' here, never a price under the wrong name.
@@ -1626,17 +1620,19 @@ const START_OFFER_REASON_OF_BLOCKER = Object.freeze({ has_plan: 'has_plan', comm
 // lookup (the default is the strict cache-only form, so a failed cache read
 // is not a miss and a failed correction read is not "no corrections"), the
 // staff-correction probe, the proof's reads and the price settings
-// (PRICING_CONFIG_UNAVAILABLE).
+// (PRICING_CONFIG_UNAVAILABLE). One read does not throw: the pricer's read
+// of the turf profile. The pest price uses no value of it, so a failed read
+// of it cannot change the answer.
 // `database` must not be a transaction: the pricer's strict option refuses
 // one (it loads the price settings on the app's own connection).
 async function buildStartOffer(customerId, database, targetKey, { propertyLookup = strictCacheOnlyPropertyLookup, visitId = null } = {}) {
   if (!customerId || !database || !visitId || !START_OFFER_FAMILIES.includes(targetKey)) {
     throw new Error('buildStartOffer: a customer, a database, a start offer family and the visit the offer follows are required');
   }
-  const premises = await resolvePortalOfferPremises(database, customerId);
+  const premises = await resolvePortalOfferPremises(database, customerId, { unresolvedFails: true });
   if (!premises) return { option: null, reason: 'premises' };
   const { customer, primaryStreet } = premises;
-  if (!(await visitIsAtPrimaryPremises(database, customer, visitId, primaryStreet))) return { option: null, reason: 'premises' };
+  if (!(await visitIsOfCustomer(database, customerId, visitId))) return { option: null, reason: 'premises' };
   let pricing;
   try {
     pricing = await resolvePortalOfferPricingResult({
