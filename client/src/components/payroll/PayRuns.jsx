@@ -533,6 +533,8 @@ export function RunDetail({ call, run, unverified, onChanged, onMessage, onRunsC
 
   async function act(action, path, body, done) {
     setBusy(true); setError('');
+    // A finalize or a void settles the run: it changes the time-off banks, the pay lines and the tax forms.
+    const settles = action === 'finalize' || action === 'void';
     try {
       const data = await call(path, { method: 'POST', ...(body ? { body } : {}) });
       setConfirmToken(null); setVoiding(false);
@@ -540,12 +542,12 @@ export function RunDetail({ call, run, unverified, onChanged, onMessage, onRunsC
       await onChanged(data.run.id);
     } catch (failure) {
       setError(failure.message);
-      // A changed draft was already saved by the server: show it.
-      if (action === 'finalize') { setConfirmToken(null); await onChanged(run.id); }
+      // The server can have committed before the error reached the page: a changed draft it saved in place
+      // of a finalize, or a void whose answer was lost. Read the run again and show what the server holds.
+      if (settles) { setConfirmToken(null); setVoiding(false); await onChanged(run.id); }
     }
-    // A finalized or voided run changes the tax form figures on this page. Refetch them after a
-    // failure too: the server may have committed before the error reached the page.
-    if ((action === 'finalize' || action === 'void') && onRunsChanged) onRunsChanged();
+    // The tax form figures on this page are read again for the same reason, after a failure too.
+    if (settles && onRunsChanged) onRunsChanged();
     setBusy(false);
   }
 
@@ -704,7 +706,9 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
   // (settledElsewhere) and that run is read again, so a draft shows as out of date. The list reloads either way.
   const [settledElsewhere, setSettledElsewhere] = useState(0);
   const changed = useCallback((id) => {
-    if (wanted.current === id) return open(id);
+    // The answer is a change too. When the read below is dropped for a run that then does not come, the
+    // run on screen is behind by this count, and the failed open reads it.
+    if (wanted.current === id) { changes.current += 1; return open(id); }
     setSettledElsewhere(count => count + 1);
     return refresh() || loadList();
   }, [open, loadList, refresh]);

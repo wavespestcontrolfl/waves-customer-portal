@@ -303,6 +303,33 @@ describe('The banks on the time off panel stay current', () => {
     await waitFor(() => expect(balanceCalls()).toBe(drafted + 2));
   });
 
+  it('shows a void the server saved when its answer was lost, and reloads the banks', async () => {
+    let status = 'finalized';
+    const original = adminFetch.getMockImplementation();
+    const runNow = () => ({ ...RUN, status, checks: [check({ status })], ...(status === 'voided' ? { voidReason: 'Redo' } : {}) });
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', weekEnd: '2026-10-18', payDate: '2026-10-23', status, totals }] });
+      if (path === '/admin/payroll/runs/run-1') { calls.push({ path, method }); return reply({ run: runNow() }); }
+      // The server voids the run. The answer does not reach the page.
+      if (path === '/admin/payroll/runs/run-1/void' && method === 'POST') { status = 'voided'; return reply({ error: 'The connection dropped.' }, false, 502); }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Void' }));
+    await waitFor(() => expect(balanceCalls()).toBeGreaterThan(0));
+    const before = balanceCalls();
+    fireEvent.change(screen.getByLabelText(/Why are you voiding this pay run/), { target: { value: 'Redo' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Void pay run' }));
+    // The run is read again: it shows as voided, with the failure still on screen, and the banks reload.
+    expect(await screen.findByText('Voided: Redo')).toBeInTheDocument();
+    expect(screen.getByText('The connection dropped.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Void pay run' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Void' })).toBeNull();
+    await waitFor(() => expect(balanceCalls()).toBe(before + 1));
+  });
+
   it('finalizes a run that has no paycheck when it lists time off not paid, and says what that does', async () => {
     let status = 'draft';
     const notPaid = [{ technicianId: 'tech-a', name: 'Sample Alpha', hours: '10.00', reason: '10.00 hours of time off are not paid, because the time-off bank does not hold them.' }];
@@ -762,6 +789,38 @@ describe('The open pay run stays the one the owner picked', () => {
     await land('second');
     expect(firstReads()).toBe(before + 2);
     expect(screen.getByLabelText(FIRST)).toBeInTheDocument();
+  });
+
+  it('shows the finalized run when its read after the finalize was dropped for a run that did not come', async () => {
+    let status = 'draft';
+    let heldRead = null;
+    const original = adminFetch.getMockImplementation();
+    const runNow = () => ({ ...DRAFT, status, checks: [check({ status })] });
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs' && method === 'GET') return reply({ runs: LIST });
+      if (path === '/admin/payroll/runs/run-1/finalize' && method === 'POST') { status = 'finalized'; heldRead = 'next'; return reply({ run: runNow() }); }
+      if (path === '/admin/payroll/runs/run-1') {
+        if (heldRead !== 'next') return reply({ run: runNow() });
+        // The read right after the finalize is slow.
+        return new Promise(resolve => { heldRead = () => resolve(reply({ run: runNow() })); });
+      }
+      if (path === '/admin/payroll/runs/run-2') return reply({ error: 'Pay run not found.' }, false, 404);
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finalize' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, finalize' }));
+    await waitFor(() => expect(heldRead).toBeTypeOf('function'));
+    // The owner asks for the other run before that read answers, and the other run does not come.
+    fireEvent.click(screen.getByRole('button', { name: 'Open pay run for Oct 5, 2026 to Oct 11, 2026' }));
+    // The draft on screen is from before the finalize: it is read again and shows as finalized.
+    expect(await screen.findByRole('button', { name: 'Void' })).toBeInTheDocument();
+    await act(async () => { heldRead(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    expect(screen.getByLabelText(FIRST)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Finalize' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Recompute' })).toBeNull();
   });
 
   it('says so and keeps Finalize off when the draft cannot be read again after a change, until a read of it succeeds', async () => {
