@@ -785,6 +785,7 @@ describe('buildReportCrossSell', () => {
       const { lineNeedsReviewBeforeExactPrice } = require('../services/estimator-engine/draft-builder');
       const { engineResultNeedsReview } = require('../services/cancellation-resolution/restart');
       const check = (data) => estimateRequiresFieldVerification(data, { replaysLawnSize: false });
+      const server = (data) => estimateRequiresFieldVerification(data, { replaysLawnSize: false, pricingAuthority: 'SERVER' });
       const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
       // A vision turf figure the lookup clamped to the parcel: it keeps its
       // MEDIUM grade and its basis, and carries the clamp as a flag.
@@ -834,16 +835,20 @@ describe('buildReportCrossSell', () => {
           expect([name, check(stored)]).toEqual([name, true]);
           expect([name, check(published)]).toEqual([name, engineResultNeedsReview(full)]);
           // The same slim result behind the engine's full result under
-          // `result` (the wizard's quote-required shape; a server reprice
-          // that left the slim one behind): the full result is current and
-          // keeps the list, so the read is exact again (pre-push r8).
-          expect([name, check(quote(services, turf).withResult)]).toEqual([name, engineResultNeedsReview(full)]);
+          // `result` (the wizard's quote-required shape). After a server
+          // reprice the full result is the authority and the slim one is not
+          // read, so the read is exact again (pre-push r8). With any other
+          // authority both are read, and the slim one counts.
+          const { withResult } = quote(services, turf);
+          expect([name, server(withResult)]).toEqual([name, engineResultNeedsReview(full)]);
+          expect([name, check(withResult)]).toEqual([name, true]);
           // A staff save: the mapped result and its raw twin. The mapped
-          // result alone reads as the raw one does, so the twin behind it
-          // holds nothing the check needs (pre-push r9).
+          // result alone reads as the raw one does, so the twin holds
+          // nothing the check needs, read or not (pre-push r9).
           const mapped = mapV1ToLegacyShape(full);
+          const twins = { engineInputs: stored.engineInput, result: mapped, engineResult: full };
           expect([name, check({ engineInputs: stored.engineInput, result: mapped })]).toEqual([name, engineResultNeedsReview(full)]);
-          expect([name, check({ engineInputs: stored.engineInput, result: mapped, engineResult: full })]).toEqual([name, engineResultNeedsReview(full)]);
+          expect([name, check(twins), server(twins)]).toEqual([name, engineResultNeedsReview(full), engineResultNeedsReview(full)]);
           graded[name] = engineResultNeedsReview(full);
         }
       }
@@ -884,37 +889,41 @@ describe('buildReportCrossSell', () => {
       expect(check({ result: { fieldVerify: [], lineItems: [{ service: 'lawn_care', turfFlags: ['FIELD_VERIFY_TURF_SQFT'] }] } })).toBe(true);
       expect(check({ result: { fieldVerify: [], lineItems: [{ service: 'lawn_care', turfFlags: [] }] } })).toBe(false);
 
-      // Which result is the estimate's price is storedEstimateContainer's
-      // rule. When it picks a `result` that keeps the engine's list, the
-      // `engineResult` behind it is not read (pre-push r8, r9).
+      // Which result is the estimate's price (pre-push r8 to r10). After a
+      // server reprice `result` is the authority, and when it keeps the
+      // engine's list the `engineResult` behind it is not read. With any
+      // other authority both are read.
       const pricedSlim = { summary: {}, lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 45, annual: 540 }] };
       const pricedFull = { fieldVerify: [], lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 45, annual: 540 }] };
-      const { storedEstimateContainer } = require('../services/estimate-result-container');
       const behind = (result, other = pricedSlim, extra = {}) => ({ inputs, result, engineResult: other, ...extra });
-      expect(storedEstimateContainer(behind(pricedFull))).toBe(pricedFull);
-      // A slim result behind it is not a marker; a `result` with no list
-      // cannot stand in for it.
-      expect(check(behind(pricedFull))).toBe(false);
-      expect(check(behind({ lineItems: pricedFull.lineItems }))).toBe(true);
-      expect(check(behind({ fieldVerify: 'none', lineItems: pricedFull.lineItems }))).toBe(true);
-      // Nothing behind it is read: a marked row, a verify list, turf flags,
-      // with a replayed lawn size too.
-      const stale = [
+      // Nothing behind a server reprice is read: a slim result, a marked
+      // row, a verify list, turf flags, with a replayed lawn size too. Each
+      // counts when it is the only result, and with any other authority.
+      const leftBehind = [
+        pricedSlim,
         { summary: {}, lineItems: [{ ...pricedSlim.lineItems[0], pricingConfidence: 'LOW' }] },
         { fieldVerify: ['TURF_CAPPED_TO_PARCEL'], lineItems: pricedFull.lineItems },
         { fieldVerify: [], lineItems: [{ service: 'tree_shrub', treeCountSource: 'default_zero' }] },
         { ...pricedSlim, property: { turfFlags: ['FIELD_VERIFY_TURF_SQFT'] } },
       ];
-      for (const [at, other] of stale.entries()) {
+      for (const [at, other] of leftBehind.entries()) {
         expect([at, check({ inputs, engineResult: other })]).toEqual([at, true]);
-        expect([at, check(behind(pricedFull, other))]).toEqual([at, false]);
-        expect([at, estimateRequiresFieldVerification(behind(pricedFull, other), { replaysLawnSize: true })]).toEqual([at, false]);
+        expect([at, server(behind(pricedFull, other))]).toEqual([at, false]);
+        expect([at, estimateRequiresFieldVerification(behind(pricedFull, other), { replaysLawnSize: true, pricingAuthority: 'SERVER' })]).toEqual([at, false]);
+        // The authority frozen in the blob at the price lock is one too.
+        expect([at, estimateRequiresFieldVerification(behind(pricedFull, other, { pricingAuthorityAtLock: 'SERVER' }), { replaysLawnSize: false, pricingAuthority: 'LOCKED' })]).toEqual([at, false]);
+        for (const authority of [null, undefined, 'LOCKED', 'CLIENT_FALLBACK']) {
+          expect([at, authority, estimateRequiresFieldVerification(behind(pricedFull, other), { replaysLawnSize: false, pricingAuthority: authority })]).toEqual([at, authority, true]);
+        }
       }
-      // A marker in the current result counts, whatever sits behind it.
-      for (const other of [pricedSlim, pricedFull, ...stale]) {
-        expect(check(behind({ fieldVerify: ['TURF_CAPPED_TO_PARCEL'], lineItems: pricedFull.lineItems }, other))).toBe(true);
-        expect(check(behind({ fieldVerify: [], lineItems: [{ ...pricedFull.lineItems[0], requiresManualReview: true }] }, other))).toBe(true);
+      // A marker in the authority counts, whatever sits behind it; and a
+      // `result` with no list hides nothing.
+      for (const other of [pricedFull, ...leftBehind]) {
+        expect(server(behind({ fieldVerify: ['TURF_CAPPED_TO_PARCEL'], lineItems: pricedFull.lineItems }, other))).toBe(true);
+        expect(server(behind({ fieldVerify: [], lineItems: [{ ...pricedFull.lineItems[0], requiresManualReview: true }] }, other))).toBe(true);
       }
+      expect(server(behind({ lineItems: pricedFull.lineItems }))).toBe(true);
+      expect(server(behind({ fieldVerify: 'none', lineItems: pricedFull.lineItems }))).toBe(true);
       // The r9 audit's case, with the real engine and mapper: a Tree & Shrub
       // quote priced on a default of zero trees, then repriced by staff with
       // a counted figure. The earlier raw result is left behind.
@@ -922,30 +931,20 @@ describe('buildReportCrossSell', () => {
       const guessedTrees = generateEstimate(treeRequest({}));
       const countedTrees = generateEstimate(treeRequest({ treeCount: 4 }));
       expect([engineResultNeedsReview(guessedTrees), engineResultNeedsReview(countedTrees)]).toEqual([true, false]);
-      const corrected = { engineInputs: treeRequest({ treeCount: 4 }), result: mapV1ToLegacyShape(countedTrees), engineResult: guessedTrees };
-      expect(storedEstimateContainer(corrected, { pricingAuthority: 'SERVER' })).toBe(corrected.result);
-      expect(estimateRequiresFieldVerification(corrected, { replaysLawnSize: false, pricingAuthority: 'SERVER' })).toBe(false);
-      // The other way round: the current result is the guessed one.
-      const regressed = { engineInputs: treeRequest({}), result: mapV1ToLegacyShape(guessedTrees), engineResult: countedTrees };
-      expect(estimateRequiresFieldVerification(regressed, { replaysLawnSize: false, pricingAuthority: 'SERVER' })).toBe(true);
-      // A `result` that prices nothing beside a priced `engineResult` is not
-      // current: both are read, so the slim one counts and so does a marker
-      // in that `result`. After a server reprice (the row's authority, or the
-      // one frozen in the blob at the price lock) the `result` is current
-      // even when it prices nothing.
-      const pricesNothing = { fieldVerify: [], lineItems: [] };
-      expect(storedEstimateContainer(behind(pricesNothing))).toBe(pricedSlim);
-      expect(check(behind(pricesNothing))).toBe(true);
-      expect(check(behind(pricesNothing, pricedFull))).toBe(false);
-      expect(check(behind({ ...pricesNothing, quoteRequiredItems: [{ service: 'bed_bug', quoteRequired: true }] }, pricedFull))).toBe(true);
-      expect(estimateRequiresFieldVerification(behind(pricesNothing), { replaysLawnSize: false, pricingAuthority: 'SERVER' })).toBe(false);
-      expect(estimateRequiresFieldVerification(behind(pricesNothing), { replaysLawnSize: false, pricingAuthority: 'LOCKED' })).toBe(true);
-      expect(check(behind(pricesNothing, pricedSlim, { pricingAuthorityAtLock: 'SERVER' }))).toBe(false);
-      // Only the root's own pair has a current one: a slim result anywhere
-      // else counts, under the current result too.
-      expect(check({ inputs, result: pricedFull, estimatorEngine: { result: pricedFull, engineResult: pricedSlim } })).toBe(true);
-      expect(check({ inputs, result: { ...pricedFull, engineResult: pricedSlim }, engineResult: pricedFull })).toBe(true);
-      expect(check({ inputs, result: { ...pricedFull, engineResult: pricedFull }, engineResult: pricedSlim })).toBe(false);
+      expect(server({ engineInputs: treeRequest({ treeCount: 4 }), result: mapV1ToLegacyShape(countedTrees), engineResult: guessedTrees })).toBe(false);
+      // The other way round: the authority is the guessed one.
+      expect(server({ engineInputs: treeRequest({}), result: mapV1ToLegacyShape(guessedTrees), engineResult: countedTrees })).toBe(true);
+      // The r10 audit's case: with no server reprice, the `engineResult` can
+      // hold a service priced only there. A clean pest row in `result` does
+      // not hide a low-confidence lawn row behind it. After a server reprice
+      // that row is a removed service.
+      const lawnOnlyBehind = behind(pricedFull, { fieldVerify: [], lineItems: [pricedFull.lineItems[0], { service: 'lawn_care', name: 'Lawn Care', monthly: 60, annual: 720, pricingConfidence: 'LOW' }] });
+      expect([check(lawnOnlyBehind), server(lawnOnlyBehind)]).toEqual([true, false]);
+      // Only the root's own pair is a reprice and its leftover: a slim result
+      // anywhere else counts, inside the authority too.
+      expect(server({ inputs, result: pricedFull, estimatorEngine: { result: pricedFull, engineResult: pricedSlim } })).toBe(true);
+      expect(server({ inputs, result: { ...pricedFull, engineResult: pricedSlim }, engineResult: pricedFull })).toBe(true);
+      expect(server({ inputs, result: { ...pricedFull, engineResult: pricedFull }, engineResult: pricedSlim })).toBe(false);
 
       // Through the loader: the wizard's request holds no lawn size to replay.
       const { loadEstimateSeed } = _private;
@@ -955,14 +954,14 @@ describe('buildReportCrossSell', () => {
       expect(await seedOf(pestQuote.stored)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: true });
       expect(await seedOf(pestQuote.published)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: false });
       expect(await seedOf(lawnQuote.published)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: true });
-      // A clean result that is current clears the slim one behind it, and the
-      // loader passes the row's pricing authority to that rule.
-      expect(await seedOf(pestQuote.withResult)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: false });
-      expect(await seedOf(lawnQuote.withResult)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
+      // The loader passes the row's pricing authority: after a server
+      // reprice a clean `result` is read alone; with no authority the slim
+      // result behind it counts.
       const seedWithAuthority = (data, authority) => loadEstimateSeed(pagedEstimates([{ ...seedRow('est-1', SEED_HERE, 'accepted', 0, data), pricing_authority: authority }]).database, 'cust-1', street);
-      const removedAll = { engineInput: pestQuote.stored.engineInput, result: pricesNothing, engineResult: pricedSlim };
-      expect(await seedWithAuthority(removedAll, null)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
-      expect(await seedWithAuthority(removedAll, 'SERVER')).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: false });
+      expect(await seedWithAuthority(pestQuote.withResult, 'SERVER')).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: false });
+      expect(await seedWithAuthority(pestQuote.withResult, null)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
+      expect(await seedOf(pestQuote.withResult)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
+      expect(await seedWithAuthority(lawnQuote.withResult, 'SERVER')).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
     });
 
     test('an offer on a seed with a marked mapped row is a quote button, and input-side flags still price', async () => {

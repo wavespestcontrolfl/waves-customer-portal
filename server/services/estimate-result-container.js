@@ -32,6 +32,11 @@ const parseStoredData = (raw) => {
   try { const parsed = JSON.parse(raw); return isRecord(parsed) ? parsed : null; } catch { return null; }
 };
 
+// Did a server reprice make `result` the authority? The row's `pricing_authority` says so, or the one the blob
+// froze at the price lock (`pricingAuthorityAtLock`), so a reader holding only the blob still sees it.
+const storedEstimateServerPriced = (data, pricingAuthority = null) => [pricingAuthority, data && data.pricingAuthorityAtLock]
+  .some((value) => String(value || '').toUpperCase() === 'SERVER');
+
 // The container a stored estimate's rows are read from, for the readers that look at ONE container (the
 // area add-on readers and the one-time breakdown normalizer): the authoritative pick above, or null when
 // the data carries neither `result` nor `engineResult`. Authority is the row's `pricing_authority`, or the
@@ -43,7 +48,7 @@ function storedEstimateContainer(estimateData, { pricingAuthority = null } = {})
   const result = data && isRecord(data.result) ? data.result : null;
   const engineResult = data && isRecord(data.engineResult) ? data.engineResult : null;
   if (!result && !engineResult) return null;
-  const serverPriced = [pricingAuthority, data.pricingAuthorityAtLock].some((value) => String(value || '').toUpperCase() === 'SERVER');
+  const serverPriced = storedEstimateServerPriced(data, pricingAuthority);
   return authoritativeEstimateResult({ result, engineResult }, {
     pricingAuthority: serverPriced ? 'SERVER' : null,
     hasPricedLines: (container) => require('./estimate-pricing-audit').hasPricedLines(container),
@@ -256,5 +261,5 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
 const proposalIsAuthoritative = (data) => data?.proposal?.enabled === true;
 
 module.exports = {
-  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedPreSlabTermiticideRows, storedTrenchingRows, storedMistingRows, storedRodentExclusionRows, exclusionRowsIn,
+  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedEstimateServerPriced, storedAreaAddOnRows, storedPreSlabTermiticideRows, storedTrenchingRows, storedMistingRows, storedRodentExclusionRows, exclusionRowsIn,
 };

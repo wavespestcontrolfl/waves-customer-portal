@@ -388,32 +388,38 @@ function positiveOrNull(value) {
 // (website-quote-publication.js), so a quote the customer accepted online is
 // read as the engine graded it.
 //
-// WHICH result is the estimate's price (pre-push r8 and r9). An estimate can
+// WHICH result is the estimate's price (pre-push r8 to r10). An estimate can
 // hold a `result` and an `engineResult`: the mapped result and its raw twin
 // from one pricing run (a staff save), the engine's full result beside the
 // wizard's slim one (a quote-required wizard quote), or a `result` that a
 // revision or a server reprice rewrote, with the earlier `engineResult` left
-// behind. storedEstimateContainer (estimate-result-container.js) is the one
-// rule for which of the two is current, and the other readers of stored rows
-// use it. When it picks a `result` that keeps the engine's list, the
-// `engineResult` behind it is not read: a marker on a row that staff have
-// since corrected is not a marker of the price, and a slim result there has
-// nothing left to vouch for. Nothing is lost for a twin: the mapped result
-// carries every marker of the raw rows (the test runs the real engine and
-// the real mapper over a grid of properties and services; on 2026-11-21 no
-// production seed's verdict depended on the result behind). In every other
-// case both are read: an `engineResult` that is current or the only one, a
-// `result` with no list, and a `result` that is not current.
+// behind. estimate-result-container.js holds the rule for the two, and the
+// check follows it as far as it is certain:
+//   - after a SERVER reprice (the row's pricing_authority, or the one the
+//     blob froze at the price lock) `result` is the authority and the whole
+//     other container is a leftover: a row there is a removed or repriced
+//     service, never an extra. When that `result` keeps the engine's list,
+//     the `engineResult` behind it is not read: a marker on a row that staff
+//     have since corrected is not a marker of the price, and a slim result
+//     there has nothing left to vouch for. Nothing is lost for a raw twin:
+//     the mapped result carries every marker of the raw rows (the test runs
+//     the real engine and the real mapper; on 2026-11-21 no production
+//     seed's verdict depended on the twin).
+//   - with any other authority both are read. The `engineResult` can then
+//     hold a service priced only there, which resolveEstimateLines keeps as
+//     a line of the estimate. Telling such a row from a stale one takes the
+//     pricing audit's line merge, and the check does not rebuild it: a stale
+//     row there keeps the quote button, as it does on main.
 const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
 const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';
 
-// The `engineResult` behind the estimate's current `result`, when that result
+// The `engineResult` a server reprice left behind `result`, when that result
 // keeps the engine's list; null in every other case.
-function resultBehindCurrent(estData, pricingAuthority) {
+function resultBehindServerReprice(estData, pricingAuthority) {
   const { result, engineResult } = estData;
   if (!isKeyed(result) || !Array.isArray(result.fieldVerify) || !isKeyed(engineResult)) return null;
-  const { storedEstimateContainer } = require('../estimate-result-container');
-  return storedEstimateContainer(estData, { pricingAuthority }) === result ? engineResult : null;
+  const { storedEstimateServerPriced } = require('../estimate-result-container');
+  return storedEstimateServerPriced(estData, pricingAuthority) ? engineResult : null;
 }
 
 function estimateRequiresFieldVerification(estData, { replaysLawnSize = true, pricingAuthority = null } = {}) {
@@ -442,9 +448,9 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true, pr
     || lineNeedsReviewBeforeExactPrice(asRow(c), { turfGrade: turfCounts });
   const turfSummaryCounts = (result) => replaysLawnSize || !Array.isArray(result.fieldVerify);
   const servicePicks = (node, key, value) => node === estData && key === 'services' && isKeyed(value);
-  const behindCurrent = resultBehindCurrent(estData, pricingAuthority);
+  const leftBehind = resultBehindServerReprice(estData, pricingAuthority);
   const notRead = (node, key, child) => SEED_INPUT_KEYS.has(key) || servicePicks(node, key, child)
-    || (behindCurrent !== null && child === behindCurrent);
+    || (leftBehind !== null && child === leftBehind);
   const slimResult = (key, value) => key === 'engineResult' && isKeyed(value) && !Array.isArray(value.fieldVerify);
   // The stored JSON is a finite tree, so the walk needs no depth limit; a
   // limit would be a place where a marker reads as clean.
