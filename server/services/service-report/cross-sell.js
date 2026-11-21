@@ -365,16 +365,27 @@ function positiveOrNull(value) {
 //          strict reading). A replayed size is the one case where the guess
 //          could reach a new price as a supplied measurement. Without one, a
 //          new lawn price computes and grades its own turf.
-//       2. the result does not keep the engine's list. The quote wizard
-//          stored a slim result with the summary's flags and no list until
-//          2026-11-21, so a parcel-capped lawn quote read as clean (pre-push
-//          r2 on this branch). Such a result does not say what it priced,
-//          and the check does not work it out from the stored request or
-//          from the rows: a request can be older than the result beside it
-//          (pre-push r3), and only some turf-priced rows carry a turf basis.
-//          It reads the summary strictly. The wizard's slim result keeps the
-//          list now (public-quote.js, pre-push r4), so a new quote is read
-//          as the engine graded it.
+//       2. the result does not keep the engine's list, so nothing says
+//          whether the guess reached its price. It is read strictly.
+//
+// A SLIM engine result cannot show that its quote was clean, so it always
+// counts (pre-push r2 to r5 on this branch). The quote wizard and the lead
+// auto-draft store a projection under `engineResult` (public-quote.js;
+// lead-estimate-automation.js compactLineItem): they drop the engine's
+// fieldVerify list and row markers the shared row test reads. The wizard's
+// rows lose the review flag and its reasons, the turf confidence, the
+// footprint markers and the tree-count source; the auto-draft's rows keep
+// one folded quote-required flag. What is left can read as clean whatever
+// the engine said: a parcel-capped lawn quote did, and so did a Tree & Shrub
+// quote priced on a default of zero trees. The check does not rebuild the engine's answer from
+// the stored request or from the slim rows: a request can be older than the
+// result beside it, and the dropped markers are gone. The missing list is
+// how it knows the projection: the engine's result and the mapped one both
+// keep it (on 2026-11-21 the 74 stored estimates with an `engineResult` and
+// no list were all wizard quotes or lead auto-drafts, none accepted). A
+// published website quote stores the full result
+// (website-quote-publication.js), so a quote the customer accepted online is
+// read as the engine graded it.
 const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
 
 function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } = {}) {
@@ -385,8 +396,9 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } =
     || (turfCounts && listsCodes(c.turfFlags))
     || lineNeedsReviewBeforeExactPrice(c, { turfGrade: turfCounts });
   const turfSummaryCounts = (result) => replaysLawnSize || !Array.isArray(result.fieldVerify);
-  const servicePicks = (node, key, value) => node === estData && key === 'services'
-    && Object.prototype.toString.call(value) === '[object Object]';
+  const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';
+  const servicePicks = (node, key, value) => node === estData && key === 'services' && isKeyed(value);
+  const slimResult = (key, value) => key === 'engineResult' && isKeyed(value) && !Array.isArray(value.fieldVerify);
   // The stored JSON is a finite tree, so the walk needs no depth limit; a
   // limit would be a place where a marker reads as clean.
   const pending = [{ node: estData, turfCounts: true }];
@@ -400,6 +412,7 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } =
     if (markedForReview(node, turfCounts)) return true;
     for (const [childKey, child] of Object.entries(node)) {
       if (SEED_INPUT_KEYS.has(childKey) || servicePicks(node, childKey, child)) continue;
+      if (slimResult(childKey, child)) return true;
       pending.push({ node: child, turfCounts: childKey !== 'property' || turfSummaryCounts(node) });
     }
   }

@@ -3271,13 +3271,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         manualQuoteLines,
         engineResult: {
           summary: estimate?.summary || {},
-          // The engine's own verify list: the summary's turf flags below for a
-          // quote that priced a turf service, empty for any other. The
-          // estimate seed's review check (service-report/cross-sell.js) reads
-          // a result that keeps the list as the engine graded it, and a
-          // result without it strictly: before this line a clean pest-only
-          // quote on a lot with a turf flag lost its exact seeded price.
-          ...(Array.isArray(estimate?.fieldVerify) ? { fieldVerify: estimate.fieldVerify } : {}),
           // Turf provenance flags (TURF_CAPPED_TO_PARCEL) — the estimate
           // view's measured-basis line demotes the satellite claim off these
           // when a staff-sent wizard draft renders (codex #3376 r2).
