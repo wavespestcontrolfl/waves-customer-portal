@@ -2,6 +2,7 @@
 // work?" (Field Team Program, Phase 0 item 1). Pure helpers plus the
 // save-time assert every visit writer calls.
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const db = require('../models/db');
 const {
@@ -19,7 +20,11 @@ const {
   isOffDay,
   offDayWarning,
   offDayWarningsFor,
+  loadTechShifts,
+  shiftMinutes,
+  storedShift,
 } = require('../services/technician-eligibility');
+const logger = require('../services/logger');
 
 function connReturning(row, { transaction = false } = {}) {
   const chain = {
@@ -426,3 +431,225 @@ describe('technician eligibility', () => {
     });
   });
 });
+
+// GATE_TECH_SHIFT_HOURS (owner 2026-11-19, page item D4): each technician's shift for a date.
+describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
+  afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+  const gateOn = () => { process.env.GATE_TECH_SHIFT_HOURS = 'true'; };
+  // 2031-03-04 is a Tuesday before the 2031-03-09 spring-forward: 15:00Z = 10:00 AM EST.
+  const NOW = new Date('2031-03-04T15:00:00Z');
+  const TODAY = '2031-03-04';
+  const TOMORROW = '2031-03-05';
+
+  // Routes 'technicians' and 'time_entries' to recording chains that resolve to the given rows.
+  function shiftConn({ techRows = [], clockRows = [], clockError = null } = {}) {
+    const calls = { technicians: [], time_entries: [] };
+    const conn = jest.fn((table) => {
+      const chain = {};
+      for (const m of ['where', 'whereNot', 'whereNotNull', 'whereIn', 'whereRaw', 'groupBy', 'select', 'min']) {
+        chain[m] = jest.fn((...args) => { calls[table].push([m, ...args]); return chain; });
+      }
+      // Settled only when the chain is awaited: a rejection made up front and never
+      // awaited (the read under test threw first) would end the whole test process.
+      const settle = () => (table === 'technicians'
+        ? Promise.resolve(techRows)
+        : clockError ? Promise.reject(clockError) : Promise.resolve(clockRows));
+      chain.then = (res, rej) => settle().then(res, rej);
+      return chain;
+    });
+    return { conn, calls };
+  }
+  const DAY_TECH = { id: 'tech-1', shift_start: '08:00:00', shift_end: '18:00:00' };
+
+  test('shiftMinutes reads HH:MM and the Postgres HH:MM:SS form; anything else is null', () => {
+    expect(shiftMinutes('08:00')).toBe(480);
+    expect(shiftMinutes('17:30:00')).toBe(1050);
+    expect(shiftMinutes('07:45:00.000')).toBe(465);
+    for (const bad of ['8:00', '24:00', '12:60', '', null, undefined, 480, 'noon']) expect(shiftMinutes(bad)).toBeNull();
+  });
+
+  test('storedShift needs both times with the end after the start', () => {
+    expect(storedShift(DAY_TECH)).toEqual({ startMin: 480, endMin: 1080 });
+    expect(storedShift({ shift_start: '08:00:00', shift_end: null })).toBeNull();
+    expect(storedShift({ shift_start: '18:00:00', shift_end: '08:00:00' })).toBeNull();
+    expect(storedShift({ shift_start: '08:00:00', shift_end: '08:00:00' })).toBeNull();
+    expect(storedShift(null)).toBeNull();
+  });
+
+  test('gate off: no read at all, and every lookup is null', async () => {
+    const { conn } = shiftConn({ techRows: [DAY_TECH] });
+    const shiftOf = await loadTechShifts(conn, { now: NOW });
+    expect(conn).not.toHaveBeenCalled();
+    expect(shiftOf('tech-1', TOMORROW)).toBeNull();
+  });
+
+  test('the set hours answer every date; a technician without hours, or a non-date, is null', async () => {
+    gateOn();
+    const { conn, calls } = shiftConn({ techRows: [DAY_TECH] });
+    const shiftOf = await loadTechShifts(conn, { now: NOW });
+    expect(shiftOf('tech-1', TOMORROW)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+    expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+    // A pg DATE read back as a Date, and a numeric id, read the same.
+    expect(shiftOf('tech-1', new Date('2031-03-06T00:00:00Z'))).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+    expect(shiftOf('tech-2', TOMORROW)).toBeNull();
+    expect(shiftOf('tech-1', 'not-a-date')).toBeNull();
+    expect(shiftOf('tech-1', null)).toBeNull();
+    // A tail, an impossible day and an invalid Date are no date (and never throw).
+    expect(shiftOf('tech-1', '2031-03-05junk')).toBeNull();
+    expect(shiftOf('tech-1', '2031-02-30')).toBeNull();
+    expect(shiftOf('tech-1', new Date('not a date'))).toBeNull();
+    expect(calls.technicians).toEqual(expect.arrayContaining([
+      ['whereNotNull', 'shift_start'], ['whereNotNull', 'shift_end'], ['select', 'id', 'shift_start', 'shift_end'],
+    ]));
+  });
+
+  test('today, after a clock-in: the same length of day from the clock-in; other dates keep the set hours', async () => {
+    gateOn();
+    // 12:52Z = 7:52 AM EST.
+    const { conn, calls } = shiftConn({ techRows: [DAY_TECH], clockRows: [{ technician_id: 'tech-1', clock_in: new Date('2031-03-04T12:52:00Z') }] });
+    const shiftOf = await loadTechShifts(conn, { now: NOW });
+    expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 472, endMin: 1072, source: 'clock_in' });
+    expect(shiftOf('tech-1', TOMORROW)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+    // Each answer is the caller's own object: changing one changes no later answer.
+    Object.assign(shiftOf('tech-1', TODAY), { endMin: 0 });
+    Object.assign(shiftOf('tech-1', TOMORROW), { endMin: 0 });
+    expect(shiftOf('tech-1', TODAY).endMin).toBe(1072);
+    expect(shiftOf('tech-1', TOMORROW).endMin).toBe(1080);
+    // The read: shift entries that are not voided, for the technicians with hours, on today's Staff work date, and
+    // not after now (an entry typed in ahead of time has not happened yet).
+    expect(calls.time_entries).toEqual(expect.arrayContaining([
+      ['where', { entry_type: 'shift' }],
+      ['whereNot', { status: 'voided' }],
+      ['whereIn', 'technician_id', ['tech-1']],
+      ['whereRaw', "(clock_in::timestamptz AT TIME ZONE 'America/New_York')::date = ?::date", [TODAY]],
+      ['where', 'clock_in', '<=', NOW],
+      ['min', { clock_in: 'clock_in' }],
+    ]));
+  });
+
+  test('a late clock-in never runs the day past midnight', async () => {
+    gateOn();
+    // 21:00Z = 4:00 PM EST, read at 5:00 PM; ten hours later would be 2:00 AM.
+    const { conn } = shiftConn({ techRows: [DAY_TECH], clockRows: [{ technician_id: 'tech-1', clock_in: '2031-03-04T21:00:00.000Z' }] });
+    const shiftOf = await loadTechShifts(conn, { now: new Date('2031-03-04T22:00:00Z') });
+    expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 960, endMin: 1440, source: 'clock_in' });
+
+    // The longest day, clocked in at 12:10 AM (05:10Z): its end is 12:09 AM tomorrow, so midnight, not minute 9.
+    const allDay = shiftConn({
+      techRows: [{ id: 'tech-1', shift_start: '00:00:00', shift_end: '23:59:00' }],
+      clockRows: [{ technician_id: 'tech-1', clock_in: new Date('2031-03-04T05:10:00Z') }],
+    });
+    const allDayShiftOf = await loadTechShifts(allDay.conn, { now: NOW });
+    expect(allDayShiftOf('tech-1', TODAY)).toEqual({ startMin: 10, endMin: 1440, source: 'clock_in' });
+  });
+
+  // The day's length is elapsed time from the clock-in, so its clock end moves with a daylight-saving change.
+  test.each([
+    // 2031-03-09: 2:00 AM EST becomes 3:00 AM EDT. 05:30Z = 12:30 AM EST; ten hours later is 15:30Z = 11:30 AM EDT.
+    ['spring forward, the clock end is an hour later', '2031-03-09', '2031-03-09T05:30:00Z', '2031-03-09T16:00:00Z', { startMin: 30, endMin: 690 }],
+    // 2031-11-02: 2:00 AM EDT becomes 1:00 AM EST. 04:30Z = 12:30 AM EDT; ten hours later is 14:30Z = 9:30 AM EST.
+    ['fall back, the clock end is an hour earlier', '2031-11-02', '2031-11-02T04:30:00Z', '2031-11-02T15:00:00Z', { startMin: 30, endMin: 570 }],
+    // After the change it is start + length again: 12:00Z = 8:00 AM EDT, ten hours later 6:00 PM EDT.
+    ['a clock-in after the change, start + length', '2031-03-09', '2031-03-09T12:00:00Z', '2031-03-09T16:00:00Z', { startMin: 480, endMin: 1080 }],
+    // The night before the change: 03:30Z on 2031-03-09 is 10:30 PM EST on the 8th; ten hours later is the 9th.
+    ['the evening before, still capped at midnight', '2031-03-08', '2031-03-09T03:30:00Z', '2031-03-09T04:00:00Z', { startMin: 1350, endMin: 1440 }],
+  ])('a clock-in on a daylight-saving weekend keeps the elapsed length: %s', async (_label, today, clockInAt, now, expected) => {
+    gateOn();
+    const { conn } = shiftConn({ techRows: [DAY_TECH], clockRows: [{ technician_id: 'tech-1', clock_in: new Date(clockInAt) }] });
+    const shiftOf = await loadTechShifts(conn, { now: new Date(now) });
+    expect(shiftOf('tech-1', today)).toEqual({ ...expected, source: 'clock_in' });
+  });
+
+  test('the day never ends before its clock-in on the clock (a short day inside the repeated hour)', async () => {
+    gateOn();
+    // 2031-11-02: 05:30Z = 1:30 AM EDT; 45 minutes later is 06:15Z = 1:15 AM EST, earlier on the clock.
+    const { conn } = shiftConn({
+      techRows: [{ id: 'tech-1', shift_start: '08:00:00', shift_end: '08:45:00' }],
+      clockRows: [{ technician_id: 'tech-1', clock_in: new Date('2031-11-02T05:30:00Z') }],
+    });
+    const shiftOf = await loadTechShifts(conn, { now: new Date('2031-11-02T15:00:00Z') });
+    expect(shiftOf('tech-1', '2031-11-02')).toEqual({ startMin: 90, endMin: 90, source: 'clock_in' });
+  });
+
+  test('a clock-in row with an unreadable time, or for a technician without set hours, is skipped; the others keep theirs', async () => {
+    gateOn();
+    logger.warn.mockClear();
+    const { conn } = shiftConn({
+      techRows: [DAY_TECH, { id: 'tech-2', shift_start: '09:00:00', shift_end: '17:00:00' }],
+      clockRows: [
+        { technician_id: 'tech-1', clock_in: 'not a time' },
+        { technician_id: 'tech-9', clock_in: new Date('2031-03-04T12:00:00Z') },
+        { technician_id: 'tech-2', clock_in: new Date('2031-03-04T13:10:00Z') },
+      ],
+    });
+    const shiftOf = await loadTechShifts(conn, { now: NOW });
+    expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+    expect(shiftOf('tech-9', TODAY)).toBeNull();
+    // 13:10Z = 8:10 AM EST, and eight hours.
+    expect(shiftOf('tech-2', TODAY)).toEqual({ startMin: 490, endMin: 970, source: 'clock_in' });
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  // The statements the shared savepoint read (utils/savepoint-read.js) sent on the transaction.
+  const savepointStatements = (conn) => conn.raw.mock.calls.map(([sql]) => sql.replace(/fail_soft_[0-9a-f]+/, 'sp'));
+
+  test('inside a transaction the clock-in read is a shared savepoint read, released when it succeeds', async () => {
+    gateOn();
+    const { conn, calls } = shiftConn({ techRows: [DAY_TECH], clockRows: [{ technician_id: 'tech-1', clock_in: new Date('2031-03-04T12:52:00Z') }] });
+    conn.isTransaction = true;
+    conn.raw = jest.fn(async () => undefined);
+    const shiftOf = await loadTechShifts(conn, { now: NOW });
+    expect(savepointStatements(conn)).toEqual(['SAVEPOINT sp', 'RELEASE SAVEPOINT sp']);
+    expect(calls.time_entries).toEqual(expect.arrayContaining([['where', { entry_type: 'shift' }]]));
+    expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 472, endMin: 1072, source: 'clock_in' });
+  });
+
+  test('inside a transaction a failed clock-in read rolls back to its savepoint and keeps the set hours', async () => {
+    gateOn();
+    const { conn } = shiftConn({ techRows: [DAY_TECH], clockError: new Error('time_entries unavailable') });
+    conn.isTransaction = true;
+    conn.raw = jest.fn(async () => undefined);
+    const shiftOf = await loadTechShifts(conn, { now: NOW });
+    expect(savepointStatements(conn)).toEqual(['SAVEPOINT sp', 'ROLLBACK TO SAVEPOINT sp', 'RELEASE SAVEPOINT sp']);
+    expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('time_entries unavailable'));
+  });
+
+  test('outside a transaction the clock-in read opens no savepoint', async () => {
+    gateOn();
+    const { conn } = shiftConn({ techRows: [DAY_TECH] });
+    conn.raw = jest.fn(async () => undefined);
+    await loadTechShifts(conn, { now: NOW });
+    expect(conn.raw).not.toHaveBeenCalled();
+  });
+
+  test('a failed clock-in read keeps the set hours for today and logs it', async () => {
+    gateOn();
+    const { conn } = shiftConn({ techRows: [DAY_TECH], clockError: new Error('time_entries unavailable') });
+    const shiftOf = await loadTechShifts(conn, { now: NOW });
+    expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('time_entries unavailable'));
+  });
+
+  test('a failed read of the hours throws (as absentTechDays does)', async () => {
+    gateOn();
+    const conn = jest.fn(() => {
+      const chain = { whereNotNull: () => chain, whereIn: () => chain, select: () => Promise.reject(new Error('technicians unavailable')) };
+      return chain;
+    });
+    await expect(loadTechShifts(conn, { now: NOW })).rejects.toThrow('technicians unavailable');
+  });
+
+  test('technicianIds narrows the hours read; no technician with hours means no clock-in read', async () => {
+    gateOn();
+    const narrowed = shiftConn({ techRows: [DAY_TECH] });
+    await loadTechShifts(narrowed.conn, { technicianIds: ['tech-1', 'tech-9'], now: NOW });
+    expect(narrowed.calls.technicians).toContainEqual(['whereIn', 'id', ['tech-1', 'tech-9']]);
+
+    const empty = shiftConn({ techRows: [{ id: 'tech-3', shift_start: '18:00:00', shift_end: '08:00:00' }] });
+    const shiftOf = await loadTechShifts(empty.conn, { now: NOW });
+    expect(empty.calls.time_entries).toEqual([]);
+    expect(shiftOf('tech-3', TOMORROW)).toBeNull();
+  });
+});
+

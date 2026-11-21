@@ -390,3 +390,90 @@ describe('workDays on create and update', () => {
   });
 });
 
+// GATE_TECH_SHIFT_HOURS (owner 2026-11-19, page item D4): the Team tab "Shift hours" row.
+describe('shiftHours on create and update', () => {
+  afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+  const gateOn = () => { process.env.GATE_TECH_SHIFT_HOURS = 'true'; };
+
+  test('create, gate on: the hours are stored as given and returned as HH:MM', async () => {
+    gateOn();
+    const insert = makeChain({ returning: [{ ...ADAM, id: 'new', shift_start: '07:00:00', shift_end: '17:00:00' }] });
+    installTransaction([makeChain({ first: undefined }), insert]);
+    const res = await invoke(createTechnician, { body: { name: 'Casey', email: 'casey@example.com', shiftHours: { start: '07:00', end: '17:00' } } });
+    expect(res.statusCode).toBe(200);
+    expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({ shift_start: '07:00', shift_end: '17:00' }));
+    expect(res.body.technician).toMatchObject({ shift_start: '07:00', shift_end: '17:00' });
+  });
+
+  test('create, gate on: an omitted shiftHours leaves both columns out of the insert', async () => {
+    gateOn();
+    const insert = makeChain({ returning: [{ ...ADAM, id: 'new' }] });
+    installTransaction([makeChain({ first: undefined }), insert]);
+    await invoke(createTechnician, { body: { name: 'Casey', email: 'casey@example.com' } });
+    expect(insert.insert.mock.calls[0][0]).not.toHaveProperty('shift_start');
+    expect(insert.insert.mock.calls[0][0]).not.toHaveProperty('shift_end');
+  });
+
+  test.each([
+    ['a missing end', { start: '08:00' }],
+    ['an end before the start', { start: '18:00', end: '08:00' }],
+    ['an end equal to the start', { start: '08:00', end: '08:00' }],
+    ['times with seconds', { start: '08:00:00', end: '18:00:00' }],
+    ['a 24:00 end', { start: '08:00', end: '24:00' }],
+    ['a one-digit hour', { start: '8:00', end: '18:00' }],
+    ['minute numbers', { start: 480, end: 1080 }],
+    ['a list', ['08:00', '18:00']],
+    ['a string', '08:00-18:00'],
+  ])('create and update, gate on: %s is a 400 before any transaction', async (_label, shiftHours) => {
+    gateOn();
+    const created = await invoke(createTechnician, { body: { name: 'Casey', email: 'casey@example.com', shiftHours } });
+    expect(created.statusCode).toBe(400);
+    expect(created.body.error).toContain('shiftHours must be');
+    const updated = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { shiftHours }, technicianId: 'adam' });
+    expect(updated.statusCode).toBe(400);
+    expect(updated.body.error).toContain('shiftHours must be');
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('update, gate on: shiftHours writes both columns, and null clears both', async () => {
+    gateOn();
+    const write = makeChain();
+    installTransaction([makeChain({ first: ADAM }), write, makeChain({ first: { ...ADAM, shift_start: '08:00:00', shift_end: '18:00:00' } })]);
+    const res = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { shiftHours: { start: '08:00', end: '18:00' } }, technicianId: 'admin-1' });
+    expect(res.statusCode).toBe(200);
+    expect(write.update).toHaveBeenCalledWith(expect.objectContaining({ shift_start: '08:00', shift_end: '18:00' }));
+    expect(res.body.technician).toMatchObject({ shift_start: '08:00', shift_end: '18:00' });
+
+    const clear = makeChain();
+    installTransaction([makeChain({ first: { ...ADAM, shift_start: '08:00:00', shift_end: '18:00:00' } }), clear, makeChain({ first: { ...ADAM, shift_start: null, shift_end: null } })]);
+    const cleared = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { shiftHours: null }, technicianId: 'admin-1' });
+    expect(clear.update).toHaveBeenCalledWith(expect.objectContaining({ shift_start: null, shift_end: null }));
+    expect(cleared.body.technician).toMatchObject({ shift_start: null, shift_end: null });
+  });
+
+  test('update, gate on: an edit that omits shiftHours leaves both columns alone', async () => {
+    gateOn();
+    const write = makeChain();
+    installTransaction([makeChain({ first: ADAM }), write, makeChain({ first: ADAM })]);
+    await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { name: 'Adam B' }, technicianId: 'admin-1' });
+    expect(write.update.mock.calls[0][0]).not.toHaveProperty('shift_start');
+    expect(write.update.mock.calls[0][0]).not.toHaveProperty('shift_end');
+  });
+
+  test('gate off: shiftHours is ignored on create and update (even an invalid value), and the hours are not returned', async () => {
+    const insert = makeChain({ returning: [{ ...ADAM, id: 'new', shift_start: '07:00:00', shift_end: '17:00:00' }] });
+    installTransaction([makeChain({ first: undefined }), insert]);
+    const created = await invoke(createTechnician, { body: { name: 'Casey', email: 'casey@example.com', shiftHours: { start: '07:00', end: '17:00' } } });
+    expect(created.statusCode).toBe(200);
+    expect(insert.insert.mock.calls[0][0]).not.toHaveProperty('shift_start');
+    expect(created.body.technician).not.toHaveProperty('shift_start');
+    expect(created.body.technician).not.toHaveProperty('shift_end');
+
+    const write = makeChain();
+    installTransaction([makeChain({ first: ADAM }), write, makeChain({ first: { ...ADAM, shift_start: '08:00:00', shift_end: '18:00:00' } })]);
+    const res = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { shiftHours: { start: '18:00', end: '08:00' } }, technicianId: 'admin-1' });
+    expect(res.statusCode).toBe(200);
+    expect(write.update.mock.calls[0][0]).not.toHaveProperty('shift_start');
+    expect(res.body.technician).not.toHaveProperty('shift_start');
+  });
+});
