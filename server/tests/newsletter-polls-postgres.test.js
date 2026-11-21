@@ -2,7 +2,8 @@
  * Waves Newsletter polls against real Postgres:
  * - newsletterIssuePolls reads one newsletter type's poll history from the
  *   issues readers got: the polls of the newest two, and every poll such an
- *   issue carried, in either body part, by the sender's own reach rule. A
+ *   issue carried, in either body part and any letter case, by the sender's
+ *   own reach rule. A
  *   'failed' send that reached readers before it stopped counts, and so does
  *   one whose only proof is a reader's spam report; a draft, a send that
  *   reached no reader (a 'sent' one whose recipients all dropped out, or whose
@@ -44,12 +45,13 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
 
   // Inserts issues and their delivery rows; returns each issue's delivery rows
   // ({ id, engagement_token }) in order. A 'sent' issue gets one delivered row
-  // unless it lists its own. textOnly puts the poll in the plain-text part only.
+  // unless it lists its own. textOnly puts the poll in the plain-text part only;
+  // upperCase writes its tokens in capitals, which the sender also reads.
   async function insertIssues(type, rows) {
     const inserted = await db('newsletter_sends').insert(rows.map((row) => ({
       subject: 'Synthetic poll issue',
-      html_body: `<p>Synthetic</p>${row.poll && !row.textOnly ? `{{quiz:${row.poll}}}` : ''}<p>End</p>`,
-      text_body: row.poll ? `Synthetic\n{{quiz-text:${row.poll}}}` : 'Synthetic',
+      html_body: `<p>Synthetic</p>${row.poll && !row.textOnly ? `{{${row.upperCase ? 'QUIZ' : 'quiz'}:${row.poll}}}` : ''}<p>End</p>`,
+      text_body: row.poll ? `Synthetic\n{{${row.upperCase ? 'QUIZ-TEXT' : 'quiz-text'}:${row.poll}}}` : 'Synthetic',
       auto_share_social: false,
       newsletter_type: row.type || type,
       status: row.status || 'sent',
@@ -155,15 +157,19 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     expect(chooseNewsletterPoll(history)).toBeNull();
   });
 
-  test('a poll carried only in the plain-text part counts too', async () => {
+  test('a poll counts from either body part, in any letter case the sender reads', async () => {
     const TYPE = newType();
     await insertIssues(TYPE, [
-      { poll: null, sentAt: daysAgo(14) },
-      { poll: P1, textOnly: true, sentAt: daysAgo(7) },
+      // Past the two-issue window: only the used list keeps P1 from coming back.
+      { poll: P1, upperCase: true, sentAt: daysAgo(35) },
+      { poll: null, sentAt: daysAgo(28) },
+      { poll: null, sentAt: daysAgo(21) },
+      { poll: P2, textOnly: true, sentAt: daysAgo(14) },
+      { poll: null, sentAt: daysAgo(7) },
     ]);
     const history = await newsletterIssuePolls({ newsletterType: TYPE });
-    expect(history.recent).toEqual([P1, null]);
-    expect(history.used).toEqual([P1]);
+    expect(history.recent).toEqual([null, P2]);
+    expect([...history.used].sort()).toEqual([P1, P2].sort());
     expect(chooseNewsletterPoll(history)).toBeNull();
   });
 

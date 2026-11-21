@@ -542,9 +542,10 @@ async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
       s.scheduled_for, s.created_at) DESC`)
     .limit(POLL_ISSUE_GAP)
     .select('s.html_body', 's.text_body');
+  // ILIKE: the sender reads quiz tokens in any letter case (parseQuizTokens).
   const withPoll = await reached()
-    .where((body) => body.where('s.html_body', 'like', `%{{quiz:${NEWSLETTER_POLL_PREFIX}%`)
-      .orWhere('s.text_body', 'like', `%{{quiz-text:${NEWSLETTER_POLL_PREFIX}%`))
+    .where((body) => body.where('s.html_body', 'ilike', `%{{quiz:${NEWSLETTER_POLL_PREFIX}%`)
+      .orWhere('s.text_body', 'ilike', `%{{quiz-text:${NEWSLETTER_POLL_PREFIX}%`))
     .select('s.html_body', 's.text_body');
   return {
     recent: newest.map(pollOf),
