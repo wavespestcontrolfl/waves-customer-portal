@@ -14064,6 +14064,28 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
 // =========================================================================
 const PENDING_REFERRAL_STATUSES = ['pending', 'contacted', 'estimated', 'sms_failed'];
 
+// GATE_REFERRAL_STEP2 words for the Refer tab (owner 2026-11-21): the friend's benefit is an account credit after the
+// first plan service. The server sends annualCap only while the program is on Step 2, with friendReward in dollars (the
+// live Referee Discount setting). Every field is null when the tab must keep today's words: Step 2 off, or the server
+// confirms no amount for that line (friend amount 0, member at the yearly limit, program paused).
+function referTabStep2Words({ data, rewardPerReferral, earnsCredit, money, shareLink }) {
+  if (data?.annualCap == null) return { heading: null, intro: null, earnStep: null, shareText: null };
+  const friendReward = Number(data.friendReward) || 0;
+  const cap = Number(data.annualCap);
+  const amounts = [
+    friendReward > 0 && `They get a ${money(friendReward)} credit after their first plan service.`,
+    earnsCredit && `You earn a ${money(rewardPerReferral)} credit after their first service. Up to ${cap} credit${cap === 1 ? '' : 's'} a year.`,
+  ].filter(Boolean);
+  return {
+    heading: 'Friends & Neighbors',
+    intro: amounts.length ? ['Share your link.', ...amounts].join(' ') : null,
+    earnStep: `Your ${money(rewardPerReferral)} credit is applied after their first paid service.`,
+    shareText: friendReward > 0
+      ? `I use Waves and thought you might want their info. You get a ${money(friendReward)} credit after your first plan service with my link: ${shareLink}`
+      : null,
+  };
+}
+
 function ReferTab({ customer, onSwitchTab }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
@@ -14284,7 +14306,8 @@ function ReferTab({ customer, onSwitchTab }) {
     : Number(stats.totalEarned || 0);
   const availableBalance = Number(data?.availableBalance || 0) / 100;
   const pendingEarnings = Number(data?.pendingEarnings || 0) / 100;
-  const shareText = `I use Waves and thought you might want their info. Here is my referral link: ${shareLink}`;
+  const step2Words = referTabStep2Words({ data, rewardPerReferral, earnsCredit, money, shareLink });
+  const shareText = step2Words.shareText || `I use Waves and thought you might want their info. Here is my referral link: ${shareLink}`;
   const customerFirstName = customer?.firstName || customer?.first_name || 'your friend';
 
   const statusConfig = {
@@ -14382,14 +14405,14 @@ function ReferTab({ customer, onSwitchTab }) {
               lineHeight: 1.1,
               letterSpacing: 0,
             }}>
-              {earnsCredit ? 'Refer and Earn' : 'Refer a Neighbor'}
+              {step2Words.heading || (earnsCredit ? 'Refer and Earn' : 'Refer a Neighbor')}
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
               {atYearlyLimit && Number(data.creditsThisYear) > 0
                 ? `You earned ${Number(data.creditsThisYear)} credits this year, the most we give. Thank you! Credits start again January 1.`
-                : earnsCredit
+                : step2Words.intro || (earnsCredit
                   ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
-                  : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.'}
+                  : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.')}
             </div>
           </div>
           <div style={{
@@ -14759,7 +14782,7 @@ function ReferTab({ customer, onSwitchTab }) {
           {[
             { icon: 'share', title: 'Share', text: 'Send your code or referral link to a neighbor.' },
             { icon: 'checkCircle', title: 'They start', text: 'We track the referral when they become a Waves customer.' },
-            earnsCredit && { icon: 'coins', title: 'You earn', text: `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
+            earnsCredit && { icon: 'coins', title: 'You earn', text: step2Words.earnStep || `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
           ].filter(Boolean).map(item => (
             <div key={item.title} style={{
               padding: 14,
