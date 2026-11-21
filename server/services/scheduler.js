@@ -8070,7 +8070,7 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 11:51PM — Tab reload check (read-only). Posts one engineering FIX
-  // row to the ops digest when a staff page view of the last 24 hours ran an
+  // row to the ops digest when a staff page view it has not read yet ran an
   // out-of-date portal build that should have reloaded (the usage beacon logs
   // the tab's build and what kept it there), and retires it on the first
   // clean night. Late evening, after the day's staff use. No other fixed or

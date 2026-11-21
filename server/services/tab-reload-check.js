@@ -5,24 +5,24 @@
 // option A). Each staff page view logs whether the tab's build was out of
 // date and what kept it there (admin_usage_events.stale_build and
 // reload_hold, written by routes/admin-usage.js). This job reads, once a
-// night, the page views from the scheduled time of the run before it up to
-// its own, and posts one engineering FIX row to the ops digest when
+// night, the page views it has not read yet, up to one minute before its
+// scheduled time, and posts one engineering FIX row to the ops digest when
 // out-of-date page views show a failed reload:
 // - no name: the move was due a reload, or no move was noted for the page
 //   (components/PortalUpdate.jsx);
-// - 'no-server-heard': the tab had still heard no server as the page view
-//   left, so it cannot know it is out of date. The route stores this name of
-//   its own (routes/admin-usage.js); 'never-heard', the name a tab sends, is
-//   not counted: a row that holds it is older than that rule;
 // - 'reloaded': three reloads for the live build came back on the old one;
 // - 'reload-missed': the page the tab loaded is the tab's own reload for a
 //   newer build, and it came back on the build it left.
-// Every other name is a rule the owner chose, and the Reload bar stays. The
-// row retires itself on the first clean night (ops-digest-fall-off.js).
+// Every other name is a rule the owner chose, and the Reload bar stays; or
+// it is 'current' or 'never-heard': the tab knew no newer build at its move.
+// A healthy tab sends 'never-heard' for a move made before its first server
+// answer, so one such view proves no failure, and it is not counted. The row
+// retires itself on the first clean run (ops-digest-fall-off.js).
 //
-// Read-only: it writes no business record, texts or emails no customer, and
-// calls no paid API. Its only write is the ops digest row (or, when the
-// in-app feed is off, one email to the internal ops inbox).
+// Read-only for the business: it writes no business record, texts or emails
+// no customer, and calls no paid API. Its writes are the ops digest row (or,
+// when the in-app feed is off, one email to the internal ops inbox) and its
+// own mark of how far it has read (system_settings).
 
 const db = require('../models/db');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
@@ -32,16 +32,22 @@ const { deliverOpsDigest } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 
 const OPS_KEY = 'tab-reload-check';
-// The job's scheduled time, Eastern (scheduler.js; a test keeps both in step).
-const RUN_AT = '23:51';
-const FAILED_NAMES = ['no-server-heard', 'reloaded', 'reload-missed'];
+// The edge of a read, Eastern: one minute before the job's scheduled time
+// (scheduler.js; a test keeps both in step). A page view takes its time from
+// the database as its insert starts. After that minute a view of before the
+// edge is in the table, also when that clock is a little behind this one.
+const EDGE_AT = '23:50';
+const FAILED_NAMES = ['reloaded', 'reload-missed'];
+// How far a finished run has read (system_settings), and the most a run goes
+// back for runs that did not finish.
+const MARK_KEY = 'tab_reload_check.read_to';
+const MAX_NIGHTS = 7;
 const OPS_INBOX = 'contact@wavespestcontrol.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || OPS_INBOX;
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 
 const CAUSES = {
   none: 'the move was due a reload, or no move was noted for the page (client/src/components/PortalUpdate.jsx)',
-  'no-server-heard': 'the tab had still heard no server as the page view left, so it cannot know it is out of date (client/src/lib/portalVersion.js, server/middleware/portal-build-header.js)',
   reloaded: 'three reloads for the live build came back on the old build (client/src/lib/portalReload.js)',
   'reload-missed': "the tab's own reload for a newer build came back on the build it left (client/src/lib/portalReload.js, client/public/sw.js)",
 };
@@ -50,26 +56,41 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// What a run reads: the last whole window, from one scheduled time (`start`)
-// up to the next (`end`, not included), in Eastern time. `end` is the latest
-// scheduled time that has come: the run's own, since a run starts a moment
-// after it (node-cron matches the clock's minute, so never before it). Each
-// page view is so read by one nightly run, and a view of that moment belongs
-// to the next night. A run by hand in the day reads the same window as the
-// night's run before it, never a part of a day. From one scheduled time to
-// the next is 23, 24 or 25 hours (the clocks change), so a fixed 24 hours
-// would skip an hour on the night the clocks go back.
-function readWindow(now = new Date()) {
-  const scheduledOn = (day) => parseETDateTime(`${etDateString(day)}T${RUN_AT}`);
-  const today = scheduledOn(now);
-  const end = today.getTime() <= now.getTime() ? today : scheduledOn(addETDays(now, -1));
-  return { start: scheduledOn(addETDays(end, -1)), end };
+// What a run reads: from where the last finished run read to (`readTo`, its
+// mark) up to the latest edge that has come (`end`, not included), in
+// Eastern time. So each page view is read by one finished run: a night whose
+// run failed is read by the next run, a run by hand included, and nothing is
+// read twice. With no mark the read starts one edge back: 23, 24 or 25 hours
+// (the clocks change), never a fixed 24. It never starts more than
+// MAX_NIGHTS back. `start` equals `end` when a finished run has read this
+// far already.
+function readWindow(now = new Date(), readTo = null) {
+  const edgeOn = (day) => parseETDateTime(`${etDateString(day)}T${EDGE_AT}`);
+  const today = edgeOn(now);
+  const end = today.getTime() <= now.getTime() ? today : edgeOn(addETDays(now, -1));
+  const from = readTo || edgeOn(addETDays(end, -1));
+  const oldest = edgeOn(addETDays(end, -MAX_NIGHTS));
+  return { start: new Date(Math.max(Math.min(from.getTime(), end.getTime()), oldest.getTime())), end };
 }
 
-// Out-of-date staff page views of this run's window whose name shows a
-// failed reload, counted for each name, page and staff member.
-function readMissedReloads({ now = new Date(), knex = db } = {}) {
-  const { start, end } = readWindow(now);
+// The mark: the `end` of the last window a run finished. An unreadable value
+// reads as no mark.
+const marks = {
+  async get(knex = db) {
+    const row = await knex('system_settings').where({ key: MARK_KEY }).first('value');
+    const at = new Date(row && typeof row.value === 'string' ? row.value : NaN);
+    return Number.isFinite(at.getTime()) ? at : null;
+  },
+  async set(at, knex = db) {
+    const value = at.toISOString();
+    await knex('system_settings').insert({ key: MARK_KEY, value, category: 'tab_reload_check' })
+      .onConflict('key').merge({ value, updated_at: new Date() });
+  },
+};
+
+// Out-of-date staff page views of a window whose name shows a failed
+// reload, counted for each name, page and staff member.
+function readMissedReloads({ start, end, knex = db }) {
   return knex('admin_usage_events')
     .where('created_at', '>=', start)
     .where('created_at', '<', end)
@@ -101,14 +122,14 @@ function summarize(rows) {
 function composeDigest({ views, people, names, pages }) {
   const s = views === 1 ? '' : 's';
   const who = `${people} staff member${people === 1 ? '' : 's'}`;
-  const lead = `In the day before this check, ${views} staff page view${s} by ${who} ran an out-of-date portal build that should have reloaded.`;
+  const lead = `Since the last check that finished, ${views} staff page view${s} by ${who} ran an out-of-date portal build that should have reloaded.`;
   const causeLine = ([name, n]) => `${name === 'none' ? 'no name' : name} (${n}): ${CAUSES[name]}`;
   const pageLine = ([page, n]) => `${page}: ${n}`;
   const source = 'Rows: admin_usage_events with stale_build true (routes/admin-usage.js).';
   return {
     subject: `FIX: ${views} staff page view${s} missed a reload to the live portal build`,
     headline: 'System — fix the reload of out-of-date staff tabs',
-    summary: `${views} staff page view${s} in the day before this check ran an out-of-date build that should have reloaded.`,
+    summary: `${views} staff page view${s} since the last finished check ran an out-of-date build that should have reloaded.`,
     text: [lead, '', 'By cause:', ...names.map((e) => `- ${causeLine(e)}`), '', 'By page:', ...pages.map((e) => `- ${pageLine(e)}`), '', source].join('\n'),
     html: [
       `<p>${esc(lead)}</p>`,
@@ -160,18 +181,25 @@ function postDigest(found, mailer) {
 }
 
 /**
- * One nightly run. When the read throws, this throws too, so runExclusive
- * records a failed run and the standing row stays: a check that did not run
- * proves nothing. Returns { views, delivery? }.
+ * One run. When the read throws, this throws too, so runExclusive records a
+ * failed run and the standing row stays: a check that did not run proves
+ * nothing. The mark moves only once the window is handled: the row retired,
+ * or the finding delivered. Returns { views, delivery?, upToDate? }.
  */
-async function runTabReloadCheck({ readRows = readMissedReloads, mailer = sendgrid, now = new Date() } = {}) {
-  const found = summarize(await readRows({ now }));
+async function runTabReloadCheck({ readRows = readMissedReloads, mailer = sendgrid, now = new Date(), markStore = marks } = {}) {
+  const { start, end } = readWindow(now, await markStore.get());
+  // A finished run has read up to this edge: nothing to add, and no reason
+  // to retire the row it left.
+  if (start.getTime() >= end.getTime()) return { views: 0, upToDate: true };
+  const found = summarize(await readRows({ start, end }));
   if (!found.views) {
     await retireIfClean(OPS_KEY);
+    await markStore.set(end);
     return { views: 0 };
   }
   logger.warn(`[tab-reload-check] ${found.views} out-of-date staff page view(s) missed a reload`);
   const delivery = await postDigest(found, mailer);
+  if (!delivery || delivery.ok !== false) await markStore.set(end);
   return { views: found.views, delivery };
 }
 
@@ -179,8 +207,9 @@ module.exports = {
   runTabReloadCheck,
   readMissedReloads,
   readWindow,
+  marks,
   OPS_KEY,
-  RUN_AT,
+  EDGE_AT,
   FAILED_NAMES,
   _private: { summarize, composeDigest },
 };
