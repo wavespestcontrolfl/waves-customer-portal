@@ -582,6 +582,14 @@ async function newsletterIssuePolls({ newsletterType, knex = require('../models/
   const reachedRow = (sub) => { reachedDelivery(deliveryRows(sub)); };
   const resumableRow = () => outstandingEligibleDeliveries('s.id', { database: knex, correlate: true })
     .select(knex.raw('1'));
+  // An unsent Waves Pest Insider issue a person can still send holds its poll
+  // too: a held issue (its send is a draft again), a queued one, and a send
+  // that failed before any delivery row was written (a Resume then mails its
+  // whole planned audience). The sender has no send window on those paths for
+  // this newsletter, so such an issue can go out after a later one. A flagship
+  // issue goes out only on its own Tuesday, so there only a resumable row holds.
+  const sendableByHand = (issue) => issue.whereIn('s.status', ['draft', 'scheduled'])
+    .orWhere((failed) => failed.where('s.status', 'failed').whereNotExists(deliveryRows));
   const newest = await issues()
     .whereExists(reachedRow)
     .orderByRaw(`COALESCE(s.sent_at,
@@ -594,7 +602,10 @@ async function newsletterIssuePolls({ newsletterType, knex = require('../models/
   // A loose prefilter (any token form, either part, any letter case);
   // pollInIssue then reads the tokens exactly as the sender renders them.
   const holding = await issues()
-    .where((issue) => issue.whereExists(reachedRow).orWhereExists(resumableRow()))
+    .where((issue) => {
+      issue.whereExists(reachedRow).orWhereExists(resumableRow());
+      if (newsletterType === PEST_INSIDER_TYPE) issue.orWhere(sendableByHand);
+    })
     .where((body) => body.where('s.html_body', 'ilike', `%{{quiz%${POLL_ID_MARK}%`)
       .orWhere('s.text_body', 'ilike', `%{{quiz%${POLL_ID_MARK}%`))
     .select('s.html_body', 's.text_body');

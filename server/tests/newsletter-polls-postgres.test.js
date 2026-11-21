@@ -14,7 +14,8 @@
  *   that poll; an issue that showed a poll takes no other quiz's answer; an
  *   issue with no poll keeps the old rule.
  * - The Waves Pest Insider (its real type key) reads its own list from its
- *   own issues, and its votes follow the same rule.
+ *   own issues, and its votes follow the same rule. An unsent Pest Insider
+ *   issue a person can still send by hand holds its poll too.
  * Real Postgres, because these are an ILIKE over the stored bodies, EXISTS
  * and subqueries over the delivery rows, and the vote's row update.
  * Runs in CI's DB-gated step or this worktree's private QA database; every
@@ -42,12 +43,16 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
   } = require('../services/newsletter-quiz');
   const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
   const [P1, P2, P3, P4] = NEWSLETTER_POLL_IDS;
-  const [PI1, PI2] = PEST_INSIDER_POLL_IDS;
+  const [PI1, PI2, PI3, PI4] = PEST_INSIDER_POLL_IDS;
   let database;
   const HOUR = 60 * 60 * 1000;
   const daysAgo = (days) => new Date(Date.now() - days * 24 * HOUR);
-  const daysAhead = (days) => new Date(Date.now() + days * 24 * HOUR);
   const newType = () => `poll-test-${randomUUID()}`;
+  // The Pest Insider tests read the real type key, so they first move any
+  // issue this database already holds under it to a throwaway type. The
+  // test's transaction rolls that back with everything else.
+  const onlyThisTestsPestInsiderIssues = () => db('newsletter_sends')
+    .where({ newsletter_type: PEST_INSIDER_TYPE }).update({ newsletter_type: newType() });
 
   // Inserts issues and their delivery rows; returns each issue's delivery rows
   // ({ id, engagement_token }) in order. A 'sent' issue gets one delivered row
@@ -270,34 +275,30 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
   });
 
   test('the Waves Pest Insider reads its own list from its own issues, and a vote counts only from the issue that carried its poll', async () => {
+    await onlyThisTestsPestInsiderIssues();
     const OTHER = newType();
     const [sub] = await db('newsletter_subscribers')
       .insert({ email: `poll-test-${randomUUID().slice(0, 8)}@example.invalid`, status: 'active', source: 'public_form' })
       .returning(['id']);
-    // The real type key picks the Pest Insider's list. The issues are dated
-    // ahead of today, so they are this newsletter's newest in any database.
+    // The real type key picks the Pest Insider's list.
     const toReader = (sentAt) => [{ status: 'sent', sentAt, subscriberId: sub.id }];
     const [[withPoll], [otherPoll]] = await insertIssues(PEST_INSIDER_TYPE, [
-      { poll: PI1, sentAt: daysAhead(3650), deliveries: toReader(daysAhead(3650)) },
+      { poll: PI1, sentAt: daysAgo(28), deliveries: toReader(daysAgo(28)) },
       // A Waves Newsletter poll's token in a Pest Insider issue is not a Pest Insider poll.
-      { poll: P1, sentAt: daysAhead(3664), deliveries: toReader(daysAhead(3664)) },
+      { poll: P1, sentAt: daysAgo(14), deliveries: toReader(daysAgo(14)) },
       // Another newsletter's issue that carried PI2 does not use PI2 up here.
-      { poll: PI2, type: OTHER, sentAt: daysAhead(3670) },
+      { poll: PI2, type: OTHER, sentAt: daysAgo(7) },
     ]);
 
-    const history = await newsletterIssuePolls({ newsletterType: PEST_INSIDER_TYPE });
-    expect(history.ids).toEqual(PEST_INSIDER_POLL_IDS);
-    expect(history.recent).toEqual([null, PI1]);
     // The stored-body prefilter finds a pi-poll token (it matched only nl-poll before).
-    expect(history.used).toContain(PI1);
-    expect(history.used).not.toContain(PI2);
-    expect(history.used).not.toContain(P1);
+    const history = await newsletterIssuePolls({ newsletterType: PEST_INSIDER_TYPE });
+    expect(history).toEqual({ ids: PEST_INSIDER_POLL_IDS, recent: [null, PI1], used: [PI1] });
     expect(chooseNewsletterPoll(history)).toBeNull();
     // And the other way: a Pest Insider poll is not another newsletter's poll.
     expect(await newsletterIssuePolls({ newsletterType: OTHER })).toEqual({ ids: NEWSLETTER_POLL_IDS, recent: [null], used: [] });
 
     // A second issue without a Pest Insider poll opens the gap: the next poll is PI2.
-    await insertIssues(PEST_INSIDER_TYPE, [{ poll: null, sentAt: daysAhead(3678) }]);
+    await insertIssues(PEST_INSIDER_TYPE, [{ poll: null, sentAt: daysAgo(1) }]);
     const later = await newsletterIssuePolls({ newsletterType: PEST_INSIDER_TYPE });
     expect(later.recent).toEqual([null, null]);
     expect(chooseNewsletterPoll(later)).toBe(PI2);
@@ -317,5 +318,36 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
       .resolves.toEqual({ ok: false, reason: 'not-in-issue' });
     expect(await answerOf(withPoll)).toEqual({ quiz_id: PI1, quiz_answer: 'ants' });
     expect(await tagsOf()).toEqual(tagsBefore);
+  });
+
+  test('an unsent Waves Pest Insider issue a person can still send holds its poll; the flagship rule does not change', async () => {
+    await onlyThisTestsPestInsiderIssues();
+    // The same five issues under each newsletter's own poll ids.
+    const issues = ([a, b, c, d]) => [
+      { poll: null, sentAt: daysAgo(28) },
+      { poll: null, sentAt: daysAgo(14) },
+      // Held: a HOLD reply or Cancel schedule made its send a draft again, and
+      // a person can send that draft by hand on any later day.
+      { poll: a, status: 'draft', createdAt: daysAgo(20) },
+      // Failed before any delivery row was written: a Resume mails its whole audience.
+      { poll: b, status: 'failed', createdAt: daysAgo(13) },
+      // Failed with rows a Resume would mail no one from: nothing left to send.
+      { poll: c, status: 'failed', createdAt: daysAgo(12), deliveries: [{ status: 'skipped' }] },
+      // Queued for its send day.
+      { poll: d, status: 'scheduled', createdAt: daysAgo(2) },
+    ];
+    await insertIssues(PEST_INSIDER_TYPE, issues([PI1, PI2, PI3, PI4]));
+    const history = await newsletterIssuePolls({ newsletterType: PEST_INSIDER_TYPE });
+    expect(history.recent).toEqual([null, null]);
+    expect([...history.used].sort()).toEqual([PI1, PI2, PI4].sort());
+    expect(chooseNewsletterPoll(history)).toBe(PI3);
+
+    // A flagship-rule newsletter: a fresh send goes out only on its own
+    // Tuesday, so none of these unsent issues holds a poll.
+    const TYPE = newType();
+    await insertIssues(TYPE, issues([P1, P2, P3, P4]));
+    const flagship = await newsletterIssuePolls({ newsletterType: TYPE });
+    expect(flagship.used).toEqual([]);
+    expect(chooseNewsletterPoll(flagship)).toBe(P1);
   });
 });
