@@ -306,6 +306,18 @@ function releaseLockSlot() {
   else activeLockHolders -= 1;
 }
 
+// A slot for a holder that is not a job lock (#8256): a caller that pins one
+// pool connection for a whole transaction and reads through the pool beside
+// it, as a job does. Its slot comes from the same cap and the same line, so
+// lock holders and such callers never pin every connection between them. It
+// waits at most waitMs (more than 0; a waiter holds no connection), then
+// resolves null: an HTTP caller must not start its work after its client
+// gave up. Otherwise it resolves the function that gives the slot back,
+// to call exactly once.
+async function holdLockSlot(label, waitMs) {
+  return (await acquireLockSlot(label, Date.now() + waitMs)) ? releaseLockSlot : null;
+}
+
 // waitForSlot defaults to "running inside a scheduled tick" (see
 // scheduled-cron.js) — independent of health recording, because scheduled
 // sweeps that opt out of job_health (link-registry-catchup) are still
@@ -708,4 +720,4 @@ async function settleDeadRunningJobs() {
   return settled;
 }
 
-module.exports = { runExclusive, isLocked, lockHeldByAnySession, recordJobStart, recordJobEnd, recordLeaseFreeJobEnd, recordMissedTick, settleDeadRunningJobs, DEAD_RUN_ERROR, wasLockSkipped, sanitizeJobError, getHeldConnection };
+module.exports = { runExclusive, holdLockSlot, isLocked, lockHeldByAnySession, recordJobStart, recordJobEnd, recordLeaseFreeJobEnd, recordMissedTick, settleDeadRunningJobs, DEAD_RUN_ERROR, wasLockSkipped, sanitizeJobError, getHeldConnection };

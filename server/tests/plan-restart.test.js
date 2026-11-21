@@ -1313,7 +1313,7 @@ describe('mintTransaction', () => {
   });
 
   test.each([
-    [20, 5], [10, 2], [7, 1], [4, 1], [2, 1], [1, 1], [0, 5], [undefined, 5], ['not a number', 5],
+    [20, 5], [10, 2], [7, 1], [4, 1], [0, 5], [undefined, 5], ['not a number', 5],
   ])('a pool of %s connections runs %s mints at once', async (max, limit) => {
     const run = start(handle(max), 7);
     await tick();
@@ -1387,6 +1387,65 @@ describe('mintTransaction', () => {
       jest.advanceTimersByTime(60000);
       release('minted');
       await expect(slow).resolves.toBe('minted');
+    });
+  });
+
+  // #8256 pre-push r2: a pool under four connections has no quarter of its own. A mint beside one cron lock
+  // holder would pin both connections of a pool of two (the knexfile floor), and each would wait for a third.
+  // There the mint takes one of the lock holders' slots (utils/cron-lock.js): one holder of either kind at a time.
+  describe('on a pool under four connections the mint takes a cron lock holder\'s slot', () => {
+    const { holdLockSlot } = require('../utils/cron-lock');
+    // The app's own pool, which the cron locks count, is the pool the mint runs on.
+    const smallPool = (max) => { db.client = { pool: { max } }; return handle(max); };
+    afterEach(() => { delete db.client; jest.useRealTimers(); });
+
+    test.each([[3], [2]])('a pool of %s runs one mint at a time, first come first served', async (max) => {
+      const run = start(smallPool(max), 3);
+      await tick();
+      expect(run.started).toEqual([0]);
+      await drain(run);
+      expect(run.ended).toEqual([0, 1, 2]);
+    });
+
+    test('a mint waits while a lock holder has the slot, and a lock holder gets none while a mint runs', async () => {
+      const dbh = smallPool(2);
+      const giveBack = await holdLockSlot('a-cron-job', 1000);
+      const run = start(dbh, 1);
+      await tick();
+      expect(run.started).toEqual([]);
+      giveBack();
+      await tick();
+      expect(run.started).toEqual([0]);
+      // The running mint holds the only slot: a lock holder that asks now gets none in its 20 ms.
+      await expect(holdLockSlot('another-cron-job', 20)).resolves.toBeNull();
+      await drain(run);
+      // The mint gave it back: the next holder has it at once.
+      const after = await holdLockSlot('a-later-cron-job', 1000);
+      expect(after).toEqual(expect.any(Function));
+      after();
+    });
+
+    test('the wait there ends after 10 seconds with the same refusal, and a failed mint gives the slot back', async () => {
+      jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+      const dbh = smallPool(2);
+      const giveBack = await holdLockSlot('a-long-cron-job', 1000);
+      const work = jest.fn(async () => 'never');
+      let settled = false;
+      const outcome = mintTransaction(dbh, work).then(() => 'ran', (err) => err).finally(() => { settled = true; });
+      jest.advanceTimersByTime(9999);
+      await tick();
+      expect(settled).toBe(false);
+      jest.advanceTimersByTime(1);
+      expect(await outcome).toMatchObject({
+        restartUnavailable: true, code: 'busy', message: 'We could not verify your services just now. Please try again in a moment.',
+      });
+      expect(work).not.toHaveBeenCalled();
+      giveBack();
+      // The place that gave up took nothing, and a mint that fails or cannot open gives the slot back.
+      await expect(mintTransaction(dbh, async () => { throw new Error('mint boom'); })).rejects.toThrow('mint boom');
+      await expect(mintTransaction({ ...dbh, transaction: () => { throw new Error('pool gone'); } }, async () => 'never')).rejects.toThrow('pool gone');
+      await expect(mintTransaction(dbh, async () => 'ran')).resolves.toBe('ran');
+      expect(jest.getTimerCount()).toBe(0);
     });
   });
 

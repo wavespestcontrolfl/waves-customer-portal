@@ -27,7 +27,7 @@ jest.mock('../services/logger', () => ({
 const db = require('../models/db');
 const logger = require('../services/logger');
 const {
-  runExclusive, lockHeldByAnySession, recordJobStart, recordJobEnd,
+  runExclusive, holdLockSlot, lockHeldByAnySession, recordJobStart, recordJobEnd,
 } = require('../utils/cron-lock');
 
 function mockConnection(lockGranted) {
@@ -702,6 +702,53 @@ describe('cron-lock runExclusive', () => {
 
     expect(body).not.toHaveBeenCalled();
     expect(result).toEqual({ skipped: true, reason: 'no_connection' });
+  });
+});
+
+// #8256: a transaction that pins one pool connection and reads through the pool beside it (a plan mint on a
+// pool under four connections) takes its slot from the lock holders' cap, in their line.
+describe('cron-lock holdLockSlot (a holder that is not a job lock)', () => {
+  // The knexfile floor: a pool of two, so a cap of one.
+  beforeEach(() => { jest.clearAllMocks(); db.client.pool = { max: 2 }; });
+  afterEach(() => { delete db.client.pool; });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  test('its slot comes from the lock holders\' cap: while it holds, a scheduled tick waits and a request-scoped lock is skipped', async () => {
+    db.client.acquireConnection.mockResolvedValue(mockConnection(true));
+    const giveBack = await holdLockSlot('plan-mint', 1000);
+    expect(giveBack).toEqual(expect.any(Function));
+
+    const tickBody = jest.fn(async () => 'swept');
+    const tick = runExclusive('tick-behind-a-mint', tickBody, { recordHealth: false, waitForSlot: true });
+    await expect(runExclusive('request-behind-a-mint', jest.fn(), { recordHealth: false, waitForSlot: false }))
+      .resolves.toEqual({ skipped: true, reason: 'no_connection' });
+    await settle();
+    // The tick waits with no connection: only the holder pins one.
+    expect(tickBody).not.toHaveBeenCalled();
+    expect(db.client.acquireConnection).not.toHaveBeenCalled();
+
+    giveBack();
+    await expect(tick).resolves.toBe('swept');
+  });
+
+  test('behind a running job it waits in line, gets null when its wait ends, and gets the slot when the job ends in time', async () => {
+    db.client.acquireConnection.mockResolvedValue(mockConnection(true));
+    let release;
+    const job = runExclusive('long-job', () => new Promise((resolve) => { release = resolve; }), { recordHealth: false, waitForSlot: true });
+    await settle();
+    await expect(holdLockSlot('plan-mint', 20)).resolves.toBeNull();
+
+    const waiting = holdLockSlot('plan-mint', 5000);
+    release('swept');
+    await expect(job).resolves.toBe('swept');
+    const giveBack = await waiting;
+    expect(giveBack).toEqual(expect.any(Function));
+    // Still one slot: a request-scoped lock is skipped until the holder gives it back.
+    await expect(runExclusive('request-behind-a-mint', jest.fn(), { recordHealth: false, waitForSlot: false }))
+      .resolves.toEqual({ skipped: true, reason: 'no_connection' });
+    giveBack();
+    // The place that gave up took nothing: the next lock runs at once.
+    await expect(runExclusive('after-the-mint', async () => 'ran', { recordHealth: false, waitForSlot: false })).resolves.toBe('ran');
   });
 });
 
