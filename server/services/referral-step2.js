@@ -73,7 +73,8 @@ function ruleTerms(settings, atCap = false) {
 // caller decides the gate and reads the settings; every Step 2 customer line lives here.
 
 // The invitation email's offer line (referral.friend_invite).
-const friendInviteOfferLine = (refereeCents) => `Start a Waves plan and get a ${dollars(refereeCents)} credit on your Waves account after your first service. Our way of saying welcome.`;
+// It keeps the instruction to book through the link: a friend who books another way is not tied to the member.
+const friendInviteOfferLine = (refereeCents) => `Start a Waves plan through their referral link and get a ${dollars(refereeCents)} credit on your Waves account after your first service. Our way of saying welcome.`;
 
 // The share text's clause, inside "We use Waves and ..." (SMS) and "We use Waves Pest Control and ..." (email).
 const friendShareClause = (refereeCents, code) => `they'll give you a ${dollars(refereeCents)} credit after your first plan service with my code ${code}`;
@@ -81,15 +82,11 @@ const friendShareClause = (refereeCents, code) => `they'll give you a ${dollars(
 // The friend's part of the member invitation email's reward line (referral.invite), after "you get a $25 referral reward and ".
 const memberInviteFriendClause = (refereeCents) => `they get a ${dollars(refereeCents)} credit after their first plan service`;
 
-// The Pest Insider newsletter's referral sentence about what the friend gets. It promises the member nothing: the
-// newsletter is one text for every reader, and a member at the yearly limit gets no credit.
-const newsletterFriendLine = (refereeCents) => `They get a ${dollars(refereeCents)} credit after their first plan service.`;
-
 // The member's credit email, account-credit destination. Account credit is used only after the customer turns the
 // switch on, so the line says how (true with the gate on or off).
 const memberCreditEmailLine = (rewardDollars) => `Your ${formatDollars(rewardDollars)} referral reward has been added to your Waves account as a credit. To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.`;
 
 module.exports = {
   STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars,
-  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, newsletterFriendLine, memberCreditEmailLine,
+  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, memberCreditEmailLine,
 };

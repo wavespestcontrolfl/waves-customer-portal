@@ -525,8 +525,7 @@ async function assemblePestInsiderNewsletter(draft) {
     parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">👉 ${cta} <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${COLORS.blue};text-decoration:underline;font-weight:600;">${escapeHtml(WAVES_SUPPORT_PHONE_DISPLAY)}</a></p>`);
     // Referral nudge — every issue carries it; readers are the warmest
     // referral audience (job #3). One line, never a second pitch.
-    const step2FriendCents = await require('./referral-engine').step2FriendCreditCents(); // GATE_REFERRAL_STEP2; 0 = today's line
-    parts.push(`<p style="margin:0 0 14px 0;font-size:14px;line-height:1.6;color:${COLORS.muted};">Know a neighbor fighting the same bugs? <a href="${WAVES_REFERRAL_URL}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">Send them our way</a>${step2FriendCents > 0 ? `. ${require('./referral-step2').newsletterFriendLine(step2FriendCents)}` : ' — referrals are the nicest compliment we get.'}</p>`);
+    parts.push(`<p style="margin:0 0 14px 0;font-size:14px;line-height:1.6;color:${COLORS.muted};">Know a neighbor fighting the same bugs? <a href="${WAVES_REFERRAL_URL}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">Send them our way</a> — referrals are the nicest compliment we get.</p>`);
   }
 
   // Sign-off — a real person, not "The Team" (reviews mention Adam by

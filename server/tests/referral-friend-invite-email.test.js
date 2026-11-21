@@ -33,7 +33,7 @@ describe('referee offer line with GATE_REFERRAL_STEP2', () => {
   test('gate on: a credit after the first service, from the setting; whole dollars and cents', () => {
     gates.referralStep2 = true;
     expect(engine.buildRefereeOfferLine({ referee_discount_cents: 5000 }))
-      .toBe('Start a Waves plan and get a $50 credit on your Waves account after your first service. Our way of saying welcome.');
+      .toBe('Start a Waves plan through their referral link and get a $50 credit on your Waves account after your first service. Our way of saying welcome.');
     expect(engine.buildRefereeOfferLine({ referee_discount_cents: 3250 })).toContain('get a $32.50 credit');
   });
   test('gate on, no amount: today\'s no-amount line', () => {

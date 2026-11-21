@@ -157,29 +157,6 @@ describe('pest-insider assemblePestInsiderNewsletter', () => {
     expect(html).toContain('<strong>P.S.</strong>');
   });
 
-  describe('referral line (GATE_REFERRAL_STEP2)', () => {
-    const { gates } = require('../config/feature-gates');
-    const engine = require('../services/referral-engine');
-    const TODAY = 'Send them our way</a> — referrals are the nicest compliment we get.</p>';
-    afterEach(() => { gates.referralStep2 = false; jest.restoreAllMocks(); });
-
-    test('gate off: today\'s line, word for word', async () => {
-      const html = await assemblePestInsiderNewsletter({ ...baseDraft });
-      expect(html).toContain(TODAY);
-    });
-    test('gate on with a friend credit: the new line, same link', async () => {
-      jest.spyOn(engine, 'step2FriendCreditCents').mockResolvedValue(5000);
-      const html = await assemblePestInsiderNewsletter({ ...baseDraft });
-      expect(html).toContain('Know a neighbor fighting the same bugs? <a href="https://www.wavespestcontrol.com/referral/"');
-      expect(html).toContain('Send them our way</a>. They get a $50 credit after their first plan service.</p>');
-      expect(html).not.toContain('nicest compliment');
-    });
-    test('amount 0 (paused, no amount or unreadable settings): today\'s line', async () => {
-      jest.spyOn(engine, 'step2FriendCreditCents').mockResolvedValue(0);
-      expect(await assemblePestInsiderNewsletter({ ...baseDraft })).toContain(TODAY);
-    });
-  });
-
   test('renders the generated issue hero instead of paying for unused artwork', async () => {
     const html = await assemblePestInsiderNewsletter({
       ...baseDraft,

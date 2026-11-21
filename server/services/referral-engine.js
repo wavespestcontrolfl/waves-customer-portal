@@ -1587,9 +1587,9 @@ async function getLiveSettings(conn = db) {
   return row ? { ...row, base_url: normalizeReferralBaseUrl(row.base_url) } : null;
 }
 
-// GATE_REFERRAL_STEP2: the friend's credit in cents, from the live settings row only, for the lines that must never
-// state a code default (the newsletter line, the invitation email). 0 = say nothing new: gate off, program paused, no
-// amount, or the live row unreadable.
+// GATE_REFERRAL_STEP2: the friend's credit in cents, from the live settings row only, for a line that must never state
+// a code default (the invitation email). 0 = say nothing new: gate off, program paused, no amount, or the live row
+// unreadable.
 async function step2FriendCreditCents() {
   if (!isEnabled('referralStep2')) return 0;
   try {

@@ -6,7 +6,7 @@ jest.mock('../services/logger', () => ({
 
 const {
   step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars, STEP2_DEFAULTS,
-  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, newsletterFriendLine, memberCreditEmailLine,
+  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, memberCreditEmailLine,
 } = require('../services/referral-step2');
 
 describe('step2Settings', () => {
@@ -67,15 +67,12 @@ describe('ruleTerms (what staff read before confirming a referral)', () => {
 
 describe('the friend and credit-email words (gate on)', () => {
   test('a whole-dollar amount reads $50, an amount with cents reads $32.50', () => {
-    expect(friendInviteOfferLine(5000)).toBe('Start a Waves plan and get a $50 credit on your Waves account after your first service. Our way of saying welcome.');
-    expect(friendInviteOfferLine(3250)).toBe('Start a Waves plan and get a $32.50 credit on your Waves account after your first service. Our way of saying welcome.');
+    expect(friendInviteOfferLine(5000)).toBe('Start a Waves plan through their referral link and get a $50 credit on your Waves account after your first service. Our way of saying welcome.');
+    expect(friendInviteOfferLine(3250)).toBe('Start a Waves plan through their referral link and get a $32.50 credit on your Waves account after your first service. Our way of saying welcome.');
     expect(friendShareClause(5000, 'ABC123')).toBe("they'll give you a $50 credit after your first plan service with my code ABC123");
     expect(friendShareClause(3250, 'ABC123')).toBe("they'll give you a $32.50 credit after your first plan service with my code ABC123");
     expect(memberInviteFriendClause(5000)).toBe('they get a $50 credit after their first plan service');
     expect(memberInviteFriendClause(3250)).toBe('they get a $32.50 credit after their first plan service');
-    // The newsletter is one text for every reader, so it promises the member nothing (a member at the yearly limit gets $0).
-    expect(newsletterFriendLine(5000)).toBe('They get a $50 credit after their first plan service.');
-    expect(newsletterFriendLine(3250)).toBe('They get a $32.50 credit after their first plan service.');
   });
   test('the member credit email line says how to use the credit, for whole dollars and cents', () => {
     expect(memberCreditEmailLine(25)).toBe('Your $25 referral reward has been added to your Waves account as a credit. To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.');
