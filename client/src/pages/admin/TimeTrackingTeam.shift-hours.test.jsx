@@ -89,6 +89,19 @@ describe('TeamTab shift hours', () => {
     expect(writes[0].body.shiftHours).toEqual({ start: '08:00', end: '18:00' });
   });
 
+  it('an edit that leaves the hours as loaded sends no shiftHours (the saved hours stand)', async () => {
+    const { writes } = setup({ ...BASE_TECH, shift_start: '08:00', shift_end: '18:00' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByPlaceholderText('e.g. John D.'), { target: { value: 'River Tech Jr' } });
+    // Changed and changed back is unchanged too.
+    fireEvent.change(end(), { target: { value: '17:00' } });
+    fireEvent.change(end(), { target: { value: '18:00' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0].body.name).toBe('River Tech Jr');
+    expect(writes[0].body).not.toHaveProperty('shiftHours');
+  });
+
   it('Clear empties both times and sends null (no set hours)', async () => {
     const { writes } = setup({ ...BASE_TECH, shift_start: '08:00', shift_end: '18:00' });
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));

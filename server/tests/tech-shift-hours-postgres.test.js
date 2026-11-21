@@ -148,6 +148,21 @@ postgres('technician shift hours (real Postgres)', () => {
       expect(shiftOf(noHours.id, TODAY)).toBeNull();
     });
 
+    test('gate on, inside a transaction: a failed clock-in read keeps the set hours and the transaction usable', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const marker = new Error('roll back');
+      await expect(db.transaction(async (trx) => {
+        // The clock-in read fails inside the caller's transaction (the table is renamed; rolled back below).
+        await trx.raw('ALTER TABLE time_entries RENAME TO time_entries_shift_hours_test');
+        const shiftOf = await eligibility.loadTechShifts(trx, { technicianIds: ids(), now: NOW });
+        expect(shiftOf(dayTech.id, TODAY)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+        // Without the savepoint every later statement would fail (25P02, transaction aborted).
+        expect((await trx.raw('select 1 as ok')).rows).toEqual([{ ok: 1 }]);
+        throw marker;
+      })).rejects.toBe(marker);
+      expect(await db.schema.hasTable('time_entries')).toBe(true);
+    });
+
     test('gate on: the work date follows Eastern time across midnight UTC', async () => {
       process.env.GATE_TECH_SHIFT_HOURS = 'true';
       // 03:00Z on 2031-03-05 is still 10:00 PM EST on 2031-03-04: today is the 4th.

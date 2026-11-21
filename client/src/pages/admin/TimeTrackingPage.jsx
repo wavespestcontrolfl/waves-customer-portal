@@ -3344,6 +3344,10 @@ export function TeamTab({ showToast }) {
   // GATE_TECH_SHIFT_HOURS: the server marks the roster response when the gate is
   // on; off, the Shift hours row and summary never render and nothing is sent.
   const [shiftHoursEnabled, setShiftHoursEnabled] = useState(false);
+  // The shift hours as the editor opened them: an edit that leaves both times as
+  // loaded sends no shiftHours, so saving another field never overwrites hours
+  // another admin set meanwhile (the API keeps omitted hours).
+  const [shiftLoaded, setShiftLoaded] = useState(null);
   // GATE_SERVICE_LINE_MAP=shadow: the server marks the roster response; off, the
   // Service lines card never renders and nothing is fetched.
   const [serviceLinesEnabled, setServiceLinesEnabled] = useState(false);
@@ -3477,12 +3481,13 @@ export function TeamTab({ showToast }) {
     try {
       if (editingId) {
         const { startMode, startText, startPoint, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
+        const shiftChanged = !shiftLoaded || shiftStart !== shiftLoaded.start || shiftEnd !== shiftLoaded.end;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
           body: JSON.stringify({
             ...rest,
             ...buildWorkDaysPayload(workDaysEnabled, workDays),
-            ...buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd),
+            ...(shiftChanged ? buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd) : {}),
             startPoint: buildStartPointPayload(form),
           }),
         });
@@ -3621,6 +3626,7 @@ export function TeamTab({ showToast }) {
 
   const startEdit = (tech) => {
     setEditingId(tech.id);
+    setShiftLoaded({ start: tech.shift_start || "", end: tech.shift_end || "" });
     setForm({
       name: tech.name,
       phone: tech.phone || "",

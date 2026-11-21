@@ -524,6 +524,19 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
     expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 960, endMin: 1440, source: 'clock_in' });
   });
 
+  test('inside a transaction the clock-in read rides a savepoint; its failure keeps the set hours', async () => {
+    gateOn();
+    const trx = shiftConn({ techRows: [DAY_TECH] });
+    const sp = shiftConn({ clockError: new Error('time_entries unavailable') });
+    trx.conn.isTransaction = true;
+    trx.conn.transaction = jest.fn((fn) => fn(sp.conn));
+    const shiftOf = await loadTechShifts(trx.conn, { now: NOW });
+    expect(trx.conn.transaction).toHaveBeenCalledTimes(1);
+    expect(trx.calls.time_entries).toEqual([]);
+    expect(sp.calls.time_entries).toEqual(expect.arrayContaining([['where', { entry_type: 'shift' }]]));
+    expect(shiftOf('tech-1', TODAY)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+  });
+
   test('a failed clock-in read keeps the set hours for today and logs it', async () => {
     gateOn();
     const { conn } = shiftConn({ techRows: [DAY_TECH], clockError: new Error('time_entries unavailable') });
