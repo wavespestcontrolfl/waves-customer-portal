@@ -7,8 +7,9 @@
  * completion-record-invariants.js included); this module only (1) gives each
  * a common finding shape, (2) runs them together once a day, and (3) emails
  * contact@ when — and only when — something is off. It defines NO predicates
- * of its own, writes NO rows except the ops-email send marker, and never
- * talks to a customer. Two of the checks
+ * of its own, writes NO business rows (only the ops-email send marker, its
+ * own run state and the state of its own alerts), and never talks to a
+ * customer. Two of the checks
  * (`churned_live_state`, `waveguard_alignment_drift`) promote CLI audits that
  * were manual-only until now; the alignment scan is invoked with no `onRepair`,
  * so this path has no write capability at all.
@@ -18,6 +19,18 @@
  * that cannot run is not a passing check). Subject grammar follows the
  * ops-email convention (first word = owner's action): FIX, because every
  * finding is a diverged record that needs repair.
+ *
+ * One alert, not one a day (owner 2026-11-20 "go", data-check audit step 4).
+ * The checks read standing state, so the same list came back every morning: 45
+ * alerts in the 45 days to 2026-11-20, each closed by hand. Now:
+ *   - A NEW ITEM posts an alert: a check that fails or cannot run and was not
+ *     failing on the last run. A higher count on a check that was already
+ *     failing posts nothing. An unchanged list posts again on the 7th day.
+ *   - `closeout_failed_facts` reads ONE day (yesterday's completed visits) and
+ *     nothing checks that day again. A failure there always posts, and that
+ *     alert is a record: the sweep never closes or replaces it.
+ *   - An alert whose closeout check was clean holds only standing state. The
+ *     sweep closes it when a newer alert replaces it or when a run is clean.
  *
  * Gate: GATE_LEAD_TO_CASH_SWEEP=true (feature-gates `leadToCashInvariantSweep`;
  * kill = unset). Cron: 6:55 ET daily (scheduler.js), after the 6:00 estimate
@@ -31,6 +44,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
@@ -38,7 +52,17 @@ const { etDateString } = require('../utils/datetime-et');
 const { scrubSentryText, safeErrorToken } = require('../utils/sentry-scrub');
 
 const SEND_MARKER_KEY = 'lead-to-cash-invariants';
+const DIGEST_KEY = 'lead-to-cash-invariants';
+const CLOSEOUT_KEY = 'closeout_failed_facts';
+const RUN_STATE_KEY = 'lead_to_cash_sweep.run_state';
 const TWENTY_HOURS_MS = 20 * 60 * 60 * 1000;
+// An unchanged list posts again on the 7th daily run after its last alert. The
+// cron fires at 06:55 with a few seconds of jitter, so the limit is 6.5 days:
+// an exact 7 days could miss the 7th run by a second and wait for the 8th.
+const REPEAT_AFTER_MS = 6.5 * 24 * 60 * 60 * 1000;
+// The metadata stamp of an alert the sweep may close by itself: its closeout
+// check was clean, so everything in it is standing state a later run re-reads.
+const REPLACEABLE = Object.freeze({ closeoutClean: true });
 const SAMPLE_IDS = 25;
 const CLOSEOUT_VISIT_CAP = 150;
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
@@ -360,10 +384,58 @@ async function stampSendMarker() {
   }
 }
 
+// What an alert is about: one item for each check that failed or could not
+// run. Counts are left out on purpose (a higher count alone is not news).
+function failingItems(results) {
+  return results.filter((r) => !r.ok).map((r) => (r.unavailable ? `${r.key}:unavailable` : r.key)).sort();
+}
+
+// A closeout check that could not run is not clean: that day was not verified.
+function closeoutIsClean(results) {
+  return !results.some((r) => r.key === CLOSEOUT_KEY && !r.ok);
+}
+
+// The last run's items and the time of the last alert: { items: string[], alertedAt: ISO|null },
+// or null when there is none or it cannot be read (the caller then posts: a
+// state fault never hides a finding).
+async function readRunState() {
+  try {
+    const row = await db('system_settings').where({ key: RUN_STATE_KEY }).first('value');
+    const state = row?.value ? JSON.parse(row.value) : null;
+    if (!state || !Array.isArray(state.items)) return null;
+    const alertedAt = Number.isFinite(Date.parse(state.alertedAt)) ? state.alertedAt : null;
+    return { items: state.items.map(String), alertedAt };
+  } catch (err) {
+    logger.warn(`[l2c-invariants] run-state read failed (${err.message}) — treating every item as new`);
+    return null;
+  }
+}
+
+async function writeRunState(items, alertedAt) {
+  try {
+    const value = JSON.stringify({ items, alertedAt: alertedAt || null });
+    await db('system_settings')
+      .insert({ key: RUN_STATE_KEY, value, category: 'ops_digest', description: 'Lead-to-cash sweep: the failing checks of the last run and the time of the last alert' })
+      .onConflict('key')
+      .merge({ value, updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[l2c-invariants] run-state write failed (${err.message}) — the next run may post again`);
+  }
+}
+
+// True when this run has nothing the last run did not have, and the last alert
+// is younger than REPEAT_AFTER_MS. A closeout failure is always news (see the header).
+function nothingNew(state, results, now) {
+  if (!state || !closeoutIsClean(results)) return false;
+  const known = new Set(state.items);
+  if (!failingItems(results).every((item) => known.has(item))) return false;
+  return Boolean(state.alertedAt) && (now.getTime() - Date.parse(state.alertedAt)) < REPEAT_AFTER_MS;
+}
+
 /**
  * Cron entry. Returns a plain summary; `error`/`skipped` values other than
- * 'gated' | 'clean' | 'recent_send' mean the sweep did not do its job and the
- * scheduler rethrows so job_health records a failed run.
+ * 'gated' | 'clean' | 'recent_send' | 'no_new_item' mean the sweep did not do
+ * its job and the scheduler rethrows so job_health records a failed run.
  */
 async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid, detectors = DETECTORS } = {}) {
   if (!isEnabled('leadToCashInvariantSweep')) return { skipped: 'gated' };
@@ -374,7 +446,12 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
     logger.info(`[l2c-invariants] clean: ${JSON.stringify(summary)}`);
     // closeout_failed_facts checks yesterday only. A clean later window
     // does not prove older failures (including license facts) were fixed,
-    // so this aggregate cannot automatically retire its prior alerts.
+    // so a prior alert that records one is never retired here. An alert with
+    // a clean closeout check held only standing state, which this run re-read.
+    // retireIfClean never throws; alerts that record a closeout failure do not
+    // carry the stamp and stay.
+    await retireIfClean(DIGEST_KEY, { whereMeta: REPLACEABLE });
+    await writeRunState([], (await readRunState())?.alertedAt);
     return { skipped: 'clean', results: summary };
   }
   const report = composeReport(results, { now });
@@ -384,9 +461,17 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   const to = sweepEmail();
   if (!isInternalEmailRecipient(to)) return { skipped: 'recipient', results: summary };
   if (await sentRecently()) return { skipped: 'recent_send', results: summary };
+  const items = failingItems(results);
+  const state = await readRunState();
+  if (nothingNew(state, results, now)) {
+    logger.info(`[l2c-invariants] no new item since the last alert (${state.alertedAt}) — not posted again`);
+    await writeRunState(items, state.alertedAt);
+    return { skipped: 'no_new_item', results: summary };
+  }
+  const closeoutClean = closeoutIsClean(results);
   try {
     await deliverOpsDigest({
-      key: 'lead-to-cash-invariants',
+      key: DIGEST_KEY,
       subject: report.subject,
       html: report.html,
       text: report.text,
@@ -394,7 +479,12 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
       // No dedupe/refresh here on purpose: closeout_failed_facts checks
       // yesterday only, so rewriting one standing row could replace an
       // unresolved closeout failure (and its IDs) with today's OK line. Each
-      // report stays its own immutable row; sentRecently() bounds the cadence.
+      // alert stays its own immutable row. This alert lists every standing
+      // check again, so it replaces the older alerts that held only standing
+      // state (REPLACEABLE); an older alert with a closeout failure stays open.
+      metadata: { closeoutClean },
+      supersedePrior: true,
+      supersedeWhereMeta: REPLACEABLE,
       sendEmail: () => mailer.sendOne({
         to, fromEmail: fromEmail(), fromName: FROM_NAME,
         subject: report.subject, html: report.html, text: report.text,
@@ -406,11 +496,15 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
     return { error: 'send_failed', results: summary };
   }
   await stampSendMarker();
+  await writeRunState(items, now.toISOString());
   return { sent: true, violations: report.total, unavailable: report.unavailable, results: summary };
 }
 
 module.exports = {
   runLeadToCashInvariantSweep,
   DETECTORS,
-  _private: { runDetectors, composeReport, sentRecently, stampSendMarker, SEND_MARKER_KEY, SAMPLE_IDS, CLOSEOUT_VISIT_CAP },
+  _private: {
+    runDetectors, composeReport, sentRecently, stampSendMarker, failingItems, closeoutIsClean, nothingNew, readRunState, writeRunState,
+    SEND_MARKER_KEY, DIGEST_KEY, RUN_STATE_KEY, REPEAT_AFTER_MS, REPLACEABLE, SAMPLE_IDS, CLOSEOUT_VISIT_CAP,
+  },
 };

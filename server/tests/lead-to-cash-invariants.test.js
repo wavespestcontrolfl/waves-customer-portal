@@ -75,7 +75,8 @@ const { getCloseoutStatus } = require('../services/closeout-status');
 const { customersWithStreetLineHoldingLocality, customersWithUnpinnedSavedAddress, customersWithIncompleteAddress } = require('../services/customer-properties');
 const { runPredicate } = require('../services/completion-record-invariants');
 const {
-  runLeadToCashInvariantSweep, DETECTORS, _private: { runDetectors, composeReport, SEND_MARKER_KEY, SAMPLE_IDS, CLOSEOUT_VISIT_CAP },
+  runLeadToCashInvariantSweep, DETECTORS,
+  _private: { runDetectors, composeReport, failingItems, SEND_MARKER_KEY, DIGEST_KEY, RUN_STATE_KEY, REPEAT_AFTER_MS, REPLACEABLE, SAMPLE_IDS, CLOSEOUT_VISIT_CAP },
 } = require('../services/lead-to-cash-invariants');
 
 const NOW = new Date('2026-06-15T10:55:00Z'); // 06:55 ET, any fixed instant (no near-today literal semantics)
@@ -209,7 +210,10 @@ describe('runLeadToCashInvariantSweep', () => {
       alert.metadata = options.metadata;
       return alert;
     });
-    const resolve = jest.spyOn(opsDigest, 'resolveOpsDigest').mockImplementation(async () => {
+    // The retire a clean run asks for, as the database applies it: only a row whose metadata contains whereMeta.
+    const resolve = jest.spyOn(opsDigest, 'resolveOpsDigest').mockImplementation(async ({ whereMeta } = {}) => {
+      const matches = Object.entries(whereMeta || {}).every(([k, v]) => alert.metadata?.[k] === v);
+      if (!matches) return 0;
       alert.read_at = 'resolved';
       alert.metadata.resolved = true;
       return 1;
@@ -220,7 +224,7 @@ describe('runLeadToCashInvariantSweep', () => {
       getCloseoutStatus.mockResolvedValue({ found: true, summary: { failed: ['license_current'], contradictions: [] } });
       expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [closeout] })).toMatchObject({ sent: true, violations: 1 });
       expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-      expect(alert.metadata).toMatchObject({ opsKey: 'lead-to-cash-invariants' });
+      expect(alert.metadata).toMatchObject({ opsKey: 'lead-to-cash-invariants', closeoutClean: false });
       expect(alert.metadata).not.toHaveProperty('fallOff');
 
       mockTables.scheduled_services = mockChain({ select: [] });
@@ -229,7 +233,9 @@ describe('runLeadToCashInvariantSweep', () => {
         skipped: 'clean', results: { closeout_failed_facts: 0 },
       });
       expect(getCloseoutStatus).toHaveBeenCalledTimes(1); // The older visit was not rechecked.
-      expect(resolve).not.toHaveBeenCalled();
+      // The clean run retires only alerts stamped closeoutClean: true. This one records a closeout failure.
+      expect(resolve).toHaveBeenCalledTimes(1);
+      expect(resolve).toHaveBeenCalledWith({ key: DIGEST_KEY, source: null, resolvedBy: `${DIGEST_KEY}:clean-run`, whereMeta: { closeoutClean: true } });
       expect(alert.read_at).toBeNull();
       expect(alert.metadata).not.toHaveProperty('resolved');
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
@@ -292,6 +298,130 @@ describe('runLeadToCashInvariantSweep', () => {
     const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [det('a', async () => ({ count: 1, ids: ['v'] }))] });
     expect(res).toEqual({ error: 'send_failed', results: { a: 1 } });
     expect(mockTables.ops_email_send_state.insert).not.toHaveBeenCalled();
+  });
+});
+
+// Owner 2026-11-20 "go" (data-check audit step 4): the sweep posted the same standing list every morning, 45 alerts
+// in 45 days, each closed by hand. A new failing check posts; a higher count alone does not; an unchanged list posts
+// again after 7 days; a closeout failure always posts and its alert is never closed or replaced by the sweep.
+describe('one alert, not one a day', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const fails = (key, count = 1) => det(key, async () => ({ count, ids: Array.from({ length: count }, (_, i) => `${key}-${i}`) }));
+  const lastRun = (items, alertedAgoMs) => {
+    mockTables.ops_email_send_state = mockChain({ first: null });
+    mockTables.system_settings = mockChain({
+      first: { value: JSON.stringify({ items, alertedAt: alertedAgoMs == null ? null : new Date(NOW.getTime() - alertedAgoMs).toISOString() }) },
+    });
+  };
+  const savedState = () => {
+    const call = mockTables.system_settings.insert.mock.calls.at(-1);
+    return call ? { key: call[0].key, ...JSON.parse(call[0].value) } : null;
+  };
+
+  test('the same failing check with a higher count posts nothing and keeps the time of the last alert', async () => {
+    lastRun(['b'], DAY);
+    const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [ok('a'), fails('b', 9)] });
+    expect(res).toEqual({ skipped: 'no_new_item', results: { a: 0, b: 9 } });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(mockTables.ops_email_send_state.insert).not.toHaveBeenCalled();
+    expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: ['b'], alertedAt: new Date(NOW.getTime() - DAY).toISOString() });
+  });
+
+  test('a check that was not failing on the last run posts an alert and stamps the alert time', async () => {
+    lastRun(['b'], DAY);
+    const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), fails('b')] });
+    expect(res).toMatchObject({ sent: true, violations: 2 });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: ['a', 'b'], alertedAt: NOW.toISOString() });
+  });
+
+  test('a check that cleared and came back is new: the last RUN is the comparison, not the last alert', async () => {
+    lastRun(['a', 'b'], 2 * DAY);
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), ok('b')] })).toMatchObject({ skipped: 'no_new_item' });
+    expect(savedState().items).toEqual(['a']); // b cleared: it is no longer on the list
+    lastRun(savedState().items, 2 * DAY);
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), fails('b')] })).toMatchObject({ sent: true });
+  });
+
+  test('a check that fails closed (cannot run) where it failed before is a new item', async () => {
+    lastRun(['b'], DAY);
+    const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [det('b', async () => { throw new Error('x'); })] });
+    expect(res).toMatchObject({ sent: true, unavailable: 1 });
+    expect(failingItems([{ key: 'b', ok: false, unavailable: true }, { key: 'a', ok: false }, { key: 'c', ok: true }])).toEqual(['a', 'b:unavailable']);
+  });
+
+  test('an unchanged list posts again on the 7th daily run after the last alert, not on the 6th', async () => {
+    // The 6th run is 6 days after the alert; the 7th is 7 days, give or take the cron's seconds of jitter.
+    expect(REPEAT_AFTER_MS).toBeGreaterThan(6 * DAY + 60 * 60 * 1000);
+    expect(REPEAT_AFTER_MS).toBeLessThan(7 * DAY - 60 * 60 * 1000);
+    lastRun(['b'], 6 * DAY + 30 * 1000);
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ skipped: 'no_new_item' });
+    lastRun(['b'], 7 * DAY - 30 * 1000);
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+  });
+
+  test('a closeout failure always posts, even when the last run listed one', async () => {
+    lastRun(['closeout_failed_facts'], DAY);
+    const res = await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('closeout_failed_facts')] });
+    expect(res).toMatchObject({ sent: true, violations: 1 });
+  });
+
+  test('a run state that is missing, unreadable or has no alert time never hides a finding', async () => {
+    mockTables.ops_email_send_state = mockChain({ first: null });
+    mockTables.system_settings = mockChain({ first: null });
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+    mockTables.system_settings = mockChain({ first: { value: '{not json' } });
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+    mockTables.system_settings = mockChain();
+    mockTables.system_settings.first = jest.fn(async () => { throw new Error('relation does not exist'); });
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+    lastRun(['b'], null);
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(4);
+  });
+
+  test('a failed send leaves the run state alone, so the next run still sees the item as new', async () => {
+    lastRun(['b'], DAY);
+    sendgrid.sendOne.mockRejectedValueOnce(new Error('sg 500'));
+    expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('a'), fails('b')] })).toEqual({ error: 'send_failed', results: { a: 1, b: 1 } });
+    expect(mockTables.system_settings.insert).not.toHaveBeenCalled();
+  });
+
+  test('a clean run retires only the replaceable alerts and empties the list, keeping the alert time', async () => {
+    lastRun(['b'], DAY);
+    const resolve = jest.spyOn(opsDigest, 'resolveOpsDigest').mockResolvedValue(1);
+    try {
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [ok('a'), ok('b')] })).toEqual({ skipped: 'clean', results: { a: 0, b: 0 } });
+      expect(resolve).toHaveBeenCalledWith({ key: DIGEST_KEY, source: null, resolvedBy: `${DIGEST_KEY}:clean-run`, whereMeta: REPLACEABLE });
+      expect(REPLACEABLE).toEqual({ closeoutClean: true });
+      expect(savedState()).toEqual({ key: RUN_STATE_KEY, items: [], alertedAt: new Date(NOW.getTime() - DAY).toISOString() });
+    } finally {
+      resolve.mockRestore();
+    }
+  });
+
+  test('in the app: the alert carries its closeout stamp, and it replaces only older alerts that carry the clean stamp', async () => {
+    gateEnvValue.mockReturnValue(true);
+    lastRun([], DAY);
+    mockTables.notifications = mockChain();
+    NotificationService._private = { openToCloser: (q) => q, doneColumns: () => ({}) };
+    NotificationService.notifyAdmin.mockImplementation(async (_category, _title, _body, options) => ({ id: 'new-alert', metadata: options.metadata }));
+    try {
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('b')] })).toMatchObject({ sent: true });
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ opsKey: DIGEST_KEY, closeoutClean: true });
+      expect(mockTables.notifications.whereRaw).toHaveBeenCalledWith('metadata @> ?::jsonb', [JSON.stringify({ closeoutClean: true })]);
+      expect(mockTables.notifications.update).toHaveBeenCalledTimes(1);
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+
+      // A closeout failure: stamped false, so no later run closes it. It still replaces the older clean-stamped alerts.
+      NotificationService.notifyAdmin.mockClear();
+      lastRun([], DAY);
+      expect(await runLeadToCashInvariantSweep({ now: NOW, detectors: [fails('closeout_failed_facts')] })).toMatchObject({ sent: true });
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ closeoutClean: false });
+    } finally {
+      delete NotificationService._private;
+      NotificationService.notifyAdmin.mockReset();
+    }
   });
 });
 

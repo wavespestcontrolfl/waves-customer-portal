@@ -249,7 +249,7 @@
  *   GATE_CARD_HOLD_PARK_ON_CANCEL=true (cancelling a visit with a one-time card hold PARKS the hold for the rebooked visit instead of releasing it; fees/offboarding/revocation unchanged)
  *   GATE_PEST_STRANDED_RECOVERY=<ISO timestamp> (stranded-activation recovery sweep covers PEST parents created at/after this epoch; set AFTER a rollout completes so old-instance bookings from the Railway overlap can never match; unset/invalid = pest excluded — owner ruling 2026-08-27)
  *   GATE_COMPLETION_AUTOPAY_CHARGE=true (completion auto-charge extends to EVERY autopay customer's collectible self-pay completion invoice — hard-capped at the visit's accepted price or membership dues rate; no anchor or above-anchor → office review bell, never an uncapped charge)
- *   GATE_LEAD_TO_CASH_SWEEP=true (daily 6:55 ET read-only lead-to-cash invariants sweep — FIX: email to contact@ only on findings; never writes)
+ *   GATE_LEAD_TO_CASH_SWEEP=true (daily 6:55 ET lead-to-cash invariants sweep, read-only on business data — one FIX alert when a check newly fails, not one a day; writes only its own alert and run state)
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
@@ -3748,8 +3748,9 @@ const gates = {
   // invariants.js): a read-only registry over existing detectors (churned
   // accounts with live plan state, WaveGuard field drift, recurring-schedule
   // anomalies, stale open visits, converted-but-open estimates, completion-
-  // lane catalog coverage, failed closeout facts). Emails contact@ ONLY when
-  // a detector finds something or cannot run. Dark everywhere until flipped
+  // lane catalog coverage, failed closeout facts). Alerts ONLY when a detector
+  // newly fails or cannot run, when a closeout failed, or once a week while the
+  // same list stands (one alert, not one a day). Dark everywhere until flipped
   // (it would email from every dev boot otherwise); kill = unset.
   leadToCashInvariantSweep: process.env.GATE_LEAD_TO_CASH_SWEEP === 'true',
 

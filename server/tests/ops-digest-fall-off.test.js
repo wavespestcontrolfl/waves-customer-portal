@@ -24,6 +24,9 @@ describe('retireIfClean', () => {
     await retireIfClean('gbp-sync-health', { lockKey: 'ops-digest:gbp-sync-health', notAfter: observation });
     expect(resolveOpsDigest).toHaveBeenLastCalledWith({ key: 'gbp-sync-health', source: null,
       resolvedBy: 'gbp-sync-health:clean-run', lockKey: 'ops-digest:gbp-sync-health', notAfter: observation });
+    await retireIfClean('lead-to-cash-invariants', { whereMeta: { closeoutClean: true } });
+    expect(resolveOpsDigest).toHaveBeenLastCalledWith({ key: 'lead-to-cash-invariants', source: null,
+      resolvedBy: 'lead-to-cash-invariants:clean-run', whereMeta: { closeoutClean: true } });
   });
 
   test('a stubbed digest module without resolveOpsDigest is a no-op', async () => {
