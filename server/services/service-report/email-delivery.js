@@ -801,6 +801,29 @@ async function sendServiceReportV1Email(recordId, {
   }
 
   const serviceLabel = serviceDisplayName(data);
+  // GATE_DOC_CROSS_SELL_EMAIL (owner 2026-11-21): one closing line pointing
+  // at the report page's add-a-service / referral cards, on the ACCOUNT
+  // HOLDER's copy only — service contacts on this send must not be invited
+  // to start the homeowner's plan. Names only the cards the live report
+  // shows (GATE_REPORT_CROSS_SELL, complaint visits suppressed), never a
+  // price. Best-effort: no line on any failure.
+  let offerLine = null;
+  const gates = require('../../config/feature-gates');
+  if (gates.isEnabled('docCrossSellEmail') && gates.isEnabled('reportCrossSell')) {
+    try {
+      const { buildCrossSellForServiceRecord } = require('./cross-sell-tap');
+      const crossSell = await buildCrossSellForServiceRecord(db, recordId);
+      const { reserviceReportCopyGateOn } = require('./reservice-report');
+      const callback = reserviceReportCopyGateOn() && service.is_callback === true;
+      const referral = callback ? null : await require('../referral-share').composeReferralCard();
+      offerLine = require('../doc-offer-email-line').docOfferEmailLine({
+        crossSell, referral, url: fullReportUrl, place: 'report',
+      });
+    } catch (err) {
+      logger.warn(`[report-email] offer line skipped (code=${err?.code || 'none'})`);
+    }
+  }
+  const { joinBodyAppends } = require('../doc-offer-email-line');
   const templateOutcomes = await Promise.allSettled(
     recipients.map((recipient) => EmailTemplateLibrary.sendTemplate({
         templateKey: 'service.report_ready',
@@ -814,7 +837,7 @@ async function sendServiceReportV1Email(recordId, {
           inspectionCreditNote,
           firstReport,
         }),
-        bodyAppend: followUsLine(),
+        bodyAppend: joinBodyAppends(recipient.role === 'primary' ? offerLine : null, followUsLine()),
         recipientType: 'customer',
         recipientId: service.customer_id || null,
         triggerEventId: `service_report_ready:${recordId}:${recipient.role || 'recipient'}`,

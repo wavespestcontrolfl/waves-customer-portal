@@ -1161,6 +1161,16 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     '— Waves Pest Control',
   ]);
 
+  // GATE_DOC_CROSS_SELL_EMAIL (owner 2026-11-21): one closing line pointing
+  // at the receipt page's add-a-service / referral cards — only the cards that
+  // page will show this customer (services/receipt-cards.js), never a price.
+  // Best-effort: no line on any failure.
+  let offerLine = null;
+  if (require('../config/feature-gates').isEnabled('docCrossSellEmail')) {
+    const cards = await require('./receipt-cards').receiptCardsForInvoiceId(invoice.id);
+    offerLine = require('./doc-offer-email-line').docOfferEmailLine({ ...cards, url: receiptUrl, place: 'receipt' });
+  }
+
   if (sendgrid.isConfigured()) {
     const receiptHandoff = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
     try {
@@ -1180,6 +1190,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         },
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
+        ...(offerLine ? { bodyAppend: offerLine } : {}),
         triggerEventId: `invoice_receipt:${invoice.id}`,
         idempotencyKey,
         categories: ['invoice_receipt'],

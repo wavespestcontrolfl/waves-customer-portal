@@ -17,21 +17,16 @@ const { loadPaymentForInvoice } = require('../services/receipt-payment');
 const { customerVisibleInvoiceNotes } = require('../services/invoice-notes');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
+const {
+  loadReceiptCardInvoice, receiptCardsEligible, receiptCardsForToken,
+} = require('../services/receipt-cards');
 
 // ── Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21) ──
-// The service report's two cards, on a PAID receipt, only when the receipt
-// link reaches the account holder alone (no third-party payer on the
-// invoice or the account, no service contact on the account — see
-// linkReachesOnlyAccountHolder). The offer needs the visit the invoice is
-// for (service_record_id) — it is the report's own composer and tap.
+// The service report's two cards on a paid receipt; who may see them lives
+// in services/receipt-cards.js (shared with the receipt email's line). The
+// referral card is static copy — enrollment happens only on the explicit
+// tap (POST /:token/referral-link), never on a GET.
 const RECEIPT_SURFACE = Object.freeze({ source: 'invoice_receipt', noun: 'receipt', title: 'invoice receipt' });
-
-function receiptCardsEligible(row) {
-  if (!isEnabled('docCrossSell') || !row?.customer_id || row.status !== 'paid') return false;
-  const { linkReachesOnlyAccountHolder } = require('../services/service-report/cross-sell-tap');
-  return linkReachesOnlyAccountHolder(row, [row.payer_id, row.customer_payer_id]);
-}
 
 // Same posture as the report's crossSellActionLimiter: a permanent bearer
 // link must not drive pricing recomputes or promoter enrollment at volume.
@@ -43,44 +38,6 @@ const receiptCardActionLimiter = rateLimit({
   keyGenerator: (req) => `receipt-xsell:${req.params.token || 'anon'}`,
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
-
-// What eligibility needs, and nothing more — never getByToken, whose
-// default records a view (a tap is not a view).
-function loadReceiptCardInvoice(token) {
-  if (typeof token !== 'string' || !token) return null;
-  const { SERVICE_CONTACT_COLUMNS } = require('../services/customer-contact');
-  return db('invoices as i')
-    .leftJoin('customers as c', 'i.customer_id', 'c.id')
-    .where('i.token', token)
-    .first(
-      'i.id', 'i.customer_id', 'i.status', 'i.payer_id', 'i.service_record_id',
-      'c.payer_id as customer_payer_id',
-      ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
-    );
-}
-
-// Best-effort, like the report: any failure renders the receipt without
-// the cards. The referral card is static copy — enrollment happens only on
-// the explicit tap (POST /:token/referral-link), never on a GET.
-async function receiptCards(token) {
-  try {
-    if (!isEnabled('docCrossSell')) return {};
-    const row = await loadReceiptCardInvoice(token);
-    if (!receiptCardsEligible(row)) return {};
-    const cards = {};
-    if (row.service_record_id) {
-      const { buildCrossSellForServiceRecord } = require('../services/service-report/cross-sell-tap');
-      const crossSell = await buildCrossSellForServiceRecord(db, row.service_record_id);
-      if (crossSell) cards.crossSell = crossSell;
-    }
-    const referral = await require('../services/referral-share').composeReferralCard();
-    if (referral) cards.referral = referral;
-    return cards;
-  } catch (err) {
-    logger.warn(`[receipt-v2] cards suppressed (code=${err?.code || 'none'})`);
-    return {};
-  }
-}
 
 // =========================================================================
 // GET /api/receipt/:token — Receipt view data (paid invoice record)
@@ -113,7 +70,7 @@ router.get('/:token', async (req, res, next) => {
       return null;
     });
 
-    const cards = await receiptCards(req.params.token);
+    const cards = await receiptCardsForToken(req.params.token);
 
     const refundAmount = payment ? Number(payment.refund_amount || 0) : 0;
     const totalPaid = payment ? Number(payment.amount || 0) : Number(data.total || 0);

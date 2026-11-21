@@ -3395,6 +3395,28 @@ above (production 2026-11-20, read-only: 3 of 654 completed visits lose a line
 from that PDF, none from the last 30 days; no visit has `ai_report` lists; no
 stored form value fails the screen).
 
+Receipt and tracker add-a-service + referral cards (owner 2026-11-21,
+`GATE_DOC_CROSS_SELL`, dark): `GET /api/receipt/:token` (a PAID invoice) and
+`GET /api/public/track/:token` (a COMPLETED visit) may carry the report's
+`crossSell` and `referral` keys — the same shapes, built by the report's own
+composer over the invoice's or visit's service record
+(`services/service-report/cross-sell-tap.js#buildCrossSellForServiceRecord`,
+which also applies the complaint-visit suppression). Only when the link
+reaches the account holder alone (`linkReachesOnlyAccountHolder`: no
+third-party payer on the invoice, job or account, no service contact on the
+account); otherwise, and with the gate off, the keys are absent and the
+payload is unchanged. A receipt with no `service_record_id`, or a visit whose
+report is not customer-deliverable, carries `referral` alone. The taps
+(`POST /api/receipt/:token/cross-sell` | `/referral-link`, `POST
+/api/public/track/:token/cross-sell` | `/referral-link`; body
+`{ metadata }` for cross-sell, the report card's metadata shape) run the
+report's own tap (`handleCrossSellTap`: recompute, 409 on any drift,
+one shared `service_requests` row with source `invoice_receipt` / `tracker`,
+`estimateUrl` with `GATE_REPORT_CLICK_TO_ESTIMATE`) and its referral composer
+(enrolls on the tap only). 404 when off or ineligible; 5 a minute per token;
+a receipt tap never records a receipt view. The receipt page shows the
+per-application price; the report card stays price-free (owner 2026-10-05).
+
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
 report payload's `crossSell` object offers the ONE next family the
@@ -7398,13 +7420,18 @@ the candidate date at the current ET day, so an overdue open occurrence is
 never announced as the next visit.
 Treat the track token and any change
 to its payload, in any state, as security-critical. The GET stays strictly
-read-only; it has exactly TWO write companions, both bounded.
+read-only; it has exactly FOUR write companions, all bounded (the two card
+taps below are dark behind `GATE_DOC_CROSS_SELL`).
 `POST /api/public/track/:token/stops-ahead` — same token gate + rate limit,
 ignores its body, and only persists the stops-ahead display-clamp floor
 (monotone LEAST, skip-unchanged) via `computeStopsAhead` before returning the
 displayable count. The floor write and its no-op reread are bound to the exact
 technician/date/window used for the count and recheck that the visit is still
 placed and eligible, so a concurrent Quick Move cannot stamp its parked row.
+`POST /api/public/track/:token/cross-sell` and `/referral-link` — the
+add-a-service and referral card taps on a COMPLETED visit (receipt/tracker
+cards entry below); 404 unless `GATE_DOC_CROSS_SELL` is on and the link
+reaches the account holder alone; 5 a minute per token.
 `POST /api/public/track/:token/view` — same token format
 gate, expiry fence (unknown / malformed / expired = the same generic 404, no
 write), privacy headers and router rate limit; ignores its body; records ONE

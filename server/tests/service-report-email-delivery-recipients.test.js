@@ -182,6 +182,35 @@ describe('service report email recipient delivery', () => {
     }
   });
 
+  // GATE_DOC_CROSS_SELL_EMAIL (owner 2026-11-21): the add-a-service /
+  // referral pointer rides the ACCOUNT HOLDER's copy only — the tenant on
+  // the same send is never invited to start the homeowner's plan.
+  test('the offer line goes to the account holder only, ahead of the follow line', async () => {
+    const gates = require('../config/feature-gates');
+    const gateSpy = jest.spyOn(gates, 'isEnabled')
+      .mockImplementation((key) => ['docCrossSellEmail', 'reportCrossSell'].includes(key));
+    const tap = require('../services/service-report/cross-sell-tap');
+    const offerSpy = jest.spyOn(tap, 'buildCrossSellForServiceRecord')
+      .mockResolvedValue({ serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', option: { perVisit: 62 } });
+    const referralSpy = jest.spyOn(require('../services/referral-share'), 'composeReferralCard')
+      .mockResolvedValue({ headline: 'Know someone?', cta: 'Send My Referral Link' });
+    try {
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+      await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      const byEmail = Object.fromEntries(EmailTemplateLibrary.sendTemplate.mock.calls.map(([args]) => [args.to, args.bodyAppend]));
+      expect(byEmail['owner@example.com'].text).toMatch(/^Add lawn care to your plan or refer a friend from your report: /);
+      expect(byEmail['owner@example.com'].text).toContain('Follow Waves on social:');
+      expect(byEmail['tenant@example.com'].text).not.toMatch(/lawn care|refer a friend/i);
+      expect(byEmail['tenant@example.com'].text).toContain('Follow Waves on social:');
+      for (const append of Object.values(byEmail)) expect(append.text).not.toContain('$');
+    } finally {
+      gateSpy.mockRestore();
+      offerSpy.mockRestore();
+      referralSpy.mockRestore();
+    }
+  });
+
   // Wraps the default table mocks: the record row gets `overrides`, and the
   // customers table (the account primary read) answers with `primaryRow`.
   function withRecord(overrides, primaryRow) {
