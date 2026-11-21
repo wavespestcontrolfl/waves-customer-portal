@@ -154,13 +154,14 @@ function payPerApplicationInvoiceParts({ setupFee = null, extraInvoiceRows = [],
 //   (`firstVisitFees`: the initial cockroach treatment, which the box does not list) or
 //   one-time services billed after completion: "application + one-time setup" is not all of it;
 // - `creditApplies`: the page knows of a credit the accept takes off this bill (a required
-//   booking deposit, an applied promo or referral code, a declared plan credit);
+//   booking deposit, an applied promo or referral code, a declared plan credit, a pest
+//   service the customer turned off);
 // - `cardPerApplicationTotal` is the proof. The accept bills the selected plan's rows less a
 //   service-preference credit and a plan-credit slice, and reads a partly priced bundle
 //   another way, so the box's first application can sit above the real invoice. The page
-//   passes the card prices added up only when its monthly average reconciles them with the
-//   plan's own monthly and no plan credit stands between (null otherwise). The line shows
-//   only when that sum is the box's first application to the cent.
+//   passes the price card's per-application price only for a one-service plan whose monthly
+//   average reconciles it with the plan's own monthly, credit-free (null otherwise). The
+//   line shows only when that price is the box's first application to the cent.
 const sameCents = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.round(a * 100) === Math.round(b * 100);
 
 // Anything that makes "application + one-time setup" not the whole first bill.

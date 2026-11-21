@@ -3975,22 +3975,22 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
 // Under the price (owner 2026-11-21, "ok a"). The first-visit line states the first bill
 // as one number before a time is picked: the same setup fee, first application and total
 // the "Reserve your spot" box lists afterwards (firstVisitTotalPreview), so that total is
-// no surprise. It is one real bill, not a plan total. `laterVisit` is the per-application
-// price of a one-service plan; a plan with several services bills different months
-// differently, so it gets no "each visit after that" sentence. The link goes down to the
-// Ask Waves box, which sits at the end of the page.
+// no surprise. It is one real bill, not a plan total. It exists only on a one-service plan
+// (the setup fee is charged on a pest-only or mosquito-only plan, never on a bundle), so
+// "each visit after that" is that plan's one per-application price. The link goes down to
+// the Ask Waves box, which sits at the end of the page.
 // The sentence is the owner-approved one, word for word (decision page, 2026-11-21). "First
 // visit" and "Each visit after that" name bills; the unit on every price stays "per
 // application" (AGENTS.md). Change these words only on the owner's word.
-export function PriceFollowUps({ firstVisit = null, laterVisit = null, severalServices = false, onAsk = null }) {
+export function PriceFollowUps({ firstVisit = null, onAsk = null }) {
   if (!firstVisit && !onAsk) return null;
   return (
     <div data-price-follow-ups="" style={{ display: 'grid', gap: 4, justifyItems: 'center', textAlign: 'center', margin: '4px 0 12px' }}>
       {firstVisit ? (
         <div data-first-visit-line="" style={{ fontSize: 16, color: ESTIMATE_TEXT, lineHeight: 1.5 }}>
           First visit: <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(firstVisit.total)}</strong>
-          {` (${fmtMoney(firstVisit.firstApplication)} ${severalServices ? 'applications' : 'application'} + ${fmtMoney(firstVisit.setup)} one-time setup).`}
-          {laterVisit > 0 ? ` Each visit after that: ${fmtMoney(laterVisit)}.` : ''}
+          {` (${fmtMoney(firstVisit.firstApplication)} application + ${fmtMoney(firstVisit.setup)} one-time setup).`}
+          {` Each visit after that: ${fmtMoney(firstVisit.firstApplication)}.`}
         </div>
       ) : null}
       {onAsk ? (
@@ -9712,16 +9712,24 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const applicationMonths = monthlyAverage ? applicationMonthsBreakdown(monthlyAverage.model) : null;
   // First-visit line under the price: the inputs are the ones the "Reserve your spot" box
   // gets below, so the line and that box's "Invoice total" are one figure. The monthly
-  // average is the proof the helper asks for: its model exists only when the card prices
-  // add up to the plan's own monthly, and a plan credit shows as `credit`.
+  // average is the proof the helper asks for: its model exists only when the card price
+  // adds up to the plan's own monthly, and a plan credit shows as `credit`. One service
+  // only: the setup fee is never charged on a bundle.
   const averageModel = monthlyAverage?.model || null;
   // Credits the accept takes off the first invoice, which the box does not show: the booking
   // deposit, a promo or referral code on this estimate (served, or entered in this session),
-  // and a plan credit on the selected cadence (read directly, not through the average: its
-  // rounding band would let a very small credit pass).
+  // a plan credit on the selected cadence and a pest service the customer turned off. The
+  // last two are read directly, not through the average: its rounding band would let a very
+  // small credit pass.
+  const serviceTurnedOff = services.filter((section) => section?.isRecurring).some((section) => {
+    const chosen = selectedAddOns[section.key];
+    return (selectedFrequencyForSection(section, selected)?.addOns || [])
+      .some((addOn) => (chosen ? !chosen.has(addOn.key) : addOn.preChecked === false));
+  });
   const firstBillCreditApplies = data?.depositPolicy?.required === true
     || !!data?.promoCode?.applied
     || codeAppliedHere
+    || serviceTurnedOff
     || selectedPlanCreditDeclared({ services, selected, selectedCombo, combinedFrequency, pricing });
   const firstVisitLine = invoiceOnlyAccept ? null : firstVisitTotalPreview({
     serviceMode,
@@ -9734,15 +9742,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     oneTimeExtrasTotal: oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode),
     firstVisitFees: pricing.firstVisitFees,
     creditApplies: firstBillCreditApplies,
-    cardPerApplicationTotal: averageModel && !averageModel.credit
-      ? averageModel.services.reduce((sum, service) => sum + service.perApplication, 0)
+    cardPerApplicationTotal: averageModel && !averageModel.credit && averageModel.services.length === 1
+      ? averageModel.services[0].perApplication
       : null,
   });
-  // "Each visit after that" only where one number is true: a one-service plan (the line
-  // exists, so its card price is that first application).
-  const firstVisitLaterAmount = firstVisitLine && averageModel.services.length === 1
-    ? firstVisitLine.firstApplication
-    : null;
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -11085,8 +11088,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             {renderQuoteDetailCards()}
             <PriceFollowUps
               firstVisit={firstVisitLine}
-              laterVisit={firstVisitLaterAmount}
-              severalServices={(combinedFrequency?.perServiceTreatments?.length || services.filter((s) => s?.isRecurring).length) > 1}
               // The link exists only where this layout renders the Ask bar at its end.
               onAsk={glassContent && !isRegulatedCertificateSurface ? scrollToAskSection : null}
             />

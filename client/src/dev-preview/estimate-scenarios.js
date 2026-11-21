@@ -10,5 +10,5 @@ export const ESTIMATE_SCENARIOS = [
   ['proposal_terms', 'Proposal with terms'], ['proposal_structured', 'Structured proposal'],
   ['proposal_programs', 'Proposal programs'], ['preslab', 'Pre-slab termite'],
   ['pest_average', 'Pest, monthly average'], ['bundle_average', 'Bundle, monthly average'], ['pest_mosquito_months', 'Pest + mosquito, application months'],
-  ['pest_first_visit', 'Pest, first-visit line'], ['pest_mosquito_first_visit', 'Pest + mosquito, first-visit line'],
+  ['pest_first_visit', 'Pest, first-visit line'],
 ];
