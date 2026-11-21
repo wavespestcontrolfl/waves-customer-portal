@@ -877,6 +877,17 @@ describe('buildReportCrossSell', () => {
       expect(check({ inputs, result: cleanNoted([{ type: 'STRUCTURE', priority: 'HIGH', text: 'Two-story home' }]) })).toBe(false);
       expect(check({ inputs, result: cleanNoted([{ type: 'LAWN_CUSTOM_QUOTE', priority: 'HIGH', text: 'Turf area exceeds 20,000 sq ft.' }]) })).toBe(true);
       expect(check({ inputs: { ...inputs, notes: [{ type: 'LAWN_CUSTOM_QUOTE' }] }, result: cleanNoted([]) })).toBe(false);
+      // The snake_case spellings of the quote-required flag on a stored
+      // recurring row (pre-push r13): the estimate page and the converter
+      // take both, so the seed check does too. Only `true` counts, and a
+      // flag in the stored request is not a row's.
+      const recurringRow = (extra) => ({ fieldVerify: [], recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 45, ...extra }] } });
+      expect(check({ inputs, result: recurringRow({}) })).toBe(false);
+      for (const key of ['quote_required', 'requires_custom_quote']) {
+        expect([key, check({ inputs, result: recurringRow({ [key]: true }) })]).toEqual([key, true]);
+        expect([key, check({ inputs, result: recurringRow({ [key]: false }) })]).toEqual([key, false]);
+        expect([key, check({ inputs: { ...inputs, [key]: true }, result: recurringRow({}) })]).toEqual([key, false]);
+      }
       // So a marker in either result counts, whichever is the newer one. A
       // marked row left behind by a revision keeps the quote button, as it
       // does on main; the reverse case must count.

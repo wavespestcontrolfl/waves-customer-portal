@@ -337,6 +337,12 @@ function positiveOrNull(value) {
 // customQuoteFlag, and the mapped result keeps the note but drops that flag
 // from a one-time lawn row (pre-push r12 on this branch). No other note type
 // states a review requirement.
+// A stored row can also spell the quote-required flag in snake_case
+// (quote_required, requires_custom_quote). No writer in the code base does,
+// and on 2026-11-21 no stored estimate held either key, but the two readers
+// of stored recurring rows take both spellings (estimate-converter.js
+// recurringRowRequiresQuote, estimate-public.js), so a row they treat as
+// quote-required is not a clean seed here (pre-push r13).
 //
 // WHERE it looks: every object of the stored blob. The blob has kept its
 // rows in many places (raw lineItems, the mapped recurring.services and
@@ -435,6 +441,7 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } =
     : c);
   const markedForReview = (c, turfCounts) => listsCodes(c.fieldVerify) || listsCodes(c.fieldVerifyFlags)
     || (turfCounts && listsCodes(c.turfFlags)) || c.type === ENGINE_REVIEW_NOTE_TYPE
+    || c.quote_required === true || c.requires_custom_quote === true
     || lineNeedsReviewBeforeExactPrice(asRow(c), { turfGrade: turfCounts });
   const turfSummaryCounts = (result) => replaysLawnSize || !Array.isArray(result.fieldVerify);
   const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';
