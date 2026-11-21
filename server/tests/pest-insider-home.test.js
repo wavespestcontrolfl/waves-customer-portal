@@ -94,9 +94,13 @@ describe('loadHomeFacts', () => {
       row({ subscriber_id: 2, ...home, last_stamps: [stamp], last_frozen: [{ line1: '9 Other Road', line2: null, city: 'Bradenton', state: 'FL', zip: '34202' }] }),
       row({ subscriber_id: 3, ...home, last_stamps: [], last_frozen: [{ line1: '100 Palm Drive', line2: null, city: 'Bradenton', zip: '34202' }, { line1: '9 Other Road', city: 'Bradenton', zip: '34202' }] }),
       row({ subscriber_id: 4, ...home, last_stamps: [stamp], last_frozen: [] }),
+      // A frozen address is complete: it never borrows the home's unit. The customer moved to Apt 4 at the same street.
+      row({ subscriber_id: 5, ...home, home_line2: 'Apt 4', last_stamps: [stamp], last_frozen: [{ line1: '100 Palm Drive', line2: null, city: 'Bradenton', zip: '34202' }] }),
+      row({ subscriber_id: 6, ...home, home_line2: 'Apt 4', last_stamps: [stamp], last_frozen: [{ line1: '100 Palm Drive', line2: 'Apt 4', city: 'Bradenton', zip: '34202' }] }),
+      row({ subscriber_id: 7, ...home, last_stamps: [stamp], last_frozen: [{ line1: '100 Palm Drive', line2: 'Apt 4', city: 'Bradenton', zip: '34202' }] }),
     ]]);
-    const facts = await loadHomeFacts(conn, [1, 2, 3, 4], NOW);
-    expect([...facts.keys()]).toEqual([1, 4]);
+    const facts = await loadHomeFacts(conn, [1, 2, 3, 4, 5, 6, 7], NOW);
+    expect([...facts.keys()]).toEqual([1, 4, 6]);
   });
 
   test('the one saved property must be the home on file: a property at another address has no entry', async () => {
@@ -202,6 +206,11 @@ describe('loadHomeFacts', () => {
     expect(calls[0].sql).toContain('LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id');
     expect(calls[0].sql).toContain('LEFT JOIN estimates e ON e.id = ss.source_estimate_id');
     expect(calls[0].sql).toContain('c.has_multi_home IS NOT TRUE');
+    // The mailbox must not be another live customer's own, service-contact or billing address.
+    for (const column of ['o.email', 'o.service_contact_email', 'o.service_contact2_email', 'o.service_contact3_email', 'np.billing_email']) {
+      expect(calls[0].sql).toContain(`TRIM(${column})`);
+    }
+    expect(calls[0].sql).toContain('FROM notification_prefs np JOIN customers o ON o.id = np.customer_id');
     expect(calls[0].sql).toContain("r.service_data->'reportIdentitySnapshot'->'address'");
     // The outer SELECT returns what the lateral computed (a rule on a column the query does not return never runs).
     expect(calls[0].sql).toContain('t.last_types, t.last_stamps, t.last_frozen,');

@@ -184,6 +184,26 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     expect((await loadHomeFacts(db, [s], NOW)).has(s)).toBe(false);
   });
 
+  test.each([
+    ['service_contact_email', (address) => customer({ service_contact_email: address })],
+    ['service_contact3_email', (address) => customer({ service_contact3_email: address.toUpperCase() })],
+    ['notification_prefs.billing_email', async (address) => db('notification_prefs').insert({ customer_id: await customer(), billing_email: address })],
+  ])('a mailbox that is also another live customer\'s %s leaves the reader out', async (_column, addOwner) => {
+    const { c, s } = await eligible();
+    const { email } = await db('customers').where({ id: c }).first('email');
+    expect((await loadHomeFacts(db, [s], NOW)).has(s)).toBe(true);
+    await addOwner(email);
+    expect((await loadHomeFacts(db, [s], NOW)).has(s)).toBe(false);
+  });
+
+  test('another live customer on the same Gmail mailbox, in another spelling, leaves the reader out', async () => {
+    const tag = randomUUID().slice(0, 12);
+    const { s } = await eligible({ email: `fixture.${tag}@gmail.com` });
+    expect((await loadHomeFacts(db, [s], NOW)).has(s)).toBe(true);
+    await customer({ email: `fixture${tag}+other@googlemail.com` });
+    expect((await loadHomeFacts(db, [s], NOW)).has(s)).toBe(false);
+  });
+
   test('a sibling profile on the account leaves the reader out, whichever profile the reader is linked to; an inactive or archived sibling does not', async () => {
     const [account] = await db('customer_accounts').insert({ first_name: 'Synthetic' }).returning('id');
     const accountId = typeof account === 'object' ? account.id : account;
