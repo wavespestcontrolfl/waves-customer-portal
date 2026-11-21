@@ -234,9 +234,11 @@ async function invoiceRefusal(invoice, dueCents, amountCents, { part = false } =
 }
 
 // The visit the paid closeout would complete (null = none); a probe that cannot read refuses (fail closed).
+// noHold (GATE_REPORT_AFTER_PAY): the payment this card records carries the card's pin, and a pinned payment never holds its visit
+// for the report, so the probe names the visit that payment closes now, as with the gate off.
 async function closeoutProbe(invoice) {
   try {
-    return { closeout: await require('../invoice-issued-closeout').issuedCloseoutTarget(invoice, { trigger: 'paid' }) };
+    return { closeout: await require('../invoice-issued-closeout').issuedCloseoutTarget(invoice, { trigger: 'paid', noHold: true }) };
   } catch {
     return { error: refusal('The bar could not check whether this payment would also complete a linked visit, so it was not offered. Record the payment from the Invoices page.', 'effects_check_failed', { invoice_id: invoice.id }) };
   }

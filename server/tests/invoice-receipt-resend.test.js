@@ -92,7 +92,8 @@ test('both legs: stamps receipt_sent_at with the trimmed, cut memo, writes the a
   expect(out.status).toBe(200);
   expect(out.body).toMatchObject({ ok: true, email: { ok: true }, sms: { ok: true }, invoice: { id: ID } });
   expect(sendReceiptEmail).toHaveBeenCalledWith(ID, { memo: 'x'.repeat(400), beforeProviderHandoff: expect.any(Function) });
-  expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: ID, trigger: 'paid', actorTechnicianId: 'admin-1' });
+  // recordHold: false (GATE_REPORT_AFTER_PAY): a resend retries a close and records no hold, so it does what its card previewed.
+  expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: ID, trigger: 'paid', actorTechnicianId: 'admin-1', recordHold: false });
   expect(InvoiceService.sendReceipt).toHaveBeenCalledWith(ID, { force: true, recordActivity: false, hasEmailLeg: true, operatorInitiated: true, beforeProviderHandoff: expect.any(Function) });
   expect(updates).toContainEqual({ table: 'invoices', patch: { receipt_sent_at: 'now()', receipt_memo: 'x'.repeat(400) } });
   expect(activity[0].row).toMatchObject({ action: 'invoice_receipt_sent', description: expect.stringMatching(/WPC-2026-0900 \(email \+ sms\) — memo: x{80}…/) });

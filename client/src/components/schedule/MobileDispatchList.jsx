@@ -22,6 +22,7 @@ import DispatchReadinessStrip from './DispatchReadinessStrip';
 import { ScheduleAccessLine } from './ScheduleAccess';
 import { openHoursForDay, hourToHHMM, useHourClock, NOT_OCCUPYING } from './openHours';
 import { formatTimeWindow } from './timeWindow';
+import { paidReportNotSent } from './visitInvoice';
 import { directionsHref } from '../../lib/directionsHref';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -305,6 +306,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onViewAudit, o
               // Completed but the closeout (invoice / report / text) is still
               // owed — tapping the row reopens the completion panel to resume.
               <Badge tone="alert">Closeout owed</Badge>
+            )}
+            {paidReportNotSent(service) && (
+              // Arrived and paid, report still owed: a same-day payment no
+              // longer closes the visit (GATE_REPORT_AFTER_PAY). Tapping the
+              // row opens the completion, as for any open visit.
+              <Badge tone="warn">Paid, report not sent</Badge>
             )}
             {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
               <span

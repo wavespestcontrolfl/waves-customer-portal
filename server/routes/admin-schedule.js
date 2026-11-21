@@ -137,7 +137,7 @@ const {
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
-const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
@@ -5777,6 +5777,13 @@ async function loadProjectCompletionContextByServiceId(services) {
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const linkedProjectLookupFailed = linkedProjectsByServiceId === null;
   const addOnVisits = await areaAddOnVisitIdsForFeed(rows);
+  // GATE_REPORT_AFTER_PAY: the visits a payment holds open for the report (invoice-issued-closeout.js reportAfterPayHeldVisitIds;
+  // empty with the gate off). A failed lookup shows no badge.
+  const heldForReport = await require('../services/invoice-issued-closeout').reportAfterPayHeldVisitIds(db, rows.map((s) => s.id))
+    .catch((e) => {
+      logger.warn(`[schedule] report-after-pay hold lookup failed: ${e.message}`);
+      return new Set();
+    });
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
@@ -5872,6 +5879,21 @@ async function loadProjectCompletionContextByServiceId(services) {
       // service with its own typed findings (cockroach, German roach
       // knockdowns): /complete requires them and the report flow has none.
       fastCompleteReportEnabled: fastCompleteReportOffered(completionProfile),
+      // GATE_REPORT_AFTER_PAY (owner 2026-11-19, *report after pay*): a payment on the visit day leaves an arrived visit open for
+      // its technician's report. True only while the gate is on and this visit's completion sends the customer a report (the
+      // completion's own delivery posture, as complete-scheduled-service.js reads it), so Dispatch's "Paid, report not sent"
+      // badge never names a report that will not go out. No profile (a lookup outage) is false.
+      reportAfterPayEnabled: Boolean(completionProfile) && require('../config/feature-gates').reportAfterPayLive()
+        && !resolveCompletionDeliveryPosture({
+          typedFindingsType: completionProfile.findingsType || null,
+          completionMode: completionProfile.completionMode,
+          profileDeliveryMode: completionProfile.deliveryMode,
+          specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
+          profileCategory: completionProfile.category,
+        }).suppressCustomerComms,
+      // GATE_REPORT_AFTER_PAY: a payment holds this visit open for its report (pre-push audit round 6). The badge reads this, not the
+      // row's newest bill: a bill the office adds after the payment must not hide the report still owed.
+      reportAfterPayHeld: heldForReport.has(String(service.id)),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -7187,6 +7209,9 @@ router.get('/', async (req, res, next) => {
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_INVOICED_VISITS — see loadProjectCompletionContextByServiceId.
         invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
+        // GATE_REPORT_AFTER_PAY — see loadProjectCompletionContextByServiceId.
+        reportAfterPayEnabled: projectCompletionContext.reportAfterPayEnabled === true,
+        reportAfterPayHeld: projectCompletionContext.reportAfterPayHeld === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
@@ -7864,6 +7889,8 @@ router.get('/week', async (req, res, next) => {
           assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
+          reportAfterPayEnabled: projectCompletionContext.reportAfterPayEnabled === true,
+          reportAfterPayHeld: projectCompletionContext.reportAfterPayHeld === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
