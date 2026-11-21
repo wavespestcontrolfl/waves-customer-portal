@@ -139,4 +139,21 @@ describe('TeamTab shift hours', () => {
     expect(writes[0].method).toBe('POST');
     expect(writes[0].body.shiftHours).toBeNull();
   });
+
+  // The edit above sends no shiftHours while nothing changed, gate on or off,
+  // so only the add form shows that the gate itself keeps the field off the wire.
+  it('gate off: the add form has no row and posts nothing about shift hours', async () => {
+    const { writes } = setup(BASE_TECH, { enabled: false });
+    fireEvent.click(await screen.findByRole('button', { name: '+ Add Technician' }));
+    expect(screen.queryByLabelText('Shift start')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('e.g. John D.'), { target: { value: 'New Tech' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0].method).toBe('POST');
+    expect(writes[0].body.name).toBe('New Tech');
+    expect(writes[0].body).not.toHaveProperty('shiftHours');
+    // The form's own fields never travel, whatever the gate says.
+    expect(writes[0].body).not.toHaveProperty('shiftStart');
+    expect(writes[0].body).not.toHaveProperty('shiftEnd');
+  });
 });

@@ -449,10 +449,12 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
       for (const m of ['where', 'whereNot', 'whereNotNull', 'whereIn', 'whereRaw', 'groupBy', 'select', 'min']) {
         chain[m] = jest.fn((...args) => { calls[table].push([m, ...args]); return chain; });
       }
-      const result = table === 'technicians'
+      // Settled only when the chain is awaited: a rejection made up front and never
+      // awaited (the read under test threw first) would end the whole test process.
+      const settle = () => (table === 'technicians'
         ? Promise.resolve(techRows)
-        : clockError ? Promise.reject(clockError) : Promise.resolve(clockRows);
-      chain.then = (res, rej) => result.then(res, rej);
+        : clockError ? Promise.reject(clockError) : Promise.resolve(clockRows));
+      chain.then = (res, rej) => settle().then(res, rej);
       return chain;
     });
     return { conn, calls };
