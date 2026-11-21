@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const { startCustomerRainRank, withDisplayTier, rainTierDiff } = require('../services/scheduling/customer-rain-rank');
 const db = require('../models/db');
-const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
+const { isAssignable, assertAssignableTechnician, loadTechShifts, shiftBounds } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
@@ -1903,6 +1903,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // Slot rules come from the shared bookingSlotWindow derivation so the
   // /confirm commit path enforces exactly what is offered here.
   const { slotGridMinutes, dayStartMin, dayEndMin } = bookingSlotWindow(config);
+  // GATE_TECH_SHIFT_HOURS (technician-eligibility.js shiftBounds): each
+  // technician's shift for a date. The finder holds its own starts inside
+  // the shift; the hours this builder adds itself (an open day's block, a
+  // gap's later hours, a start snapped to the grid) are held to it in
+  // addCandidate. Gate off: no read, and every day keeps its own bounds.
+  const shiftOf = await loadTechShifts(db);
   // Offer must mirror the /confirm commit gate (the #2704 estimate-surface
   // rule, filterCollidingSlots' dead-end-loop incident): createSelfBooking
   // blocks on unassigned zone rows and live customer-NULL estimate holds,
@@ -1985,7 +1991,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const addCandidate = (slot, startMin) => {
     const endMin = startMin + duration;
     if (!isWholeHour(startMin)) return;
-    if (startMin < dayStartMin || endMin > dayEndMin) return;
+    const day = shiftBounds(shiftOf(slot.technician.id, slot.date), dayStartMin, dayEndMin);
+    if (startMin < day.openMin || endMin > day.closeMin) return;
     // The documented public grid (09:00-17:00) is narrower than dayStartMin
     // (08:00, this file's own day-start default — matched to the voice
     // agent's 8am-6pm business-hours bound, call-recording-processor.js) —

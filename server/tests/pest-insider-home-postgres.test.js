@@ -396,6 +396,61 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     expect(await lineFor((c) => plain(c, { service_type: `Twin name ${tag}` }))).toBeNull();
   });
 
+  test('a visit that performed no work keeps its date and prints no label; a frozen add-on line of another category makes the day two lines', async () => {
+    const visitOf = async (recordOver) => {
+      const c = await customer();
+      await db('service_records').insert({ id: randomUUID(), customer_id: c, service_date: '2026-11-05', service_type: 'Fixture visit, no catalog name', status: 'completed', ...recordOver });
+      const s = await reader(c);
+      return (await loadHomeFacts(db, [s], NOW)).get(s).lastVisit;
+    };
+    const lawn = await catalogService('lawn_care');
+    const pest = await catalogService('pest_control');
+    const sweep = await catalogService('pest_control');
+    const mosquito = await catalogService('mosquito');
+    const data = (key, addons = []) => JSON.stringify({ completedServiceKey: key, completedAddonLines: addons.map((serviceKey) => ({ serviceKey })) });
+    expect(await visitOf({ service_data: data(lawn), structured_notes: JSON.stringify({ visitOutcome: 'completed' }) })).toEqual({ date: '2026-11-05', line: 'lawn' });
+    expect(await visitOf({ service_data: data(lawn), structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }) })).toEqual({ date: '2026-11-05', line: null });
+    expect(await visitOf({ service_data: data(pest), structured_notes: JSON.stringify({ visitOutcome: 'inspection_only' }) })).toEqual({ date: '2026-11-05', line: null });
+    expect(await visitOf({ service_data: data(pest, [sweep]) })).toEqual({ date: '2026-11-05', line: 'pest' });
+    expect(await visitOf({ service_data: data(pest, [mosquito]) })).toEqual({ date: '2026-11-05', line: null });
+    // An add-on list that is not a list, or a line with a key the catalog does not have, changes nothing.
+    expect(await visitOf({ service_data: JSON.stringify({ completedServiceKey: pest, completedAddonLines: 'none' }) })).toEqual({ date: '2026-11-05', line: 'pest' });
+    expect(await visitOf({ service_data: data(pest, [`gone_${randomUUID().slice(0, 8)}`]) })).toEqual({ date: '2026-11-05', line: 'pest' });
+    // A frozen line with no key is read by its catalog id.
+    const mosquitoId = (await db('services').where({ service_key: mosquito }).first('id')).id;
+    expect(await visitOf({ service_data: JSON.stringify({ completedServiceKey: pest, completedAddonLines: [{ serviceId: mosquitoId, serviceName: 'Typed by the office' }] }) }))
+      .toEqual({ date: '2026-11-05', line: null });
+    expect(await visitOf({ service_data: JSON.stringify({ completedServiceKey: pest, completedAddonLines: [{ serviceId: null, serviceName: 'Mosquito Control' }, 'text', 7, null] }) }))
+      .toEqual({ date: '2026-11-05', line: 'pest' });
+  });
+
+  test('a record with no frozen add-on list reads its appointment\'s add-on rows (key snapshot, else catalog id); a record with a list never does', async () => {
+    const pest = await catalogService('pest_control');
+    const mosquito = await catalogService('mosquito');
+    const termite = await catalogService('termite');
+    const termiteId = (await db('services').where({ service_key: termite }).first('id')).id;
+    const visitWithAddon = async (addon, serviceData) => {
+      const c = await customer();
+      const appointment = randomUUID();
+      await db('scheduled_services').insert({ id: appointment, customer_id: c, scheduled_date: '2026-11-05', service_type: 'Fixture visit, no catalog name', status: 'completed' });
+      await db('scheduled_service_addons').insert({ scheduled_service_id: appointment, service_name: 'Fixture add-on', ...addon });
+      await db('service_records').insert({
+        id: randomUUID(), customer_id: c, scheduled_service_id: appointment, service_date: '2026-11-05', service_type: 'Fixture visit, no catalog name', status: 'completed',
+        service_data: JSON.stringify(serviceData),
+      });
+      const s = await reader(c);
+      return (await loadHomeFacts(db, [s], NOW)).get(s).lastVisit.line;
+    };
+    // No frozen list: the appointment's add-on of another line makes the day two lines.
+    expect(await visitWithAddon({ service_key_snapshot: mosquito }, { completedServiceKey: pest })).toBeNull();
+    expect(await visitWithAddon({ service_id: termiteId }, { completedServiceKey: pest })).toBeNull();
+    // An add-on of the same line, or one with no key and no id, changes nothing.
+    expect(await visitWithAddon({ service_key_snapshot: pest }, { completedServiceKey: pest })).toBe('pest');
+    expect(await visitWithAddon({}, { completedServiceKey: pest })).toBe('pest');
+    // A frozen list, even an empty one, is the record: a later add-on row on the appointment is not read.
+    expect(await visitWithAddon({ service_key_snapshot: mosquito }, { completedServiceKey: pest, completedAddonLines: [] })).toBe('pest');
+  });
+
   test('a customer staff marked multi-home, or one with no street on file, has no entry', async () => {
     // has_multi_home: a second premises that never got a customer_properties row.
     const { s: flagged } = await eligible({ has_multi_home: true });

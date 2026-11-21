@@ -49,16 +49,26 @@ const neutralizeHomeTokens = (content) => String(content || '').split(HOME_TEXT_
 // and the catalog gives that key one category. A record with no key (a visit before the
 // keys) counts only when its name is one catalog name, letter for letter. A service name
 // is never read for words: "Core Aeration" holds "rat", and the placeholder appointment
-// holds the company's own "Pest Control". `categories` is every category of that day.
+// holds the company's own "Pest Control". `categories` is every category of that day
+// (one list per record, or one flat list).
 // Exactly one line across the day is that line; none, or more than one, has none: the
 // block prints no label then. Specialty and inspection work has no line of its own.
+// Every add-on line the completion froze (service_data.completedAddonLines) counts as a
+// service of that day, so a pest visit with a mosquito add-on is a day with two lines. A
+// line is read by its frozen catalog key, else by its catalog id. A record from before the
+// frozen list reads its appointment's add-on rows the same way (key snapshot, else id), as
+// the service report does. A
+// record whose outcome performed no work (visit-outcomes.js: an inspection only, or the
+// customer declined) keeps the visit's date and gives no category.
+const performedSql = (alias) => `COALESCE(${alias}.structured_notes->>'visitOutcome', '') NOT IN (${
+  require('../visit-outcomes').NON_PERFORMED_VISIT_OUTCOMES.map((outcome) => `'${outcome}'`).join(', ')})`;
 const CATEGORY_LINE = new Map([
   ['pest_control', 'pest'], ['lawn_care', 'lawn'], ['mosquito', 'mosquito'],
   ['termite', 'termite'], ['rodent', 'rodent'], ['tree_shrub', 'tree_shrub'],
 ]);
 function serviceLineOf(categories) {
   const lines = new Set();
-  for (const category of Array.isArray(categories) ? categories : [categories]) {
+  for (const category of (Array.isArray(categories) ? categories : [categories]).flat()) {
     const line = CATEGORY_LINE.get(String(category ?? '').trim().toLowerCase());
     if (line) lines.add(line);
   }
@@ -217,7 +227,7 @@ JOIN LATERAL (
   WHERE r.customer_id = c.id AND COALESCE(r.status, 'completed') = 'completed' AND r.service_date <= CAST(? AS date)
 ) v ON v.last_date IS NOT NULL
 JOIN LATERAL (
-  SELECT array_agg(DISTINCT sv.category) FILTER (WHERE sv.category IS NOT NULL) AS last_categories,
+  SELECT COALESCE(json_agg(sv.categories) FILTER (WHERE sv.categories IS NOT NULL), '[]'::json) AS last_categories,
          COALESCE(json_agg(json_build_object(
            'property_id', ss.property_id, 'address_line1', ss.service_address_line1, 'address_line2', ss.service_address_line2,
            'city', ss.service_address_city, 'zip', ss.service_address_zip,
@@ -230,11 +240,26 @@ JOIN LATERAL (
   LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id
   LEFT JOIN estimates e ON e.id = ss.source_estimate_id
   LEFT JOIN LATERAL (
-    SELECT CASE WHEN COUNT(DISTINCT s.category) = 1 THEN MIN(s.category) END AS category
-    FROM services s
-    WHERE s.service_key = NULLIF(TRIM(r.service_data->>'completedServiceKey'), '')
-       OR (NULLIF(TRIM(r.service_data->>'completedServiceKey'), '') IS NULL AND LOWER(TRIM(s.name)) = LOWER(TRIM(r.service_type)))
-  ) sv ON true
+    SELECT array_agg(DISTINCT k.category) FILTER (WHERE k.category IS NOT NULL) AS categories
+    FROM (
+      SELECT CASE WHEN COUNT(DISTINCT s.category) = 1 THEN MIN(s.category) END AS category
+      FROM services s
+      WHERE s.service_key = NULLIF(TRIM(r.service_data->>'completedServiceKey'), '')
+         OR (NULLIF(TRIM(r.service_data->>'completedServiceKey'), '') IS NULL AND LOWER(TRIM(s.name)) = LOWER(TRIM(r.service_type)))
+      UNION ALL
+      SELECT s.category
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(r.service_data->'completedAddonLines') = 'array'
+                                     THEN r.service_data->'completedAddonLines' ELSE '[]'::jsonb END) AS line
+      JOIN services s ON s.service_key = line->>'serviceKey'
+                      OR (line->>'serviceKey' IS NULL AND s.id::text = line->>'serviceId')
+      UNION ALL
+      SELECT s.category
+      FROM scheduled_service_addons a
+      JOIN services s ON s.service_key = a.service_key_snapshot OR (a.service_key_snapshot IS NULL AND s.id = a.service_id)
+      WHERE a.scheduled_service_id = r.scheduled_service_id
+        AND jsonb_typeof(r.service_data->'completedAddonLines') IS DISTINCT FROM 'array'
+    ) k
+  ) sv ON ${performedSql('r')}
   WHERE r.customer_id = c.id AND COALESCE(r.status, 'completed') = 'completed' AND r.service_date = v.last_date
 ) t ON true
 WHERE ns.id IN (${idList})
