@@ -36,6 +36,7 @@ const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, C
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
+const { hasHomeToken, loadHomeFacts } = require('./pest-insider/home');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
@@ -464,6 +465,48 @@ async function loadPersonalizationContext(subscribers) {
     logger.warn(`[newsletter] personalization context load failed: ${err.message}`);
   }
   return map;
+}
+
+/**
+ * A Waves Pest Insider issue's "Your home" block, per reader (pest-insider/home.js,
+ * render.js). The facts of the linked customers are read once: a read that
+ * fails logs one warning and leaves the map empty, so every reader gets ''
+ * and the send goes out. Never throws.
+ */
+async function loadHomeFactsSafe(customerIds, sendId, into = new Map()) {
+  try {
+    for (const [id, home] of await loadHomeFacts(db, customerIds)) into.set(id, home);
+  } catch (err) {
+    logger.warn(`[newsletter] send ${sendId} "Your home" facts load failed, no reader gets the block: ${err.message}`);
+  }
+  return into;
+}
+
+// The substitutions for both home tokens, one reader at a time. A reader's
+// block must pass the send check (render.js homeBlockErrors); one that fails,
+// or a check that throws, leaves that reader '' and is counted in `state`.
+function makeHomeSubstitutions(facts) {
+  const { homeSubstitutions, homeBlockErrors } = require('./pest-insider/render');
+  const verdicts = new Map();
+  const state = { rejected: 0 };
+  const errorsOf = (block) => {
+    if (!verdicts.has(block.text)) {
+      try {
+        verdicts.set(block.text, homeBlockErrors(block));
+      } catch (err) {
+        verdicts.set(block.text, [`check failed: ${err.message}`]);
+      }
+    }
+    return verdicts.get(block.text);
+  };
+  return {
+    state,
+    forCustomer(customerId) {
+      const { substitutions, rejected } = homeSubstitutions(customerId ? facts.get(customerId) : null, { errorsOf });
+      if (rejected) state.rejected += 1;
+      return substitutions;
+    },
+  };
 }
 
 /**
@@ -1211,6 +1254,13 @@ async function sendCampaign(sendId, opts = {}) {
   // engagement_token so a tap lands on the right delivery row. Scanned on
   // the local copies so the send-time append above is always resolved.
   const feedbackEnabled = hasFeedbackToken(quizBody);
+  // A Waves Pest Insider issue's "Your home" tokens ({{pi-home}} / {{pi-home-text}}):
+  // each reader's own block, or '' for both tokens (a missing key would mail the raw token).
+  const homeEnabled = hasHomeToken(quizBody);
+  const homeFacts = homeEnabled
+    ? await loadHomeFactsSafe(subscribersToSend.map((s) => s.customer_id).filter(Boolean), send.id)
+    : null;
+  const homeSubs = homeEnabled ? makeHomeSubstitutions(homeFacts) : null;
   // Event click-tracking tokens ({{evclick:<eventId>}}): substituted per
   // recipient with the tracking redirect carrying their engagement_token —
   // same substitution mechanics as the quiz/feedback tokens. The direct
@@ -1319,6 +1369,8 @@ async function sendCampaign(sendId, opts = {}) {
             personalizationByCustomer.set(customerId, ctx);
           }
         }
+        // A relinked reader's facts come in the same way: they were not in the first read.
+        if (homeEnabled) await loadHomeFactsSafe(chunkToSend.map((s) => s.customer_id).filter((id) => id && !homeFacts.has(id)), send.id, homeFacts);
         logger.info(`[newsletter] send ${send.id} refreshed ${relinkedSubs.length} recipient link(s) relinked between selection and dispatch (archive relink)`);
       }
 
@@ -1345,6 +1397,7 @@ async function sendCampaign(sendId, opts = {}) {
             ...(quizEnabled ? buildQuizSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
             ...(feedbackEnabled ? buildFeedbackSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
             ...(evclickEnabled ? buildEvclickSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token, urlById: evclickUrlById }) : {}),
+            ...(homeEnabled ? homeSubs.forCustomer(s.customer_id) : {}),
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row
@@ -1469,6 +1522,9 @@ async function sendCampaign(sendId, opts = {}) {
 
     }
     if (claimLost || deadlineReached) break;
+  }
+  if (homeEnabled && homeSubs.state.rejected) {
+    logger.warn(`[newsletter] send ${send.id}: ${homeSubs.state.rejected} reader(s) got no "Your home" block, the send check refused it`);
   }
 
   // A worker that lost its claim must not finalize, advance the calendar,

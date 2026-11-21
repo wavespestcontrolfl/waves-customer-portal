@@ -1,7 +1,9 @@
 // Pest Insider renderer: reviewed copy only, escaping, absolute links, dark-mode hooks.
 const {
-  renderIssue, withToolBlock, wrapIssueHtml, speciesEmoji, escapeHtml, POST_LINK_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
+  renderIssue, withToolBlock, addReaderBlock, wrapIssueHtml, speciesEmoji, escapeHtml, POST_LINK_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
+  homeBlock, homeBlockErrors, homeSubstitutions, HOME_LINE_LABELS, HOME_TOKEN, HOME_TEXT_TOKEN,
 } = require('../services/pest-insider/render');
+const { neutralizeHomeTokens, hasHomeToken } = require('../services/pest-insider/home');
 const { SPECIES } = require('../services/pest-insider/plan');
 const { cardFor } = require('../services/pest-insider/cards');
 const { POSTS, POST_URLS, postUrl } = require('../services/pest-insider/posts');
@@ -273,7 +275,8 @@ describe('renderIssue', () => {
     // in normal body text, not the muted small print
     expect(html.slice(html.lastIndexOf('<p', sentenceAt), sentenceAt)).not.toMatch(/dm-muted/);
     const sharedText = shared.text_body.slice(0, shared.text_body.length - SIGNOFF_TEXT.length);
-    expect(shared.text_body.endsWith(`\n\n${SIGNOFF_TEXT}`)).toBe(true);
+    // The "Your home" token stands right before the sign-off; the tool block goes between them.
+    expect(shared.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`)).toBe(true);
     expect(r.text_body)
       .toBe(`${sharedText}A TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}\n\n${SIGNOFF_TEXT}`);
   });
@@ -330,7 +333,7 @@ describe('renderIssue', () => {
     // The band stands alone: no small label over it, as in the Waves Newsletter.
     expect(html).toContain('<div class="dm-text">\n<h2 class="dm-chip"');
     expect(renderIssue(BASE).html_body).not.toContain('<div class="dm-text">\n<h2 class="dm-chip"');
-    expect(r.text_body).toContain(`\n\nQUICK POLL\n{{quiz-text:${poll}}}\n\n${SIGNOFF_TEXT}`);
+    expect(r.text_body).toContain(`\n\nQUICK POLL\n{{quiz-text:${poll}}}\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`);
     // The tool is added per reader before the sign-off, so after the poll.
     const withTool = withToolBlock(r, toolById('acurite-glass-rain-gauge'));
     expect(withTool.html_body.indexOf('A tool we&#39;d use')).toBeGreaterThan(withTool.html_body.indexOf(`{{quiz:${poll}}}`));
@@ -383,6 +386,172 @@ describe('renderIssue', () => {
       });
       expect(errors).toEqual([]);
     }
+  });
+});
+
+describe('"Your home": the tokens in the shared body and the per-reader block', () => {
+  const NOW = new Date('2026-11-21T15:00:00Z');
+  const HOME = { lastVisit: { date: '2026-11-10', line: 'pest' }, sinceDate: '2024-03-05', visitCount: 7 };
+  const POLL = PEST_INSIDER_POLL_IDS[0];
+  const signoffHtmlOf = (html) => html.slice(html.lastIndexOf('<div class="dm-text">'));
+
+  test('both tokens stand alone right before the sign-off, after "What\'s this?" and the poll, in both parts', () => {
+    for (const pollQuizId of [null, POLL]) {
+      const r = renderIssue({ ...BASE, pollQuizId });
+      const signoffHtml = signoffHtmlOf(r.html_body);
+      // The HTML token is a line of its own glued to the sign-off: no divider, heading or wrapper around it.
+      expect(r.html_body.endsWith(`\n${HOME_TOKEN}${signoffHtml}`)).toBe(true);
+      expect(r.html_body.split(HOME_TOKEN)).toHaveLength(2);
+      expect(r.html_body.indexOf(HOME_TOKEN)).toBeGreaterThan(r.html_body.indexOf('Aedes Mosquito'));
+      if (pollQuizId) expect(r.html_body.indexOf(HOME_TOKEN)).toBeGreaterThan(r.html_body.indexOf(`{{quiz:${pollQuizId}}}`));
+      expect(r.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`)).toBe(true);
+      expect(r.text_body.split(HOME_TEXT_TOKEN)).toHaveLength(2);
+      expect(r.text_body.indexOf(HOME_TEXT_TOKEN)).toBeGreaterThan(r.text_body.indexOf('WHAT\'S THIS?'));
+      if (pollQuizId) expect(r.text_body.indexOf(HOME_TEXT_TOKEN)).toBeGreaterThan(r.text_body.indexOf(`{{quiz-text:${pollQuizId}}}`));
+      expect(hasHomeToken(r.html_body)).toBe(true);
+      expect(hasHomeToken(r.text_body)).toBe(true);
+    }
+  });
+
+  test('with an empty value the body is the issue without the block: no empty band, no extra blank line', () => {
+    for (const pollQuizId of [null, POLL]) {
+      const r = renderIssue({ ...BASE, pollQuizId });
+      const html = neutralizeHomeTokens(r.html_body);
+      const text = neutralizeHomeTokens(r.text_body);
+      // The issue as it read before the tokens: every part joined by one newline (HTML) or one blank line (text).
+      expect(html).not.toContain(`\n\n${signoffHtmlOf(r.html_body)}`);
+      expect(html).toContain(`</div>\n${signoffHtmlOf(r.html_body)}`);
+      // The token adds no newline of its own: the blank lines the HTML already had are all it has.
+      expect(html.split('\n\n')).toHaveLength(r.html_body.split('\n\n').length);
+      expect(html.endsWith(signoffHtmlOf(r.html_body))).toBe(true);
+      expect(text).not.toMatch(/\n\n\n/);
+      expect(text.endsWith(`\n\n${SIGNOFF_TEXT}`)).toBe(true);
+      expect(text).not.toContain('{{pi-home');
+      // The substitution a reader with no block gets is exactly that.
+      const empty = homeSubstitutions(null).substitutions;
+      expect(r.html_body.split(HOME_TOKEN).join(empty[HOME_TOKEN])).toBe(html);
+      expect(r.text_body.split(HOME_TEXT_TOKEN).join(empty[HOME_TEXT_TOKEN])).toBe(text);
+    }
+  });
+
+  test('with a value, the block sits between "What\'s this?" and the sign-off, and the reader blocks still go before the sign-off', () => {
+    const r = renderIssue({ ...BASE, pollQuizId: POLL });
+    const subs = homeSubstitutions(HOME, { now: NOW }).substitutions;
+    const filledHtml = r.html_body.split(HOME_TOKEN).join(subs[HOME_TOKEN]);
+    const filledText = r.text_body.split(HOME_TEXT_TOKEN).join(subs[HOME_TEXT_TOKEN]);
+    expect(filledHtml.indexOf('Your home')).toBeGreaterThan(filledHtml.indexOf(`{{quiz:${POLL}}}`));
+    expect(filledHtml.indexOf('Your home')).toBeLessThan(filledHtml.indexOf('Catch you next time.'));
+    expect(filledText).toContain(`{{quiz-text:${POLL}}}\n\nYOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024, 7 visits so far.\n\n${SIGNOFF_TEXT}`);
+    expect(filledHtml.split('<h2 class="dm-chip"').length - 1).toBe(4);
+    // addReaderBlock / withToolBlock still put their block before the sign-off, and the body still ends with it.
+    const gauge = toolById('acurite-glass-rain-gauge');
+    const withTool = withToolBlock(r, gauge);
+    expect(withTool.html_body.endsWith(signoffHtmlOf(r.html_body))).toBe(true);
+    expect(withTool.text_body.endsWith(SIGNOFF_TEXT)).toBe(true);
+    expect(withTool.html_body.indexOf(HOME_TOKEN)).toBeLessThan(withTool.html_body.indexOf('A tool we&#39;d use'));
+    expect(withTool.html_body.indexOf('A tool we&#39;d use')).toBeLessThan(withTool.html_body.indexOf('Catch you next time.'));
+    const added = addReaderBlock(r, { html: '<p>mine</p>', text: 'MINE' });
+    expect(added.html_body.endsWith(signoffHtmlOf(r.html_body))).toBe(true);
+    expect(added.html_body).toContain('<p>mine</p>\n</div>\n<div class="dm-text">');
+    expect(added.text_body).toBe(`${r.text_body.slice(0, r.text_body.length - SIGNOFF_TEXT.length)}MINE\n\n${SIGNOFF_TEXT}`);
+    // A tool block after an empty home value reads as it does today: one blank line between the sections.
+    const toolText = neutralizeHomeTokens(withTool.text_body);
+    expect(toolText).toContain(`${AMAZON_DISCLOSURE}\n\n${SIGNOFF_TEXT}`);
+    expect(toolText).not.toMatch(/\n\n\n/);
+  });
+
+  test('the block prints the fixed words and the dates it formats itself', () => {
+    const b = homeBlock(HOME, NOW);
+    expect(b.text).toBe('YOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024, 7 visits so far.\n\n');
+    expect(b.html.startsWith(`<div style="text-align:center;margin:28px 0;"><img src="${DIVIDER}"`)).toBe(true);
+    expect(b.html.endsWith('</div>\n')).toBe(true);
+    expect(b.html).toContain('<strong><em>Your home</em></strong>');
+    expect(b.html).toContain('📅 Last visit: November 10 (pest control).<br/>');
+    expect(b.html).toContain('🌊 With Waves since March 2024, 7 visits so far.');
+  });
+
+  test('one visit reads in the singular; a count that is not a positive integer leaves the count out', () => {
+    expect(homeBlock({ ...HOME, visitCount: 1 }, NOW).text).toContain('With Waves since March 2024, 1 visit so far.\n');
+    expect(homeBlock({ ...HOME, visitCount: 120 }, NOW).text).toContain('120 visits so far.');
+    for (const visitCount of [0, -3, 2.5, NaN, Infinity, '7', null, undefined, {}, [4], 1e21]) {
+      expect(homeBlock({ ...HOME, visitCount }, NOW).text).toContain('\nWith Waves since March 2024.\n');
+    }
+  });
+
+  test.each(Object.entries(HOME_LINE_LABELS))('the fixed label for %s prints and the whole block passes the send check', (line, label) => {
+    const b = homeBlock({ ...HOME, lastVisit: { date: '2026-11-10', line } }, NOW);
+    expect(b.text).toContain(`Last visit: November 10 (${label}).`);
+    expect(b.html).toContain(`Last visit: November 10 (${label}).`);
+    expect(homeBlockErrors(b)).toEqual([]);
+    expect(homeSubstitutions({ ...HOME, lastVisit: { date: '2026-11-10', line } }, { now: NOW }).substitutions[HOME_TEXT_TOKEN]).toBe(b.text);
+  });
+
+  test('the labels are the six service lines', () => {
+    expect(Object.keys(HOME_LINE_LABELS)).toEqual(['pest', 'lawn', 'mosquito', 'termite', 'rodent', 'tree_shrub']);
+    expect(Object.values(HOME_LINE_LABELS)).toEqual(['pest control', 'lawn care', 'mosquito control', 'termite protection', 'rodent control', 'tree and shrub care']);
+  });
+
+  test.each([null, undefined, 'lawn and tree', 'constructor', '__proto__', 'toString', 7, {}, ['pest']])('an unknown or missing line (%p) prints no label', (line) => {
+    const b = homeBlock({ ...HOME, lastVisit: { date: '2026-11-10', line } }, NOW);
+    expect(b.text).toContain('Last visit: November 10.\n');
+    expect(b.html).not.toContain('(');
+  });
+
+  test('a date that is not a real calendar day, or a future last visit, drops its line; no line leaves no block', () => {
+    const bad = ['2026-02-30', '2026-13-01', '2026-11-1', 'tomorrow', '', null, undefined, 20261110, new Date('2026-11-10'), '2026-11-10T00:00:00Z', '0000-01-01'];
+    for (const date of bad) {
+      const b = homeBlock({ ...HOME, lastVisit: { date, line: 'pest' } }, NOW);
+      expect(b.text).toBe('YOUR HOME\nWith Waves since March 2024, 7 visits so far.\n\n');
+      expect(homeBlock({ ...HOME, sinceDate: date }, NOW).text).toBe('YOUR HOME\nLast visit: November 10 (pest control).\n\n');
+      expect(homeBlock({ lastVisit: { date, line: 'pest' }, sinceDate: date, visitCount: 3 }, NOW)).toBeNull();
+    }
+    // After today in Eastern time: the late evening of the 21st is still the 21st.
+    expect(homeBlock({ ...HOME, lastVisit: { date: '2026-11-22', line: 'pest' } }, NOW).text).not.toContain('Last visit');
+    expect(homeBlock({ ...HOME, lastVisit: { date: '2026-11-21', line: 'pest' } }, NOW).text).toContain('Last visit: November 21 (pest control).');
+    expect(homeBlock({ ...HOME, lastVisit: { date: '2026-11-21', line: 'pest' } }, new Date('2026-11-21T03:00:00Z')).text).not.toContain('Last visit');
+    expect(homeBlock({ ...HOME, sinceDate: '2027-01-01' }, NOW).text).not.toContain('With Waves');
+    for (const home of [null, undefined, {}, { lastVisit: null }, 'home', 7]) expect(homeBlock(home, NOW)).toBeNull();
+  });
+
+  test('no database text reaches the block: hostile strings in every field print nothing of theirs', () => {
+    const hostile = '<script>alert(1)</script> gate code 4821 Mary Johnson 123 Main St {{unsubscribe_url}} {{quiz:x}} resident@example.com';
+    const homes = [
+      { lastVisit: { date: '2026-11-10', line: hostile, serviceType: hostile, notes: hostile, name: hostile }, sinceDate: '2024-03-05', visitCount: 7, name: hostile, address: hostile, notes: hostile },
+      { lastVisit: { date: hostile, line: hostile }, sinceDate: hostile, visitCount: hostile },
+      { lastVisit: { date: '2026-11-10', line: 'pest', label: hostile, text: hostile }, sinceDate: '2024-03-05', visitCount: 7, line: hostile },
+    ];
+    for (const home of homes) {
+      const b = homeBlock(home, NOW);
+      const all = b ? `${b.html}\n${b.text}` : '';
+      for (const word of ['script', '4821', 'Mary', 'Main St', 'unsubscribe_url', '{{', 'resident@', 'hostile', 'gate code']) expect(all).not.toContain(word);
+      if (b) expect(b.html.replace(/<[^>]+>/g, '')).not.toMatch(/[<>"]/);
+    }
+    // A date string with markup in it is no calendar day: nothing of it can print.
+    expect(homeBlock({ lastVisit: { date: `2026-11-10${hostile}` }, sinceDate: `2024-03-05${hostile}`, visitCount: 3 }, NOW)).toBeNull();
+  });
+
+  test('homeSubstitutions always has both keys; a block the send check refuses leaves both empty and is reported', () => {
+    for (const home of [null, undefined, {}, { lastVisit: { date: 'x' } }]) {
+      expect(homeSubstitutions(home, { now: NOW })).toEqual({ substitutions: { [HOME_TOKEN]: '', [HOME_TEXT_TOKEN]: '' }, rejected: false });
+    }
+    const ok = homeSubstitutions(HOME, { now: NOW });
+    expect(Object.keys(ok.substitutions)).toEqual([HOME_TOKEN, HOME_TEXT_TOKEN]);
+    expect(ok.substitutions[HOME_TEXT_TOKEN]).toBe(homeBlock(HOME, NOW).text);
+    expect(ok.rejected).toBe(false);
+    expect(homeSubstitutions(HOME, { now: NOW, errorsOf: () => ['blocked'] }))
+      .toEqual({ substitutions: { [HOME_TOKEN]: '', [HOME_TEXT_TOKEN]: '' }, rejected: true });
+  });
+
+  test('the token helpers find and remove both tokens, in any letter case, and leave everything else', () => {
+    expect(hasHomeToken('a {{pi-home}} b')).toBe(true);
+    expect(hasHomeToken('a {{pi-home-text}} b')).toBe(true);
+    expect(hasHomeToken('a {{PI-HOME}} b')).toBe(true);
+    expect(hasHomeToken('a {{pi-homes}} {{pi}} {{quiz:x}}')).toBe(false);
+    expect(hasHomeToken(null)).toBe(false);
+    expect(neutralizeHomeTokens('a {{pi-home}}b{{pi-home-text}}{{ PI-Home }} c')).toBe('a b c');
+    expect(neutralizeHomeTokens(null)).toBe('');
+    // Repeated calls keep working (no sticky regex state).
+    for (let i = 0; i < 3; i += 1) expect(hasHomeToken('{{pi-home}}')).toBe(true);
   });
 });
 
