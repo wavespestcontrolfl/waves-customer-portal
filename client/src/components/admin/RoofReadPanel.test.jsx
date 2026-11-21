@@ -647,6 +647,24 @@ describe("confirmed points", () => {
     expect(lastBody()).toEqual({ pins: SAVED, crop: { lat: SPOT.lat, lng: SPOT.lng }, address: ADDR, expected_pins: SAVED, expected_holder: null });
   });
 
+  it("hiding an unconfirmed list sends only the checkbox, also with the photo loaded; showing it again confirms the list", async () => {
+    await opened({}, READ({ tech_pins: SAVED, points_address: null }));
+    expect(screen.getByTestId("roof-read-points-unconfirmed")).toBeInTheDocument();
+    // The photo is on screen. Staff untick Show and save: the list is not sent, so a stored note the server would now
+    // refuse cannot block the hide.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show these points on the customer estimate" }));
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED, points_address: null, hide_on_estimate: true }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    expect(lastBody()).toEqual({ hide_on_estimate: true });
+    // Ticking Show again is a choice to show the points: that save confirms the list with the checkbox.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show these points on the customer estimate" }));
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    expect(lastBody()).toEqual({ pins: SAVED, crop: { lat: SPOT.lat, lng: SPOT.lng }, address: ADDR, expected_pins: SAVED, expected_holder: null, hide_on_estimate: false });
+  });
+
   it("asks for no confirmation when the list has its address, when no list is saved, or when the saved list is empty", async () => {
     await opened({}, READ({ tech_pins: SAVED }));
     expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();

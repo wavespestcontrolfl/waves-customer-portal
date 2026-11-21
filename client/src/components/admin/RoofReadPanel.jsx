@@ -318,6 +318,11 @@ function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, onReadAga
   const { unconfirmed, confirmReady, nothingToSave } = confirmStateOf(saved, imageState);
   // Whether the checkbox differs from what the server holds: only then is hide_on_estimate sent.
   const hideChanged = hideEdited && !showOnEstimate !== saved.hidden;
+  // Whether a save sends the list: when staff edited it, or to confirm it (`confirmReady`). Hiding needs no
+  // confirmation: an unedited list stays unconfirmed and only the checkbox goes, so a list saved before the note screen
+  // existed (its note may now be refused) can never block the hide.
+  const hiding = hideChanged && !showOnEstimate;
+  const sendPoints = pointsEdited || (confirmReady && !hiding);
   const selected = points.find((p) => p.id === selectedId) || null;
 
   const clearNote = () => setPointsState((st) => (st.busy ? st : IDLE));
@@ -351,7 +356,6 @@ function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, onReadAga
 
   async function savePoints() {
     if (locked) return;
-    const sendPoints = pointsEdited || confirmReady;
     if (!sendPoints && !hideChanged) {
       setPointsState({ ...IDLE, err: nothingToSave });
       return;
