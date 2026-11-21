@@ -507,6 +507,9 @@ async function renderSendPreview(send, toEmail) {
     CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL,
   } = require('./newsletter-draft');
   const { neutralizeQuizTokens } = require('./newsletter-quiz');
+  // The owner's copy is not any reader's: a Waves Pest Insider issue's
+  // "Your home" tokens (per reader, filled only by the send) are removed.
+  const { neutralizeHomeTokens } = require('./pest-insider/home');
 
   // Demo unsubscribe URL — won't resolve to a real subscriber but the link
   // renders correctly and Gmail/Apple Mail will show the native unsub UI.
@@ -560,7 +563,7 @@ async function renderSendPreview(send, toEmail) {
   }
   const { neutralizeFeedbackTokens } = require('./newsletter-feedback');
   const applyTokens = (s) => neutralizeFeedbackTokens(neutralizeQuizTokens(
-    String(s)
+    neutralizeHomeTokens(String(s))
       .split(GREETING_NAME_TOKEN).join(greetingValue)
       .split(CITY_TOKEN).join(cityValue)
       .split(GRASS_TYPE_TOKEN).join(grassValue),

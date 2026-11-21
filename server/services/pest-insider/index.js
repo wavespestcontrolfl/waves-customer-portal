@@ -39,6 +39,7 @@ const { sendDateET } = require('./facts');
 const { postUrl } = require('./posts');
 const { validateNewsletterDraft } = require('../newsletter-validator');
 const { neutralizeQuizTokens, pollInIssue, PEST_INSIDER_POLL_IDS } = require('../newsletter-quiz');
+const { neutralizeHomeTokens } = require('./home');
 
 // The Pest Insider's newsletter type key: the send path, the proof kill
 // switch and the validator's claim rules all key on it.
@@ -52,13 +53,15 @@ const copyFailReason = (copy) => `copy_check_failed: ${copy.problems.map((p) => 
 // The send validator itself, on the issue as rendered. It reads the whole
 // email, where a pronoun opening one block reads the sentence before it, so
 // an issue this returns errors for would be refused at send anyway. A poll
-// is read as its words (the archive's render), not as its token.
+// is read as its words (the archive's render), not as its token. The "Your
+// home" tokens are removed: the shared body is that block's absence, and each
+// reader's block is checked on its own at send time (render.js homeBlockErrors).
 function sendGateErrors(issue) {
   const { errors } = validateNewsletterDraft({
     subject: issue.subject,
     preview_text: issue.preview,
-    html_body: neutralizeQuizTokens(issue.html_body),
-    text_body: neutralizeQuizTokens(issue.text_body),
+    html_body: neutralizeHomeTokens(neutralizeQuizTokens(issue.html_body)),
+    text_body: neutralizeHomeTokens(neutralizeQuizTokens(issue.text_body)),
     newsletter_type: NEWSLETTER_TYPE,
   });
   return errors;
