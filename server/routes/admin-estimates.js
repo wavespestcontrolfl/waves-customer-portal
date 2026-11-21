@@ -52,6 +52,7 @@ const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
   estimateReviseBlock,
+  selfServeMintEditRefusal,
   estimateEditVersion,
   estimateViewUrl,
   reviseAdminEstimate,
@@ -4462,7 +4463,7 @@ router.get('/', async (req, res, next) => {
     const soldByById = await loadSoldByForList(db, estimates);
     // Call list: the newest outbound call to each VIEWED row's phone, one batched read.
     // A failed read costs only the field (lastCalledAt stays null).
-    const { lastCalledAtByEstimateId, callTodayFields } = require('../services/estimate-call-list');
+    const { lastCalledAtByEstimateId, lastCallOutcomeByEstimateId, callTodayFields } = require('../services/estimate-call-list');
     let lastCalledById = new Map();
     try {
       lastCalledById = await lastCalledAtByEstimateId(db, estimates);
@@ -4470,6 +4471,15 @@ router.get('/', async (req, res, next) => {
       // Never err.message: a Knex error carries the SQL with its bindings, i.e. every customer
       // phone in the batch's whereIn (AGENTS.md, PII in logs). The driver code is enough.
       logger.warn(`[estimates] call-list lastCalledAt read failed (${err?.code || 'no code'})`);
+    }
+    // The newest call outcome tapped on each row (POST /:id/call-outcome), one batched read. A failed read marks every
+    // row callOutcomeUnknown, and the shared rule then keeps it off Call today: a row someone logged must not come
+    // back because the read failed (the 9 AM push sends nothing then).
+    let lastCallOutcomeById = null;
+    try {
+      lastCallOutcomeById = await lastCallOutcomeByEstimateId(db, estimates.map((e) => e.id));
+    } catch (err) {
+      logger.warn(`[estimates] call-list call outcome read failed (${err?.code || 'no code'})`);
     }
 
     res.json({
@@ -4538,6 +4548,8 @@ router.get('/', async (req, res, next) => {
           ...callTodayFields(e, {
             lastClickedAt: clickStats.get(e.id)?.last_clicked_at,
             lastCalledAt: lastCalledById.get(e.id),
+            lastCallOutcome: lastCallOutcomeById?.get(e.id),
+            callOutcomeUnknown: !lastCallOutcomeById,
             undeliveredSelfServe: require('../services/self-serve-estimates').isUndeliveredSelfServe(e.source, estData),
           }),
           source: e.source || 'manual',
@@ -5883,6 +5895,36 @@ router.post('/:id/unarchive', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /:id/call-outcome — what a call from the Call today list came to (owner 2026-11-20, D1 A): Booked, Call back,
+// Not interested or No answer (shared/estimate-call-today.cjs CALL_OUTCOMES). One tap saves the outcome, who tapped and
+// when as an activity_log row on the estimate, and the row leaves Call today until the customer opens or taps the
+// estimate again. It only records: it texts, emails and calls nobody, books nothing and changes no estimate field.
+// "Not interested" also opens the page's Mark lost box, which saves through PATCH /:id as before. The log line carries
+// no customer name (the row's estimate_id and customer_id say whose it is), so a failed insert puts none in the error
+// log (AGENTS.md, PII in logs).
+router.post('/:id/call-outcome', async (req, res, next) => {
+  try {
+    const { CALL_OUTCOMES } = require('../../shared/estimate-call-today.cjs');
+    const { CALL_OUTCOME_ACTION, staffFirstName } = require('../services/estimate-call-list');
+    const outcome = CALL_OUTCOMES.find((o) => o.key === req.body?.outcome);
+    if (!outcome) return res.status(400).json({ error: 'Pick an outcome: Booked, Call back, Not interested or No answer.' });
+    const estimate = await db('estimates').where({ id: req.params.id }).first('id', 'customer_id', 'status');
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    // A draft was never sent, so no call came of it. Only a draft can be deleted, and an outcome row on it would block
+    // that delete (activity_log.estimate_id has no ON DELETE).
+    if (estimate.status === 'draft') return res.status(409).json({ error: 'A draft estimate has no call to log. Send it first.' });
+    const [row] = await db('activity_log').insert({
+      admin_user_id: req.technicianId || null,
+      customer_id: estimate.customer_id || null,
+      estimate_id: estimate.id,
+      action: CALL_OUTCOME_ACTION,
+      description: `Call outcome: ${outcome.label}`,
+      metadata: JSON.stringify({ outcome: outcome.key }),
+    }).returning(['created_at']);
+    res.status(201).json({ callOutcome: { outcome: outcome.key, at: row.created_at, by: staffFirstName(req.technician?.name) } });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/estimates/:id/follow-up — manually send a follow-up SMS
 router.post('/:id/follow-up', async (req, res, next) => {
   try {
@@ -6357,6 +6399,15 @@ router.patch('/:id', async (req, res, next) => {
       if (verdict.error) return res.status(400).json({ error: verdict.error });
       Object.assign(updates, verdict.updates);
     }
+    // A customer's own mint (plan_restart / plan_start) is never edited in place, and these two
+    // options change what its accept does (codex pre-push r29 on #8132): any change to either gets the
+    // revise refusal, in both directions. Turning one back OFF would make a quote the page already
+    // refused acceptable again on the same estimate, where a card that tab captured and dropped could
+    // be replayed (tenth pre-push audit). Such a quote is replaced instead: the customer's next portal
+    // tap archives it and mints a fresh one (reuseLiveQuote).
+    const mintRefusal = (req.body.showOneTimeOption !== undefined || req.body.billByInvoice !== undefined)
+      ? selfServeMintEditRefusal(estimate) : null;
+    if (mintRefusal) return res.status(409).json({ error: mintRefusal });
     if (req.body.showOneTimeOption !== undefined) {
       const nextShowOneTimeOption = !!req.body.showOneTimeOption;
       const deliveryError = nextShowOneTimeOption ? validateEstimateDeliveryOptions({

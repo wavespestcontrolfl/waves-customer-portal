@@ -39,7 +39,8 @@
 // - Route refresh: when a service status changes, does the rest of
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
+import { Suspense, useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
+import { lazyPanel } from '../../components/LazyPanel';
 import { useFieldPortalClass } from '../../components/tech/fieldPortal';
 import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
@@ -104,20 +105,27 @@ import { recordlessVisitNeedsCloseout, shortAddress } from './visitBrief';
 // owner ask 2026-07-13): tapping a visit whose report already exists opens
 // that report right here, like the pest completion, instead of re-opening
 // a create form (duplicate risk) or leaving the portal. Lazy so the admin
-// Jobs module stays out of the tech bundle until first use.
-const ProjectDetail = lazy(() =>
-  import('../admin/ProjectsPage').then((m) => ({ default: m.ProjectDetail })),
+// Jobs module stays out of the tech bundle until first use. Its Close is the
+// editor's own, so when a deploy removed its code, its Reload prompt shows in
+// a "Report" dialog whose Close or Escape closes the editor (`dialog` in
+// LazyPanel.jsx): in the editor's place, the overlay would have no Close.
+export const ProjectDetail = lazyPanel(
+  () => import('../admin/ProjectsPage').then((m) => ({ default: m.ProjectDetail })),
+  { dialog: 'Report' },
 );
 
 // The visit job card (product checks, mix amounts, label limits, Order more)
 // is the Schedule's ProtocolPanel, opened here from the Today visit (owner
 // 2026-11-04). It reads the same technician-scoped job-card route. Lazy so the
-// Schedule page stays out of the Today bundle until first use.
-const ProtocolPanel = lazy(() =>
-  import('../admin/SchedulePage').then((m) => ({ default: m.ProtocolPanel })),
+// Schedule page stays out of the Today bundle until first use. It draws its
+// own dialog, so when a deploy removed its code, its Reload prompt shows in a
+// "Job card" dialog whose Close clears the visit (`dialog` in LazyPanel.jsx).
+const ProtocolPanel = lazyPanel(
+  () => import('../admin/SchedulePage').then((m) => ({ default: m.ProtocolPanel })),
+  { dialog: 'Job card' },
 );
 
-function JobCardOverlay({ service, onClose }) {
+export function JobCardOverlay({ service, onClose }) {
   if (!service) return null;
   return <Suspense fallback={null}><ProtocolPanel service={service} onClose={onClose} /></Suspense>;
 }
@@ -1629,7 +1637,7 @@ function ProjectServicePicker({ services, recoveryServiceIds, onClose, onSelect 
 // technician login lists only the alert types a technician can receive and
 // saves a mute per type. The bell's "Notification settings" link lands here
 // (#notifications). Lazy and closed until opened, so nothing is read before.
-const PushSettingsV2 = lazy(() => import('../../components/admin/PushSettingsV2'));
+const PushSettingsV2 = lazyPanel(() => import('../../components/admin/PushSettingsV2'));
 function AlertSettings() {
   const [open, setOpen] = useState(() => typeof window !== 'undefined' && window.location.hash === '#notifications');
   return (

@@ -3,8 +3,8 @@
 // The 9:00 AM "Call today" banner (owner 2026-11-19, plan page "Lead to Customer Plan", phase 1, "do phase 1 first").
 // The plan names it "a 9 AM push with the 'Call today' list" and describes that list loosely in a parenthetical
 // ("estimates sent the day before and not yet won"). The list is the Estimates page's EXISTING Call today list:
-// a viewed, unarchived estimate with a phone, last touched by the customer 2 h to 48 h ago, with no call or follow-up
-// since (shared/estimate-call-today.cjs). The push counts that list, and the link opens it; it does not count a
+// a viewed, unarchived estimate with a phone, last touched by the customer 2 h to 48 h ago, with no call, follow-up or
+// call outcome since (shared/estimate-call-today.cjs). The push counts that list, and the link opens it; it does not count a
 // different cohort.
 //
 // ONE phone banner a day to the admin phones: "Call today: N estimates", and a tap opens the Estimates page on its
@@ -32,7 +32,8 @@ const { etDateString } = require('../utils/datetime-et');
 const { isCallTodayEstimate } = require('../../shared/estimate-call-today.cjs');
 const { undeliveredSelfServeSql } = require('./self-serve-estimates');
 const {
-  ESTIMATE_LIST_LIMIT, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId, callTodayFields,
+  ESTIMATE_LIST_LIMIT, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId, lastCallOutcomeByEstimateId,
+  callTodayFields,
 } = require('./estimate-call-list');
 
 const CLAIM_PREFIX = 'estimate_call_today:';
@@ -67,18 +68,21 @@ async function lastClickedAtById(ids) {
 }
 
 // How many estimates are on the Call today list right now. Throws when a read fails: a count that missed the
-// "somebody already called" read would be too high, so the caller sends nothing.
+// "somebody already called" or "somebody logged an outcome" read would be too high, so the caller sends nothing.
 async function countCallToday(nowMs) {
   const rows = await candidateRows();
   if (!rows.length) return 0;
-  const [clicked, called] = await Promise.all([
-    lastClickedAtById(rows.map((r) => r.id)),
+  const ids = rows.map((r) => r.id);
+  const [clicked, called, outcomes] = await Promise.all([
+    lastClickedAtById(ids),
     lastCalledAtByEstimateId(db, rows, nowMs),
+    lastCallOutcomeByEstimateId(db, ids),
   ]);
   return rows.filter((row) => isCallTodayEstimate(
     callTodayFields(row, {
       lastClickedAt: clicked.get(row.id),
       lastCalledAt: called.get(row.id),
+      lastCallOutcome: outcomes.get(row.id),
       undeliveredSelfServe: row.undelivered_self_serve,
     }),
     nowMs,

@@ -34,6 +34,7 @@ const APP_LINK_PATH_PREFIXES = Object.freeze([
 const BROWSER_ONLY_PATH_ROOTS = Object.freeze([
   '/card', // a tech's business card for prospects: Save contact downloads a vCard
   '/careers', // job applicants, not customers
+  '/help', // static how-to pages (client/public/help): no app screens, so Safari opens them
   '/newsletter', // public newsletter pages
 ]);
 

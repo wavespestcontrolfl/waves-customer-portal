@@ -126,6 +126,12 @@ describe('POST /admin/reviews/:id/reply — the account facts for the post-PUT c
     AutoReply.parseGroundingToken = jest.fn(() => null);
     AutoReply.STATUS = { PARKED: 'parked' };
     AutoReply.RECONCILE_REASONS = new Set(['google_uncertain', 'persist_failed']);
+    // The runner's rule (unit-tested in review-reply-runner.test.js); the
+    // real module cannot load here (the publisher is a stub in this file).
+    AutoReply.isMachineStoredDraft = (r, t) => !!r?.auto_reply_draft
+      && ['drafted', 'parked', 'failed', 'skipped'].includes(r.auto_reply_status)
+      && !['human', 'agent_ops'].includes(r.auto_reply_version || '') && r.auto_reply_reason !== 'agent_ops_draft'
+      && String(t || '').trim() === String(r.auto_reply_draft).trim();
   });
   afterEach(() => db.mockReset());
 
@@ -146,6 +152,23 @@ describe('POST /admin/reviews/:id/reply — the account facts for the post-PUT c
     expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(true);
     Publisher.publishReviewReply.mockClear();
     expect(await expectedAccountFor({ replyText: 'Hi Dana, pipeline words, and thanks.' })).toBeUndefined();
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(false);
+  });
+
+  test('an automatic attempt kept after a failed or uncertain post (reply box empty), pasted unchanged, keeps its snapshot and its machine origin; edited text or a posted row does not', async () => {
+    const kept = { review_reply: null, auto_reply_draft: 'Hi Dana, pipeline words.', auto_reply_version: 'reply-v3', auto_reply_status: 'failed', auto_reply_reason: 'google_uncertain_cleared', auto_reply_grounding: { fingerprint: 'f'.repeat(40), accountFingerprint: 'acct-stored' } };
+    for (const state of [kept, { ...kept, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' }]) {
+      row = state;
+      Publisher.publishReviewReply.mockClear();
+      expect(await expectedAccountFor({ replyText: ' Hi Dana, pipeline words. ' })).toBe('acct-stored');
+      expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(true);
+    }
+    Publisher.publishReviewReply.mockClear();
+    expect(await expectedAccountFor({ replyText: 'Hi Dana, pipeline words. Thanks.' })).toBeUndefined();
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(false);
+    Publisher.publishReviewReply.mockClear();
+    row = { ...kept, auto_reply_status: 'posted', auto_reply_reason: null };
+    expect(await expectedAccountFor({ replyText: 'Hi Dana, pipeline words.' })).toBeUndefined();
     expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(false);
   });
 

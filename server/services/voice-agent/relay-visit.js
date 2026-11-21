@@ -334,7 +334,9 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
       }
     }
   }
-  const record = await query.first('id', 'service_date', 'service_type', 'technician_notes',
+  // service_line: the stored line decides whether the technician's own note
+  // may be spoken, as on the web report (visitReportCustomerCopy).
+  const record = await query.first('id', 'service_date', 'service_type', 'service_line', 'technician_notes',
     'structured_notes', 'status', 'started_at', 'ended_at', 'advisory', 'service_data');
   if (!record) {
     return wanted
@@ -366,17 +368,19 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   }
 
   const [findings, allProducts] = await Promise.all([
-    // ⭐ OVERFETCH, THEN CUT AFTER THE FILTERS — the estimates/invoices rule.
+    // ⭐ READ EVERY ROW, THEN CUT AFTER THE FILTERS — the estimates/invoices rule.
     // The spoken cap used to be this query's LIMIT, but the provenance filter
     // below discards title-only raw-note rows AFTER the query: six synthesized
     // rows up front would consume the whole limit and a genuine structured
     // finding behind them was never fetched, so the report said nothing was
-    // found. The cap is applied to the FILTERED list instead; the fetch stays
-    // bounded well above any real per-visit row count.
+    // found. The cap is applied to the FILTERED list instead, and the read
+    // takes every finding of the visit (production, 2026-11-20: at most 4 on
+    // one visit): on a note record the screen below refuses rows too, so any
+    // bound before it could fill with refused rows.
     safeRows(db('service_findings')
       .where({ service_record_id: record.id })
       .orderBy('created_at', 'asc')
-      .limit(SERVICE_REPORT_FINDING_LIMIT * 10)
+      .orderBy('id', 'asc')
       .select('category', 'severity', 'title', 'detail', 'recommendation')),
     // Columns are the UNION of what the spoken report needs and what
     // buildReentryContext reads (id, applied_at, created_at, application_area,
@@ -467,10 +471,14 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   // title can carry a gate or lockbox code. A finding with structured content
   // came from the findings pipeline; a bare title did not, and it is never
   // spoken. The compliance screen below handles banned copy — this handles
-  // where the text CAME FROM.
-  const structuredFindings = findings.filter(
+  // where the text CAME FROM. On a record that carries the technician's own
+  // note, provenFindingRows also screens each title and keeps a stock-detail
+  // row only for a screened label of the record's own form
+  // (finding-provenance.js), as the web report does.
+  const { provenFindingRows } = require('../service-report/finding-provenance');
+  const structuredFindings = provenFindingRows(findings.filter(
     (f) => String((f && f.detail) || '').trim() || String((f && f.recommendation) || '').trim(),
-  );
+  ), record.structured_notes);
   if (structuredFindings.length) {
     // ⭐ THE CAP RUNS AFTER BOTH SCREENS (provenance above, compliance here) —
     // six leading findings whose every speakable field the compliance screen

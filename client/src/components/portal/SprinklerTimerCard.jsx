@@ -37,27 +37,43 @@ const MODEL_HINTS = {
 
 const HUNTER_GUIDE = { url: `${HUB}hunter/`, cta: 'How to run it on a Hunter', line: 'The Waves Hunter guide shows how to run this week\'s plan on your timer.' };
 // The question's words, by brand. Who is asked is controllerAsksAboutApp: an X-Core has no phone app, so it is not.
-const APP_QUESTIONS = { hunter: 'Do you run it from Hunter\'s Hydrawise phone app?', rain_bird: 'Do you run it from the Rain Bird phone app?' };
-// One entry per timer the card can show.
+const APP_QUESTIONS = {
+  hunter: 'Do you run it from Hunter\'s Hydrawise phone app?',
+  rain_bird: 'Do you run it from the Rain Bird phone app?',
+  orbit_bhyve: 'Do you run it from the B-hyve phone app?',
+  rachio: 'Do you run it from the Rachio phone app?',
+};
+// One entry per timer the card can show: each Hunter model, then each brand that has no model on the list (`pick`
+// is the picker's button for that brand).
 const TIMERS = {
   x2: { name: 'Hunter X2', ...HUNTER_GUIDE },
   x_core: { name: 'Hunter X-Core', ...HUNTER_GUIDE },
   pro_c: { name: 'Hunter Pro-C', ...HUNTER_GUIDE },
   hydrawise: { name: 'Hunter Hydrawise timer', ...HUNTER_GUIDE },
   rain_bird: {
-    name: 'Rain Bird', url: `${HUB}rain-bird/`, cta: 'How to run it on a Rain Bird',
+    name: 'Rain Bird', url: `${HUB}rain-bird/`, cta: 'How to run it on a Rain Bird', pick: 'My timer is a Rain Bird',
     line: 'The Waves Rain Bird guide shows how to run this week\'s plan on your timer.',
   },
+  orbit_bhyve: {
+    name: 'Orbit B-hyve', url: `${HUB}orbit-b-hyve/`, cta: 'How to run it on a B-hyve', pick: 'My timer is a B-hyve',
+    line: 'The Waves Orbit B-hyve guide shows how to run this week\'s plan on your timer.',
+  },
+  rachio: {
+    name: 'Rachio', url: `${HUB}rachio/`, cta: 'How to run it on a Rachio', pick: 'My timer is a Rachio',
+    line: 'The Waves Rachio guide shows how to run this week\'s plan on your timer.',
+  },
   other: {
-    name: 'Another brand', url: HUB, cta: 'See the Waves timer guides',
+    name: 'Another brand', url: HUB, cta: 'See the Waves timer guides', pick: 'My timer is another brand',
     line: 'The Waves timer guides cover the most common brands. This week\'s plan gives the minutes for any timer.',
   },
 };
+// The brands the card names without a model: every brand on the list but Hunter.
+const BRANDS_WITHOUT_MODEL = Object.keys(CONTROLLER_BRANDS).filter((key) => key !== 'hunter');
 
 // The timer on file, or null while there is nothing complete to show (no brand, or a Hunter with no model yet).
 function timerOnFile(brand, model) {
   if (brand === 'hunter') return TIMERS[model] && model in CONTROLLER_MODELS ? TIMERS[model] : null;
-  return brand === 'rain_bird' || brand === 'other' ? TIMERS[brand] : null;
+  return BRANDS_WITHOUT_MODEL.includes(brand) ? TIMERS[brand] : null;
 }
 
 function ChoiceChip({ active, onClick, children }) {
@@ -115,7 +131,7 @@ function Picker({ startBrand, onPick, onCancel }) {
             background: '#fff', color: B.glassNavy, fontSize: 14, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 8,
           }}>
             <Icon name="check" size={16} strokeWidth={2} />
-            {brand === 'rain_bird' ? 'My timer is a Rain Bird' : 'My timer is another brand'}
+            {(TIMERS[brand] || TIMERS.other).pick}
           </button>
         </div>
       )}

@@ -357,15 +357,16 @@ execute the workflows they describe.
   are blocked from engine drafting; low-confidence markers (fpSource
   fallback, low pricingConfidence, turfBasis fallbacks) route to review.
   Caller-stated unit size + `relationship_to_property: tenant` outrank
-  county sqft for commercial tenants. Two owner-approved exceptions mint a
-  customer-viewable estimate for the tapping customer — a priced
-  cross-sell tap (`GATE_REPORT_CLICK_TO_ESTIMATE`) and a churned
-  customer's "Restart my plan" tap (`GATE_CANCEL_FLOW_V2`, `plan_restart`
-  mint, account re-verified churned under the row lock, families with live
-  recurring rows excluded) — under the same bounds: deterministic options
-  only, no LLM, the server recompute must match the shown/snapshotted
-  price to the cent or the mint refuses, and zero delivery (no send, no
-  follow-up automation, no customer comms). "Never auto-send" stands
+  county sqft for commercial tenants. Three owner-approved taps mint the
+  tapping customer an estimate: a priced cross-sell
+  (`GATE_REPORT_CLICK_TO_ESTIMATE`), "Restart my plan" (`plan_restart`;
+  re-verified churned under the row lock, live recurring families
+  excluded) and "See my price and book" (`plan_start`; no membership,
+  recurring row or prepay term, re-verified under the row lock and at
+  accept). Same bounds: deterministic options only, no LLM, the server
+  recompute matches the shown/snapshotted price to the cent or it refuses,
+  zero delivery (no send, follow-up automation or customer comms).
+  "Never auto-send" stands
   everywhere else except website estimate self-service
   (`website-quote-publication.js`, `GATE_WEBSITE_QUOTE_BOOKING`): eligible
   new-customer engine quotes publish without staff approval, under estimate

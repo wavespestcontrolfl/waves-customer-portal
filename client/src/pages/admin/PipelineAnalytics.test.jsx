@@ -11,7 +11,7 @@ import PipelineAnalytics, {
   isPickReasonEstimate,
   withinDateRange,
 } from "./PipelineAnalytics";
-import { isCallTodayEstimate } from "@estimate-call-today";
+import { isCallableEstimate, isCallTodayEstimate } from "@estimate-call-today";
 
 const NOW = new Date("2026-05-15T12:00:00.000Z");
 
@@ -900,12 +900,41 @@ describe("isCallTodayEstimate", () => {
     expect(isCallTodayEstimate(viewedOffer(10, { lastCalledAt: null }), NOW_MS)).toBe(true);
   });
 
+  // Owner 2026-11-20 (D1 A): every outcome tapped on the row counts, No answer and Call back too.
+  it.each(["booked", "call_back", "not_interested", "no_answer"])(
+    "drops the offer once a %s outcome is logged after the last engagement, until the customer touches it again",
+    (outcome) => {
+      const logged = (hours) => ({ outcome, at: hoursAgo(hours), by: "Virginia" });
+      expect(isCallTodayEstimate(viewedOffer(10, { lastCallOutcome: logged(3) }), NOW_MS)).toBe(false);
+      expect(isCallTodayEstimate(viewedOffer(10, { lastCallOutcome: logged(20) }), NOW_MS)).toBe(true);
+      expect(isCallTodayEstimate(viewedOffer(10, { lastCallOutcome: null }), NOW_MS)).toBe(true);
+    },
+  );
+
   it("needs a viewed, unarchived offer with a phone", () => {
     expect(isCallTodayEstimate(viewedOffer(10, { customerPhone: "" }), NOW_MS)).toBe(false);
     expect(isCallTodayEstimate(viewedOffer(10, { customerPhone: undefined }), NOW_MS)).toBe(false);
     expect(isCallTodayEstimate(viewedOffer(10, { archivedAt: hoursAgo(1) }), NOW_MS)).toBe(false);
     expect(isCallTodayEstimate(viewedOffer(10, { status: "sent" }), NOW_MS)).toBe(false);
     expect(isCallTodayEstimate(estimate({ status: "viewed", customerPhone: "+19415550101" }), NOW_MS)).toBe(false);
+  });
+
+  // The row checks alone, which a row held on the page after a call from the list must still pass (codex pre-push P1).
+  it("isCallableEstimate is the row checks alone: a viewed, unarchived, delivered offer with a phone, at any age", () => {
+    expect(isCallableEstimate(viewedOffer(10))).toBe(true);
+    expect(isCallableEstimate(viewedOffer(0))).toBe(true); // opened a moment ago: too fresh for the list, still callable
+    expect(isCallableEstimate(viewedOffer(10, { status: "accepted" }))).toBe(false);
+    expect(isCallableEstimate(viewedOffer(10, { status: "declined" }))).toBe(false);
+    expect(isCallableEstimate(viewedOffer(10, { archivedAt: hoursAgo(1) }))).toBe(false);
+    expect(isCallableEstimate(viewedOffer(10, { undeliveredSelfServe: true }))).toBe(false);
+    expect(isCallableEstimate(viewedOffer(10, { customerPhone: " " }))).toBe(false);
+    expect(isCallableEstimate(null)).toBe(false);
+  });
+
+  // The list route marks every row callOutcomeUnknown when its outcome read fails (codex pre-push P1).
+  it("withholds an offer whose call outcomes could not be read", () => {
+    expect(isCallTodayEstimate(viewedOffer(10, { callOutcomeUnknown: true }), NOW_MS)).toBe(false);
+    expect(isCallTodayEstimate(viewedOffer(10, { callOutcomeUnknown: false }), NOW_MS)).toBe(true);
   });
 
   it("lists no self-serve quote nobody delivered, in any follow-up bucket (zero-follow-up contract, codex pre-push P1)", () => {

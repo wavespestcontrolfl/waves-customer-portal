@@ -555,6 +555,32 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(day(invoices[0].due_date)).toBe(etDateString(addETDays(new Date(), 30)));
   });
 
+  test("a record keeps the picked action labels apart from the note lines, and a record with the technician's own note reads only those", async () => {
+    const input = submission({ actor: { techRole: 'admin', technicianId: fixture.techId } });
+    input.items[0].body = { ...input.items[0].body,
+      protocolActionsCompleted: ['Granular bait in beds', 'Treatment is safe for pets'], technicianNotes: '[Action] Treated along the side gate',
+      recommendations: ['Trim the hedge back from the wall', 'Toxic residue on the sill'] };
+    expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202 });
+    const record = await mockPg('service_records').where({ scheduled_service_id: input.items[0].serviceId }).first();
+    // The form-only copy also leaves out a label that fails the complete
+    // customer-copy screen; the merged list keeps today's content.
+    expect(record.structured_notes).toMatchObject({
+      protocolActionsCompleted: ['Granular bait in beds', 'Treatment is safe for pets', 'Treated along the side gate'],
+      formProtocolActions: ['Granular bait in beds'],
+    });
+    // The form's recommendations store the same way (pre-push audit on
+    // d9da442dba): the refused value stays in the merged list only.
+    expect(record.structured_notes.formRecommendations).toEqual(['Trim the hedge back from the wall']);
+    expect(record.structured_notes.recommendations).toEqual(expect.arrayContaining(['Trim the hedge back from the wall', 'Toxic residue on the sill']));
+    // The report's reader (report-data buildProtocolPayload) on the saved
+    // record, then on the same record once it carries the technician's own note.
+    const { buildProtocolPayload } = require('../services/service-report/report-data');
+    expect(buildProtocolPayload(record).actions).toEqual(['Granular bait in beds', 'Treatment is safe for pets', 'Treated along the side gate']);
+    const reportNote = { v: 1, text: 'I put bait in the beds.', source: 'cleaned' };
+    expect(buildProtocolPayload({ ...record, structured_notes: { ...record.structured_notes, reportNote } }).actions)
+      .toEqual(['Granular bait in beds']);
+  });
+
   test.each([
     ['inspection only', false], ['inspection only', true], ['callback', true], ['always-free follow-up', true],
   ])('nonbillable estimate members (%s) leave unrelated acceptance invoices outside packet billing (lock=%s)', async (kind, heldLock) => {
