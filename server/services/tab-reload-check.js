@@ -33,8 +33,9 @@ const { deliverOpsDigest, resolveOpsDigest } = require('./ops-digest');
 const OPS_KEY = 'tab-reload-check';
 // The edge of a read, Eastern: one minute before the job's scheduled time
 // (scheduler.js; a test keeps both in step). A page view takes its time from
-// the database as its insert starts. After that minute a view of before the
-// edge is in the table, also when that clock is a little behind this one.
+// the database as its insert starts. The minute lets that insert end, and
+// covers a database clock a little behind this one. A view whose insert is
+// held up for longer than the minute at the edge is not read (a known limit).
 const EDGE_AT = '23:50';
 const FAILED_NAMES = ['reloaded', 'reload-missed'];
 // How far a finished run has read (system_settings).
