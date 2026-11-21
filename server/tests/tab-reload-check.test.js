@@ -75,7 +75,7 @@ describe('runTabReloadCheck', () => {
     expect(sent.headline.length).toBeLessThanOrEqual(60);
     expect(sent.summary.length).toBeLessThanOrEqual(110);
     expect(sent.text).toContain('6 staff page views by 2 staff members');
-    expect(sent.text).toContain('- never-heard (3): the tab never heard');
+    expect(sent.text).toContain('- never-heard (3): the tab had still heard no server');
     expect(sent.text).toContain('- no name (3): the move was due a reload');
     expect(sent.text).toContain('- pipeline: 5\n- dashboard: 1');
     expect(result.delivery).toEqual({ ok: true, channel: 'in_app', id: 'n1' });

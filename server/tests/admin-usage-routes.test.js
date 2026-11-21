@@ -349,6 +349,28 @@ describe('admin usage: POST /track tab build', () => {
     await expect(stored({ build: 'bbb222bbb222', reloadHold: 'current', ...newer })).resolves.toEqual({ stale_build: false, reload_hold: null });
   });
 
+  // The name is what the tab knew at its last page move; the page view can
+  // leave long after it (a tab switch on the same page, after a deploy).
+  test("'never-heard' is kept only while the page view names no server the tab has heard from", async () => {
+    const { BOOT } = require('../middleware/portal-build-header');
+    setPortalBuildForTests('bbb222bbb222');
+    const tab = { build: 'aaa111aaa111', reloadHold: 'never-heard' };
+    // The tab still has heard no server: it cannot know it is out of date.
+    await expect(stored(tab)).resolves.toEqual({ stale_build: true, reload_hold: 'never-heard' });
+    await expect(stored({ ...tab, boot: 0 })).resolves.toEqual({ stale_build: true, reload_hold: 'never-heard' });
+    await expect(stored({ ...tab, boot: String(Number(BOOT)), liveBuild: 'not a build' })).resolves.toEqual({ stale_build: true, reload_hold: 'never-heard' });
+    // It has heard one since its move (this server, an older one, or one
+    // whose start time did not arrive): the move was by a tab that knew no
+    // newer build.
+    await expect(stored({ ...tab, boot: Number(BOOT), liveBuild: 'bbb222bbb222' })).resolves.toEqual({ stale_build: true, reload_hold: 'current' });
+    await expect(stored({ ...tab, boot: Number(BOOT) - 60000 })).resolves.toEqual({ stale_build: true, reload_hold: 'current' });
+    await expect(stored({ ...tab, liveBuild: 'AAA111aaa111' })).resolves.toEqual({ stale_build: true, reload_hold: 'current' });
+    // Every other name is kept as sent, and a current tab keeps none.
+    await expect(stored({ ...tab, reloadHold: 'reloaded', boot: Number(BOOT) })).resolves.toEqual({ stale_build: true, reload_hold: 'reloaded' });
+    await expect(stored({ ...tab, reloadHold: 'reload-missed', boot: Number(BOOT) })).resolves.toEqual({ stale_build: true, reload_hold: 'reload-missed' });
+    await expect(stored({ build: 'bbb222bbb222', reloadHold: 'never-heard', boot: Number(BOOT) })).resolves.toEqual({ stale_build: false, reload_hold: null });
+  });
+
   test('without a build tag on the server, whether the tab is out of date is unknown', async () => {
     setPortalBuildForTests(null);
     await expect(stored({ build: 'aaa111aaa111', reloadHold: 'current' })).resolves.toEqual({ stale_build: null, reload_hold: null });

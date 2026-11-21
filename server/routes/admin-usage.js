@@ -164,12 +164,21 @@ const ET_DAY_SQL = "(created_at AT TIME ZONE 'America/New_York')::date";
 // both fields are unknown. When that newer server serves this server's build
 // (`liveBuild`: a restart with no new build, or another replica), this
 // server's build is the live one, and it judges.
+// 'never-heard' is what the tab knew at its last page move, and a page view
+// can leave long after that move (a tab switch on the same page). `boot` and
+// `liveBuild` are read as the page view leaves. When one is there, the tab
+// has heard a server since: its move was one by a tab that knew no newer
+// build ('current'), and a build that went live after the move is no missed
+// reload. So a stored 'never-heard' is a tab that is out of date and still
+// cannot know it (the nightly check counts it, services/tab-reload-check.js).
 function tabReloadFields(build, reloadHold, boot, liveBuild) {
   const served = servedPortalBuild();
   const sameBuild = typeof liveBuild === 'string' && liveBuild.toLowerCase() === served;
   const draining = typeof boot === 'number' && boot > Number(BOOT) && !sameBuild;
   const stale = !draining && typeof build === 'string' && BUILD_RE.test(build) && served ? build.toLowerCase() !== served : null;
-  return { stale_build: stale, reload_hold: stale && RELOAD_BLOCKERS.has(reloadHold) ? reloadHold : null };
+  const name = stale && RELOAD_BLOCKERS.has(reloadHold) ? reloadHold : null;
+  const heard = (typeof boot === 'number' && boot > 0) || (typeof liveBuild === 'string' && BUILD_RE.test(liveBuild));
+  return { stale_build: stale, reload_hold: name === 'never-heard' && heard ? 'current' : name };
 }
 
 router.post('/track', async (req, res, next) => {

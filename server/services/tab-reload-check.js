@@ -9,8 +9,9 @@
 // when out-of-date page views show a failed reload:
 // - no name: the move was due a reload, or no move was noted for the page
 //   (components/PortalUpdate.jsx);
-// - 'never-heard': the tab never heard the server's build, so it cannot
-//   know it is out of date;
+// - 'never-heard': the tab had still heard no server as the page view left,
+//   so it cannot know it is out of date (the route stores the name only
+//   then, routes/admin-usage.js);
 // - 'reloaded': three reloads for the live build came back on the old one;
 // - 'reload-missed': the page the tab loaded is the tab's own reload for a
 //   newer build, and it came back on the build it left.
@@ -36,7 +37,7 @@ const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 
 const CAUSES = {
   none: 'the move was due a reload, or no move was noted for the page (client/src/components/PortalUpdate.jsx)',
-  'never-heard': "the tab never heard the server's build, so it cannot know it is out of date (client/src/lib/portalVersion.js, server/middleware/portal-build-header.js)",
+  'never-heard': 'the tab had still heard no server as the page view left, so it cannot know it is out of date (client/src/lib/portalVersion.js, server/middleware/portal-build-header.js)',
   reloaded: 'three reloads for the live build came back on the old build (client/src/lib/portalReload.js)',
   'reload-missed': "the tab's own reload for a newer build came back on the build it left (client/src/lib/portalReload.js, client/public/sw.js)",
 };
