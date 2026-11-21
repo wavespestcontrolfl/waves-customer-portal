@@ -287,20 +287,21 @@ function comparableEmail(value) {
 // 2026-11-20: text unless the customer sets the app up). The current form marks a save
 // where the customer changed the receipt selector (paymentConfirmationChannelEdited;
 // the payload's receiptChannelEditMark tells the page this server accepts the mark).
-// So in a legacy form save, App over an untouched Text default is stored only with that
-// mark; an unmarked one is an echo and is dropped. The mark is transport only and never
-// reaches the write.
+// So in a legacy form save an App value is written only with that mark; an unmarked one
+// is an echo and is dropped, whatever the stored row holds. (The stored row is not read:
+// a stale tab that still shows App must not undo a Text choice the customer made in
+// another tab, and dropping an echo of a stored App choice changes nothing.) The page
+// compares the returned channel with its pick and does not show Saved on a difference.
+// The mark is transport only and never reaches the write.
 // Only the legacy form save is judged: it always carries billingEmail and
 // billingReminderChannel. A save of the receipt channel alone cannot be that form's echo
 // and is stored as sent. The billing channels list (paymentConfirmationChannels) and
 // every other channel key send only what the customer changed.
-function dropLegacyReceiptAppEcho(updates, existing = {}) {
+function dropLegacyReceiptAppEcho(updates) {
   const edited = updates.paymentConfirmationChannelEdited === true;
   delete updates.paymentConfirmationChannelEdited;
   const legacyFormSave = updates.billingEmail !== undefined && updates.billingReminderChannel !== undefined;
-  if (legacyFormSave && !edited && updates.paymentConfirmationChannel === 'push'
-    && channelValue(existing?.payment_receipt_channel, true) === 'sms'
-    && existing?.payment_receipt_channel_explicit !== true) {
+  if (legacyFormSave && !edited && updates.paymentConfirmationChannel === 'push') {
     delete updates.paymentConfirmationChannel;
   }
   return updates;
@@ -1116,7 +1117,7 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     const existing = await ensurePrefs(req.customerId);
-    dropLegacyReceiptAppEcho(updates, existing || {});
+    dropLegacyReceiptAppEcho(updates);
     const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {});
 
     // Delivery channels are account-level — persist them on the primary profile

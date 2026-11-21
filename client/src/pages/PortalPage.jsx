@@ -7382,6 +7382,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
     }
     setBillingPrefsSaving(true);
     setBillingPrefsStatus(null);
+    // An App pick for receipts that this save carries. The server writes it only with the mark below.
+    const receiptAppPickSent = !billingChannelsAvailable && receiptChannelEdited && paymentConfirmationChannel === 'push';
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
       ...(paymentSmsReenabled ? { paymentConfirmationSms: true } : {}),
@@ -7406,6 +7408,15 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           setPaymentIssueChannel(result?.preferences?.paymentIssueChannel || savedPaymentIssueChannel);
           throw new Error('Billing delivery preference was not saved');
         }
+        // Read first what this server accepts, so a pick made again after a refusal carries the mark.
+        if (result?.preferences) setReceiptEditMarkAccepted(result.preferences.receiptChannelEditMark === true);
+        // The server did not store the App pick (it got no mark: the page loaded from a server that did not
+        // offer one). Show what is stored and report the failure, as the invoice selectors above do.
+        if (receiptAppPickSent && result?.preferences?.paymentConfirmationChannel !== 'push') {
+          setPaymentConfirmationChannel(result?.preferences?.paymentConfirmationChannel || 'sms');
+          setReceiptChannelEdited(false);
+          throw new Error('Receipt delivery preference was not saved');
+        }
         if (!billingChannelsAvailable) {
           setSavedInvoiceChannel(invoiceChannel);
           setSavedPaymentIssueChannel(paymentIssueChannel);
@@ -7413,7 +7424,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         setSavedBillingEmail(billingEmail);
         // The receipt selector is locked while this save runs, so the mark cleared here is the one just sent.
         setReceiptChannelEdited(false);
-        if (result?.preferences) setReceiptEditMarkAccepted(result.preferences.receiptChannelEditMark === true);
         // Keep local state in step with the coerced save — otherwise
         // re-adding an email (or re-enabling email messages) in the same
         // session resurrects a stale Email/Both selection the server was

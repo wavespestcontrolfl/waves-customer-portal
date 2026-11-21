@@ -106,10 +106,28 @@ describe('save route: an App pick is the customer\'s own choice and is stored (o
       { payment_receipt_channel: 'sms', payment_receipt_channel_explicit: true },
       { payment_receipt_channel: 'email', payment_receipt_channel_explicit: false },
     ]) {
-      const updates = dropLegacyReceiptAppEcho({ paymentConfirmationChannel: 'push', billingEmail: 'a@example.com' }, existing);
-      expect(updates).toEqual({ paymentConfirmationChannel: 'push', billingEmail: 'a@example.com' });
       expect(notificationPrefsDbUpdates({ paymentConfirmationChannel: 'push' }, existing))
         .toEqual({ payment_receipt_channel: 'push', payment_receipt_channel_explicit: true });
+    }
+  });
+
+  // A stale tab still shows App for what was an untouched Text default. The customer then picks Text in
+  // another tab. The stale tab's email-only save must not write App over that choice (pre-push audit, 6cedc6d6db).
+  test('an unmarked App value in a legacy form save is never written, whatever the stored row holds', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/notifications.js'), 'utf8');
+    expect(source).toContain('function dropLegacyReceiptAppEcho(updates) {');
+    for (const existing of [
+      { payment_receipt_channel: 'sms', payment_receipt_channel_explicit: true },
+      { payment_receipt_channel: 'email', payment_receipt_channel_explicit: false },
+      { payment_receipt_channel: 'both', payment_receipt_channel_explicit: true },
+      { payment_receipt_channel: 'push', payment_receipt_channel_explicit: true },
+    ]) {
+      const updates = dropLegacyReceiptAppEcho(
+        { paymentConfirmationChannel: 'push', billingEmail: 'a@example.com', billingReminderChannel: 'sms' }, existing);
+      expect(updates).toEqual({ billingEmail: 'a@example.com', billingReminderChannel: 'sms' });
+      const write = notificationPrefsDbUpdates(updates, existing);
+      expect(write).not.toHaveProperty('payment_receipt_channel');
+      expect(write).not.toHaveProperty('payment_receipt_channel_explicit');
     }
   });
 
@@ -184,7 +202,7 @@ describe('save route: an App pick is the customer\'s own choice and is stored (o
 
   test('the save route runs the echo guard before it builds the write', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/notifications.js'), 'utf8');
-    const guard = source.indexOf('dropLegacyReceiptAppEcho(updates, existing || {});');
+    const guard = source.indexOf('    dropLegacyReceiptAppEcho(updates);');
     const write = source.indexOf('const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {});');
     expect(guard).toBeGreaterThan(-1);
     expect(write).toBeGreaterThan(guard);

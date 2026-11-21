@@ -211,6 +211,33 @@ it('never sends the receipt mark to a server that did not say it accepts it', as
   expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('paymentConfirmationChannelEdited');
 });
 
+// The page loaded from a server that offered no mark, so its App pick goes unmarked and the server drops it.
+it('does not show Saved for a receipt App pick the server did not store, and the next pick carries the mark', async () => {
+  prefs.billingChannelsAvailable = false;
+  prefs.paymentConfirmationChannel = 'sms';
+  render(<BillingTab customer={customer} />);
+  const select = await screen.findByRole('combobox', { name: 'Delivery method for payment confirmations' });
+  await waitFor(() => expect(within(select).getByRole('option', { name: 'App', exact: true })).not.toBeDisabled());
+  api.updateNotificationPrefs.mockImplementationOnce(async (changes) => {
+    const stored = { ...changes };
+    delete stored.paymentConfirmationChannel;
+    prefs = { ...prefs, ...stored, receiptChannelEditMark: true };
+    return { success: true, preferences: prefs };
+  });
+  fireEvent.change(select, { target: { value: 'push' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await waitFor(() => expect(select).toHaveValue('sms'));
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('paymentConfirmationChannelEdited');
+  expect(screen.queryByRole('button', { name: 'Saved', exact: true })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save billing preferences' })).toBeInTheDocument();
+  fireEvent.change(select, { target: { value: 'push' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(2));
+  expect(api.updateNotificationPrefs.mock.calls[1][0]).toMatchObject({ paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: true });
+  await screen.findByRole('button', { name: 'Saved', exact: true });
+  expect(select).toHaveValue('push');
+});
+
 // A choice made while an earlier save is in flight would lose its mark when that save returns.
 it('locks the scalar receipt selector while a billing save is in flight', async () => {
   prefs.billingChannelsAvailable = false;
