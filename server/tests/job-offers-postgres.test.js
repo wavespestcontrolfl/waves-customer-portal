@@ -21,9 +21,12 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockSendStageComms = jest.fn(async () => ({ sms: 'sent', email: 'sent' }));
+// The gates of a recruiting stage, as job-offers.js asks the sender for them (the reminder pass). On in this suite.
+const mockStageEnabled = jest.fn(() => true);
 jest.mock('../services/recruiting-comms', () => ({
   ...jest.requireActual('../services/recruiting-comms'),
   sendStageComms: (...args) => mockSendStageComms(...args),
+  stageEnabled: (...args) => mockStageEnabled(...args),
 }));
 const mockRaise = jest.fn(async () => ({ id: 'bell-1' }));
 jest.mock('../services/admin-alert-compose', () => ({
@@ -66,6 +69,21 @@ jest.setTimeout(120000);
     } catch (err) {
       if (err.message !== 'rollback') throw err;
     }
+  }
+
+  // Runs `work` with the service's next transaction opened by `first`; the ones after it are the real ones.
+  async function withNextTransaction(first, work) {
+    const real = mockDb;
+    let used = false;
+    const stand = (...args) => real(...args);
+    stand.raw = (...args) => real.raw(...args);
+    stand.transaction = (...args) => {
+      if (used) return real.transaction(...args);
+      used = true;
+      return first(...args);
+    };
+    mockDb = stand;
+    try { return await work(); } finally { mockDb = real; }
   }
 
   // The version a read of the link shows: what the page sends back with each answer.
@@ -877,21 +895,6 @@ jest.setTimeout(120000);
         await JobOffers.closeExpiredOffers();
         mockRaise.mockClear();
       });
-      // Runs `work` with the service's next transaction opened by `first`; the ones after it are the real ones.
-      async function withNextTransaction(first, work) {
-        const real = mockDb;
-        let used = false;
-        const stand = (...args) => real(...args);
-        stand.raw = (...args) => real.raw(...args);
-        stand.transaction = (...args) => {
-          if (used) return real.transaction(...args);
-          used = true;
-          return first(...args);
-        };
-        mockDb = stand;
-        try { return await work(); } finally { mockDb = real; }
-      }
-
       test('a sent offer past its expiry is stored as expired and rings one bell; a second pass does nothing', async () => {
         const app = await newApplication();
         const sent = (await sendNew(app)).offer;
@@ -1163,6 +1166,358 @@ jest.setTimeout(120000);
         expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 1, failed: 0 });
         expect(await statusOf(first.id)).toBe('expired');
         expect(mockRaise).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    describe('the 2-day reminder', () => {
+      const offerRow = (id) => root('job_offers').where({ id }).first();
+      // The pass runs on a test clock: noon Eastern on the day this suite loaded, inside the reminder hours whenever
+      // the suite runs. The day is read once, so a run across midnight keeps one clock.
+      const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+      const testDay = etDateString();
+      const atEt = (time) => () => parseETDateTime(`${testDay}T${time}`);
+      const midday = atEt('12:00');
+      // The offer was sent `hours` before that noon. Its expiry stays 7 days after the real send, so it is still open.
+      const sentAgo = (id, hours) => root('job_offers').where({ id }).update({ sent_at: new Date(midday().getTime() - hours * 3600000) });
+      // Ticks, or clears, "Text me about this offer" on the offer page.
+      const tickTextBox = async (offerId, consent = true) => {
+        const { token } = await offerRow(offerId);
+        return JobOffers.setTextConsent(token, consent, await shownVersion(token));
+      };
+      // An offer two days old (and one hour), for an applicant who ticked "Text me about this offer" (texts: false
+      // leaves the box empty).
+      async function dueOffer({ texts = true, ...over } = {}, hours = 49) {
+        const app = await newApplication(over);
+        const sent = (await sendNew(app)).offer;
+        if (texts) await tickTextBox(sent.id);
+        await sentAgo(sent.id, hours);
+        mockSendStageComms.mockClear();
+        return { app, sent };
+      }
+      const none = { reminded: 0, notSent: 0, failed: 0 };
+      const one = { reminded: 1, notSent: 0, failed: 0 };
+      // Earlier cases leave due offers in the shared transaction: take them first, so each count is this case's own.
+      beforeEach(async () => {
+        await JobOffers.sendDueReminders(midday);
+        mockSendStageComms.mockClear();
+      });
+
+      test('an open offer two days old gets one reminder, by text and email, and never a second one', async () => {
+        const { app, sent } = await dueOffer();
+        const before = await offerRow(sent.id);
+        // The offer is taken before anything is sent: a send that fails, or a process that stops, cannot lead to a second one.
+        let takenAtSend;
+        mockSendStageComms.mockImplementationOnce(async () => {
+          takenAtSend = await offerRow(sent.id);
+          return { sms: 'sent', email: 'sent' };
+        });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(one);
+        expect(takenAtSend).toMatchObject({ reminder_claimed_at: expect.any(Date), reminder_sent_at: null });
+        expect(mockSendStageComms).toHaveBeenCalledTimes(1);
+        const [application, stage, opts] = mockSendStageComms.mock.calls[0];
+        expect(application.id).toBe(app.id);
+        expect(stage).toBe('offer_reminder');
+        expect(opts).toMatchObject({
+          sms: true, email: true, by: 'system',
+          vars: {
+            offer_link: expect.stringMatching(new RegExp(`/careers/offer/${before.token}$`)),
+            expires_on: JobOffers.fmtDay(etDateString(new Date(before.expires_at))),
+            job_title: 'Pest Control Technician', sender_name: 'Test Owner',
+          },
+        });
+        const after = await offerRow(sent.id);
+        expect(after.reminder_claimed_at).toBeInstanceOf(Date);
+        expect(after.reminder_sent_at).toBeInstanceOf(Date);
+        // The reminder changes nothing the applicant or the owner acts on: the offer keeps its version and its state.
+        expect(after.updated_at).toEqual(before.updated_at);
+        expect(after.status).toBe('sent');
+        const panel = await JobOffers.adminPanel(app.id, actor());
+        expect(panel.current.timeline.map((t) => t.kind)).toContain('reminded');
+
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockSendStageComms).toHaveBeenCalledTimes(1);
+      });
+
+      test('with a gate off a direct call takes nothing: the offer keeps its one attempt', async () => {
+        const { sent } = await dueOffer();
+        mockStageEnabled.mockReturnValueOnce(false);
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockStageEnabled).toHaveBeenLastCalledWith('offer_reminder');
+        expect(mockSendStageComms).not.toHaveBeenCalled();
+        expect((await offerRow(sent.id)).reminder_claimed_at).toBeNull();
+        // With the gates on again the same offer gets its reminder.
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(one);
+      });
+
+      test('the check before each provider passes only while the offer is the open one with this link', async () => {
+        const { app, sent } = await dueOffer();
+        await JobOffers.sendDueReminders(midday);
+        const { stillEligible } = mockSendStageComms.mock.calls[0][2];
+        for (const channel of ['sms', 'email']) expect(await stillEligible(root, channel)).toBe(true);
+        await inRolledBack(async (sp) => {
+          // The check reads the pass's clock (noon Eastern), so the expiry is set against that clock.
+          await sp('job_offers').where({ id: sent.id }).update({ expires_at: new Date(midday().getTime() - 1000) });
+          for (const channel of ['sms', 'email']) expect(await stillEligible(sp, channel)).toBe(false);
+        });
+        await inRolledBack(async (sp) => {
+          await sp('job_applications').where({ id: app.id }).update({ status: 'rejected' });
+          for (const channel of ['sms', 'email']) expect(await stillEligible(sp, channel)).toBe(false);
+        });
+        await JobOffers.withdrawOffer(app.id, sent.id, actor(), { expectedStatus: 'sent' });
+        for (const channel of ['sms', 'email']) expect(await stillEligible(root, channel)).toBe(false);
+      });
+
+      test('an applicant who clears "Text me about this offer" after the pass took the offer gets no text; the email still goes', async () => {
+        // Text consent on the application does not keep the text alive: the cleared box is the answer for this offer.
+        const { sent } = await dueOffer({ sms_consent: true });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(one);
+        const opts = mockSendStageComms.mock.calls[0][2];
+        expect(opts).toMatchObject({ sms: true, email: true });
+        expect(await opts.stillEligible(root, 'sms')).toBe(true);
+        // The box is cleared before the text reaches the provider: the sender reads this check inside its locked handoff.
+        await tickTextBox(sent.id, false);
+        expect(await opts.stillEligible(root, 'sms')).toBe(false);
+        expect(await opts.stillEligible(root, 'email')).toBe(true);
+      });
+
+      test('it leaves an offer under two days old, an expired one, a date request, and an application that left Offer', async () => {
+        const young = (await sendNew(await newApplication())).offer;
+        await sentAgo(young.id, 47);
+        const lapsed = (await dueOffer()).sent;
+        await root('job_offers').where({ id: lapsed.id }).update({ expires_at: new Date(midday().getTime() - 60000) });
+        const asked = (await dueOffer()).sent;
+        const askedToken = (await offerRow(asked.id)).token;
+        await JobOffers.requestDate(askedToken, { requestedStartDate: JobOffers.suggestStartDate(new Date(Date.now() + 14 * 86400000)), version: await shownVersion(askedToken) });
+        const gone = await dueOffer();
+        await root('job_applications').where({ id: gone.app.id }).update({ status: 'interview' });
+        mockSendStageComms.mockClear();
+
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockSendStageComms).not.toHaveBeenCalled();
+        for (const id of [young.id, lapsed.id, asked.id, gone.sent.id]) expect((await offerRow(id)).reminder_claimed_at).toBeNull();
+      });
+
+      test('an offer with reminder_sent_at is never reminded, also when the row holds no claim', async () => {
+        // reminder_sent_at alone closes the offer for the pass (a row restored or repaired without its claim).
+        const { sent } = await dueOffer();
+        await root('job_offers').where({ id: sent.id }).update({ reminder_claimed_at: null, reminder_sent_at: new Date(midday().getTime() - 3600000) });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockSendStageComms).not.toHaveBeenCalled();
+        expect((await offerRow(sent.id)).reminder_claimed_at).toBeNull();
+      });
+
+      test('an offer withdrawn, or signed, while the pass waited for it gets no reminder', async () => {
+        const withdrawn = await dueOffer();
+        // The change lands after the pass listed the offer and before it took the locks.
+        const changeThenOpen = (change) => async (work) => { await change(); return root.transaction(work); };
+        const withdraw = changeThenOpen(() => root('job_offers').where({ id: withdrawn.sent.id }).update({ status: 'withdrawn', withdrawn_at: new Date(), updated_at: new Date() }));
+        expect(await withNextTransaction(withdraw, () => JobOffers.sendDueReminders(midday))).toEqual(none);
+
+        const signed = await dueOffer();
+        const sign = changeThenOpen(() => root('job_offers').where({ id: signed.sent.id }).update({ status: 'accepted', updated_at: new Date() }));
+        expect(await withNextTransaction(sign, () => JobOffers.sendDueReminders(midday))).toEqual(none);
+
+        expect(mockSendStageComms).not.toHaveBeenCalled();
+        for (const { sent } of [withdrawn, signed]) expect((await offerRow(sent.id)).reminder_claimed_at).toBeNull();
+      });
+
+      test('outside 9:00 AM to 5:55 PM Eastern the pass takes nothing', async () => {
+        const { sent } = await dueOffer({}, 72);
+        for (const time of ['08:59', '17:55', '18:00', '21:00']) {
+          expect(await JobOffers.sendDueReminders(atEt(time))).toEqual(none);
+        }
+        expect(mockSendStageComms).not.toHaveBeenCalled();
+        expect((await offerRow(sent.id)).reminder_claimed_at).toBeNull();
+        expect(await JobOffers.sendDueReminders(atEt('09:00'))).toEqual(one);
+      });
+
+      test('a pass still running at 5:55 PM takes no more offers: the clock is read for each offer, after its row locks', async () => {
+        // Offers that earlier cases left under two days old at noon are due by the evening: take them first.
+        await JobOffers.sendDueReminders(atEt('17:50'));
+        mockSendStageComms.mockClear();
+        const first = await dueOffer({}, 72);
+        const second = await dueOffer({}, 71);
+        // The pass starts at 5:54 PM; the first offer is taken then; the clock passes 5:55 PM before the second one.
+        const times = [atEt('17:54')(), atEt('17:54')(), atEt('17:55')()];
+        const events = [];
+        const clock = () => { events.push('clock'); return times.shift() || atEt('17:55')(); };
+        const listen = (query) => { if (/for update/i.test(query.sql) && /"job_(applications|offers)"/.test(query.sql)) events.push('lock'); };
+        database.on('query', listen);
+        try {
+          expect(await JobOffers.sendDueReminders(clock)).toEqual(one);
+        } finally {
+          database.removeListener('query', listen);
+        }
+        // One read to start the pass, then for each offer: both row locks, then the clock.
+        expect(events).toEqual(['clock', 'lock', 'lock', 'clock', 'lock', 'lock', 'clock']);
+        expect((await offerRow(first.sent.id)).reminder_claimed_at).toBeInstanceOf(Date);
+        expect((await offerRow(second.sent.id)).reminder_claimed_at).toBeNull();
+        // The next working day's pass takes the one that was left.
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(one);
+        expect((await offerRow(second.sent.id)).reminder_sent_at).toBeInstanceOf(Date);
+      });
+
+      test('a channel that reaches its provider at 6 PM is not sent: the text went at 5:59, the email did not', async () => {
+        await JobOffers.sendDueReminders(atEt('17:50'));
+        mockSendStageComms.mockClear();
+        const { sent } = await dueOffer({}, 72);
+        // The pass starts and takes the offer at 5:54 PM; the text's check runs at 5:59 PM, the email's at 6:00 PM.
+        const times = [atEt('17:54')(), atEt('17:54')(), atEt('17:59')()];
+        const clock = () => times.shift() || atEt('18:00')();
+        let answers;
+        mockSendStageComms.mockImplementationOnce(async (_application, _stage, opts) => {
+          answers = { sms: await opts.stillEligible(root, 'sms'), email: await opts.stillEligible(root, 'email') };
+          return { sms: answers.sms ? 'sent' : 'stale', email: answers.email ? 'sent' : 'stale' };
+        });
+        expect(await JobOffers.sendDueReminders(clock)).toEqual(one);
+        expect(answers).toEqual({ sms: true, email: false });
+        expect((await offerRow(sent.id)).reminder_sent_at).toBeInstanceOf(Date);
+      });
+
+      test('a check before a provider that cannot be read stops that channel and fails the pass; the other channel still runs', async () => {
+        const { sent } = await dueOffer();
+        const down = () => { throw new Error('connection lost'); };
+        mockSendStageComms.mockImplementationOnce(async (_application, _stage, opts) => {
+          // The text's check cannot read the offer; the email's check reads it.
+          const sms = await opts.stillEligible(down, 'sms');
+          const email = await opts.stillEligible(root, 'email');
+          return { sms: sms ? 'sent' : 'stale', email: email ? 'sent' : 'stale' };
+        });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 1, notSent: 0, failed: 1 });
+        expect((await offerRow(sent.id)).reminder_sent_at).toBeInstanceOf(Date);
+
+        // Neither check could be read: nothing went out, and the job still fails.
+        const none2 = await dueOffer();
+        mockSendStageComms.mockImplementationOnce(async (_application, _stage, opts) => {
+          expect(await opts.stillEligible(down, 'sms')).toBe(false);
+          expect(await opts.stillEligible(down, 'email')).toBe(false);
+          return { sms: 'stale', email: 'stale' };
+        });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 0, notSent: 0, failed: 1 });
+        expect(await offerRow(none2.sent.id)).toMatchObject({ reminder_claimed_at: expect.any(Date), reminder_sent_at: null });
+      });
+
+      test('the text goes only to an applicant who ticked "Text me about this offer"; the email goes to everyone with an email', async () => {
+        // An empty box means no text, also for an applicant who agreed to texts on the application: the page shows
+        // the box empty.
+        const quiet = await dueOffer({ texts: false, sms_consent: true });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(one);
+        expect(mockSendStageComms.mock.calls[0][2]).toMatchObject({ sms: false, email: true });
+        expect((await offerRow(quiet.sent.id)).reminder_sent_at).toBeInstanceOf(Date);
+
+        // A ticked box is the yes, with no text consent on the application.
+        await dueOffer({ sms_consent: false });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(one);
+        expect(mockSendStageComms.mock.calls[0][2]).toMatchObject({ sms: true, email: true });
+      });
+
+      test('an applicant the pass cannot reach is not taken, and gets the reminder after a yes to texts', async () => {
+        const { sent } = await dueOffer({
+          texts: false, contact_snapshot: JSON.stringify({ name: 'Jordan Rivera', phone: '(941) 555-0100' }),
+        });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockSendStageComms).not.toHaveBeenCalled();
+        expect((await offerRow(sent.id)).reminder_claimed_at).toBeNull();
+
+        await tickTextBox(sent.id);
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(one);
+        expect(mockSendStageComms.mock.calls[0][2]).toMatchObject({ sms: true, email: false });
+      });
+
+      test('a reminder that did not go out for a known reason is not marked sent, is not a failure, and is not tried again', async () => {
+        // The applicant opted out of texts and the email address is suppressed.
+        const blocked = await dueOffer();
+        mockSendStageComms.mockResolvedValueOnce({ sms: 'blocked', email: 'blocked' });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 0, notSent: 1, failed: 0 });
+        expect(await offerRow(blocked.sent.id)).toMatchObject({ reminder_claimed_at: expect.any(Date), reminder_sent_at: null });
+        const panel = await JobOffers.adminPanel(blocked.app.id, actor());
+        expect(panel.current.timeline.map((t) => t.kind)).not.toContain('reminded');
+
+        // The offer closed between the claim and the provider.
+        await dueOffer();
+        mockSendStageComms.mockResolvedValueOnce({ sms: 'stale', email: 'stale' });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 0, notSent: 1, failed: 0 });
+
+        mockSendStageComms.mockClear();
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockSendStageComms).not.toHaveBeenCalled();
+      });
+
+      test('a channel that failed fails the pass, also when the other channel went out, and the offer is not tried again', async () => {
+        // An applicant with an email only, whose email failed: nothing went out.
+        const emailOnly = await dueOffer({ texts: false });
+        mockSendStageComms.mockResolvedValueOnce({ sms: 'not_requested', email: 'failed' });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 0, notSent: 0, failed: 1 });
+        expect(await offerRow(emailOnly.sent.id)).toMatchObject({ reminder_claimed_at: expect.any(Date), reminder_sent_at: null });
+
+        // The email went and the text failed: reminded, and still a failure for the job's health.
+        const half = await dueOffer();
+        mockSendStageComms.mockResolvedValueOnce({ sms: 'failed', email: 'sent' });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 1, notSent: 0, failed: 1 });
+        expect((await offerRow(half.sent.id)).reminder_sent_at).toBeInstanceOf(Date);
+
+        // A send that threw may have reached one channel: counted, and never repeated.
+        const threw = await dueOffer();
+        mockSendStageComms.mockRejectedValueOnce(new Error('provider down'));
+        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 0, notSent: 0, failed: 1 });
+        expect(await offerRow(threw.sent.id)).toMatchObject({ reminder_claimed_at: expect.any(Date), reminder_sent_at: null });
+
+        mockSendStageComms.mockClear();
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockSendStageComms).not.toHaveBeenCalled();
+      });
+
+      test('a reminder that went out but whose time was not stored counts as reminded, fails the pass, and is not sent again', async () => {
+        const { sent } = await dueOffer();
+        const real = mockDb;
+        // The pass's only plain write to job_offers is the reminder_sent_at stamp (the claim runs in a transaction).
+        const stand = (table) => (table === 'job_offers' ? { where: () => ({ update: async () => { throw new Error('write failed'); } }) } : real(table));
+        stand.raw = (...args) => real.raw(...args);
+        stand.transaction = (...args) => real.transaction(...args);
+        mockDb = stand;
+        try {
+          expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 1, notSent: 0, failed: 1 });
+        } finally {
+          mockDb = real;
+        }
+        expect(mockSendStageComms).toHaveBeenCalledTimes(1);
+        expect(await offerRow(sent.id)).toMatchObject({ reminder_claimed_at: expect.any(Date), reminder_sent_at: null });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockSendStageComms).toHaveBeenCalledTimes(1);
+      });
+
+      test('a channel whose result is not known fails the pass, is not shown as "Reminder sent", and is not tried again', async () => {
+        // The applicant may hold the message and nobody can say so: no timeline entry, a failed job, no second send.
+        const unknown = await dueOffer({ texts: false });
+        mockSendStageComms.mockResolvedValueOnce({ sms: 'not_requested', email: 'uncertain' });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 0, notSent: 0, failed: 1 });
+        expect(await offerRow(unknown.sent.id)).toMatchObject({ reminder_claimed_at: expect.any(Date), reminder_sent_at: null });
+        const panel = await JobOffers.adminPanel(unknown.app.id, actor());
+        expect(panel.current.timeline.map((t) => t.kind)).not.toContain('reminded');
+
+        // The email went and the text is not known: reminded by the email, and still a failure for the job.
+        const half = await dueOffer();
+        mockSendStageComms.mockResolvedValueOnce({ sms: 'uncertain', email: 'sent' });
+        expect(await JobOffers.sendDueReminders(midday)).toEqual({ reminded: 1, notSent: 0, failed: 1 });
+        expect((await offerRow(half.sent.id)).reminder_sent_at).toBeInstanceOf(Date);
+
+        mockSendStageComms.mockClear();
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockSendStageComms).not.toHaveBeenCalled();
+      });
+
+      test('the pass does not wait on a row another transaction holds: both locked reads are SKIP LOCKED', async () => {
+        await dueOffer();
+        const rowLocks = [];
+        const listen = (query) => { if (/for update/i.test(query.sql) && /"job_(applications|offers)"/.test(query.sql)) rowLocks.push(query.sql); };
+        database.on('query', listen);
+        try {
+          expect(await JobOffers.sendDueReminders(midday)).toEqual(one);
+        } finally {
+          database.removeListener('query', listen);
+        }
+        expect(rowLocks).toHaveLength(2);
+        for (const sql of rowLocks) expect(sql).toMatch(/for update skip locked$/);
       });
     });
 

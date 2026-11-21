@@ -8,7 +8,7 @@
  *   - the Technician Terms lookup (ISSUED versions only, never a draft);
  *   - admin operations (panel, save draft, send, withdraw, revise, signed copy);
  *   - public operations (view, text consent, accept, date request, decline);
- *   - the scheduled 7-day close (closeExpiredOffers).
+ *   - the scheduled 7-day close (closeExpiredOffers) and 2-day reminder (sendDueReminders).
  *
  * Every state change is ONE transaction that locks the application row, then the offer row (always in that order),
  * re-reads the status under the lock and refuses a replay with the current state. Comms and bells run AFTER the
@@ -19,7 +19,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { dateOnlyAtNoonUtc, dateOnlyString, formatDateOnly, validDateOnly } = require('../utils/date-only');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 const { portalUrl } = require('../utils/portal-url');
 const { hash: canonicalHash } = require('./staff-document-source');
@@ -1343,6 +1343,174 @@ async function closeExpiredOffers() {
   return result;
 }
 
+// ----------------------------------------------------------- 2-day reminder
+
+const REMINDER_AFTER_MS = 2 * 24 * 60 * 60 * 1000;
+// The reminder goes out in the working day (Eastern). It is a courtesy to the applicant, not a legal window: the text
+// rail keeps its own 8 AM to 8 PM, and the email has none. The pass takes an offer from 9:00 AM until 5:55 PM, and a
+// channel's handoff starts only before 6:00 PM (the check before each provider reads the clock); the five minutes
+// are for the provider calls of the last offer taken. A handoff that passed its check finishes: the sender takes
+// its own locks after that check, and no clock read can sit on the provider request itself.
+const REMINDER_DAY_ET = Object.freeze({ from: 9 * 60, lastClaim: 17 * 60 + 55, until: 18 * 60 });
+const minuteOfDayEt = (now) => {
+  const { hour, minute } = etParts(now);
+  return hour * 60 + minute;
+};
+const mayClaimAt = (now) => minuteOfDayEt(now) >= REMINDER_DAY_ET.from && minuteOfDayEt(now) < REMINDER_DAY_ET.lastClaim;
+const maySendAt = (now) => minuteOfDayEt(now) >= REMINDER_DAY_ET.from && minuteOfDayEt(now) < REMINDER_DAY_ET.until;
+// The reminder's gates (GATE_JOB_OFFER_REMINDER and GATE_JOB_OFFERS), as the sender reads them for the stage. The
+// scheduler reads them before its lock. The pass reads them again before it takes an offer: a claim made with a
+// gate off would use up the offer's one attempt on a send that the sender refuses.
+const reminderOn = () => require('./recruiting-comms').stageEnabled('offer_reminder');
+// A channel that did not go cleanly for a reason on our side: it failed, or its result is not known (the applicant
+// may hold the message, and nobody can say so).
+const NOT_CLEAN = ['failed', 'uncertain'];
+
+// The applicant's yes to a text about this offer: the "Text me about this offer" box on the offer page. It starts
+// empty and the applicant can clear it again. The page shows that box, so it alone decides: the application's own
+// text consent (sms_consent) is about the application, and it does not stand in for a box the applicant sees empty
+// or has cleared. The reminder is the one message of the flow that no person presses, so its text needs this yes
+// when the pass takes the offer and again when the text goes to the provider.
+const agreedToTexts = (offer) => Boolean(offer.text_consent_at);
+
+// What the reminder may use for one applicant: a text with the applicant's yes, an email when one is on file.
+function reminderChannels(application, offer) {
+  const contact = contactOf(application);
+  return { sms: Boolean(contact.phone) && agreedToTexts(offer), email: Boolean(contact.email) };
+}
+
+// An offer sent two days ago or more, still open, on an application still at Offer, that has had no reminder. A
+// reminder that went out (reminder_sent_at) counts by itself, also on a row that holds no claim.
+const reminderDue = (application, offer, now) => application.status === 'offer' && offer.status === 'sent'
+  && !expiredByClock(offer, now) && !offer.reminder_claimed_at && !offer.reminder_sent_at && Boolean(offer.sent_at)
+  && now.getTime() - new Date(offer.sent_at).getTime() >= REMINDER_AFTER_MS;
+
+// Takes one offer for its reminder. Null when it is not due any more, it is past 5:55 PM, it has no channel to
+// use, or a row is held by another transaction (SKIP LOCKED: the next pass takes it). The claim (reminder_claimed_at)
+// commits before anything is sent, so an offer is tried once: a send that fails, or a process that stops after it,
+// never leads to a second reminder. An offer with no channel is not claimed: it gets its reminder if the applicant
+// agrees to texts later. The claim does not move updated_at: a reminder changes nothing the applicant or the owner
+// acts on, so no page they have open goes stale.
+async function claimReminder(applicationId, offerId, clock) {
+  return db.transaction(async (trx) => {
+    const application = await trx('job_applications').where({ id: applicationId }).forUpdate().skipLocked().first();
+    const offer = application && await trx('job_offers').where({ id: offerId }).forUpdate().skipLocked().first();
+    // The clock is read after both locks, as for every offer write. Each offer has its own read, so a long pass
+    // stops taking offers at 5:55 PM.
+    const now = clock();
+    if (!offer || !mayClaimAt(now) || !reminderDue(application, offer, now)) return null;
+    const channels = reminderChannels(application, offer);
+    if (!channels.sms && !channels.email) return null;
+    await trx('job_offers').where({ id: offerId }).update({ reminder_claimed_at: now });
+    return { application, offer, channels };
+  });
+}
+
+// Sends the reminder of a claimed offer through the recruiting sender (the stage 'offer_reminder'): the same link and
+// the same link rules as the offer text and email. The sender reads stillEligible again before each provider, for the
+// text inside its locked handoff (the application row is held, and every offer write takes that row first): the offer
+// must still be the open one with this link, it must be before 6:00 PM, and the text needs the applicant's yes to
+// texts at that moment. The sender never queues a reminder text for later (recruiting-comms TRIED_ONCE_STAGES).
+// Returns the sender's outcome for each channel, and checkFailed: a read of that check threw. The sender stops that
+// channel (it reports 'stale'), and the offer is not tried again, so the pass counts it as a failure.
+async function deliverReminder({ application, offer, channels }, clock) {
+  const snapshot = asObject(offer.snapshot);
+  let checkFailed = false;
+  const stillEligible = async (conn = db, channel) => {
+    try {
+      const row = await conn('job_offers').where({ id: offer.id }).first('status', 'token', 'expires_at', 'text_consent_at');
+      const app = await conn('job_applications').where({ id: application.id }).first('status');
+      const now = clock();
+      const open = Boolean(row && row.status === 'sent' && row.token === offer.token && !expiredByClock(row, now) && app && app.status === 'offer');
+      return open && maySendAt(now) && (channel !== 'sms' || agreedToTexts(row));
+    } catch (err) {
+      checkFailed = true;
+      logger.error(`[job-offers] reminder check failed before the ${channel || 'send'} (offer ${offer.id}): ${errTag(err)}`);
+      return false;
+    }
+  };
+  const comms = await require('./recruiting-comms').sendStageComms(application, 'offer_reminder', {
+    sms: channels.sms,
+    email: channels.email,
+    by: 'system',
+    stillEligible,
+    vars: {
+      offer_link: portalUrl(`/careers/offer/${offer.token}`),
+      expires_on: fmtDay(instantToEtDay(offer.expires_at)),
+      job_title: snapshot.jobTitle || offer.job_title,
+      sender_name: String((snapshot.owner && snapshot.owner.name) || '').trim() || ownerFirstName(snapshot),
+    },
+  });
+  return { sms: comms.sms, email: comms.email, checkFailed };
+}
+
+/**
+ * The 2-day reminder: the one message of the offer flow that no person presses (GATE_JOB_OFFER_REMINDER, read by the
+ * scheduler with GATE_JOB_OFFERS). Each sent offer that is two days old or more and still open, on an application
+ * still at Offer, gets one reminder: an email, and a text when the applicant ticked "Text me about this offer". A date request gets
+ * none: the owner answers it. A catch-up pass (each run takes every offer that is due); it takes an offer only from
+ * 9:00 AM to 5:55 PM Eastern, and no channel's handoff starts after 6:00 PM.
+ *
+ * Returns { reminded, notSent, failed }. reminded: a provider took the text or the email (reminder_sent_at is set;
+ * the offer timeline reads it as "Reminder sent", so a result that is not known does not set it). notSent: nothing went out, for a known reason (the offer closed first, the address is
+ * suppressed, the applicant opted out, it was 6 PM). failed: a channel failed or its result is not known, a check
+ * before a provider could not be read, or the pass threw; the scheduler fails the job. The sender reads the reminder
+ * text fail-loud (recruiting-comms triedOnceTextOutcome): a text that did not go is 'failed' unless the rail refused
+ * it because of the applicant.
+ * One offer can count as reminded and as failed (the email went, and the text failed or its result is not known).
+ * With either gate off the pass takes nothing, also on a direct call.
+ * clock: the time source, for tests. The scheduler passes none.
+ */
+async function sendDueReminders(clock = () => new Date()) {
+  const now = clock();
+  const result = { reminded: 0, notSent: 0, failed: 0 };
+  if (!reminderOn() || !mayClaimAt(now)) return result;
+  const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
+    .where('o.status', 'sent').where('a.status', 'offer').whereNull('o.reminder_claimed_at').whereNull('o.reminder_sent_at')
+    .where('o.sent_at', '<=', new Date(now.getTime() - REMINDER_AFTER_MS)).where('o.expires_at', '>=', now)
+    .orderBy('o.sent_at').select('o.id', 'o.application_id');
+  for (const row of due) {
+    try {
+      const claimed = await claimReminder(row.application_id, row.id, clock);
+      if (claimed) await remindClaimed(claimed, result, clock);
+    } catch (err) {
+      // A claimed offer is not tried again: a channel may already have gone out. The application's message history
+      // has what each channel did.
+      result.failed += 1;
+      logger.error(`[job-offers] reminder failed (offer ${row.id}): ${errTag(err)}`);
+    }
+  }
+  return result;
+}
+
+// Sends one claimed offer's reminder and counts it. A channel the sender reports as failed or as not known, or a
+// check before a provider that could not be read, fails the pass, also when the other channel went out: the offer is
+// not tried again, so the job's health is the only place the failure shows.
+// reminder_sent_at is written after the send, and only when a provider took a channel: the timeline must not say
+// "Reminder sent" for a result nobody knows (the claim alone keeps the offer from a second attempt). When that write
+// fails the reminder still went, so it counts as reminded and as a failure.
+async function remindClaimed(claimed, result, clock) {
+  const { id } = claimed.offer;
+  const comms = await deliverReminder(claimed, clock);
+  const went = comms.sms === 'sent' || comms.email === 'sent';
+  const channelFailed = NOT_CLEAN.includes(comms.sms) || NOT_CLEAN.includes(comms.email) || comms.checkFailed;
+  if (channelFailed) {
+    result.failed += 1;
+    logger.error(`[job-offers] reminder channel failed (offer ${id}): text ${comms.sms}, email ${comms.email}${comms.checkFailed ? ', a check could not be read' : ''}`);
+  } else if (!went) {
+    result.notSent += 1;
+    logger.warn(`[job-offers] reminder not sent (offer ${id}): text ${comms.sms}, email ${comms.email}`);
+  }
+  if (!went) return;
+  result.reminded += 1;
+  try {
+    await db('job_offers').where({ id }).update({ reminder_sent_at: new Date() });
+  } catch (err) {
+    if (!channelFailed) result.failed += 1;
+    logger.error(`[job-offers] reminder went out but its time was not stored (offer ${id}): ${errTag(err)}`);
+  }
+}
+
 // ------------------------------------------------------------------ bells
 
 const BELLS = {
@@ -1434,5 +1602,5 @@ module.exports = {
   // public
   publicView, setTextConsent, acceptOffer, requestDate, declineOffer,
   // scheduled
-  closeExpiredOffers,
+  closeExpiredOffers, sendDueReminders,
 };
