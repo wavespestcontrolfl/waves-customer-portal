@@ -12,6 +12,11 @@
  *   "Approve was refused: <reason>."     Approve was refused for a reason the page does not walk them through
  * and "<name> came back to an expired estimate", with when it expired and what the page offers them.
  *
+ * The same bell carries "<name> is still deciding" (owner 2026-11-21, estimate page changes, change 1): the customer
+ * tapped "I'm still deciding" and picked what would help. The why is that reason, in the office's words. It rings
+ * like a new day's reason unless today's row already says still deciding, so a customer who asked for a call is
+ * never hidden behind an earlier stuck alert.
+ *
  * Each search, hold start and hold end is a row in audit_log (audit-log.js auditEstimateBookingStep), so the next
  * booking audit can see this step; the empty-search count reads the same rows.
  *
@@ -64,11 +69,25 @@ const ROUTINE_UNCODED_WORDS = /slot no longer available|expired|no active reserv
 const ACTIONS = {
   stuck: [(who) => `${who} is stuck booking a visit`, (who) => `${who} is stuck booking`],
   expired: [(who) => `${who} came back to an expired estimate`, (who) => `${who} came back, estimate expired`],
+  deciding: [(who) => `${who} is still deciding`, (who) => `${who}: still deciding`],
+};
+// What the customer picked under "What would help you decide?" (estimate-change-request.js STILL_DECIDING_REASONS),
+// as the office reads it after "<name> is still deciding". The page tells a customer who picks "Talking to a person
+// first" that we will call, but only when the estimate has a phone (estimate-public.js softExitCall).
+const DECIDING_WHY = {
+  price: () => 'Wants a lower price.',
+  person: (row) => (String(row.customer_phone || '').trim()
+    ? 'Wants to talk to a person first; the page said we will call.'
+    : 'Wants to talk to a person first; the estimate has no phone number.'),
+  quotes: () => 'Is comparing other quotes.',
+  timing: () => 'Says it is not the right time yet.',
+  other: () => 'Picked Something else and gave no detail.',
 };
 // The why when the reason's own words break the alert rules.
 const PLAIN_WHY = {
   stuck: 'The estimate page could not get them to a booking.',
   expired: 'Their estimate expired before they booked.',
+  deciding: 'They said what would help them decide.',
 };
 const REFUSED = 'Approve was refused';
 
@@ -105,12 +124,13 @@ function settledReason(row) {
   return row.archived_at ? 'estimate archived' : null;
 }
 
-// The estimate as an alert needs it, or null when none may raise: a bad id, never sent, or settled.
-async function openEstimate(estimateId) {
+// The estimate as an alert needs it, or null when none may raise: a bad id, never sent, or settled. `unsentToo`: the
+// customer acted on a page the server showed them (a website quote has no send), so a missing send stamp is no bar.
+async function openEstimate(estimateId, { unsentToo = false } = {}) {
   if (!UUID_RE.test(String(estimateId || ''))) return null;
   const row = await db('estimates').where({ id: estimateId })
-    .first('id', 'status', 'sent_at', 'archived_at', 'expires_at', 'customer_id', 'customer_name');
-  return row && row.sent_at && !settledReason(row) ? row : null;
+    .first('id', 'status', 'sent_at', 'archived_at', 'expires_at', 'customer_id', 'customer_name', 'customer_phone');
+  return row && (row.sent_at || unsentToo) && !settledReason(row) ? row : null;
 }
 
 function stuckSpec(estimate, kind, name, why) {
@@ -152,7 +172,7 @@ async function categorySilenced() {
 
 // Raise, or refresh, the estimate's one bell. `whyFor(row)` words the reason from the estimate read here.
 async function raiseStuck(estimateId, kind, whyFor, { now = new Date() } = {}) {
-  const estimate = await openEstimate(estimateId);
+  const estimate = await openEstimate(estimateId, { unsentToo: kind === 'deciding' });
   if (!estimate) return { raised: false, reason: 'not_open' };
   if (await categorySilenced()) return { raised: false, reason: 'silenced' };
   const composed = composeStuck(estimate, kind, whyFor(estimate));
@@ -164,7 +184,9 @@ async function raiseStuck(estimateId, kind, whyFor, { now = new Date() } = {}) {
     dedupeVersion: day,
     refreshOnDedupe: true,
     bumpOnRefresh: true,
-    ringOnRefresh: (existing, existingMeta) => existingMeta?.stuckDay !== day,
+    // A still-deciding reason also rings over a row that says something else today (see the header).
+    ringOnRefresh: (existing, existingMeta) => existingMeta?.stuckDay !== day
+      || (kind === 'deciding' && existingMeta?.stuckReason !== 'deciding'),
     // triggerKey names the phone banner (bell-banners.js); customerId sits at the top level, where
     // notification-service's test-customer suppression reads it.
     metadata: {
@@ -343,6 +365,16 @@ function noteExpiredReturn(estimate, { offered = false, selfServe = false } = {}
   });
 }
 
+// POST change-request recorded a still-deciding reason (estimate-change-request.js recordEstimateStillDeciding, after
+// its commit). The sheet is only on a live estimate the customer can accept, so a quote with no send stamp counts.
+function noteStillDeciding(req, estimateId, reason) {
+  return safely('still deciding', async () => {
+    const whyFor = Object.hasOwn(DECIDING_WHY, String(reason)) ? DECIDING_WHY[reason] : null;
+    if (!estimateId || !whyFor || !customerRequest(req)) return null;
+    return raiseStuck(estimateId, 'deciding', whyFor);
+  });
+}
+
 const SILENCED = 'silenced in Push Settings';
 const idOf = (key) => String(key).slice(KEY_PREFIX.length);
 const ESTIMATE_STATE = ['id', 'status', 'archived_at'];
@@ -406,6 +438,7 @@ module.exports = {
   noteExpiredHolds,
   noteAcceptRefused,
   noteExpiredReturn,
+  noteStillDeciding,
   closeSettledStuckAlerts,
   categorySilenced,
   _private: { holdLabel, refusalWhy, expiredWhy, settledReason, ROUTINE_ACCEPT_CODES },

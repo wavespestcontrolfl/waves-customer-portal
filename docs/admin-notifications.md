@@ -735,9 +735,16 @@ Stuck-booking alert (owner 2026-11-05, "1, 2 and 3": the estimate page audit's f
 five date or Waves AI searches in a row came back empty, a time they picked expired with no booking, the time list
 answered an error, or Approve was refused for a reason the page does not walk them through. The same row says when a
 customer came back to an expired estimate. It rings at most once per Eastern day (the day is the `dedupeVersion`, and
-`ringOnRefresh` rings only a new day); a second reason the same day rewrites the row without a ring. A ring also sends a
+`ringOnRefresh` rings only a new day); a second reason the same day rewrites the row without a ring. The same row reads
+"<name> is still deciding" when the customer taps "I'm still deciding" on the estimate page and picks what would help
+(owner 2026-11-21; `noteStillDeciding`, called by `recordEstimateStillDeciding` after its commit). The why is the reason:
+"Wants a lower price.", "Wants to talk to a person first; the page said we will call." (or "the estimate has no phone
+number", and then the page promised no call), "Is comparing other quotes.", "Says it is not the right time yet." or
+"Picked Something else and gave no detail." This reason also rings over a row that says something else that day, so a
+customer who asked for a call is never hidden behind an earlier stuck alert; a second still-deciding reason that day
+does not ring. A tap with no reason raises nothing. It raises on a live quote with no send stamp too. A ring also sends a
 phone banner with the New lead sound (`bell-banners.js` kind `estimate_stuck`, 7:00 AM to 9:00 PM Eastern). The category
-rings by default and the owner can silence it under Push Settings ("Customers stuck booking an estimate"); while it is
+rings by default and the owner can silence it under Push Settings ("Customers stuck or still deciding on an estimate"); while it is
 silenced nothing raises or refreshes (notifyAdmin reads the mute only on a fresh insert) and the 5-minute pass closes the
 open rows. Bots, staff
 browsers and the office network never raise it. The 5-minute estimate tick closes a row once its estimate is accepted,

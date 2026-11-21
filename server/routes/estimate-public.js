@@ -19449,7 +19449,9 @@ router.post('/:token/promo-code', stampPromoCodeHeaders, promoCodeLimiter, async
 // soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). body.kind:
 //   'change'         → parks ONE service_requests row + admin bell (note
 //                      required; topics optional chips)
-//   'still_deciding' → one activity_log row, no bell, no request row
+//   'still_deciding' → one activity_log row a day, no request row. With
+//                      body.reason (what would help the customer decide) the
+//                      row takes the reason and the office gets one bell.
 // Neither touches the estimate or messages the customer. Contract mirrors
 // measurement-review: gate + token-format gate + generic 404 (unknown /
 // malformed / ineligible / gate-off indistinguishable) + gate-aware limiter,
@@ -19494,7 +19496,7 @@ router.post('/:token/change-request', softExitLimiter, async (req, res, next) =>
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const result = kind === 'still_deciding'
-      ? await recordEstimateStillDeciding({ estimateToken: req.params.token, callSideBlockedFor })
+      ? await recordEstimateStillDeciding({ estimateToken: req.params.token, reason: req.body?.reason, req, callSideBlockedFor })
       : await createEstimateOfficeRequest({
         estimateToken: req.params.token,
         kind,
@@ -32034,6 +32036,10 @@ async function composeEstimateDataPayload(estimate, {
           // email-only estimate would 400 on submit, so the page withholds
           // the branch instead (GH codex P2). Include-when-true.
           ...(estimate.customer_id || String(estimate.customer_phone || '').trim() ? { softExitChange: true } : {}),
+          // The sheet tells a customer who wants to talk to a person "We will
+          // call you" only when the estimate has a number to call (the Call
+          // today list needs the same phone). Include-when-true.
+          ...(String(estimate.customer_phone || '').trim() ? { softExitCall: true } : {}),
         } : {}),
       // Services this customer has opted out of. Present only when there is
       // something to report, so a gate-off (or never-used) response stays

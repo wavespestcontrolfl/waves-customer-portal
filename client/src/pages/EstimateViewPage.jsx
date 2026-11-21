@@ -3684,13 +3684,17 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
   );
 }
 
-// Soft exit (GATE_ESTIMATE_SOFT_EXIT) — the "Not what you expected?" sheet.
+// Soft exit (GATE_ESTIMATE_SOFT_EXIT) — the "Not ready yet?" sheet.
 // Chip keys are the API contract (estimate-disposition.js
-// CUSTOMER_DECLINE_REASONS / estimate-change-request.js CHANGE_REQUEST_TOPICS);
-// labels are the customer's words. Three exits, none of which message the
-// customer: a reason-tagged decline (the only one that closes the estimate),
-// a change request the office answers with a revision, and a "still
-// deciding" signal that writes one activity row and nothing else.
+// CUSTOMER_DECLINE_REASONS / estimate-change-request.js CHANGE_REQUEST_TOPICS
+// and STILL_DECIDING_REASONS); labels are the customer's words. Three exits,
+// none of which message the customer: a reason-tagged decline (the only one
+// that closes the estimate), a change request the office answers with a
+// revision, and a "still deciding" signal. The tap on "I'm still deciding"
+// writes one activity row; the step after it asks what would help, and a
+// reason sent there goes to the office on one bell (Skip sends nothing more).
+// The sheet's words are owner-approved (2026-11-21, estimate page changes,
+// change 1): change them only on the owner's word.
 export const SOFT_EXIT_REASONS = [
   { key: 'price', label: 'Too expensive' },
   { key: 'timing', label: 'Not the right time' },
@@ -3702,6 +3706,14 @@ export const SOFT_EXIT_TOPICS = [
   { key: 'price', label: 'The price' },
   { key: 'services', label: 'Which services are included' },
   { key: 'schedule', label: 'How often you visit' },
+  { key: 'other', label: 'Something else' },
+];
+
+export const SOFT_EXIT_DECIDING_REASONS = [
+  { key: 'price', label: 'A lower price' },
+  { key: 'person', label: 'Talking to a person first' },
+  { key: 'quotes', label: 'Comparing other quotes' },
+  { key: 'timing', label: 'Not the right time yet' },
   { key: 'other', label: 'Something else' },
 ];
 
@@ -3729,11 +3741,43 @@ const softExitInputStyle = {
   padding: '10px 12px', fontSize: 14, fontFamily: 'inherit', color: COLORS.glassNavy,
 };
 
-export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, onClose, onDeclined }) {
-  const [step, setStep] = useState('choose'); // choose | change | decline | done
+// What the sheet says once an exit is done: [heading, text]. `callPromised`: the customer asked to talk to a person
+// and the estimate has a phone.
+function softExitDoneCopy(doneKind, callPromised, expiresDisplay) {
+  if (doneKind === 'change') {
+    return ['Got it — we’ll send a revised estimate',
+      'We’ll take a look and send an updated estimate. Your current one stays as-is in the meantime, through its normal expiration date.'];
+  }
+  if (doneKind === 'decline') {
+    return ['Thanks for letting us know', 'We’ve closed this estimate. If anything changes, call (941) 297-5749 and we’ll put together a fresh one.'];
+  }
+  if (callPromised) return ['We will call you', expiresDisplay ? `This estimate stays open through ${expiresDisplay}.` : ''];
+  return ['No rush', `Take your time${expiresDisplay ? ` — this estimate stays open through ${expiresDisplay}` : ''}. Questions? Call (941) 297-5749.`];
+}
+
+const softExitQuietButtonStyle = { padding: '10px 16px', borderRadius: 10, border: 'none', background: 'none', color: ESTIMATE_BODY, fontSize: 14, cursor: 'pointer' };
+
+// The two buttons of the "What would help you decide?" step.
+function SoftExitDecidingButtons({ picked, submitting, onSend, onSkip }) {
+  const canSend = !submitting && picked;
+  return (
+    <>
+      <button type="button" data-glass-accent="" onClick={onSend} disabled={!canSend} style={softExitPrimaryStyle(canSend)}>
+        {submitting ? 'Sending…' : 'Send'}
+      </button>
+      <button type="button" onClick={onSkip} disabled={submitting} style={softExitQuietButtonStyle}>Skip</button>
+    </>
+  );
+}
+
+// `canCall`: the estimate has a phone (the server's softExitCall), so the sheet may say "We will call you".
+export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, canCall = false, onClose, onDeclined }) {
+  const [step, setStep] = useState('choose'); // choose | deciding | change | decline | done
   const [doneKind, setDoneKind] = useState(null); // change | still_deciding | decline
   const [topics, setTopics] = useState(() => new Set());
   const [reason, setReason] = useState(null);
+  const [help, setHelp] = useState(null); // the picked SOFT_EXIT_DECIDING_REASONS key
+  const [callPromised, setCallPromised] = useState(false);
   const [note, setNote] = useState('');
   const [competitorName, setCompetitorName] = useState('');
   const [competitorPrice, setCompetitorPrice] = useState('');
@@ -3751,14 +3795,13 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
     return payload;
   };
 
-  const run = async (kind, fn) => {
+  const run = async (fn, then) => {
     if (submitting) return;
     setSubmitting(true);
     setError('');
     try {
       await fn();
-      setDoneKind(kind);
-      setStep('done');
+      then();
     } catch (err) {
       setError(err?.message || 'That didn’t go through. Try again.');
     } finally {
@@ -3766,20 +3809,36 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
     }
   };
 
-  const submitChange = () => run('change', () => post('change-request', 'POST', {
+  const finish = (kind) => {
+    setDoneKind(kind);
+    setStep('done');
+  };
+  const submitChange = () => run(() => post('change-request', 'POST', {
     kind: 'change',
     topics: Array.from(topics),
     note: note.trim(),
-  }));
-  const submitStillDeciding = () => run('still_deciding', () => post('change-request', 'POST', { kind: 'still_deciding' }));
-  const submitDecline = () => run('decline', () => post('decline', 'PUT', {
+  }), () => finish('change'));
+  // The tap is the signal, as before the reasons step existed: a customer who
+  // leaves the sheet on that step has still said "still deciding".
+  const startStillDeciding = () => run(
+    () => post('change-request', 'POST', { kind: 'still_deciding' }),
+    () => goTo('deciding'),
+  );
+  const sendHelp = () => run(
+    () => post('change-request', 'POST', { kind: 'still_deciding', reason: help }),
+    () => {
+      setCallPromised(help === 'person' && canCall);
+      finish('still_deciding');
+    },
+  );
+  const submitDecline = () => run(() => post('decline', 'PUT', {
     reason,
     note: note.trim() || undefined,
     ...(reason === 'competitor' ? {
       competitorName: competitorName.trim() || undefined,
       competitorPrice: competitorPrice.trim() || undefined,
     } : {}),
-  }));
+  }), () => finish('decline'));
 
   const toggleTopic = (key) => setTopics((prev) => {
     const next = new Set(prev);
@@ -3810,6 +3869,7 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
   const goTo = (next) => {
     setNote('');
     setReason(null);
+    setHelp(null);
     setTopics(new Set());
     setCompetitorName('');
     setCompetitorPrice('');
@@ -3817,12 +3877,12 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
     setStep(next);
   };
 
+  const [doneHeading, doneText] = softExitDoneCopy(doneKind, callPromised, expiresDisplay);
   const heading = step === 'change' ? 'What would you like changed?'
     : step === 'decline' ? 'What made this a no?'
-    : step === 'done' ? (doneKind === 'change' ? 'Got it — we’ll send a revised estimate'
-      : doneKind === 'still_deciding' ? 'No rush'
-      : 'Thanks for letting us know')
-    : 'Not what you expected?';
+    : step === 'deciding' ? 'What would help you decide?'
+    : step === 'done' ? doneHeading
+    : 'Not ready yet?';
 
   return (
     <div
@@ -3838,7 +3898,7 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
         {step === 'choose' ? (
           <>
             <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 14px' }}>
-              Tell us where this landed. Nothing here sends you a message &mdash; it just helps us get it right.
+              Tell us where you are. Nothing here sends you a message.
             </div>
             <div style={{ display: 'grid', gap: 10 }}>
               {/* A change request needs a customer the office can answer; an
@@ -3850,7 +3910,7 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
                   I&rsquo;d like to change something
                 </button>
               ) : null}
-              <button type="button" onClick={submitStillDeciding} disabled={submitting} style={softExitOptionStyle}>
+              <button type="button" onClick={startStillDeciding} disabled={submitting} style={softExitOptionStyle}>
                 {submitting ? 'One moment…' : 'I’m still deciding'}
               </button>
               <button type="button" onClick={() => goTo('decline')} style={softExitOptionStyle}>
@@ -3858,6 +3918,16 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
               </button>
             </div>
           </>
+        ) : null}
+
+        {step === 'deciding' ? (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '14px 0' }}>
+            {SOFT_EXIT_DECIDING_REASONS.map(({ key, label }) => (
+              <button key={key} type="button" onClick={() => setHelp(key)} aria-pressed={help === key} style={softExitChipStyle(help === key)}>
+                {label}
+              </button>
+            ))}
+          </div>
         ) : null}
 
         {step === 'change' ? (
@@ -3932,13 +4002,7 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
         ) : null}
 
         {step === 'done' ? (
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
-            {doneKind === 'change'
-              ? 'We’ll take a look and send an updated estimate. Your current one stays as-is in the meantime, through its normal expiration date.'
-              : doneKind === 'still_deciding'
-                ? `Take your time${expiresDisplay ? ` — this estimate stays open through ${expiresDisplay}` : ''}. Questions? Call (941) 297-5749.`
-                : 'We’ve closed this estimate. If anything changes, call (941) 297-5749 and we’ll put together a fresh one.'}
-          </div>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>{doneText}</div>
         ) : null}
 
         {error ? (
@@ -3955,6 +4019,9 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
             <button type="button" data-glass-accent="" onClick={submitDecline} disabled={!canSubmitDecline} style={softExitPrimaryStyle(canSubmitDecline)}>
               {submitting ? 'Sending…' : 'Close this estimate'}
             </button>
+          ) : null}
+          {step === 'deciding' ? (
+            <SoftExitDecidingButtons picked={!!help} submitting={submitting} onSend={sendHelp} onSkip={() => finish('still_deciding')} />
           ) : null}
           {step === 'done' ? (
             <button type="button" data-glass-accent="" onClick={close} style={softExitPrimaryStyle(true)}>Done</button>
@@ -3975,9 +4042,10 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
   );
 }
 
-// The sheet's entry point — a quiet text link under the page's ask/support
-// blocks. Rendered only when the payload stamped `softExit` (gate on, live
-// row, not a staff preview), so the page never offers a write it refuses.
+// The sheet's entry point — a quiet text link under the approve area and
+// again under the page's ask/support blocks. Rendered only when the payload
+// stamped `softExit` (gate on, live row, not a staff preview), so the page
+// never offers a write it refuses.
 // Under the price (owner 2026-11-21, "ok a"). The first-visit line states the first bill
 // as one number before a time is picked: the same setup fee, first application and total
 // the "Reserve your spot" box lists afterwards (firstVisitTotalPreview), so that total is
@@ -4020,7 +4088,7 @@ function SoftExitLink({ onOpen }) {
         onClick={onOpen}
         style={{ background: 'none', border: 'none', padding: '8px 12px', fontSize: 14, fontWeight: 600, color: ESTIMATE_BODY, textDecoration: 'underline', cursor: 'pointer' }}
       >
-        Not what you expected? Tell us
+        Not ready yet? Tell us why
       </button>
     </div>
   );
@@ -10908,6 +10976,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             )}
           </div>
   );
+  const softExitLink = data?.softExit === true && !readOnlyPreview && !isRegulatedCertificateSurface && ctaPhase !== 'submitting'
+    ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null;
+
   const paymentContent = (
     (existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
             <div id={PAYMENT_SECTION_ID} style={{ scrollMarginTop: 76 }}>
@@ -11033,6 +11104,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           token={token}
           expiresAt={estimate.expiresAt || null}
           changeEligible={data?.softExitChange === true}
+          canCall={data?.softExitCall === true}
           onClose={() => setSoftExitOpen(false)}
           // A decline is terminal: reload so the server's terminal state
           // (declined card, no CTAs) paints from truth, not local state.
@@ -11161,6 +11233,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           <EstimateErrorBanner error={error} />
 
+          {/* Beside the decision: under the Approve button once a time is
+              picked, under the time list before that (owner 2026-11-21). */}
+          {softExitLink}
+
           {/* Glass-ordered tail (approved section positioning): why-price-
               custom with its lock-in CTA, reviews with the join CTA, the app
               section, Ask, then the lawn upsell — replaces both the
@@ -11195,8 +11271,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   chips={askChips}
                 />
               ) : null}
-              {data?.softExit === true && !readOnlyPreview && !isRegulatedCertificateSurface && ctaPhase !== 'submitting'
-                ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
+              {softExitLink}
               <EstimateAddServiceRequestCard
                 offer={offerCardOffer}
                 requestState={addServiceRequestState}
@@ -11216,8 +11291,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
           <CustomerReviews />
-          {data?.softExit === true && !readOnlyPreview && !isRegulatedCertificateSurface && ctaPhase !== 'submitting' && !(ctaPhase === 'review' && reservation)
-            ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
+          {ctaPhase === 'review' && reservation ? null : softExitLink}
         </>
       )}
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +

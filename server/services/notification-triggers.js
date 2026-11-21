@@ -1086,7 +1086,7 @@ const TRIGGER_REGISTRY = {
   // estimate, rung once per Eastern day) and closes it once the estimate is accepted, declined or archived; this
   // entry is the banner bell-banners.js sends for a write that rang, so `build` takes the row's own words.
   estimate_stuck: {
-    label: 'Customer stuck booking an estimate',
+    label: 'Customer stuck or still deciding on an estimate',
     category: 'estimate_stuck',
     priority: 'high',
     group: 'Leads & Sales',

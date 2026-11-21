@@ -1207,9 +1207,10 @@ window.fetch = async (input, init) => {
       lawnCalendar: { programs: { standard: { visitsPerYear: 9 } } },
       ...referral,
       // softExit mirrors the GATE_ESTIMATE_SOFT_EXIT /data flag on a live row so
-      // the "Not what you expected?" sheet is exercised in preview.
+      // the "Not ready yet?" sheet is exercised in preview.
       softExit: true,
       softExitChange: true,
+      softExitCall: true,
       ...(pdfPass && documentRenderAffirmed(proposal) ? { documentRender: true } : {}),
     });
   }

@@ -82,6 +82,70 @@ beforeEach(() => {
   bellPolicy.bellAllowed.mockResolvedValue(true);
 });
 
+describe('still deciding: what the customer said would help (owner 2026-11-21)', () => {
+  const PHONE_ROW = { ...OPEN_ROW, customer_phone: '(941) 555-0100' };
+
+  test('each reason reads as the office needs it, on the estimate\'s one bell', async () => {
+    tables.estimates = estimateRow(PHONE_ROW);
+    const whys = {
+      price: 'Wants a lower price.',
+      person: 'Wants to talk to a person first; the page said we will call.',
+      quotes: 'Is comparing other quotes.',
+      timing: 'Says it is not the right time yet.',
+      other: 'Picked Something else and gave no detail.',
+    };
+    for (const reason of Object.keys(whys)) await stuck.noteStillDeciding(REQ, EST, reason);
+    expect(raised().map((a) => a.why)).toEqual(Object.values(whys));
+    for (const alert of raised()) {
+      expect(alert.headline).toBe('Estimates — Pat Tester is still deciding');
+      expect(alert.opts).toMatchObject({
+        dedupeKey: `estimate_stuck:${EST}`,
+        link: `/admin/estimates?estimateId=${EST}`,
+        metadata: expect.objectContaining({ triggerKey: 'estimate_stuck', stuckReason: 'deciding', severity: 'needs-you', subject: { type: 'estimate', id: EST } }),
+      });
+    }
+  });
+
+  test('a customer who wants a person, on an estimate with no phone: the bell says so, with no call promised', async () => {
+    await stuck.noteStillDeciding(REQ, EST, 'person');
+    expect(raised().map((a) => a.why)).toEqual(['Wants to talk to a person first; the estimate has no phone number.']);
+  });
+
+  test('it rings over a row that says something else today, and once for a day of still-deciding reasons', async () => {
+    await stuck.noteStillDeciding(REQ, EST, 'person');
+    const { ringOnRefresh, metadata } = raised()[0].opts;
+    expect(ringOnRefresh({}, { stuckDay: metadata.stuckDay, stuckReason: 'stuck' })).toBe(true);
+    expect(ringOnRefresh({}, { stuckDay: metadata.stuckDay, stuckReason: 'expired' })).toBe(true);
+    expect(ringOnRefresh({}, { stuckDay: metadata.stuckDay, stuckReason: 'deciding' })).toBe(false);
+    expect(ringOnRefresh({}, { stuckDay: '2026-11-04', stuckReason: 'deciding' })).toBe(true);
+  });
+
+  test('a quote with no send stamp still rings (the sheet shows only on a live estimate); a stuck reason on it does not', async () => {
+    tables.estimates = estimateRow({ ...OPEN_ROW, sent_at: null });
+    await stuck.noteSlotListFailed(REQ, OPEN_ROW, new Error('boom'));
+    expect(raised()).toEqual([]);
+    await stuck.noteStillDeciding(REQ, EST, 'timing');
+    expect(raised().map((a) => a.why)).toEqual(['Says it is not the right time yet.']);
+  });
+
+  test('never for a staff browser or a bot, a settled estimate, a reason the sheet does not offer, or no estimate', async () => {
+    shouldRecord.mockReturnValue(false);
+    await stuck.noteStillDeciding(REQ, EST, 'price');
+    shouldRecord.mockReturnValue(true);
+    for (const reason of ['cheaper', 'constructor', '__proto__', undefined, null]) await stuck.noteStillDeciding(REQ, EST, reason);
+    await stuck.noteStillDeciding(REQ, null, 'price');
+    tables.estimates = estimateRow({ ...OPEN_ROW, status: 'accepted' });
+    await stuck.noteStillDeciding(REQ, EST, 'price');
+    expect(raised()).toEqual([]);
+  });
+
+  test('never throws: a failed read logs its code alone', async () => {
+    tables.estimates = { first: () => { throw Object.assign(new Error('select * from estimates where token = secret-token'), { code: '57014' }); } };
+    await expect(stuck.noteStillDeciding(REQ, EST, 'price')).resolves.toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith('[estimate-stuck] still deciding failed: 57014');
+  });
+});
+
 describe('the reasons, in the approved words', () => {
   test('the 90-day look-ahead found no times: names the customer, links the estimate, one key per estimate', async () => {
     await stuck.noteSlotAnswer(REQ, OPEN_ROW, { windowDays: 90 }, { primary: [], expander: [] });
