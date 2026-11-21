@@ -47,7 +47,11 @@ describe('serviceNameFromSummary', () => {
 // Priced recurring lines, in the shape the estimator stores them.
 const line = (service, mo) => ({ service, mo });
 const LAWN_AND_PEST_LINES = { result: { recurring: { services: [line('lawn_care', 50), line('pest_control', 40)] } } };
-const PEST_LINES = { result: { recurring: { services: [line('pest_control', 40)] } } };
+// Priced one-time rows.
+const item = (name, price) => ({ name, price });
+const PEST_ONE_TIME = { result: { oneTime: { items: [item('One-Time Pest Control', 150)] } } };
+const TERMITE_ONE_TIME = { result: { oneTime: { items: [item('Termite Treatment', 900)] } } };
+const PEST_AND_TERMITE_ONE_TIME = { result: { oneTime: { items: [item('One-Time Pest Control', 150), item('Termite Treatment', 900)] } } };
 const PEST_AND_MOSQUITO_LINES = { result: { recurring: { services: [line('pest_control', 40), line('mosquito', 30)] } } };
 
 // Today's two generic labels, read from the packs (never retyped).
@@ -107,9 +111,9 @@ describe('emailedServiceName', () => {
   test('the fixture matches the inference the proof uses', () => {
     const est = estimate();
     expect(inferEstimateServiceInterest({ ...est, estimateData: est.estimate_data })).toBe('Lawn Care + Pest Control');
-    // The lines alone give the same words (the reader's third check).
-    expect(inferEstimateServiceInterest({ estimateData: LAWN_AND_PEST_LINES })).toBe('Lawn Care + Pest Control');
-    expect(inferEstimateServiceInterest({ estimateData: PEST_LINES })).toBe('Pest Control');
+    // The trap the third proof closes: with no stored interest, a description alone names a service
+    // while the only priced row is another one.
+    expect(inferEstimateServiceInterest({ description: 'Pest Control', estimateData: TERMITE_ONE_TIME })).toBe('Pest Control');
   });
 
   test('asks for this estimate, the three delivery keys, the current address, newest first, with no limit', async () => {
@@ -168,7 +172,7 @@ describe('emailedServiceName', () => {
     expect(db).not.toHaveBeenCalledWith('email_messages');
   });
 
-  describe('the address and the service are judged on a fresh estimate row', () => {
+  describe('the address and the service are judged on a fresh estimate row and its priced rows', () => {
     test('the service changed after the engine read the row: no name', async () => {
       rows = [row()];
       const stale = estimate();
@@ -184,14 +188,42 @@ describe('emailedServiceName', () => {
       expect(db).not.toHaveBeenCalledWith('email_messages');
     });
 
-    test('a revision changed only the lines (the stored interest still says lawn and pest): no name', async () => {
+    test('a revision changed only the priced rows (the stored interest still says lawn and pest): no name', async () => {
       rows = [row()];
       await expect(emailedServiceName(estimate({ estimate_data: PEST_AND_MOSQUITO_LINES }), BUNDLE)).resolves.toBeNull();
     });
 
-    test('a stored interest with no lines behind it: no name', async () => {
+    test('a stored interest with no priced rows behind it: no name', async () => {
       rows = [row()];
       await expect(emailedServiceName(estimate({ estimate_data: null }), BUNDLE)).resolves.toBeNull();
+    });
+
+    test('a description says pest control and the only priced one-time row is a termite treatment: no name', async () => {
+      rows = [row({ payload_snapshot: { service_summary: 'Pest Control' } })];
+      const est = estimate({ service_interest: null, description: 'Pest Control', estimate_data: TERMITE_ONE_TIME });
+      await expect(emailedServiceName(est, ONE_TIME)).resolves.toBeNull();
+    });
+
+    test('a one-time estimate with a second priced row for another service: no name', async () => {
+      rows = [row({ payload_snapshot: { service_summary: 'Pest Control' } })];
+      const est = estimate({ service_interest: 'Pest Control', estimate_data: PEST_AND_TERMITE_ONE_TIME });
+      await expect(emailedServiceName(est, ONE_TIME)).resolves.toBeNull();
+    });
+
+    test('a one-time estimate with no priced row: no name', async () => {
+      rows = [row({ payload_snapshot: { service_summary: 'Pest Control' } })];
+      const est = estimate({ service_interest: 'Pest Control', estimate_data: null });
+      await expect(emailedServiceName(est, ONE_TIME)).resolves.toBeNull();
+    });
+
+    test('recurring rows do not back a one-time name, and one-time rows do not back the two-service name', async () => {
+      rows = [row({ payload_snapshot: { service_summary: 'Pest Control' } })];
+      const recurringPest = { result: { recurring: { services: [line('pest_control', 40)] } } };
+      await expect(emailedServiceName(estimate({ service_interest: 'Pest Control', estimate_data: recurringPest }), ONE_TIME))
+        .resolves.toBeNull();
+      rows = [row()];
+      const oneTimeBoth = { result: { oneTime: { items: [item('Lawn Care', 90), item('One-Time Pest Control', 150)] } } };
+      await expect(emailedServiceName(estimate({ estimate_data: oneTimeBoth }), BUNDLE)).resolves.toBeNull();
     });
 
     test('the row is gone: no name and no email-log read', async () => {
@@ -246,7 +278,7 @@ describe('emailedServiceName', () => {
 
   describe('the stored email must show the summary on its Service line', () => {
     const WRAPPER = 'Waves Pest Control & Lawn Care\nWaves Pest Control, LLC';
-    const pestOnly = { service_interest: 'Pest Control', estimate_data: PEST_LINES };
+    const pestOnly = { service_interest: 'Pest Control', estimate_data: PEST_ONE_TIME };
     const pestPayload = { service_summary: 'Pest Control' };
 
     test('the exact Service line counts, with spaces around it', async () => {
@@ -271,7 +303,7 @@ describe('emailedServiceName', () => {
   });
 
   describe('only the two generic labels are replaced', () => {
-    const pestOnly = { service_interest: 'Pest Control', estimate_data: PEST_LINES };
+    const pestOnly = { service_interest: 'Pest Control', estimate_data: PEST_ONE_TIME };
     const pestRow = () => row({ payload_snapshot: { service_summary: 'Pest Control' } });
 
     test.each([['pest control'], ['lawn care'], ['termite protection'], [undefined], [null], ['']])(

@@ -89,6 +89,20 @@ function emailShowed(row, summary) {
   return row.text_snapshot.split('\n').some((line) => line.trim() === `${SERVICE_ROW_PREFIX}${summary}`);
 }
 
+// The services on the priced rows behind a generic label, in the delivery email's "A + B" form: the recurring
+// rows behind the bundle label, the one-time rows behind the one-time label. No rows give "", and a row with
+// no known service gives a part no summary has, so neither can match.
+function pricedRowsSummary(todayLabel, estimateData) {
+  const lines = require('./estimate-service-lines');
+  const { PACKS } = require('./estimate-followup-copy')._private;
+  const data = lines.parseEstimateData(estimateData);
+  const rows = todayLabel === PACKS.bundle.label
+    ? lines.recurringServicesFromData(data)
+    : lines.oneTimeServicesFromData(data);
+  const labels = rows.map((row) => row.summaryLabel || lines.SERVICE_LINE_LABELS[row.key] || '?');
+  return [...new Set(labels)].join(SUMMARY_SEPARATOR);
+}
+
 // Trimmed and lower-cased, as the email log is asked for a recipient.
 const lowerAddress = (value) => String(value || '').trim().toLowerCase();
 
@@ -117,13 +131,12 @@ async function emailedServiceName(estimate, todayLabel) {
     // The payload holds the summary even when a template version does not print it. The customer
     // must have been shown these words: the stored email text has to carry its Service line.
     if (!name || !emailShowed(newest, stored)) return null;
-    // Second proof: the function the delivery email used must still give the same words, and must give them
-    // again with the stored service_interest blank. That function returns a stored interest before it looks
-    // at the lines, so the second ask makes the estimate's own lines agree too.
+    // Second proof: the function the delivery email used must still give the same words.
     const { inferEstimateServiceInterest } = require('./estimate-service-lines');
-    const stillSays = [fresh, { ...fresh, service_interest: null, serviceInterest: null }]
-      .every((row) => inferEstimateServiceInterest({ ...row, estimateData: fresh.estimate_data }) === stored);
-    return stillSays ? name : null;
+    if (inferEstimateServiceInterest({ ...fresh, estimateData: fresh.estimate_data }) !== stored) return null;
+    // Third proof: that function can take its words from a stored interest, a description or a note.
+    // The priced rows must say the same service.
+    return serviceNameFromSummary(pricedRowsSummary(todayLabel, fresh.estimate_data)) === name ? name : null;
   } catch (err) {
     // A knex message can carry addresses: log only the code or name.
     logger.warn(`[estimate-emailed-service-name] read failed: ${err?.code || err?.name || 'error'}`);
