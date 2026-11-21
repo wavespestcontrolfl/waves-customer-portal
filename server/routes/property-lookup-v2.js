@@ -75,6 +75,7 @@ const {
 } = require('../services/estimator-engine/property-facts-shadow');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
+const { hasStructuredCommercialAiSignal } = require('../services/property-lookup/commercial-ai-signal');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
@@ -4022,17 +4023,6 @@ function commercialSignalText(rc = {}, ai = {}) {
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
-}
-
-function hasStructuredCommercialAiSignal(ai = {}) {
-  const propertyUse = String(ai?.propertyUse || '').trim().toUpperCase();
-  const commercialUseType = String(ai?.commercialUseType || '').trim().toUpperCase();
-  const nonCommercialUseTypes = ['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'];
-  if (['COMMERCIAL', 'MIXED'].includes(propertyUse)) return true;
-  if (!commercialUseType || nonCommercialUseTypes.includes(commercialUseType)) {
-    return false;
-  }
-  return commercialUseType === 'OTHER' || normalizePricingPropertyType(commercialUseType) === 'commercial';
 }
 
 // propertyType sourceTypes that describe THIS parcel authoritatively (a county
