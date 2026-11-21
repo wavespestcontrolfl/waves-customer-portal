@@ -86,6 +86,34 @@ describe('loadHomeFacts', () => {
     expect([...facts.keys()]).toEqual([4, 5]);
   });
 
+  test('the address a finished report froze must be the home: a customer who moved since has no entry', async () => {
+    const home = { home_line1: '100 Palm Drive', home_line2: null, home_city: 'Bradenton', home_zip: '34202', home_property_id: 'p1' };
+    const stamp = { property_id: 'p1', address_line1: null, address_line2: null, city: null, zip: null, estimate_property_id: null, estimate_address: null, estimate_live_draft: null };
+    const { conn } = fakeConn([[
+      row({ subscriber_id: 1, ...home, last_stamps: [stamp], last_frozen: [{ line1: '100 Palm Dr', line2: null, city: 'Bradenton', state: 'FL', zip: '34202' }] }),
+      row({ subscriber_id: 2, ...home, last_stamps: [stamp], last_frozen: [{ line1: '9 Other Road', line2: null, city: 'Bradenton', state: 'FL', zip: '34202' }] }),
+      row({ subscriber_id: 3, ...home, last_stamps: [], last_frozen: [{ line1: '100 Palm Drive', line2: null, city: 'Bradenton', zip: '34202' }, { line1: '9 Other Road', city: 'Bradenton', zip: '34202' }] }),
+      row({ subscriber_id: 4, ...home, last_stamps: [stamp], last_frozen: [] }),
+    ]]);
+    const facts = await loadHomeFacts(conn, [1, 2, 3, 4], NOW);
+    expect([...facts.keys()]).toEqual([1, 4]);
+  });
+
+  test('a live quote-wizard draft cannot place an appointment: with no other location, no entry', async () => {
+    const home = { home_line1: '100 Palm Drive', home_line2: null, home_city: 'Bradenton', home_zip: '34202', home_property_id: 'p1' };
+    const stamp = (over = {}) => ({ property_id: null, address_line1: null, address_line2: null, city: null, zip: null, estimate_property_id: null, estimate_address: null, estimate_live_draft: false, ...over });
+    const { conn } = fakeConn([[
+      row({ subscriber_id: 1, ...home, last_stamps: [stamp({ estimate_live_draft: true, estimate_address: '100 Palm Drive, Bradenton, FL 34202' })] }),
+      row({ subscriber_id: 2, ...home, last_stamps: [stamp({ estimate_live_draft: true, estimate_property_id: 'p1' })] }),
+      // The appointment's own stamp or pointer still places it.
+      row({ subscriber_id: 3, ...home, last_stamps: [stamp({ estimate_live_draft: true, address_line1: '100 Palm Drive', zip: '34202' })] }),
+      row({ subscriber_id: 4, ...home, last_stamps: [stamp({ estimate_live_draft: true, property_id: 'p1' })] }),
+      row({ subscriber_id: 5, ...home, last_stamps: [stamp({ estimate_address: '100 Palm Drive, Bradenton, FL 34202' })] }),
+    ]]);
+    const facts = await loadHomeFacts(conn, [1, 2, 3, 4, 5], NOW);
+    expect([...facts.keys()]).toEqual([3, 4, 5]);
+  });
+
   test('a stamped address is the home only when both streets can be keyed: a home with no usable street confirms nothing', async () => {
     const stamp = (over = {}) => ({ property_id: null, address_line1: null, address_line2: null, city: null, zip: null, estimate_property_id: null, estimate_address: null, ...over });
     const noStreet = { home_line1: null, home_line2: null, home_city: 'Bradenton', home_zip: '34202', home_property_id: '' };
@@ -159,6 +187,8 @@ describe('loadHomeFacts', () => {
     expect(calls[0].sql).toContain('LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id');
     expect(calls[0].sql).toContain('LEFT JOIN estimates e ON e.id = ss.source_estimate_id');
     expect(calls[0].sql).toContain('c.has_multi_home IS NOT TRUE');
+    expect(calls[0].sql).toContain("r.service_data->'reportIdentitySnapshot'->'address'");
+    expect(calls[0].sql).toContain("e.source = 'quote_wizard' AND e.status = 'draft' AND e.archived_at IS NULL");
     expect(calls[0].sql).toContain("TRIM(COALESCE(c.address_line1, '')) <> ''");
     expect(calls[0].sql).toMatch(/LOWER\(TRIM\(ns\.email\)\) = LOWER\(TRIM\(c\.email\)\)/);
     expect(calls[0].sql).toMatch(/COALESCE\(o\.account_id, o\.id\) = COALESCE\(c\.account_id, c\.id\)/);

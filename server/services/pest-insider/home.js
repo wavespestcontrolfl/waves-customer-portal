@@ -93,6 +93,10 @@ function appointmentAtHome(stamp, home, homePropertyId) {
   if (elsewhere(stamp.property_id)) return false;
   if (String(stamp.address_line1 ?? '').trim()) return addressIsHome(stamp, home);
   if (stamp.property_id) return true;
+  // A live quote-wizard draft is rewritten for the customer's next quote, at any address, so
+  // it cannot say where an older appointment was (recurring-appointment-seeder.js
+  // sourceEstimateForScope). It is this appointment's only location evidence: no block.
+  if (stamp.estimate_live_draft === true) return false;
   if (elsewhere(stamp.estimate_property_id)) return false;
   if (!String(stamp.estimate_address ?? '').trim()) return true;
   const quoted = require('../estimate-property-linkage').parseEstimateAddress(stamp.estimate_address);
@@ -106,7 +110,11 @@ function lastVisitIsAtHome(row) {
   const stamps = Array.isArray(row.last_stamps) ? row.last_stamps : [];
   const home = { address_line1: row.home_line1, address_line2: row.home_line2, city: row.home_city, zip: row.home_zip };
   const homePropertyId = String(row.home_property_id ?? '');
-  return stamps.every((stamp) => appointmentAtHome(stamp, home, homePropertyId));
+  // The address each finished report froze at completion (service_data.reportIdentitySnapshot,
+  // the one the customer's report shows). A customer who moved since has the old home there.
+  const frozen = Array.isArray(row.last_frozen) ? row.last_frozen : [];
+  const frozenAtHome = (a) => addressIsHome({ address_line1: a?.line1, address_line2: a?.line2, city: a?.city, zip: a?.zip }, home);
+  return frozen.every(frozenAtHome) && stamps.every((stamp) => appointmentAtHome(stamp, home, homePropertyId));
 }
 
 // One reader's facts from its row, or null when the customer is commercial, the last
@@ -159,7 +167,11 @@ JOIN LATERAL (
          COALESCE(json_agg(json_build_object(
            'property_id', ss.property_id, 'address_line1', ss.service_address_line1, 'address_line2', ss.service_address_line2,
            'city', ss.service_address_city, 'zip', ss.service_address_zip,
-           'estimate_property_id', e.property_id, 'estimate_address', e.address)) FILTER (WHERE ss.id IS NOT NULL), '[]'::json) AS last_stamps
+           'estimate_property_id', e.property_id, 'estimate_address', e.address,
+           'estimate_live_draft', (e.source = 'quote_wizard' AND e.status = 'draft' AND e.archived_at IS NULL)))
+           FILTER (WHERE ss.id IS NOT NULL), '[]'::json) AS last_stamps,
+         COALESCE(json_agg(r.service_data->'reportIdentitySnapshot'->'address')
+           FILTER (WHERE jsonb_typeof(r.service_data->'reportIdentitySnapshot'->'address') = 'object'), '[]'::json) AS last_frozen
   FROM service_records r
   LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id
   LEFT JOIN estimates e ON e.id = ss.source_estimate_id

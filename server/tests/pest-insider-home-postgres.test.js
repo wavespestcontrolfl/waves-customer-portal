@@ -269,6 +269,30 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     await db('service_records').insert({ id: randomUUID(), customer_id: customerId, service_date: date, service_type: 'Quarterly Pest Control', status: 'completed', scheduled_service_id: visitId });
   }
 
+  test('the address the finished report froze must be the home; a live quote-wizard draft places no appointment', async () => {
+    const frozenRecord = (customerId, address) => db('service_records').insert({
+      id: randomUUID(), customer_id: customerId, service_date: '2026-11-05', service_type: 'Quarterly Pest Control', status: 'completed',
+      service_data: JSON.stringify({ reportIdentitySnapshot: { address } }),
+    });
+    const HOME = { line1: '100 Test Lane', line2: null, city: 'Test City', state: 'FL', zip: '00000' };
+    const stayed = await customer();
+    await frozenRecord(stayed, HOME);
+    // The report froze the old home; the customer's address on file is the new one.
+    const moved = await customer();
+    await frozenRecord(moved, { ...HOME, line1: '9 Old Road' });
+    const noSnapshot = await customer();
+    await db('service_records').insert({ id: randomUUID(), customer_id: noSnapshot, service_date: '2026-11-05', service_type: 'Quarterly Pest Control', status: 'completed', service_data: JSON.stringify({}) });
+    const WIZARD = { source: 'quote_wizard', status: 'draft' };
+    const liveDraft = await customer();
+    await visitRecord(liveDraft, '2026-11-05', { source_estimate_id: await estimate(liveDraft, '100 Test Lane, Test City, FL 00000', WIZARD) });
+    const archivedDraft = await customer();
+    await visitRecord(archivedDraft, '2026-11-05', { source_estimate_id: await estimate(archivedDraft, '100 Test Lane, Test City, FL 00000', { ...WIZARD, archived_at: new Date('2026-11-01T12:00:00Z') }) });
+    const readers = {};
+    for (const [name, id] of Object.entries({ stayed, moved, noSnapshot, liveDraft, archivedDraft })) readers[name] = await reader(id);
+    const facts = await loadHomeFacts(db, Object.values(readers), NOW);
+    expect(Object.keys(readers).filter((name) => facts.has(readers[name])).sort()).toEqual(['archivedDraft', 'noSnapshot', 'stayed']);
+  });
+
   test('a customer staff marked multi-home, or one with no street on file, has no entry', async () => {
     // has_multi_home: a second premises that never got a customer_properties row.
     const { s: flagged } = await eligible({ has_multi_home: true });
@@ -280,8 +304,8 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
   });
 
   // An estimate of the customer with the address it quoted; returns its id.
-  async function estimate(customerId, address) {
-    const [inserted] = await db('estimates').insert({ id: randomUUID(), customer_id: customerId, address, estimate_data: JSON.stringify({}) }).returning('id');
+  async function estimate(customerId, address, over = {}) {
+    const [inserted] = await db('estimates').insert({ id: randomUUID(), customer_id: customerId, address, estimate_data: JSON.stringify({}), ...over }).returning('id');
     return typeof inserted === 'object' ? inserted.id : inserted;
   }
 
