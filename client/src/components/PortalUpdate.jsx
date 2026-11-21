@@ -3,7 +3,7 @@ import { useLocation, useNavigationType } from 'react-router-dom';
 import { Button } from './ui';
 import { isAdminPath, isFieldPath } from '../lib/adminBookmarkMeta';
 import { newerBuild, subscribePortalVersion } from '../lib/portalVersion';
-import { browserOffline, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
+import { browserOffline, noteMoveOutcome, reloadBlockerAtMove, reloadBlockers, reloadForNewBuild } from '../lib/portalReload';
 import { notePageInView, notePageMove, onPageUse, usedOnPageInView } from '../lib/staleChunkReload';
 
 // Wraps the route tree (App.jsx). At a page move that is due a reload
@@ -18,7 +18,8 @@ import { notePageInView, notePageMove, onPageUse, usedOnPageInView } from '../li
 // (reloadHolds.js). A held move opens the next page in the old code. If the
 // deploy removed that page's code, the stale-chunk reload obeys the same
 // holds (staleChunkReload.js): the page waits for open work, then reloads
-// once or shows its retry screen.
+// once or shows its retry screen. Each move notes why its page did not
+// reload, for the usage beacon (noteMoveOutcome, lib/portalReload.js).
 export function PortalUpdateGate({ fallback, children }) {
   const { pathname } = useLocation();
   const navigationType = useNavigationType();
@@ -37,7 +38,10 @@ export function PortalUpdateGate({ fallback, children }) {
   // leaves a field page, each replace after it keeps that page, until the
   // next push or Back: /admin -> Today -> the sign-in page -> the next page
   // leaves Today, as Today -> the sign-in page does.
-  const [gate, setGate] = useState({ pathname, origin: pathname, from: null, reloading: false });
+  const [gate, setGate] = useState(() => {
+    noteMoveOutcome(pathname, 'first-page');
+    return { pathname, origin: pathname, from: null, reloading: false };
+  });
   if (gate.pathname !== pathname) {
     const replace = navigationType === 'REPLACE';
     const origin = replace ? gate.origin : gate.pathname;
@@ -46,7 +50,9 @@ export function PortalUpdateGate({ fallback, children }) {
     // from this render on: the new page's code can fail before the move is
     // in view.
     notePageMove(from, pathname, origin);
-    setGate({ pathname, origin, from, reloading: reloadDueAtMove(pathname, Date.now(), from) });
+    const blocker = reloadBlockerAtMove(pathname, Date.now(), from);
+    noteMoveOutcome(pathname, blocker);
+    setGate({ pathname, origin, from, reloading: blocker === null });
   }
   // A layout effect, so that no tap comes between the move and this note.
   useLayoutEffect(() => { notePageInView(gate.from, gate.pathname); }, [gate.from, gate.pathname]);
@@ -55,7 +61,9 @@ export function PortalUpdateGate({ fallback, children }) {
     if (!gate.reloading) return undefined;
     let current = true;
     reloadForNewBuild({ current: () => current }).then((blocker) => {
-      if (current && blocker) setGate((state) => (state === gate ? { ...state, reloading: false } : state));
+      if (!current || !blocker) return;
+      noteMoveOutcome(gate.pathname, blocker);
+      setGate((state) => (state === gate ? { ...state, reloading: false } : state));
     });
     return () => { current = false; };
   }, [gate]);

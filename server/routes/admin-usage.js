@@ -11,13 +11,18 @@
  * Privacy contract: rows are staff-only navigation metadata. page_key /
  * path / tab are validated against strict slug patterns server-side, so a
  * customer id, search string, or free text can never be persisted even by
- * a buggy or hostile client.
+ * a buggy or hostile client. stale_build and reload_hold describe the tab:
+ * whether its build is not the one this server serves, and the code name of
+ * what kept its last page move from reloading it (client/src/lib/portalReload.js),
+ * kept only for a stale tab. A nightly read-only check reads them (owner
+ * 2026-11-19, option A).
  */
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { servedPortalBuild } = require('../middleware/portal-build-header');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -42,6 +47,8 @@ const TAB_RE = /^(?=.{1,32}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 // always are (Codex #2961 r21). Mirrored client-side.
 const TAB_OPAQUE_RE = /^(?=[a-z0-9-]*\d)[a-z0-9-]{20,}$/;
 const SOURCES = new Set(['sidebar', 'tabbar', 'more', 'palette', 'load', 'in-app']);
+// The tab's build tag, as vite.config.js writes it (portal-build-header.js).
+const BUILD_RE = /^[a-f0-9]{8,64}$/i;
 const EVENT_TYPES = new Set(['page_view']);
 
 // Mirror of the client normalizer's ID detection (lib/adminUsage.js). The
@@ -131,9 +138,22 @@ function stripIdSegments(path) {
 // never interpolate request input into raw SQL.
 const ET_DAY_SQL = "(created_at AT TIME ZONE 'America/New_York')::date";
 
+// The two fields that describe the tab (client/src/lib/adminUsage.js), which
+// never cost the page view: a value of the wrong shape is dropped. stale_build
+// is null when either side has no build tag (a dev server, a tab from before
+// the beacon sent one). reload_hold, the code name of what kept the tab's last
+// page move from reloading it, is kept only for a stale tab, and only in the
+// shape of a tab slug.
+function tabReloadFields(build, reloadHold) {
+  const served = servedPortalBuild();
+  const stale = typeof build === 'string' && BUILD_RE.test(build) && served ? build.toLowerCase() !== served : null;
+  const keep = stale && typeof reloadHold === 'string' && TAB_RE.test(reloadHold) && !TAB_OPAQUE_RE.test(reloadHold);
+  return { stale_build: stale, reload_hold: keep ? reloadHold : null };
+}
+
 router.post('/track', async (req, res, next) => {
   try {
-    const { pageKey, path, tab, source, eventType } = req.body || {};
+    const { pageKey, path, tab, source, eventType, build, reloadHold } = req.body || {};
 
     if (typeof pageKey !== 'string' || !PAGE_KEY_RE.test(pageKey) || isIdSegment(pageKey)) {
       return res.status(400).json({ error: 'Invalid pageKey' });
@@ -181,6 +201,7 @@ router.post('/track', async (req, res, next) => {
       path: cleanPath,
       tab: tab || null,
       source: source || null,
+      ...tabReloadFields(build, reloadHold),
     });
     res.status(204).end();
   } catch (err) { next(err); }

@@ -14,7 +14,7 @@ vi.mock('../native/platform', () => ({ isWavesAdminApp: () => false }));
 import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from '../lib/portalVersion';
 import { registerReloadHold } from '../lib/reloadHolds';
 import { countDeviceWrite } from '../lib/deviceWrites';
-import { PAGE_USE_EVENTS } from '../lib/portalReload';
+import { PAGE_USE_EVENTS, moveBlockerFor } from '../lib/portalReload';
 import { usedOnPageInView, watchPageUse } from '../lib/staleChunkReload';
 import { PortalReloadPrompt, PortalUpdateBar, PortalUpdateGate } from './PortalUpdate';
 
@@ -292,6 +292,29 @@ describe('PortalUpdateGate', () => {
     await act(async () => {});
     expect(reload).not.toHaveBeenCalled();
     expect(screen.getByText('Home')).toBeTruthy();
+  });
+
+  test('notes why each page did not reload, for the usage beacon: the page the tab loaded, a held move (a tab inside the page keeps the note), and a due move until its reload gives up', async () => {
+    renderAt('/admin/dashboard');
+    expect(moveBlockerFor('/admin/dashboard')).toBe('first-page');
+    goLive('bbb222bbb222');
+    holding = true;
+    fireEvent.click(screen.getByText('Open Pipeline'));
+    expect(moveBlockerFor('/admin/pipeline')).toBe('test-hold');
+    fireEvent.click(screen.getByText('Leads tab'));
+    expect(moveBlockerFor('/admin/pipeline')).toBe('test-hold');
+    holding = false;
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('full'); });
+    try {
+      fireEvent.click(screen.getByText('Open Dashboard'));
+      expect(screen.getByText('Loading the new version...')).toBeTruthy();
+      expect(moveBlockerFor('/admin/dashboard')).toBeNull();
+      await waitFor(() => expect(screen.getByText('Dashboard')).toBeTruthy());
+      expect(moveBlockerFor('/admin/dashboard')).toBe('storage');
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      setItem.mockRestore();
+    }
   });
 
   test('held work keeps the tab: the move opens the page and the bar stays', async () => {

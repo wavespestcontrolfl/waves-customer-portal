@@ -26,7 +26,7 @@ let writes = 0;
 let requests = 0;
 const listeners = new Set();
 
-function loadedBuild() {
+export function loadedBuild() {
   if (pageBuild === undefined) {
     pageBuild = typeof document === 'undefined'
       ? null

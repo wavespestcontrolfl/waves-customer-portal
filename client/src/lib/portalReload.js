@@ -39,14 +39,14 @@ export function isPageUse(event) {
 // worker answers with its saved copy. So the tab may try again at a later
 // move, up to three times for one build, and each try needs a recent answer
 // from the new server (hasSignal), which a page that just loaded has not had
-// yet. Without session storage the tab cannot count its tries, so it never
-// reloads by itself.
+// yet. Without session storage the tab cannot count its tries (null), so it
+// never reloads by itself.
 function reloadTries(build) {
   try {
     const marker = JSON.parse(sessionStorage.getItem(RELOADED_FOR));
     if (marker?.build !== build) return 0;
-    return Number.isInteger(marker.tries) ? marker.tries : RELOAD_TRIES;
-  } catch { return RELOAD_TRIES; }
+    return Number.isInteger(marker.tries) ? marker.tries : null;
+  } catch { return null; }
 }
 
 export const browserOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
@@ -73,16 +73,43 @@ export function selfReloadBarred(pathname, from = null) {
   return isFieldPath(pathname) || isFieldPath(from) || isWavesAdminApp();
 }
 
-// `from`: the page the move leaves.
-export function reloadDueAtMove(pathname, now = Date.now(), from = null) {
+// Why a move to `pathname` does not reload the tab, or null when the move is
+// due a reload. `from`: the page the move leaves. The name says what stopped
+// the reload first: a page that never reloads by itself ('not-staff',
+// 'admin-index', 'waves-admin', 'field-page'), a tab that knows no newer
+// build ('current', or 'never-heard' when no staff answer has named a build
+// since the page loaded), then 'offline', 'no-signal', 'storage' (the tries
+// cannot be counted), 'reloaded' (three tries spent), a hold's name and
+// 'stalled'.
+export function reloadBlockerAtMove(pathname, now = Date.now(), from = null) {
+  if (!isAdminPath(pathname)) return 'not-staff';
+  if (adminIndex(pathname)) return 'admin-index';
+  if (selfReloadBarred(pathname, from)) return isWavesAdminApp() ? 'waves-admin' : 'field-page';
   const build = newerBuild();
-  return Boolean(build)
-    && isAdminPath(pathname) && !adminIndex(pathname)
-    && !selfReloadBarred(pathname, from)
-    && hasSignal(now)
-    && reloadTries(build) < RELOAD_TRIES
-    && !reloadHoldName()
-    && !stalledWork();
+  if (!build) return heardFromServerWithin(Infinity, now) ? 'current' : 'never-heard';
+  if (browserOffline()) return 'offline';
+  if (!hasSignal(now)) return 'no-signal';
+  const tries = reloadTries(build);
+  if (tries === null) return 'storage';
+  if (tries >= RELOAD_TRIES) return 'reloaded';
+  return reloadHoldName() ?? (stalledWork() ? 'stalled' : null);
+}
+
+// What the latest page move did, for the usage beacon (lib/adminUsage.js):
+// the blocker that kept the page in view in this build, null when its move
+// was due a reload, or 'first-page' for the page the tab loaded.
+// PortalUpdateGate notes it at each move and when a held reload gives up.
+let moveOutcome = { pathname: null, blocker: null };
+export function noteMoveOutcome(pathname, blocker) {
+  moveOutcome = { pathname, blocker };
+}
+
+// The note when the latest move opened `pathname`, as the router reads it,
+// else null.
+export function moveBlockerFor(pathname) {
+  return moveOutcome.pathname !== null && routerPath(moveOutcome.pathname) === routerPath(pathname)
+    ? moveOutcome.blocker
+    : null;
 }
 
 // Saves still open: API writes on their way, and writes to the device's own
@@ -175,6 +202,7 @@ export async function reloadForNewBuild({
   const build = newerBuild();
   if (!build) return 'current';
   const tries = reloadTries(build);
+  if (tries === null) return 'storage';
   if (tries >= RELOAD_TRIES) return 'reloaded';
   // The wait for writes can outlast the signal: ask again.
   if (!hasSignal(now())) return 'no-signal';

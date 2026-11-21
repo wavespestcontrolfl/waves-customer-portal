@@ -25,12 +25,19 @@ function readPortalBuild(indexPath = INDEX_HTML) {
   }
 }
 
+// The build this server serves, or null without the tag. The usage beacon
+// compares a tab's build with it (routes/admin-usage.js).
+function servedPortalBuild() {
+  if (cachedBuild === undefined) cachedBuild = readPortalBuild();
+  return cachedBuild;
+}
+
 // Never throws: the stamp must not change what the request gets.
 function stampPortalBuild(res) {
   try {
-    if (cachedBuild === undefined) cachedBuild = readPortalBuild();
-    if (!cachedBuild || typeof res?.setHeader !== 'function') return;
-    res.setHeader('X-Portal-Build', cachedBuild);
+    const build = servedPortalBuild();
+    if (!build || typeof res?.setHeader !== 'function') return;
+    res.setHeader('X-Portal-Build', build);
     res.setHeader('X-Portal-Boot', BOOT);
   } catch {
     // The answer goes out without the stamp.
@@ -41,4 +48,4 @@ function setPortalBuildForTests(build) {
   cachedBuild = build;
 }
 
-module.exports = { readPortalBuild, stampPortalBuild, setPortalBuildForTests, BOOT };
+module.exports = { readPortalBuild, servedPortalBuild, stampPortalBuild, setPortalBuildForTests, BOOT };

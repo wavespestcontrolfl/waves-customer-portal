@@ -11,7 +11,7 @@ vi.mock('../native/platform', () => ({ isWavesAdminApp: () => platform.wavesAdmi
 import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from './portalVersion';
 import { registerReloadHold } from './reloadHolds';
 import { countDeviceWrite } from './deviceWrites';
-import { RECENT_ANSWER_MS, WRITE_WAIT_MS, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from './portalReload';
+import { RECENT_ANSWER_MS, WRITE_WAIT_MS, moveBlockerFor, noteMoveOutcome, reloadBlockerAtMove, reloadBlockers, reloadForNewBuild } from './portalReload';
 import { adminFetch } from '../utils/admin-fetch';
 
 const NOW = 1_000_000;
@@ -36,80 +36,99 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('reloadDueAtMove', () => {
+describe('reloadBlockerAtMove', () => {
   test('a move to a staff page in an out-of-date tab is due a reload', () => {
     liveBuild('bbb222bbb222');
-    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(true);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBeNull();
   });
 
   test('never while the tab runs the live build', () => {
     liveBuild('aaa111aaa111');
-    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBe('current');
   });
 
   test('a move to the /admin index is not a page move, as it only redirects; the move on to the page it lands on decides', () => {
     liveBuild('bbb222bbb222');
-    expect(reloadDueAtMove('/admin', NOW, '/admin/pipeline')).toBe(false);
-    expect(reloadDueAtMove('/admin/', NOW, '/admin/pipeline')).toBe(false);
-    expect(reloadDueAtMove('/Admin', NOW, '/admin/pipeline')).toBe(false);
-    expect(reloadDueAtMove('/%61dmin', NOW, '/admin/pipeline')).toBe(false);
+    expect(reloadBlockerAtMove('/admin', NOW, '/admin/pipeline')).toBe('admin-index');
+    expect(reloadBlockerAtMove('/admin/', NOW, '/admin/pipeline')).toBe('admin-index');
+    expect(reloadBlockerAtMove('/Admin', NOW, '/admin/pipeline')).toBe('admin-index');
+    expect(reloadBlockerAtMove('/%61dmin', NOW, '/admin/pipeline')).toBe('admin-index');
     // The router matches it with any number of trailing slashes too.
-    expect(reloadDueAtMove('/admin///', NOW, '/admin/pipeline')).toBe(false);
-    expect(reloadDueAtMove('/%61dmin///', NOW, '/admin/pipeline')).toBe(false);
+    expect(reloadBlockerAtMove('/admin///', NOW, '/admin/pipeline')).toBe('admin-index');
+    expect(reloadBlockerAtMove('/%61dmin///', NOW, '/admin/pipeline')).toBe('admin-index');
     // The dashboard landing reloads. Today, for a technician or with Field
     // view on, does not.
-    expect(reloadDueAtMove('/admin/dashboard', NOW, '/admin')).toBe(true);
-    expect(reloadDueAtMove('/admin/today', NOW, '/admin')).toBe(false);
+    expect(reloadBlockerAtMove('/admin/dashboard', NOW, '/admin')).toBeNull();
+    expect(reloadBlockerAtMove('/admin/today', NOW, '/admin')).toBe('field-page');
   });
 
   test('never on customer pages, the field pages or in Waves Admin', () => {
     liveBuild('bbb222bbb222');
-    expect(reloadDueAtMove('/billing', NOW)).toBe(false);
-    expect(reloadDueAtMove('/admin/today', NOW)).toBe(false);
-    expect(reloadDueAtMove('/admin/today/visit/1', NOW)).toBe(false);
+    expect(reloadBlockerAtMove('/billing', NOW)).toBe('not-staff');
+    expect(reloadBlockerAtMove('/admin/today', NOW)).toBe('field-page');
+    expect(reloadBlockerAtMove('/admin/today/visit/1', NOW)).toBe('field-page');
     // Read as the routes match it: an encoded segment still opens Today.
-    expect(reloadDueAtMove('/admin/%74oday', NOW)).toBe(false);
-    expect(reloadDueAtMove('/%61dmin/dashboard', NOW)).toBe(true);
+    expect(reloadBlockerAtMove('/admin/%74oday', NOW)).toBe('field-page');
+    expect(reloadBlockerAtMove('/%61dmin/dashboard', NOW)).toBeNull();
     // Nor at a move away from a field page: a time-clock punch there can
     // still be waiting for the location.
-    expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/today')).toBe(false);
-    expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/today/truck-check')).toBe(false);
-    expect(reloadDueAtMove('/admin/pipeline', NOW, '/%61dmin/today')).toBe(false);
-    expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/dashboard')).toBe(true);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW, '/admin/today')).toBe('field-page');
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW, '/admin/today/truck-check')).toBe('field-page');
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW, '/%61dmin/today')).toBe('field-page');
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW, '/admin/dashboard')).toBeNull();
     platform.wavesAdmin = true;
-    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBe('waves-admin');
   });
 
   test('never without a recent answer from the new server (no signal)', () => {
     liveBuild('bbb222bbb222', NOW - RECENT_ANSWER_MS - 1);
-    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBe('no-signal');
   });
 
   test('up to three tries per live build, as a reload can come back on the old page, and never without session storage', () => {
     liveBuild('bbb222bbb222');
     sessionStorage.setItem('portal-reloaded-for', JSON.stringify({ build: 'bbb222bbb222', tries: 2 }));
-    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(true);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBeNull();
     sessionStorage.setItem('portal-reloaded-for', JSON.stringify({ build: 'bbb222bbb222', tries: 3 }));
-    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBe('reloaded');
     sessionStorage.setItem('portal-reloaded-for', JSON.stringify({ build: 'old000old000', tries: 3 }));
-    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(true);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBeNull();
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
-    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBe('storage');
   });
 
   test('never while registered work holds it', () => {
     liveBuild('bbb222bbb222');
     holding = true;
-    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBe('test-hold');
+  });
+
+  test('a tab that knows no newer build names current once a staff answer named its own build, and never-heard before; a page that never reloads by itself names its rule first', () => {
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBe('never-heard');
+    expect(reloadBlockerAtMove('/admin/today', NOW)).toBe('field-page');
+    liveBuild('aaa111aaa111', NOW - RECENT_ANSWER_MS - 1);
+    expect(reloadBlockerAtMove('/admin/pipeline', NOW)).toBe('current');
+  });
+});
+
+describe('the move note for the usage beacon', () => {
+  test('names the latest move\'s blocker for the page that move opened, as the router reads it, and nothing for another page', () => {
+    noteMoveOutcome('/admin/pipeline', 'card-payment');
+    expect(moveBlockerFor('/admin/pipeline')).toBe('card-payment');
+    expect(moveBlockerFor('/%61dmin/Pipeline')).toBe('card-payment');
+    expect(moveBlockerFor('/admin/dashboard')).toBeNull();
+    noteMoveOutcome('/admin/dashboard', null);
+    expect(moveBlockerFor('/admin/dashboard')).toBeNull();
+    expect(moveBlockerFor('/admin/pipeline')).toBeNull();
   });
 });
 
 describe('offline', () => {
   test('a tab the browser reports offline is not due, and never reloads or records the build', async () => {
     liveBuild('bbb222bbb222', Date.now());
-    expect(reloadDueAtMove('/admin/pipeline')).toBe(true);
+    expect(reloadBlockerAtMove('/admin/pipeline')).toBeNull();
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
-    expect(reloadDueAtMove('/admin/pipeline')).toBe(false);
+    expect(reloadBlockerAtMove('/admin/pipeline')).toBe('offline');
     const reload = vi.fn();
     await expect(reloadForNewBuild({ reload })).resolves.toBe('offline');
     expect(reload).not.toHaveBeenCalled();
@@ -161,6 +180,14 @@ describe('reloadForNewBuild', () => {
     expect(reload).toHaveBeenCalledTimes(3);
     await expect(reloadForNewBuild({ reload })).resolves.toBe('reloaded');
     expect(reload).toHaveBeenCalledTimes(3);
+  });
+
+  test('a tab that cannot read its count in session storage never reloads, and names storage', async () => {
+    liveBuild('bbb222bbb222', Date.now());
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
+    const reload = vi.fn();
+    await expect(reloadForNewBuild({ reload })).resolves.toBe('storage');
+    expect(reload).not.toHaveBeenCalled();
   });
 
   test('waits for a write to the device storage that the closing page started, then reloads', async () => {
@@ -298,20 +325,20 @@ describe('reloadForNewBuild', () => {
     });
 
     test('work that outlasts a full wait makes no later move wait again, until all work settles', async () => {
-      expect(reloadDueAtMove('/admin/pipeline', Date.now())).toBe(true);
+      expect(reloadBlockerAtMove('/admin/pipeline', Date.now())).toBeNull();
       const reload = vi.fn();
       const done = reloadForNewBuild({ reload });
       await vi.advanceTimersByTimeAsync(WRITE_WAIT_MS + 400);
       await expect(done).resolves.toBe('saving');
       // The same save is still open: the next move opens its page at once,
       // with no second 10 s wait.
-      expect(reloadDueAtMove('/admin/dashboard', Date.now())).toBe(false);
+      expect(reloadBlockerAtMove('/admin/dashboard', Date.now())).toBe('stalled');
       finishSave();
       await vi.advanceTimersByTimeAsync(400);
       // Once it settles, a move is due again, also while new work is open.
       let finishWrite;
       countDeviceWrite(new Promise((resolve) => { finishWrite = resolve; }));
-      expect(reloadDueAtMove('/admin/dashboard', Date.now())).toBe(true);
+      expect(reloadBlockerAtMove('/admin/dashboard', Date.now())).toBeNull();
       finishWrite();
       await vi.advanceTimersByTimeAsync(0);
       expect(reload).not.toHaveBeenCalled();

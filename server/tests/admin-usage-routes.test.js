@@ -139,6 +139,8 @@ describe('admin usage: POST /track', () => {
         path: '/admin/customers/:id',
         tab: 'notes',
         source: 'sidebar',
+        stale_build: null,
+        reload_hold: null,
       });
     });
   });
@@ -278,6 +280,52 @@ describe('admin usage: POST /track', () => {
       expect(res.status).toBe(400);
       expect(chain.calls.insert).toBeNull();
     });
+  });
+});
+
+describe('admin usage: POST /track tab build', () => {
+  // The tab's build and the name of what kept its last page move from
+  // reloading it (client/src/lib/adminUsage.js), for a nightly read-only
+  // check.
+  const { setPortalBuildForTests } = require('../middleware/portal-build-header');
+  afterEach(() => setPortalBuildForTests(undefined));
+  const track = (baseUrl, extra) => fetch(`${baseUrl}/admin/usage/track`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pageKey: 'pipeline', path: '/admin/pipeline', ...extra }),
+  });
+  const stored = async (extra) => {
+    const chain = makeChain();
+    db.mockImplementation(() => chain);
+    let row;
+    await withServer(async (baseUrl) => {
+      expect((await track(baseUrl, extra)).status).toBe(204);
+      row = { stale_build: chain.calls.insert.stale_build, reload_hold: chain.calls.insert.reload_hold };
+    });
+    return row;
+  };
+
+  test('keeps whether the tab is out of date, and its blocker name only when it is', async () => {
+    setPortalBuildForTests('bbb222bbb222');
+    await expect(stored({ build: 'AAA111AAA111', reloadHold: 'card-payment' })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+    await expect(stored({ build: 'aaa111aaa111' })).resolves.toEqual({ stale_build: true, reload_hold: null });
+    await expect(stored({ build: 'BBB222bbb222', reloadHold: 'current' })).resolves.toEqual({ stale_build: false, reload_hold: null });
+  });
+
+  test.each([
+    ['a build of the wrong shape', { build: 'not a build', reloadHold: 'current' }, null, null],
+    ['a build that is not text', { build: 12, reloadHold: 'current' }, null, null],
+    ['a name with spaces', { build: 'aaa111aaa111', reloadHold: 'John Smith' }, true, null],
+    ['an opaque token as the name', { build: 'aaa111aaa111', reloadHold: 'abcdef0123456789abcdef0123456789' }, true, null],
+    ['a name that is not text', { build: 'aaa111aaa111', reloadHold: 7 }, true, null],
+  ])('keeps the page view and drops %s', async (_label, extra, staleBuild, reloadHold) => {
+    setPortalBuildForTests('bbb222bbb222');
+    await expect(stored(extra)).resolves.toEqual({ stale_build: staleBuild, reload_hold: reloadHold });
+  });
+
+  test('without a build tag on the server, whether the tab is out of date is unknown', async () => {
+    setPortalBuildForTests(null);
+    await expect(stored({ build: 'aaa111aaa111', reloadHold: 'current' })).resolves.toEqual({ stale_build: null, reload_hold: null });
   });
 });
 

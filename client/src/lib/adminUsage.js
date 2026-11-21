@@ -12,8 +12,14 @@
 // Privacy contract (mirrored server-side in routes/admin-usage.js): only
 // normalized route metadata leaves the browser — page key, ID-stripped path
 // pattern, a sanitized tab slug, and a navigation source. Never query
-// strings, search text, customer ids, or tokens.
+// strings, search text, customer ids, or tokens. Two fields describe the tab,
+// not the page: its build tag, and the code name of what kept its last page
+// move from reloading it (lib/portalReload.js). The server keeps that name
+// only for a tab on an out-of-date build.
 // =============================================================================
+
+import { loadedBuild } from './portalVersion';
+import { moveBlockerFor } from './portalReload';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -394,6 +400,8 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
       path: norm.path,
       tab: tab || undefined,
       source,
+      build: loadedBuild() || undefined,
+      reloadHold: moveBlockerFor(pathname) || undefined,
     },
   };
   pendingTimer = setTimeout(
