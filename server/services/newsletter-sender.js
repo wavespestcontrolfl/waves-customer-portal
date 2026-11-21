@@ -1275,9 +1275,10 @@ async function sendCampaign(sendId, opts = {}) {
   // A Waves Pest Insider issue's "Your home" tokens ({{pi-home}} / {{pi-home-text}}):
   // each reader's own block, or '' for both tokens (a missing key would mail the raw token).
   const homeEnabled = hasHomeToken(quizBody);
-  // Only a send with a planned audience (every Pest Insider issue) shows a block: a token
-  // pasted into another newsletter gets '' for every reader.
-  const homePlanned = homeEnabled && sendHoldout(send.segment_filter) !== null;
+  // Only a Waves Pest Insider issue with its planned audience shows a block: a token
+  // pasted into another newsletter, even one that carries the Pest Insider audience
+  // filter, gets '' for every reader.
+  const homePlanned = homeEnabled && send.newsletter_type === PEST_INSIDER_TYPE && sendHoldout(send.segment_filter) !== null;
   const homeSubs = homeEnabled ? makeHomeSubstitutions(homePlanned) : null;
   // Event click-tracking tokens ({{evclick:<eventId>}}): substituted per
   // recipient with the tracking redirect carrying their engagement_token —

@@ -55,6 +55,22 @@ describe('loadHomeFacts', () => {
     expect(JSON.stringify([...facts])).not.toMatch(/visit_?count|count/i);
   });
 
+  test('a last visit booked at another address than the home on file has no entry; the home\'s own address, in another spelling, does', async () => {
+    const home = { home_line1: '100 Palm Drive', home_line2: null, home_city: 'Bradenton', home_zip: '34202', home_property_id: 'p1' };
+    const stamp = (over = {}) => ({ property_id: null, address_line1: null, address_line2: null, city: null, zip: null, ...over });
+    const { conn } = fakeConn([[
+      row({ subscriber_id: 1, ...home, last_stamps: [] }),
+      row({ subscriber_id: 2, ...home, last_stamps: [stamp()] }),
+      row({ subscriber_id: 3, ...home, last_stamps: [stamp({ property_id: 'p1', address_line1: '100 Palm Dr', city: 'Bradenton', zip: '34202' })] }),
+      row({ subscriber_id: 4, ...home, last_stamps: [stamp({ address_line1: '9 Other Road', city: 'Bradenton', zip: '34202' })] }),
+      row({ subscriber_id: 5, ...home, last_stamps: [stamp({ property_id: 'p2' })] }),
+      row({ subscriber_id: 6, ...home, last_stamps: [stamp({ property_id: 'p1' }), stamp({ address_line1: '100 Palm Drive', zip: '34211' })] }),
+      row({ subscriber_id: 7, ...home, home_property_id: null, last_stamps: [stamp({ property_id: 'p9' })] }),
+    ]]);
+    const facts = await loadHomeFacts(conn, [1, 2, 3, 4, 5, 6, 7], NOW);
+    expect([...facts.keys()]).toEqual([1, 2, 3]);
+  });
+
   test('the last day\'s service names are classified together: two lines on one day give no label', async () => {
     const { conn } = fakeConn([[row({ last_types: ['Quarterly Pest Control', 'Lawn Care Visit'] }), row({ subscriber_id: 12, last_types: ['Lawn Care Visit', 'Lawn Care Visit #2'] })]]);
     const facts = await loadHomeFacts(conn, [11, 12], NOW);
@@ -94,7 +110,9 @@ describe('loadHomeFacts', () => {
     expect(calls[0].sql).toContain("COALESCE(r.status, 'completed') = 'completed'");
     expect(calls[0].sql).toContain('FROM service_records r');
     expect(calls[0].sql).toContain('LOWER(TRIM(ns.email)) AS reader_address');
-    expect(calls[0].sql).not.toContain('scheduled_services');
+    // The visits are the records; the appointment is joined only for its address stamp.
+    expect(calls[0].sql).not.toMatch(/FROM scheduled_services/);
+    expect(calls[0].sql).toContain('LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id');
     expect(calls[0].sql).toMatch(/LOWER\(TRIM\(ns\.email\)\) = LOWER\(TRIM\(c\.email\)\)/);
     expect(calls[0].sql).toMatch(/COALESCE\(o\.account_id, o\.id\) = COALESCE\(c\.account_id, c\.id\)/);
     expect(calls[0].sql).toContain('customer_properties');

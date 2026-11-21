@@ -66,8 +66,25 @@ const dayNumber = (ymd) => {
   return Date.UTC(y, m - 1, d) / DAY_MS;
 };
 
-// One reader's facts from its row, or null when the customer is commercial or the
-// last finished visit is over a year old.
+// True when every appointment behind the last day's records was at this home. An
+// appointment can be booked at another address than the one on file (its property
+// pointer, or the address stamped on it: migration 20260709000001), and a visit there
+// is not a visit to "your home". An appointment with no pointer and no stamp was at
+// the customer's address on file; a record with no appointment predates the link.
+function lastVisitIsAtHome(row) {
+  const { addressCanNameProperty } = require('../customer-properties');
+  const stamps = Array.isArray(row.last_stamps) ? row.last_stamps : [];
+  const home = { address_line1: row.home_line1, address_line2: row.home_line2, city: row.home_city, zip: row.home_zip };
+  return stamps.every((stamp) => {
+    if (stamp.property_id && String(stamp.property_id) !== String(row.home_property_id ?? '')) return false;
+    if (!String(stamp.address_line1 ?? '').trim()) return true;
+    // The portal's own "does this address name that property" rule (suffixes, units, ZIP).
+    return addressCanNameProperty(stamp, home);
+  });
+}
+
+// One reader's facts from its row, or null when the customer is commercial, the last
+// finished visit is over a year old, or it was at another address than this home.
 function homeFromRow(row, today) {
   // The platform's own commercial test (the residential-only emails read it too).
   const { isCommercialAccount } = require('../self-booking-plan-sync');
@@ -75,6 +92,7 @@ function homeFromRow(row, today) {
   const lastDate = dateOnlyString(row.last_date);
   if (!lastDate) return null;
   if (dayNumber(today) - dayNumber(lastDate) > MAX_LAST_VISIT_AGE_DAYS) return null;
+  if (!lastVisitIsAtHome(row)) return null;
   return {
     customerId: row.customer_id,
     // The address these facts were read for: the sender mails a block only to this address.
@@ -98,7 +116,9 @@ function homeFromRow(row, today) {
 // family_occupied stays out on purpose: that home's payer can be another person.
 const FACTS_SQL = (idList) => `
 SELECT ns.id AS subscriber_id, c.id AS customer_id, c.member_since, c.property_type, c.waveguard_tier,
-       LOWER(TRIM(ns.email)) AS reader_address, v.last_date, t.last_types
+       LOWER(TRIM(ns.email)) AS reader_address, v.last_date, t.last_types, t.last_stamps,
+       c.address_line1 AS home_line1, c.address_line2 AS home_line2, c.city AS home_city, c.zip AS home_zip,
+       (SELECT p.id FROM customer_properties p WHERE p.customer_id = c.id LIMIT 1) AS home_property_id
 FROM newsletter_subscribers ns
 JOIN customers c ON c.id = ns.customer_id
 JOIN LATERAL (
@@ -107,8 +127,12 @@ JOIN LATERAL (
   WHERE r.customer_id = c.id AND COALESCE(r.status, 'completed') = 'completed' AND r.service_date <= CAST(? AS date)
 ) v ON v.last_date IS NOT NULL
 JOIN LATERAL (
-  SELECT array_agg(DISTINCT r.service_type) AS last_types
+  SELECT array_agg(DISTINCT r.service_type) AS last_types,
+         COALESCE(json_agg(json_build_object(
+           'property_id', ss.property_id, 'address_line1', ss.service_address_line1, 'address_line2', ss.service_address_line2,
+           'city', ss.service_address_city, 'zip', ss.service_address_zip)) FILTER (WHERE ss.id IS NOT NULL), '[]'::json) AS last_stamps
   FROM service_records r
+  LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id
   WHERE r.customer_id = c.id AND COALESCE(r.status, 'completed') = 'completed' AND r.service_date = v.last_date
 ) t ON true
 WHERE ns.id IN (${idList})

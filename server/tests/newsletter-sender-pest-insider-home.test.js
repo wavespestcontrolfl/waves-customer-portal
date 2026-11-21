@@ -165,7 +165,7 @@ const factsFor = (customerId, over = {}) => ({ customerId, address: 'a@example.c
 const sendRow = (over = {}) => ({
   id: 'send-1', status: 'draft', html_body: ISSUE.html_body, text_body: ISSUE.text_body, subject: ISSUE.subject,
   from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
-  segment_filter: PLAN([1, 2, 3]), subject_b: null, ...over,
+  segment_filter: PLAN([1, 2, 3]), subject_b: null, newsletter_type: 'pest-insider-monthly', ...over,
 });
 const recipients = (batch = 0) => mockSendBroadcast.mock.calls[batch][0].recipients;
 const BASE_KEYS = ['{{greeting-name}}', '{{city}}', '{{grass-type}}'];
@@ -208,8 +208,19 @@ describe('sendCampaign: the "Your home" tokens', () => {
     expect(mockWarn).not.toHaveBeenCalled();
   });
 
+  // (A Waves Pest Insider issue with no plan never sends at all: audienceRefusal stops it first.)
   test('a send with no planned audience gives every reader empty values and reads no facts, token or not', async () => {
-    buildDb({ send: sendRow({ segment_filter: null }), subscribers: SUBS, deliveries: DELIVERIES });
+    buildDb({ send: sendRow({ segment_filter: null, newsletter_type: 'free-form' }), subscribers: SUBS, deliveries: DELIVERIES });
+    mockLoadHomeFacts.mockResolvedValue(new Map([[1, factsFor(C1)]]));
+
+    await sendCampaign('send-1');
+
+    expect(mockLoadHomeFacts).not.toHaveBeenCalled();
+    for (const r of recipients()) expectEmpty(r);
+  });
+
+  test('another newsletter that carries the Pest Insider audience plan and the tokens shows no block and reads no facts', async () => {
+    buildDb({ send: sendRow({ newsletter_type: 'free-form' }), subscribers: SUBS, deliveries: DELIVERIES, mailbox: { 1: [C1] } });
     mockLoadHomeFacts.mockResolvedValue(new Map([[1, factsFor(C1)]]));
 
     await sendCampaign('send-1');

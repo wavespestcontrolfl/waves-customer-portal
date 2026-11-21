@@ -262,6 +262,38 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     expect((await loadHomeFacts(db, [s], NOW)).size).toBe(0);
   });
 
+  // A completed record behind an appointment, with the appointment's own property pointer and address stamp.
+  async function visitRecord(customerId, date, appointment = {}) {
+    const visitId = randomUUID();
+    await db('scheduled_services').insert({ id: visitId, customer_id: customerId, service_type: 'Quarterly Pest Control', scheduled_date: date, status: 'completed', ...appointment });
+    await db('service_records').insert({ id: randomUUID(), customer_id: customerId, service_date: date, service_type: 'Quarterly Pest Control', status: 'completed', scheduled_service_id: visitId });
+  }
+
+  test('a last visit booked at another address or another property has no entry; the home\'s own stamp, or none, does', async () => {
+    const plain = await customer();
+    await visitRecord(plain, '2026-11-05');
+    const same = await customer();
+    await visitRecord(same, '2026-11-05', { service_address_line1: '100 Test Ln', service_address_city: 'Test City', service_address_zip: '00000' });
+    const elsewhere = await customer();
+    await visitRecord(elsewhere, '2026-11-05', { service_address_line1: '9 Other Road', service_address_city: 'Test City', service_address_zip: '00000' });
+    // An older visit elsewhere does not matter: only the last day's visits are named.
+    const older = await customer();
+    await visitRecord(older, '2026-08-05', { service_address_line1: '9 Other Road', service_address_city: 'Test City', service_address_zip: '00000' });
+    await visitRecord(older, '2026-11-05');
+    // A pointer at the customer's one saved property is this home; a pointer at any other property is not.
+    const own = await customer();
+    const [ownProperty] = await db('customer_properties').insert({ customer_id: own, occupancy_type: 'owner_occupied', active: true }).returning('id');
+    await visitRecord(own, '2026-11-05', { property_id: typeof ownProperty === 'object' ? ownProperty.id : ownProperty });
+    const stranger = await customer();
+    const [strangerProperty] = await db('customer_properties').insert({ customer_id: stranger, occupancy_type: 'owner_occupied', active: true }).returning('id');
+    const pointed = await customer();
+    await visitRecord(pointed, '2026-11-05', { property_id: typeof strangerProperty === 'object' ? strangerProperty.id : strangerProperty });
+    const readers = {};
+    for (const [name, id] of Object.entries({ plain, same, elsewhere, older, own, pointed })) readers[name] = await reader(id);
+    const facts = await loadHomeFacts(db, Object.values(readers), NOW);
+    expect(Object.keys(readers).filter((name) => facts.has(readers[name])).sort()).toEqual(['older', 'own', 'plain', 'same']);
+  });
+
   test('a last visit over 365 days old has no entry; exactly 365 days old still does; no record at all has none', async () => {
     const old = await customer();
     await record(old, '2024-05-01');
