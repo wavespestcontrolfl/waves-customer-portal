@@ -818,10 +818,12 @@
     {
       "router": "server/routes/receipt-v2.js",
       "mount": "/api/receipt",
-      "reason": "Tokenized receipt viewer + PDF from customer comms",
+      "reason": "Tokenized receipt viewer + PDF from customer comms; add-a-service and referral card taps (GATE_DOC_CROSS_SELL)",
       "routes": [
         "GET /api/receipt/:token",
-        "GET /api/receipt/:token/pdf"
+        "GET /api/receipt/:token/pdf",
+        "POST /api/receipt/:token/cross-sell",
+        "POST /api/receipt/:token/referral-link"
       ]
     },
     {

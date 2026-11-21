@@ -67,6 +67,7 @@ import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
 import TREATMENT_AREA_SCOPES from '../../../shared/treatment-area-scopes.json';
+import CrossSellOfferCard from '../components/crossSell/CrossSellOfferCard';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
@@ -4219,89 +4220,19 @@ function UpcomingVisitsCard({ data, mode }) {
 // key means no card, never a client-side guess. The CTA books nothing and
 // charges nothing: it records the request and the office follows up (owner
 // sends all customer communications).
+// The add-a-service card is the shared CrossSellOfferCard (also on the
+// receipt and the tracker, owner 2026-11-21); this wrapper owns the
+// report-specific parts: live-view only, and the tap rides the report's
+// events endpoint (its analytics event commits with the request row).
 function CrossSellCard({ data, token, mode }) {
-  // idle → sending → sent | failed (failed keeps the button for a retry —
-  // the UI may only confirm after the server recorded the request).
-  const [requestState, setRequestState] = useState('idle');
-  const offer = data?.crossSell;
-  if (mode !== 'live' || !offer?.serviceKey) return null;
-  const option = offer.option || {};
-  const handleRequest = async () => {
-    if (requestState === 'sending' || requestState === 'sent') return;
-    setRequestState('sending');
-    const result = await submitReportEvent(token, 'cross_sell_requested', {
-      serviceKey: offer.serviceKey,
-      serviceLabel: offer.label,
-      optionId: option.id || null,
-      perApplication: option.perVisit || null,
-      offerMode: offer.mode,
-      // Server-issued digest of everything this card rendered — the click
-      // path rejects any drift from what the customer actually saw.
-      fingerprint: offer.fingerprint || null,
-    });
-    // 409 = the server-recomputed offer no longer matches this render —
-    // retrying the same stale payload can never succeed, so prompt a
-    // refresh instead of a dead retry loop (codex #3367 PR r5).
-    setRequestState(result.ok ? 'sent' : result.status === 409 ? 'stale' : 'failed');
-    // Click-to-estimate (GATE_REPORT_CLICK_TO_ESTIMATE): a priced tap's
-    // response can carry the freshly minted estimate's URL — go straight
-    // into the estimate page (slot pick + acceptance). The 'sent'
-    // confirmation above stays rendered behind the navigation, so a blocked
-    // redirect still shows the recorded-request copy, never a dead card.
-    // SAME-ORIGIN only, against the browser's actual origin (belt-and-
-    // braces on a server-composed value): the report and estimate pages are
-    // one SPA, so a legitimate link always shares this page's origin — in
-    // prod and in preview/dev environments alike — and anything
-    // cross-origin or unparsable never navigates.
-    const estimateUrl = result.ok ? result.body?.estimateUrl : null;
-    if (typeof estimateUrl === 'string' && estimateUrl) {
-      try {
-        const parsed = new URL(estimateUrl, window.location.origin);
-        if (parsed.origin === window.location.origin) {
-          window.location.assign(parsed.href);
-        }
-      } catch { /* unparsable URL: keep the confirmation, never navigate */ }
-    }
-  };
+  if (mode !== 'live' || !data?.crossSell?.serviceKey) return null;
   return (
-    <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
-      {/* The card was a bare button; say what the button asks for (owner 2026-10-05). */}
-      <h2>{`Want a quote for ${String(offer.label || '').toLowerCase()}?`}</h2>
-      <p className="map-context-copy">Tap below and we&apos;ll follow up with the details. Nothing is booked or charged.</p>
-      <div className="cross-sell-cta-row">
-        {requestState === 'sent' ? (
-          <p className="cross-sell-confirm">
-            Request received — we&apos;ll confirm the details with you before anything is scheduled.
-          </p>
-        ) : requestState === 'stale' ? (
-          <button
-            type="button"
-            data-glass-accent=""
-            className="review-cta cross-sell-cta"
-            onClick={() => window.location.reload()}
-          >
-            Offer updated — refresh to see the latest
-          </button>
-        ) : (
-          <button
-            type="button"
-            data-glass-accent=""
-            className="review-cta cross-sell-cta"
-            disabled={requestState === 'sending'}
-            onClick={handleRequest}
-          >
-            {requestState === 'sending'
-              ? 'Sending…'
-              : 'Request an Estimate'}
-          </button>
-        )}
-      </div>
-      {requestState === 'failed' && (
-        <p className="cross-sell-fine cross-sell-error">
-          That didn&apos;t go through — please try again, or call (941) 297-5749.
-        </p>
-      )}
-    </section>
+    <CrossSellOfferCard
+      offer={data.crossSell}
+      showPrice={false}
+      className="report-card cross-sell-card"
+      submit={(metadata) => submitReportEvent(token, 'cross_sell_requested', metadata)}
+    />
   );
 }
 

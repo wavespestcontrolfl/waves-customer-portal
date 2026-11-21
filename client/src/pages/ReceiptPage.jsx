@@ -33,7 +33,7 @@
 //   does the recipient see the same invoice? That's intended (it's
 //   a receipt) but should NOT expose card details.
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS } from '../theme-doc';
+import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, docButton } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
 import DocumentActionBar from '../components/DocumentActionBar';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
@@ -41,6 +41,8 @@ import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
+import CrossSellOfferCard from '../components/crossSell/CrossSellOfferCard';
+import ReferralShareCard from '../components/referral/ReferralShareCard';
 import {
   WavesShell,
   CustomerColumn,
@@ -142,6 +144,72 @@ function SummaryRow({ label, value, strong, danger }) {
   );
 }
 
+
+// Typography for the shared cards on a page without the report stylesheet.
+// The card section carries BrandCard's own surface (one card, not a card
+// inside a card).
+const receiptCardStyle = {
+  background: 'var(--surface)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-xl)',
+  boxShadow: 'var(--shadow-card)',
+  padding: 'clamp(20px, 4vw, 24px)',
+  boxSizing: 'border-box',
+  width: '100%',
+  textAlign: 'center',
+  marginBottom: SP.lg,
+};
+const receiptCardStyles = {
+  heading: { fontSize: 20, lineHeight: 1.35, fontWeight: FW.semibold, color: DOC.ink, margin: '0 0 8px' },
+  price: { fontSize: FS.bodyLg, fontWeight: FW.semibold, color: DOC.ink, margin: '0 0 8px' },
+  copy: { fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted, margin: '0 0 14px' },
+  button: { ...docButton('primary'), display: 'inline-block', fontSize: FS.bodyLg },
+  link: { ...docButton('primary'), display: 'inline-block', fontSize: FS.bodyLg, textDecoration: 'none', margin: '10px 6px 0' },
+  code: { fontSize: 20, fontWeight: 700, color: DOC.ink, letterSpacing: '0.04em', marginRight: 10 },
+};
+
+async function postReceiptCardAction(token, path, payload) {
+  try {
+    const response = await fetch(`${API_BASE}/receipt/${token}/${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {}),
+    });
+    const body = await response.json().catch(() => null);
+    return { ok: response.ok, status: response.status, body };
+  } catch {
+    return { ok: false, status: 0, body: null };
+  }
+}
+
+function ReceiptCards({ data, token }) {
+  if (!data?.crossSell && !data?.referral) return null;
+  const fetchLink = async () => {
+    const result = await postReceiptCardAction(token, 'referral-link');
+    if (!result.ok) throw new Error(`referral link ${result.status}`);
+    return result.body;
+  };
+  return (
+    <div className="waves-no-print">
+      {data.crossSell && (
+        <CrossSellOfferCard
+          offer={data.crossSell}
+          style={receiptCardStyle}
+          styles={receiptCardStyles}
+          submit={(metadata) => postReceiptCardAction(token, 'cross-sell', { metadata })}
+        />
+      )}
+      {data.referral && (
+        <ReferralShareCard
+          referral={data.referral}
+          fetchLink={fetchLink}
+          style={receiptCardStyle}
+          styles={receiptCardStyles}
+        />
+      )}
+    </div>
+  );
+}
 
 export default function ReceiptPage() {
   // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
@@ -657,6 +725,12 @@ export default function ReceiptPage() {
             </div>
           ) : null}
         </BrandCard>
+
+        {/* Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner
+            2026-11-21): the service report's cards, on the customer's own
+            paid receipt. The server decides eligibility; absent keys render
+            nothing. Screen only — the receipt prints as a record. */}
+        <ReceiptCards data={data} token={token} />
 
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
