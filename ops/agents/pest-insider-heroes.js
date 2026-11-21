@@ -31,7 +31,10 @@
  * files the portal ships (pest-insider-fonts.js), so the drawing needs no
  * network; a picture is refused when either font did not load, so none
  * ships in a fallback font. Every color comes from cards.js WAVES_COLORS, and a
- * test refuses any other. Change the drawing below -> bump HERO_DESIGN in
+ * test refuses any other. The Waves Lawn & Pest logo (heroes.js HERO_LOGO) goes
+ * on last, in the bottom-right corner of the still and of every GIF frame, so
+ * neither the art nor the motion covers it; a picture is refused when the logo
+ * file is not the one HERO_LOGO names. Change the drawing below -> bump HERO_DESIGN in
  * heroes.js, so every picture gets a new file name; change the motion or its
  * GIF settings -> bump HERO_MOTION_DESIGN.
  */
@@ -138,6 +141,25 @@ ${fonts}
 </div></body></html>`;
 }
 
+// The logo for the bottom-right corner, at 2x: the file trimmed to the logo's
+// own edge (the file has an empty transparent border; the logo itself is never
+// cropped), sized to HERO_LOGO.height, HERO_LOGO.margin in from the corner.
+async function logoLayer(bytes, { height, margin }, pictureWidth, pictureHeight) {
+  const { data, info } = await sharp(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  let left = info.width; let top = info.height; let right = -1; let bottom = -1;
+  for (let y = 0; y < info.height; y += 1) {
+    for (let x = 0; x < info.width; x += 1) {
+      if (data[(y * info.width + x) * 4 + 3] > 8) {
+        left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y);
+      }
+    }
+  }
+  const input = await sharp(bytes).extract({ left, top, width: right - left + 1, height: bottom - top + 1 })
+    .resize({ height: height * 2 }).png().toBuffer();
+  const size = await sharp(input).metadata();
+  return { input, left: pictureWidth * 2 - size.width - margin * 2, top: pictureHeight * 2 - size.height - margin * 2 };
+}
+
 // Largest title that fits its box: no word wider than the box, all lines within it.
 async function fitTitle(page, box) {
   return page.evaluate(({ width, height }) => {
@@ -153,7 +175,7 @@ async function fitTitle(page, box) {
 }
 
 async function draw(H) {
-  const { HEROES, HERO_DIR, HERO_WIDTH, HERO_HEIGHT, ART_DIR } = H;
+  const { HEROES, HERO_DIR, HERO_WIDTH, HERO_HEIGHT, ART_DIR, HERO_LOGO } = H;
   const outDir = path.resolve(cli.values['--out'] || path.join(repoRoot, HERO_DIR));
   const wanted = Object.entries(HEROES).filter(([key]) => !only || only.has(key));
   const unknown = only ? [...only].filter((id) => !Object.prototype.hasOwnProperty.call(HEROES, id)) : [];
@@ -166,6 +188,10 @@ async function draw(H) {
     console.log(`Dry run: nothing written. Add --execute to draw into ${outDir}.`);
     return;
   }
+  // The logo, checked like the art: the file must hash to the HERO_LOGO.sha16 that names every picture.
+  const logoFile = fs.readFileSync(path.join(repoRoot, HERO_LOGO.file));
+  if (sha16(logoFile) !== HERO_LOGO.sha16) { console.error(`${HERO_LOGO.file} is not the logo heroes.js HERO_LOGO names; nothing drawn`); process.exit(1); }
+  const logo = await logoLayer(logoFile, HERO_LOGO, HERO_WIDTH, HERO_HEIGHT);
   fs.mkdirSync(outDir, { recursive: true });
   const fontCss = fontStyle([700, 800]);
   const browser = await chromium.launch();
@@ -187,15 +213,16 @@ async function draw(H) {
     if (!size) { console.error(`${id}: the title does not fit`); failed += 1; continue; }
     const shot = await page.screenshot({ clip: { x: 0, y: 0, width: HERO_WIDTH, height: HERO_HEIGHT } });
     if (missing.includes(hero.file)) {
-      const jpg = await sharp(shot).jpeg({ quality: 82, mozjpeg: true }).toBuffer();
+      const jpg = await sharp(shot).composite([logo]).jpeg({ quality: 82, mozjpeg: true }).toBuffer();
       publish(outDir, hero.file, jpg);
       console.log(`${id}  ${hero.file}  ${hero.art ? 'art' : 'no art'}  title ${size}px  ${Math.round(jpg.length / 1024)} KB`);
     }
     if (missing.includes(hero.gifFile)) {
-      // Frame 0 is the whole picture, as every frame is: the motion only moves over the art.
+      // Frame 0 is the whole picture, as every frame is: the motion only moves over the art,
+      // and the logo goes on last, so the motion never covers it.
       const frames = [];
       for (let f = 0; f < MOTION_FRAMES; f += 1) {
-        frames.push(await sharp(shot).composite([{ input: Buffer.from(motionSvg(hero.motion, f, HERO_WIDTH * 2, HERO_HEIGHT * 2)) }]).png().toBuffer());
+        frames.push(await sharp(shot).composite([{ input: Buffer.from(motionSvg(hero.motion, f, HERO_WIDTH * 2, HERO_HEIGHT * 2)) }, logo]).png().toBuffer());
       }
       // Dithered, so the art's soft fades show no bands; a pixel that did not move is kept from the frame before.
       const gif = await sharp(frames, { join: { animated: true } })

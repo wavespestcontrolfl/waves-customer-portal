@@ -545,7 +545,11 @@ router.post('/:id/reply', async (req, res, next) => {
     // submitted unchanged without Use Draft: the same snapshot and machine
     // origin as Use Draft.
     const storedDraftFits = slotDraft != null && !!current.auto_reply_draft && slotDraft === String(current.auto_reply_draft).trim();
-    const unchangedStoredDraft = storedDraftFits && slotDraft === submitted;
+    // Also with the slot empty: an automatic attempt kept after a failed or
+    // uncertain post shows its text from auto_reply_draft. The guard checks
+    // it against the stored snapshot either way.
+    const machineDraft = AutoReply.isMachineStoredDraft(current, submitted);
+    const unchangedStoredDraft = (storedDraftFits && slotDraft === submitted) || machineDraft;
     const result = await ReplyPublisher.publishReviewReply({
       reviewId: req.params.id,
       text: replyText,
@@ -581,7 +585,7 @@ router.post('/:id/reply', async (req, res, next) => {
         // stored pipeline draft's snapshot carries the account fingerprint it
         // was grounded on (codex r50). Unchanged agent text (above): the
         // account facts its attempt recorded, as Post now.
-        const snapshotFits = unchangedAgentText || ((useDraft || unchangedStoredDraft) && storedDraftFits);
+        const snapshotFits = unchangedAgentText || machineDraft || ((useDraft || unchangedStoredDraft) && storedDraftFits);
         if (!snapshotFits) return undefined;
         const g = current.auto_reply_grounding;
         const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);

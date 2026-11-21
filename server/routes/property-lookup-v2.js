@@ -5892,6 +5892,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       warrantyTier: o.trenchingWarrantyTier || o.warrantyTier || 'one_year_retreat',
       labelConfirmed: o.trenchingLabelConfirmed === true || o.labelConfirmed === true ||
         o.trenchingLabelConfirmed === 'true' || o.labelConfirmed === 'true',
+      // The bottle the label check was made for: the engine counts a bifenthrin check only with Crosscheck Plus (owner 2026-11-18).
+      labelBottle: o.bifenthrinLabelBottle,
       measurements: trenchingMeasurements,
       allowComputedPerimeterFromFootprint: !!o.trenchingEstimateFromFootprint,
     };
@@ -5915,6 +5917,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       includeWarrantyExtended: !!o.includePreSlabWarrantyExtended || o.preslabWarranty === 'EXTENDED',
       labelConfirmed: o.preslabLabelConfirmed === true || o.preSlabLabelConfirmed === true ||
         o.preslabLabelConfirmed === 'true' || o.preSlabLabelConfirmed === 'true',
+      // The bottle the label check was made for: the engine counts a bifenthrin check only with Crosscheck Plus (owner 2026-11-18).
+      labelBottle: o.bifenthrinLabelBottle,
     };
   }
   if (sel.has('FOAM')) {

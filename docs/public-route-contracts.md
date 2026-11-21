@@ -505,7 +505,22 @@ snapshot: a row with a detail or a recommendation, or one whose title the
 completion form's `structured_notes.formObservations` lists. A bare title (the
 form's free-text observations, a `[Found]` line of the raw technician note
 among them) never prints, as in the report document, the texting prompt and
-the voice relay.
+the voice relay. On a record that carries the technician's own note
+(`carriesReportNote`), a label proves a row only when it passes that record's
+screen (`noteRecordCopyViolations`: `customerCopyViolations` and any time
+figure, below), as that record's report lists do. There a row whose
+only text is the stock detail completion writes for a picked label
+(`STRUCTURED_OBSERVATION_FINDING_DETAIL`) is that label alone, so it stands
+only when the label passes the same screen. There every text field a customer
+reads passes the screen first: a row whose title fails it is dropped, and a
+detail or a recommendation that fails it is left out of its row. A row with no
+text left is then dropped too, the stored "no activity" row of the pest,
+mosquito, termite and rodent lines among them (its fixed detail, "were clear",
+fails the screen). The texting prompt (`loadLatestVisitFindings`)
+and the voice relay (`get_service_report`) run `provenFindingRows` too, after
+their own rule that a row needs a detail or a recommendation. Each reads every
+finding of the visit, with no cap before the screens (production, 2026-11-20:
+at most 4 on one visit), and cuts to its limit (5 and 6) after the filters.
 
 Pest rain outlook (owner 2026-10-24; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
@@ -763,7 +778,10 @@ raw note). The invoice keeps the note as it stood when billed, which on older
 invoices is the raw note, so the route screens it on the way out against the
 visit's own record (`service_records` by the invoice's `service_record_id` and
 `customer_id`). A raw note, a combined-visit invoice (it keeps none) or a
-missing record returns null.
+missing record returns null. So does a visit whose record carries the
+technician's own note (`structured_notes.reportNote`, `carriesReportNote`): its
+invoice kept the raw note, and the note on the record is not the copy that was
+billed.
 
 Part payments (billing audit 2026-10-30): `/api/pay/:token` returns
 `invoice.amountPaid`, the money the office already recorded on this
@@ -2092,6 +2110,124 @@ bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
 
+`PUT /api/estimates/:token/accept` on an estimate with `source = 'plan_start'` (the portal
+pricing card's first-plan quote, `GATE_PORTAL_PLAN_START`) re-runs the mint's eligibility inside
+the accept transaction, at the same point and under the same locks as the plan-restart re-check
+(comms advisory lock, then the property-preferences key, tried once, then the customers row
+`FOR UPDATE`): the customer must still be active (the
+flag exactly true: customer auth reads NULL as inactive), not churned, not deleted, carry no plan
+membership on the row (a real WaveGuard tier, a plan billing lane or a monthly rate), and own no
+live recurring service of any family (rodent and commercial rows included, and a visit still en
+route or on site after ET midnight) and no annual prepay term covering today, since the mint priced
+the option with no WaveGuard qualifiers. The account must also still pass the mint's residential and
+premises checks: a stored property type that is not commercial (the mint's stored-type guard,
+`isCommercialProperty`), and one provable premises (`singlePremisesStreet`, strict: not flagged
+multi-home, a primary street with a city or zip, at most one property row and that row at the
+primary street, and no visit whose stamped address, property row or creating estimate names another
+address or cannot be resolved) whose street is both the estimate's own address and the home the mint
+priced (`estimate_data.planStart.premisesKey`), so a move or a second property since the mint refuses,
+even after a staff address change rewrote the open quote's address. The estimate must still belong to
+the customer the accept read before its row lock: one that a merge or its undo moved to another
+customer refuses, and the re-check reads and locks no other customer. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
+error reads "This account changed since this estimate was created — please go back to your portal
+for a current price.") and writes nothing. The same code, with "This estimate changed since it was
+created", refuses an estimate that has the one-time option or invoice billing on: the mint sets
+neither and staff can no longer change either, on or off, so such a row was changed by staff before
+that rule, and it stays refused until the customer's next portal tap replaces it with a fresh quote.
+The accept answers this refusal before it checks any field of the request body (contact fields,
+slot, service mode, payment), so an invoice-mode quote, whose page sends no slot, gets it rather
+than `plan_start_slot_required`. It also answers ahead of the Florida consumer notice
+(`consumer_notice_required`), so a customer is never asked to sign for a quote they cannot accept. The re-check answers it again on both options as the row reads
+under the estimate row lock, before the comms lock (a writer from before the write refusal can
+commit between the accept's read and that lock). The page drops a recurring card it captured on
+either answer, so the accept retires that capture: the early refusal retires the
+`recurringCardSetupIntentId` the request sends before its 409, and the locked re-check marks a
+verified capture for the existing retirement after the rollback. A `PLAN_START_RECHECK_RETRY` or
+`RESTART_RECHECK_RETRY` keeps the capture, since the page reuses it on the retry. When Stripe cannot confirm a
+retirement, the accept answers the existing 503 `RECURRING_CARD_RETIRE_FAILED` and the tab keeps its
+intent. Two accepts of one plan quote that overlap on its row lock are the exception: the later one's
+locked check reads the plan the earlier one created as a state change, so after the rollback the accept
+re-reads the estimate, and when it is now accepted it answers the same success replay as any accept of an
+accepted estimate and retires nothing (a failed read takes the error path, also with nothing retired). The
+replay answers only for the estimate and customer the request first read: the same refusal answers a merge or
+undo that moved the estimate to another customer, so when that customer's accept committed instead, the
+request keeps its 409 and retires nothing. It also retires nothing when the estimate moved but is not yet
+accepted, since that customer's accept may still be binding the same card. The read and the retirement run in one
+transaction that holds the estimate row lock, the lock an accept takes before it re-reads its card live, so an
+accept that commits first reads as accepted here, and one that commits after finds the card retired and asks for a
+new one (402).
+The estimate page answers both state-changed codes with a banner that keeps the server's
+message and links back to the portal, never "Refresh times". It turns off its one booking condition
+(the time picker, the pick-a-time prompts, the sticky booking bar and every book button) and its
+payment choices for that quote. Only the React page has that banner, so an accept-active
+`plan_start` or `plan_restart` estimate always gets the React view: the `/estimate/` mount skips the
+legacy renderer and the GrowthBook holdback, and the `/api/estimates` mount redirects to
+`/estimate/:token`. `GET /:token/data` marks a row that already has an option on before any tap:
+`estimate.quoteRefusal: { code, error }`, the accept's code and words, present only on such a plan
+quote, so the page shows the banner and offers no booking from the first load. Such a row also carries
+no `cta.consumerNotice`, so the page offers no form to sign. `POST
+/:token/card-hold-intent` and `/recurring-card-intent` answer the same 409 after the park decision and
+before any policy answer or Stripe call, and mint nothing; a recurring replace request's named
+capture is retired first (the existing 503 when Stripe cannot confirm). Every slot route answers the
+same 409 too, through the router's two shared checks: `GET /:token/available-slots`, `POST
+/:token/find-slots`, `POST /:token/reserve` and its `extend`, after the blocking state and before every
+shortcut, on the first read and again on the locked row (an extend that skips the park decision on a
+busy customer row still applies this rule, which reads the row alone). Both card steps apply it again
+on the row they re-read after Stripe answers, so a change that lands during the mint withholds the
+client secret (the recurring step retires its minted intent first). The texting AI offers no time for
+such a quote. A recurring card the tab captured and then dropped on this answer, by any path (a hold
+extension, a slot read, a 3DS return), is retired by its `setup_intent.succeeded` webhook
+(`stripe-webhook.js`): such a quote is never accepted, so the event's next delivery retires the capture
+and acks instead of waiting for an accept, even with the recurring-card kill switch off (Stripe unable to
+confirm = the event retries). The page
+answers that 409 from every card step (the modal mint, the replace-method call and the inline
+pre-mint), from the reserve, from its slot reads (the slot picker hands a 409 up through
+`onRefusal`: the list, a picked date, the date search and the 90-day look-ahead) and from the consumer
+notice tap (the card steps aside) with the same banner, and reads it on a
+hold extension as a no-booking answer (release the hold, then reload into the banner). In website mode
+(`?website=1`) a refused quote turns booking off, so the quote step shows the banner in place of the
+contact line. A load whose
+`/data` carries the mark and still lists a live hold releases that hold with the same
+release-then-refresh recovery, once per hold, and never adopts it; only the customer's own page does
+this, never a staff preview or the headless PDF capture (`?mode=pdf`). The office's stuck-booking
+alert treats both codes as routine, since the banner walks the customer back to the portal. A re-check that cannot read its state, or that finds the
+customer's property-preferences key held by another change (the re-check tries that key and never
+waits on it while it holds the comms key), answers 409
+`{ error, code: 'PLAN_START_RECHECK_RETRY' }` with a retry line and writes nothing; the estimate page
+keeps the held time and the payment choice for that retry, as for `ACCEPT_INVOICE_BUSY_RETRY`. Before that
+check, a `plan_start` accept must name the visit it books: a held `slotId` or an `existingAppointmentId`,
+both verified as on every accept. An accept that names neither answers 400 `{ error, code:
+'plan_start_slot_required' }` and writes nothing, so the quote stays open. Estimates of every other source are unchanged.
+
+`PUT /api/estimates/:token/accept` on an estimate with `source = 'plan_restart'` (the portal's
+restart quote, `GATE_CANCEL_FLOW_V2`) re-runs the restart mint's eligibility at the same point and
+under the same locks (comms advisory lock, then the property-preferences key, tried once, then the
+customers row `FOR UPDATE`): the account must still carry the exact churn stamp (`active` false,
+`pipeline_stage` `churned`), own no live row of a quoted family, and still be in the cancellation
+the quote was made for (the same eligible families, case id and request id). The estimate must
+still belong to the customer the accept read before its row lock: one that a merge or its undo
+moved to another customer refuses, and the re-check reads and locks no other customer. An estimate
+with the one-time option or invoice billing on refuses too, ahead of the request-body checks and
+again on the row as read under the estimate row lock (the plan_start rule above, with its card
+retirement, page banner and React view), so a one-time request on it gets this code
+rather than `restart_quote_frozen`. Otherwise it answers 409 `{ error, code: 'RESTART_STATE_CHANGED' }` and writes nothing. A re-check that cannot
+read its state, or that finds the customer's property-preferences key held by another change,
+answers 409 `{ error, code: 'RESTART_RECHECK_RETRY' }` with a retry line and writes nothing; the
+estimate page keeps the held time and the payment choice for that retry, as for
+`PLAN_START_RECHECK_RETRY`.
+
+`GET /api/estimates/:token` and the accept build an estimate's offer through
+`buildPricingBundle`, which serves the frozen send snapshot as is only when
+`sentSnapshotServesAsIs` passes (`server/routes/estimate-public.js`). For a `plan_start` row that
+predicate also accepts the snapshot when the entry the page opens on carries the row's
+`monthly_total` to the cent and its displayed per-application price times its visits equals the
+row's `annual_total` to the cent (`planStartSnapshotMatchesTotals`,
+`server/services/estimate-pricing-bundle-utils.js`). Without it, a quarterly pest quote misses the
+generic check (its entry shows monthly x 12, cents off the per-application total) and the page
+rebuilds the offer on live pricing. The plan-start mint publishes a quote, and hands back a live
+one, only when this predicate serves its snapshot: a live quote whose snapshot a page handler deleted
+(`invalidateSendSnapshotPricingBundle`) is re-minted. Every other source keeps the generic check.
+
 `PUT /api/estimates/:token/accept` answers 409
 `{ error, reason: 'retired_lawn_cadence_selection' }` when a recurring lawn
 row still resolves to a retired lawn cadence — any tier hidden via
@@ -2815,6 +2951,22 @@ Won / phone accept) and to booking from a linked not-yet-accepted estimate
 (409 before any appointment is written). Estimates accepted before the
 retirement are unaffected.
 
+Termite bottle pins (2026-11-19, the house bifenthrin moved to LESCO Crosscheck
+Plus): a replay of a sent estimate (`GET /:token/data`, the view, `PUT /accept`
+and every money gate that re-prices it) keeps the cost a pre-slab or trench line
+was quoted with when a stored row carries it: the pre-slab container cost and
+size, and the trench product surcharge (server-owned
+`preSlabTermiticidePricingKnobs` / `trenchingTermiticidePricingKnobs`, like the
+termite station and misting pins). The engine uses a pin only for the product
+it was quoted with (for trenching, also the rate and product oz); a cost set on
+the service still wins. A never-issued draft replays its pins like every other
+pin, so its first send and every later replay agree; a re-save in the estimate
+tool prices today's bottle. An estimate that kept only its engine inputs has no
+stored row, so no pin: it prices today's bottle, as the other pins do without
+their stored rows. On 2026-11-19 no open sent or viewed estimate held a slab
+or trench service. A send snapshot that serves as sent is unchanged. No new
+quote-required reason.
+
 Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,
 or an annual-plan offer already delivered before the gate turned off): a
 `prepay_annual` accept of the Subterranean Termite Protection annual plan
@@ -3042,8 +3194,169 @@ that root shows the state the render's key was computed under
 (`reportPdfReadySelector` in `server/services/service-report/pdf.js`). A page
 built in the other state (a rolling restart's overlap), or by a page bundle or
 server from before this key, never matches: the render times out and nothing
-is stored. Every other record renders the same in both states and waits for
-the report root alone.
+is stored. Every other record renders the same in both states and does not
+check that state. A record that carries the technician's own note
+(`carriesReportNote`; its PDF key has `-rn`) waits the same way for its note
+state: in `mode=pdf` its payload also carries `reportNote`
+(`reportNoteRenderState`): `shown:` and the 8-hex digest of the signed note as
+it prints when the summary is the note (`summaryIsOwnNote`; the digest the
+key's `-tr` part names), else `withheld`. The PDF document shows it on its root
+(`data-report-note`), and both providers print only once that root shows the
+state of the caller's own build. A page built from another read of the record
+(the note or the signing name changed between the two reads) never matches.
+Every other `mode=pdf` payload carries `reportNote: 'none'`, and a record with
+no note waits for a root that shows it (`[data-report-note="none"]`): a record
+that gained a note after the caller's read never prints under the caller's
+key, and neither does a page bundle from before the note reader, which shows
+no note state at all (pre-push audit round 29). No other mode carries the key.
+
+The technician's own note (owner 2026-11-19, the report speed plan; reader
+`visitReportCustomerCopy`, `technician-report-copy.js`): a completed visit may
+carry `structured_notes.reportNote = { v: 1, text, source: 'cleaned' | 'fixed' }`.
+Nothing writes it yet (its writer ships later, behind `GATE_REPORT_OWN_NOTE`). A
+render reads it from the record whatever a gate says, so a report already sent
+keeps its text. On such a record `technician_notes` holds the technician's raw
+note, and no reader below shows a line of it. (The lawn and tree & shrub
+technician paragraphs, each under its own gate, still take that note as their
+input, as they do on any visit today.) The payload changes existing fields
+and adds the one key below: `summary` is the note when the summary rule accepts it
+(only on a pest report, the line the report renders as, `service_line` or else
+`detectServiceLine(service_type)`; a reader whose row has no `service_line`
+column shows no note, so every reader reads the column, the voice agent's two
+visit queries included; only on a visit with no frozen typed
+card, primary or companion; and never on a visit whose recorded outcome applied
+nothing, `inspection_only` or `customer_declined`, callback or not, read from
+the stored `service_data` and structured notes as the callback copy reads it,
+since a callback's report leads with the outcome copy and its PDF prints no
+summary there; and never on a visit whose `service_data` is present but cannot
+be read: a string that does not parse to an object, a value that is not one, or
+a `protocol` inside it that cannot be read, since it hides the outcome and the
+frozen typed cards this rule checks; absent `service_data` reads as none), a `cleaned`
+note signed ` — <first name>` (the identity snapshot's name, never a generic
+label). The note, and every list value and finding field below on such a
+record, passes `noteRecordCopyViolations`: `customerCopyViolations`; the
+access check (`heldAccessCode`), which withholds a value that holds a
+code-shaped number or speaks of getting in, whatever the code is: a
+code-shaped number, whatever words surround it (3 or more digits, with up to 3
+spaces, line breaks or hyphens between any two: "I punched 1234 into the
+padlock", "1 2 3 4"; or 3 or more number words in a row: "one two three four";
+a figure with a unit, "150 feet", is withheld too); any word about getting in
+("I used the word ROSE to unlock the side gate"): a gate, a lock, latch, key,
+keypad, lockbox, fob, buzzer, intercom or opener, a code, PIN, passcode,
+password, passphrase or combination ("a combination of ants" too), a magic,
+secret or pass word, access or gaining entry; how anyone or anything gets in
+("I punched rose into the security panel to get inside"): getting or letting
+in, inside, into, through or past, entering, keying a word in (punch, tap,
+dial, input, key or type in, press, say), and a security panel, alarm, call
+box or touch pad, so a pest that gets in is refused too ("entry points" and
+"inside" alone stay legal); and a door, garage, entrance, entry (not "entry
+points") or lanai in a sentence that opens it or keys a word in (open,
+unlatch, say, type, punch, press), with a colon or a dash after it, or with a
+word in capitals on its line ("through" and "with" stay legal).
+It catches every value the completion access-code check
+(`COMPLETION_ACCESS_CODE_RE`) and the visit-history reader's redactor
+(`redactAccessCodes`) caught: each needs a run of digits or a code noun.
+Production, 2026-11-20, read-only, counts only: the code shape added 10 of 401
+raw pest technician notes; the words about getting in and the door rules add
+15 more, and 7 of 474 pest recaps; no finding field or form value. And any time a technician can give: any word that names hours, minutes or seconds, with
+or without a figure ("30+ minutes", "eighteen minutes", "½ hour", "a few
+minutes"); a figure with h, m or s ("90s"); a clock time in any marked form ("3:30", any
+pm or a.m., "four am", "3 o'clock", "half past three", "four in the
+afternoon") or as an hour after at, after, until, till, by, before, around,
+past, between or from ("after four"), a 24-hour clock there too ("at 1600");
+overnight, tonight, tomorrow, noon or midnight. AGENTS.md bans a fixed re-entry or drying time, and a figure can be
+written in more ways than any list names, so a marker alone decides (the unit
+word, the clock marker, the time word before an hour) and each match withholds
+the copy. A count after such a time word ("at 3 stations") is withheld too.
+Days stay legal (the next visit, when results show), except in a sentence
+that names drying or re-entry ("dry", "re-enter", "keep … off", "stay …
+inside", "off-limits", "avoid"), the people and pets a re-entry line is
+about, or a customer's permission to use the place again ("you can use it",
+"feel free to use", "it is fine to enjoy", "the treated patio is fine to
+use"): there any figure or number word withholds the copy ("11/22", "2d"),
+and so does a day word (a unit from a day up, a weekday, full or short
+("until Sat."), "today", a part of
+the day or a meal, a month other than "may", a season other than "fall"), so
+"until dry" is the only time such a sentence may give. The re-entry verbs the
+complete screen already pairs with minutes and hours (`REENTRY_VERB_SRC`:
+return, come back, walk on, use the treated area, ready for use, …) withhold a
+sentence with a day word too ("You can return to the treated area in two
+days."), unless the verb follows I, we, the technician or the team: that is a
+follow-up ("I will return in two weeks to check the stations"). A full stop ends that sentence only before a capital letter
+or the end, and never after "approx." or a like abbreviation ("1.5 days",
+"approx. two days", "approx. Two days" stay in it); a line break does not.
+The text is cut into sentences before these rules run, by a split that tells
+a capital from a small letter (the rules themselves ignore case).
+"Keep an eye out" is no keep-off. The ordinal "second" and "am" after
+anything but a number stay legal, and so does a part of the day with no hour
+outside such a sentence.
+Production count (read-only, 2026-11-20): the rule matches 47 of 474 pest
+customer recaps and 56 of 401 technician notes, none of the form lists or
+finding fields; the access-code check matches none. Otherwise it is what the report builds with no free text (the lawn visit
+summary, or on a live view a narrative of the typed card under that narrative's
+own gate, which reads an empty recap) or empty, never `customerRecap`. A
+refused or malformed note is no text, and the raw column is never its fallback.
+A note on a record of any other line is no text too: the lawn and tree & shrub
+reports take the note in their own later step, and the termite, rodent, mosquito
+and palm reports with the typed visits.
+Stored notes that cannot be read (a top-level value that is not an object)
+count as a note on every reader below too. Every frozen card's `todaysResult`
+drops a body it took from report text (`bodySource: 'technician_report'`) and
+keeps its headline. The
+protocol lists (`actions`, `observations`, `recommendations`) carry only what the
+completion form recorded (`structured_notes.formProtocolActions`,
+`formObservations`, `formRecommendations`), never tagged lines of the raw note,
+and each value passes `noteRecordCopyViolations` as it renders. Completion
+writes `formProtocolActions` (the picked labels that pass
+`customerCopyViolations`) beside the merged `protocolActionsCompleted` on every
+visit, and stores `formRecommendations` through the same screen: a refused
+value stays in the merged `recommendations` only, and every report reader
+already screens that list as it renders, so no report changes. `findings` drops
+a row with a bare title (no detail, no recommendation; text of only spaces
+counts as none), a stored row whose only text is the stock detail unless its
+label passes `noteRecordCopyViolations`, and any row whose title fails that
+screen; a detail
+or a recommendation that fails it is left out of its row, so a row with no text
+left drops, the stored "no activity" row of the pest, mosquito, termite and
+rodent lines among them (`provenFindingRows`, as in the readers above). The
+pest report's concern pass, which softens a stored "no activity" row when the
+customer flagged something, never runs on such a record, so the stored row
+reaches that screen as stored. The render adds no "no activity" row of its own
+either: the form's lists being empty proves nothing beside a note. The lawn
+write gate's report build reads stored notes that cannot be read as stored,
+never an object it rebuilt around its frozen facts, so it reads them as the
+live report does. The PDF key hashes the summary as it prints, and on such a
+record it always carries `-rn` (just before any `-fson`/`-fsoff` part), summary
+or not. The visit notes on the other surfaces (`customerSafeVisitNotes`) run
+the same rule. The Documents API
+PDF (`routes/documents.js` `generateServiceReportPDF`, at the signed-in
+`/api/documents/service-report/:serviceRecordId` and the shared
+`/api/documents/shared/:token`) prints every record's observation and
+recommendation lists from the completion form's values (`buildProtocolPayload`
+`structuredObservations` / `structuredRecommendations`, screened as above on
+such a record), never the merged `structured_notes` lists (which fold in raw
+`[Found]` / `[Next]` lines) or `ai_report`, on a record with no note too. On
+every record each value passes `customerCopyViolations` before it prints (the
+web payload screens its recommendations with it too), and a value the
+access check catches drops (`heldAccessCode`: a code-shaped number or any word
+about getting in, as on a note record; production, 2026-11-20, read-only: no
+form value of the 11 records with form lists); a refused value is left out. That
+PDF prints the service title frozen at completion, but it judges whether the
+note may stand from the stored row, as the web report does: a row with no
+stored `service_line` takes the line its stored `service_type` names before
+the frozen title replaces the type (`applyReportIdentitySnapshotToLegacyPdf`),
+so a visit corrected after completion (pest to lawn) prints its note in
+neither place. The payload adds
+one key and no query parameter: `summaryIsOwnNote: true`, present only when
+`summary` is the note (on such a record a `technician_report` summary is always
+the note). The page's Visit Summary and the PDF print that summary as stored
+(`printedVisitSummary`), never through `cleanVisitSummary`'s fixes for the
+stored legacy recap, and the lawn layout takes no applied sentence out of it. A record whose stored notes are an object without
+`reportNote` renders exactly as before, and its payload has no
+`summaryIsOwnNote` key; its Documents API PDF prints the form's lists, as
+above (production 2026-11-20, read-only: 3 of 654 completed visits lose a line
+from that PDF, none from the last 30 days; no visit has `ai_report` lists; no
+stored form value fails the screen).
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
@@ -4639,7 +4952,19 @@ still sends the reader to the event. The per-IP over-budget path records
 nothing and applies the same rules. Gate off = the behaviour
 above this note, unchanged)
 — rate-limited, read-only for posts/rss,
-double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,
+double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text.
+The address check runs first: a missing, non-string or malformed `email` answers the signup's own 400
+(`signupEmailError` in `newsletter-subscribers.js`) whether or not the bot check would drop the
+body, so a drop is not visible from a bad address. Then the bot check
+(`server/services/newsletter-signup-screen.js`, owner 2026-11-20): a body whose
+`website` (the website form's hidden field) is anything but absent, null or blank text; a body with
+source `astro-website` or `out_of_area_waitlist` (the astro `NewsletterSignup` form) whose `formMs`
+(ms from the form appearing to the submit) is present but not a number or under 1000; or such a body
+with no `formMs` whose Origin header is not on the CORS allowlist (`config/cors-origins.js`; forms
+built before the check send no `formMs`, and a browser on a fleet page always sends its Origin)
+writes no row, sends no email, logs one line with the reason and the known source only (never the
+address), and answers the same `{ success: true, pending: true }`; every other source needs no
+`formMs`;
 and ONLY `source: "out_of_area_waitlist"` also reads the optional body `zip` / `city`
 strings (newer sites; they win) and the optional `tags` array (older sites send only
 `["out_of_area_waitlist", "zip:NNNNN", "city:slug"]`), keeping at most one `zip:` tag that is exactly 5 digits and one `city:` tag normalized to a
@@ -6516,7 +6841,11 @@ out by the standard hold window: same `reserveLimiter` budget and token-format
 gate as `/reserve`, same call-side-blocked and ineligible-estimate refusals,
 and the same generic 404 for an unknown token, an unknown hold, a hold
 belonging to ANOTHER estimate, an already-committed row, or a hold past the
-grace — the route is not an enumeration oracle for hold ids. It never creates
+grace — the route is not an enumeration oracle for hold ids. The estimate-level
+refusals (these two, the no-booking shapes and a refused plan quote) answer before
+the hold is read, the same for every hold id, so they reveal nothing about holds.
+The route reads no request body and takes no card action: a recurring card the page
+drops on its refusal is retired by the `setup_intent.succeeded` webhook. It never creates
 a hold, never changes the slot, and never touches price, customer or estimate
 state. A hold may not live past `MAX_HOLD_MINUTES` (60) from its own
 `created_at` however many times it is extended (409 `HOLD_LIMIT_REACHED` with
@@ -6680,7 +7009,9 @@ server-rendered page reads the same pack, so the two paths cannot drift.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,
-`no-store`).
+`no-store`; a visit that carries the technician's own note prints the
+web report's screened form lists, never the merged note lists or
+`ai_report`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
 terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL
@@ -6930,8 +7261,9 @@ AASA also requires a team ID (`APPLE_TEAM_ID`/`APNS_TEAM_ID`), assetlinks
 also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
 `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
 API/PDF responses must never be claimed by the app. It also excludes the
-browser-only pages (`/card`, `/careers`, `/newsletter`, the roots Android's
-allowlist leaves out) and the exact marketing-redirect paths (`/quote`, bare
+browser-only pages (`/card`, `/careers`, `/help`, `/newsletter`, the roots
+Android's allowlist leaves out; `/help/*` is the static how-to pages in
+`client/public/help`) and the exact marketing-redirect paths (`/quote`, bare
 `/estimate`, `/estimate/<service>`), so those open in Safari; `/estimate/<token>`
 stays claimed).
 `/.well-known/security.txt` (RFC 9116 vulnerability-disclosure contact — static
@@ -8746,7 +9078,7 @@ dark those fields are ignored so the plain decline stays byte-identical.
 Treat the gate, the lock ordering, the no-comms contract, and the no-
 estimate-write contract as security-critical.)
 `/api/estimates/:token/commercial-agreement` (POST; the commercial proposal's "Accept & sign agreement" tap, GATE_COMMERCIAL_PROPOSAL_SIGN. Issues, or re-opens, one `customer_contracts` row from the document template `service_agreement.commercial_pest` for the estimate's customer and returns `{ signingUrl }`, the public `/contract/:token` URL the customer signs on (the existing `POST /api/contracts/:token/sign`). Idempotent per estimate: a second tap returns the same open agreement with a fresh link (the link is stored as a hash only, so each mint replaces the previous link) only when the quote fingerprint matches (a sha256 over the normalized proposal lines, programs, corrective work, scope, terms and tax rate, its totals, the rendered merge values, the customer and the template version, stored in the snapshot as `estimate.fingerprint`); any difference cancels the stale open agreement and issues a new one; a signed agreement answers 409 `already_signed`. The estimate is NEVER mutated, never accepted, and no visit, invoice or charge is created (owner ruling 2026-09-24: staff confirm commercial). The customer is not messaged by this route; the signed copy goes out through the existing signed-contract email after signing. Guards mirror contact-phone: `commercialAgreementPreGuard`, mounted in `server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter, stamps the privacy headers (`no-store`, `no-cache`, `noindex`, `no-referrer`) on every response of this route (router.param's malformed-token 404, the global limiter's 429, the route limiter's 429 and the handler's answers) and answers the generic 404 with the gate dark, ahead of any limiter; then the gate-aware route limiter skip (dark = generic 404, 10/hr shared IPv6-safe key), token format gate through `router.param`, the durable call-side linkage verdict, full customer-viewability + accepted/declined/expired/archived/unpublished exclusion (`isEstimateCustomerViewable` + `isEstimateAcceptActive`), an authored proposal with a recurring price whose structured commercial terms agree with every fixed term of the agreement template (`agreementTermsConflict`: payment terms required, Net 30 or Net 60 (owner 2026-10-29), or Auto Pay while `GATE_COMMERCIAL_AUTOPAY` is on and the estimate does not bill by invoice; initial term blank or 12 months, renewal / cancellation / price adjustment blank or the agreement-aligned text; an unknown structured term fails closed; site access and free-text additional terms do not block; any conflict answers the same 404) and a building use (residential or nonresidential; a proposal without one answers the same 404 and is cancelled at sign time like any other term conflict), and the staff-preview marker `?adminPreview=1` = 404; all of those answer the same generic 404. The gate is read again after the last lock and before any write, so a request that waited on locks while the kill switch was thrown writes nothing and answers the generic 404. The eligibility checks are re-run on the estimate row locked in the issuing transaction (customer first: the comms fence, customers, then estimates, leads, call_log, the template row, the contracts; an estimate whose customer changed between the route's unlocked read and the lock is refused with the generic 404 and nothing is written), so a decline, expiry or linkage correction landing in between wins. The one distinct answer, 409 `no_customer` for an estimate with no customer account, is given only after every check above passed. Privacy headers (`no-store`, `no-referrer`) on every response; logging is `err.code` only, never the token. The same gate adds `cta.commercialAgreement` (`{ canSign, state }`, no token, id or contract detail) to `GET /api/estimates/:token/data`, only for an open authored proposal and never to a staff preview. `POST /api/contracts/:token/sign` also guards the signature itself for a contract carrying the snapshot marker `estimate.source = commercial_proposal_sign`: the customer row is locked first and the estimate row next, before the contract row (the issuer's order, customer first like every customer contact write such as the operator email change and its estimate fanout, so none of them can deadlock), an estimate that no longer belongs to the locked customer is never checked further, and the sign is refused with 409 `proposal_changed` and the stale open contract cancelled in the same transaction when the gate is off, the estimate is no longer open and viewable, the terms no longer agree with the agreement, the customer changed, or the quote fingerprint differs from the one stored at issue; for every other contract the route is unchanged. An Auto Pay or Net 60 agreement prints its payment paragraph in the template's `{{agreement.payment_terms}}` slot (template version 2); on an active version without that slot (version 1 prints only the Net 30 paragraph) the issue answers 409 `template_unavailable` and writes nothing. For a signed agreement on Auto Pay (`GATE_COMMERCIAL_AUTOPAY`, the payment term read from the contract's frozen proposal snapshot) the 200 sign response adds `autopaySetup`: `{ state: 'setup', url }`, the customer's standalone Auto Pay setup link (`/secure/:token` from `requestAutopaySetupLink` with delivery `inline`, so nothing is sent and nothing is charged; that link's own eligibility, guards and 30-day expiry apply), or `{ state: 'on' }` when the account is already on Auto Pay or the link service enrolled its consented saved card. It is minted after the commit and before the office alert, which then says whether a card or bank account is saved. The key is absent when the link service declines, with the gate off, and for every other contract. The post-signature hook (an admin alert plus an `activity_log` row, after commit, never throwing) reads only the same marker, so it is inert for every other contract. Treat the gate, the no-acceptance rule, the no-comms-from-this-route rule and the locked re-check as security-critical.)
-`/api/estimates/:token/consumer-notice` (POST; the estimate page's "Read and sign the notice" tap, GATE_ESTIMATE_CONSUMER_NOTICE. Issues, or re-opens, one `customer_contracts` row from the document template `consumer_notice.fdacs_13692` (Florida Consumer Notice Form FDACS-13692, Rule 5E-14.105(1), F.A.C.) for the estimate's customer and returns `{ signingUrl }`, the public `/contract/:token` URL the customer signs on (the existing `POST /api/contracts/:token/sign`). Idempotent: a second tap returns the same open notice with a fresh link (stored as a hash only, so each mint replaces the previous link) only when the notice reads exactly as one issued now (same form version, customer name, representative and date); otherwise the stale open notice is cancelled and a new one issued. Only a notice carrying the snapshot marker `estimate.source = estimate_consumer_notice` is reused, so a notice staff issued by hand is never re-linked. A notice already on file answers 409 `already_signed`; an estimate with no customer account 409 `no_account`; no active creator or single active admin to print as the Waves representative 409 `no_representative`. The estimate is NEVER mutated and no visit, invoice or charge is created. The customer is not messaged by this route. Guards mirror commercial-agreement: `consumerNoticePreGuard`, mounted in `server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter, stamps the privacy headers (`no-store`, `no-cache`, `noindex`, `no-referrer`) and answers the generic 404 with the gate dark, ahead of any limiter; then the gate-aware route limiter skip (dark = generic 404, 10/hr shared IPv6-safe key), token format gate through `router.param`, the durable call-side linkage verdict, `isEstimateCustomerViewable` + `isEstimateAcceptActive`, an estimate with at least one termite-family line, and the staff-preview marker `?adminPreview=1` = 404; all of those answer the same generic 404. The gate is read again after the last lock and before any write. The customer row is locked first (comms fence, then customers, then the template row, then contracts). The distinct 409s come only after every check above passed. Logging is `err.code` only, never the token. The same gate adds `cta.consumerNotice` (`{ state, canSign, reason? }`, no token, id or contract detail) to `GET /api/estimates/:token/data` for an open estimate with a termite line, never to a staff preview, a draft preview or the document render, and makes `PUT /api/estimates/:token/accept` answer 409 `consumer_notice_required` (after the viewability, inactive, blocking-state and Bermuda answers, before any contact validation, write, charge or booking) until the customer has a notice on file. `GET /api/contracts/:token` and the sign response add `fromEstimate: true` for a contract carrying that marker so the signing page can offer "Back to your estimate"; every other contract payload is unchanged. Treat the gate, the no-write refusal order in accept and the no-comms-from-this-route rule as security-critical.)
+`/api/estimates/:token/consumer-notice` (POST; the estimate page's "Read and sign the notice" tap, GATE_ESTIMATE_CONSUMER_NOTICE. Issues, or re-opens, one `customer_contracts` row from the document template `consumer_notice.fdacs_13692` (Florida Consumer Notice Form FDACS-13692, Rule 5E-14.105(1), F.A.C.) for the estimate's customer and returns `{ signingUrl }`, the public `/contract/:token` URL the customer signs on (the existing `POST /api/contracts/:token/sign`). Idempotent: a second tap returns the same open notice with a fresh link (stored as a hash only, so each mint replaces the previous link) only when the notice reads exactly as one issued now (same form version, customer name, representative and date); otherwise the stale open notice is cancelled and a new one issued. Only a notice carrying the snapshot marker `estimate.source = estimate_consumer_notice` is reused, so a notice staff issued by hand is never re-linked. A notice already on file answers 409 `already_signed`; an estimate with no customer account 409 `no_account`; no active creator or single active admin to print as the Waves representative 409 `no_representative`. The estimate is NEVER mutated and no visit, invoice or charge is created. The customer is not messaged by this route. Guards mirror commercial-agreement: `consumerNoticePreGuard`, mounted in `server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter, stamps the privacy headers (`no-store`, `no-cache`, `noindex`, `no-referrer`) and answers the generic 404 with the gate dark, ahead of any limiter; then the gate-aware route limiter skip (dark = generic 404, 10/hr shared IPv6-safe key), token format gate through `router.param`, the durable call-side linkage verdict, `isEstimateCustomerViewable` + `isEstimateAcceptActive`, an estimate with at least one termite-family line, and the staff-preview marker `?adminPreview=1` = 404; all of those answer the same generic 404. The gate is read again after the last lock and before any write. The customer row is locked first (comms fence, then customers, then the template row, then contracts). The distinct 409s come only after every check above passed. A customer's own plan quote that staff changed answers the accept's own 409 (`PLAN_START_STATE_CHANGED` or `RESTART_STATE_CHANGED`, `{ error, code }`) after those checks, judged again on the estimate row the service locks, so a tab loaded before the change gets no form to sign. Logging is `err.code` only, never the token. The same gate adds `cta.consumerNotice` (`{ state, canSign, reason? }`, no token, id or contract detail) to `GET /api/estimates/:token/data` for an open estimate with a termite line, never to a staff preview, a draft preview or the document render, and makes `PUT /api/estimates/:token/accept` answer 409 `consumer_notice_required` (after the viewability, inactive, blocking-state and Bermuda answers, before any contact validation, write, charge or booking) until the customer has a notice on file. `GET /api/contracts/:token` and the sign response add `fromEstimate: true` for a contract carrying that marker so the signing page can offer "Back to your estimate"; every other contract payload is unchanged. Treat the gate, the no-write refusal order in accept and the no-comms-from-this-route rule as security-critical.)
 `/api/estimates/:token/first-visit/availability` and `/api/estimates/:token/first-visit` (both POST; "Pick your first visit" after a commercial agreement is signed, GATE_COMMERCIAL_FIRST_VISIT, owner 2026-10-26 decision page choice 1B). `services/commercial-first-visit.js` owns the plan, the times and the booking. Eligible = an authored proposal (`normalizeProposal(...).enabled`, not synthesized) that does not bill by invoice (`bill_by_invoice`: invoice mode stays with the office), whose structured payment terms are none or Auto Pay (the win refuses any other term outside invoice mode), and whose recurring itemization is pest service programs only (no misting identity), every program on ONE whole cadence (12, 6, 4, 3, 2 or 1 visits a year), no building line items, no corrective work and no one-time total, where a year of visits at the summed per-visit price equals `annualRecurring` exactly, and whose per-visit tax (per application, as `computeProposalTotals` rounds it) equals the tax the completion invoice will charge (`completionTaxMatches`: the `InvoiceService.previewInvoiceTotals` dry run of the visit price under `Commercial Pest Control`, with `assumeCommercial` when the win will mark the customer commercial; else 409 `call_us` at the routes and no picker); plus a customer account whose address on file is the premises the signed agreement names (`proposal.propertyAddress`, else the estimate's address; `sameProperty` from `services/estimate-consultation-offer.js`: same street, same unit, same zip; else 409 `call_us` and no picker, since the booking, its pin and the series run at the customer's address), a SIGNED `service_agreement.commercial_pest` contract for this estimate and customer whose frozen quote fingerprint still equals the proposal's fingerprint now (`signedQuoteMatches`, the sign-time comparison; a program's `visitMinutes` is left out of the fingerprint as scheduling only, so a proposal edited after signing gets no picker and no booking), no live visit linked to the estimate (`scheduled_services.source_estimate_id`, any status but cancelled / canceled / skipped / rescheduled / no_show) and a booking location for the customer (`customerBookingLocation`, else 409 `call_us`; a customer with no saved pin books at that canonical fallback, which the commit re-derives and stamps on the visit). Visit length = the builder's per-program `visitMinutes` summed when every program has one, else the estimator's pest `onSiteMin` rounded up to 5, else 60; at least 15, and over 90 (`MAX_BOOKING_DURATION_MINUTES`, the commit's limit) the estimate is not eligible. Availability answers `{ ok, days, slots, nearby, rangeFrom, rangeTo, durationMinutes }` from `buildBookingAvailability` (routes/booking.js) at the customer's pin with funnel key `pest_control`, self-serve notice, insertion offers while `bookInsertionOffersLive()` and the booking arrival grace; it writes nothing. The booking body is `{ date: 'YYYY-MM-DD', time: 'HH:MM' }`: the slot must be in a fresh single-day build at the visit length (409 `slot_taken` otherwise); the commit is `createSelfBooking` with an internal `callbackVisit` (service_type `Commercial Pest Control`, service_id null, `isCallback: false`, `dedupeLane: false`, `expectedLocation`, `billing: { estimatedPrice }` so the visit carries the per-visit price and `create_invoice_on_complete`, and `estimateGuard`: inside the booking transaction an `estimate-booking-guard` advisory lock on the estimate id, then a re-check on that transaction (409 `estimate_changed` when the gate was turned off, read after the guard's last lock wait; 409 `already_booked` when a first visit landed; 409 `estimate_changed` when the estimate is no longer open, its call-side verdict now blocks it (re-run with the estimate row share-locked, then the linked lead and the call row locked through the insert), its plan changed, the customer row the booking holds is no longer at the signed premises, or its quote is no longer the signed one)); `source_estimate_id` links the visit, and the commit's idempotent replay is bound to it (a paid estimate-page booking replays only a visit linked to its own estimate, never another signed proposal's booking at the same start). After the commit: `markEstimateManuallyAccepted({ source: 'customer_first_visit_booking', bookedAppointmentIds, expected })` marks the proposal won, pinned (`estimateRowPin`) to the row version the booking committed under, so an edit after the booking refuses the accept (a refusal leaves the visit booked, seeds no series, and the office alert says to mark it won and set the repeat visits); the series is seeded from the visit (`seedFollowUpsForParent`, pattern by cadence, `plannedCount` = visits a year, ongoing, child identity pinned to `Commercial Pest Control` unlinked, under the funnel's lock order; a customer with an active pest series keeps it and the visit stays a one-off); one needs-you admin alert (dedupe `commercial-first-visit:<estimate id>`). The booking sends the customer the standard self-booking confirmation text and reminders (`registerAppointment`) and the internal booking SMS; nothing else messages the customer. Answers `{ booked: true, visit: { date, windowStart, windowEnd } }`. Guards: `commercialFirstVisitPreGuard`, mounted in `server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter, stamps the privacy headers and answers the generic 404 with the gate dark, ahead of any limiter; then the gate-aware route limiters (dark = skipped; 15/min availability, 10/min booking), token format through `router.param`, the staff-preview marker `?adminPreview=1` = 404, the durable call-side linkage verdict, `isEstimateCustomerViewable` + `isEstimateAcceptActive`, then the eligibility above (every ineligible estimate answers the same generic 404; the distinct answers are 409 `already_booked` (with the booked visit), `call_us`, `slot_taken`, `estimate_changed`, and 400 for a malformed body). Privacy headers (`no-store`, `no-cache`, `noindex`, `no-referrer`) on both. Logging is `err.code` only. The same gate adds `cta.commercialFirstVisit` to `GET /api/estimates/:token/data` for an eligible proposal (never a draft preview): `{ state: 'booked', visit }` whenever a live visit is linked (an accepted proposal's page reads the date from it), and only for an open estimate the customer is viewing (never a staff preview or the document render) `{ state: 'pick', durationMinutes }` once signed or `{ state: 'after_signing' }` before; `GET /api/contracts/:token` and the sign response add `fromEstimate: true` for a contract carrying the marker `estimate.source = commercial_proposal_sign` so the signing page offers "Back to your estimate". Treat the gate, the paid-visit price, the one-visit-per-estimate guard and the accept-after-booking order as security-critical.
 `/api/public/estimate-assessment/:token` (GET + POST, plus `POST /:token/find-slots`; "Book a free Waves Assessment first" from an open estimate, owner 2026-10-26 decision page choice 3A). The `/inspection/:token` page contract keyed by the ESTIMATE's own share token instead of a signed lead token (`server/routes/estimate-assessment-public.js`), served to the SPA route `/estimate/:token/assessment` (`ScheduleFlowPage` flow `assessment`). Guards: a pre-guard in `server/index.js` on `/api/public/estimate-assessment`, BEFORE the global `/api/` limiter and the body parsers, stamps `no-store` and answers the generic 404 when the token is not `ESTIMATE_TOKEN_RE`-shaped; the router repeats `no-store`, then the limiters (30/min reads, 15/min find-slots, 10/min commits). Resolution, on every request: the token's estimate, the durable call-side verdict (`callSideBlockForEstimateData`) and `isEstimateCustomerViewable` (else the generic 404 `{ error: 'not_found' }`), then `isEstimateAcceptActive` (else `{ state: 'gone' }`); eligibility (`assessmentEligibility`): not a property group, not drafted from a visit, a customer account whose stored address is the estimate's property (`sameProperty`, `services/estimate-consultation-offer.js`) and not an excluded locality by its city or ZIP (`services/excluded-localities.js`), else `{ state: 'gone' }`; the booking setup then runs the inspection page's whole service-area check at the pin and the stored address (`serviceAreaFailure`: the box, the county, the excluded localities): out of the area answers `{ state: 'gone' }` on every route, and a check that cannot answer holds the times (`service_area_unavailable`, a 503 on the POST routes); an open Waves Assessment for that customer, of any date (the commit's per-customer assessment lane dedupe counts past-due ones too), answers `{ state: 'already_booked', lead, visit, rescheduleUrl, code: 'ALREADY_BOOKED' }`. After that check, a Waves Assessment of that customer with status `completed` on or after 30 days before the estimate's `created_at` (`hadCompletedLook`: that visit was the look for this estimate, though it is not linked to it) answers `{ state: 'gone' }` on every route and in `/data`; a failed read logs a warning and leaves the answer unchanged. GET answers `{ state: 'ok', lead: { first_name, phone_masked, has_address: true, address_display }, availability, needs_address: false, selfServeNotice: true, durationMinutes }` (or `service_area_unavailable` / `booking_unavailable` with no times) built at `customerBookingLocation` with the assessment catalog duration (a customer with no saved pin is offered times at that canonical fallback, which the commit re-derives and stamps on the visit); it writes nothing. find-slots takes `{ query }` (1-500 characters) and answers the inspection page's search shape. The commit body is `{ date, time, notes? }` (`parseCommitBody`); the slot must be in a fresh single-day build (409 `SLOT_TAKEN` with refreshed times); the booking is the inspection page's `bookAssessmentVisit` (`createSelfBooking` with the assessment's internal `callbackVisit`, its per-customer assessment lane dedupe, `expectedLocation`, source `estimate_assessment_link`) plus `estimateGuard`: inside the booking transaction, under the `estimate-booking-guard` advisory lock, the estimate is re-read share-locked (still open and customer-viewable for the same customer), its call-side verdict re-run with the linked lead and call row locked (`callSideBlockedUnderLock`), eligibility re-run on that transaction (an open assessment answers `already_booked`). An `ESTIMATE_CHANGED` refusal answers the page's state now (`gone`, `already_booked`), else 409 `SLOT_TAKEN` with fresh times. The visit is never linked to the estimate (no `source_estimate_id`), never billed, and the estimate stays open; the office note names the estimate (`Booked from estimate <number>.` plus the customer's note, internal only). The booking sends the standard self-booking confirmation text and reminders and the internal booking SMS; nothing else messages the customer. The same feature adds `assessmentFirst: { url: '/estimate/<token>/assessment' }` to `GET /api/estimates/:token/data` for an open estimate the customer is viewing (never a staff, draft or document render) that this page would book (`assessmentFirstFor`, the same eligibility, plus the no-network service-area box at the customer's stored pin, `isInServiceAreaBox`; the county lookup stays the booking page's); while it is present, the lead-only `consultationOffer` is not built. The token stays out of logs and referrers like the estimate page's own: the request log redacts a legacy `nameSlug-8hex` token under `estimate-assessment` too (`server/utils/redact-request-url.js` ESTIMATE_BEARER_PARENTS; hex and long tokens by the generic rules), and the SPA page `/estimate/:token/assessment` gets the estimate page's noindex, no-referrer and no-store headers (`server/utils/sensitive-spa-headers.js` isEstimatePath). Treat the estimate-token bearer, the call-side verdict and its in-transaction re-check, and the never-linked, never-billed visit as security-critical.
 `/api/contracts/:token/sign` drawn signature (POST; the `/contract/:token` signing page's optional signature pad, no gate. The body may carry `signatureImage`, a PNG or JPEG data URL, beside the required typed `signedName`, `initials` and consents; the typed name stays the signature of record and the image is additional evidence. Absent, `null` or blank = the route signs exactly as before. When present, an unknown link answers the same 404 `Contract not found` before any image work, and the image is decoded only for a LIVE link (status `sent` or `viewed`, not expired) whose consent box is ticked (`agreeAuthorization` for an AutoPay authorization, else `agreeDocumentTerms`), read in one unlocked peek; every other request skips the decode and gets the locked path's own refusal, exactly as a typed-only request does (410 expired / already signed / no longer available, 400 consent required), and a link that was not signable when the request arrived but is signable under lock (a re-send in between) answers 409 rather than signing without the drawing. Drawings are budgeted: 10 drawing attempts per link per 15 minutes (`drawnSignatureLimiter`, keyed by the link hash, counting only a drawing on a well-formed link; else 429), and at most 2 decodes at once per process with 8 waiting (else 503 `signature_busy`, try again). The image is validated before any lock or write by `parseSignatureImage` (`server/services/signature-image.js`, shared with the WDO licensee pad): a PNG or JPEG data URL (else 400 `signature must be a PNG or JPEG data URL`), at most 512KB decoded (else 413 `Signature image too large (max 512KB)`), real PNG or JPEG magic bytes (else 400 `signature image is not a valid PNG or JPEG`), at most 1600px wide, 1000px tall and 1.2 megapixels (the signing page's pad exports at most 1200px wide and 150px × devicePixelRatio tall), read from the image header before any pixel decode (else 413), and visible ink (a uniform image, or one that cannot be decoded, answers 400 with `code: 'signature_blank'`). The validated data URL is stored in `customer_contracts.signature_image` (migration `20261026001000`) with the signature, and the signed event's metadata records `drawnSignature: true|false`. The executed PDF (the signed-copy email and the customer portal's Documents download, `GET /api/documents/contract/:id/download`, a customer-session route) prints it above the typed name; an image that fails to decode at print time is skipped and the typed signature stands. No public payload carries the image: `GET /api/contracts/:token` and the sign response are unchanged, and only the staff contract read adds `hasDrawnSignature` (a boolean). Treat the pre-lock validation, the live-link-and-consent check before any decode, both decode budgets and the no-image-in-public-payloads rule as security-critical.)
@@ -9383,3 +9715,5 @@ Referral code in the same field (`GATE_ESTIMATE_REFERRAL_CODE`, dark in prod, ow
 `/api/pay/:token/plan-choice` (POST, body `{ plan: 'prepay_annual' }`; the "prepay the year" pick on the invoice pay page, `GATE_PAY_PLAN_CHOICE`, dark everywhere unless exactly `true`, owner 2026-11-19). It inherits the `/api/pay` router's baseline (token format gate with the generic 404, `payLimiter`, `noStore` privacy headers) and answers that same 404 while the gate is off or the token is unknown. While the gate is off the request skips `payLimiter` (a `skip` on the router limiter for this path only), so a dark probe never sees a 429 and spends none of the caller's quota for the live pay routes. `400 { error: 'invalid_plan' }` for any other plan (paying per application is paying the invoice as it stands; it has no action here). `409 { error: 'plan_choice_unavailable' }` when the choice is not, or no longer, offered on this invoice. `200 { success: true, payUrl }`: `payUrl` is the pay link of the annual prepay invoice this pick minted (an unsent draft plus a `payment_pending` term), and a repeat answers with the same link, never a second invoice. `503` on a failure the customer can retry. Every amount is derived server-side from the booked series; the body's `plan` is the only field read. Nothing is charged, sent or voided: the first invoice stays payable, and paying the prepay closes it. The read side is a `planChoice` key on `GET /api/pay/:token`, absent with the gate off or when the choice is not offered (that payload stays byte-identical): `{ selected: false, serviceType, visitsPerYear, perApplication: { perVisit, setupFee, yearTotal }, prepay: { total, setupFeeWaived, discount, discountLabel, savings } }` before a pick, `{ selected: true, prepay: { total } }` after one. It never carries the prepay invoice's token; only the POST answers the link.
 
 `/pest-insider/cards/<fact>-<hash>.png` and `/pest-insider/heroes/<fact>-<hash>.jpg`, and their moving copies `<fact>-<hash>.gif` in the same two folders, and `/pest-insider/parts/<id>-<hash>.jpg` (GET; static pictures inside Waves Pest Insider emails: each lead fact's card and top picture, `server/services/pest-insider/cards.js` and `heroes.js`, and the part picture of a lead fact or species that names a part, `parts.js`: a real CC0 or CC BY 4.0 photo with the part circled and labeled, credited under the picture in the email, or a Waves diagram; an email shows a GIF to every mail app but classic Outlook, which gets the still, as does a reader whose mail app reports a reduced-motion setting). Served from `client/public/pest-insider/` (in production, its copy in `client/dist/`) by the two existing static mounts in `server/index.js`: no token, no database read, no gate, nothing taken from the caller, and the static mounts' own cache headers. The files are drawn on a Mac (`ops/agents/pest-insider-cards.js`, `pest-insider-heroes.js`, with `pest-insider-motion.js` for the moving top pictures, and `pest-insider-parts.js` from the photos in `ops/agents/pest-insider-photos/`) from reviewed copy only (a fact's title or one whole reviewed sentence, a tag from a fixed list, "Waves Pest Insider") and wordless ChatGPT art, and each name carries a hash of everything drawn on it, so a URL never changes what it shows. They carry the static mounts' headers unchanged, including helmet's `Cross-Origin-Resource-Policy: same-origin`, as the app-store badges in emails (`/app-email/`) do today: a mail app that loads pictures directly, with no image proxy, may block them and show the alt text instead. A `cross-origin` header on these folders changes both static mounts' allowlist keys, so it waits for owner review. No route or middleware of its own serves them. The drawing scripts never remove a file, because a sent email and the issue archive keep the exact picture URLs; an old file is removed by hand only once no sent issue uses it.
+
+`/help/iphone-alerts.html` and `/help/iphone-waves-notifications.png` (GET; a static how-to page with one marked picture of the iPhone Waves notification settings, linked from the Quick Links guide `howto:alerts_iphone` in `client/src/lib/howToGuides.js`, owner 2026-11-20). Served from `client/public/help/` (in production, its copy in `client/dist/`) by the two existing static mounts in `server/index.js`: no token, no database read, no gate, nothing taken from the caller, and the static mounts' own cache and security headers (helmet's CSP: the page has no script and only inline styles, which `style-src 'unsafe-inline'` allows). The page holds no customer data: the picture is a settings screen with the status bar cut off. `/help` is a browser-only root (`BROWSER_ONLY_PATH_ROOTS` in `server/services/messaging/email-link-policy.js`), so the iOS association file excludes `/help` and `/help/*` and Android's allowlist leaves it out: a tap opens the browser, never the app. The service worker serves the page network-first and never stores it as the offline shell (it holds no `/assets/` build files). No route or middleware of its own serves it. `howToGuides.test.js` keeps the page's steps in line with the guide's.

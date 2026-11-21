@@ -492,6 +492,7 @@ function genericCompletionFacts(opts = {}) {
       writers: [COMPLETE_SERVICE, SCHEDULE_PAGE],
       readers: withExtra('form_recommendations', [{ file: REPORT_DATA, section: 'Recommendations (form-sourced, structuredRecommendations)' }]),
       whenMissing: 'hidden',
+      notes: 'The form recommendation values that pass customerCopyViolations; a refused value stays in recommendations only.',
     },
     {
       key: 'tech_tips',
@@ -532,6 +533,16 @@ function genericCompletionFacts(opts = {}) {
       notes: 'On the Fast Complete report flow the pest protocol\'s sweep action ("Swept eaves, window frames, door frames, and lanai") comes from the note, never a box (owner 2026-10-08): visit-voice-facts.js reads whether the technician swept webs today and the sheet sends the action with its exterior scope. The full form keeps its checkbox.',
     },
     {
+      key: 'form_protocol_actions',
+      label: 'Protocol actions completed — form provenance only',
+      capture: ['prefill', 'voice', 'tap'],
+      storage: 'structured_notes.formProtocolActions',
+      writers: [COMPLETE_SERVICE],
+      readers: withExtra('form_protocol_actions', [{ file: REPORT_DATA, section: 'What we did, on a record that carries the technician\'s own note (buildProtocolPayload)' }]),
+      whenMissing: 'hidden',
+      notes: 'The picked action labels that pass customerCopyViolations, nothing else. protocolActionsCompleted also folds in [Protocol] / [Protocol optional] / [Action] technician-note lines; on a record that carries structured_notes.reportNote the notes column is the raw note, so the report reads this list instead.',
+    },
+    {
       key: 'protocol_action_scopes_completed',
       label: 'Protocol action scopes completed (interior/exterior/treatment metadata per action)',
       capture: ['derived'],
@@ -560,12 +571,12 @@ function genericCompletionFacts(opts = {}) {
         },
         {
           file: REPORT_DATA,
-          section: 'Visit summary / Today\'s Result body — ONLY the screened WHAT WE DID / WHAT WE FOUND parse; the raw column never egresses',
-          readerSymbol: 'technicianReportCustomerCopy',
+          section: 'Visit summary / Today\'s Result body — ONLY the screened WHAT WE DID / WHAT WE FOUND parse, or on a record that carries structured_notes.reportNote the stored own note (on a pest report only); the raw column never egresses',
+          readerSymbol: 'visitReportCustomerCopy',
         },
       ]),
       whenMissing: 'fallback',
-      notes: 'The raw column is INTERNAL (it can hold access or billing notes; AGENTS.md: raw technician_notes never egress on any report path) and is never a customer-facing fact. Customer exposure is only via the AI writer, with redaction: generate-report reads the tech\'s notes box through redactAccessCodes, its two-section draft is written back into the box, and the report shows only technicianReportCustomerCopy\'s re-screened parse of that draft (any extra line, banned copy or access code rejects it and the report falls back to its deterministic summary). Tagged [found]/[next] lines feed the internal merged protocol lists, which the report document never renders. Parked [Next] lines travel as internalRecommendations, not in the writer\'s Service Notes, and the planned voice-fill OFFICE note is a different field that must never reach the report writer (owner ruling 2026-09-28).',
+      notes: 'The raw column is INTERNAL (it can hold access or billing notes; AGENTS.md: raw technician_notes never egress on any report path) and is never a customer-facing fact. Customer exposure is only via the AI writer, with redaction: generate-report reads the tech\'s notes box through redactAccessCodes, its two-section draft is written back into the box, and the report shows only technicianReportCustomerCopy\'s re-screened parse of that draft (any extra line, banned copy or access code rejects it and the report falls back to its deterministic summary). On a record that carries structured_notes.reportNote (the technician\'s own note, owner 2026-11-19) the column holds the raw note and never reaches customer copy: the report shows the stored note (visitReportCustomerCopy, screened on every read) or nothing, and its protocol lists read only the form fields. Tagged [found]/[next] lines feed the internal merged protocol lists, which the report document never renders. Parked [Next] lines travel as internalRecommendations, not in the writer\'s Service Notes, and the planned voice-fill OFFICE note is a different field that must never reach the report writer (owner ruling 2026-09-28).',
     },
     {
       key: 'customer_concern_text',
@@ -676,7 +687,7 @@ function genericCompletionFacts(opts = {}) {
  * `structuredFindings` on top of it, never replaces it — and
  * complete-scheduled-service.js freezes these into structured_notes
  * unconditionally (~5755-5801, ~5854-5874): customerRecap, customerInteraction,
- * protocolActionsCompleted, protocolActionScopesCompleted, customerConcernText,
+ * protocolActionsCompleted, formProtocolActions, protocolActionScopesCompleted, customerConcernText,
  * timeOnSite, visitDurationAllocation, recommendations, formRecommendations,
  * techTips and technician_notes. report-data.js reads them the same way for a
  * typed report: buildProtocolPayload (~1791-1848, actions/recommendations/techTips)
@@ -701,6 +712,7 @@ const TYPED_SHARED_FACT_KEYS = Object.freeze([
   'customer_recap',
   'customer_interaction',
   'protocol_actions_completed',
+  'form_protocol_actions',
   'protocol_action_scopes_completed',
   'recommendations',
   'form_recommendations',

@@ -372,6 +372,30 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('reserveSlot refuses an archived row on the LOCKED read, whatever its source — generic not-found, no hold minted (GATE_PORTAL_PLAN_START pre-push P1)', async () => {
+    // The plan-start and plan-restart mints archive the quote they replace and release its holds; a
+    // reserve that passed the route's archived check and waited on this row lock must not re-create one.
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456', status: 'sent', source: 'plan_start', service_interest: 'Generic estimate service',
+        archived_at: '2027-05-01T14:59:00Z',
+      });
+      const insertBuilder = makeInsertBuilder({ id: 'scheduled-123', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+      const trx = makeTrx({ estimateBuilder, technicianBuilder: makeTechnicianBuilder(), scheduledBuilders: [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder] });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+        selectedFrequency: 'quarterly',
+      })).rejects.toMatchObject({ code: 'ESTIMATE_NOT_FOUND' });
+      expect(insertBuilder.insert).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('reserveSlot refuses a row under a clarify re-price hold on the LOCKED read — generic not-found, no hold minted (codex r11 P0 on #3804)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));

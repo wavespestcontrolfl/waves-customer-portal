@@ -99,6 +99,31 @@ function storedMistingRows(estimateData, options = {}) {
   return mistingRowsIn(storedEstimateContainer(data, options) || data);
 }
 
+// The stored rows of a one-time termiticide line, pre-slab (a legacy pre_slab_termidor row included) or trenching: the mapped
+// one-time item, its quote-required copy and the raw engine line, from the same authoritative container. Each keeps the product
+// it quoted and what it priced that product with. The deprecated client engine (client/src/lib/estimateEngine.js calculateEstimate)
+// wrote the same rows with a name and no service, 'Pre-Slab' and 'Trenching': a row of that shape is the line too.
+const PRE_SLAB_ROWS = { services: new Set(['pre_slab_termiticide', 'pre_slab_termidor']), clientName: 'Pre-Slab' };
+const TRENCHING_ROWS = { services: new Set(['trenching']), clientName: 'Trenching' };
+const isLineRow = (row, line) => isRecord(row) && (line.services.has(row.service) || (!row.service && row.name === line.clientName));
+function termiticideRowsIn(container, line) {
+  const nested = container.results && container.results.oneTime;
+  return [
+    container.oneTime && container.oneTime.items, container.oneTime && container.oneTime.specItems,
+    nested && nested.items, nested && nested.specItems,
+    container.specItems, container.quoteRequiredItems, container.lineItems,
+  ].filter(Array.isArray).flat().filter((row) => isLineRow(row, line));
+}
+function storedTermiticideRows(estimateData, options, line) {
+  const data = parseStoredData(estimateData);
+  if (!data) return [];
+  const containers = [data.result, data.engineResult].filter(isRecord);
+  if (containers.length && !containers.some((container) => termiticideRowsIn(container, line).length)) return [];
+  return termiticideRowsIn(storedEstimateContainer(data, options) || data, line);
+}
+const storedPreSlabTermiticideRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, PRE_SLAB_ROWS);
+const storedTrenchingRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, TRENCHING_ROWS);
+
 // The stored rows of the rodent exclusion (whole-home terms replay, GATE_EXCLUSION_WHOLE_HOME), from the same
 // authoritative container and under every shape a row rides in, like the area add-on rows above.
 function exclusionRowsIn(container) {
@@ -231,5 +256,5 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
 const proposalIsAuthoritative = (data) => data?.proposal?.enabled === true;
 
 module.exports = {
-  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedMistingRows, storedRodentExclusionRows, exclusionRowsIn,
+  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedPreSlabTermiticideRows, storedTrenchingRows, storedMistingRows, storedRodentExclusionRows, exclusionRowsIn,
 };

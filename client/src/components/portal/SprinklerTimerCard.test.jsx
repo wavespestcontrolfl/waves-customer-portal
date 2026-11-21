@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import { CONTROLLER_MODELS, controllerAsksAboutApp } from '@waves/irrigation-runtime';
+import { CONTROLLER_BRANDS, CONTROLLER_MODELS, controllerAsksAboutApp } from '@waves/irrigation-runtime';
 import SprinklerTimerCard from './SprinklerTimerCard';
 
 afterEach(cleanup);
@@ -40,11 +40,32 @@ it('shows the timer on file with its guide, and a phone-app answer saves with th
   expect(onChange).toHaveBeenLastCalledWith({ irrigationControllerBrand: 'rain_bird', irrigationControllerModel: null, irrigationControllerApp: 'unknown' });
 });
 
-it('asks the phone-app question for exactly the timers the server takes an answer for', () => {
-  const timers = [...Object.keys(CONTROLLER_MODELS).map((model) => ['hunter', model]), ['rain_bird', null], ['other', null]];
+it('shows every timer on the list, and asks the phone-app question for exactly the timers the server takes an answer for', () => {
+  const brandsWithoutModel = Object.keys(CONTROLLER_BRANDS).filter((brand) => brand !== 'hunter');
+  const timers = [...Object.keys(CONTROLLER_MODELS).map((model) => ['hunter', model]), ...brandsWithoutModel.map((brand) => [brand, null])];
   for (const [brand, model] of timers) {
     const { unmount } = render(<SprinklerTimerCard brand={brand} model={model} onChange={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Change my timer' })).toBeInTheDocument();
     expect(!!screen.queryByRole('button', { name: 'Not sure' })).toBe(controllerAsksAboutApp(brand, model));
+    unmount();
+  }
+});
+
+it('records an Orbit B-hyve or a Rachio, links its Waves guide, and asks about its own app', () => {
+  for (const [chip, pick, brand, question, cta, url] of [
+    ['Orbit B-hyve', 'My timer is a B-hyve', 'orbit_bhyve', 'Do you run it from the B-hyve phone app?', 'How to run it on a B-hyve', 'orbit-b-hyve/'],
+    ['Rachio', 'My timer is a Rachio', 'rachio', 'Do you run it from the Rachio phone app?', 'How to run it on a Rachio', 'rachio/'],
+  ]) {
+    const onChange = vi.fn();
+    const { rerender, unmount } = render(<SprinklerTimerCard onChange={onChange} />);
+    fireEvent.click(screen.getByRole('button', { name: chip }));
+    fireEvent.click(screen.getByRole('button', { name: pick }));
+    expect(onChange).toHaveBeenCalledWith({ irrigationControllerBrand: brand, irrigationControllerModel: null, irrigationControllerApp: null });
+    rerender(<SprinklerTimerCard brand={brand} onChange={onChange} />);
+    expect(screen.getByText(question)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: cta })).toHaveAttribute('href', `https://www.wavespestcontrol.com/sprinkler-timers/${url}`);
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
+    expect(onChange).toHaveBeenLastCalledWith({ irrigationControllerBrand: brand, irrigationControllerModel: null, irrigationControllerApp: 'yes' });
     unmount();
   }
 });
@@ -95,7 +116,10 @@ it('opens the model list for a Hunter that staff recorded without a model', () =
 });
 
 it('never says the portal connects to, pauses or starts a timer', () => {
-  const states = [{}, { brand: 'hunter', model: 'x2' }, { brand: 'hunter', model: 'hydrawise', app: 'yes' }, { brand: 'rain_bird' }, { brand: 'other' }];
+  const states = [
+    {}, { brand: 'hunter', model: 'x2' }, { brand: 'hunter', model: 'hydrawise', app: 'yes' }, { brand: 'rain_bird' },
+    { brand: 'orbit_bhyve', app: 'yes' }, { brand: 'rachio' }, { brand: 'other' },
+  ];
   for (const state of states) {
     const { container, unmount } = render(<SprinklerTimerCard {...state} onChange={vi.fn()} />);
     expect(container.textContent).not.toMatch(/connect|pause|we'll (run|start|water)|Wi-Fi|module/i);

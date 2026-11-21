@@ -54,18 +54,19 @@ const timerColumns = ([brand, model, app]) => ({
   irrigation_controller_brand: brand, irrigation_controller_model: model, irrigation_controller_app: app,
 });
 
-test('the phone-app question exists for a Rain Bird and for the Hunter models that can go on Hydrawise', () => {
+test('the phone-app question exists for a Rain Bird, an Orbit B-hyve, a Rachio, and the Hunter models that can go on Hydrawise', () => {
   const asked = [];
   for (const brand of [null, ...Object.keys(CONTROLLER_BRANDS)]) {
     for (const model of [null, ...Object.keys(CONTROLLER_MODELS)]) if (controllerAsksAboutApp(brand, model)) asked.push(`${brand}/${model}`);
   }
-  expect(asked).toEqual(['hunter/x2', 'hunter/pro_c', 'hunter/hydrawise', ...[null, ...Object.keys(CONTROLLER_MODELS)].map((m) => `rain_bird/${m}`)]);
+  const everyModel = (brand) => [null, ...Object.keys(CONTROLLER_MODELS)].map((m) => `${brand}/${m}`);
+  expect(asked).toEqual(['hunter/x2', 'hunter/pro_c', 'hunter/hydrawise', ...['rain_bird', 'orbit_bhyve', 'rachio'].flatMap(everyModel)]);
 });
 
 test('a whole timer that can exist passes untouched beside other fields; a write without one is never refused', () => {
   for (const timer of [
     ['hunter', 'x2', 'yes'], ['hunter', 'hydrawise', null], ['hunter', 'x_core', null], ['hunter', null, null],
-    ['rain_bird', null, 'unknown'], ['other', null, null], [null, null, null],
+    ['rain_bird', null, 'unknown'], ['orbit_bhyve', null, 'yes'], ['rachio', null, 'no'], ['other', null, null], [null, null, null],
   ]) {
     const updates = { irrigation_zones: 6, ...timerColumns(timer) };
     expect(settle({ ...updates })).toEqual({ rejected: [], left: updates });
@@ -83,6 +84,7 @@ test('a timer field sent without the other two is rejected: an answer never land
 test('a timer that cannot exist is rejected whole, with one reason on each field', () => {
   for (const [timer, reason] of [
     [['rain_bird', 'x2', null], /Only a Hunter/],
+    [['orbit_bhyve', 'pro_c', 'yes'], /Only a Hunter/],
     [['other', null, 'yes'], /no phone-app question/],
     [['hunter', 'x_core', 'no'], /no phone-app question/],
     [['hunter', null, 'yes'], /no phone-app question/],
@@ -144,7 +146,7 @@ test('the timer a form saw comes from either writer\'s field, as brand|model|app
       }
     }
   }
-  expect(everyTimer).toHaveLength(20);
+  expect(everyTimer).toHaveLength(28);
   expect(controllerTimerSeen({ controller_timer_seen: everyTimer })).toEqual(everyTimer);
 });
 
@@ -176,6 +178,16 @@ test('the staff count totals the customers by timer and by phone-app answer, whe
     { timer: 'Hunter (model not recorded)', phone_app: 'not_answered', customers: 1 },
     { timer: 'Rain Bird', phone_app: 'on_phone_app', customers: 2 },
   ]));
+  // An Orbit B-hyve and a Rachio count their answers, under the names the card shows.
+  expect(controllerTimerCounts([row('orbit_bhyve', null, 'yes', '3'), row('rachio', null, 'no', '1'), row('rachio', null, null, '2')])).toEqual({
+    customers_with_a_timer: 6,
+    summary: { on_phone_app: 3, not_on_phone_app: 1, not_sure: 0, not_answered: 2, no_app_question: 0 },
+    by_timer: [
+      { timer: 'Orbit B-hyve', phone_app: 'on_phone_app', customers: 3 },
+      { timer: 'Rachio', phone_app: 'not_answered', customers: 2 },
+      { timer: 'Rachio', phone_app: 'not_on_phone_app', customers: 1 },
+    ],
+  });
   expect(controllerTimerCounts([])).toEqual({
     customers_with_a_timer: 0, summary: { on_phone_app: 0, not_on_phone_app: 0, not_sure: 0, not_answered: 0, no_app_question: 0 }, by_timer: [],
   });

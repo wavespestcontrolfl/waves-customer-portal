@@ -14,6 +14,10 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { UserPlus, Phone, MessageSquare, Mail } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import OfferDialog from "../../components/admin/recruiting/OfferDialog";
+import OfferSection from "../../components/admin/recruiting/OfferSection";
+import useOfferFlow from "../../components/admin/recruiting/useOfferFlow";
+import { stageMoveOfferNote } from "../../components/admin/recruiting/offerLogic";
 import {
   Button,
   Badge,
@@ -442,6 +446,7 @@ function StageChangeDialog({
   preview,
   previewLoading,
   previewError,
+  onRetryPreview,
   note,
   onNoteChange,
   smsChecked,
@@ -459,6 +464,9 @@ function StageChangeDialog({
   sendResult,
   busy,
   stale,
+  refreshFailed,
+  onRetryRefresh,
+  offerNote,
   error,
   onConfirm,
   onClose,
@@ -469,11 +477,18 @@ function StageChangeDialog({
         <DialogTitle>{title}</DialogTitle>
       </DialogHeader>
       <DialogBody>
+        {refreshFailed && !sendResult && (
+          <ActionFeedback error className="mb-3" onRetry={onRetryRefresh}>
+            This application could not be reloaded after the offer change, so its stage may be out of date. Confirm stays off until it loads.
+          </ActionFeedback>
+        )}
+        {offerNote && !sendResult && <ActionFeedback className="mb-3">{offerNote}</ActionFeedback>}
         {previewLoading && (
           <div className="text-14 text-zinc-500 py-4 text-center">Loading preview…</div>
         )}
+        {/* Try again reads the same move's preview again; the note, the channels and any edited message stay. */}
         {previewError && (
-          <ActionFeedback error className="mb-3">
+          <ActionFeedback error className="mb-3" onRetry={onRetryPreview}>
             {previewError}
           </ActionFeedback>
         )}
@@ -533,7 +548,11 @@ function StageChangeDialog({
 // decisions (which channels to include, whether a resend was requested, the
 // preview-vs-stale-response guard) out of RecruitingPage's own complexity —
 // the same way openDetail/load already stayed out as their own callbacks.
-function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
+// refreshFailed: the page's in-place re-read of this application failed (after an
+// offer action), so the stage on screen may be out of date. It holds Confirm, as it
+// holds the stage buttons behind the dialog. onOffersChanged: re-read the offer card,
+// after a move the server refused because the job offers changed since the preview.
+function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refreshFailed, onOffersChanged) {
   const [stageDialog, setStageDialog] = useState(null);
   const [preview, setPreview] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -549,40 +568,66 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
   const [stageError, setStageError] = useState(null);
   const [busy, setBusy] = useState(false);
 
+  // After a 409 the detail shows the newer stage; this dialog was opened on
+  // the old one, so Confirm could only be refused again. The owner closes
+  // it and decides from the refreshed detail.
+  const stale = Boolean(stageDialog && detail && stageDialog.fromStatus !== detail.status);
+  // The preview says what the move does to the application's job offers (the
+  // server's rule, with the offer gate on or off). Confirm writes only while the
+  // stage on screen is the one the dialog opened on, the last re-read of the
+  // application worked, and this account may make the move: one that withdraws an
+  // offer the applicant holds is the owner account's alone.
+  const offerNote = preview ? stageMoveOfferNote(preview.offers, detail?.contact_snapshot?.name) : null;
+  const held = stale || Boolean(refreshFailed) || Boolean(preview?.offers?.owner_only);
+
   // Invalidates an in-flight preview fetch the same way detailSeq guards
   // openDetail — closing the dialog (or reopening it for a different
   // stage) must not let a slow response land on the wrong stage.
   const previewSeq = useRef(0);
   const submitSeq = useRef(0);
+  // The message copy comes from the first preview this dialog loads. A later read (Try again, or the re-read after a
+  // move the server refused because the job offers changed) keeps what the owner typed and chose.
+  const copyFilled = useRef(false);
+  const fillCopy = useCallback((data) => {
+    if (!data || copyFilled.current) return;
+    copyFilled.current = true;
+    setSmsBody(data.sms_body || "");
+    setEmailSubject(data.email_subject || "");
+    setEmailBody(data.email_body || "");
+  }, []);
 
-  const openStageDialog = useCallback(
-    async (status, { resend = false } = {}) => {
-      if (!detail) return;
+  // Reads the move's preview into the dialog, superseding any read before it: when
+  // the dialog opens, and again when a move was refused because the job offers changed
+  // since (what the owner typed and chose stays). Returns the preview, or null when the
+  // read failed or a newer one replaced it. A failed read clears the preview, so
+  // Confirm never acts on one the server has refused.
+  const readPreview = useCallback(
+    async (status) => {
       const seq = ++previewSeq.current;
-      // fromStatus = the stage the operator SAW on the detail, not whatever
-      // the preview read later: Confirm is refused if it changed since
-      // (recruiting audit R1).
-      setStageDialog({ status, resend, fromStatus: detail.status });
-      setPreview(null);
       setPreviewError(null);
-      setSendResult(null);
-      setStageError(null);
-      setNote("");
-      setMoveWithoutNotifying(false);
       setPreviewLoading(true);
       try {
         const data = await adminFetch(
           `/admin/careers/${detail.id}/stage-preview?status=${encodeURIComponent(status)}`,
         );
-        if (seq !== previewSeq.current) return;
+        if (seq !== previewSeq.current) return null;
+        // Confirm sends back the stamp of the job offers this preview showed, and the server checks a move against
+        // them only when it has one. A preview without a valid stamp is refused like a failed read (Try again).
+        if (!/^[0-9a-f]{32}$/.test(data?.offers?.stamp ?? "")) {
+          throw new Error("The preview did not say what this move does to the job offers. Nothing was changed. Try again.");
+        }
         setPreview(data);
-        setSmsChecked(Boolean(data.templated && data.channels?.sms?.available));
-        setEmailChecked(Boolean(data.templated && data.channels?.email?.available));
-        setSmsBody(data.sms_body || "");
-        setEmailSubject(data.email_subject || "");
-        setEmailBody(data.email_body || "");
+        // A channel this preview cannot reach is never selected. The dialog opens with
+        // every channel on, so this leaves on the ones it can reach; a re-read turns off
+        // one that closed since and keeps the owner's other choices.
+        setSmsChecked((on) => on && Boolean(data.templated && data.channels?.sms?.available));
+        setEmailChecked((on) => on && Boolean(data.templated && data.channels?.email?.available));
+        return data;
       } catch (err) {
-        if (seq === previewSeq.current) setPreviewError(err.message);
+        if (seq !== previewSeq.current) return null;
+        setPreview(null);
+        setPreviewError(err.message);
+        return null;
       } finally {
         if (seq === previewSeq.current) setPreviewLoading(false);
       }
@@ -590,13 +635,39 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
     [detail],
   );
 
+  const openStageDialog = useCallback(
+    async (status, { resend = false } = {}) => {
+      if (!detail) return;
+      // fromStatus = the stage the operator SAW on the detail, not whatever
+      // the preview read later: Confirm is refused if it changed since
+      // (recruiting audit R1).
+      setStageDialog({ status, resend, fromStatus: detail.status });
+      setPreview(null);
+      setSendResult(null);
+      setStageError(null);
+      setNote("");
+      setMoveWithoutNotifying(false);
+      setSmsChecked(true);
+      setEmailChecked(true);
+      copyFilled.current = false;
+      fillCopy(await readPreview(status));
+    },
+    [detail, readPreview, fillCopy],
+  );
+
+  // Try again after a failed preview read, for the same move. A read that a close or a newer read replaced answers
+  // null and fills nothing.
+  const retryPreview = async () => {
+    if (stageDialog) fillCopy(await readPreview(stageDialog.status));
+  };
+
   const closeStageDialog = useCallback(() => {
     previewSeq.current += 1; // invalidate any in-flight preview fetch
     setStageDialog(null);
   }, []);
 
   const confirmStage = async () => {
-    if (!stageDialog || !detail) return;
+    if (!stageDialog || !detail || held) return;
     // The submission is bound to THIS applicant (Codex r19 P2 / r22 P2): if
     // the detail switches while the PATCH is in flight, neither its response
     // nor its failure may touch the new applicant's dialog or busy state.
@@ -605,9 +676,16 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
     setBusy(true);
     setStageError(null);
     try {
-      const body = { status: stageDialog.status, expected_status: stageDialog.fromStatus };
-      if (note.trim()) body.note = note.trim();
-      if (stageDialog.resend) body.resend = true;
+      // The stage the owner saw and the job offers its preview showed: the server
+      // refuses the move if either changed since. An empty note and resend: false
+      // read on the server as none.
+      const body = {
+        status: stageDialog.status,
+        expected_status: stageDialog.fromStatus,
+        expected_offers: preview?.offers?.stamp,
+        note: note.trim(),
+        resend: stageDialog.resend,
+      };
       const wantsNotify =
         preview?.templated &&
         !moveWithoutNotifying &&
@@ -638,6 +716,13 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
       if (err.status === 409 && err.body?.application) {
         onApplicationUpdated(err.body.application);
         load(tab); // not awaited: nothing is sending, so no "Sending…" while the list reloads
+        // The job offers changed since the preview (another session sent, revised or
+        // withdrew one): read the preview again, and the offer card. Confirm stays off
+        // until the new preview is on screen.
+        if (err.body.code === "OFFERS_CHANGED") {
+          onOffersChanged();
+          readPreview(stageDialog.status);
+        }
       }
       setStageError(err.message);
     } finally {
@@ -652,6 +737,7 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
   const resetForNewApplicant = useCallback(() => {
     previewSeq.current += 1;
     submitSeq.current += 1; // any in-flight stage PATCH now belongs to the previous applicant
+    copyFilled.current = false;
     setBusy(false);
     setStageDialog(null);
     setPreview(null);
@@ -674,15 +760,12 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
       : `Move to ${STATUS_LABEL[stageDialog.status] || stageDialog.status}`
     : "";
 
-  // After a 409 the detail shows the newer stage; this dialog was opened on
-  // the old one, so Confirm could only be refused again. The owner closes
-  // it and decides from the refreshed detail.
-  const stale = Boolean(stageDialog && detail && stageDialog.fromStatus !== detail.status);
 
   return {
     stageDialog,
     title,
-    stale,
+    stale: held,
+    offerNote,
     preview,
     previewLoading,
     previewError,
@@ -705,6 +788,7 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
     error: stageError,
     openStageDialog,
     closeStageDialog,
+    retryPreview,
     confirmStage,
     resetForNewApplicant,
   };
@@ -716,7 +800,8 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
 // with a resend option, or no link yet with a send/resend CTA. A distinct
 // component because this sub-tree carries most of the dialog's own
 // branching (the booked/unbooked split, the link-status copy).
-function InterviewSchedulingBlock({ detail, onOpenStageDialog }) {
+// disabled: the application could not be re-read, so its stage may be out of date.
+function InterviewSchedulingBlock({ detail, onOpenStageDialog, disabled }) {
   const relevant = ["offer", "hired"].includes(detail.status)
     ? Boolean(detail.interview_booked_at || detail.interview_url)
     : detail.status === "interview";
@@ -738,6 +823,7 @@ function InterviewSchedulingBlock({ detail, onOpenStageDialog }) {
               size="sm"
               variant="ghost"
               onClick={() => onOpenStageDialog("interview", { resend: true })}
+              disabled={disabled}
             >
               Resend link
             </Button>
@@ -761,6 +847,7 @@ function InterviewSchedulingBlock({ detail, onOpenStageDialog }) {
               size="sm"
               variant="secondary"
               onClick={() => onOpenStageDialog("interview", { resend: true })}
+              disabled={disabled}
             >
               {detail.interview_url ? "Resend link" : "Send link"}
             </Button>
@@ -822,8 +909,23 @@ function SamePhoneBlock({ records, onOpenApplication }) {
 // own right (derives contact/screen from `detail`, owns the interview-block
 // branching) rather than a one-use helper — moving it out is what actually
 // removes those decisions from RecruitingPage.
-function ApplicationDetailContent({ detail, replyMedia, samePhone, onOpenStageDialog, onOpenApplication, onClose }) {
+const CLOSED_STATUSES = ["hired", "rejected", "withdrawn"];
+// A hired, rejected or withdrawn application: the server refuses every offer write on it (APPLICATION_CLOSED).
+const isClosed = (application) => CLOSED_STATUSES.includes(application?.status);
+
+// The Offer button opens the Offer form while the offer flow is on for a
+// technician application, and is today's status-only move only when the
+// server said the flow is off (or for a non-technician).
+function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, onOfferChanged, refreshError, onRetryRefresh, onOpenStageDialog, onOpenApplication, onClose }) {
   const contact = detail?.contact_snapshot || {};
+  const technician = detail.role === "technician";
+  // A closed application cannot take an offer: Offer is the plain status move there, whatever the offer read says (the
+  // stage preview and the move check it).
+  const closed = isClosed(detail);
+  const offerForm = offerFlow.enabled && technician && !closed;
+  // Until the offer read confirms on or off, a technician in an open application has no Offer move.
+  const offerPending = technician && !closed && (offerFlow.loading || Boolean(offerFlow.error) || Boolean(offerFlow.refreshError));
+  const onStageButton = (key) => (key === "offer" && offerForm ? offerFlow.openForm() : onOpenStageDialog(key));
   const screen = detail?.ai_screen || null;
 
   return (
@@ -834,6 +936,11 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, onOpenStageDi
         </DialogTitle>
       </DialogHeader>
       <DialogBody>
+        {refreshError && (
+          <ActionFeedback error className="mb-4" onRetry={onRetryRefresh}>
+            This application could not be reloaded after the offer change, so its stage may be out of date. Stage moves stay off until it loads.
+          </ActionFeedback>
+        )}
         <div className="flex flex-wrap items-center gap-3 mb-4">
           {CONTACT_LINKS.filter(({ key }) => contact[key]).map(
             ({ key, scheme, Icon, label }) => (
@@ -906,7 +1013,9 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, onOpenStageDi
             ))}
         </div>
 
-        <InterviewSchedulingBlock detail={detail} onOpenStageDialog={onOpenStageDialog} />
+        <InterviewSchedulingBlock detail={detail} onOpenStageDialog={onOpenStageDialog} disabled={Boolean(refreshError)} />
+
+        <OfferSection detail={detail} offerFlow={offerFlow} onChanged={onOfferChanged} detailStale={Boolean(refreshError)} />
 
         <StatusHistoryList history={detail.status_history} />
 
@@ -920,7 +1029,8 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, onOpenStageDi
                 key={key}
                 size="sm"
                 variant="secondary"
-                onClick={() => onOpenStageDialog(key)}
+                onClick={() => onStageButton(key)}
+                disabled={Boolean(refreshError) || (key === "offer" && offerPending)}
               >
                 {label}
               </Button>
@@ -938,6 +1048,8 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, onOpenStageDi
 export default function RecruitingPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState("new");
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
   const [applications, setApplications] = useState([]);
   // The status whose rows `applications` holds. A failed read for another
   // tab must not show the previous tab's cards under it, or an empty state
@@ -947,6 +1059,8 @@ export default function RecruitingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [detail, setDetail] = useState(null);
+  // Set when the in-place re-read of the open application after an offer change failed.
+  const [detailRefreshError, setDetailRefreshError] = useState(null);
   const [replyMedia, setReplyMedia] = useState({});
   // The open applicant's other records (same phone number), from the detail read.
   const [samePhone, setSamePhone] = useState([]);
@@ -989,31 +1103,111 @@ export default function RecruitingPage() {
   // not replace an already-opened applicant B (a status/note could land on
   // the wrong person), and closing the dialog invalidates pending opens.
   const detailSeq = useRef(0);
+  // Bumped by each in-place re-read and by each stage move's answer: a re-read
+  // applies only while nothing newer has reached the open application, so an
+  // older read cannot put back a stage that a move already changed.
+  const refreshSeq = useRef(0);
+  const applyStageAnswer = useCallback((application) => {
+    refreshSeq.current += 1;
+    setDetail(application);
+  }, []);
 
-  const stageWorkflow = useStageChangeWorkflow(detail, tab, load, setDetail);
+  const offerFlow = useOfferFlow(detail?.id, detail?.status);
+  const reloadOfferFor = offerFlow.reloadFor;
+  // The offer form open now, if any: the draft it opened on, the offers out the owner saw first, and its key.
+  const { draft: formDraft, seenOut, key: formKey } = offerFlow.form || {};
+  const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError), offerFlow.reload);
+  const detailIdRef = useRef(null);
+  detailIdRef.current = detail?.id ?? null;
 
-  const openDetail = useCallback(async (id) => {
-    const seq = ++detailSeq.current;
+  // refresh: re-read the open applicant in place. It never bumps detailSeq, so a
+  // switch to another applicant that is still opening is not cancelled, and it
+  // applies only while that applicant is still the one on screen and nothing
+  // newer has reached it (a later re-read, or a stage move's answer: refreshSeq).
+  // An explicit open (a list click, a bell link) of the applicant already on screen
+  // is read in place the same way, except that it cancels any other open (the owner
+  // asked for this applicant last) and acknowledges replies, as every open does.
+  const openDetail = useCallback(async (id, { refresh } = {}) => {
+    // An action that finished after the owner opened another applicant: its
+    // re-read is for one no longer on screen, and it must not cancel the open
+    // applicant's own re-read (refreshSeq).
+    if (refresh && detailIdRef.current !== id) return;
+    const inPlace = refresh || detailIdRef.current === id;
+    const seq = refresh ? detailSeq.current : ++detailSeq.current;
+    // Whether the page still wants this read: no other open, no close, and an in-place read's applicant still on screen.
+    const wanted = () => seq === detailSeq.current && (!inPlace || detailIdRef.current === id);
+    // An in-place read takes its version when its request starts: an answer that reaches the applicant after that (a
+    // stage move's, a later re-read) outranks it.
+    let fresh = 0;
+    const newest = () => wanted() && (!inPlace || fresh === refreshSeq.current);
     try {
-      const data = await adminFetch(`/admin/careers/${id}`);
-      if (seq !== detailSeq.current) return; // superseded or dialog closed
+      // An explicit open of the applicant on screen re-reads the offer card first: a date request or an answer changes
+      // the offer without changing the stage. The offer, then the application, as after an offer action, so the stage
+      // shown is never older than the offer. Another applicant's offer is read when it opens.
+      if (inPlace && !refresh) {
+        await reloadOfferFor(id);
+        // The application read below marks replies read: never for an open the owner closed or left meanwhile.
+        if (!wanted()) return;
+      }
+      if (inPlace) fresh = ++refreshSeq.current;
+      // An open of another applicant marks the replies it shows as read. A read in place never does (?peek=1): the
+      // page's own re-reads (after an offer action, or a Try again) and an open of the applicant already on screen,
+      // whose answer may land behind a dialog, after another open, or be dropped. The next open marks those replies.
+      const data = await adminFetch(`/admin/careers/${id}${inPlace ? "?peek=1" : ""}`);
+      if (!newest()) return;
       setDetail(data.application);
       setReplyMedia(data.reply_media || {});
       setSamePhone(data.same_phone || []);
-      stageWorkflow.resetForNewApplicant();
+      setDetailRefreshError(null);
+      // Only another applicant resets the stage workflow: for the one on screen, an open stage dialog, its typed note
+      // and a move in flight all still belong to it.
+      if (!inPlace) stageWorkflow.resetForNewApplicant();
     } catch (err) {
-      if (seq === detailSeq.current) setError(err.message);
+      if (!newest()) return;
+      // A failed in-place read stays on the detail with Try again (the list reload clears the page error).
+      if (inPlace) setDetailRefreshError(err.message);
+      else setError(err.message);
     }
-  }, [stageWorkflow]);
+  }, [stageWorkflow, reloadOfferFor]);
+
+  // The offer read returns the stage it read with the offers (applicationStatus). The application is read on its own,
+  // and a first open reads it before the offer, so an answer between the two reads leaves the stage behind the offer
+  // card: re-read the application in place, once for each offer read that disagrees with it. Until the two agree, a
+  // new offer waits (OfferSection).
+  const offerRead = offerFlow.data;
+  const checkedOfferRead = useRef(null);
+  useEffect(() => {
+    if (!offerRead || checkedOfferRead.current === offerRead) return;
+    checkedOfferRead.current = offerRead;
+    if (detail && offerRead.applicationStatus && offerRead.applicationStatus !== detail.status) openDetail(detail.id, { refresh: true });
+  }, [offerRead, detail, openDetail]);
 
   const closeDetail = useCallback(() => {
     detailSeq.current += 1; // invalidate any in-flight open
     setDetail(null);
+    setDetailRefreshError(null);
     setSamePhone([]);
     // The stage dialog nests inside the detail dialog's lifetime — closing
     // the outer one must not leave the inner one open over a null detail.
     stageWorkflow.closeStageDialog();
   }, [stageWorkflow]);
+
+  // After any offer write, or one the server refused because something moved
+  // on: re-read the offer, then the open application and the list in place. A
+  // signature or a close moves the stage, so the detail must follow. A switch
+  // to another applicant meanwhile stays untouched, and the list reloads the tab
+  // on screen when the reads finish, not the one open when the action began.
+  // Returns the offer read.
+  const refreshAfterOffer = async () => {
+    const forId = detail?.id;
+    // retry: as reload, but a failed first offer read blanks to loading while it re-reads (OfferSection's Try again).
+    const next = await offerFlow.retry();
+    if (forId) {
+      await openDetail(forId, { refresh: true });
+      load(tabRef.current);
+    }
+    return next;
+  };
 
   // Bell deep link: consume ?application=<id> and clear it. Reacts to the
   // param (not mount-only): clicking a second notification while already on
@@ -1166,6 +1360,10 @@ export default function RecruitingPage() {
             detail={detail}
             replyMedia={replyMedia}
             samePhone={samePhone}
+            offerFlow={offerFlow}
+            onOfferChanged={refreshAfterOffer}
+            refreshError={detailRefreshError}
+            onRetryRefresh={() => openDetail(detail.id, { refresh: true })}
             onOpenStageDialog={stageWorkflow.openStageDialog}
             onOpenApplication={openDetail}
             onClose={closeDetail}
@@ -1173,12 +1371,30 @@ export default function RecruitingPage() {
         )}
       </Dialog>
 
+      <OfferDialog
+        open={Boolean(offerFlow.form) && Boolean(detail)}
+        applicationId={detail?.id}
+        contact={detail?.contact_snapshot}
+        data={offerFlow.data}
+        draft={formDraft}
+        seenOut={seenOut}
+        stale={Boolean(offerFlow.refreshError || detailRefreshError)}
+        // Another admin can close the application while the form is open; a re-read of it then locks the form.
+        closed={isClosed(detail)}
+        // Bound to the form open at this render: a close from an action that started in it (a Try again whose read
+        // finds the draft gone) cannot close a form opened since.
+        onClose={() => offerFlow.closeForm(formKey)}
+        onChanged={refreshAfterOffer}
+        onSent={refreshAfterOffer}
+      />
+
       <StageChangeDialog
         open={Boolean(stageWorkflow.stageDialog)}
         title={stageWorkflow.title}
         preview={stageWorkflow.preview}
         previewLoading={stageWorkflow.previewLoading}
         previewError={stageWorkflow.previewError}
+        onRetryPreview={stageWorkflow.retryPreview}
         note={stageWorkflow.note}
         onNoteChange={stageWorkflow.setNote}
         smsChecked={stageWorkflow.smsChecked}
@@ -1196,6 +1412,9 @@ export default function RecruitingPage() {
         sendResult={stageWorkflow.sendResult}
         busy={stageWorkflow.busy}
         stale={stageWorkflow.stale}
+        refreshFailed={Boolean(detailRefreshError)}
+        onRetryRefresh={() => openDetail(detail.id, { refresh: true })}
+        offerNote={stageWorkflow.offerNote}
         error={stageWorkflow.error}
         onConfirm={stageWorkflow.confirmStage}
         onClose={stageWorkflow.closeStageDialog}

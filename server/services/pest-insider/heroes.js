@@ -12,6 +12,12 @@
  * check has `art: null`: its picture is the title on navy over the Waves
  * wave band, drawn by code alone.
  *
+ * Every top picture carries the Waves Lawn & Pest logo in its bottom-right
+ * corner (owner 2026-11-20: "add the waves lawn and pest logo, bottom
+ * right"): the full logo from client/public/waves-logo.png, the one the
+ * Waves emails and portal use, never cropped (owner 2026-11-20). It is
+ * drawn last, over the art and any motion, so nothing covers it.
+ *
  * Loaded from server/data/pest-insider-heroes-v1.json: fact id -> { art },
  * where art is the first 16 hex of the sha256 of the fact's art file, or
  * null. The art file carries that hash in its name
@@ -19,8 +25,8 @@
  * overwrites the art the heroes file names. The pictures are drawn
  * on a Mac by ops/agents/pest-insider-heroes.js and ship with the portal
  * (client/public/pest-insider/heroes/). Each file name carries a hash of
- * everything drawn on it (title, tag, art), so a changed title or new art
- * gets a new file, and a test fails until it is drawn.
+ * everything drawn on it (title, tag, art, logo), so a changed title, new
+ * art or a new logo gets a new file, and a test fails until it is drawn.
  *
  * Motion (owner 2026-11-19, approved plan step 2: "ChatGPT art, moved by
  * code"): a top picture may also move. Its entry then names one kind of
@@ -39,8 +45,8 @@ const data = require('../../data/pest-insider-heroes-v1.json');
 const { factById } = require('./facts');
 const { cardFor } = require('./cards');
 
-/** Bump when the drawing changes: every top picture gets a new file name. */
-const HERO_DESIGN = 1;
+/** Bump when the drawing changes: every top picture gets a new file name. 2: the logo, bottom right. */
+const HERO_DESIGN = 2;
 const HERO_WIDTH = 582;
 const HERO_HEIGHT = 326;
 const HERO_BASE_URL = 'https://portal.wavespestcontrol.com/pest-insider/heroes/';
@@ -48,6 +54,12 @@ const HERO_DIR = 'client/public/pest-insider/heroes';
 const ART_DIR = 'ops/agents/pest-insider-art';
 /** The fixed line over the title: no fact in it. */
 const HERO_KICKER = 'Waves Pest Insider';
+/**
+ * The logo in the bottom-right corner: the repo file, the first 16 hex of its
+ * sha256 (a test checks the file, and the hash names every picture), and its
+ * height and gap from the corner in pixels on the 582-wide picture.
+ */
+const HERO_LOGO = Object.freeze({ file: 'client/public/waves-logo.png', sha16: 'd9abeec95d8bcf49', height: 84, margin: 10 });
 
 /** Bump when the motion drawing changes (ops/agents/pest-insider-motion.js): every moving picture gets a new file name. */
 const HERO_MOTION_DESIGN = 1;
@@ -124,7 +136,7 @@ function validateHeroes(raw) {
     const problem = heroProblem(id, hero);
     if (problem) throw new Error(`pest-insider heroes: ${id}: ${problem}`);
     // Everything drawn on the picture, in a fixed order: the hash names the file.
-    const shown = { design: HERO_DESIGN, title: factById(id).title, tag: cardFor(id).tag, kicker: HERO_KICKER, art: hero.art };
+    const shown = { design: HERO_DESIGN, title: factById(id).title, tag: cardFor(id).tag, kicker: HERO_KICKER, art: hero.art, logo: HERO_LOGO.sha16 };
     const file = `${id.toLowerCase()}-${hash10(shown)}.jpg`;
     // The moving picture: the same picture with its motion, named by both.
     const motion = hero.motion === undefined ? null : motionOf(hero.motion).motion;
@@ -137,20 +149,21 @@ function validateHeroes(raw) {
       motion,
       gifFile,
       gifUrl: gifFile && `${HERO_BASE_URL}${gifFile}`,
-      // The picture's words are the title; the art and its motion have none.
+      // The picture's words are the title; the art and its motion have none,
+      // and the logo's words are the Waves name, not a fact.
       alt: shown.title,
     });
   }
   return Object.freeze(heroes);
 }
 
-/** Fact id -> its top picture: { title, tag, kicker, art, artFile, file, url, motion, gifFile, gifUrl, alt }. Frozen. */
+/** Fact id -> its top picture: { title, tag, kicker, art, logo, artFile, file, url, motion, gifFile, gifUrl, alt }. Frozen. */
 const HEROES = validateHeroes(data);
 
 const heroFor = (factId) => (typeof factId === 'string' && Object.prototype.hasOwnProperty.call(HEROES, factId) ? HEROES[factId] : null);
 
 module.exports = {
-  HEROES, HERO_DESIGN, HERO_WIDTH, HERO_HEIGHT, HERO_BASE_URL, HERO_DIR, ART_DIR, HERO_KICKER,
+  HEROES, HERO_DESIGN, HERO_WIDTH, HERO_HEIGHT, HERO_BASE_URL, HERO_DIR, ART_DIR, HERO_KICKER, HERO_LOGO,
   HERO_MOTION_DESIGN, HERO_ART_LEFT, MOTION_KINDS, MOTION_COLORS,
   heroFor, validateHeroes,
 };

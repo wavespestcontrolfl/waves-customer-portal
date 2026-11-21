@@ -271,6 +271,10 @@ describe('notification trigger push tags', () => {
     expect(blocked.link).toBe('/admin/newsletter?tab=history');
     expect(blocked.body).toMatch(/Nothing was sent\.$/);
     expect(blocked.body).not.toMatch(/composer/i);
+    // A planned issue's outcome (its settle step) is told in its own words: some readers may have got
+    // it, so never "did not pass the send gate" or "Nothing was sent".
+    const outcome = TRIGGER_REGISTRY.newsletter_proof_blocked.build({ sendId: 'send-7', subject: 'x', errors: ['Did not go out: its send failed after 40 of 85 readers got it'], outcome: true });
+    expect(outcome.body).toBe('"x": Did not go out: its send failed after 40 of 85 readers got it.');
     expect(TRIGGER_REGISTRY.newsletter_send_not_dispatched).toBeUndefined();
     expect(TRIGGER_REGISTRY.pest_insider_draft).toBeUndefined();
     for (const type of Object.keys(TRIGGER_REGISTRY).filter((t) => t.startsWith('newsletter_'))) {
@@ -655,6 +659,15 @@ describe('triggerNotification bell outcome', () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
     expect(await triggerNotification('sms_reply', { twilioSid: 'SM-synthetic-replay' },
       { dedupeKey: 'sms-reply:SM-synthetic-replay' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  // A planned Waves Pest Insider issue's outcome alert is keyed per issue: a hit is the settle
+  // step's retry of an alert that landed before its row was marked told.
+  test('a keyed send-stop alert retry reuses its bell and does not push again', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'outcome-bell', deduped: true });
+    expect(await triggerNotification('newsletter_proof_blocked', { sendId: 'send-7', subject: 'x', errors: ['e'] },
+      { dedupeKey: 'pest-insider-outcome:issue-1' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
     expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
   });
 

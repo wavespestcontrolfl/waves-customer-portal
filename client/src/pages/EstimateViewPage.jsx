@@ -297,6 +297,9 @@ function pricingServices(pricing = {}) {
   }];
 }
 
+// The opening entry (with pricingServices above) has a server mirror for the
+// plan-start mint and page reader: openingEntryForService in
+// server/services/estimate-pricing-bundle-utils.js. Change both together.
 function defaultSelectedForServices(services = [], previous = {}, preserveSelection = false) {
   return services.reduce((next, section) => {
     const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
@@ -4799,13 +4802,17 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
   // needs a time, and a bare scroll back to the times read as the page
   // starting over (a customer gave up and phoned in).
   const pickTime = kind === 'pick_time';
+  // 'stale_quote': the server refused the customer's own plan quote as
+  // changed. No time fixes that, so the banner gives the server's reason and
+  // a link back to the portal for a fresh quote, never "Refresh times".
+  const staleQuote = kind === 'stale_quote';
   return (
     <div role="status" style={{
       background: '#fff4e5', borderRadius: 12, padding: 16,
       border: `1px solid #f5bb5c`, marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, color: COLORS.navy }}>
-        {pickTime ? (
+        {staleQuote ? (note || 'This quote changed since it was created — please go back to your portal for a current quote.') : pickTime ? (
           <>
             <strong>Pick a visit time below to approve your plan.</strong>{' '}
             Starting later? Use &ldquo;Can&apos;t find a date?&rdquo; under the times, or call{' '}
@@ -4818,7 +4825,16 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
             ? 'Your time-slot hold expired — pick a time again to finish signing up.'
             : note || "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
-      {onRetry ? (
+      {staleQuote ? (
+        <a
+          href="/"
+          style={{
+            display: 'inline-block', marginTop: 12, padding: '8px 16px',
+            background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
+            borderRadius: 8, fontSize: 14, fontWeight: 600,
+          }}
+        >Back to your Waves portal</a>
+      ) : onRetry ? (
         <button
           type="button"
           onClick={onRetry}
@@ -6054,6 +6070,9 @@ export function ServiceSection({
 // this set — those render the picker for the customer to (re)pick a slot,
 // and every path back to them clears the reservation first.
 const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']);
+// The two codes a refused plan quote answers with, from the accept and from both card steps: the page keeps the
+// server's message in its stale-quote banner and links back to the portal (docs/public-route-contracts.md).
+const STALE_QUOTE_CODES = new Set(['RESTART_STATE_CHANGED', 'PLAN_START_STATE_CHANGED']);
 
 // Remount the estimate view whenever the bearer :token changes, so NO state
 // survives an A→B navigation: reservation, the live Stripe deposit / card-hold
@@ -6429,6 +6448,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The hold a recovery could not finish releasing/refreshing — the banner's
   // Retry re-runs that recovery instead of only re-fetching slots.
   const pendingRecoveryHoldRef = useRef(null);
+  // The hold a refused plan quote's /data load already released (the hydration effect): once per hold, so a /data
+  // that still lists it cannot start a release-and-reload loop.
+  const refusedQuoteHoldReleaseRef = useRef(null);
   // Rendered state for the same fact: a ref cannot drive the banner, and a
   // no_booking recovery lands on 'configure', which has no slot banner — so
   // a failed release left the stale contract in place with nothing to tap
@@ -6437,6 +6459,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The server's reason for a slot_conflict recovery that is not a taken
   // slot (a visit before the move-in date); null keeps the default copy.
   const [deadHoldNote, setDeadHoldNote] = useState(null);
+  // The server's reason when it refused the customer's own plan quote as
+  // changed (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED). No time on
+  // this page can accept that quote, so its banner stays up and links back
+  // to the portal for a fresh quote; null = no such refusal. /data marks a
+  // quote staff changed before this load (estimate.quoteRefusal), so that
+  // banner is up from the start (codex pre-push P1).
+  const [staleQuoteReply, setStaleQuoteNote] = useState(null);
+  const staleQuoteNote = staleQuoteReply || data?.estimate?.quoteRefusal?.error || null;
+  // The /data mark alone (the hold hydration below releases the hold such a load still offers).
+  const quoteRefusalCode = data?.estimate?.quoteRefusal?.code || null;
   // Recovery releases the hold and re-reads the contract. Until BOTH land,
   // `data.estimate.acceptance` still describes the dead hold, so leaving the
   // payment buttons live let a customer re-adopt the very hold being deleted
@@ -7025,6 +7057,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           await enterContactReviewRef.current(body);
           return 'contact_review';
         }
+        // A refused plan quote (codex pre-push P1) is a no-booking answer too:
+        // the settle releases the hold and reloads, and the reload's /data
+        // marks the quote (estimate.quoteRefusal), so the page shows its banner.
+        // A recurring card the recovery drops here is retired server-side: such
+        // a quote is never accepted, so its setup_intent.succeeded webhook
+        // retires the capture (stripe-webhook.js), whichever request saw it.
+        if (STALE_QUOTE_CODES.has(body.code)) return 'no_booking';
         // The route's specialized no-booking bodies (codex r7 P2): staff can
         // reshape an estimate mid-checkout into a commercial-manual,
         // guarantee-only or trenching-review contract, and /extend preserves
@@ -7130,7 +7169,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // a payment method re-adopted the dead hold. Refreshing the contract is
   // what actually reopens the picker, so every caller goes through here
   // rather than repeating the reset.
-  const recoverFromDeadHold = useCallback((phase, note = null) => {
+  const recoverFromDeadHold = useCallback((phase, note = null, holdId = null) => {
     // Never DURING Stripe's confirmation (codex r16 P1): recovery clears the
     // reservation, unmounts payment capture and DELETEs the hold, which
     // mid-confirmSetup would cancel a hold the confirmation is about to use
@@ -7153,8 +7192,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // it first is what returns the contract to standard_slot_pick. A hold
     // that is already gone (expired, swept) just 404s the release.
     // On a retry the reservation is already cleared, so fall back to the
-    // hold the previous attempt could not release.
-    const deadHoldId = reservationRef.current?.scheduledServiceId
+    // hold the previous attempt could not release. A caller that names the
+    // hold releases that one (codex pre-push P1): the refused-quote
+    // hydration names the hold /data lists, which another tab may have
+    // swapped for the one this tab still holds.
+    const deadHoldId = holdId
+      || reservationRef.current?.scheduledServiceId
       || pendingRecoveryHoldRef.current
       || null;
     setCtaPhase(phase);
@@ -7209,6 +7252,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         recoveryInFlightRef.current = false;
       });
   }, [loadEstimate, releaseHeldReservation]);
+  // A refused plan quote (STALE_QUOTE_CODES), from the accept or a card step: keep the server's message in the
+  // stale-quote banner, release the hold and re-read the estimate. True when it took the answer. A ref, like
+  // enterContactReviewRef, so every handler and effect reads the live callback.
+  const refuseStaleQuoteRef = useRef(null);
+  refuseStaleQuoteRef.current = (status, body) => {
+    if (status !== 409 || !STALE_QUOTE_CODES.has(body?.code)) return false;
+    setStaleQuoteNote(body.error || 'This quote changed since it was created — please go back to your portal for a current quote.');
+    recoverFromDeadHold('configure');
+    return true;
+  };
 
   // A RELOADED page must start the clock immediately (codex r9 P1). The
   // adopted hold used to be hydrated only inside handlePaymentChoice, so a
@@ -7230,6 +7283,21 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     const held = existingAppointment?.isHold && existingAppointment?.reservationExpiresAt
       ? existingAppointment
       : null;
+    // A refused plan quote holds no time (codex pre-push P1): when /data marks it (estimate.quoteRefusal) and still
+    // offers a live hold, the hold is released through the same release-then-refresh recovery a refused answer runs
+    // (refuseStaleQuoteRef), and never adopted. Not mid-confirmSetup (recoverFromDeadHold refuses then, and the
+    // confirm's own extend or accept gets the refusal). A recurring card this tab restored (a 3DS return) is never
+    // used on such a quote, and the setup_intent.succeeded webhook retires it (stripe-webhook.js). Only the customer's
+    // own page releases it: a staff preview (its print view included) and the headless PDF capture (?mode=pdf) never
+    // act on the customer's hold (codex pre-push P1).
+    if (held && quoteRefusalCode) {
+      if (!readOnlyPreview && !pdfDocumentMode
+        && !inlineConfirmBusyRef.current && refusedQuoteHoldReleaseRef.current !== held.id) {
+        refusedQuoteHoldReleaseRef.current = held.id;
+        recoverFromDeadHold('configure', null, held.id);
+      }
+      return;
+    }
     if (!held) {
       // Refreshed server data no longer offers a hold: drop an adopted one we
       // seeded earlier rather than leaving a countdown on a row that is gone.
@@ -7257,7 +7325,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // Re-seeding is idempotent: the updater returns `prev` unchanged once the
     // same hold+expiry is in place, so this cannot loop.
   }, [existingAppointment?.id, existingAppointment?.isHold, existingAppointment?.reservationExpiresAt,
-    reservation?.scheduledServiceId, ctaPhase]);
+    reservation?.scheduledServiceId, ctaPhase, quoteRefusalCode, readOnlyPreview, pdfDocumentMode,
+    recoverFromDeadHold]);
 
   // ONE place that turns an extend outcome into page state (codex r7 P1).
   // The wrapper and the 0:00 rescue both needed identical handling three
@@ -7813,6 +7882,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(CONSUMER_NOTICE_HINT);
       return;
     }
+    // A refused plan quote takes no hold (codex pre-push P1): its banner sends the customer to the portal.
+    if (staleQuoteNote) return;
     // Belt and braces behind the disabled buttons (codex r11 P2): a retained
     // callback or a keyboard event that skips `disabled` must not re-adopt a
     // hold that recovery is deleting, or one it failed to delete.
@@ -7895,6 +7966,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           await enterContactReviewRef.current(body);
           return;
         }
+        // A refused plan quote holds no time (codex pre-push P1): the shared answer shows the portal banner.
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         const message = body.error || 'Unable to reserve this slot.';
         if (body.code === 'CUSTOMER_BUSY_RETRY') {
           // The matched customer row was being updated for a moment (nothing was reserved): retryable, with the
@@ -7934,7 +8007,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [readOnlyPreview, consumerNoticeBlocked, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
+  }, [readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     // With per-service combos: combo-axis sections (pest + lawn/tree) are
@@ -8031,6 +8104,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(CONSUMER_NOTICE_HINT);
       return;
     }
+    // A refused plan quote accepts nothing, also from a card or deposit
+    // step that finishes later (codex pre-push P1).
+    if (staleQuoteNote) return;
     // Required-field guard mirrors confirmDisabled below (defense in depth —
     // the button is disabled while this is true, but a stale disabled-state
     // read should never let a request through with a required field blank).
@@ -8400,8 +8476,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             setPrepayConsentChecked(false);
             throw new Error(body.error || 'Your total changed while confirming — please confirm the updated amount.');
           }
-          if (['ACCEPT_INVOICE_BUSY_RETRY', 'DEPOSIT_LEDGER_BUSY_RETRY'].includes(body.code)) {
-            // Invoice/deposit settlement is briefly holding a lock. The
+          if (['ACCEPT_INVOICE_BUSY_RETRY', 'DEPOSIT_LEDGER_BUSY_RETRY', 'PLAN_START_RECHECK_RETRY', 'RESTART_RECHECK_RETRY'].includes(body.code)) {
+            // Invoice/deposit settlement is briefly holding a lock, or the
+            // plan start or plan restart re-check could not read its state (a
+            // read failure, not a changed account). The
             // acceptance transaction rolled back without invalidating this
             // reservation, so keep the held time, plan selections, payment
             // preference and any acknowledged prepay quote intact. Falling
@@ -8417,6 +8495,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // call-the-office message instead of a slot-picker retry loop.
             throw new Error(body.error || 'We couldn\'t confirm this plan\'s pricing online — please call the office and we\'ll finish it for you.');
           }
+          // The customer's own plan quote no longer fits the account, or
+          // staff changed it (docs/public-route-contracts.md). No new time
+          // or reload can accept it, so the slot-conflict recovery below
+          // offered "Refresh times" on a dead quote (codex pre-push P1).
+          // The shared answer releases the hold like the no-booking
+          // refusals do, and keeps a banner that links back to the portal.
+          if (refuseStaleQuoteRef.current(r.status, body)) return;
           if (/estimate is no longer active/i.test(body.error || '')) {
             setCtaPhase('configure');
             setReservation(null);
@@ -8497,7 +8582,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, consumerNoticeBlocked, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
+  }, [readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -8511,6 +8596,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(CONSUMER_NOTICE_HINT);
       return;
     }
+    // A refused plan quote mints no intent and accepts nothing (codex pre-push P1).
+    if (staleQuoteNote) return;
     // No card step and no accept while the estimate has no phone: the server
     // refuses both. The review button is disabled for it; this covers every
     // other entry (the annual-prepay confirm).
@@ -8557,6 +8644,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
           throw new Error(await enterContactReviewRef.current(body));
         }
+        // A refused plan quote takes no card: its banner sends the customer back to the portal.
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         if (r.status === 409 && body.exemptReason) {
           // Policy says no hold owed — fall through to accept. 'saved_method'
           // means the hold still stands (a saved card backs it); any other
@@ -8661,6 +8750,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
           throw new Error(await enterContactReviewRef.current(body));
         }
+        // A refused plan quote takes no card: its banner sends the customer back to the portal.
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         if (r.status === 409 && body.exemptReason) {
           // Policy says no card owed — fall through to the deposit/accept.
           // Only saved_method_consented / autopay_already_active keep the
@@ -8750,7 +8841,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       }
     }
     await performAccept();
-  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, consumerNoticeBlocked, extendHoldAndSettle, noteRenderedRecurringConsent]);
+  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, extendHoldAndSettle, noteRenderedRecurringConsent]);
 
   const handleDepositSuccess = useCallback(async (paymentIntentId) => {
     depositPaymentIntentIdRef.current = paymentIntentId;
@@ -8897,6 +8988,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         await enterContactReviewRef.current(body);
         return false;
       }
+      if (refuseStaleQuoteRef.current(r.status, body)) return false;
       if (!r.ok || !body?.clientSecret) return false;
       if (recurringCardIntentOpenRef.current) {
         setRecurringCardIntent(body);
@@ -9011,6 +9103,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           await enterContactReviewRef.current(body);
           return;
         }
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         // Staleness re-check at RESOLVE time (r3 P2): a confirm tapped before
         // this pre-mint resolved fell back to the modal path with its own
         // intent — accepting this late response would render the inline
@@ -9378,7 +9471,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     slug: estimate.slug,
   };
   const renderFlags = pricing?.renderFlags || {};
-  const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
+  // A refused plan quote (staleQuoteNote) books nothing: the picker, the pick-a-time prompts, the sticky
+  // booking bar and every "book" button read this one condition, so the banner's portal link is the
+  // only way forward (codex pre-push P1).
+  const canShowSlotPicker = acceptance.mode === 'standard_slot_pick' && !staleQuoteNote;
   // Resolve the tier label unconditionally; whether the badge actually renders
   // is decided by per-section eligibility (server-authoritative
   // section.waveGuardTierEligible — true iff the section covers >=1 WaveGuard
@@ -10302,7 +10398,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <>
           {/* The booking step (with the notice card) is hidden during review: a notice asked for after the customer
               reached review (the gate turned on, or a refused accept) is signed right here. */}
-          {consumerNoticeBlocked ? <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} /> : null}
+          {consumerNoticeBlocked ? <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)} /> : null}
           <ConsumerNoticeHint blocked={consumerNoticeBlocked} />
           {existingAppointment ? (
             <>
@@ -10320,7 +10416,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // unmounts the inline Payment Element mid-confirmSetup and
                 // the in-flight handleConfirm closure would book the OLD
                 // choice the UI no longer shows.
-                disabled={readOnlyPreview || consumerNoticeBlocked || ctaPhase === 'submitting' || inlineConfirmBusy || recoveryInFlight || recoveryStuck}
+                disabled={readOnlyPreview || consumerNoticeBlocked || !!staleQuoteNote || ctaPhase === 'submitting' || inlineConfirmBusy || recoveryInFlight || recoveryStuck}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
@@ -10664,7 +10760,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const bookingContent = (
     <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {/* Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): right above the accept controls; absent with the gate off. */}
-            <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} />
+            <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)} />
             {canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId
               ? <SlotIssueBanner key={pickTimePrompt} kind="pick_time" /> : null}
             {canShowSlotPicker ? (
@@ -10706,6 +10802,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
                   onContactReview={(body) => enterContactReviewRef.current(body).catch(() => {})}
+                  // A refused plan quote from a slot read (codex pre-push P1): the same banner.
+                  onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)}
                 />
               </div>
             ) : (
@@ -10724,7 +10822,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // payment options the customer will get. Forcing cta.canAccept
                 // false server-side would fall through to the null-terminal
                 // "expired" card and destroy the preview's purpose.
-                disabled={readOnlyPreview || consumerNoticeBlocked || ctaPhase === 'submitting' || recoveryInFlight || recoveryStuck}
+                disabled={readOnlyPreview || consumerNoticeBlocked || !!staleQuoteNote || ctaPhase === 'submitting' || recoveryInFlight || recoveryStuck}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
@@ -10746,7 +10844,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   );
 
   // A stuck recovery outranks the phase-specific banners: it is the reason
-  // the options on screen may be wrong (codex r10 P2).
+  // the options on screen may be wrong (codex r10 P2). A refused plan quote
+  // comes next: no time or retry on this page can accept it, so the way
+  // forward is a fresh quote from the portal (codex pre-push P1).
   const slotIssueBanner = recoveryStuck ? (
     <SlotIssueBanner
       kind="stale_hold"
@@ -10754,6 +10854,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ? ctaPhase
         : 'configure', ctaPhase === 'slot_conflict' ? deadHoldNote : null)}
     />
+  ) : staleQuoteNote ? (
+    <SlotIssueBanner kind="stale_quote" note={staleQuoteNote} />
   ) : ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
     <SlotIssueBanner
       kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
@@ -10779,6 +10881,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
         bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
+        // A refused plan quote turns booking off, so the booking step (and its banner) is never offered: the quote
+        // step shows the banner with the portal link instead of "Our team will contact you" (codex pre-push P1).
+        quoteNotice={staleQuoteNote ? slotIssueBanner : null}
         reviewing={!!reservation && (ctaPhase === 'review' || (ctaPhase === 'submitting' && !!inlineCardIntent))}
         busy={ctaPhase === 'submitting'} timer={reservation?.expiresAt ? (
           <HoldCountdownBarWhenTimed

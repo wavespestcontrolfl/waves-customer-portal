@@ -255,6 +255,15 @@ const IDENTITY_FIELD = { phone: 'phoneKey', email: 'email', customer: 'customerI
 // What a skipped lead is reported as, by the scope its ambiguous contact named.
 const SHARED_REASON = { phone: 'shared_phone', email: 'shared_email', customer: 'multiple_open_leads_for_customer' };
 
+// Why a contact witness cannot be credited to a lead, or null when it can: the contact row
+// belongs to a different customer than the lead, or another open lead shares the identity the
+// contact names. One rule, read by this sweep and by lead-reach-stats.js (the Leads page figure).
+function contactSkipReason(w, customerId, owners) {
+  if (w.customerId && w.customerId !== customerId) return 'customer_mismatch';
+  if ((owners.get(w.key)?.size || 0) > 1) return SHARED_REASON[w.scope];
+  return null;
+}
+
 /**
  * Judge a batch of 'new' leads. Read-only: returns Map(lead id -> verdict),
  * every lead with one: the earliest positive contact
@@ -293,8 +302,8 @@ async function judgeLeads(dbi, leads) {
     const skips = [];
     const usable = [];
     for (const w of mine) {
-      if (w.customerId && w.customerId !== customerId) skips.push('customer_mismatch');
-      else if ((owners.get(w.key)?.size || 0) > 1) skips.push(SHARED_REASON[w.scope]);
+      const reason = contactSkipReason(w, customerId, owners);
+      if (reason) skips.push(reason);
       else usable.push(w);
     }
     const first = usable[0];
@@ -367,6 +376,9 @@ module.exports = {
   judgeLeads,
   candidateLeadsQuery,
   openLeadIdentities,
+  contactSkipReason,
+  usablePhoneKey,
+  leadEmail,
   PERFORMED_BY,
   LOOKBACK_DAYS,
   _test: { usablePhoneKey, leadEmail, resumeAfter: () => resumeAfter, resetResume: () => { resumeAfter = null; } },
