@@ -113,6 +113,10 @@ const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcon
 // ---------------------------------------------------------------------------
 const DETECTORS = Object.freeze([
   {
+    // A standing check. One of its flags (`upcoming_visit`) reads visits dated
+    // today or later, but that finding does not leave with nothing fixed: when
+    // the date passes, the visit was completed or cancelled (a real change),
+    // or it is still open and stale_open_visits reads it.
     key: 'churned_live_state',
     label: 'Churned/inactive accounts still carrying live plan state',
     href: '/admin/customers',
@@ -585,6 +589,15 @@ function hasNewItem(hashes, seen) {
   return hashes.some((hash) => !known.has(hash));
 }
 
+// What the run state keeps for one failing check of a record. A check that
+// could not run saw nothing, so what it had found stays known beside the
+// "could not run" item: a rerun on the same day that works again does not
+// post the same findings a second time.
+function findingsNow(r, seen, now) {
+  const hashes = itemHashes(r, now);
+  return r.unavailable && Array.isArray(seen) ? [...new Set([...seen, ...hashes])].sort() : hashes;
+}
+
 // Which alert a result belongs to (see the header): true = a record.
 const isRecordResult = (r) => r.moving && !(r.unavailable && !r.freshEachRun);
 
@@ -680,7 +693,7 @@ async function postRecords(moving, notRun, state, { now, mailer, to }) {
   const failing = moving.filter((r) => !r.ok);
   const before = state?.seen || {};
   const kept = Object.fromEntries(notRun.filter((r) => Array.isArray(before[r.key])).map((r) => [r.key, before[r.key]]));
-  const current = { ...kept, ...Object.fromEntries(failing.map((r) => [r.key, itemHashes(r, now)])) };
+  const current = { ...kept, ...Object.fromEntries(failing.map((r) => [r.key, findingsNow(r, before[r.key], now)])) };
   // A finding that left is dropped here, so the same finding posts again if
   // it comes back.
   if (!failing.some((r) => hasNewItem(current[r.key], before[r.key]))) return { posted: false, seen: current };

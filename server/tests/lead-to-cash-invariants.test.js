@@ -717,6 +717,21 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(posts()).toHaveLength(5);
     });
 
+    test('a closeout failure, then a rerun that cannot read closeouts, then a rerun that can: one record for the visits', async () => {
+      const down = { ...det('closeout_failed_facts', async () => { throw new Error('x'); }), moving: true, freshEachRun: true };
+      lastRun([], DAY);
+      expect(await sweep([closeout(['v1 [x]', 'v2 [y]'])])).toMatchObject({ sent: true });
+      carry();
+      expect(await sweep([down])).toMatchObject({ sent: true }); // "could not run" is a record of its own
+      expect(savedState().seen.closeout_failed_facts).toHaveLength(3); // the two visits stay known beside it
+      carry();
+      expect(await sweep([down])).toMatchObject({ skipped: 'no_new_item' }); // still down: the outage is posted once
+      carry();
+      expect(await sweep([closeout(['v1 [x]', 'v2 [y]'])])).toMatchObject({ skipped: 'no_new_item' });
+      expect(savedState().seen.closeout_failed_facts).toHaveLength(2);
+      expect(posts()).toHaveLength(2);
+    });
+
     test('a check with a standing window that cannot run joins the standing list, and its known findings stay known', async () => {
       const down = { ...det('new_plan_without_welcome', async () => { throw new Error('x'); }), moving: true };
       lastRun([], DAY);
