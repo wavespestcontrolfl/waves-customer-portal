@@ -340,46 +340,52 @@ function positiveOrNull(value) {
 // accepted estimates held a review-marked row the old list did not read. A
 // missed marker reads as "clean", so an unknown key is read, never skipped.
 // Two parts of the blob are not markers of the price:
-//   - what was fed INTO the pricer (SEED_INPUT_KEYS), at any depth: the
-//     estimator also attaches the request to the result it saves. The lookup
-//     profile kept there lists verify flags for most properties. The check
-//     never read it, and reading it would end nearly every seeded price;
+//   - what was fed INTO the pricer:
+//       a. the stored requests (SEED_INPUT_KEYS), at any depth: the estimator
+//          also attaches the request to the result it saves. The lookup
+//          profile kept there lists verify flags for most properties. The
+//          check never read it, and reading it would end nearly every seeded
+//          price;
+//       b. the service picks at the root (`services` as an object keyed by
+//          service). The quote wizard stores the request body's picks there
+//          as submitted, beside the normalized engineInput, and the lead
+//          auto-draft stores its mapped picks there. A caller's option is not
+//          a priced row (pre-push r3 on this branch). Rows are kept in lists
+//          (result.recurring.services): a list under this key is read, and so
+//          is an object under it anywhere below the root.
 //   - the turf signal on a result's `property` summary (its turf grade and
 //     its turfFlags list): the engine's own lawn-size guess for the lot,
-//     which every result carries, a pest-only quote included. It counts in
-//     two cases:
+//     which every result carries, a pest-only quote included. Whether that
+//     guess reached the quote's price is the engine's to say, and it says it
+//     in the result's fieldVerify list: the summary's flags for a quote that
+//     priced a turf service, empty for any other. That list is read like any
+//     other marker. So the summary itself counts in two cases only:
 //       1. the caller replays a lawn size (replaysLawnSize; the seed loader
 //          passes what it replays, and a caller that says nothing gets the
 //          strict reading). A replayed size is the one case where the guess
 //          could reach a new price as a supplied measurement. Without one, a
 //          new lawn price computes and grades its own turf.
-//       2. the quote itself priced a turf service. Then the engine lists the
-//          summary's flags in the result's fieldVerify, and that list is
-//          read like any other. The quote wizard stores the summary's flags
-//          and drops the list (public-quote.js), so a parcel-capped lawn
-//          quote read as clean (pre-push r2 on this branch). The engine's
-//          rule for the list (turfPricedServicesSelected) is applied to the
-//          request stored with the quote. With no request to ask, a result
-//          that keeps its fieldVerify list holds the engine's answer, and a
-//          result with neither is read strictly.
+//       2. the result does not keep the engine's list. The quote wizard and
+//          the lead auto-draft store a slim result with the summary's flags
+//          and no list (public-quote.js), so a parcel-capped lawn quote read
+//          as clean (pre-push r2 on this branch). Such a result does not say
+//          what it priced, and the check does not work it out from the
+//          stored request or from the rows: a request can be older than the
+//          result beside it (pre-push r3), and only some turf-priced rows
+//          carry a turf basis. It reads the summary strictly. A writer that
+//          wants the exact reading keeps the list.
 const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
 
 function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } = {}) {
   if (!estData || typeof estData !== 'object') return false;
   const { lineNeedsReviewBeforeExactPrice } = require('../estimator-engine/draft-builder');
-  const { turfPricedServicesSelected } = require('../pricing-engine/estimate-engine');
   const listsCodes = (list) => Array.isArray(list) && list.length > 0;
   const markedForReview = (c, turfCounts) => listsCodes(c.fieldVerify) || listsCodes(c.fieldVerifyFlags)
     || (turfCounts && listsCodes(c.turfFlags))
     || lineNeedsReviewBeforeExactPrice(c, { turfGrade: turfCounts });
-  // The requests stored with the quote that name their services as the engine
-  // reads them (an object keyed by service).
-  const requestedServices = [...SEED_INPUT_KEYS]
-    .map((key) => estData[key] && estData[key].services)
-    .filter((services) => Object.prototype.toString.call(services) === '[object Object]');
-  const quotePricedTurf = requestedServices.some(turfPricedServicesSelected);
-  const turfSummaryCounts = (result) => replaysLawnSize
-    || (requestedServices.length ? quotePricedTurf : !Array.isArray(result.fieldVerify));
+  const turfSummaryCounts = (result) => replaysLawnSize || !Array.isArray(result.fieldVerify);
+  const servicePicks = (node, key, value) => node === estData && key === 'services'
+    && Object.prototype.toString.call(value) === '[object Object]';
   // The stored JSON is a finite tree, so the walk needs no depth limit; a
   // limit would be a place where a marker reads as clean.
   const pending = [{ node: estData, turfCounts: true }];
@@ -392,7 +398,7 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } =
     }
     if (markedForReview(node, turfCounts)) return true;
     for (const [childKey, child] of Object.entries(node)) {
-      if (SEED_INPUT_KEYS.has(childKey)) continue;
+      if (SEED_INPUT_KEYS.has(childKey) || servicePicks(node, childKey, child)) continue;
       pending.push({ node: child, turfCounts: childKey !== 'property' || turfSummaryCounts(node) });
     }
   }

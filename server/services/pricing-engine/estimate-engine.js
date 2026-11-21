@@ -977,22 +977,6 @@ function wholeHomeInputError(message, code) {
 // A priced exclusion result that already includes the 1-year re-entry guarantee.
 const includesReentryGuarantee = (result) => result?.includesReentryGuarantee === true;
 
-// The services priced from the property's turf area. A quote that selects one
-// lists the property summary's turf flags in its fieldVerify (below). A stored
-// quote that kept the flags and not the list is read with this same rule
-// (service-report/cross-sell.js, the estimate seed's review check).
-// Plugging is not here: it prices only from its own entered area.
-function turfPricedServicesSelected(services) {
-  const picked = services && typeof services === 'object' ? services : {};
-  return !!(
-    picked.lawn ||
-    picked.oneTimeLawn ||
-    picked.lawnPestControl ||
-    picked.topDressing ||
-    picked.dethatching
-  );
-}
-
 // ── Generate Complete Estimate ────────────────────────────────
 function generateEstimate(input) {
   const services = input.services || {};
@@ -3366,6 +3350,15 @@ function generateEstimate(input) {
       priority: 'HIGH',
     });
   }
+  // Plugging is not here: it prices only from its own entered area.
+  const turfPricedServicesSelected = !!(
+    services.lawn ||
+    services.oneTimeLawn ||
+    services.lawnPestControl ||
+    services.topDressing ||
+    services.dethatching
+  );
+
   // ── 8. Build estimate output ───────────────────────────────
   return {
     // Property
@@ -3410,7 +3403,7 @@ function generateEstimate(input) {
     marginWarnings,
     pricingMetadata,
     routingMetadata: pricingMetadata,
-    fieldVerify: turfPricedServicesSelected(services) ? Array.from(new Set(property.turfFlags || [])) : [],
+    fieldVerify: turfPricedServicesSelected ? Array.from(new Set(property.turfFlags || [])) : [],
 
     // Property-driven modifiers & structural notes (v2 port)
     modifiers,
@@ -3450,4 +3443,4 @@ function quickQuote(input) {
   };
 }
 
-module.exports = { generateEstimate, quickQuote, turfPricedServicesSelected, _test: { serviceCreditTargetsLine } };
+module.exports = { generateEstimate, quickQuote, _test: { serviceCreditTargetsLine } };

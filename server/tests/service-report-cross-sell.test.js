@@ -667,6 +667,18 @@ describe('buildReportCrossSell', () => {
       expect(flagged({ engineRequest: { profile }, result: { engineRequest: { profile, options: {} }, lineItems: [{ service: 'pest_control', inputs: { fieldVerifyFlags: profile.fieldVerifyFlags } }] } })).toBe(false);
       // A marker beside the request is still read.
       expect(flagged({ result: { engineRequest: { profile }, lineItems: [{ service: 'pest_control', requiresManualReview: true }] } })).toBe(true);
+
+      // The service picks at the root (pre-push r3): the quote wizard stores
+      // the request body's picks there as submitted, and the lead auto-draft
+      // its mapped picks. An option a caller sent is not a priced row.
+      const picks = { pest: { frequency: 'quarterly', requiresManualReview: true, customQuoteFlag: true }, lawn: { track: 'A', turfConfidence: 'LOW', fieldVerify: ['x'] } };
+      expect(flagged({ services: picks, engineResult: { fieldVerify: [], lineItems: [{ service: 'pest_control' }] } })).toBe(false);
+      // Rows are kept in lists: a list under that key is read, at the root too.
+      expect(flagged({ services: [{ service: 'pest_control', requiresManualReview: true }] })).toBe(true);
+      expect(flagged({ services: picks, result: { recurring: { services: [{ service: 'pest_control', requiresManualReview: true }] } } })).toBe(true);
+      // Only the root holds the picks: an object under that key anywhere else is read.
+      expect(flagged({ result: { services: picks } })).toBe(true);
+      expect(flagged({ automation: { draftEstimateAutomation: { services: picks } } })).toBe(true);
     });
 
     test('the property summary turf grade counts only when the seed replays a lawn size', async () => {
@@ -709,20 +721,21 @@ describe('buildReportCrossSell', () => {
       }
     });
 
-    test('a quote that priced turf counts the property summary\'s turf flags (pre-push r2: the wizard\'s stored shape)', async () => {
-      const { generateEstimate, turfPricedServicesSelected } = require('../services/pricing-engine/estimate-engine');
+    test('a result that does not keep the engine\'s fieldVerify list is read strictly (pre-push r2, r3: the wizard\'s stored shape)', async () => {
+      const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
       const { lineNeedsReviewBeforeExactPrice } = require('../services/estimator-engine/draft-builder');
       const check = (data) => estimateRequiresFieldVerification(data, { replaysLawnSize: false });
       // A vision turf figure the lookup clamped to the parcel: it keeps its
       // MEDIUM grade and its basis, and carries the clamp as a flag.
-      const request = (services) => ({ ...inputs, propertyType: 'Single Family', estimatedTurfSf: 2500, turfCappedToParcel: true, features: {}, services });
-      // What the quote wizard stores of a result (public-quote.js): the
-      // request, the summary's turf flags and a projection of each line. It
-      // drops the result's fieldVerify list.
-      const wizardStored = (services) => {
-        const full = generateEstimate(request(services));
+      const request = (services, turf = { estimatedTurfSf: 2500, turfCappedToParcel: true }) => ({ ...inputs, propertyType: 'Single Family', ...turf, features: {}, services });
+      // What the quote wizard stores (public-quote.js): the submitted picks,
+      // the request, the summary's turf flags when it has any, and a
+      // projection of each line. It drops the result's fieldVerify list.
+      const quote = (services, turf) => {
+        const full = generateEstimate(request(services, turf));
         const stored = {
-          engineInput: request(services),
+          services,
+          engineInput: request(services, turf),
           engineResult: {
             summary: full.summary || {},
             ...(full.property.turfFlags.length ? { property: { turfFlags: full.property.turfFlags } } : {}),
@@ -732,72 +745,84 @@ describe('buildReportCrossSell', () => {
         return { full, stored };
       };
 
-      // The engine lists the summary's flags in fieldVerify for a quote that
-      // priced a turf service, and for no other. The stored quote reads the same.
       const picks = [{ lawn: {} }, { oneTimeLawn: {} }, { lawnPestControl: {} }, { topDressing: {} }, { dethatching: {} }, { pest: {}, lawn: {} },
         { pest: {} }, { mosquito: {} }, { plugging: { areaSqFt: 400 } }];
+      const listed = [];
       for (const services of picks) {
         const name = Object.keys(services).join('+');
-        const { full, stored } = wizardStored(services);
+        const { full, stored } = quote(services);
         expect([name, full.property.turfFlags]).toEqual([name, ['TURF_CAPPED_TO_PARCEL']]);
+        if (full.fieldVerify.length) listed.push(name);
+        // The engine's own answer, kept: its list holds the summary's flags
+        // for a quote that priced a turf service and is empty for any other.
+        // A result stored with that list reads as the list says.
+        expect([name, check({ engineInput: stored.engineInput, engineResult: { fieldVerify: full.fieldVerify, ...stored.engineResult } })])
+          .toEqual([name, full.fieldVerify.length > 0]);
+        // The slim result drops the list, so it does not say what it priced:
+        // the summary's flags count, whatever the stored request names.
         expect([name, stored.engineResult.fieldVerify]).toEqual([name, undefined]);
-        expect([name, check(stored)]).toEqual([name, full.fieldVerify.length > 0]);
+        expect([name, check(stored)]).toEqual([name, true]);
       }
-      // The rule itself, pinned: the five services priced from the turf area.
-      for (const key of ['lawn', 'oneTimeLawn', 'lawnPestControl', 'topDressing', 'dethatching']) {
-        expect([key, turfPricedServicesSelected({ pest: {}, [key]: {} })]).toEqual([key, true]);
-      }
-      expect(turfPricedServicesSelected({ pest: {}, mosquito: {}, plugging: { areaSqFt: 400 }, lawn: false })).toBe(false);
-      expect([undefined, null, 'lawn', ['lawn']].map(turfPricedServicesSelected)).toEqual([false, false, false, false]);
+      expect(listed).toEqual(['lawn', 'oneTimeLawn', 'lawnPestControl', 'topDressing', 'dethatching', 'pest+lawn']);
 
-      const lawnQuote = wizardStored({ lawn: {} });
-      const pestQuote = wizardStored({ pest: {} });
-      // The audit's case: no row of the lawn quote carries a marker, so the
-      // flag list is the only one.
+      const lawnQuote = quote({ lawn: {} });
+      const pestQuote = quote({ pest: {} });
+      // The r2 audit's case: no row of the capped lawn quote carries a marker,
+      // so the summary's flag list is the only one.
       expect(lawnQuote.full.fieldVerify).toEqual(['TURF_CAPPED_TO_PARCEL']);
       expect(lawnQuote.full.lineItems.some((line) => lineNeedsReviewBeforeExactPrice(line))).toBe(false);
-      expect(check(lawnQuote.stored)).toBe(true);
-      expect(check(pestQuote.stored)).toBe(false);
-
-      // The request is read under each key it is stored at.
+      // The r3 audit's case: a stored request that names no turf service
+      // beside a result with a lawn row. The request does not clear the flags.
+      expect(check({ engineInput: pestQuote.stored.engineInput, engineResult: lawnQuote.stored.engineResult })).toBe(true);
       for (const key of ['inputs', 'engineInputs', 'engineInput']) {
-        expect([key, check({ [key]: lawnQuote.stored.engineInput, engineResult: lawnQuote.stored.engineResult })]).toEqual([key, true]);
-        expect([key, check({ [key]: pestQuote.stored.engineInput, engineResult: pestQuote.stored.engineResult })]).toEqual([key, false]);
+        expect([key, check({ [key]: pestQuote.stored.engineInput, engineResult: lawnQuote.stored.engineResult })]).toEqual([key, true]);
       }
+
+      // A slim result with no flag on its summary has nothing to count.
+      const noFlags = { estimatedTurfSf: 2500 };
+      for (const services of [{ lawn: {} }, { pest: {} }]) {
+        const { full, stored } = quote(services, noFlags);
+        expect(full.property.turfFlags).toEqual([]);
+        expect(stored.engineResult.property).toBeUndefined();
+        expect(check(stored)).toBe(false);
+      }
+
       const summary = { property: { turfFlags: ['TURF_CAPPED_TO_PARCEL'] } };
       const asking = (services) => ({ ...inputs, services });
-      // Either stored request that priced turf is enough.
-      expect(check({ inputs: asking({ pest: {} }), engineInput: asking({ lawn: {} }), result: summary })).toBe(true);
-      // A request that can answer outranks a kept list: a stale empty list
-      // never clears a turf quote.
-      expect(check({ inputs: asking({ lawn: {} }), result: { fieldVerify: [], ...summary } })).toBe(true);
-      // A request that names no services cannot answer. Then a result that
-      // keeps its list holds the engine's answer, and a result with neither
-      // is read strictly.
-      for (const noAnswer of [inputs, asking(['lawn']), asking(null)]) {
-        expect(check({ inputs: noAnswer, result: { fieldVerify: [], ...summary } })).toBe(false);
-        expect(check({ inputs: noAnswer, result: summary })).toBe(true);
+      // The list decides, never the request: a kept empty list clears, and a
+      // missing list counts, with any request or none.
+      for (const stored of [undefined, inputs, asking({ pest: {} }), asking({ lawn: {} }), asking(['lawn']), asking(null)]) {
+        expect(check({ inputs: stored, result: { fieldVerify: [], ...summary } })).toBe(false);
+        expect(check({ inputs: stored, result: summary })).toBe(true);
       }
-      expect(check({ result: summary })).toBe(true);
+      // Each result answers for its own summary.
+      expect(check({ result: { fieldVerify: [], ...summary }, engineResult: summary })).toBe(true);
+      // A list that is not a list is no answer.
+      expect(check({ result: { fieldVerify: 'none', ...summary } })).toBe(true);
       // The summary's turf grade follows the same rule as its flags.
-      expect(check({ inputs: asking({ lawn: {} }), result: { fieldVerify: [], property: { turfConfidence: 'LOW' } } })).toBe(true);
-      expect(check({ inputs: asking({ pest: {} }), result: { property: { turfConfidence: 'LOW' } } })).toBe(false);
+      expect(check({ result: { property: { turfConfidence: 'LOW' } } })).toBe(true);
+      expect(check({ result: { fieldVerify: [], property: { turfConfidence: 'LOW' } } })).toBe(false);
+      expect(check({ result: { property: { turfBasis: 'plausibleMaxTurfCap' } } })).toBe(true);
       // A summary with no flag and a supplied grade has nothing to count.
-      expect(check({ inputs: asking({ lawn: {} }), result: { property: { turfSf: 2500, turfConfidence: 'HIGH', turfBasis: 'measuredTurfSf', turfFlags: [] } } })).toBe(false);
-      // A replayed lawn size counts the flags whatever the quote priced, and
+      expect(check({ result: { property: { turfSf: 2500, turfConfidence: 'HIGH', turfBasis: 'measuredTurfSf', turfFlags: [] } } })).toBe(false);
+      // A replayed lawn size counts the flags beside a kept empty list, and
       // so does a caller that states nothing.
-      expect(estimateRequiresFieldVerification(pestQuote.stored, { replaysLawnSize: true })).toBe(true);
-      expect(estimateRequiresFieldVerification(pestQuote.stored)).toBe(true);
+      const pestKept = { engineInput: pestQuote.stored.engineInput, engineResult: { fieldVerify: [], ...pestQuote.stored.engineResult } };
+      expect(check(pestKept)).toBe(false);
+      expect(estimateRequiresFieldVerification(pestKept, { replaysLawnSize: true })).toBe(true);
+      expect(estimateRequiresFieldVerification(pestKept)).toBe(true);
       // A flag list on a row is never the summary.
-      expect(check({ inputs: asking({ pest: {} }), result: { fieldVerify: [], lineItems: [{ service: 'lawn_care', turfFlags: ['FIELD_VERIFY_TURF_SQFT'] }] } })).toBe(true);
-      expect(check({ inputs: asking({ pest: {} }), result: { fieldVerify: [], lineItems: [{ service: 'lawn_care', turfFlags: [] }] } })).toBe(false);
+      expect(check({ result: { fieldVerify: [], lineItems: [{ service: 'lawn_care', turfFlags: ['FIELD_VERIFY_TURF_SQFT'] }] } })).toBe(true);
+      expect(check({ result: { fieldVerify: [], lineItems: [{ service: 'lawn_care', turfFlags: [] }] } })).toBe(false);
 
       // Through the loader: the wizard's request holds no lawn size to replay.
       const { loadEstimateSeed } = _private;
       const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(SEED_HERE);
       const seedOf = (data) => loadEstimateSeed(pagedEstimates([seedRow('est-1', SEED_HERE, 'accepted', 0, data)]).database, 'cust-1', street);
       expect(await seedOf(lawnQuote.stored)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: true });
-      expect(await seedOf(pestQuote.stored)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: false });
+      expect(await seedOf(pestQuote.stored)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: true });
+      expect(await seedOf(pestKept)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: false });
+      expect(await seedOf(quote({ pest: {} }, noFlags).stored)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: false });
     });
 
     test('an offer on a seed with a marked mapped row is a quote button, and input-side flags still price', async () => {
@@ -836,17 +861,29 @@ describe('buildReportCrossSell', () => {
       expect(priced.mode).toBe('priced');
       expect(priced.option.perVisit).toBeGreaterThan(0);
 
-      // The quote wizard's stored shape: the summary's turf flags with no
-      // fieldVerify list. A quote that priced lawn demotes; one that did not, prices.
-      const wizard = (services) => args({
-        inputs: { ...inputs, services },
-        engineResult: { summary: {}, property: { turfFlags: ['TURF_CAPPED_TO_PARCEL'] }, lineItems: [{ service: 'lawn_care', turfBasis: 'estimatedTurfSf' }] },
+      // The quote wizard's stored shape: the submitted picks at the root and a
+      // slim result with no fieldVerify list. With turf flags on its summary
+      // the offer is a quote button, whatever the stored request names.
+      // Without them it prices, and a submitted option is not a marker.
+      const wizard = (services, row, property) => args({
+        services,
+        engineInput: { ...inputs, services },
+        engineResult: { summary: {}, ...(property ? { property } : {}), lineItems: [row] },
       });
-      const wizardLawn = await buildReportCrossSell(SERVICE(), dbFor(wizard({ lawn: {} })), { propertyLookup: missLookup });
-      expect(wizardLawn.mode).toBe('quote_cta');
-      expect(wizardLawn.option).toBeNull();
-      const wizardOther = await buildReportCrossSell(SERVICE(), dbFor(wizard({ mosquito: {} })), { propertyLookup: missLookup });
-      expect(wizardOther.mode).toBe('priced');
+      const cappedSummary = { turfFlags: ['TURF_CAPPED_TO_PARCEL'] };
+      const lawnRow = { service: 'lawn_care', turfBasis: 'estimatedTurfSf' };
+      for (const quote of [wizard({ lawn: {} }, lawnRow, cappedSummary), wizard({ mosquito: {} }, lawnRow, cappedSummary), wizard({ mosquito: {} }, { service: 'mosquito' }, cappedSummary)]) {
+        const offer = await buildReportCrossSell(SERVICE(), dbFor(quote), { propertyLookup: missLookup });
+        expect(offer.mode).toBe('quote_cta');
+        expect(offer.option).toBeNull();
+      }
+      const wizardClean = await buildReportCrossSell(
+        SERVICE(),
+        dbFor(wizard({ mosquito: { tier: 'gold', requiresManualReview: true } }, { service: 'mosquito' })),
+        { propertyLookup: missLookup },
+      );
+      expect(wizardClean.mode).toBe('priced');
+      expect(wizardClean.option.perVisit).toBeGreaterThan(0);
     });
   });
 
