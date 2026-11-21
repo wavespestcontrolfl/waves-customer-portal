@@ -277,14 +277,15 @@ describe('blogHeroSocialImageUrl', () => {
     });
 
     test('after Facebook reads the page, the post waits for its picture fetch', async () => {
-      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '25';
-      const timers = jest.spyOn(global, 'setTimeout');
-      let waitedBeforePost = null;
+      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '60';
+      let readAt = null;
+      let postedAt = null;
       global.fetch = jest.fn(async (url) => {
         if (String(url) === 'https://graph.facebook.com/v25.0/') {
+          readAt = Date.now();
           return { ok: true, json: async () => ({ id: PAGE, updated_time: '2026-11-21T02:06:03+0000' }), text: async () => '' };
         }
-        waitedBeforePost = timers.mock.calls.some(([, ms]) => ms === 25);
+        postedAt = Date.now();
         return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
       });
 
@@ -297,9 +298,37 @@ describe('blogHeroSocialImageUrl', () => {
         });
 
         expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
-        expect(waitedBeforePost).toBe(true);
+        // The post goes out only after the wait has passed (a timer never fires early
+        // by more than a millisecond or two).
+        expect(postedAt - readAt).toBeGreaterThanOrEqual(55);
       } finally {
-        timers.mockRestore();
+        delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+      }
+    });
+
+    test('a read with no fresh-read time posts at once', async () => {
+      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '4000';
+      let readAt = null;
+      let postedAt = null;
+      global.fetch = jest.fn(async (url) => {
+        if (String(url) === 'https://graph.facebook.com/v25.0/') {
+          readAt = Date.now();
+          return { ok: true, json: async () => ({ id: PAGE }), text: async () => '' };
+        }
+        postedAt = Date.now();
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+
+      try {
+        await social.publishToAll({
+          title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+          imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+          channels: ['facebook'], customContent: { facebook: 'Caption' },
+          noAiImage: true,
+        });
+
+        expect(postedAt - readAt).toBeLessThan(1000);
+      } finally {
         delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
       }
     });

@@ -1458,8 +1458,13 @@ async function renderBrandCardUrl(cardInput, platform) {
 // 2026-08 to 2026-11-20), and a later re-read never changed a post already
 // made. So ask Facebook to read the page before the post, then give its picture
 // fetch a moment. Best-effort: a miss never blocks the post.
+//
+// The read took about 1.1 s on 2026-11-20. Read timeout + wait stay under 10 s
+// together, so a request-bound publish (Instagram alone may wait 45 s) keeps
+// its place under the proxy timeout.
+const FACEBOOK_PREVIEW_READ_TIMEOUT_MS = 6000;
 const FACEBOOK_PREVIEW_SETTLE_DEFAULT_MS = 3000;
-const FACEBOOK_PREVIEW_SETTLE_MAX_MS = 10000;
+const FACEBOOK_PREVIEW_SETTLE_MAX_MS = 4000;
 
 function facebookPreviewSettleMs() {
   const raw = process.env.FACEBOOK_PREVIEW_SETTLE_MS;
@@ -1474,7 +1479,7 @@ async function refreshFacebookLinkPreview(link, token) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: link, scrape: true, access_token: token }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS),
     });
     if (!res.ok) {
       logger.warn(`[social] Facebook link preview refresh returned ${res.status}`);
