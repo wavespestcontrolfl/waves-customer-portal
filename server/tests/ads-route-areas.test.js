@@ -121,6 +121,16 @@ describe('buildRouteAreas: one technician', () => {
     }));
     // 600 - (7 * 45 + 120) - 20 * 8 = 5 open minutes.
     expect(dayOf(after, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'minutes', route_slots: 2, open_min: 5, room: false, zip_reason: 'full' });
+    // A stop moved or made longer after the route check: the count is the same, its row's change time is later.
+    const moved = buildRouteAreas(input({
+      stops: [stop({ changedAt: '2026-11-23T13:00:00.000Z' }), stop({ changedAt: '2026-11-23T13:45:00.000Z' })], routeCheck: { ...seenTwo, days: [{ ...seenTwo.days[0], slots: 0 }] },
+    }));
+    expect(dayOf(moved, T1, WEEKDAYS[1])).toMatchObject({ stops: 2, route_stops: 2, route_slots: 0, room_basis: 'minutes', room: true });
+    // The same day with no row changed since the run keeps the route check's measure.
+    const still = buildRouteAreas(input({
+      stops: [stop({ changedAt: '2026-11-23T13:00:00.000Z' }), stop({ changedAt: '2026-11-23T13:30:00.000Z' })], routeCheck: { ...seenTwo, days: [{ ...seenTwo.days[0], slots: 0 }] },
+    }));
+    expect(dayOf(still, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'route_check', room: false });
     // An entry with no stop count is not used.
     const noCount = buildRouteAreas(input({ stops: [stop()], routeCheck: { at, days: [{ date: WEEKDAYS[1], technicianId: T1, slots: 0, skip: null }] } }));
     expect(dayOf(noCount, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'minutes', room: true });
@@ -486,7 +496,7 @@ describe('recordRouteAreas', () => {
     const { conn, store, upserts, state } = fakeConn({
       stopRows: [
         { technician_id: T1, day: '2026-11-23', zip: '34201', minutes: 60, minutes_left: 0, done: true, booked: true },
-        { technician_id: T1, day: '2026-11-24', zip: '34203', minutes: '120', minutes_left: '90', done: false, booked: true },
+        { technician_id: T1, day: '2026-11-24', zip: '34203', minutes: '120', minutes_left: '90', done: false, booked: true, changed_at: new Date('2026-11-22T20:00:00Z') },
         { technician_id: null, day: '2026-11-24', zip: null, minutes: 60, minutes_left: 60, done: false, booked: false },
       ],
       lineRows: [{ service_category: 'general', home_technician_id: T1, gap_technician_id: T1 }],
@@ -497,7 +507,10 @@ describe('recordRouteAreas', () => {
     const [sql, bindings] = conn.raw.mock.calls[0];
     expect(bindings).toEqual(['2026-11-23', '2026-11-24', ...NOT_A_ROUTE_STOP_STATUSES]);
     expect(sql).toMatch(/ss\.status NOT IN \(\?, \?, \?, \?\)/);
-    expect(sql).toMatch(/ss\.reservation_expires_at IS NULL OR ss\.reservation_expires_at > now\(\)/);
+    // A booked visit or a live hold, as occupancy counts them: a customer-linked visit keeps counting after its old
+    // hold time passes; an unclaimed hold counts until it expires.
+    expect(sql).toMatch(/AND \(ss\.reservation_expires_at IS NULL OR ss\.customer_id IS NOT NULL OR ss\.reservation_expires_at > now\(\)\)/);
+    expect(sql).toMatch(/GREATEST\(MAX\(ss\.updated_at\), MAX\(ss\.created_at\)\) AS changed_at/);
     expect(sql).toMatch(/ss\.visit_id IS NOT NULL/);
     // A live hold with no customer yet is its own stop: without the row id its key would be NULL.
     expect(sql).toMatch(/COALESCE\(ss\.customer_id::text, 'hold:' \|\| ss\.id::text\)/);
@@ -572,7 +585,11 @@ describe('recordRouteAreas', () => {
     try {
       const { conn, store } = fakeConn();
       expect((await recordRouteAreas({ now: NOW, conn })).rule.territory_live).toBe(true);
-      expect(JSON.parse(store[HISTORY_KEY])[0].rule.territory_live).toBe(true);
+      const entry = JSON.parse(store[HISTORY_KEY])[0];
+      expect(entry.rule.territory_live).toBe(true);
+      // A line decided ZIP by ZIP can hold part of an area: the history then keeps each date's ZIP list.
+      expect(entry.lines.pest.days.map((d) => d.zips)).toEqual([[], []]);
+      expect(entry.lines.lawn.days[1]).toEqual({ date: '2026-11-24', technician_ids: [T1], open_min: 600, zips: [] });
     } finally {
       delete featureGates.territoryRoutingLive;
     }

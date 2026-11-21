@@ -17,8 +17,9 @@
  *   route_check  a date after today that the hourly route check measured in the last ROUTE_CHECK_MAX_AGE_MIN minutes:
  *                at least one job fits one of its real openings, on the hour, with its drive (route_check_runs
  *                `slots`). Free time in pieces too short for a job does not count. The measure is used only while
- *                the day is as the route check saw it: the same number of stops for the technician, and no
- *                unassigned work (the route check skips such a day). A booking since then puts the day on `minutes`.
+ *                the day is as the route check saw it: the same number of stops for the technician, no stop row
+ *                changed since its run, and no unassigned work (the route check skips such a day). A booking or a
+ *                move since then puts the day on `minutes`.
  *   minutes      today, and a date the route check did not measure (no fresh run, or a day it skips): the open
  *                minutes of the day hold one more job with its drive (close-gaps SLOT_MIN). This is a daily total,
  *                so it is a ceiling: the route check does not measure today (its room depends on where the van is).
@@ -172,10 +173,12 @@ function techDay(input, ctx, techId, date) {
   // Room needs a stop left under the gap rule's limit for that weekday (the owner's setting, which the live 7-day
   // budget rule already follows) and a job that fits: one of the route check's real openings when it measured this
   // date, else the open minutes of the day. Every count is stored, so each test can be counted again alone.
-  // The route check's measure holds only while the day is as it saw it: a booking since then (one more stop for him,
-  // or work with no technician, which the route check itself skips) puts the day back on the minute total.
+  // The route check's measure holds only while the day is as it saw it. A booking since then (one more stop for him,
+  // or work with no technician, which the route check itself skips) or a stop changed in place since then (moved,
+  // made longer: its row's change time is after the route check's run) puts the day back on the minute total.
   const seen = date === input.dates[0] ? undefined : ctx.routeDays.get(`${techId}:${date}`);
-  const measured = seen !== undefined && seen.stops === mine.length && unassigned.stops_left === 0;
+  const changedSince = mine.some((s) => s.changedAt && s.changedAt > ctx.routeAt);
+  const measured = seen !== undefined && seen.stops === mine.length && unassigned.stops_left === 0 && !changedSince;
   const room = staffed && openStops >= 1 && (measured ? seen.slots >= 1 : openMin >= input.slotMin);
   const { areas, unmapped } = areasOfStops(mine, ctx.maps.areaOfZip);
   const zipPart = zipRule({ staffed, room, stopCount: mine.length, areas, techId }, ctx.maps, input.territory);
@@ -276,6 +279,8 @@ function buildRouteAreas(input) {
     unassigned: new Map(unassignedByDate(input).map((u) => [u.date, u])),
     // `<technician>:<card line>` for a technician who is off for that line.
     lineOff: new Set(input.lineOff || []),
+    // The route check's run time (ISO, so it compares as text with a stop's change time); '' when there is none.
+    routeAt: input.routeCheck?.at || '',
     // `<technician>:<date>` -> what the route check measured (the jobs that fit, the stops it saw); only the
     // tech-days it measured.
     routeDays: new Map((input.routeCheck?.days || [])
@@ -331,7 +336,11 @@ const BOOKED_STOP_SQL = `(ss.customer_id IS NOT NULL OR ss.reservation_expires_a
 // A service's minutes. A stored 0 is a missing estimate, as scheduling occupancy reads it (occupancy.js).
 const DURATION_SQL = `COALESCE(NULLIF(ss.estimated_duration_minutes, 0), NULLIF(sv.default_duration_minutes, 0), ${JOB_MIN})`;
 
-/** The physical stops of the two dates, one row each (same row filter as the gap rule's window read). */
+/**
+ * The physical stops of the two dates, one row each. Rows: not cancelled, skipped, no-show or rescheduled, and a booked
+ * visit or a live hold as occupancy counts them (reservation-occupancy bookedVisitOrLiveHold): a customer-linked visit
+ * counts even when it keeps its old hold time; an unclaimed hold counts until it expires.
+ */
 async function readStops(conn, dates) {
   const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
   const { normalizeZip } = require('../territory');
@@ -343,14 +352,15 @@ async function readStops(conn, dates) {
       SUM(${DURATION_SQL})::int AS minutes,
       COALESCE(SUM(${DURATION_SQL}) FILTER (WHERE ss.status <> 'completed'), 0)::int AS minutes_left,
       bool_and(ss.status = 'completed') AS done,
-      bool_or(${BOOKED_STOP_SQL}) AS booked
+      bool_or(${BOOKED_STOP_SQL}) AS booked,
+      GREATEST(MAX(ss.updated_at), MAX(ss.created_at)) AS changed_at
     FROM scheduled_services ss
     LEFT JOIN customers c ON c.id = ss.customer_id
     LEFT JOIN customer_properties cp ON cp.id = ss.property_id AND cp.customer_id = ss.customer_id
     LEFT JOIN services sv ON sv.id = ss.service_id
     WHERE ss.scheduled_date BETWEEN ?::date AND ?::date
       AND ss.status NOT IN (${marks})
-      AND (ss.reservation_expires_at IS NULL OR ss.reservation_expires_at > now())
+      AND (ss.reservation_expires_at IS NULL OR ss.customer_id IS NOT NULL OR ss.reservation_expires_at > now())
     GROUP BY ss.technician_id, ss.scheduled_date, ${STOP_KEY_SQL}`,
   [dates[0], dates[dates.length - 1], ...NOT_A_ROUTE_STOP_STATUSES]);
   return (result.rows || []).map((r) => ({
@@ -361,6 +371,7 @@ async function readStops(conn, dates) {
     minutesLeft: parseInt(r.minutes_left, 10) || 0,
     done: r.done === true,
     booked: r.booked === true,
+    changedAt: r.changed_at ? new Date(r.changed_at).toISOString() : null,
   }));
 }
 
@@ -468,11 +479,17 @@ async function loadRouteAreasInput(conn, now) {
   };
 }
 
-/** A line's compact history part: its area keys, its open minutes (both dates), and the technicians it followed each date. */
-const compactLine = (line) => ({
+/**
+ * A line's compact history part: its area keys, its open minutes (both dates), and the technicians it followed each
+ * date. keepZips (territory routing live): each date keeps the line's ZIP list, because a line decided ZIP by ZIP can
+ * hold part of an area, which the area key cannot say.
+ */
+const compactLine = (line, keepZips) => ({
   areas: line.areas,
   open_min: sum(line.days, (d) => d.open_min),
-  days: line.days.map((d) => ({ date: d.date, technician_ids: d.technician_ids, open_min: d.open_min })),
+  days: line.days.map((d) => ({
+    date: d.date, technician_ids: d.technician_ids, open_min: d.open_min, ...(keepZips ? { zips: d.zips } : {}),
+  })),
 });
 
 /**
@@ -499,7 +516,7 @@ function compactEntry(record) {
       route_check_at: routeCheckAt,
     },
     unassigned: record.unassigned.map((u) => ({ date: u.date, stops_left: u.stops_left, minutes_left: u.minutes_left })),
-    lines: { pest: compactLine(record.lines.pest), lawn: compactLine(record.lines.lawn) },
+    lines: { pest: compactLine(record.lines.pest, territoryLive), lawn: compactLine(record.lines.lawn, territoryLive) },
     techs: record.technicians.map((t) => ({
       id: t.id,
       days: t.days.map((d) => ({
