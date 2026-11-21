@@ -844,19 +844,31 @@ describe('streetLineHoldsLocality', () => {
 });
 
 describe('streetLineNamesStreet (codex pre-push r31 P1 on #8132)', () => {
-  test('a street names one, with or without a unit in either position; a state road counts', () => {
+  const namesStreet = (line) => streetLineNamesStreet({ address_line1: line, city: 'Sarasota' });
+
+  test('a street names one, with or without a unit in either position; a road number in any spelling counts', () => {
     for (const line of ['1 Main St', '1 Main St Apt 4', '1 Main St Apt#4', '1 Main St Apt-4', 'Unit 4, 1 Main St',
-      'Apt 204 at 1 Main St', '#204 900 Bayview Ter', 'Bldg 9, Apt 204, 123 Main St', '12345 FL-70', 'Florida 70',
-      '4500 US-41', '12345 SR64', 'Lot 12 Sunny Acres', '100 Space Coast Pkwy', '123 Unity Way']) {
-      expect([line, streetLineNamesStreet(line)]).toEqual([line, true]);
+      'Apt 204 at 1 Main St', '#204 900 Bayview Ter', 'Bldg 9, Apt 204, 123 Main St', '12345 FL-70', '12345 FL 70',
+      '12345 FL70', 'Florida 70', 'Highway 70', '4500 US-41', '12345 SR64', '123 1st', 'Lot 12 Sunny Acres',
+      '100 Space Coast Pkwy', '123 Unity Way', '123 Sarasota Blvd', '123 Main St, Sarasota, FL 34236']) {
+      expect([line, namesStreet(line)]).toEqual([line, true]);
     }
   });
 
-  test('a blank line, a unit alone, a lone unit value, or a number with a unit or a city names none', () => {
-    for (const line of ['', null, 'Apt 4', '#4', 'Apt#4', 'Apt4', 'Apt AB', 'Bldg 2 Apt 4', 'Apt 4, Bldg 2', '4', '4B',
-      '123 Apt 4', '123 Apt#4', '123 Apt4', '123 Apt-4', '#PH1', '123 Ste 4B', 'Apt 4 12', 'Lot 12',
-      '123, Sarasota, FL 34236']) {
-      expect([line, streetLineNamesStreet(line)]).toEqual([line, false]);
+  test('a blank line, a unit alone, a lone unit value, or a number with a unit names none', () => {
+    for (const line of ['', null, 'Apt 4', '#4', 'Apt#4', 'Apt4', 'Apt AB', 'Bldg 2 Apt 4', 'Apt 4, Bldg 2', 'Bldg 2 Fl 3',
+      '4', '4B', '123 B', 'PH1', 'TH12', '#AB', '123 Apt 4', '123 Apt#4', '123 Apt4', '123 Apt-4', '123 Unit-A', '123 Ste 4B',
+      'Apt 4 12', 'Lot 12', '123, Bradenton, FL 34203']) {
+      expect([line, namesStreet(line)]).toEqual([line, false]);
     }
+  });
+
+  test('a city is not a street: the row\'s own city, or a segment with no house number before the state or ZIP', () => {
+    for (const line of ['Sarasota', '123 Sarasota', 'Apt 4, Sarasota, FL 34236', 'Apt 4 Sarasota FL 34236',
+      'Apt 4, Bradenton, FL 34203', 'Apt 4, Bradenton FL 34203', 'Bradenton, FL']) {
+      expect([line, namesStreet(line)]).toEqual([line, false]);
+    }
+    // The row's city is what makes a lone city word a city.
+    expect(streetLineNamesStreet({ address_line1: 'Bradenton', city: 'Sarasota' })).toBe(true);
   });
 });
