@@ -1395,7 +1395,10 @@ async function sendCampaign(sendId, opts = {}) {
       const mailboxBySub = new Map(freshRows.map((r) => [r.id, r.mailbox_customer_ids]));
       // The "Your home" facts, read now for exactly the readers this batch mails: after the
       // eligibility re-check and the relink adoption, before the personalizations are built.
-      const homeFacts = homePlanned ? await loadHomeFactsSafe(chunkToSend.map((s) => s.id), send.id) : null;
+      // The block is dark with its gate: an issue a person sends or resumes by hand while
+      // GATE_PEST_INSIDER_AUTO_SEND is off carries none. Read per batch, so turning the gate
+      // off stops the block from the next batch on.
+      const homeFacts = homePlanned && pestInsiderAutoSendLive() ? await loadHomeFactsSafe(chunkToSend.map((s) => s.id), send.id) : null;
       const recipients = chunkToSend.map((s) => {
         const attemptToken = attemptTokenBySub.get(s.id);
         const pctx = s.customer_id ? personalizationByCustomer.get(s.customer_id) : null;

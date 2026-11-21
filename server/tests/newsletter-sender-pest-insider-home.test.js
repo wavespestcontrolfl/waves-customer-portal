@@ -180,9 +180,16 @@ const expectBlock = (r) => {
 };
 const one = (over = {}) => ({ send: sendRow({ segment_filter: PLAN([1]) }), subscribers: [SUBS[0]], deliveries: [DELIVERIES[0]], mailbox: { 1: [C1] }, ...over });
 
+const GATE = 'GATE_PEST_INSIDER_AUTO_SEND';
+const gateBefore = process.env[GATE];
 beforeEach(() => {
   jest.clearAllMocks();
   mockLoadHomeFacts.mockReset();
+  process.env[GATE] = 'true';
+});
+afterAll(() => {
+  if (gateBefore === undefined) delete process.env[GATE];
+  else process.env[GATE] = gateBefore;
 });
 
 describe('sendCampaign: the "Your home" tokens', () => {
@@ -227,6 +234,19 @@ describe('sendCampaign: the "Your home" tokens', () => {
 
     expect(mockLoadHomeFacts).not.toHaveBeenCalled();
     for (const r of recipients()) expectEmpty(r);
+  });
+
+  test.each([undefined, 'false', '1'])('with GATE_PEST_INSIDER_AUTO_SEND = %p an issue sent by hand carries no block and reads no facts', async (value) => {
+    if (value === undefined) delete process.env[GATE];
+    else process.env[GATE] = value;
+    buildDb(one());
+    mockLoadHomeFacts.mockResolvedValue(new Map([[1, factsFor(C1)]]));
+
+    await sendCampaign('send-1');
+
+    expect(mockLoadHomeFacts).not.toHaveBeenCalled();
+    expect(recipients()).toHaveLength(1);
+    expectEmpty(recipients()[0]);
   });
 
   test('the facts are read once per batch, after that batch\'s eligibility re-check, for exactly the readers it mails', async () => {

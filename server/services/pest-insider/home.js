@@ -66,21 +66,41 @@ const dayNumber = (ymd) => {
   return Date.UTC(y, m - 1, d) / DAY_MS;
 };
 
+// "Is this address the customer's home?", by the portal's one unit-aware rule for readers that
+// speak about the home itself (stamped-address.js visitAtCustomerHome: the pet-named text, Away
+// Watch). A unit on one side only is another premise; an address with no street is the home.
+function addressIsHome(address, home) {
+  const { visitAtCustomerHome } = require('../stamped-address');
+  return visitAtCustomerHome({
+    service_address_line1: address.address_line1, service_address_line2: address.address_line2,
+    service_address_city: address.city, service_address_zip: address.zip,
+    address_line1: home.address_line1, address_line2: home.address_line2, city: home.city, zip: home.zip,
+  });
+}
+
+// One appointment's place. Its own property pointer and address stamp (migration
+// 20260709000001) come first; an appointment with no location of its own takes its source
+// estimate's (customer-properties.js propertyRemovalDependents reads a visit the same way);
+// with none of these it was at the customer's address on file.
+function appointmentAtHome(stamp, home, homePropertyId) {
+  const elsewhere = (propertyId) => Boolean(propertyId) && String(propertyId) !== homePropertyId;
+  if (elsewhere(stamp.property_id)) return false;
+  if (String(stamp.address_line1 ?? '').trim()) return addressIsHome(stamp, home);
+  if (stamp.property_id) return true;
+  if (elsewhere(stamp.estimate_property_id)) return false;
+  if (!String(stamp.estimate_address ?? '').trim()) return true;
+  const quoted = require('../estimate-property-linkage').parseEstimateAddress(stamp.estimate_address);
+  return Boolean(quoted) && addressIsHome(quoted, home);
+}
+
 // True when every appointment behind the last day's records was at this home. An
-// appointment can be booked at another address than the one on file (its property
-// pointer, or the address stamped on it: migration 20260709000001), and a visit there
-// is not a visit to "your home". An appointment with no pointer and no stamp was at
-// the customer's address on file; a record with no appointment predates the link.
+// appointment can be booked at another address than the one on file, and a visit there
+// is not a visit to "your home". A record with no appointment predates the link.
 function lastVisitIsAtHome(row) {
-  const { addressCanNameProperty } = require('../customer-properties');
   const stamps = Array.isArray(row.last_stamps) ? row.last_stamps : [];
   const home = { address_line1: row.home_line1, address_line2: row.home_line2, city: row.home_city, zip: row.home_zip };
-  return stamps.every((stamp) => {
-    if (stamp.property_id && String(stamp.property_id) !== String(row.home_property_id ?? '')) return false;
-    if (!String(stamp.address_line1 ?? '').trim()) return true;
-    // The portal's own "does this address name that property" rule (suffixes, units, ZIP).
-    return addressCanNameProperty(stamp, home);
-  });
+  const homePropertyId = String(row.home_property_id ?? '');
+  return stamps.every((stamp) => appointmentAtHome(stamp, home, homePropertyId));
 }
 
 // One reader's facts from its row, or null when the customer is commercial, the last
@@ -130,9 +150,11 @@ JOIN LATERAL (
   SELECT array_agg(DISTINCT r.service_type) AS last_types,
          COALESCE(json_agg(json_build_object(
            'property_id', ss.property_id, 'address_line1', ss.service_address_line1, 'address_line2', ss.service_address_line2,
-           'city', ss.service_address_city, 'zip', ss.service_address_zip)) FILTER (WHERE ss.id IS NOT NULL), '[]'::json) AS last_stamps
+           'city', ss.service_address_city, 'zip', ss.service_address_zip,
+           'estimate_property_id', e.property_id, 'estimate_address', e.address)) FILTER (WHERE ss.id IS NOT NULL), '[]'::json) AS last_stamps
   FROM service_records r
   LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id
+  LEFT JOIN estimates e ON e.id = ss.source_estimate_id
   WHERE r.customer_id = c.id AND COALESCE(r.status, 'completed') = 'completed' AND r.service_date = v.last_date
 ) t ON true
 WHERE ns.id IN (${idList})

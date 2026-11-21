@@ -269,6 +269,12 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     await db('service_records').insert({ id: randomUUID(), customer_id: customerId, service_date: date, service_type: 'Quarterly Pest Control', status: 'completed', scheduled_service_id: visitId });
   }
 
+  // An estimate of the customer with the address it quoted; returns its id.
+  async function estimate(customerId, address) {
+    const [inserted] = await db('estimates').insert({ id: randomUUID(), customer_id: customerId, address, estimate_data: JSON.stringify({}) }).returning('id');
+    return typeof inserted === 'object' ? inserted.id : inserted;
+  }
+
   test('a last visit booked at another address or another property has no entry; the home\'s own stamp, or none, does', async () => {
     const plain = await customer();
     await visitRecord(plain, '2026-11-05');
@@ -288,10 +294,18 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     const [strangerProperty] = await db('customer_properties').insert({ customer_id: stranger, occupancy_type: 'owner_occupied', active: true }).returning('id');
     const pointed = await customer();
     await visitRecord(pointed, '2026-11-05', { property_id: typeof strangerProperty === 'object' ? strangerProperty.id : strangerProperty });
+    // A unit on the stamp that the home on file does not have is another premise.
+    const unit = await customer();
+    await visitRecord(unit, '2026-11-05', { service_address_line1: '100 Test Lane', service_address_line2: 'Apt 4', service_address_city: 'Test City', service_address_zip: '00000' });
+    // An appointment with no location of its own takes its source estimate's address.
+    const quotedHome = await customer();
+    await visitRecord(quotedHome, '2026-11-05', { source_estimate_id: await estimate(quotedHome, '100 Test Lane, Test City, FL 00000') });
+    const quotedElsewhere = await customer();
+    await visitRecord(quotedElsewhere, '2026-11-05', { source_estimate_id: await estimate(quotedElsewhere, '9 Other Road, Test City, FL 00000') });
     const readers = {};
-    for (const [name, id] of Object.entries({ plain, same, elsewhere, older, own, pointed })) readers[name] = await reader(id);
+    for (const [name, id] of Object.entries({ plain, same, elsewhere, older, own, pointed, unit, quotedHome, quotedElsewhere })) readers[name] = await reader(id);
     const facts = await loadHomeFacts(db, Object.values(readers), NOW);
-    expect(Object.keys(readers).filter((name) => facts.has(readers[name])).sort()).toEqual(['older', 'own', 'plain', 'same']);
+    expect(Object.keys(readers).filter((name) => facts.has(readers[name])).sort()).toEqual(['older', 'own', 'plain', 'quotedHome', 'same']);
   });
 
   test('a last visit over 365 days old has no entry; exactly 365 days old still does; no record at all has none', async () => {
