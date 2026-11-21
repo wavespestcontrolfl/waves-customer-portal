@@ -198,6 +198,24 @@ describe('planStartBlocker', () => {
         expect(await blocker(world({ customer: { contact_role, property_type: 'condo' } }))).toBeNull();
       });
 
+      // The proof knows a manager by the exact word, and the estimator's resolver by a pattern (manager,
+      // management). They must agree on every role the app can save: a role added later that the estimator
+      // reads as a manager fails here until the proof reads it too.
+      test('every contact role is a manager for the proof exactly where the estimator reads one', async () => {
+        const { commercialCategoryConflict } = require('../services/estimator-engine/unit-scope-model');
+        const { CONTACT_ROLES } = require('../constants/contact-roles');
+        expect(CONTACT_ROLES).toContain('property_manager');
+        const answers = [];
+        const expected = [];
+        for (const contact_role of CONTACT_ROLES) {
+          const extraction = { caller: { relationship_to_property: contact_role }, property: { property_type: 'condo' } };
+          expected.push([contact_role, commercialCategoryConflict({ extraction, intent: null }) ? 'commercial' : null]);
+          answers.push([contact_role, await blocker(world({ customer: { contact_role, property_type: 'condo' } }))]);
+        }
+        expect(answers).toEqual(expected);
+        expect(expected.map(([, answer]) => answer)).toContain('commercial');
+      });
+
       // The rule is for a unit of a multi-unit building. A manager's single home is a home by the app's rule.
       test.each([['single_family'], ['townhome'], ['duplex'], ['mobile_home'], ['unknown'], [null]])('a property manager with the type %j, on the row and on a saved property, is not commercial', async (property_type) => {
         const db = world({ customer: { contact_role: 'property_manager', property_type }, tables: { customer_properties: [PROPERTY({ property_type, relationship: 'managed_for_client' })] } });
@@ -301,6 +319,18 @@ describe('planStartBlocker', () => {
       test.each([['own_home'], ['rental_owned'], ['family_home'], [null], [undefined]])('a condo with the relationship %j, on an account with no manager role, is a home', async (relationship) => {
         const condo = PROPERTY({ property_type: 'condo', relationship, occupancy_type: 'owner_occupied' });
         expect(await blocker(world({ customer: { property_type: 'condo' }, tables: { customer_properties: [condo, PROPERTY({ id: 'prop-2', is_primary: false, property_type: 'condo_ground', relationship })] } }))).toBeNull();
+      });
+
+      // The proof reads one relationship as a manager's. A relationship the app adds later fails here until
+      // someone sorts it: a manager's, or the customer's own.
+      test('every relationship of a saved property is sorted: managed for a client, or not', async () => {
+        const { PROPERTY_RELATIONSHIPS } = require('../constants/property-relationships');
+        expect([...PROPERTY_RELATIONSHIPS].sort()).toEqual(['family_home', 'managed_for_client', 'own_home', 'rental_owned']);
+        const answers = [];
+        for (const relationship of PROPERTY_RELATIONSHIPS) {
+          answers.push([relationship, await blocker(world({ tables: { customer_properties: [PROPERTY({ property_type: 'condo', relationship })] } }))]);
+        }
+        expect(answers).toEqual(PROPERTY_RELATIONSHIPS.map((relationship) => [relationship, relationship === 'managed_for_client' ? 'commercial' : null]));
       });
 
       test.each([['single_family'], ['townhome'], ['duplex'], ['mobile_home'], [null]])('a property of the type %j that is managed for a client is not commercial', async (property_type) => {
@@ -923,6 +953,21 @@ describe('planStartBlocker', () => {
       });
       const withLeads = (leads, given = {}) => world({ ...given, tables: { leads } });
 
+      // The payload scan of the save belongs to another module, and a rule of the proof reads each mark it reads
+      // today. The proof must still ask it: a mark the scan gains later counts on that day.
+      test('a mark only the payload scan of the save reads counts on a lead', async () => {
+        const owner = require('../services/estimate-delivery-options');
+        const real = owner.isCommercialEstimateData;
+        const spy = jest.spyOn(owner, 'isCommercialEstimateData').mockImplementation((given, ...rest) => (given?.depot === true ? true : real(given, ...rest)));
+        const leads = [LEAD(), LEAD({ extracted_data: { depot: true } })];
+        try {
+          expect(await blocker(withLeads(leads))).toBe('commercial');
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await blocker(withLeads(leads))).toBeNull();
+      });
+
       // Each case carries ONE mark, between two home leads.
       test.each([
         ['the commercial flag', LEAD({ is_commercial: true })],
@@ -937,7 +982,7 @@ describe('planStartBlocker', () => {
         // Marks beside a field that reads residential: one mark is enough.
         ['a commercial category beside a residential type in one object of the payload', LEAD({ extracted_data: { enriched: { category: 'COMMERCIAL', propertyType: 'single_family' } } })],
         ['a commercial subtype beside a toggle set to no', LEAD({ extracted_data: { isCommercial: 'NO', commercialSubtype: 'office' } })],
-        // A mark only the payload scan of the save reads.
+        // The mark of an auto-priced commercial quote.
         ['the mark of commercial estimated pricing', LEAD({ extracted_data: { quote: { commercialEstimatedPricing: true } } })],
         // What the lookup keeps on a profile about a business at the address, where a lead keeps the profile.
         ["staff's answer about a business at the address", LEAD({ extracted_data: { enriched: { category: 'RESIDENTIAL', isCommercial: false, occupancyAnswer: 'building' } } })],
@@ -1400,6 +1445,22 @@ describe('planStartBlocker', () => {
           ...extraction({ caller: { relationship_to_property }, property: SECOND('condo') }),
         });
         expect(await blocker(withCalls([call, CALL()]))).toBeNull();
+      });
+
+      // The same agreement as for the account's role, on every relationship the call system can save.
+      test('every relationship of the call schema is a manager for the proof exactly where the estimator reads one', async () => {
+        const { commercialCategoryConflict } = require('../services/estimator-engine/unit-scope-model');
+        const relationships = require('../schemas/call-extraction.persisted.schema.json').properties.caller.properties.relationship_to_property.enum;
+        expect(relationships).toContain('property_manager');
+        const answers = [];
+        const expected = [];
+        for (const relationship_to_property of relationships) {
+          const caller = { relationship_to_property };
+          expected.push([relationship_to_property, commercialCategoryConflict({ extraction: { caller, property: { property_type: 'condo' } }, intent: null }) ? 'commercial' : null]);
+          answers.push([relationship_to_property, await blocker(withCalls([CALL(extraction({ caller, property: SECOND('condo') }))]))]);
+        }
+        expect(answers).toEqual(expected);
+        expect(expected.map(([, answer]) => answer)).toContain('commercial');
       });
 
       test('the call of a property manager about single homes only: homes', async () => {

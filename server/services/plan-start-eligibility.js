@@ -227,6 +227,14 @@ function isCommercialPropertyType(propertyType, managed) {
 // writes the role's word under two names: the relationship the estimator
 // resolved, in the unit scope a draft keeps (customerRelationship), and the
 // caller's relationship in a call's extraction (relationship_to_property).
+// The word is matched exactly: each writer saves it from a closed vocabulary
+// (the contact roles, the estimator's resolver, the enum of the call schema),
+// and the tests ask the estimator's rule about every word of the first and
+// of the last. Not read as a manager: the role of a SECONDARY contact (the
+// account's service_contact_role, the secondary contact of a call or of a
+// lead). The estimator's rule reads the client alone. And the manager one
+// JSON record names is the client of that record: a condo in another record
+// of the account stays a home.
 const RELATIONSHIP_NAMES = Object.freeze(['customerRelationship', 'relationship_to_property']);
 const namesManager = (node) => RELATIONSHIP_NAMES.some((name) => isManagerWord(node[name]));
 // Has this JSON record a manager: the account's, or one it names itself?
@@ -441,7 +449,7 @@ const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.m
 //   set counts.
 const OCCUPANCY_NAMES = Object.freeze(['bedbugOccupancyType', 'occupancyType', 'occupancy_type', 'occupancy']);
 const COMMERCIAL_OCCUPANCIES = Object.freeze(['apartment', 'hotel', 'studenthousing', 'commercial']);
-const isCommercialOccupancy = (value) => typeof value === 'string' && COMMERCIAL_OCCUPANCIES.includes(value.trim().toLowerCase());
+const isCommercialOccupancy = (value) => COMMERCIAL_OCCUPANCIES.includes(String(value ?? '').trim().toLowerCase());
 function namesCommercialPremises(node, managed) {
   return [node.property_type, node.propertyType].some((type) => isCommercialPropertyType(type, managed))
     || OCCUPANCY_NAMES.some((name) => isCommercialOccupancy(node[name]))
@@ -740,7 +748,10 @@ async function hasCommercialContract(database, customerId) {
 //   premises, as a saved property does. Each such property is asked with a
 //   manager where the call has one (its caller, or the account's role): the
 //   rule above reads the caller for the main property alone, and a manager's
-//   second property is a client's too.
+//   second property is a client's too. The rule's other reading of the caller
+//   (the owner of an apartment building with no unit line) stays with the
+//   main property: an additional property keeps no service address to find a
+//   unit line in.
 // - The extraction's commercial-signals block with a value set in it (a
 //   business name, a budget or a procurement remark). The extraction leaves
 //   the block null for a home.
