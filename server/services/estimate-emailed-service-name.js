@@ -89,16 +89,19 @@ function emailShowed(row, summary) {
   return row.text_snapshot.split('\n').some((line) => line.trim() === `${SERVICE_ROW_PREFIX}${summary}`);
 }
 
+// Trimmed and lower-cased, as the email log is asked for a recipient.
+const lowerAddress = (value) => String(value || '').trim().toLowerCase();
+
 async function emailedServiceName(estimate, todayLabel) {
   try {
-    if (!replaceableLabel(todayLabel) || !estimate?.id) return null;
+    if (!replaceableLabel(todayLabel)) return null;
     // The engine read its row before it claimed the job. The address and the service are judged on a fresh
     // row, so a change since that read (a corrected address, a revised service) drops the name.
     const fresh = await db('estimates').where({ id: estimate.id }).first();
-    const address = String(fresh?.customer_email || '').trim().toLowerCase();
-    if (!fresh || !address) return null;
-    // The follow-up goes to the address on the engine's row. A different address now = no name.
-    if (address !== String(estimate.customer_email || '').trim().toLowerCase()) return null;
+    if (!fresh) return null;
+    // The follow-up goes to the address on the engine's row: no address, or a different address now, = no name.
+    const address = lowerAddress(fresh.customer_email);
+    if (!address || address !== lowerAddress(estimate.customer_email)) return null;
     const rows = await db('email_messages')
       .where({ estimate_id: fresh.id })
       .whereIn('template_key', DELIVERY_TEMPLATE_KEYS())
@@ -107,25 +110,20 @@ async function emailedServiceName(estimate, todayLabel) {
       .orderByRaw('COALESCE(sent_at, queued_at) DESC NULLS LAST')
       .orderBy('created_at', 'desc')
       .select('payload_snapshot', 'text_snapshot', 'status', 'provider_retry_next_at', 'provider_retry_exhausted_at', 'provider_retry_count');
-    const newest = (rows || []).find(acceptedForSending);
+    const newest = rows.find(acceptedForSending);
     if (!newest) return null;
     const stored = summaryFromSnapshot(newest.payload_snapshot);
     const name = nameForTodayLabel(todayLabel, serviceNameFromSummary(stored));
-    if (!name) return null;
     // The payload holds the summary even when a template version does not print it. The customer
     // must have been shown these words: the stored email text has to carry its Service line.
-    if (!emailShowed(newest, stored)) return null;
-    // Second proof: the same function the delivery email used must still give
-    // the same words. A different or empty result means the estimate changed.
+    if (!name || !emailShowed(newest, stored)) return null;
+    // Second proof: the function the delivery email used must still give the same words, and must give them
+    // again with the stored service_interest blank. That function returns a stored interest before it looks
+    // at the lines, so the second ask makes the estimate's own lines agree too.
     const { inferEstimateServiceInterest } = require('./estimate-service-lines');
-    const current = inferEstimateServiceInterest({ ...fresh, estimateData: fresh.estimate_data });
-    if (current !== stored) return null;
-    // A stored service_interest wins in that function before it looks at the lines. Ask it again with the
-    // stored interest blank: the estimate's own lines must give the same words, or the name is not used.
-    const fromLines = inferEstimateServiceInterest({
-      ...fresh, service_interest: null, serviceInterest: null, estimateData: fresh.estimate_data,
-    });
-    return fromLines === stored ? name : null;
+    const stillSays = [fresh, { ...fresh, service_interest: null, serviceInterest: null }]
+      .every((row) => inferEstimateServiceInterest({ ...row, estimateData: fresh.estimate_data }) === stored);
+    return stillSays ? name : null;
   } catch (err) {
     // A knex message can carry addresses: log only the code or name.
     logger.warn(`[estimate-emailed-service-name] read failed: ${err?.code || err?.name || 'error'}`);
