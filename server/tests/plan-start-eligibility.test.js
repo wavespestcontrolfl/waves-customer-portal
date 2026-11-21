@@ -831,6 +831,25 @@ describe('planStartBlocker', () => {
         expect(await blocker(withEstimates([ESTIMATE({ notes: HOUSE_NOTES, estimate_data }), ESTIMATE()]))).toBeNull();
       });
 
+      // The one-time lines are looked for in the payload the rules read: a payload that came back as JSON text too.
+      test('the notes of an estimate whose payload came back as JSON text, with a one-time line in it, are not sorted', async () => {
+        const estimate_data = JSON.stringify({ result: { oneTime: { items: [ONE_TIME] } } });
+        expect(await blocker(withEstimates([ESTIMATE({ notes: HOUSE_NOTES, estimate_data }), ESTIMATE()]))).toBeNull();
+      });
+
+      // Any commercial key the reader answers is a mark, not the pest key alone. No other rule reads the notes.
+      test.each([
+        ['commercial_lawn', 'Quote the commercial lawn program for the plaza.'],
+        ['commercial_mosquito', 'Commercial mosquito service for the patio.'],
+        ['commercial_termite_bait', 'Commercial termite bait stations for the shop.'],
+        ['commercial_rodent_bait', 'Commercial rodent bait stations for the bakery.'],
+        ['commercial_tree_shrub', 'Commercial tree and shrub care for the plaza.'],
+      ])('notes the reader sorts as the line %s, on an estimate with no line, are a mark', async (key, notes) => {
+        const { inferEstimateServiceLines } = require('../services/estimate-service-lines');
+        expect(inferEstimateServiceLines({ notes, estimate_data: {} }).map((line) => line.key)).toEqual([key]);
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ notes, estimate_data: {} })]))).toBe('commercial');
+      });
+
       test('the same notes are sorted on an estimate with no line of either kind, and a commercial one-time line is a mark', async () => {
         expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ notes: HOUSE_NOTES, estimate_data: {} })]))).toBe('commercial');
         const commercialJob = { result: { oneTime: { items: [{ service: 'commercial_pest', name: 'One-Time Service', price: 150 }] } } };
