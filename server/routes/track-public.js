@@ -52,7 +52,7 @@ const {
   isServiceDateToday,
   isPlacedOrLegacyDateOnly,
 } = require('../services/stops-ahead');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, isEnabled } = require('../config/feature-gates');
 const { customerTrackState } = require('../services/track-transitions');
 const { dayOnlyVisit } = require('../services/time-display');
 const { dateOnlyString } = require('../utils/date-only');
@@ -823,6 +823,8 @@ router.get('/:token', async (req, res, next) => {
         ? await buildApproxVehicle(row)
         : null,
       summary: customerState === 'complete' ? await buildSummary(row) : null,
+      // GATE_DOC_CROSS_SELL: absent keys = no cards (see trackCards).
+      ...(customerState === 'complete' ? await trackCards(req.params.token) : {}),
       cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }
         : null,
@@ -949,6 +951,114 @@ router.post('/:token/view', async (req, res) => {
     // Code-only log; the beacon is best-effort telemetry, so answer 204.
     logViewFailure('lookup', 'track', 'scheduled_service', err);
     return res.status(204).end();
+  }
+});
+
+// ── Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21) ──
+// The service report's two cards on a COMPLETED visit's tracker. The track
+// link also goes to the account's service contacts (tenant, home buyer,
+// property manager — see the identity block above), so the cards show only
+// when the account holder is the only person this link reaches: no service
+// contact on the account and no third-party payer on the job or the
+// account. Otherwise a tenant could start a plan, or enroll as the
+// homeowner's promoter. The offer is the report's own composer over the
+// visit's service record, and the tap is the report's own tap.
+const TRACK_CARD_SURFACE = Object.freeze({ source: 'tracker', noun: 'page', title: 'visit tracker' });
+
+const trackCardActionLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `track-xsell:${req.params.token || 'anon'}`,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
+// → { customerId, serviceRecordId|null } when the token's visit may carry
+// the cards, else null. serviceRecordId is null when the visit has no
+// customer-deliverable report (the referral card still shows).
+async function loadTrackCardContext(token) {
+  if (!isEnabled('docCrossSell') || !TOKEN_RE.test(token || '')) return null;
+  const row = await db('scheduled_services as s')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .where('s.track_view_token', token)
+    .first(
+      's.id', 's.customer_id', 's.status', 's.track_token_expires_at',
+      's.payer_id as job_payer_id', 'c.payer_id as customer_payer_id',
+      ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
+    );
+  if (!row?.customer_id || !isTrackTokenLive(row.track_token_expires_at)) return null;
+  if (row.status !== 'completed') return null;
+  if (row.job_payer_id || row.customer_payer_id) return null;
+  if (serviceContactNamesOf(row).length > 0) return null;
+  const record = await db('service_records')
+    .where({ scheduled_service_id: row.id })
+    .orderBy('created_at', 'desc')
+    .first('id', 'structured_notes');
+  let notes = {};
+  try {
+    notes = typeof record?.structured_notes === 'string'
+      ? JSON.parse(record.structured_notes)
+      : (record?.structured_notes || {});
+  } catch { notes = {}; }
+  // Same rule as the summary above: a visit whose report never reaches the
+  // customer gets no report-derived offer either.
+  const deliverable = !(notes.typedReportDelivery && notes.typedReportDelivery !== 'auto_send');
+  return { customerId: row.customer_id, serviceRecordId: record?.id && deliverable ? record.id : null };
+}
+
+// Best-effort: any failure renders the tracker without the cards.
+async function trackCards(token) {
+  try {
+    const context = await loadTrackCardContext(token);
+    if (!context) return {};
+    const cards = {};
+    if (context.serviceRecordId) {
+      const { buildCrossSellForServiceRecord } = require('../services/service-report/cross-sell-tap');
+      const crossSell = await buildCrossSellForServiceRecord(db, context.serviceRecordId);
+      if (crossSell) cards.crossSell = crossSell;
+    }
+    const referral = await require('../services/referral-share').composeReferralCard();
+    if (referral) cards.referral = referral;
+    return cards;
+  } catch (err) {
+    logger.warn(`[track-public] cards suppressed (code=${err?.code || 'none'})`);
+    return {};
+  }
+}
+
+// POST /:token/cross-sell — the add-a-service card's tap (the report's tap).
+router.post('/:token/cross-sell', trackCardActionLimiter, async (req, res) => {
+  res.set(PRIVACY_HEADERS);
+  try {
+    const context = await loadTrackCardContext(req.params.token);
+    if (!context?.serviceRecordId) return res.status(404).json({ error: 'Not found' });
+    const { handleCrossSellTap } = require('../services/service-report/cross-sell-tap');
+    const metadata = req.body && typeof req.body.metadata === 'object' && req.body.metadata ? req.body.metadata : {};
+    const { status, body } = await handleCrossSellTap({
+      db, serviceRecordId: context.serviceRecordId, metadata, surface: TRACK_CARD_SURFACE,
+    });
+    return res.status(status).json(body);
+  } catch (err) {
+    // Code only: Knex text can carry the bound track token.
+    logger.warn(`[track-public] cross-sell tap failed (code=${err?.code || 'none'})`);
+    return res.status(503).json({ error: 'Could not record the request — please try again' });
+  }
+});
+
+// POST /:token/referral-link — the referral card's tap (enrolls on the tap).
+router.post('/:token/referral-link', trackCardActionLimiter, async (req, res) => {
+  res.set(PRIVACY_HEADERS);
+  try {
+    const context = await loadTrackCardContext(req.params.token);
+    if (!context) return res.status(404).json({ error: 'Not found' });
+    const share = await require('../services/referral-share').buildReferralShareForCustomer(context.customerId);
+    if (!share) return res.status(404).json({ error: 'Not found' });
+    if (share.unavailable) return res.status(503).json({ error: 'Referral link unavailable — please try again' });
+    return res.json(share);
+  } catch (err) {
+    logger.warn(`[track-public] referral-link failed (code=${err?.code || 'none'})`);
+    return res.status(503).json({ error: 'Referral link unavailable — please try again' });
   }
 });
 

@@ -458,11 +458,13 @@
     {
       "router": "server/routes/track-public.js",
       "mount": "/api/public/track",
-      "reason": "Tokenized live technician-tracking map linked from appointment SMS",
+      "reason": "Tokenized live technician-tracking map linked from appointment SMS; add-a-service and referral card taps on a completed visit (GATE_DOC_CROSS_SELL)",
       "routes": [
         "GET /api/public/track/:token",
         "POST /api/public/track/:token/stops-ahead",
-        "POST /api/public/track/:token/view"
+        "POST /api/public/track/:token/view",
+        "POST /api/public/track/:token/cross-sell",
+        "POST /api/public/track/:token/referral-link"
       ]
     },
     {
