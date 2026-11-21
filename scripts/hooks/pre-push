@@ -35,6 +35,9 @@
 #   CLAUDE_REVIEW_MODEL=opus           — fallback auditor model (default sonnet)
 #   SPLIT_WARN_FILES=25                — advisory split threshold, files (0 disables)
 #   SPLIT_WARN_BYTES=120000            — advisory split threshold, bytes (0 disables)
+#   CODEX_REVIEW_ROUND_LOG=off         — do not log this audit run; or a file
+#                                         path to log it there (default
+#                                         <common git dir>/codex-review-rounds.jsonl)
 #
 # ── Two LLM auditors ─────────────────────────────────────────────────────
 # Codex is the PRIMARY reviewer. Claude is the FALLBACK, and it runs only
@@ -373,9 +376,62 @@ if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
   warn_and_pass "base ref '$BASE' not found locally — try: git fetch origin"
 fi
 
+# ── Round log ────────────────────────────────────────────────────────────
+# One line for each run that reaches the LLM audit, in the clone's COMMON git
+# dir, so every worktree of this clone appends to the same file. Why: local
+# rounds were invisible. The artifact dir below keeps only the last run, so a
+# branch that took ten audit rounds looked the same as one that took one, and
+# nobody could see a branch looping (waves-ship §4's round cap counts GitHub
+# rounds only). A weekly read of this file shows rounds per branch, P0
+# blocks and un-audited pushes.
+#   CODEX_REVIEW_ROUND_LOG=<file>  write there instead
+#   CODEX_REVIEW_ROUND_LOG=off     write nothing
+# It runs from the EXIT trap, after the verdict is decided. It never prints,
+# never changes the exit code, and a failed write is dropped.
+log_audit_round() {
+  local rc="$1" file="${CODEX_REVIEW_ROUND_LOG:-}" dir size
+  [ "$file" = "off" ] && return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  if [ -z "$file" ]; then
+    dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+    [ -n "$dir" ] && [ -d "$dir" ] || return 0
+    file="$dir/codex-review-rounds.jsonl"
+  fi
+  jq -cn \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg ref "${ROUND_LOG_REF:-}" \
+    --arg sha "${ROUND_LOG_SHA:-}" \
+    --arg auditors "${AUDITORS_USED:-}" \
+    --arg rc "$rc" \
+    --arg seconds "${SECONDS:-0}" \
+    --arg refs "${ROUND_LOG_REFS:-0}" \
+    --arg audited "${AUDITED:-0}" \
+    --arg unaudited "${UNAUDITED_REFS:-0}" \
+    --arg p0 "${P0_TOTAL:-0}" \
+    --arg p1 "${P1_TOTAL:-0}" \
+    '{ts: $ts, ref: $ref, sha: $sha, refs: ($refs | tonumber), audited: ($audited | tonumber),
+      unaudited: ($unaudited | tonumber), p0: ($p0 | tonumber), p1: ($p1 | tonumber),
+      auditors: ($auditors | split(" ") | map(select(length > 0))),
+      exit: ($rc | tonumber), seconds: ($seconds | tonumber)}' \
+    >> "$file" 2>/dev/null || return 0
+  # Keep the file small: past ~4 MB, keep the newest 8000 runs.
+  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')"
+  if [ "${size:-0}" -gt 4194304 ] 2>/dev/null; then
+    if tail -n 8000 "$file" > "$file.$$.tmp" 2>/dev/null; then
+      mv -f "$file.$$.tmp" "$file" 2>/dev/null || rm -f "$file.$$.tmp" 2>/dev/null
+    else
+      rm -f "$file.$$.tmp" 2>/dev/null
+    fi
+  fi
+  return 0
+}
+ROUND_LOG_REF="${GUARD_REMOTE_REFS[0]:-}"
+ROUND_LOG_SHA="${REF_SHAS[0]:-}"
+ROUND_LOG_REFS="${#REF_SHAS[@]}"
+
 # ── Per-ref audit ────────────────────────────────────────────────────────
 TMPDIR_RUN="$(mktemp -d -t codex-review.XXXXXX)"
-trap 'rm -rf "$TMPDIR_RUN"' EXIT
+trap 'ROUND_LOG_RC=$?; log_audit_round "$ROUND_LOG_RC" 2>/dev/null || true; rm -rf "$TMPDIR_RUN"' EXIT
 
 # Stable artifact dir: the EXIT trap above deletes $TMPDIR_RUN the moment the
 # hook exits, so on a BLOCKED push the findings JSON was gone before anyone
