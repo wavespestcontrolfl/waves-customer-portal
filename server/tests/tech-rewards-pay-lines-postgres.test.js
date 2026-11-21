@@ -287,6 +287,26 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await linesOf(tech)).toHaveLength(0);
     });
 
+    it('never pays less overtime for a week than one check would: the week\'s own check rounds half up, the gift\'s check rounds up', async () => {
+      const tech = await readyTech('Sample Alpha');
+      const WEEK = '2026-11-09'; // 45 h worked, 5 of them overtime
+      await approvedWeek(tech, WEEK, '2400.00', '300.00');
+      // a 6.00 commission earned that week rides on the week's own check: 1/2 x 600 / 45 h x 5 h = 33.33 -> 33
+      await trx('payroll_pay_lines').insert({ technician_id: tech, kind: 'commission', amount_cents: 600, earned_week_start: WEEK });
+      const own = await draft(WEEK);
+      expect(checkOf(own, tech)).toMatchObject({ commissionCents: 600, lineOvertimePremiumCents: 33 });
+      await finalize(own.id);
+      // the gift's share of that week is also 6.00 (30,000 over 50 workweeks). On its own check, months later: 33.33 -> 34
+      await approvedWeek(tech, GIFT_WEEK);
+      const giftRun = await draft(GIFT_WEEK);
+      const check = checkOf(giftRun, tech);
+      expect(check).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 34 });
+      const stored = await trx('payroll_checks').where({ id: check.id }).first();
+      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK).premiumCents).toBe(34);
+      // one check with both lines would owe 1/2 x 1,200 / 45 h x 5 h = 66.67 -> 67; the two checks pay 33 + 34
+      expect(33 + check.lineOvertimePremiumCents).toBeGreaterThanOrEqual(67);
+    });
+
     it('adds the half-time premium of the overtime weeks it covers', async () => {
       const tech = await readyTech('Sample Alpha');
       // one paid week of the year with 50 h worked, 10 h of them overtime; every other covered week had no hours
@@ -775,6 +795,40 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(checkOf(again, alpha).techRewardsCents).toBe(GIFT);
       expect(await linesOf(alpha)).toHaveLength(1);
       expect(await notesOf(run.id)).toEqual([waits('Sample Bravo', held)]);
+    });
+
+    it('holds the gift when a gift line carries the Tech Rewards source type with a source key that is not the sync\'s own', async () => {
+      const alpha = await readyTech('Sample Alpha'); // holds an open row keyed with no year
+      const bravo = await readyTech('Sample Bravo'); // holds a paid row keyed with Charlie's id
+      const charlie = await readyTech('Sample Charlie'); // has no row, but Bravo's row holds the key of Charlie's gift
+      const delta = await readyTech('Sample Delta'); // nothing in the way
+      for (const tech of [alpha, bravo, charlie, delta]) await approvedWeek(tech, GIFT_WEEK);
+      const row = { kind: 'december_gift', amount_cents: 12345, source_type: 'tech_rewards', covers_from: '2026-01-01', covers_to: '2026-12-13' };
+      // open in the gift week: the gift week's run pays an open Tech Rewards line of its own week
+      await trx('payroll_pay_lines').insert({ ...row, technician_id: alpha, earned_week_start: GIFT_WEEK, source_id: `december_gift:${alpha}:gift` });
+      const paidRun = await paidWeek(bravo, EARLY_WEEK);
+      const paidCheck = await trx('payroll_checks').where({ run_id: paidRun, technician_id: bravo }).first('id');
+      await trx('payroll_pay_lines').insert({
+        ...row, technician_id: bravo, earned_week_start: EARLY_WEEK, covers_from: EARLY_WEEK, covers_to: '2026-12-06',
+        source_id: `december_gift:${charlie}:2026`, status: 'paid', check_id: paidCheck.id,
+      });
+      const run = await draft(GIFT_WEEK);
+      const held = 'a December gift line that the pay run did not write is already on file for them, so check that line first';
+      // Alpha: the row rides on the check alone, no 300.00 beside it. Bravo: no second gift. Charlie: the key of their gift
+      // is taken, so their gift waits (the unique source key never fails the run). Delta: the gift, as always.
+      expect(checkOf(run, alpha).techRewardsCents).toBe(12345);
+      expect(checkOf(run, bravo)).not.toHaveProperty('techRewardsCents');
+      expect(checkOf(run, charlie)).not.toHaveProperty('techRewardsCents');
+      expect(checkOf(run, delta).techRewardsCents).toBe(GIFT);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', held), waits('Sample Bravo', held), waits('Sample Charlie', held)]);
+      const rows = await trx('payroll_pay_lines').where({ kind: 'december_gift' }).orderBy('amount_cents');
+      expect(rows.map((r) => [r.technician_id, Number(r.amount_cents), r.status])).toEqual([
+        [alpha, 12345, 'open'], [bravo, 12345, 'paid'], [delta, GIFT, 'open'],
+      ]);
+      // a recompute changes nothing: the hand-made rows are never matched, moved or changed
+      await recompute(run.id);
+      expect((await trx('payroll_pay_lines').where({ kind: 'december_gift' })).map((r) => Number(r.amount_cents)).sort()).toEqual([12345, 12345, GIFT]);
+      expect((await syncEventOf(run.id, 'waits')).flatMap((m) => m.waits).filter((w) => w.reason !== 'other_gift_line')).toEqual([]);
     });
 
     it('leaves every line the sync did not write to carry forward as before, also a reward kind with no source', async () => {

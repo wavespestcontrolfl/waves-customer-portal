@@ -362,9 +362,10 @@ const GROSS_LINE_KINDS = ['review_bonus', 'commission', 'health_allowance'];
  * hours the CHECK stored for each week (calc_snapshot.lineOvertimeWeeks workedMinutes and overtimeMinutes), never from timesheets as
  * they are now, so an edit after the check was paid cannot move the base. A check with no Tech Rewards line keeps its stored
  * premium. `lines`: every pay line of the check { kind, cents, weekStart, coversFrom, coversTo }; `storedWeeks`: the snapshot's
- * [{ weekStart, workedMinutes, overtimeMinutes, premiumCents }]. Returns { weeks: [{ weekStart, premiumCents }], excludedCents }. Pure.
+ * [{ weekStart, workedMinutes, overtimeMinutes, premiumCents }]; `payWeek`: the check's own pay week, which the pay run's rule
+ * rounds half up (every other week rounds up). Returns { weeks: [{ weekStart, premiumCents }], excludedCents }. Pure.
  */
-function ordinaryPremium(lines, storedWeeks) {
+function ordinaryPremium(lines, storedWeeks, payWeek = null) {
   const techKinds = new Set(TECH_REWARD_KINDS);
   const plain = storedWeeks.map((w) => ({ weekStart: w.weekStart, premiumCents: w.premiumCents }));
   if (!lines.some((line) => techKinds.has(line.kind)) || !storedWeeks.length) return { weeks: plain, excludedCents: 0 };
@@ -376,7 +377,7 @@ function ordinaryPremium(lines, storedWeeks) {
     regularMinutes: (Number(w.workedMinutes || 0) - Number(w.overtimeMinutes || 0)).toFixed(2),
     overtimeMinutes: Number(w.overtimeMinutes || 0).toFixed(2),
   }));
-  const weeks = ordinary.length ? lineOvertimePremium({ weeks: hours, lines: ordinary }).weeks.map((w) => ({ weekStart: w.weekStart, premiumCents: w.premiumCents })) : [];
+  const weeks = ordinary.length ? lineOvertimePremium({ weeks: hours, lines: ordinary, payWeek }).weeks.map((w) => ({ weekStart: w.weekStart, premiumCents: w.premiumCents })) : [];
   const sum = (list) => list.reduce((total, w) => total + w.premiumCents, 0);
   return { weeks, excludedCents: sum(plain) - sum(weeks) };
 }
@@ -409,6 +410,7 @@ async function readGross(conn, technicianId, from, to) {
       (Array.isArray(row.line_overtime_weeks) ? row.line_overtime_weeks : []).map((w) => ({
         weekStart: w.weekStart, workedMinutes: w.workedMinutes, overtimeMinutes: w.overtimeMinutes, premiumCents: toCents(w.premiumCents),
       })),
+      row.week_start,
     );
     const check = {
       weekStart: row.week_start,

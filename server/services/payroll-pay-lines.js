@@ -288,8 +288,11 @@ const lineSpan = (line) => (line.coversFrom ? { coversFrom: line.coversFrom, cov
  * missing week holds worked time, so a line is never paid without that week's
  * overtime, and holds the check when a covered week has an unreviewed automatic
  * clock-out (GATE_SHIFT_CLOSE_REVIEW).
+ * payWeek: the pay week of the run that pays the lines. Its premium rounds half up and every earlier week's rounds up, so two
+ * checks for one workweek never pay less than one would (payroll-regular-rate.js). A caller that reads only the weeks (not
+ * the premium) may leave it out.
  */
-async function priceLines(conn, byTech, { lock = false } = {}) {
+async function priceLines(conn, byTech, { lock = false, payWeek = null } = {}) {
   const priced = new Map();
   if (!byTech.size) return priced;
   const spansByTech = new Map();
@@ -312,7 +315,7 @@ async function priceLines(conn, byTech, { lock = false } = {}) {
     const approvedWeeks = new Set(rows.map((row) => row.week_start));
     const covered = [...new Set(lines.flatMap((line) => weeksOfLine(line)))].sort();
     priced.set(technicianId, {
-      ...lineOvertimePremium({ weeks, lines }),
+      ...lineOvertimePremium({ weeks, lines, payWeek }),
       coveredWeeks: covered,
       missingWeeks: covered.filter((week) => !approvedWeeks.has(week)),
     });

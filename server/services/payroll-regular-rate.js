@@ -23,9 +23,22 @@
  * - Paid time off and holiday hours are not hours worked and never enter here.
  *   The caller passes only worked minutes (regular plus overtime).
  * - A week with no overtime, no hours or no approved timesheet earns no premium.
- * - Integer cents. Each week's premium rounds half up once (the same BigInt
- *   half-up rule payroll-calc.js uses). Line shares are kept as exact fractions
+ * - Integer cents, one rounding per week. Line shares are kept as exact fractions
  *   until then, so splitting 100 cents over 3 weeks loses nothing before the round.
+ * - The premium of the check's OWN pay week (`payWeek`) rounds half up, the same
+ *   BigInt half-up rule payroll-calc.js uses. The premium of every other week
+ *   rounds UP to the next whole cent.
+ *   Why: one workweek's line pay can arrive on more than one check (a commission
+ *   on the week's own check, then a bonus that covers the same week months later).
+ *   Each check prices only its own lines. If both rounded half up, two checks could
+ *   pay 1 cent less for the week than one check with both lines (33 + 33 against
+ *   67). A week has one live pay run (payroll_runs_one_live_week) and a technician
+ *   one check on it, so at most one check rounds a week half up (off by under half
+ *   a cent). Every other check that pays for that week rounds up (never below its
+ *   exact share). So the checks for a week, however many and in any order, never
+ *   add up to less than the half-up premium on the week's whole line pay. The cost
+ *   is under 1 cent per earlier week with overtime, per check.
+ *   A caller that gives no `payWeek` gets every week rounded up.
  *
  * Minutes arrive like computePaycheck's: numbers or decimal strings, read at two
  * decimals (hundredths of a minute). The units cancel in the formula.
@@ -45,6 +58,9 @@ function positiveCents(value, label) {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive whole number of cents`);
   return BigInt(value);
 }
+
+// numerator / denominator, rounded up to a whole number. Both are zero or more, and the denominator is never zero.
+const ceilDiv = (numerator, denominator) => (numerator + denominator - 1n) / denominator;
 
 const gcd = (a, b) => (b === 0n ? a : gcd(b, a % b));
 const lcm = (a, b) => (a / gcd(a, b)) * b;
@@ -76,12 +92,14 @@ function weeksOfLine(line) {
  *   an approved timesheet (a week left out counts as no hours worked).
  * lines: [{ id?, amountCents, weekStart } or { id?, amountCents, coversFrom, coversTo }]
  *   weekStart is the earned week (a Monday) and is used only when there is no span.
+ * payWeek: the pay week of the check the lines are on (any date in it), or null.
  * Returns { extraPremiumCents, weeks: [{ weekStart, workedMinutes, overtimeMinutes,
  *   allocatedCents, premiumCents }] } with one entry per week that holds line pay,
  *   oldest first. allocatedCents is the week's line pay rounded to the cent for
  *   display; the premium comes from the exact share.
  */
-function lineOvertimePremium({ weeks = [], lines = [] }) {
+function lineOvertimePremium({ weeks = [], lines = [], payWeek = null }) {
+  const ownWeek = payWeek == null ? null : staffWeekStartForWorkDate(payWeek);
   const hoursByWeek = new Map();
   for (const week of weeks) {
     const regular = nonNegativeUnits(week.regularMinutes, 'Regular minutes');
@@ -109,9 +127,11 @@ function lineOvertimePremium({ weeks = [], lines = [] }) {
   const breakdown = [...shareByWeek.keys()].sort().map((weekStart) => {
     const share = shareByWeek.get(weekStart);
     const hours = hoursByWeek.get(weekStart) || { worked: 0n, overtime: 0n };
-    // 1/2 x (share / worked) x overtime, with share over the common denominator.
+    // 1/2 x (share / worked) x overtime, with share over the common denominator. Half up for the check's own pay week,
+    // up for any other week: see the rules above.
+    const rounded = weekStart === ownWeek ? roundDiv : ceilDiv;
     const premium = hours.worked > 0n && hours.overtime > 0n
-      ? roundDiv(share * hours.overtime, 2n * denominator * hours.worked)
+      ? rounded(share * hours.overtime, 2n * denominator * hours.worked)
       : 0n;
     extra += premium;
     return {

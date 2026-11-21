@@ -90,6 +90,19 @@ describe('ordinaryPremium: the overtime a check paid for its ordinary lines only
     // a check whose only line is the bonus: none of its premium is a base
     expect(ordinaryPremium([reward], stored)).toEqual({ weeks: [], excludedCents: 4000 });
   });
+
+  test('prices the ordinary lines by the pay run\'s rounding: half up in the check\'s own pay week, up in any other week', () => {
+    // 45 hours, 5 of them overtime: a 600 commission earns 33.33 of premium, and the 600 weekly share of a gift the same
+    const week = [{ weekStart: '2026-11-09', workedMinutes: 2700, overtimeMinutes: 300, premiumCents: 67 }];
+    const lines = [
+      { kind: 'commission', cents: 600, weekStart: '2026-11-09' },
+      { kind: 'december_gift', cents: 600, weekStart: '2026-11-09', coversFrom: '2026-11-09', coversTo: '2026-11-15' },
+    ];
+    // on the week's own check the commission's part is 33, as the pay run priced it
+    expect(ordinaryPremium(lines, week, '2026-11-09')).toEqual({ weeks: [{ weekStart: '2026-11-09', premiumCents: 33 }], excludedCents: 34 });
+    // on a later check (a catch-up line) the same part was rounded up
+    expect(ordinaryPremium(lines, [{ ...week[0], premiumCents: 67 }], '2026-12-14')).toEqual({ weeks: [{ weekStart: '2026-11-09', premiumCents: 34 }], excludedCents: 33 });
+  });
 });
 
 describe('earnedGrossCents (by component earning date)', () => {

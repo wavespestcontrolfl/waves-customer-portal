@@ -575,6 +575,7 @@ async function lineWeeksUnreviewed(conn, priced) {
 // ({ amountCents, earnedWeekStart, coversFrom, coversTo }), or null. Tech Rewards asks before it writes a line
 // (tech-rewards-pay-lines.js waitOf), so a line it writes never holds a pay run.
 async function lineGuardWeek(conn, technicianId, line) {
+  // only the covered weeks are read here, never the premium, so no pay week is given
   const priced = await priceLines(conn, new Map([[technicianId, { lines: [line] }]]));
   const waitingOn = (await lineWeeksWaiting(conn, priced)).get(technicianId);
   const unreviewed = shiftCloseReviewLive() ? (await lineWeeksUnreviewed(conn, priced)).get(technicianId) : undefined;
@@ -735,7 +736,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
   // with lines and no hours (one who has left too) gets a check for the lines alone,
   // unless their worked time is still waiting for approval.
   const lineMap = payLinesOn() ? await openLinesFor(conn, end, { lock }) : new Map();
-  const priced = await priceLines(conn, lineMap, { lock });
+  const priced = await priceLines(conn, lineMap, { lock, payWeek: start });
   const haveCheck = new Set([...withHours, ...timeOffOnlyRows].map((row) => row.technician_id));
   // A line that covers an earlier week whose worked time is not approved yet cannot be
   // priced: the technician waits, and gets no check on this run until that week is approved.

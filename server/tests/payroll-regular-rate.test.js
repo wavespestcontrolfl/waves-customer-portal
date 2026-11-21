@@ -16,8 +16,9 @@ describe('lineOvertimePremium', () => {
         { amountCents: 3000, weekStart: '2026-10-12' },
         { amountCents: 4615, weekStart: '2026-10-12' },
       ],
+      payWeek: '2026-10-12', // the week's own check
     });
-    // 1/2 x ($76.15 / 42 h) x 2 h = $1.81
+    // 1/2 x ($76.15 / 42 h) x 2 h = $1.8131 -> $1.81
     expect(result.extraPremiumCents).toBe(181);
     expect(result.weeks).toEqual([
       { weekStart: '2026-10-12', workedMinutes: 2520, overtimeMinutes: 120, allocatedCents: 7615, premiumCents: 181 },
@@ -28,6 +29,7 @@ describe('lineOvertimePremium', () => {
     const { extraPremiumCents } = lineOvertimePremium({
       weeks: [week('2026-10-12', '2400.00', '120.00')],
       lines: [{ amountCents: 3000, weekStart: '2026-10-12' }, { amountCents: 4615, weekStart: '2026-10-12' }],
+      payWeek: '2026-10-12',
     });
     const pay = computePaycheck({
       payDate: '2026-10-23', hourlyRate: '23.00', regularMinutes: '2400.00', overtimeMinutes: '120.00', w4: W4,
@@ -96,13 +98,71 @@ describe('lineOvertimePremium', () => {
         { amountCents: 100, coversFrom: '2026-09-14', coversTo: '2026-09-28' },
         { amountCents: 100, coversFrom: '2026-09-14', coversTo: '2026-09-20' },
       ],
+      payWeek: '2026-09-14',
     });
     // Week 1 holds 100/3 + 100 = 133.33 cents; 1/2 x (133.33 / 80 h) x 40 h = 33.33 -> 33.
     expect(result.weeks[0]).toMatchObject({ weekStart: '2026-09-14', allocatedCents: 133, premiumCents: 33 });
   });
 
+  describe('rounding: half up for the check\'s own pay week, up for any other week', () => {
+    // 45 h worked, 5 of them overtime: premium = line pay x 5 / 90
+    const hours = [week('2026-11-09', '2400.00', '300.00')];
+    const premium = (cents, payWeek) => lineOvertimePremium({
+      weeks: hours, lines: [].concat(cents).map((amountCents) => ({ amountCents, weekStart: '2026-11-09' })), payWeek,
+    }).extraPremiumCents;
+
+    it('rounds the pay week\'s own premium half up and another week\'s premium up; a whole cent never moves', () => {
+      expect(premium(600, '2026-11-09')).toBe(33); // 33.33 on the week's own check
+      expect(premium(600, '2026-12-14')).toBe(34); // the same share on a later check
+      expect(premium(600, '2026-11-12')).toBe(33); // any date in the pay week names it
+      expect(premium(600)).toBe(34); // no pay week given: up
+      expect(premium(609, '2026-11-09')).toBe(34); // 33.83: half up is already up
+      expect(premium(900, '2026-11-09')).toBe(50); // exact
+      expect(premium(900, '2026-12-14')).toBe(50);
+      expect(premium(1, '2026-12-14')).toBe(1); // 0.06 of a cent on a later check is 1 cent
+      expect(premium(1, '2026-11-09')).toBe(0);
+    });
+
+    it('two checks for one workweek never pay less than one check with both lines (33 + 34 against 67)', () => {
+      // a $6.00 commission on the week's own check, then the $6.00 weekly share of a bonus on a check months later
+      const own = premium(600, '2026-11-09');
+      const later = premium(600, '2026-12-14');
+      const together = premium([600, 600], '2026-11-09');
+      expect([own, later, together]).toEqual([33, 34, 67]);
+      expect(own + later).toBeGreaterThanOrEqual(together);
+    });
+
+    it('holds for any amounts and hours: one own-week check and two later checks, against all three lines on one check', () => {
+      let seed = 20261121;
+      const next = (max) => { seed = (seed * 1103515245 + 12345) % 2147483648; return 1 + (seed % max); };
+      for (let i = 0; i < 3000; i += 1) {
+        const [a, b, c] = [next(50000), next(50000), next(50000)];
+        const overtime = next(1500); // up to 25 h of overtime
+        const weeks = [week('2026-11-09', '2400.00', `${overtime}.00`)];
+        const price = (cents, payWeek) => lineOvertimePremium({
+          weeks, lines: cents.map((amountCents) => ({ amountCents, weekStart: '2026-11-09' })), payWeek,
+        }).extraPremiumCents;
+        const split = price([a], '2026-11-09') + price([b], '2026-11-16') + price([c], '2026-12-14');
+        const together = price([a, b, c], '2026-11-09');
+        // never less, and at most 1 cent more for each later check
+        expect([i, split >= together, split - together <= 2]).toEqual([i, true, true]);
+      }
+    });
+
+    it('rounds each earlier week of a span up and its own pay week half up', () => {
+      // each week had 80 h worked, 40 of them overtime: premium = 1/2 x share x 40 / 80 = a quarter of the week's share
+      const weeks = ['2026-09-14', '2026-09-21', '2026-09-28'].map((w) => week(w, '2400.00', '2400.00'));
+      const result = lineOvertimePremium({
+        weeks, lines: [{ amountCents: 100, coversFrom: '2026-09-14', coversTo: '2026-10-04' }], payWeek: '2026-09-28',
+      });
+      // 100 / 3 = 33.33 a week, a quarter is 8.33: up to 9 in the two earlier weeks, half up to 8 in the pay week
+      expect(result.weeks.map((w) => [w.weekStart, w.premiumCents])).toEqual([['2026-09-14', 9], ['2026-09-21', 9], ['2026-09-28', 8]]);
+      expect(result.extraPremiumCents).toBe(26);
+    });
+  });
+
   it('counts an HSA line like any other line (a cash-or-HSA choice is in the regular rate)', () => {
-    const base = { weeks: [week('2026-10-12', '2400.00', '120.00')] };
+    const base = { weeks: [week('2026-10-12', '2400.00', '120.00')], payWeek: '2026-10-12' };
     const without = lineOvertimePremium({ ...base, lines: [{ amountCents: 4615, weekStart: '2026-10-12' }] });
     const withHsa = lineOvertimePremium({ ...base, lines: [{ amountCents: 4615, weekStart: '2026-10-12' }, { amountCents: 20000, weekStart: '2026-10-12' }] });
     expect(without.extraPremiumCents).toBe(110);

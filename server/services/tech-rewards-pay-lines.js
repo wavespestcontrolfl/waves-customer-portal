@@ -146,6 +146,18 @@ function dueInRun(payDate) {
 
 const sourceIdOf = (kind, technicianId, key) => `${kind}:${technicianId}:${key}`;
 
+/**
+ * The parts of a pay line's source key when the WHOLE key is one this sync writes: the Tech Rewards source type, and a source id
+ * of the line's own kind, its own technician and a year. Null for any other line: one with no source, another source type, or
+ * the Tech Rewards source type with a source id that names another kind, another technician or no year. Pure.
+ */
+function ownKeyOf(line) {
+  if (line.source_type !== SOURCE_TYPE) return null;
+  const match = SOURCE_ID_RE.exec(line.source_id || '');
+  const own = match && match[1] === line.kind && match[2].toLowerCase() === String(line.technician_id).toLowerCase();
+  return own ? { kind: match[1], key: match[3] } : null;
+}
+
 /** The last pay date a run can carry the gift of `year` on: LOOKBACK_DAYS after the gift date. Pure. */
 const lastPayDate = (year) => addStaffWorkDays(decemberGiftDate(year), LOOKBACK_DAYS);
 
@@ -247,7 +259,7 @@ async function priceCandidate(trx, cand, tech, run) {
 
 // ---- Sync
 
-const lineColumns = (trx) => ['id', 'technician_id', 'kind', 'status', 'amount_cents', 'source_id',
+const lineColumns = (trx) => ['id', 'technician_id', 'kind', 'status', 'amount_cents', 'source_type', 'source_id',
   trx.raw("to_char(earned_week_start, 'YYYY-MM-DD') as earned_week_start"),
   trx.raw("to_char(covers_from, 'YYYY-MM-DD') as covers_from"),
   trx.raw("to_char(covers_to, 'YYYY-MM-DD') as covers_to")];
@@ -313,10 +325,17 @@ async function loadState(trx, run, lock) {
   const openQuery = trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' }).select(lineColumns(trx));
   if (lock) openQuery.forUpdate();
   const allOpen = await openQuery;
-  const openHere = allOpen.filter((line) => line.earned_week_start === run.week_start);
+  const closed = await trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
+    .select('technician_id', 'kind', 'source_type', 'source_id');
+  // Only a line whose WHOLE source key is the sync's own (ownKeyOf) is treated as a line the sync wrote. A row with the Tech
+  // Rewards source type and any other source id (another technician's key, no year) is a row somebody put in the database by
+  // hand. The sync never matches it to a candidate, never changes it, and never writes the line whose key it holds: that
+  // candidate waits (other_gift_line), so the unique source key cannot fail the pay run.
+  const ownOpen = allOpen.filter((line) => ownKeyOf(line));
+  const foreignKeys = new Set([...allOpen, ...closed].filter((line) => !ownKeyOf(line)).map((line) => line.source_id));
+  const openHere = ownOpen.filter((line) => line.earned_week_start === run.week_start);
   // paid (or voided) lines are evidence: their keys are never read or written again
-  const settled = new Set((await trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
-    .select('source_id')).map((row) => row.source_id));
+  const settled = new Set(closed.filter((line) => ownKeyOf(line)).map((line) => line.source_id));
   // The technicians who get a line (recipients), read only for a run that is dated for one: most runs of the year are not, and
   // they read and lock no technician row. With lock the rows are read FOR SHARE, as payroll-family-employee.js familyExemptIds
   // reads them: a change to one of these technicians waits for the pay run's transaction, so a finalize never pays a gift the
@@ -340,28 +359,29 @@ async function loadState(trx, run, lock) {
   // run's own answer (its pay date), whoever the technician is, so the audit event says which of the two took the line off.
   const dueKeys = new Set(due.map((d) => `${d.kind}:${d.key}`));
   for (const line of openHere) {
-    const match = SOURCE_ID_RE.exec(line.source_id || '');
-    const own = match && match[1] === line.kind && match[2].toLowerCase() === line.technician_id.toLowerCase();
+    const own = ownKeyOf(line);
     if (own && !candidates.has(line.source_id)) {
       candidates.set(line.source_id, {
-        kind: line.kind, key: match[3], technicianId: line.technician_id, due: dueKeys.has(`${line.kind}:${match[3]}`),
+        kind: line.kind, key: own.key, technicianId: line.technician_id, due: dueKeys.has(`${line.kind}:${own.key}`),
       });
     }
   }
-  // A December gift line this sync did not write. No code path makes one (the add form and its route offer the four manual
-  // kinds only), so it is a row somebody put in the database by hand: that technician's automatic gift is held for review, and
-  // never paid beside it. Any year, open or paid; a voided row does not count.
-  const handMade = new Set(due.length
-    ? (await trx('payroll_pay_lines').where({ kind: GIFT }).whereNot({ status: 'voided' })
-      .where(function notSynced() { this.whereNull('source_type').orWhereNot('source_type', SOURCE_TYPE); })
-      .select('technician_id')).map((row) => row.technician_id)
-    : []);
+  // A December gift line this sync did not write: its whole source key is not the sync's own (ownKeyOf), whatever its source
+  // type says. No code path makes one (the add form and its route offer the four manual kinds only, with no source), so it is
+  // a row somebody put in the database by hand: that technician's automatic gift is held for review, and never paid beside
+  // it. Any year, open or paid; a voided row does not count. One small read: a technician has one gift line a year.
+  const giftLines = due.length
+    ? await trx('payroll_pay_lines').where({ kind: GIFT }).whereNot({ status: 'voided' })
+      .select('technician_id', 'kind', 'source_type', 'source_id')
+    : [];
+  const handMade = new Set(giftLines.filter((line) => !ownKeyOf(line)).map((line) => line.technician_id));
   return {
     candidates,
     techById: new Map(techs.map((row) => [row.id, row])),
     settled,
     handMade,
-    openBySource: new Map(allOpen.map((line) => [line.source_id, line])),
+    foreignKeys,
+    openBySource: new Map(ownOpen.map((line) => [line.source_id, line])),
   };
 }
 
@@ -387,7 +407,7 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
   let priced;
   if (!cand.due) priced = { skip: 'not_due_in_this_run' };
   else if (!tech) priced = { skip: 'not_active' };
-  else if (state.handMade.has(cand.technicianId)) priced = { wait: { reason: 'other_gift_line', week: null } };
+  else if (state.handMade.has(cand.technicianId) || state.foreignKeys.has(sourceId)) priced = { wait: { reason: 'other_gift_line', week: null } };
   else priced = await priceCandidate(trx, cand, tech, run);
   if (priced.skip || priced.wait) {
     if (here) await trx('payroll_pay_lines').where({ id: open.id }).del();
@@ -477,8 +497,11 @@ async function waitNotes(conn, runId) {
   const waits = (row && Array.isArray(row.tech_rewards_waits) ? row.tech_rewards_waits : [])
     .filter((w) => KIND_WORDS[w.kind] && WAIT_WORDS[w.reason] && SOURCE_ID_RE.test(w.source_id || ''));
   if (!waits.length) return [];
+  // paid: a line the sync wrote (its whole source key is its own) that is no longer open. A hand-made row that holds the key
+  // is not the gift, so its technician's note stays.
   const paid = new Set((await conn('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
-    .whereIn('source_id', waits.map((w) => w.source_id)).select('source_id')).map((line) => line.source_id));
+    .whereIn('source_id', waits.map((w) => w.source_id)).select('technician_id', 'kind', 'source_type', 'source_id'))
+    .filter((line) => ownKeyOf(line)).map((line) => line.source_id));
   // only for a technician who still gets a line (recipients): one who left since gets no gift from any run, so nothing waits
   const techs = new Map((await recipients(conn).whereIn('technicians.id', waits.map((w) => w.technician_id))
     .select('technicians.id', 'technicians.name', conn.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date")))
