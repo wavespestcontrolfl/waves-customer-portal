@@ -77,7 +77,7 @@ postgres('tech rewards pay lines: the December gift', () => {
     regular_minutes: regular, overtime_minutes: overtime,
   });
   // A finalized check for one earlier week, in a finalized run of that week: the week is paid.
-  const paidWeek = async (technicianId, weekStart) => {
+  const paidWeek = async (technicianId, weekStart, stored = {}) => {
     let id = (await trx('payroll_runs').where({ week_start: weekStart, status: 'finalized' }).first('id'))?.id;
     if (!id) {
       [id] = (await trx('payroll_runs').insert({ week_start: weekStart, pay_date: addDays(weekStart, 11), status: 'finalized' }).returning('id')).map((r) => r.id);
@@ -87,9 +87,23 @@ postgres('tech rewards pay lines: the December gift', () => {
       hourly_rate: 22, regular_minutes: 2400, overtime_minutes: 0, gross_cents: 88000, regular_pay_cents: 88000, overtime_pay_cents: 0,
       overtime_premium_cents: 0, federal_income_tax_cents: 0, social_security_cents: 0, medicare_cents: 0, additional_medicare_cents: 0,
       net_cents: 0, employer_social_security_cents: 0, employer_medicare_cents: 0, futa_cents: 0, fl_reemployment_cents: 0,
-      ytd_gross_before_cents: 0, calc_snapshot: '{}', pay_method: 'check', status: 'finalized',
+      ytd_gross_before_cents: 0, calc_snapshot: '{}', pay_method: 'check', status: 'finalized', ...stored,
     });
     return id;
+  };
+  // A finalized check of the run of `runWeek` that already paid a commission line earned in `lineWeek` (45 h worked, 5 of them
+  // overtime), with the premium the check stored for that week: its column and its week row. `premiumCents` is whatever that
+  // check paid, by whatever rule it was priced. A finalized check cannot be edited, so it is written whole. { runId, lineId }
+  const paidLine = async (technicianId, runWeek, cents, lineWeek, premiumCents) => {
+    const runId = await paidWeek(technicianId, runWeek, {
+      line_overtime_premium_cents: premiumCents,
+      calc_snapshot: JSON.stringify({ lineOvertimeWeeks: [{ weekStart: lineWeek, workedMinutes: 2700, overtimeMinutes: 300, allocatedCents: cents, premiumCents }] }),
+    });
+    const check = await trx('payroll_checks').where({ run_id: runId, technician_id: technicianId }).first('id');
+    const [line] = await trx('payroll_pay_lines').insert({
+      technician_id: technicianId, kind: 'commission', amount_cents: cents, earned_week_start: lineWeek, status: 'paid', check_id: check.id,
+    }).returning('id');
+    return { runId, lineId: line.id || line };
   };
   const api = async (method, path, { body } = {}) => {
     const response = await fetch(`${baseUrl}${path}`, {
@@ -288,7 +302,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await linesOf(tech)).toHaveLength(0);
     });
 
-    it('rounds a week up when a finalized check already paid line pay for it: 33 then 34, never under the 67 of one check', async () => {
+    it('a week a finalized check already paid line pay for: 33 then 34, the 67 of one check with both lines', async () => {
       const tech = await readyTech('Sample Alpha');
       const WEEK = '2026-11-09'; // 45 h worked, 5 of them overtime
       await approvedWeek(tech, WEEK, '2400.00', '300.00');
@@ -299,15 +313,19 @@ postgres('tech rewards pay lines: the December gift', () => {
       const ownStored = await trx('payroll_checks').where({ id: checkOf(own, tech).id }).first();
       expect(ownStored.calc_snapshot.lineOvertimeWeeks[0]).not.toHaveProperty('roundedUp');
       await finalize(own.id);
-      // the gift's share of that week is also 6.00 (30,000 over 50 workweeks); a check already paid for the week: 33.33 -> 34
+      // the gift's share of that week is also 6.00 (30,000 over 50 workweeks). Its own floor is 33.33 up = 34, and the week's
+      // shortfall is 67 (66.67 on the 12.00) less the 33 paid = 34
       await approvedWeek(tech, GIFT_WEEK);
       const giftRun = await draft(GIFT_WEEK);
       const check = checkOf(giftRun, tech);
       expect(check).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 34 });
       const stored = await trx('payroll_checks').where({ id: check.id }).first();
-      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({ allocatedCents: 600, premiumCents: 34, roundedUp: true });
+      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
+        allocatedCents: 600, premiumCents: 34, roundedUp: true, earlierAllocatedCents: 600, earlierPremiumCents: 33,
+      });
       // a week nobody paid for is not marked
-      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === '2026-11-02')).not.toHaveProperty('roundedUp');
+      const plain = stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === '2026-11-02');
+      expect([plain.roundedUp, plain.earlierAllocatedCents, plain.earlierPremiumCents]).toEqual([undefined, undefined, undefined]);
       // a recompute and the finalize give the same figure (this run's own lines are open, so they are no history)
       expect(checkOf(await recompute(giftRun.id), tech).lineOvertimePremiumCents).toBe(34);
       await finalize(giftRun.id);
@@ -349,24 +367,44 @@ postgres('tech rewards pay lines: the December gift', () => {
       const NEW_YEAR_WEEK = '2026-01-05';
       await approvedWeek(tech, WEEK, '2400.00', '300.00');
       await approvedWeek(tech, NEW_YEAR_WEEK);
-      // December: a finalized check of the week's own run paid a 6.03 line of that week (33.5 -> 34 on that check)
-      const decemberRun = await paidWeek(tech, WEEK);
-      const decemberCheck = await trx('payroll_checks').where({ run_id: decemberRun, technician_id: tech }).first('id');
-      const [decemberLine] = await trx('payroll_pay_lines').insert({
-        technician_id: tech, kind: 'commission', amount_cents: 603, earned_week_start: WEEK, status: 'paid', check_id: decemberCheck.id,
-      }).returning('id');
-      // January: another 6.03 line of that week rides on a 2026 run. A check already paid for the week: 33.5 up = 34
+      // December: the week's own check paid a 6.03 line of that week and 34 of premium for it (33.5 half up)
+      const { runId: decemberRun, lineId: decemberLine } = await paidLine(tech, WEEK, 603, WEEK, 34);
+      // January: another 6.03 line of that week rides on a 2026 run. Both lines earn 67 and 34 is paid, a shortfall of 33;
+      // the check pays its own floor, 33.5 up = 34
       await trx('payroll_pay_lines').insert({ technician_id: tech, kind: 'commission', amount_cents: 603, earned_week_start: WEEK });
       const january = await draft(NEW_YEAR_WEEK);
       expect(checkOf(january, tech)).toMatchObject({ commissionCents: 603, lineOvertimePremiumCents: 34 });
       await finalize(january.id);
       // the December run is voided (no later check of its own tax year is final) and its reopened line is taken out
       await voidRun(decemberRun);
-      expect((await trx('payroll_pay_lines').where({ id: decemberLine.id || decemberLine }).first()).status).toBe('open');
-      await trx('payroll_pay_lines').where({ id: decemberLine.id || decemberLine }).del();
+      expect((await trx('payroll_pay_lines').where({ id: decemberLine }).first()).status).toBe('open');
+      await trx('payroll_pay_lines').where({ id: decemberLine }).del();
       // the January check is final and whole: 34 is what its 6.03 line earns alone (1/2 x 603 / 45 h x 5 h = 33.5 -> 34)
       const kept = await trx('payroll_checks').where({ run_id: january.id, technician_id: tech, status: 'finalized' }).first();
       expect(Number(kept.line_overtime_premium_cents)).toBe(34);
+    });
+
+    it('makes a week whole that two older checks left 1 cent short: 33 + 33, then the gift\'s check pays 68 (134 on the three lines)', async () => {
+      // hired the week of Jun 22: the gift covers 25 workweeks, 12.00 a week
+      const tech = await readyTech('Sample Alpha', { hire_date: '2026-06-22' });
+      const WEEK = '2026-11-09'; // 45 h worked, 5 of them overtime
+      await approvedWeek(tech, WEEK, '2400.00', '300.00');
+      // two checks priced the older way: each paid a 6.02 line of WEEK and rounded half up on its own (33.44 -> 33). Together
+      // the two lines earn 66.89 -> 67, so the week is 1 cent short before the gift.
+      await paidLine(tech, WEEK, 602, WEEK, 33);
+      await paidLine(tech, '2026-11-16', 602, WEEK, 33);
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      const check = checkOf(run, tech);
+      // the three lines earn 1/2 x 24.04 / 45 h x 5 h = 133.56 -> 134, and 66 is paid: 68 (the gift's own floor is 67)
+      expect(check).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 68 });
+      const stored = await trx('payroll_checks').where({ id: check.id }).first();
+      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
+        allocatedCents: 1200, premiumCents: 68, roundedUp: true, earlierAllocatedCents: 1204, earlierPremiumCents: 66,
+      });
+      await finalize(run.id);
+      const paid = await trx('payroll_checks').where({ technician_id: tech, status: 'finalized' });
+      expect(paid.reduce((total, c) => total + Number(c.line_overtime_premium_cents), 0)).toBe(134);
     });
 
     it('adds the half-time premium of the overtime weeks it covers', async () => {

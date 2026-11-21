@@ -363,8 +363,9 @@ const GROSS_LINE_KINDS = ['review_bonus', 'commission', 'health_allowance'];
  * they are now, so an edit after the check was paid cannot move the base. A check with no Tech Rewards line keeps its stored
  * premium. `lines`: every pay line of the check { kind, cents, weekStart, coversFrom, coversTo }; `storedWeeks`: the snapshot's
  * [{ weekStart, workedMinutes, overtimeMinutes, premiumCents, roundedUp? }]. Returns { weeks: [{ weekStart, premiumCents }], excludedCents }. Pure.
- * Each week is priced by the rule the check itself used: up for a week the check stored as roundedUp (a finalized check had
- * already paid line pay for it), half up for every other week, and so for every check stored before that rule existed.
+ * Each week is priced by the rule the check itself used for its own lines: up for a week the check stored as roundedUp (a
+ * finalized check had already paid line pay for it), half up for every other week, and so for every check stored before that
+ * rule existed. Cents a mixed check paid to make up an older check's shortfall stay out of the base.
  */
 function ordinaryPremium(lines, storedWeeks) {
   const techKinds = new Set(TECH_REWARD_KINDS);
