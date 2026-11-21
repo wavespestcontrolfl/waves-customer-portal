@@ -777,6 +777,8 @@ describe('PATCH /:id/status — closing an application withdraws its outstanding
       where: { application_id: APP_ID, status: 'sent' }, statuses: null, column: ['expires_at', '<', expect.any(Date)],
       payload: { status: 'expired', updated_at: expect.any(Date) },
     }]);
+    // One clock: the expiry cutoff is the instant the withdrawal is stamped with.
+    expect(mockDb.__expiryStores()[0].column[2]).toBe(mockDb.__closedOffers()[0].payload.withdrawn_at);
   });
 
   test.each(['reviewed', 'interview'])('moving back from offer to %s withdraws the live offers, so an old link cannot sign over the new decision', async (status) => {

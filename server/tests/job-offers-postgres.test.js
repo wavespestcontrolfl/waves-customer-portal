@@ -1026,23 +1026,37 @@ jest.setTimeout(120000);
         expect(await parentAfterSend(true)).toEqual(['expired', 'expired']);
       });
 
+      // Runs `work` with the offer's expiry falling after the call started and before its transaction holds the locks.
+      const expiringWhileItWaits = (offerId, work) => {
+        const started = Date.now();
+        return withNextTransaction(async (body) => {
+          await root('job_offers').where({ id: offerId }).update({ expires_at: new Date(started + 5) });
+          await new Promise((resolve) => { setTimeout(resolve, 25); });
+          return root.transaction(body);
+        }, work);
+      };
+
       test('an offer that passes its expiry while a Send waits for the locks refuses that Send', async () => {
         const app = await newApplication();
         const out = (await sendNew(app)).offer;
         const revision = await JobOffers.reviseOffer(app.id, out.id, { expectedStatus: 'sent' }, actor());
         const { outStamp } = await JobOffers.adminPanel(app.id, actor());
-        const started = Date.now();
-        // The expiry falls after the Send started and before it holds the locks.
-        const expireThenOpen = async (work) => {
-          await root('job_offers').where({ id: out.id }).update({ expires_at: new Date(started + 5) });
-          await new Promise((resolve) => { setTimeout(resolve, 25); });
-          return root.transaction(work);
-        };
         // No clock is passed, as from the route.
-        await expect(withNextTransaction(expireThenOpen, () => JobOffers.sendOffer(app.id, revision.id, actor(), revision.draftHash, undefined, { expectedOut: outStamp })))
-          .rejects.toMatchObject({ status: 409, code: 'OFFERS_CHANGED' });
+        const send = () => JobOffers.sendOffer(app.id, revision.id, actor(), revision.draftHash, undefined, { expectedOut: outStamp });
+        await expect(expiringWhileItWaits(out.id, send)).rejects.toMatchObject({ status: 409, code: 'OFFERS_CHANGED' });
         expect(await statusOf(out.id)).toBe('sent');
         expect(await statusOf(revision.id)).toBe('draft');
+      });
+
+      test('an offer that passes its expiry while a withdrawal waits for the locks is not withdrawn; the pass closes it', async () => {
+        const app = await newApplication();
+        const out = (await sendNew(app)).offer;
+        const withdraw = () => JobOffers.withdrawOffer(app.id, out.id, actor(), { expectedStatus: 'sent' });
+        await expect(expiringWhileItWaits(out.id, withdraw)).rejects.toMatchObject({ status: 409, code: 'OFFER_NOT_WITHDRAWABLE' });
+        expect(await statusOf(out.id)).toBe('sent');
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 1, failed: 0 });
+        expect(await statusOf(out.id)).toBe('expired');
+        expect(mockRaise).toHaveBeenCalledTimes(1);
       });
 
       test('a Send that replaces a lapsed offer stores its expiry with no bell, and no later pass rings for it', async () => {

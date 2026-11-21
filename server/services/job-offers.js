@@ -748,8 +748,9 @@ async function reviseOffer(applicationId, offerId, input, actor, fixedNow) {
 /**
  * POST /:id/offer/:offerId/withdraw — sends nothing; the application status stays as it is. Needs { expectedStatus } (the
  * state the owner saw: 'draft', 'sent' or 'date_requested') and, for a draft, the { draftHash } of the preview he read.
+ * fixedNow: a clock for tests; without it the clock is read once both row locks are held.
  */
-async function withdrawOffer(applicationId, offerId, actor, precondition = {}, now = new Date()) {
+async function withdrawOffer(applicationId, offerId, actor, precondition = {}, fixedNow) {
   const { expectedStatus, draftHash } = precondition || {};
   if (!LIVE_STATUSES.includes(expectedStatus)) {
     throw new OfferError(400, 'EXPECTED_STATUS_REQUIRED', 'Say which state of the offer you are acting on.');
@@ -760,6 +761,9 @@ async function withdrawOffer(applicationId, offerId, actor, precondition = {}, n
   return db.transaction(async (trx) => {
     await loadApplication(trx, applicationId, { lock: true });
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
+    // Both rows are locked: the clock is read now. A withdrawal that waited for a lock while the offer passed its
+    // expiry is refused, so an offer whose link already read closed is never stored as withdrawn.
+    const now = fixedNow || new Date();
     assertExpectedStatus(offer, expectedStatus, LIVE_STATUSES);
     if (expectedStatus === 'draft') {
       const { terms, payDayLine } = await loadIssuedTerms(trx, now);
