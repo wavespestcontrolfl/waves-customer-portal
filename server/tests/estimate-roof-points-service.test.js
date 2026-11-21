@@ -165,9 +165,14 @@ describe('roofPointsDocBlock', () => {
     expect(await show(estimate, forB)).toBeUndefined();
     // After a duplicate merge the read's customer is the estimate's customer: it answers again (the roof read's own rule).
     expect(await show(estimate, { ...forB, customer_id: 'cust-a' })).toEqual(SNAPSHOT);
-    // The plain read is the estimate's, whoever holds it.
+    // A plain read that names no customer is the estimate's, whoever holds it.
     expect(await show(est({ customer_id: 'cust-b' }), frozenRead())).toEqual(SNAPSHOT);
     expect(await show(est({ customer_id: null }), frozenRead())).toEqual(SNAPSHOT);
+    // A plain read taken while customer A held the estimate names A: it is A's alone (ids compare without case).
+    const plainForA = frozenRead({ customer_id: 'CUST-A' });
+    expect(await show(estimate, plainForA)).toEqual(SNAPSHOT);
+    expect(await show(est({ customer_id: 'cust-b' }), plainForA)).toBeUndefined();
+    expect(await show(est({ customer_id: null }), plainForA)).toBeUndefined();
     // A read of another estimate, or a copy whose read is gone, proves nothing.
     expect(await show(estimate, frozenRead({ context_key: 'e:est-2' }))).toBeUndefined();
     expect(await show(estimate, null)).toBeUndefined();

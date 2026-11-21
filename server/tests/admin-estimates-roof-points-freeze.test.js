@@ -305,6 +305,29 @@ describe('sendEstimateNow: roof points frozen at send', () => {
     expect(store['est-1'].read_id).toBe('read-plain');
   });
 
+  test('a plain read taken while customer A held the estimate is not sent to customer B after the estimate is reassigned', async () => {
+    // Read with the estimate and its customer: the key is the plain one, and the row names customer A (cust-1).
+    reads = [read({ customer_id: 'cust-1', tech_pins: [{ x: 0.2, y: 0.2, type: 'gable_vents', note: 'note for A' }] })];
+    const send = async (row) => {
+      db.mockImplementation((table) => {
+        if (table === 'roof_entry_reads') return readsBuilder();
+        if (table === 'estimate_roof_points') return pointsBuilder();
+        return makeBuilder(row);
+      });
+      await router.sendEstimateNow(row, 'email');
+    };
+    await send(estimateRow());
+    expect(store['est-1'].read_id).toBe('read-1');
+    // Reassigned to customer B with no new send: the page does not show A's copy.
+    const stamp = { deliveryState: { lastDeliveredAt: stampedHandoff() } };
+    expect((await roofPointsDocBlock(estimateRow({ estimate_data: stamp }), { knex: db })).roofPoints).toBeDefined();
+    expect(await roofPointsDocBlock(estimateRow({ customer_id: 'cust-2', estimate_data: stamp }), { knex: db })).toEqual({});
+    expect(await roofPointsDocBlock(estimateRow({ customer_id: null, estimate_data: stamp }), { knex: db })).toEqual({});
+    // A send to customer B takes nothing and deletes A's copy.
+    await send(estimateRow({ customer_id: 'cust-2' }));
+    expect(store['est-1']).toBeUndefined();
+  });
+
   test('points cleared on the newest read: the copy is deleted and the older list does not come back', async () => {
     const later = new Date('2026-11-20T16:00:00Z');
     reads = [read()];

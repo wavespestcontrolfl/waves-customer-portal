@@ -292,6 +292,18 @@ jest.setTimeout(60000);
       expect(await chosen(custA)).toBe(plain.id);
     });
 
+    test('a plain-key read taken while customer A held the estimate is not chosen once the estimate is B\'s or no one\'s', async () => {
+      const [custA, custB] = [await insertId('customers'), await insertId('customers')];
+      const est = await insertId('estimates', { customer_id: custA });
+      const read = (await svc.runRoofEntryRead(home({ estimateId: est, customerId: custA }))).read;
+      await savePoints(read, 27.46, 'for A');
+      expect(await database('roof_entry_reads').where({ id: read.id }).first('context_key', 'customer_id')).toEqual({ context_key: `e:${est}`, customer_id: custA });
+      const chosen = async (customerId) => (await newestPointsRead({ id: est, customer_id: customerId }, database))?.id;
+      expect(await chosen(custA)).toBe(read.id);
+      expect(await chosen(custB)).toBeUndefined();
+      expect(await chosen(null)).toBeUndefined();
+    });
+
     test('a cleared read stays the newest read set, so an older list does not come back; a read never set does not count', async () => {
       const est = await insertId('estimates');
       const older = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;

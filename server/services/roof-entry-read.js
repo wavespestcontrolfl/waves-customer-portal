@@ -315,6 +315,9 @@ function publicRead(row) {
     tech_final_count: row.tech_final_count ?? null,
     tech_final_flags: row.tech_final_flags == null ? null : parseJson(row.tech_final_flags),
     tech_pins: row.tech_pins == null ? null : parseJson(row.tech_pins),
+    // The address the points were saved for. Null on a list saved before it was recorded: the panel then asks staff to
+    // save the list once more, because a send copies points only with their address (estimate-roof-points.js).
+    points_address: row.points_address || null,
     hide_on_estimate: Boolean(row.hide_on_estimate),
     created_at: row.created_at,
   };

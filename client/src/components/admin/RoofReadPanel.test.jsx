@@ -21,6 +21,8 @@ const READ = (over = {}) => ({
     plumbing_vent_stacks: { likely: "yes", pins: [{ x: 0.25, y: 0.5 }, { x: 0.75, y: 0.1 }] },
     gable_vents: { likely: "unsure" },
   }),
+  // A saved list carries the address it was saved for (pass points_address: null for a list from before that was recorded).
+  points_address: over.tech_pins?.length ? ADDR : null,
   ...over,
 });
 
@@ -44,6 +46,13 @@ afterEach(() => {
 const tap = () => fireEvent.click(screen.getByTestId("roof-read-button"));
 
 describe("the Read the roof tap", () => {
+  it("tells staff what reaches the customer: the AI read stays with staff, saved points and notes show on the estimate", async () => {
+    render(<RoofReadPanel spot={SPOT} address={ADDR} estimateId={EST} />);
+    const panel = screen.getByTestId("roof-read-panel");
+    expect(panel).toHaveTextContent("The AI read stays with staff. The points you save, with their notes, show on the customer estimate from its next send");
+    expect(panel).not.toHaveTextContent("Nothing here reaches the customer");
+  });
+
   it("posts nothing until staff tap, then sends the lookup's point, county and the ids", async () => {
     render(<RoofReadPanel spot={SPOT} address={ADDR} estimateId={EST} customerId={CUST} />);
     await new Promise((r) => setTimeout(r, 10));
@@ -549,6 +558,40 @@ describe("confirmed points", () => {
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/Change a point or the checkbox first/);
     expect(patches()).toHaveLength(1);
+  });
+
+  it("a list saved before the address was recorded: the panel says so, and Save points sends it unchanged with the crop, the address and the list it loaded", async () => {
+    await opened({}, READ({ tech_pins: SAVED, points_address: null }));
+    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/the customer estimate does not show them.*press Save points to confirm them for this address/);
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    expect(patches()).toHaveLength(1);
+    expect(lastBody()).toEqual({
+      pins: SAVED,
+      crop: { lat: SPOT.lat, lng: SPOT.lng },
+      address: ADDR,
+      expected_pins: SAVED,
+    });
+    // The server now holds the address: the note goes, and an unchanged list is not sent again.
+    expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/Change a point or the checkbox first/);
+    expect(patches()).toHaveLength(1);
+  });
+
+  it("asks for no confirmation when the list has its address, when no list is saved, or when the saved list is empty", async () => {
+    await opened({}, READ({ tech_pins: SAVED }));
+    expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
+    cleanup();
+    await opened({}, READ());
+    expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
+    cleanup();
+    await opened({}, READ({ tech_pins: [], points_address: null }));
+    expect(screen.queryByTestId("roof-read-points-unconfirmed")).toBeNull();
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/Change a point or the checkbox first/);
+    expect(patches()).toHaveLength(0);
   });
 
   it("can save an empty list after the last point is removed, and shows the server's refusal", async () => {

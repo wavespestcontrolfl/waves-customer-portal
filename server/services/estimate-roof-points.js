@@ -43,13 +43,26 @@ const estimateContext = (estimate) => ({
 });
 
 /**
+ * Is this read the estimate's own, so its points and notes may go to whoever holds the estimate now?
+ *  - The roof read's own context rule (matchesContext): the estimate's plain row, or the two-part row of the customer the
+ *    estimate belongs to now.
+ *  - And a read that names a customer is that customer's alone. A plain row read while customer A held the estimate
+ *    carries A's id: it is not B's once the estimate goes to B, and it is no one's once the estimate has no customer.
+ *    A duplicate merge repoints the read and the estimate together, so the merged customer keeps it.
+ */
+function ownRead(row, estimate) {
+  const ctx = estimateContext(estimate);
+  if (row.customer_id && String(row.customer_id).toLowerCase() !== ctx.customerId) return false;
+  return matchesContext(row, ctx);
+}
+
+/**
  * The newest finished read of the estimate whose points the technician set, or undefined.
  *  - "Set" is a saved list (an empty one counts: the technician confirmed none) or a cleared one (crop_lat is written
  *    with every points list and a clear leaves it). So neither an empty list nor a clear lets an older read's points
  *    come back. A read on which no list was ever saved is not "set".
- *  - "Of the estimate" follows the roof read's own context rule (matchesContext): the estimate's plain row, or the
- *    two-part row of the customer the estimate belongs to now. A read taken for another customer while the estimate had
- *    no customer is never published on it, and an estimate with no customer takes its plain row only.
+ *  - "Of the estimate" is ownRead: a read taken for another customer, while the estimate had no customer or while that
+ *    customer held it, is never published on it.
  * Every candidate is judged: there is no limit.
  */
 async function newestPointsRead(estimate, knex) {
@@ -58,8 +71,7 @@ async function newestPointsRead(estimate, knex) {
     .whereRaw("(crop_lat IS NOT NULL OR (tech_pins IS NOT NULL AND jsonb_typeof(tech_pins) = 'array'))")
     .orderBy(NEWEST)
     .select();
-  const ctx = estimateContext(estimate);
-  return rows.find((row) => matchesContext(row, ctx));
+  return rows.find((row) => ownRead(row, estimate));
 }
 
 // The misting layout's address comparison (addressKey: case, spacing, punctuation and a trailing ZIP or state are
@@ -125,7 +137,7 @@ function copyIsCurrent(row, estimate) {
  *  - Staff did not hide the estimate's roof points. Hide or show is one choice for the estimate: saveTechCount writes it
  *    to every read of the estimate and a new read starts with it. So "hidden" is "any read of this estimate is hidden"
  *    (plus the read the copy came from, by id): no later read, with or without points, brings hidden points back.
- *  - The read the copy came from is still one of this estimate's own reads (matchesContext), so an estimate handed to
+ *  - The read the copy came from is still one of this estimate's own reads (ownRead), so an estimate handed to
  *    another customer since the send does not show a read taken for the first one. A copy whose read is gone cannot be
  *    judged, so it is not shown (no code deletes a read).
  */
@@ -135,7 +147,7 @@ async function readsAllowCopy(estimate, readId, knex) {
     knex(READS).where({ estimate_id: estimate.id, hide_on_estimate: true }).first('id'),
   ]);
   if (anyHidden || !frozen || frozen.hide_on_estimate) return false;
-  return matchesContext(frozen, estimateContext(estimate));
+  return ownRead(frozen, estimate);
 }
 
 function cleanSnapshot(snapshot) {

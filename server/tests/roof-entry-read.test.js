@@ -1467,7 +1467,10 @@ describe('saveTechCount pins', () => {
     // The estimate moved to another home while this photo was open: the points keep the home the photo is of.
     mockRows[0].estimate_id = EST;
     mockRefs.estimates = [{ id: EST, address: '99 Other Road, Sarasota, FL 34232' }];
-    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: `  ${ADDRESS} ` });
+    // The staff answer says whether the points have their address: null until one is stored (the panel then asks for a save).
+    expect((await svc.saveTechCount(READ_A, { count: 1 })).points_address).toBeNull();
+    const saved = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: `  ${ADDRESS} ` });
+    expect(saved.points_address).toBe(ADDRESS);
     expect(mockRows[0].points_address).toBe(ADDRESS);
     // A count-only or hide-only save never rewrites it, with or without an address in the call.
     await svc.saveTechCount(READ_A, { count: 2, hideOnEstimate: true, address: '99 Other Road, Sarasota, FL 34232' });
