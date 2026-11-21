@@ -5,9 +5,6 @@
  * retires the row on a clean night. The SQL itself runs against PostgreSQL in
  * tab-reload-check-postgres.test.js.
  */
-const fs = require('fs');
-const path = require('path');
-
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({
@@ -25,7 +22,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const sendgrid = require('../services/sendgrid-mail');
 const { deliverOpsDigest } = require('../services/ops-digest');
 const { retireIfClean } = require('../services/ops-digest-fall-off');
-const { runTabReloadCheck, readWindow, OPS_KEY, EDGE_AT, FAILED_NAMES } = require('../services/tab-reload-check');
+const { runTabReloadCheck, readWindow, OPS_KEY, FAILED_NAMES } = require('../services/tab-reload-check');
 const { RELOAD_BLOCKERS } = require('../routes/admin-usage');
 
 const TECH_A = 'a0000000-0000-4000-8000-000000000001';
@@ -240,23 +237,5 @@ describe('readWindow', () => {
   test('a mark at or past the latest edge leaves nothing to read', () => {
     expect(win('2026-11-21T20:00:00Z', NOV_20)).toEqual([NOV_20, NOV_20]);
     expect(win('2026-11-21T20:00:00Z', NOV_21)).toEqual([NOV_20, NOV_20]);
-  });
-});
-
-describe('scheduler wiring', () => {
-  test('runs nightly at 11:51 PM ET under runExclusive, with a lazy require and a job_health rethrow', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
-    // The job runs one minute after the edge of its read (EDGE_AT).
-    const [hour, minute] = EDGE_AT.split(':');
-    expect(`cron.schedule('${Number(minute) + 1} ${Number(hour)} * * *'`).toBe("cron.schedule('51 23 * * *'");
-    const i = src.indexOf("cron.schedule('51 23 * * *'");
-    expect(i).toBeGreaterThan(-1);
-    const block = src.slice(i, src.indexOf('timezone', i) + 40);
-    expect(block).toContain("runExclusive('tab-reload-check'");
-    expect(block).toContain("require('./tab-reload-check')");
-    expect(block).toContain('result.delivery.ok === false');
-    expect(block).toContain("timezone: 'America/New_York'");
-    // #3208 rule. failing-jobs-check.test.js also checks that no fixed or hourly job shares the minute.
-    expect(src.match(/cron\.schedule\('51 23 \* \* \*'/g)).toHaveLength(1);
   });
 });

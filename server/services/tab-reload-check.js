@@ -32,10 +32,10 @@ const { deliverOpsDigest } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 
 const OPS_KEY = 'tab-reload-check';
-// The edge of a read, Eastern: one minute before the job's scheduled time
-// (scheduler.js; a test keeps both in step). A page view takes its time from
-// the database as its insert starts. After that minute a view of before the
-// edge is in the table, also when that clock is a little behind this one.
+// The edge of a read, Eastern: one minute before the job's scheduled time,
+// 11:51 PM. A page view takes its time from the database as its insert
+// starts. After that minute a view of before the edge is in the table, also
+// when that clock is a little behind this one.
 const EDGE_AT = '23:50';
 const FAILED_NAMES = ['reloaded', 'reload-missed'];
 // How far a finished run has read (system_settings), and the most a run goes
