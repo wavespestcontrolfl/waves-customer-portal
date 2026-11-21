@@ -49,6 +49,20 @@ const TAB_OPAQUE_RE = /^(?=[a-z0-9-]*\d)[a-z0-9-]{20,}$/;
 const SOURCES = new Set(['sidebar', 'tabbar', 'more', 'palette', 'load', 'in-app']);
 // The tab's build tag, as vite.config.js writes it (portal-build-header.js).
 const BUILD_RE = /^[a-f0-9]{8,64}$/i;
+// Every code name a tab sends as reloadHold, and the only values stored: a
+// slug-shaped name off this list could be an identifier. A name the list
+// lacks reads as no name. The client drift test keeps it in step with
+// client/src/lib/portalReload.js and the holds the client registers.
+const RELOAD_BLOCKERS = new Set([
+  // Page moves and the reload itself (reloadBlockerAtMove, reloadForNewBuild).
+  'first-page', 'admin-index', 'waves-admin', 'field-page', 'current', 'never-heard',
+  'offline', 'no-signal', 'storage', 'reloaded', 'stalled', 'saving', 'request',
+  // Holds (registerReloadHold, holdReloadWhileSending).
+  'ask-draft', 'bank-import', 'bank-link', 'card-payment', 'dictation', 'email-draft',
+  'estimate-send', 'misting-layout', 'photo-assessment', 'push-setup', 'recap-upload',
+  'schedule-notice', 'tap-to-pay', 'text-attachment', 'text-draft', 'time-clock',
+  'visit-step', 'visual-note', 'zone-map',
+]);
 const EVENT_TYPES = new Set(['page_view']);
 
 // Mirror of the client normalizer's ID detection (lib/adminUsage.js). The
@@ -142,13 +156,12 @@ const ET_DAY_SQL = "(created_at AT TIME ZONE 'America/New_York')::date";
 // never cost the page view: a value of the wrong shape is dropped. stale_build
 // is null when either side has no build tag (a dev server, a tab from before
 // the beacon sent one). reload_hold, the code name of what kept the tab's last
-// page move from reloading it, is kept only for a stale tab, and only in the
-// shape of a tab slug.
+// page move from reloading it, is kept only for a stale tab, and only when it
+// is on RELOAD_BLOCKERS.
 function tabReloadFields(build, reloadHold) {
   const served = servedPortalBuild();
   const stale = typeof build === 'string' && BUILD_RE.test(build) && served ? build.toLowerCase() !== served : null;
-  const keep = stale && typeof reloadHold === 'string' && TAB_RE.test(reloadHold) && !TAB_OPAQUE_RE.test(reloadHold);
-  return { stale_build: stale, reload_hold: keep ? reloadHold : null };
+  return { stale_build: stale, reload_hold: stale && RELOAD_BLOCKERS.has(reloadHold) ? reloadHold : null };
 }
 
 router.post('/track', async (req, res, next) => {
@@ -307,3 +320,5 @@ module.exports = router;
 // Exposed for the App.jsx drift test only — the registry must track the
 // client route table, and the test is what enforces that.
 module.exports.KNOWN_PAGE_KEYS = KNOWN_PAGE_KEYS;
+// Exposed for the client drift test of the reload blocker names, likewise.
+module.exports.RELOAD_BLOCKERS = RELOAD_BLOCKERS;

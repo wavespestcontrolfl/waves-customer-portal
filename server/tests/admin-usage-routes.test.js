@@ -316,6 +316,7 @@ describe('admin usage: POST /track tab build', () => {
     ['a build of the wrong shape', { build: 'not a build', reloadHold: 'current' }, null, null],
     ['a build that is not text', { build: 12, reloadHold: 'current' }, null, null],
     ['a name with spaces', { build: 'aaa111aaa111', reloadHold: 'John Smith' }, true, null],
+    ['a slug-shaped name off the list, which could be an identifier', { build: 'aaa111aaa111', reloadHold: 'customer-12345' }, true, null],
     ['an opaque token as the name', { build: 'aaa111aaa111', reloadHold: 'abcdef0123456789abcdef0123456789' }, true, null],
     ['a name that is not text', { build: 'aaa111aaa111', reloadHold: 7 }, true, null],
   ])('keeps the page view and drops %s', async (_label, extra, staleBuild, reloadHold) => {
@@ -326,6 +327,34 @@ describe('admin usage: POST /track tab build', () => {
   test('without a build tag on the server, whether the tab is out of date is unknown', async () => {
     setPortalBuildForTests(null);
     await expect(stored({ build: 'aaa111aaa111', reloadHold: 'current' })).resolves.toEqual({ stale_build: null, reload_hold: null });
+  });
+
+  // The list is what keeps an identifier out of reload_hold, but a
+  // hardcoded list drifts. This test reads every code name the reload module
+  // quotes, the gate's first-page note and each hold the client registers,
+  // and fails when one is added or removed without updating RELOAD_BLOCKERS
+  // in routes/admin-usage.js.
+  test('RELOAD_BLOCKERS holds every name a tab can send, and no other', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const { RELOAD_BLOCKERS } = require('../routes/admin-usage');
+    const src = path.join(__dirname, '..', '..', 'client', 'src');
+    const read = (file) => fs.readFileSync(path.join(src, file), 'utf8');
+    // Quoted in portalReload.js but never sent: a storage key, a typeof
+    // check, the page-use events, 'moved' (the gate drops it) and
+    // 'not-staff' (the beacon logs staff pages only).
+    const notSent = new Set(['portal-reloaded-for', 'undefined', 'pointerdown', 'click', 'keydown', 'input', 'change', 'moved', 'not-staff']);
+    const names = new Set([...read('lib/portalReload.js').matchAll(/'([a-z][a-z0-9-]*)'/g)].map((m) => m[1]).filter((name) => !notSent.has(name)));
+    for (const m of read('components/PortalUpdate.jsx').matchAll(/noteMoveOutcome\([^,]+, '([a-z-]+)'\)/g)) names.add(m[1]);
+    const sources = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) return sources(file);
+      return /\.jsx?$/.test(entry.name) && !/\.test\./.test(entry.name) ? [file] : [];
+    });
+    const holds = sources(src).flatMap((file) => [...fs.readFileSync(file, 'utf8').matchAll(/(?:registerReloadHold|holdReloadWhileSending)\(\s*["']([a-z0-9-]+)["']/g)].map((m) => m[1]));
+    expect(holds.length).toBeGreaterThan(10);
+    holds.forEach((name) => names.add(name));
+    expect([...RELOAD_BLOCKERS].sort()).toEqual([...names].sort());
   });
 });
 
