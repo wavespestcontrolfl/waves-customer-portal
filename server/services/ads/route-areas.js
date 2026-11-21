@@ -18,8 +18,9 @@
  *                at least one job fits one of its real openings, on the hour, with its drive (route_check_runs
  *                `slots`). Free time in pieces too short for a job does not count. The measure is used only while
  *                the day is as the route check saw it: the same number of stops for the technician, no stop row
- *                changed since its run, and no unassigned work (the route check skips such a day). A booking or a
- *                move since then puts the day on `minutes`.
+ *                of that date changed since its run, and no unassigned work (the route check skips such a day). A
+ *                booking or a move since then puts the day on `minutes`. So does a day where the two stop counts
+ *                differ by their grouping (the route check counts one visit in two separate windows as two stops).
  *   minutes      today, and a date the route check did not measure (no fresh run, or a day it skips): the open
  *                minutes of the day hold one more job with its drive (close-gaps SLOT_MIN). This is a daily total,
  *                so it is a ceiling: the route check does not measure today (its room depends on where the van is).
@@ -174,10 +175,12 @@ function techDay(input, ctx, techId, date) {
   // budget rule already follows) and a job that fits: one of the route check's real openings when it measured this
   // date, else the open minutes of the day. Every count is stored, so each test can be counted again alone.
   // The route check's measure holds only while the day is as it saw it. A booking since then (one more stop for him,
-  // or work with no technician, which the route check itself skips) or a stop changed in place since then (moved,
-  // made longer: its row's change time is after the route check's run) puts the day back on the minute total.
+  // or work with no technician, which the route check itself skips) or a stop changed since then (booked, moved,
+  // made longer: its row's change time is after the route check's run) puts the day back on the minute total. Any
+  // technician's stop that date counts: while the occupancy check is tech-blind, one booking holds its time for
+  // every technician, so another technician's new stop can take this one's opening.
   const seen = date === input.dates[0] ? undefined : ctx.routeDays.get(`${techId}:${date}`);
-  const changedSince = mine.some((s) => s.changedAt && s.changedAt > ctx.routeAt);
+  const changedSince = input.stops.some((s) => s.date === date && s.changedAt && s.changedAt > ctx.routeAt);
   const measured = seen !== undefined && seen.stops === mine.length && unassigned.stops_left === 0 && !changedSince;
   const room = staffed && openStops >= 1 && (measured ? seen.slots >= 1 : openMin >= input.slotMin);
   const { areas, unmapped } = areasOfStops(mine, ctx.maps.areaOfZip);
@@ -238,17 +241,20 @@ function lineDay(input, ctx, cardLine, technicians, date) {
     .filter((t) => !ctx.lineOff.has(`${t.id}:${cardLine}`) && dayOf(t).staffed)
     .map((t) => [t.id, dayOf(t)]));
   const card = (input.lineCard || {})[cardLine];
-  // Whom the line follows by the card alone; then ZIP by ZIP, with the ZIP's territory technician laid over the card.
-  // A ZIP is the line's when the technician the line follows for that ZIP has it on his day.
-  const followed = new Set(lineTechIds(card, fitDays, techIds));
+  // ZIP by ZIP, with the ZIP's territory technician laid over the card: a ZIP is the line's when the technician the
+  // line follows for that ZIP has it on his day.
+  const picked = new Set();
   const zips = [];
   for (const zip of uniqSorted([...fitDays.values()].flatMap((d) => d.zips))) {
-    const ids = lineTechIds(entryForZip(card, ctx.maps.ownerOfZip.get(zip), cardLine, input), fitDays, techIds)
+    const forZip = lineTechIds(entryForZip(card, ctx.maps.ownerOfZip.get(zip), cardLine, input), fitDays, techIds)
       .filter((id) => fitDays.get(id).zips.includes(zip));
-    if (ids.length) zips.push(zip);
-    ids.forEach((id) => followed.add(id));
+    if (forZip.length) zips.push(zip);
+    forZip.forEach((id) => picked.add(id));
   }
-  const ids = techIds.filter((id) => followed.has(id));
+  // The line follows every technician a ZIP was picked for, and the card's own pick while he lists no ZIPs (a full
+  // day). The card's pick whose every ZIP went to another technician (a territory) is not followed.
+  const byCard = lineTechIds(card, fitDays, techIds);
+  const ids = techIds.filter((id) => picked.has(id) || (byCard.includes(id) && fitDays.get(id).zips.length === 0));
   return {
     date,
     technician_ids: ids,

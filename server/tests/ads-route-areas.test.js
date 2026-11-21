@@ -131,6 +131,12 @@ describe('buildRouteAreas: one technician', () => {
       stops: [stop({ changedAt: '2026-11-23T13:00:00.000Z' }), stop({ changedAt: '2026-11-23T13:30:00.000Z' })], routeCheck: { ...seenTwo, days: [{ ...seenTwo.days[0], slots: 0 }] },
     }));
     expect(dayOf(still, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'route_check', room: false });
+    // Another technician's stop booked that date since the run: tech-blind, it can hold this technician's opening.
+    const other = buildRouteAreas(input({
+      techIds: [T1, T2], routeCheck: seenTwo,
+      stops: [stop(), stop(), stop({ technicianId: T2, zip: '34203', changedAt: '2026-11-23T13:45:00.000Z' })],
+    }));
+    expect(dayOf(other, T1, WEEKDAYS[1])).toMatchObject({ stops: 2, route_stops: 2, route_slots: 2, room_basis: 'minutes' });
     // An entry with no stop count is not used.
     const noCount = buildRouteAreas(input({ stops: [stop()], routeCheck: { at, days: [{ date: WEEKDAYS[1], technicianId: T1, slots: 0, skip: null }] } }));
     expect(dayOf(noCount, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'minutes', room: true });
@@ -383,6 +389,16 @@ describe('buildRouteAreas: service lines', () => {
     const covered = buildRouteAreas(input({ techIds: [T1, T2], lineCard: card, territory, territoryLive: true, stops: [stop(), stop({ zip: '34203' }), ...full] }));
     expect(dayOf(covered, T2, WEEKDAYS[1]).room).toBe(false);
     expect(covered.lines.pest.days[1]).toMatchObject({ technician_ids: [T1], zips: ['34201', '34202', '34203'] });
+
+    // Every ZIP of the card technician's day goes to its territory technician: the card technician is not followed,
+    // and his minutes are not in the line's.
+    const allOwned = buildRouteAreas(input({
+      techIds: [T1, T2], lineCard: card, territory, territoryLive: true, stops: [stop({ zip: '34203' }), stop({ technicianId: T2, zip: '34203' })],
+    }));
+    expect(dayOf(allOwned, T1, WEEKDAYS[1])).toMatchObject({ room: true, zips: ['34203'] });
+    expect(allOwned.lines.pest.days[1]).toEqual({
+      date: WEEKDAYS[1], technician_ids: [T2], open_min: dayOf(allOwned, T2, WEEKDAYS[1]).open_min, zips: ['34203'],
+    });
 
     // Gate off: the card alone decides.
     const off = buildRouteAreas(input({ techIds: [T1, T2], lineCard: card, territory, stops }));
