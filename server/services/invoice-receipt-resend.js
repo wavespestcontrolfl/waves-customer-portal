@@ -25,7 +25,10 @@
  * re-derives and refuses with 409 `receipt_approval_changed` on ANY difference
  * (receipt_sent_at, recipients, amount, linked visit, channels): no effect, the
  * claim handed back untouched. `rederive({ownClaimToken})` must ignore the
- * caller's own claim row.
+ * caller's own claim row. The closeout that follows resolves the linked visit
+ * once more, so it is handed the visit that version names
+ * (`approved.closeout_visit`), or 'none': a visit that became closable after
+ * the check stays open for this run (runCloseout).
  * Besides `{status, body}` the result carries what the caller must not guess:
  * `lockLost` / `stampWritten` (the send lock's session ended mid-send: which step found it,
  * and whether the stamp was written),
@@ -153,10 +156,22 @@ async function verifyApproved(s, claim) {
 // ahead of BOTH legs, so an email-only resend retries too; a completed visit refuses quietly.
 // GATE_REPORT_AFTER_PAY: a resend retries a close and records no hold (`recordHold: false`), so it
 // does what its card's preview read: a visit the payment holds, or would hold, stays open today.
+// A card-driven resend (`expect`) closes only the visit its card named (`closeout_visit`), or none. The
+// closeout resolves the visit again, after verifyApproved, and what it finds can differ: a bill added in
+// between ends a hold the card read, a technician arrives. The closeout is handed the card's target and
+// leaves any other visit open (pre-push audit round 12 on #8239). The target limits this run only
+// (`targetBindsRetries: false`): its refusal (`visit_not_on_card`) is read by no retry sweep, so each
+// decides that visit as if this resend had not run. The Invoices route shows no card and names no target.
 async function runCloseout(s, stillHeld) {
   if (!stillHeld('before_closeout')) return;
   const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
-  s.closeout = await closeOutVisitForIssuedInvoice({ invoiceId: s.id, trigger: 'paid', actorTechnicianId: s.actorTechnicianId, recordHold: false });
+  s.closeout = await closeOutVisitForIssuedInvoice({
+    invoiceId: s.id,
+    trigger: 'paid',
+    actorTechnicianId: s.actorTechnicianId,
+    recordHold: false,
+    ...(s.expect ? { approvedTarget: s.expect.approved.closeout_visit || 'none', targetBindsRetries: false } : {}),
+  });
 }
 
 // Before each delivery leg: the approval re-check first (it awaits database reads), then lock
