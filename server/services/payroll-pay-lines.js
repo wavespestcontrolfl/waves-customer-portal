@@ -235,6 +235,11 @@ async function openLinesFor(conn, end, { lock = false } = {}) {
     .join('technicians as t', 't.id', 'l.technician_id')
     .where('l.status', 'open')
     .where('l.earned_week_start', '<=', end)
+    // A Tech Rewards line is paid by the run of its own earned week only (the run that wrote it): a later run never picks up one
+    // that belongs to an earlier week (tech-rewards-pay-lines.js).
+    .where(function ownWeekOnly() {
+      this.whereNotIn('l.kind', TECH_REWARD_KINDS).orWhere('l.earned_week_start', addStaffWorkDays(end, -6));
+    })
     .where('t.employment_type', 'w2')
     .orderBy([{ column: 'l.earned_week_start' }, { column: 'l.created_at' }, { column: 'l.id' }]);
   if (lock) query.forUpdate('l');
