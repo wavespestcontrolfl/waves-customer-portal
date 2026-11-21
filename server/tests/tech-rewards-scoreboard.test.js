@@ -91,19 +91,41 @@ describe('ordinaryPremium: the overtime a check paid for its ordinary lines only
     expect(ordinaryPremium([reward], stored)).toEqual({ weeks: [], excludedCents: 4000 });
   });
 
-  test('prices the ordinary lines by the rule the check used for each week: up where the check stored roundedUp, half up elsewhere', () => {
-    // 45 hours, 5 of them overtime: a 600 commission earns 33.33 of premium, and the 600 weekly share of a gift the same
+  test('a week paid on more than one check is counted once: the ordinary lines of the earlier checks and of this one together, less what is counted', () => {
+    // 45 hours, 5 of them overtime: a 600 commission earns 33.33 of premium, and a 600 share of a gift the same
+    const WEEK = '2026-11-09';
+    const commission = { kind: 'commission', cents: 600, weekStart: WEEK };
+    const gift = { kind: 'december_gift', cents: 600, weekStart: WEEK, coversFrom: WEEK, coversTo: '2026-11-15' };
+    const row = (premiumCents) => ({ weekStart: WEEK, workedMinutes: 2700, overtimeMinutes: 300, premiumCents });
+    // the first check for the week, a commission and the gift (67 stored): the commission's part is 33
+    expect(ordinaryPremium([commission, gift], [row(67)])).toEqual({ weeks: [{ weekStart: WEEK, premiumCents: 33 }], excludedCents: 34 });
+    // the same check after an earlier check paid a commission and 33: the two commissions earn 67 together and 33 is counted
+    const earlier = { lines: [commission], attributed: new Map([[WEEK, 33]]) };
+    expect(ordinaryPremium([commission, gift], [row(67)], earlier)).toEqual({ weeks: [{ weekStart: WEEK, premiumCents: 34 }], excludedCents: 33 });
+    // a check with only the gift (12.00 for the week) that paid 68: its own 67, and the 1 cent two older commission checks
+    // were short (6.02 each, 33 + 33 counted; together they earn 66.89 -> 67). That cent is ordinary.
+    const older = { lines: [{ ...commission, cents: 602 }, { ...commission, cents: 602 }], attributed: new Map([[WEEK, 66]]) };
+    expect(ordinaryPremium([{ ...gift, cents: 1200 }], [row(68)], older)).toEqual({ weeks: [{ weekStart: WEEK, premiumCents: 1 }], excludedCents: 67 });
+    // never over what the check stored for the week, never under zero
+    expect(ordinaryPremium([gift], [row(0)], older)).toEqual({ weeks: [], excludedCents: 0 });
+    expect(ordinaryPremium([gift], [row(34)], { lines: [commission], attributed: new Map([[WEEK, 40]]) })).toEqual({ weeks: [], excludedCents: 34 });
+    // an earlier line of another week changes nothing
+    expect(ordinaryPremium([commission, gift], [row(67)], { lines: [{ ...commission, weekStart: '2026-11-02' }], attributed: new Map([['2026-11-02', 33]]) }))
+      .toEqual({ weeks: [{ weekStart: WEEK, premiumCents: 33 }], excludedCents: 34 });
+  });
+
+  test('a week no Tech Rewards line of the check covers keeps all of its stored premium, a make-up for an older shortfall included', () => {
+    // the check holds the gift for the week of Nov 9, and a 12.00 commission for the week of Nov 2 that paid 68: its own 67
+    // and 1 cent an older commission check was short
     const lines = [
-      { kind: 'commission', cents: 600, weekStart: '2026-11-09' },
+      { kind: 'commission', cents: 1200, weekStart: '2026-11-02' },
       { kind: 'december_gift', cents: 600, weekStart: '2026-11-09', coversFrom: '2026-11-09', coversTo: '2026-11-15' },
     ];
-    const row = { weekStart: '2026-11-09', workedMinutes: 2700, overtimeMinutes: 300, premiumCents: 67 };
-    // the first check for the week (and every check stored before the rule): the commission's part is 33
-    expect(ordinaryPremium(lines, [row])).toEqual({ weeks: [{ weekStart: '2026-11-09', premiumCents: 33 }], excludedCents: 34 });
-    expect(ordinaryPremium(lines, [{ ...row, roundedUp: false }])).toEqual({ weeks: [{ weekStart: '2026-11-09', premiumCents: 33 }], excludedCents: 34 });
-    // a later check for the week (an earlier commission was paid 33): this commission's part is 34, so the two commissions
-    // together count 67, what they earn together
-    expect(ordinaryPremium(lines, [{ ...row, roundedUp: true }])).toEqual({ weeks: [{ weekStart: '2026-11-09', premiumCents: 34 }], excludedCents: 33 });
+    const stored = [
+      { weekStart: '2026-11-02', workedMinutes: 2700, overtimeMinutes: 300, premiumCents: 68 },
+      { weekStart: '2026-11-09', workedMinutes: 2700, overtimeMinutes: 300, premiumCents: 33 },
+    ];
+    expect(ordinaryPremium(lines, stored)).toEqual({ weeks: [{ weekStart: '2026-11-02', premiumCents: 68 }], excludedCents: 33 });
   });
 });
 

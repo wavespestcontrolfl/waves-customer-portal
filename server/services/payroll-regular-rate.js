@@ -108,17 +108,14 @@ const ceilDiv = (numerator, denominator) => (numerator + denominator - 1n) / den
  *   week with `lines` matters. Such a week takes the rounded-up floor.
  * earlierPremiums: [{ weekStart, premiumCents }] the line premium finalized checks
  *   stored for a week (several rows for a week add up).
- * roundUpWeeks: weeks (any date in each) to give the rounded-up floor when the caller
- *   knows them without the lines: the scoreboard, from a stored week row.
  * Returns { extraPremiumCents, weeks: [{ weekStart, workedMinutes, overtimeMinutes,
  *   allocatedCents, premiumCents }] } with one entry per week that holds line pay,
  *   oldest first. allocatedCents is the week's line pay rounded to the cent for
- *   display; the premium comes from the exact share. A week whose floor was rounded
- *   up carries roundedUp: true, and a week with earlier line pay or premium carries
- *   earlierAllocatedCents and earlierPremiumCents, so a stored row says how it was
- *   priced.
+ *   display; the premium comes from the exact share. A week with earlier line pay or
+ *   premium carries earlierAllocatedCents and earlierPremiumCents, so a stored row
+ *   says how it was priced (earlier line pay: the floor was rounded up).
  */
-function lineOvertimePremium({ weeks = [], lines = [], earlierLines = [], earlierPremiums = [], roundUpWeeks = [] }) {
+function lineOvertimePremium({ weeks = [], lines = [], earlierLines = [], earlierPremiums = [] }) {
   const hoursByWeek = new Map();
   for (const week of weeks) {
     const regular = nonNegativeUnits(week.regularMinutes, 'Regular minutes');
@@ -154,8 +151,6 @@ function lineOvertimePremium({ weeks = [], lines = [], earlierLines = [], earlie
     const key = staffWeekStartForWorkDate(row.weekStart);
     paidByWeek.set(key, (paidByWeek.get(key) || 0n) + BigInt(cents));
   }
-  const up = new Set([...roundUpWeeks].map((week) => staffWeekStartForWorkDate(week)));
-  for (const week of earlierShareByWeek.keys()) up.add(week);
 
   let extra = 0n;
   const breakdown = [...shareByWeek.keys()].sort().map((weekStart) => {
@@ -163,13 +158,12 @@ function lineOvertimePremium({ weeks = [], lines = [], earlierLines = [], earlie
     const earlierShare = earlierShareByWeek.get(weekStart) || 0n;
     const paid = paidByWeek.get(weekStart) || 0n;
     const hours = hoursByWeek.get(weekStart) || { worked: 0n, overtime: 0n };
-    const roundedUp = up.has(weekStart);
     let premium = 0n;
     if (hours.worked > 0n && hours.overtime > 0n) {
       // 1/2 x (line pay / worked) x overtime, with the line pay over the common denominator
       const divisor = 2n * denominator * hours.worked;
       // (a) the floor, from this check's lines only: up when a finalized check already paid line pay for the week
-      const floor = (roundedUp ? ceilDiv : roundDiv)(share * hours.overtime, divisor);
+      const floor = (earlierShare > 0n ? ceilDiv : roundDiv)(share * hours.overtime, divisor);
       // (b) the shortfall: the premium on the week's whole line pay, less what the earlier checks paid
       const shortfall = roundDiv((share + earlierShare) * hours.overtime, divisor) - paid;
       premium = shortfall > floor ? shortfall : floor;
@@ -181,7 +175,6 @@ function lineOvertimePremium({ weeks = [], lines = [], earlierLines = [], earlie
       overtimeMinutes: Number(hours.overtime) / 100,
       allocatedCents: Number(roundDiv(share, denominator)),
       premiumCents: Number(premium),
-      ...(roundedUp ? { roundedUp: true } : {}),
       ...(earlierShare > 0n || paid > 0n
         ? { earlierAllocatedCents: Number(roundDiv(earlierShare, denominator)), earlierPremiumCents: Number(paid) }
         : {}),

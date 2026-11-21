@@ -311,7 +311,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       const own = await draft(WEEK);
       expect(checkOf(own, tech)).toMatchObject({ commissionCents: 600, lineOvertimePremiumCents: 33 });
       const ownStored = await trx('payroll_checks').where({ id: checkOf(own, tech).id }).first();
-      expect(ownStored.calc_snapshot.lineOvertimeWeeks[0]).not.toHaveProperty('roundedUp');
+      expect(ownStored.calc_snapshot.lineOvertimeWeeks[0]).not.toHaveProperty('earlierPremiumCents');
       await finalize(own.id);
       // the gift's share of that week is also 6.00 (30,000 over 50 workweeks). Its own floor is 33.33 up = 34, and the week's
       // shortfall is 67 (66.67 on the 12.00) less the 33 paid = 34
@@ -321,11 +321,11 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(check).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 34 });
       const stored = await trx('payroll_checks').where({ id: check.id }).first();
       expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
-        allocatedCents: 600, premiumCents: 34, roundedUp: true, earlierAllocatedCents: 600, earlierPremiumCents: 33,
+        allocatedCents: 600, premiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33,
       });
-      // a week nobody paid for is not marked
+      // a week nobody paid for carries no earlier figures
       const plain = stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === '2026-11-02');
-      expect([plain.roundedUp, plain.earlierAllocatedCents, plain.earlierPremiumCents]).toEqual([undefined, undefined, undefined]);
+      expect([plain.earlierAllocatedCents, plain.earlierPremiumCents]).toEqual([undefined, undefined]);
       // a recompute and the finalize give the same figure (this run's own lines are open, so they are no history)
       expect(checkOf(await recompute(giftRun.id), tech).lineOvertimePremiumCents).toBe(34);
       await finalize(giftRun.id);
@@ -400,7 +400,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(check).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 68 });
       const stored = await trx('payroll_checks').where({ id: check.id }).first();
       expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
-        allocatedCents: 1200, premiumCents: 68, roundedUp: true, earlierAllocatedCents: 1204, earlierPremiumCents: 66,
+        allocatedCents: 1200, premiumCents: 68, earlierAllocatedCents: 1204, earlierPremiumCents: 66,
       });
       await finalize(run.id);
       const paid = await trx('payroll_checks').where({ technician_id: tech, status: 'finalized' });
@@ -673,6 +673,27 @@ postgres('tech rewards pay lines: the December gift', () => {
       await approvedWeek(bravo, NEXT_WEEK);
       const next = await draft(NEXT_WEEK);
       expect(checkOf(next, alpha)).toMatchObject({ techRewardsCents: GIFT, grossCents: GIFT });
+    });
+
+    it('waits on a later run while a week between the gift\'s period and that run is worked and has no check', async () => {
+      const tech = await readyTech('Sample Alpha');
+      const LATER = '2026-12-21';
+      // the gift week was paid by a check with no gift on it, so a later run carries the gift
+      await approvedWeek(tech, GIFT_WEEK);
+      await paidWeek(tech, GIFT_WEEK);
+      await approvedWeek(tech, NEXT_WEEK); // worked; its own run, dated Dec 25, is not final
+      await approvedWeek(tech, LATER);
+      const run = await draft(LATER, '2026-12-30');
+      // A gift on this run could leave a check of theirs dated Dec 30 while the week of Dec 14 has none: that week's own run
+      // (dated Dec 25) would then refuse to finalize. The gift waits for the week, though it covers no day of it.
+      expect(await linesOf(tech)).toHaveLength(0);
+      expect(checkOf(run, tech)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Dec 14, 2026 is not paid yet')]);
+      // the week is paid: the run carries the gift, with the period it always had
+      await paidWeek(tech, NEXT_WEEK);
+      expect(checkOf(await recompute(run.id), tech).techRewardsCents).toBe(GIFT);
+      const line = await lineOf(tech);
+      expect([dateOf(line.earned_week_start), dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual([LATER, '2026-01-01', '2026-12-13']);
     });
 
     it('waits on a January run whose own week has work to approve, though the gift covers no day of that week', async () => {

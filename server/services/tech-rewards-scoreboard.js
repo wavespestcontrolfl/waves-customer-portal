@@ -356,31 +356,52 @@ const lineEarnedOnBindings = () => [COMMISSION_SOURCE_TYPE, REVIEW_BONUS_SOURCE_
 const GROSS_LINE_KINDS = ['review_bonus', 'commission', 'health_allowance'];
 
 /**
- * The overtime a finalized check's ORDINARY pay lines cause, taken out of the check's stored premium (a bonus never feeds a bonus):
- * the Tech Rewards lines' part is left out of the base. It is priced again by the pay run's own rule (payroll-regular-rate.js
- * lineOvertimePremium over every ordinary line together, the employer HSA included because it counts in the regular rate) from the
- * hours the CHECK stored for each week (calc_snapshot.lineOvertimeWeeks workedMinutes and overtimeMinutes), never from timesheets as
- * they are now, so an edit after the check was paid cannot move the base. A check with no Tech Rewards line keeps its stored
- * premium. `lines`: every pay line of the check { kind, cents, weekStart, coversFrom, coversTo }; `storedWeeks`: the snapshot's
- * [{ weekStart, workedMinutes, overtimeMinutes, premiumCents, roundedUp? }]. Returns { weeks: [{ weekStart, premiumCents }], excludedCents }. Pure.
- * Each week is priced by the rule the check itself used for its own lines: up for a week the check stored as roundedUp (a
- * finalized check had already paid line pay for it), half up for every other week, and so for every check stored before that
- * rule existed. Cents a mixed check paid to make up an older check's shortfall stay out of the base.
+ * The overtime a finalized check paid for ORDINARY pay lines, taken out of the check's stored premium (a bonus never feeds a
+ * bonus): the Tech Rewards lines' part is left out of the base. `lines`: every pay line of the check { kind, cents, weekStart,
+ * coversFrom, coversTo }; `storedWeeks`: the snapshot's [{ weekStart, workedMinutes, overtimeMinutes, premiumCents }].
+ * Returns { weeks: [{ weekStart, premiumCents }], excludedCents }. Pure.
+ * A check with no Tech Rewards line keeps its stored premium. On a check with one, week by week:
+ * - No Tech Rewards line of the check covers the week: all of the stored premium is ordinary, a make-up for an older check's
+ *   shortfall included.
+ * - A Tech Rewards line covers the week: the ordinary part is what the ordinary lines earn for the week (the pay run's own
+ *   math, payroll-regular-rate.js lineOvertimePremium, the employer HSA included because it counts in the regular rate), from
+ *   the hours the CHECK stored for the week, never from timesheets as they are now, so an edit after the check was paid cannot
+ *   move the base. The rest is the Tech Rewards lines' part.
+ * A week can be paid on more than one check (a commission on the week's own check, then a gift that covers the week on a later
+ * one, which also makes up any shortfall). `earlier` holds what the technician's EARLIER finalized checks did for these weeks,
+ * so a week is counted once: { lines: the ordinary lines those checks paid, attributed: Map of week -> the ordinary premium
+ * already counted }. The ordinary part of a covered week is then what the earlier ordinary lines and this check's earn
+ * TOGETHER, less what is already counted; never under zero, never over what this check stored for the week.
  */
-function ordinaryPremium(lines, storedWeeks) {
+function ordinaryPremium(lines, storedWeeks, earlier = {}) {
   const techKinds = new Set(TECH_REWARD_KINDS);
   const plain = storedWeeks.map((w) => ({ weekStart: w.weekStart, premiumCents: w.premiumCents }));
-  const roundUpWeeks = storedWeeks.filter((w) => w.roundedUp === true).map((w) => w.weekStart);
-  if (!lines.some((line) => techKinds.has(line.kind)) || !storedWeeks.length) return { weeks: plain, excludedCents: 0 };
-  const ordinary = lines.filter((line) => !techKinds.has(line.kind) && line.cents > 0).map((line) => ({
-    amountCents: line.cents, weekStart: line.weekStart, coversFrom: line.coversFrom || null, coversTo: line.coversTo || null,
-  }));
+  const rewards = lines.filter((line) => techKinds.has(line.kind));
+  if (!rewards.length || !storedWeeks.length) return { weeks: plain, excludedCents: 0 };
+  const spanOf = (line) => ({ amountCents: line.cents, weekStart: line.weekStart, coversFrom: line.coversFrom || null, coversTo: line.coversTo || null });
+  const rewardWeeks = new Set(rewards.flatMap((line) => weeksOfLine(spanOf(line))));
+  const ordinary = lines.filter((line) => !techKinds.has(line.kind) && line.cents > 0).map(spanOf);
+  const ownWeeks = new Set(ordinary.flatMap((line) => weeksOfLine(line)));
+  // only an earlier line that shares a week with a Tech Rewards line of this check matters
+  const before = (earlier.lines || []).filter((line) => line.cents > 0).map(spanOf)
+    .filter((line) => weeksOfLine(line).some((week) => rewardWeeks.has(week)));
+  const counted = earlier.attributed || new Map();
   const hours = storedWeeks.map((w) => ({
     weekStart: w.weekStart,
     regularMinutes: (Number(w.workedMinutes || 0) - Number(w.overtimeMinutes || 0)).toFixed(2),
     overtimeMinutes: Number(w.overtimeMinutes || 0).toFixed(2),
   }));
-  const weeks = ordinary.length ? lineOvertimePremium({ weeks: hours, lines: ordinary, roundUpWeeks }).weeks.map((w) => ({ weekStart: w.weekStart, premiumCents: w.premiumCents })) : [];
+  const together = new Map((ordinary.length || before.length ? lineOvertimePremium({ weeks: hours, lines: [...before, ...ordinary] }).weeks : [])
+    .map((w) => [w.weekStart, w.premiumCents]));
+  const weeks = [];
+  for (const w of plain) {
+    if (!rewardWeeks.has(w.weekStart)) {
+      weeks.push(w);
+    } else {
+      const part = Math.min(w.premiumCents, Math.max(0, (together.get(w.weekStart) || 0) - (counted.get(w.weekStart) || 0)));
+      if (part > 0 || ownWeeks.has(w.weekStart)) weeks.push({ weekStart: w.weekStart, premiumCents: part });
+    }
+  }
   const sum = (list) => list.reduce((total, w) => total + w.premiumCents, 0);
   return { weeks, excludedCents: sum(plain) - sum(weeks) };
 }
@@ -395,7 +416,7 @@ async function readGross(conn, technicianId, from, to) {
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
     .whereRaw('c.week_start + 6 >= ?::date', [from])
-    .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents', 'c.regular_pay_cents',
+    .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), conn.raw("to_char(r.pay_date, 'YYYY-MM-DD') AS pay_date"), 'c.gross_cents', 'c.regular_pay_cents',
       'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents', 'c.tech_rewards_cents',
       conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"));
   if (!rows.length) return 0;
@@ -406,15 +427,23 @@ async function readGross(conn, technicianId, from, to) {
       conn.raw("to_char(l.covers_from, 'YYYY-MM-DD') AS covers_from"), conn.raw("to_char(l.covers_to, 'YYYY-MM-DD') AS covers_to"),
       conn.raw(`to_char(${LINE_DAY_SQL}, 'YYYY-MM-DD') AS earned_on`, lineEarnedOnBindings()));
   const checks = [];
+  // In pay order (pay date, then pay week: the order finalize keeps within a tax year), so the ordinary overtime of a week that
+  // was paid on more than one check is counted once (ordinaryPremium `earlier`). Every check that paid a line for a week of
+  // the window is in `rows`: a line is paid by its own week's run or a later one.
+  rows.sort((a, b) => (a.pay_date || '').localeCompare(b.pay_date || '') || a.week_start.localeCompare(b.week_start));
+  const earlier = { lines: [], attributed: new Map() };
   for (const row of rows) {
     const ownLines = lineRows.filter((line) => line.check_id === row.id);
+    const paidLines = ownLines.map((line) => ({ kind: line.kind, cents: toCents(line.amount_cents), weekStart: line.week_start, coversFrom: line.covers_from, coversTo: line.covers_to }));
     const premium = ordinaryPremium(
-      ownLines.map((line) => ({ kind: line.kind, cents: toCents(line.amount_cents), weekStart: line.week_start, coversFrom: line.covers_from, coversTo: line.covers_to })),
+      paidLines,
       (Array.isArray(row.line_overtime_weeks) ? row.line_overtime_weeks : []).map((w) => ({
         weekStart: w.weekStart, workedMinutes: w.workedMinutes, overtimeMinutes: w.overtimeMinutes, premiumCents: toCents(w.premiumCents),
-        roundedUp: w.roundedUp === true,
       })),
+      earlier,
     );
+    earlier.lines.push(...paidLines.filter((line) => !TECH_REWARD_KINDS.includes(line.kind) && line.cents > 0));
+    for (const w of premium.weeks) earlier.attributed.set(w.weekStart, (earlier.attributed.get(w.weekStart) || 0) + w.premiumCents);
     const check = {
       weekStart: row.week_start,
       grossCents: toCents(row.gross_cents),

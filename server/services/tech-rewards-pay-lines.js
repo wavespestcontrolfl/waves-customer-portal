@@ -210,12 +210,15 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
  * Why the gift cannot go on this run for the technician, as { reason, week }, or null when it can:
  *   later_check_final   a later check of theirs in the tax year is already final: finalize refuses a run that holds a check
  *                       of theirs, so a gift here would hold the whole run (week is null)
- *   week_not_paid       an earlier week of its span holds work and has no finalized check
+ *   week_not_paid       a week before the run's own, from the start of its span on, holds work and has no finalized check
  *   week_needs_review   the pay run's own line guards would hold a check for an earlier week of its span
  *   no_paycheck         no check can be worked out for the technician on this run (week is null)
  * (priceCandidate adds two before it asks: hire_date_missing, no hire date on file; pay_week_too_early, the run pays a week
  * before the last week the gift covers.)
- * The unpaid test asks only the weeks before the run's own: the run's own week is the one this run pays. The line guards are
+ * The unpaid test asks the weeks before the run's own (the run's own week is the one this run pays), from the start of the span
+ * to the day before the run's week. For a later run that carries the gift, that is past the end of the span: a check dated
+ * after a worked week that has no check yet would make that week's own run refuse to finalize (laterFinalCheckExists), and a
+ * gift never puts the office there. The line guards are
  * asked for the WHOLE span, exactly as the run asks them of the line (evaluate), and for the run's OWN week also when it lies
  * after the span (a later run that carries the gift, in January too): a gift goes on a run only when the technician's own
  * week there has no work waiting for approval and no automatic clock-out nobody reviewed. A line that passes never makes the
@@ -224,7 +227,7 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
 async function waitOf(trx, run, technicianId, span) {
   if (await payrollRuns().laterFinalCheckExists(trx, run, [technicianId])) return { reason: 'later_check_final', week: null };
   const beforeRun = addStaffWorkDays(run.week_start, -1);
-  const earlier = { coversFrom: span.coversFrom, coversTo: beforeRun < span.coversTo ? beforeRun : span.coversTo };
+  const earlier = { coversFrom: span.coversFrom, coversTo: beforeRun };
   if (earlier.coversFrom <= earlier.coversTo) {
     const unpaid = await oldestUnpaidWeek(trx, technicianId, earlier);
     if (unpaid) return { reason: 'week_not_paid', week: unpaid };

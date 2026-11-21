@@ -376,6 +376,37 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.seasonBonus.grossCents).toBe(70000 + 10000 + 1000);
   });
 
+  test('a week paid on two checks: the commissions\' overtime counts once in the season base, the stay bonus\'s part never', async () => {
+    const [tau] = await db('technicians').insert({ name: 'Sample Tau', hire_date: '2024-01-15' }).returning('id');
+    // inserted newest first: the checks are read in pay order, whatever order they are stored in
+    const [later, own] = await db('payroll_runs').insert([
+      { status: 'finalized', week_start: '2026-06-01', pay_date: '2026-06-12' },
+      { status: 'finalized', week_start: '2026-05-04', pay_date: '2026-05-15' },
+    ]).returning('id');
+    // The week of May 4: 45 hours, 5 of them overtime. Its own check paid a 600 commission and 33 of premium (33.33).
+    // The later check paid another 600 commission and a 600 stay bonus for that week, and 67 of premium: the three lines
+    // earn 100 together and 33 was paid.
+    const [second, first] = await insertChecks([
+      {
+        run_id: later.id, technician_id: tau.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 70000 + 600 + 600 + 67, regular_pay_cents: 70000, tech_rewards_cents: 600,
+        calc_snapshot: { lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 2700, overtimeMinutes: 300, premiumCents: 67, earlierAllocatedCents: 600, earlierPremiumCents: 33 }] },
+      },
+      {
+        run_id: own.id, technician_id: tau.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 70000 + 600 + 33, regular_pay_cents: 70000,
+        calc_snapshot: { lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 2700, overtimeMinutes: 300, premiumCents: 33 }] },
+      },
+    ]).returning('id');
+    await db('payroll_pay_lines').insert([
+      { technician_id: tau.id, check_id: first.id, kind: 'commission', status: 'paid', earned_week_start: '2026-05-04', amount_cents: 600 },
+      { technician_id: tau.id, check_id: second.id, kind: 'commission', status: 'paid', earned_week_start: '2026-05-04', amount_cents: 600 },
+      { technician_id: tau.id, check_id: second.id, kind: 'stay_bonus', status: 'paid', earned_week_start: '2026-06-01', covers_from: '2026-05-04', covers_to: '2026-05-10', amount_cents: 600 },
+    ]);
+    const board = await service.getScoreboard(tau.id, { now: NOW });
+    // both weeks' wages, both commissions, and the 67 the two commissions earn together (33 on the first check, 34 of the
+    // second check's 67). The stay bonus and the other 33 are out.
+    expect(board.seasonBonus.grossCents).toBe(140000 + 1200 + 67);
+  });
+
   test('review asks are counted in SQL on each send time: an initial ask outside the season does not drag its in-season follow-up out', async () => {
     const [c1, c2] = [randomUUID(), randomUUID()];
     const rows = await db('review_requests').insert([
