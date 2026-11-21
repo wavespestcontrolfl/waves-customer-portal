@@ -739,7 +739,8 @@ customer came back to an expired estimate. It rings at most once per Eastern day
 "<name> is still deciding" when the customer taps "I'm still deciding" on the estimate page and picks what would help
 (owner 2026-11-21; `noteStillDeciding`, called by `recordEstimateStillDeciding` after its commit). The why is the reason:
 "Wants a lower price.", "Wants to talk to a person first; the page said we will call." (or "the estimate has no phone
-number", and then the page promised no call), "Is comparing other quotes.", "Says it is not the right time yet." or
+number", and then the page promised no call: the page promises it only when `noteStillDeciding` answers `callPromised`,
+which needs this bell raised), "Is comparing other quotes.", "Says it is not the right time yet." or
 "Picked Something else and gave no detail." This reason also rings over a row that says something else that day, so a
 customer who asked for a call is never hidden behind an earlier stuck alert; a second still-deciding reason that day
 does not ring (`metadata.decidingDay`). A tap with no reason raises nothing. It raises on a live quote with no send stamp too. A ring also sends a

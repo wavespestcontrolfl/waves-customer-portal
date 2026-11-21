@@ -126,6 +126,28 @@ describe('still deciding: what the customer said would help (owner 2026-11-21)',
     expect(ringOnRefresh({}, { stuckDay: '2026-11-04', stuckReason: 'deciding', decidingDay: '2026-11-04' })).toBe(true);
   });
 
+  // The page says "We will call you" on this answer alone, so it is true only when the office was told and can call.
+  test('callPromised: only "Talking to a person first", a raised bell and a phone on the estimate', async () => {
+    tables.estimates = estimateRow(PHONE_ROW);
+    await expect(stuck.noteStillDeciding(REQ, EST, 'person')).resolves.toEqual({ raised: true, reason: 'sent', callPromised: true });
+    await expect(stuck.noteStillDeciding(REQ, EST, 'price')).resolves.toMatchObject({ raised: true, callPromised: false });
+    tables.estimates = estimateRow(OPEN_ROW);
+    await expect(stuck.noteStillDeciding(REQ, EST, 'person')).resolves.toMatchObject({ raised: true, callPromised: false });
+  });
+
+  test('callPromised is false when the office was not told: the category is silenced, or the bell was not written', async () => {
+    tables.estimates = estimateRow(PHONE_ROW);
+    bellPolicy.isBellPolicyEnabled.mockReturnValue(true);
+    bellPolicy.bellAllowed.mockResolvedValue(false);
+    await expect(stuck.noteStillDeciding(REQ, EST, 'person')).resolves.toEqual({ raised: false, reason: 'silenced', callPromised: false });
+    bellPolicy.bellAllowed.mockResolvedValue(true);
+    raiseAdminAlert.mockResolvedValueOnce(null);
+    await expect(stuck.noteStillDeciding(REQ, EST, 'person')).resolves.toEqual({ raised: false, reason: 'notify_failed', callPromised: false });
+    // A staff browser, a bot or the office network: no bell, so no answer and no promise.
+    shouldRecord.mockReturnValue(false);
+    await expect(stuck.noteStillDeciding(REQ, EST, 'person')).resolves.toBeNull();
+  });
+
   test('a booking problem never stamps the still-deciding day, and keeps its own once-a-day ring', async () => {
     await stuck.noteExpiredReturn(OPEN_ROW, { offered: true, selfServe: true });
     const { ringOnRefresh, metadata } = raised()[0].opts;

@@ -35,6 +35,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const {
   INACTIVE_ESTIMATE_STATUSES,
   SOURCE_PUBLIC_ESTIMATE,
@@ -306,20 +307,15 @@ async function recordEstimateStillDeciding({
       source: SOURCE_PUBLIC_ESTIMATE,
       ...(reasonKey ? { reason: reasonKey, reason_at: now().toISOString() } : {}),
     });
+    // One row per estimate per Eastern day, the day the office bell counts by: a reason sent this morning goes on
+    // today's row and never rewrites the reason saved last night.
     const recent = await dbx('activity_log')
       .where({ estimate_id: lockedEstimate.id, action: STILL_DECIDING_ACTION })
-      .where('created_at', '>', dbx.raw("NOW() - interval '1 day'"))
+      .where('created_at', '>=', parseETDateTime(`${etDateString(now())}T00:00`))
       .first();
-    // "We will call you" is the server's to say: only for "Talking to a person first", and only while the locked
-    // estimate has a phone. The sheet words its closing text from this answer, never from the page it loaded.
-    const answer = {
-      success: true,
-      estimateId: lockedEstimate.id,
-      ...(reasonKey === 'person' && String(lockedEstimate.customer_phone || '').trim() ? { callPromised: true } : {}),
-    };
     if (recent) {
       if (reasonKey) await dbx('activity_log').where({ id: recent.id }).update({ description, metadata });
-      return { ...answer, deduped: true };
+      return { success: true, deduped: true, estimateId: lockedEstimate.id };
     }
 
     await dbx('activity_log').insert({
@@ -330,12 +326,14 @@ async function recordEstimateStillDeciding({
       metadata,
     });
     logger.info(`[estimate-change-request] still-deciding signal for estimate ${lockedEstimate.id}`);
-    return { ...answer, deduped: false };
+    return { success: true, deduped: false, estimateId: lockedEstimate.id };
   });
 
   const { estimateId, ...result } = outcome;
-  if (reasonKey) await noteReason(req, estimateId, reasonKey);
-  return result;
+  // "We will call you" is the office's to promise. The sheet says it only on callPromised, and the bell hook answers
+  // that: this request asked for a person, the office bell was raised for it, and the estimate has a phone.
+  const told = reasonKey ? await noteReason(req, estimateId, reasonKey) : null;
+  return { ...result, ...(told?.callPromised === true ? { callPromised: true } : {}) };
 }
 
 module.exports = {

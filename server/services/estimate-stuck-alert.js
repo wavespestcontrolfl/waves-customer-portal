@@ -73,7 +73,8 @@ const ACTIONS = {
 };
 // What the customer picked under "What would help you decide?" (estimate-change-request.js STILL_DECIDING_REASONS),
 // as the office reads it after "<name> is still deciding". The page tells a customer who picks "Talking to a person
-// first" that we will call, but only when the estimate has a phone (the still_deciding response's callPromised).
+// first" that we will call only when noteStillDeciding answers callPromised: this bell was raised, on an estimate
+// with a phone.
 const DECIDING_WHY = {
   price: () => 'Wants a lower price.',
   person: (row) => (String(row.customer_phone || '').trim()
@@ -371,7 +372,14 @@ function noteStillDeciding(req, estimateId, reason) {
   return safely('still deciding', async () => {
     const whyFor = Object.hasOwn(DECIDING_WHY, String(reason)) ? DECIDING_WHY[reason] : null;
     if (!estimateId || !whyFor || !customerRequest(req)) return null;
-    return raiseStuck(estimateId, 'deciding', whyFor);
+    let hasPhone = false;
+    const result = await raiseStuck(estimateId, 'deciding', (row) => {
+      hasPhone = Boolean(String(row.customer_phone || '').trim());
+      return whyFor(row);
+    });
+    // The page may say "We will call you" only when this is true: the customer asked for a person, the office bell
+    // was raised for it, and the row the bell was worded from has a phone.
+    return { ...result, callPromised: reason === 'person' && result.raised === true && hasPhone };
   });
 }
 

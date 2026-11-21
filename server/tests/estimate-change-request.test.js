@@ -46,6 +46,7 @@ function mockDb({ estimate = ESTIMATE_ROW, dupeRow = null, recentSignal = null }
   const inserts = [];
   const activity = [];
   const activityUpdates = [];
+  const activityDayBounds = [];
   const database = (table) => {
     if (table === 'estimates') return { where: () => ({ first: async () => estimate }) };
     if (table === 'service_requests') {
@@ -62,7 +63,7 @@ function mockDb({ estimate = ESTIMATE_ROW, dupeRow = null, recentSignal = null }
     if (table === 'activity_log') {
       return {
         where: (filter) => ({
-          where: () => ({ first: async () => recentSignal }),
+          where: (...bound) => { activityDayBounds.push(bound); return { first: async () => recentSignal }; },
           update: async (changes) => { activityUpdates.push({ filter, changes }); return 1; },
         }),
         insert: async (row) => { activity.push(row); return [1]; },
@@ -74,6 +75,7 @@ function mockDb({ estimate = ESTIMATE_ROW, dupeRow = null, recentSignal = null }
   database.inserts = inserts;
   database.activity = activity;
   database.activityUpdates = activityUpdates;
+  database.activityDayBounds = activityDayBounds;
   return database;
 }
 const viewable = () => true;
@@ -254,16 +256,27 @@ describe('recordEstimateStillDeciding', () => {
       expect(noteReason).toHaveBeenCalledWith(REQ, 'est-1', 'price');
     });
 
-    // The sheet says "We will call you" only on this answer, so it is true only when a call can be made.
-    test('the answer promises a call only for "Talking to a person first" on an estimate with a phone', async () => {
-      const withPhone = { ...ESTIMATE_ROW, customer_phone: ' +19415550100 ' };
-      const noteReason = async () => undefined;
-      expect(await record(mockDb({ estimate: withPhone }), 'person', noteReason)).toEqual({ success: true, deduped: false, callPromised: true });
-      expect(await record(mockDb({ estimate: withPhone, recentSignal: { id: 'act-1' } }), 'person', noteReason))
+    // The sheet says "We will call you" only on this answer. The office bell hook decides it (the bell was raised for
+    // a customer who asked for a person, on an estimate with a phone); this function only passes it on.
+    test('the answer promises a call only when the office bell hook says so', async () => {
+      const told = (answer) => async () => answer;
+      expect(await record(mockDb(), 'person', told({ raised: true, reason: 'sent', callPromised: true }))).toEqual({ success: true, deduped: false, callPromised: true });
+      expect(await record(mockDb({ recentSignal: { id: 'act-1' } }), 'person', told({ raised: true, reason: 'refreshed', callPromised: true })))
         .toEqual({ success: true, deduped: true, callPromised: true });
-      expect(await record(mockDb({ estimate: { ...ESTIMATE_ROW, customer_phone: '  ' } }), 'person', noteReason)).toEqual({ success: true, deduped: false });
-      expect(await record(mockDb({ estimate: withPhone }), 'price', noteReason)).toEqual({ success: true, deduped: false });
-      expect(await record(mockDb({ estimate: withPhone }), undefined, noteReason)).toEqual({ success: true, deduped: false });
+      for (const answer of [{ raised: true, reason: 'sent', callPromised: false }, { raised: false, reason: 'silenced', callPromised: false }, null, undefined]) {
+        expect(await record(mockDb(), 'person', told(answer))).toEqual({ success: true, deduped: false });
+      }
+    });
+
+    test('the day\'s row is today\'s Eastern day: a reason this morning never rewrites last night\'s row', async () => {
+      // 15:00Z on Nov 21 is 10:00 AM Eastern; the Eastern day began at 05:00Z.
+      const database = mockDb();
+      await record(database, 'price', async () => undefined);
+      expect(database.activityDayBounds).toEqual([['created_at', '>=', new Date('2026-11-21T05:00:00.000Z')]]);
+      // 03:30Z on Nov 22 is still Nov 21, 10:30 PM Eastern: the same day's row.
+      const late = mockDb();
+      await recordEstimateStillDeciding({ estimateToken: 'tok-1', database: late, viewabilityCheck: viewable, now: () => new Date('2026-11-22T03:30:00.000Z') });
+      expect(late.activityDayBounds).toEqual([['created_at', '>=', new Date('2026-11-21T05:00:00.000Z')]]);
     });
 
     test('a signal with no reason never clears a reason and rings nothing', async () => {
