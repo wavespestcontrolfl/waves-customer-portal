@@ -206,9 +206,15 @@ function scrollToBookingSection() {
   if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
 }
 
+// Scrolls to the Ask box and moves keyboard focus onto it (the box is focusable by script,
+// tabIndex -1), so the next Tab lands in the question field instead of walking the booking
+// controls in between. The box itself takes the focus, not the field: focusing the field
+// would open the on-screen keyboard over a link that only says where the box is.
 function scrollToAskSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(ASK_SECTION_ID) : null;
-  if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  if (!el) return;
+  el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  el.focus({ preventScroll: true });
 }
 
 // Once a slot is picked the approve CTAs land on the payment step (the actual
@@ -1333,7 +1339,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   }, [asking, askToken, question, selectedFrequency, serviceMode, token, preview]);
 
   return (
-    <section id={ASK_SECTION_ID} {...(glassCard ? { 'data-glass': 'card' } : {})} style={{ ...estimateCard(), display: 'grid', gap: 12, scrollMarginTop: 76 }}>
+    <section id={ASK_SECTION_ID} tabIndex={-1} {...(glassCard ? { 'data-glass': 'card' } : {})} style={{ ...estimateCard(), display: 'grid', gap: 12, scrollMarginTop: 76, outline: 'none' }}>
       <div>
         <div style={{
           fontSize: 14,

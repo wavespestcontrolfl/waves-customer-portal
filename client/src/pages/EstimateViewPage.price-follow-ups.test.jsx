@@ -220,7 +220,7 @@ describe('estimate page: first-visit line and Ask Waves link under the price', (
     await expectNoLine(single({ planFrequency: pestFrequency(120, 4, 39) }));
   });
 
-  it('the link scrolls to the Ask Waves box at the end of the page', async () => {
+  it('the link scrolls to the Ask Waves box at the end of the page and moves keyboard focus onto it', async () => {
     const scrollIntoView = vi.fn();
     const original = Element.prototype.scrollIntoView;
     Element.prototype.scrollIntoView = scrollIntoView;
@@ -233,6 +233,8 @@ describe('estimate page: first-visit line and Ask Waves link under the price', (
       fireEvent.click(link);
       expect(scrollIntoView).toHaveBeenCalledTimes(1);
       expect(scrollIntoView.mock.instances[0]).toBe(askBox);
+      // Focus is on the box, so the next Tab reaches the question field, not the booking controls.
+      expect(document.activeElement).toBe(askBox);
     } finally {
       Element.prototype.scrollIntoView = original;
     }
