@@ -17,11 +17,17 @@
  * WHICH RUN. By the run's PAY DATE (the date on its checks). The gift is due the last Friday on or before Dec 20. The FIRST run
  * dated on or after that day, up to 60 days after it, that is ready for a technician writes their line; a run that is not ready
  * writes nothing for them and the next run tries again. The line is $300 (owner 2026-11-20), source_type 'tech_rewards', source
- * key 'december_gift:<technician id>:<year>' (the table's unique key stops a repeat in any status), and covers Jan 1 of the
- * year (the hire date, for a technician hired during the year) to the end of the run's pay week (Dec 31 at the latest):
- * payroll_pay_lines refuses a line that covers days after the week that pays it. The span is spread over its workweeks by payroll-regular-rate.js (29 CFR 778.209), so the gift adds overtime
- * premium to the weeks it covers. It is included in the regular rate on purpose, the conservative reading: whether the
- * 29 CFR 778.212 gift exclusion applies is a question for the employment lawyer / CPA, not decided here.
+ * key 'december_gift:<technician id>:<year>' (the table's unique key stops a repeat in any status).
+ *
+ * WHAT IT COVERS. One period for each technician and year, the same whichever run pays it (spanOf): Jan 1 of the year (the
+ * hire date, for a technician hired during the year) to the end of the GIFT WEEK, the pay week whose check is dated the gift
+ * date (Sun Dec 13, 2026 for the gift of Fri Dec 18). The gift is for the work done up to the check that carries it; a week
+ * after that cannot have earned it. payroll_pay_lines refuses a line that covers days after the week that pays it, so a run
+ * carries the gift only when its pay week is the last covered week or a later one: a run for an earlier week (an old week paid
+ * late, dated on or after the gift date) WAITS, and never shortens the period to fit. The period is spread over its workweeks
+ * by payroll-regular-rate.js (29 CFR 778.209), so the gift adds overtime premium to the weeks it covers. It is included in
+ * the regular rate on purpose, the conservative reading: whether the 29 CFR 778.212 gift exclusion applies is a question for
+ * the employment lawyer / CPA, not decided here.
  *
  * WHICH DRAFT. An OPEN Tech Rewards line sits in ONE pay week, and only that week's run pays it (payroll-pay-lines.js
  * openLinesFor). There is no order between two draft runs: a sync that is dated for the line and ready for the technician takes
@@ -35,9 +41,10 @@
  * off the run keeps no stored wait (clearWaits).
  *
  * READINESS. A sync NEVER blocks a check or holds a run. A technician who cannot get the gift at all is skipped with a reason
- * in the audit event and no note: hired after the gift date, or the run's week ended before Jan 1 of the gift year. A
- * technician with no hire date on file WAITS until it is entered (no money on a guess), and so does one who has a December
- * gift line this sync did not write (a row added by hand in the database: the automatic gift is never paid beside it). A technician who can get it but not on
+ * in the audit event and no note: hired after the gift date. A technician with no hire date on file WAITS until it is entered
+ * (no money on a guess), and so does one who has a December gift line this sync did not write (a row added by hand in the
+ * database: the automatic gift is never paid beside it), and so does every technician on a run whose pay week is before the
+ * last week the gift covers (priceCandidate). A technician who can get it but not on
  * this run WAITS (waitOf): a later check of theirs in the tax year is already final, so
  * finalize would refuse a run that holds a check of theirs (laterFinalCheckExists); or an earlier week of the year holds work (a
  * weekly timesheet with minutes, recorded work by workedDates, or paid time off) and has no FINALIZED check; or the pay run's own
@@ -98,17 +105,23 @@ function decemberGiftDate(year) {
 }
 
 /**
- * What the gift of `key` (the year, as text) covers when the run of the pay week starting `weekStart` pays it to a technician
- * hired on `hireDate`. Pure. { earnedWeekStart, coversFrom, coversTo } for the pay line: Jan 1 to the end of the pay week,
- * Dec 31 at the latest. For a technician hired during the year it starts at the hire date: the gift is spread over the weeks
- * they were employed, so weeks before they started take no share of it from the weeks they worked (29 CFR 778.209). When they
- * were hired after the pay week ended, coversFrom is after coversTo: this run cannot cover it (priceCandidate makes it wait).
+ * What the gift of `key` (the year, as text) covers for a technician hired on `hireDate`, as the pay line of the run of the
+ * pay week starting `weekStart`. Pure. { earnedWeekStart, coversFrom, coversTo }. The period does NOT depend on the run:
+ *   from  Jan 1 of the year, or the hire date for a technician hired during the year: the gift is spread over the weeks they
+ *         were employed, so weeks before they started take no share of it from the weeks they worked (29 CFR 778.209)
+ *   to    the end of the gift week: the Monday-Sunday week before the week of the gift date, the one a check dated the gift
+ *         date pays (payroll-runs.js defaultPayDate). For a technician hired after that week ended (and by the gift date),
+ *         the end of the week they were hired in.
+ * A run whose pay week is before the week of coversTo cannot carry the line (payroll_pay_lines refuses a line that covers days
+ * after the week that pays it): priceCandidate makes it wait. A run of that week or a later one carries the same period.
  */
 function spanOf(key, weekStart, hireDate = null) {
-  const weekEnd = addStaffWorkDays(weekStart, 6);
-  const jan1 = ymd(Number(key), 1, 1);
-  const dec31 = ymd(Number(key), 12, 31);
-  return { earnedWeekStart: weekStart, coversFrom: hireDate && hireDate > jan1 ? hireDate : jan1, coversTo: weekEnd < dec31 ? weekEnd : dec31 };
+  const year = Number(key);
+  const jan1 = ymd(year, 1, 1);
+  const giftWeekEnd = addStaffWorkDays(staffWeekStartForWorkDate(decemberGiftDate(year)), -1);
+  const coversFrom = hireDate && hireDate > jan1 ? hireDate : jan1;
+  const coversTo = coversFrom > giftWeekEnd ? addStaffWorkDays(staffWeekStartForWorkDate(coversFrom), 6) : giftWeekEnd;
+  return { earnedWeekStart: weekStart, coversFrom, coversTo };
 }
 
 /**
@@ -180,13 +193,13 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
  *   week_not_paid       an earlier week of its span holds work and has no finalized check
  *   week_needs_review   the pay run's own line guards would hold a check for an earlier week of its span
  *   no_paycheck         no check can be worked out for the technician on this run (week is null)
- * (priceCandidate adds two before it asks: hire_date_missing, no hire date on file; hired_after_pay_week, hired after the
- * run's pay week ended, so the span would be empty.)
- * The unpaid test asks only the weeks before the run's own: the span ends in the run's own week by design (spanOf), and that
- * week is the one this run pays. The line guards are asked for the WHOLE span, exactly as the run asks them of the line
- * (evaluate), and for the run's OWN week also when it lies after the span (a January run that carries last year's gift, whose
- * span ends Dec 31): a gift goes on a run only when the technician's own week there has no work waiting for approval and no
- * automatic clock-out nobody reviewed. A line that passes never makes the run wait, hold a check or block.
+ * (priceCandidate adds two before it asks: hire_date_missing, no hire date on file; pay_week_too_early, the run pays a week
+ * before the last week the gift covers.)
+ * The unpaid test asks only the weeks before the run's own: the run's own week is the one this run pays. The line guards are
+ * asked for the WHOLE span, exactly as the run asks them of the line (evaluate), and for the run's OWN week also when it lies
+ * after the span (a later run that carries the gift, in January too): a gift goes on a run only when the technician's own
+ * week there has no work waiting for approval and no automatic clock-out nobody reviewed. A line that passes never makes the
+ * run wait, hold a check or block.
  */
 async function waitOf(trx, run, technicianId, span) {
   if (await payrollRuns().laterFinalCheckExists(trx, run, [technicianId])) return { reason: 'later_check_final', week: null };
@@ -209,17 +222,17 @@ async function waitOf(trx, run, technicianId, span) {
 
 /** { amountCents, span }, { skip: reason } (no gift for them) or { wait: { reason, week } } (not on this run) for one candidate. */
 async function priceCandidate(trx, cand, tech, run) {
-  const year = Number(cand.key);
-  if (tech.hire_date && tech.hire_date > decemberGiftDate(year)) return { skip: 'hired_after_gift_date' };
-  // a run for a week that ended before Jan 1 of the gift year (an old week paid late) has no day of the year to cover
-  if (run.week_start < addStaffWorkDays(ymd(year, 1, 1), -6)) return { skip: 'pay_week_before_gift_year' };
+  if (tech.hire_date && tech.hire_date > decemberGiftDate(Number(cand.key))) return { skip: 'hired_after_gift_date' };
   // No hire date on file: the run cannot tell whether they were hired by the gift date, and no money goes out on a guess. The
   // gift waits, with a note, until the date is entered.
   if (!tech.hire_date) return { wait: { reason: 'hire_date_missing', week: null } };
   const span = spanOf(cand.key, run.week_start, tech.hire_date);
-  // Hired after this run's pay week ended (and by the gift date): a pay line cannot cover days after the week that pays it, so
-  // the run of a later week writes it.
-  if (span.coversFrom > span.coversTo) return { wait: { reason: 'hired_after_pay_week', week: null } };
+  // This run pays a week before the last week the gift covers (an old week paid late; or the gift week's own run, for a
+  // technician hired after that week). A line cannot cover days after the week that pays it, and the period is never cut
+  // short to fit: the overtime of the weeks left out would get no share of the gift. The run of that week or a later one
+  // writes it.
+  const lastWeek = staffWeekStartForWorkDate(span.coversTo);
+  if (run.week_start < lastWeek) return { wait: { reason: 'pay_week_too_early', week: lastWeek } };
   const wait = await waitOf(trx, run, tech.id, span);
   return wait ? { wait } : { amountCents: DECEMBER_GIFT_CENTS, span };
 }
@@ -240,7 +253,7 @@ const WAIT_WORDS = {
   no_paycheck: () => 'no paycheck can be worked out for them on this pay run (check their pay rate, and the tax tables for the pay date)',
   later_check_final: () => 'a later paycheck of theirs is already final, so this pay run cannot hold one for them',
   hire_date_missing: () => 'their hire date is not on file, so the pay run cannot tell whether they were hired by the gift date',
-  hired_after_pay_week: () => 'they were hired after the week this pay run pays',
+  pay_week_too_early: (w) => `this pay run pays an earlier week than the week of ${dayLabel(w.week)}, the last week the gift covers`,
   other_gift_line: () => 'a December gift line that the pay run did not write is already on file for them, so check that line first',
 };
 

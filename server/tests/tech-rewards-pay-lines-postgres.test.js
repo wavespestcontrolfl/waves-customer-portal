@@ -124,6 +124,8 @@ postgres('tech rewards pay lines: the December gift', () => {
   const notesOf = async (runId) => (await api('GET', `/runs/${runId}`)).body.run.techRewardsNotes || [];
   // the note for a gift of 2026 that waits: the reason, then the last pay date that can carry it (Dec 18 + 60 days)
   const waits = (name, why) => `December gift for ${name} waits: ${why}. Only a pay run dated Feb 16, 2027 or earlier can add it`;
+  // why a run for a week before the last week the gift covers does not carry it
+  const tooEarly = (week) => `this pay run pays an earlier week than the week of ${week}, the last week the gift covers`;
   // the same gift on a FINALIZED run: no reason (the run is never worked out again, so a reason would go out of date)
   const missed = (name) => `December gift for ${name} was not on this pay run. Only a pay run dated Feb 16, 2027 or earlier can add it`;
   // Every event of one test has the same created_at (one outer transaction), so a test picks its event by run and by key.
@@ -304,7 +306,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       await approvedWeek(other, GIFT_WEEK);
       const run = await draft(GIFT_WEEK);
       expect(await linesOf(tech)).toHaveLength(0);
-      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'they were hired after the week this pay run pays')]);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', tooEarly('Dec 14, 2026'))]);
       await finalize(run.id);
       await approvedWeek(tech, NEXT_WEEK);
       const next = await draft(NEXT_WEEK);
@@ -333,15 +335,20 @@ postgres('tech rewards pay lines: the December gift', () => {
         .toContainEqual({ technician_id: bravo, kind: 'december_gift', reason: 'not_due_in_this_run' });
     });
 
-    it('writes no gift, and still drafts the run, when an old week from before the gift year is paid on the gift date', async () => {
+    it.each([
+      ['from before the gift year', '2025-12-15'],
+      ['of the gift year', '2026-11-30'],
+    ])('writes no gift, and still drafts the run, when an old week %s is paid on the gift date: the gift waits for a later week\'s run', async (_label, week) => {
       const tech = await readyTech('Sample Alpha');
-      await approvedWeek(tech, '2025-12-15');
-      const run = await draft('2025-12-15', '2026-12-18');
+      await approvedWeek(tech, week);
+      const run = await draft(week, '2026-12-18');
       expect(run.payDate).toBe('2026-12-18');
       expect(await linesOf(tech)).toHaveLength(0);
       expect(checkOf(run, tech)).not.toHaveProperty('techRewardsCents');
-      expect((await syncEvents()).flatMap((e) => e.metadata.skipped || []))
-        .toContainEqual({ technician_id: tech, kind: 'december_gift', reason: 'pay_week_before_gift_year' });
+      expect([run.waiting, run.blocked]).toEqual([[], []]);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', tooEarly('Dec 7, 2026'))]);
+      expect((await syncEventOf(run.id, 'waits')).flatMap((m) => m.waits))
+        .toContainEqual(expect.objectContaining({ technician_id: tech, reason: 'pay_week_too_early', week: GIFT_WEEK }));
     });
   });
 
@@ -389,10 +396,13 @@ postgres('tech rewards pay lines: the December gift', () => {
   });
 
   describe('a gift that is not ready waits and never holds the run', () => {
-    it('waits, with a note, while an earlier week of the year is approved and has no finalized check; the next run claims it', async () => {
+    it('waits, with a note, while an earlier week of the year is approved and has no finalized check; the catch-up run for that week never carries it, the next weekly run does, for the whole period', async () => {
       const alpha = await readyTech('Sample Alpha');
       const bravo = await readyTech('Sample Bravo');
       await approvedWeek(alpha, '2026-11-02'); // approved, never paid
+      // a paid week between the catch-up week and the gift date: 50 h worked, 10 h of them overtime
+      await approvedWeek(alpha, '2026-11-23', '2400.00', '600.00');
+      await paidWeek(alpha, '2026-11-23');
       await approvedWeek(alpha, GIFT_WEEK);
       await approvedWeek(bravo, GIFT_WEEK);
       const run = await draft(GIFT_WEEK);
@@ -404,20 +414,33 @@ postgres('tech rewards pay lines: the December gift', () => {
       const final = await finalize(run.id);
       expect(checkOf(final, bravo).techRewardsCents).toBe(GIFT);
       expect(checkOf(final, alpha)).not.toHaveProperty('techRewardsCents');
-      // the office pays the November week on a catch-up run dated after Dec 18 (an earlier date is refused: Alpha's Dec 18 check
-      // is final). That run is dated for the gift and ready, so it is the first check that can carry it.
+      // The office pays the November week on a catch-up run dated after Dec 18 (an earlier date is refused: Alpha's Dec 18 check
+      // is final). That run is dated for the gift, but it pays a week before the gift week: a line on it could cover Jan 1 to
+      // Nov 8 only, and the overtime of Nov 23 would get no share of the gift. It writes none.
       const catchUp = await draft('2026-11-02', '2026-12-22');
       expect(catchUp.payDate).toBe('2026-12-22');
-      expect(checkOf(catchUp, alpha).techRewardsCents).toBe(GIFT);
-      const line = await lineOf(alpha);
-      expect([dateOf(line.earned_week_start), dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual(['2026-11-02', '2026-01-01', '2026-11-08']);
+      expect(checkOf(catchUp, alpha)).not.toHaveProperty('techRewardsCents');
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect([catchUp.waiting, catchUp.blocked]).toEqual([[], []]);
+      expect(await notesOf(catchUp.id)).toEqual([waits('Sample Alpha', tooEarly('Dec 7, 2026'))]);
       await finalize(catchUp.id);
-      expect((await lineOf(alpha)).status).toBe('paid');
-      expect(await notesOf(run.id)).toEqual([]); // the finalized run no longer says "waits": the gift has its line
-      // the next weekly run does not write either gift again
+      // Every covered week is paid now. The next weekly run carries the gift, for the same period the Dec 18 run would have
+      // written, and the overtime week between the catch-up week and the gift date gets its premium.
       await approvedWeek(alpha, NEXT_WEEK);
       const next = await draft(NEXT_WEEK);
-      expect(checkOf(next, alpha)).not.toHaveProperty('techRewardsCents');
+      const check = checkOf(next, alpha);
+      // 30,000 over the 50 workweeks Dec 29 2025 .. Dec 7 2026 = 600 a week; 1/2 x 600 / 50 h x 10 h = 60
+      expect(check).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 60 });
+      const stored = await trx('payroll_checks').where({ id: check.id }).first();
+      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === '2026-11-23').premiumCents).toBe(60);
+      const line = await lineOf(alpha);
+      expect([dateOf(line.earned_week_start), dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual([NEXT_WEEK, '2026-01-01', '2026-12-13']);
+      expect(checkOf(next, bravo)).toBeUndefined(); // Bravo's gift is paid and they have no hours this week
+      await finalize(next.id);
+      expect((await lineOf(alpha)).status).toBe('paid');
+      // no finalized run says the gift was not on it any more: it is paid
+      expect(await notesOf(run.id)).toEqual([]);
+      expect(await notesOf(catchUp.id)).toEqual([]);
       expect(await notesOf(next.id)).toEqual([]);
       expect(await linesOf(alpha)).toHaveLength(1);
       expect(await linesOf(bravo)).toHaveLength(1);
@@ -486,7 +509,7 @@ postgres('tech rewards pay lines: the December gift', () => {
         technician_id: tech, entry_type: 'shift', status: 'completed', clock_in: '2027-01-05T14:00:00Z', clock_out: '2027-01-05T22:00:00Z',
       });
       jest.setSystemTime(Date.parse('2027-01-12T17:00:00Z')); // the week of Jan 4 has ended
-      const run = await draft('2027-01-04'); // dated Jan 15, 2027: it carries the 2026 gift, whose span ends Dec 31
+      const run = await draft('2027-01-04'); // dated Jan 15, 2027: it carries the 2026 gift, whose span ended Dec 13
       expect(run.payDate).toBe('2027-01-15');
       expect(run.waiting.map((w) => w.technicianId)).toEqual([tech]); // the run itself holds their check for that week
       expect(await linesOf(tech)).toHaveLength(0);
@@ -945,7 +968,8 @@ postgres('tech rewards pay lines: the December gift', () => {
       await approvedWeek(tech, NEXT_WEEK);
       const next = await draft(NEXT_WEEK);
       const line = await lineOf(tech);
-      expect([dateOf(line.earned_week_start), dateOf(line.covers_to)]).toEqual([NEXT_WEEK, '2026-12-20']);
+      // the line moves to the week that pays it; what it covers does not change with the run
+      expect([dateOf(line.earned_week_start), dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual([NEXT_WEEK, '2026-01-01', '2026-12-13']);
       expect(checkOf(next, tech).techRewardsCents).toBe(GIFT);
       expect(await linesOf(tech)).toHaveLength(1);
     });
