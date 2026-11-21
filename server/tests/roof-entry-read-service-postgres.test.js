@@ -29,6 +29,8 @@ const m1 = require('../models/migrations/20261119140000_roof_entry_reads');
 const m2 = require('../models/migrations/20261119150000_roof_entry_read_claims');
 const m3 = require('../models/migrations/20261119160000_roof_entry_read_ctx_key');
 const m4 = require('../models/migrations/20261119170000_roof_entry_read_rollback_guard');
+const m5 = require('../models/migrations/20261120200000_roof_entry_read_tech_pins');
+const m6 = require('../models/migrations/20261120220000_roof_entry_read_points_address');
 
 jest.setTimeout(60000);
 (SKIP ? describe.skip : describe)('roof entry read service on PostgreSQL', () => {
@@ -47,9 +49,9 @@ jest.setTimeout(60000);
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 5 } });
     mockDb = database;
     await database.raw('CREATE SCHEMA ??', [schema]);
-    await database.raw('CREATE TABLE ??.estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid)', [schema]);
+    await database.raw('CREATE TABLE ??.estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, address text)', [schema]);
     await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deleted_at timestamptz, phone text)', [schema]);
-    for (const m of [m1, m2, m3, m4]) await m.up(database);
+    for (const m of [m1, m2, m3, m4, m5, m6]) await m.up(database);
   });
   beforeEach(() => {
     mockDispatch.mockReset().mockImplementation(async () => goodAnswer());
@@ -221,6 +223,19 @@ jest.setTimeout(60000);
     expect(merged).toEqual(expect.objectContaining({ tech_final_count: 3, tech_final_flags: { gable_vents: 'no', chimney_or_flue: 'yes' } }));
     const [stored] = await rows();
     expect(stored.tech_final_flags).toEqual({ gable_vents: 'no', chimney_or_flue: 'yes' });
+  });
+
+  test("a points save stores the estimate's address in the same statement; a count save leaves it", async () => {
+    const est = await insertId('estimates', { address: '12 Synthetic Way, Bradenton, FL 34203' });
+    const { read } = await svc.runRoofEntryRead(home({ estimateId: est }));
+    const pins = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }];
+    const saved = await svc.saveTechCount(read.id, { pins, crop: { lat: 27.46, lng: -82.57 }, expectedPins: null });
+    expect(saved.tech_pins).toEqual(pins);
+    const stored = () => database('roof_entry_reads').where({ id: read.id }).first('points_address');
+    expect((await stored()).points_address).toBe('12 Synthetic Way, Bradenton, FL 34203');
+    await database('estimates').where({ id: est }).update({ address: '99 Other Road, Sarasota, FL 34232' });
+    await svc.saveTechCount(read.id, { count: 2 });
+    expect((await stored()).points_address).toBe('12 Synthetic Way, Bradenton, FL 34203');
   });
 
   test('a customer retired by a duplicate merge (deleted_at + merged- phone) is refused; an archived one is not', async () => {

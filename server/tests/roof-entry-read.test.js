@@ -102,6 +102,9 @@ jest.mock('../models/db', () => {
         // The flags merge is SQL (COALESCE(col, '{}') || ?::jsonb); the mock applies the same merge to the stored JSON.
         const mergeFlags = patch.tech_final_flags && patch.tech_final_flags.raw ? JSON.parse(patch.tech_final_flags.bindings[0]) : null;
         if (mergeFlags) delete patch.tech_final_flags;
+        // points_address is a subquery on the read's estimate (same statement); the mock reads it from mockRefs.estimates.
+        const addressFromEstimate = !!(patch.points_address && patch.points_address.raw);
+        if (addressFromEstimate) delete patch.points_address;
         return settled(() => {
           if (mockUpdateError && name === 'roof_entry_reads') { const err = mockUpdateError; mockUpdateError = null; throw err; }
           mockEvents.push(renewing ? 'renew' : `update:${patch.status || ''}`);
@@ -109,6 +112,7 @@ jest.mock('../models/db', () => {
           rows.forEach((r) => {
             Object.assign(r, patch);
             if (mergeFlags) r.tech_final_flags = JSON.stringify({ ...(r.tech_final_flags ? JSON.parse(r.tech_final_flags) : {}), ...mergeFlags });
+            if (addressFromEstimate) r.points_address = (mockRefs.estimates || []).find((e) => e.id === r.estimate_id)?.address ?? null;
           });
           return rows;
         });
@@ -1454,6 +1458,17 @@ describe('saveTechCount pins', () => {
     expect(read.hide_on_estimate).toBe(false);
     expect(mockRows[0].crop_lat).toBe(27.46);
     expect(mockRows[0].crop_lng).toBe(-82.57);
+  });
+
+  it('records the estimate address in the same write, so a send can tell the points belong to that home', async () => {
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, address: '12 Synthetic Way, Bradenton, FL 34203' }];
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
+    expect(mockRows[0].points_address).toBe('12 Synthetic Way, Bradenton, FL 34203');
+    // A count-only or hide-only save never rewrites it.
+    mockRefs.estimates[0].address = '99 Other Road, Sarasota, FL 34232';
+    await svc.saveTechCount(READ_A, { count: 2, hideOnEstimate: true });
+    expect(mockRows[0].points_address).toBe('12 Synthetic Way, Bradenton, FL 34203');
   });
 
   it.each([

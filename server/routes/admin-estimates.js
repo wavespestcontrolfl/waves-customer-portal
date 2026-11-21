@@ -31,7 +31,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { clearRouteCacheForRequest } = require('../utils/route-cache');
 const { nanpNationalDigits, isValidNanpNumber, nanpPhoneProblem } = require('../utils/phone');
 const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
-const { freezeRoofPointsForSend } = require('../services/estimate-roof-points');
+const { freezeRoofPointsForEstimate } = require('../services/estimate-roof-points');
 const { soldByLive, setEstimateSoldBy, listSellerCandidates, loadSoldByForList, soldByRowFields } = require('../services/estimate-sold-by');
 const {
   buildEstimatePricingAudit,
@@ -3474,10 +3474,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     };
   }
   // Roof points (owner ruling 2026-11-20, choice 4A): the customer page shows only the points the technician confirmed, as
-  // they stand NOW. This is the one place every delivered send passes (immediate, scheduled, lead auto-send, tech send and
-  // re-sends all end in sendEstimateNow), so the copy is taken here for the anchor and each sibling this send publishes.
-  // A re-send replaces the copy; no confirmed points now deletes it. Never throws: a failure here cannot fail the send.
-  try { await freezeRoofPointsForSend([estimate, ...claimedGroupSiblings]); } catch { /* the send stands */ }
+  // they stood at the last send that reached the customer. Every delivered send passes here (immediate, scheduled, lead
+  // auto-send, tech send and re-sends all end in sendEstimateNow), but only a REAL provider handoff takes the copy, the
+  // same test that moves the price snapshot: a suppressed or deduplicated send must not change a link the customer
+  // already holds. Each group sibling takes its copy below, once this send has published it. A re-send replaces the copy;
+  // no confirmed points now deletes it. Never throws, so it cannot fail the send.
+  if (stampChannels.length > 0) await freezeRoofPointsForEstimate(estimate);
   // Rollout telemetry from the FINAL delivered row — after the provider
   // handoff, after the send-time park recompute and every pre-delivery
   // check (GH codex P2 on #3750: counting earlier labelled aborted or
@@ -3836,6 +3838,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             }
           }
           published = true;
+          // The sibling's link went out with this real handoff: take its roof points copy now (never throws).
+          if (stampChannels.length > 0) await freezeRoofPointsForEstimate(sibling);
           // A sibling is a delivered row of its own after the confirmed
           // handoff — same telemetry as the anchor (a fallback sibling
           // behind a SERVER anchor was invisible before; GH codex P2 on

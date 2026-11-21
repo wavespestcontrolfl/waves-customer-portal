@@ -728,6 +728,9 @@ async function saveTechCount(id, { count, flags, pins, crop, expectedPins, hideO
     patch.tech_pins = JSON.stringify(pins);
     patch.crop_lat = roundCentre(crop.lat);
     patch.crop_lng = roundCentre(crop.lng);
+    // The estimate's address as the points are saved, in the same statement: a send freezes them only while the estimate
+    // still has it (estimate-roof-points.js), so an estimate moved to another home never shows this roof.
+    patch.points_address = db.raw('(SELECT address FROM estimates WHERE estimates.id = roof_entry_reads.estimate_id)');
     // lookup_key never changes, so this also proves the row still names the crop that was checked.
     where.lookup_key = row.lookup_key;
   }

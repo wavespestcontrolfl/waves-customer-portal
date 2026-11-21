@@ -1,10 +1,12 @@
 // estimate-roof-points: the /data block for the customer page (owner ruling 2026-11-20, choice 4A). It prints the frozen
-// copy, but staff hiding is immediate (the frozen read, or the estimate's newest saved read, hidden NOW), and an estimate that
-// has moved to another address prints nothing. Any miss is `{}` so the response stays byte-identical.
+// copy, but staff hiding is immediate (the frozen read, the estimate's newest finished read with or without points, or its
+// newest read with saved points, hidden NOW), and an estimate that has moved to another address prints nothing. Any miss
+// is `{}` so the response stays byte-identical.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { roofPointsDocBlock, freezeRoofPointsForEstimate, freezeRoofPointsForSend } = require('../services/estimate-roof-points');
+const logger = require('../services/logger');
+const { roofPointsDocBlock, freezeRoofPointsForEstimate } = require('../services/estimate-roof-points');
 
 const SNAPSHOT = {
   imageUrl: 'https://example.test/aerial.jpg',
@@ -23,12 +25,13 @@ function fakeKnex({ point, reads = [], throwOn = null }) {
     q.where = (w) => { where = { ...where, ...w }; return q; };
     q.whereRaw = () => q;
     q.orderBy = () => q;
-    q.first = async () => {
-      if (throwOn === table) throw new Error(`${table} down`);
-      if (table === 'estimate_roof_points') return point;
-      const rows = reads.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v)).sort((a, b) => b.created_at - a.created_at);
-      return rows[0];
+    q.limit = () => q;
+    const matching = () => {
+      if (throwOn === table) throw Object.assign(new Error(`${table} down: 12 Synthetic Way, note "front left"`), { code: '57014' });
+      return reads.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v)).sort((a, b) => b.created_at - a.created_at);
     };
+    q.first = async () => (table === 'estimate_roof_points' && throwOn !== table ? point : matching()[0]);
+    q.select = async () => matching();
     return q;
   };
   knex.fn = { now: () => 'NOW' };
@@ -58,6 +61,20 @@ describe('roofPointsDocBlock', () => {
     expect(await roofPointsDocBlock(estimate, { knex })).toEqual({});
   });
 
+  test('a newer finished read hidden with no points saved on it: {} (staff can hide without saving points)', async () => {
+    const reads = [frozenRead(), frozenRead({ id: 'read-2', tech_pins: null, hide_on_estimate: true, created_at: new Date('2026-11-20T18:00:00Z') })];
+    expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
+  });
+
+  test('the newest read with saved points hidden, under a newer unsaved read that is not: {}', async () => {
+    const reads = [
+      frozenRead(),
+      frozenRead({ id: 'read-2', hide_on_estimate: true, created_at: new Date('2026-11-20T17:00:00Z') }),
+      frozenRead({ id: 'read-3', tech_pins: null, created_at: new Date('2026-11-20T18:00:00Z') }),
+    ];
+    expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
+  });
+
   test('a newer read of the estimate hidden NOW: {} even though the frozen read is not hidden', async () => {
     const reads = [frozenRead(), frozenRead({ id: 'read-2', hide_on_estimate: true, created_at: new Date('2026-11-20T18:00:00Z') })];
     expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
@@ -76,9 +93,10 @@ describe('roofPointsDocBlock', () => {
     expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point({ snapshot: 'not json' }), reads }) })).toEqual({});
   });
 
-  test.each(['estimate_roof_points', 'roof_entry_reads'])('a storage failure on %s omits the section and never throws', async (table) => {
+  test.each(['estimate_roof_points', 'roof_entry_reads'])('a storage failure on %s omits the section, never throws, and logs only the code', async (table) => {
     const knex = fakeKnex({ point: point(), reads: [frozenRead()], throwOn: table });
     expect(await roofPointsDocBlock(estimate, { knex })).toEqual({});
+    expect(logger.warn).toHaveBeenLastCalledWith('[estimate-roof-points] section skipped for estimate est-1: 57014');
   });
 
   test('an estimate with no id: {}', async () => {
@@ -87,10 +105,11 @@ describe('roofPointsDocBlock', () => {
 });
 
 describe('freeze helpers never throw', () => {
-  test('a failing read reports skipped; a row with no id is skipped; the loop keeps going', async () => {
+  test('a failing read reports skipped and logs only the code; a row with no id is skipped', async () => {
     const knex = fakeKnex({ reads: [], throwOn: 'roof_entry_reads' });
     expect(await freezeRoofPointsForEstimate({ id: 'est-1', address: ADDRESS }, { knex })).toBe('skipped');
+    expect(logger.warn).toHaveBeenLastCalledWith('[estimate-roof-points] freeze skipped for estimate est-1: 57014');
     expect(await freezeRoofPointsForEstimate({}, { knex })).toBe('skipped');
-    await expect(freezeRoofPointsForSend([{ id: 'a' }, null, { id: 'b' }], { knex })).resolves.toBeUndefined();
+    expect(await freezeRoofPointsForEstimate(null, { knex })).toBe('skipped');
   });
 });

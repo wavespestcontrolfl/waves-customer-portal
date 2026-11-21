@@ -10,6 +10,7 @@ const m2 = require('../models/migrations/20261119150000_roof_entry_read_claims')
 const m3 = require('../models/migrations/20261119160000_roof_entry_read_ctx_key');
 const m4 = require('../models/migrations/20261119170000_roof_entry_read_rollback_guard');
 const m5 = require('../models/migrations/20261120200000_roof_entry_read_tech_pins');
+const m6 = require('../models/migrations/20261120220000_roof_entry_read_points_address');
 
 jest.setTimeout(60000);
 (SKIP ? describe.skip : describe)('roof_entry_reads migrations on PostgreSQL', () => {
@@ -22,7 +23,7 @@ jest.setTimeout(60000);
     await database.raw('CREATE SCHEMA ??', [schema]);
     await database.raw('CREATE TABLE ??.estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid)', [schema]);
     await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid())', [schema]);
-    for (const m of [m1, m2, m3, m4, m5]) await m.up(database);
+    for (const m of [m1, m2, m3, m4, m5, m6]) await m.up(database);
   });
   afterEach(async () => {
     await database.raw('DROP SCHEMA ?? CASCADE', [schema]);
@@ -163,5 +164,19 @@ jest.setTimeout(60000);
     const again = await database('roof_entry_reads').where({ id: row.id }).first();
     expect(again.tech_pins).toBeNull();
     expect(again.hide_on_estimate).toBe(false);
+  });
+
+  test('the points address migration adds a nullable column, is idempotent, and its down drops only that column', async () => {
+    const row = await read({ tech_final_count: 4 });
+    expect(row.points_address).toBeNull();
+    await database('roof_entry_reads').where({ id: row.id }).update({ points_address: '12 Synthetic Way, Bradenton, FL 34203' });
+    await m6.up(database);
+    expect((await database('roof_entry_reads').where({ id: row.id }).first()).points_address).toBe('12 Synthetic Way, Bradenton, FL 34203');
+    await m6.down(database);
+    expect(await database.schema.hasColumn('roof_entry_reads', 'points_address')).toBe(false);
+    expect((await database('roof_entry_reads').where({ id: row.id }).first()).tech_final_count).toBe(4);
+    await m6.down(database);
+    await m6.up(database);
+    expect((await database('roof_entry_reads').where({ id: row.id }).first()).points_address).toBeNull();
   });
 });

@@ -6972,6 +6972,26 @@ satellite photo, which is then not shown, and counts a sketch that fails to load
 page (`EstimateViewPage`, Waves AI card) shows the same card in the place of the satellite photo, with an
 animated blue mist canvas over the picture drawn from `geometry` (paused offscreen and while the tab is hidden, still
 with `prefers-reduced-motion`), and puts the satellite photo back when the picture fails to load.
+`/data` (the normal page load and the `?mode=pdf` document render pass alike) may carry an optional top-level
+`roofPoints` block (owner ruling 2026-11-20, choice 4A; no gate): `{ imageUrl, imageYear|null, pins: [{ n, x, y, type,
+label, action }] }`, the roof entry points the Waves technician confirmed on the county roof photo
+(`services/estimate-roof-points.js`). It is a copy frozen into `estimate_roof_points` at the estimate's last send with a
+real provider handoff (the same test that moves the price snapshot; a group sibling takes its copy once that send
+published it), from `customerPointsFromRow` of the newest finished roof read for the estimate that has a saved points
+list; a re-read or an edit after the send never changes it until the next such send, and a send with no points deletes
+it. `imageUrl` is the county aerial export URL of the read's own crop, rebuilt by the server from the read's image source
+and its stored centre (never caller-supplied, no key); `imageYear` is that photo's year. `n` is the 1-based number the page
+prints on the pin and in the list; `x` and `y` are 0-1 fractions of the photo from its top-left corner; `type` is a roof
+entry type or `other`; `label` is the plain name, followed by the staff note when one was saved ("Roof return, front left");
+`action` is the repair word ("seal", "trim back"). No AI read, no read id, no suggestion source, no prices. The key is
+ABSENT unless a copy exists, the points were saved for the address the estimate had then and still has
+(`roof_entry_reads.points_address`, checked at the freeze), the copy was frozen for the estimate's current address (the
+misting layout's address rule), and staff have not hidden the points (checked at request time against the frozen read,
+the estimate's newest finished read with or without points, and its newest read with saved points); every other response
+stays byte-identical. A storage failure omits the key, never the response. The interactive estimate page
+(`EstimateViewPage`, Waves AI card) shows it in the place of the satellite photo (a misting layout wins when both are
+present) and puts the satellite photo back when the picture fails to load. `EstimateProposalDocument` (the emailed PDF)
+ignores it, and the emailed-PDF fingerprint does not read it.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that

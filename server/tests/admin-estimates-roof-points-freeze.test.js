@@ -1,8 +1,9 @@
 /**
- * Roof points frozen at send (owner ruling 2026-11-20, choice 4A): every delivered send in sendEstimateNow copies the
- * technician-confirmed roof points of the newest finished read into estimate_roof_points (the customer page prints that
- * copy). A re-send replaces it, a send with no confirmed points (or with the points hidden) deletes it, and a failure in
- * the step never fails the send. The real estimate-roof-points service runs against a small in-memory stand-in for the two
+ * Roof points frozen at send (owner ruling 2026-11-20, choice 4A): every send in sendEstimateNow with a real provider
+ * handoff copies the technician-confirmed roof points of the newest finished read into estimate_roof_points (the customer
+ * page prints that copy), but only when the points were saved for the address the estimate still has. A re-send replaces
+ * it, a send with no confirmed points (or with the points hidden) deletes it, a send with no real handoff leaves it alone,
+ * and a failure in the step never fails the send. The real estimate-roof-points service runs against a small in-memory stand-in for the two
  * tables; the rest of the send harness is the one the channel-link suite uses.
  */
 
@@ -122,6 +123,7 @@ const read = (over = {}) => ({
     { x: 0.7, y: 0.55, type: 'trees_touching_roof' },
   ],
   hide_on_estimate: false,
+  points_address: '12 Synthetic Way, Bradenton, FL 34203',
   crop_lat: 26.95,
   crop_lng: -82.4,
   image_source: 'manatee_2025_rgb',
@@ -256,6 +258,84 @@ describe('sendEstimateNow: roof points frozen at send', () => {
     expect(result.sent).toBe(true);
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[estimate-roof-points] freeze skipped for estimate est-1'));
+  });
+
+  test('points saved for another address are not copied, and an older copy is deleted (the estimate moved homes)', async () => {
+    reads = [read()];
+    await router.sendEstimateNow(estimateRow(), 'email');
+    expect(store['est-1']).toBeDefined();
+    const moved = estimateRow({ address: '99 Other Road, Sarasota, FL 34232' });
+    db.mockImplementation((table) => {
+      if (table === 'roof_entry_reads') return readsBuilder();
+      if (table === 'estimate_roof_points') return pointsBuilder();
+      return makeBuilder(moved);
+    });
+    const result = await router.sendEstimateNow(moved, 'email');
+    expect(result.sent).toBe(true);
+    expect(store['est-1']).toBeUndefined();
+  });
+
+  test('points saved before the address was recorded (points_address null) are not copied', async () => {
+    reads = [read({ points_address: null })];
+    await router.sendEstimateNow(estimateRow(), 'email');
+    expect(store).toEqual({});
+  });
+
+  test('a send with no real provider handoff (a deduplicated email) leaves the copy alone', async () => {
+    reads = [read()];
+    await router.sendEstimateNow(estimateRow(), 'email');
+    const before = JSON.stringify(store['est-1']);
+    reads = [read({ tech_pins: [{ x: 0.1, y: 0.1, type: 'chimney_or_flue' }] })];
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, providerAttempted: false, providerAccepted: false });
+    const result = await router.sendEstimateNow(estimateRow(), 'email');
+    expect(result.sent).toBe(true);
+    expect(JSON.stringify(store['est-1'])).toBe(before);
+  });
+
+  // The claimed-sibling group send shape from admin-estimates-send-channel-links (one builder for every estimates query),
+  // with the two roof tables routed to the in-memory stand-ins.
+  function groupSend({ failSiblingPublish = false } = {}) {
+    const anchor = estimateRow({ estimate_group_id: 'grp-roof' });
+    const sibling = estimateRow({ id: 'est-2', token: 'tok-2', status: 'draft', estimate_group_id: 'grp-roof', estimate_data: '{}',
+      address: '14 Synthetic Way, Bradenton, FL 34203' });
+    db.mockImplementation((table) => {
+      if (table === 'roof_entry_reads') return readsBuilder();
+      if (table === 'estimate_roof_points') return pointsBuilder();
+      const b = makeBuilder(anchor);
+      let groupProbe = false; let claimable = false;
+      b.where = jest.fn((clause) => { if (clause?.estimate_group_id && !clause.id) groupProbe = true; return b; });
+      b.whereNot = jest.fn(() => b);
+      b.whereIn = jest.fn((column, statuses) => { if (column === 'status' && statuses.includes('draft')) claimable = true; return b; });
+      b.modify = jest.fn((callback) => { callback(b); return b; });
+      b.first = jest.fn(async () => (groupProbe ? null : anchor));
+      b.select = jest.fn(async () => (claimable ? [sibling] : []));
+      b.then = (resolve, reject) => Promise.resolve(claimable ? [sibling] : []).then(resolve, reject);
+      b.update = jest.fn(async (patch) => {
+        if (patch.status === 'sending') sibling.status = 'sending';
+        if (patch.sent_at && patch.expires_at && patch.followup_expiring_sent) {
+          if (failSiblingPublish) throw new Error('sibling publication down');
+          sibling.status = 'sent';
+        }
+        return 1;
+      });
+      return b;
+    });
+    reads = [read(), read({ id: 'read-2', estimate_id: 'est-2', points_address: sibling.address })];
+    return router.sendEstimateNow(anchor, 'email', { callerPreClaimed: true });
+  }
+
+  test("a group send copies each sibling it published, from that sibling's own read and address", async () => {
+    const result = await groupSend();
+    expect(result.sent).toBe(true);
+    expect(store['est-1']).toMatchObject({ read_id: 'read-1' });
+    expect(store['est-2']).toMatchObject({ read_id: 'read-2', address: '14 Synthetic Way, Bradenton, FL 34203' });
+  });
+
+  test('a sibling whose publication fails (released for a re-send) gets no copy; the anchor keeps its own', async () => {
+    const result = await groupSend({ failSiblingPublish: true });
+    expect(result.sent).toBe(true);
+    expect(store['est-1']).toBeDefined();
+    expect(store['est-2']).toBeUndefined();
   });
 
   test('a send that delivered nothing leaves the copy alone', async () => {

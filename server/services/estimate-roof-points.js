@@ -5,9 +5,11 @@
  *
  * The customer estimate shows ONLY the roof points the technician confirmed, on the county roof photo, in the Waves AI
  * card in place of the satellite photo. Two halves:
- *   - freezeRoofPointsForEstimate: at every send, copy what customerPointsFromRow gives for the newest finished read that
- *     has confirmed points into estimate_roof_points (a re-send replaces it; no points now deletes it). Between sends the
- *     copy never changes, so a re-read, an edit or a label change cannot alter an estimate the customer already holds.
+ *   - freezeRoofPointsForEstimate: at every send with a real provider handoff (and for each group sibling once that send
+ *     published it), copy what customerPointsFromRow gives for the newest finished read that has confirmed points into
+ *     estimate_roof_points (a re-send replaces it; no points now deletes it). The points must have been saved for the
+ *     address the estimate has now (points_address), or nothing is copied. Between sends the copy never changes, so a
+ *     re-read, an edit or a label change cannot alter an estimate the customer already holds.
  *     Fail-soft by contract: it never throws, so it can never block or fail a send.
  *   - roofPointsDocBlock: the /data key `{ roofPoints: { imageUrl, imageYear, pins } }`, or `{}` so a response with no
  *     snapshot stays byte-identical. Staff hiding is immediate (checked against the read rows NOW); the content is the
@@ -21,6 +23,11 @@ const { sameProperty } = require('./misting-layout-validate');
 
 const TABLE = 'estimate_roof_points';
 const READS = 'roof_entry_reads';
+const NEWEST = [{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }];
+// Reads per estimate are a handful (each "Read the roof" tap reuses a recent read); the cap only bounds the hide check.
+const MAX_HIDE_READS = 50;
+// Knex puts bound values (the address, the photo centre, the technician's notes) in err.message: log the code only.
+const errCode = (err) => err?.code || 'error';
 
 function parsed(v) {
   if (v == null) return null;
@@ -36,9 +43,10 @@ function newestPointsRead(estimateId, knex) {
   return knex(READS)
     .where({ estimate_id: estimateId, status: 'done' })
     .whereRaw("tech_pins IS NOT NULL AND jsonb_typeof(tech_pins) = 'array'")
-    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .orderBy(NEWEST)
     .first();
 }
+const hasSavedPoints = (row) => Array.isArray(parsed(row?.tech_pins));
 
 /**
  * Freeze (or clear) one estimate's roof points. `estimate` needs { id, address }. Returns 'frozen', 'cleared' or 'skipped'
@@ -48,7 +56,10 @@ async function freezeRoofPointsForEstimate(estimate, { knex = db } = {}) {
   if (!estimate?.id) return 'skipped';
   try {
     const row = await newestPointsRead(estimate.id, knex);
-    const points = row ? customerPointsFromRow(row) : null;
+    // The points were confirmed for the address the estimate had when they were saved. An estimate moved to another home
+    // since is another roof: it gets no points until staff read and confirm that one.
+    const sameRoof = Boolean(row?.points_address && estimate.address) && sameProperty(row.points_address, estimate.address);
+    const points = sameRoof ? customerPointsFromRow(row) : null;
     if (!points) {
       await knex(TABLE).where({ estimate_id: estimate.id }).del();
       return 'cleared';
@@ -63,27 +74,26 @@ async function freezeRoofPointsForEstimate(estimate, { knex = db } = {}) {
     await knex(TABLE).insert(record).onConflict('estimate_id').merge();
     return 'frozen';
   } catch (err) {
-    logger.warn(`[estimate-roof-points] freeze skipped for estimate ${estimate.id}: ${err.message}`);
+    logger.warn(`[estimate-roof-points] freeze skipped for estimate ${estimate.id}: ${errCode(err)}`);
     return 'skipped';
   }
 }
 
-/** Freeze every row in turn (the sent estimate plus any group sibling the same send published). Never throws. */
-async function freezeRoofPointsForSend(estimates, opts) {
-  for (const e of estimates || []) {
-     
-    await freezeRoofPointsForEstimate(e, opts);
-  }
-}
-
-/** True when staff hid the points: the frozen read, or the estimate's newest finished read, has hide_on_estimate set. */
+/**
+ * True when staff hid the points NOW: on the frozen read, on the estimate's newest finished read (staff can hide without
+ * saving any points, so it counts with or without a points list), or on its newest read with saved points.
+ */
 async function hiddenNow(estimateId, readId, knex) {
   if (readId) {
     const frozen = await knex(READS).where({ id: readId }).first('hide_on_estimate');
     if (frozen?.hide_on_estimate) return true;
   }
-  const newest = await newestPointsRead(estimateId, knex);
-  return Boolean(newest?.hide_on_estimate);
+  const reads = await knex(READS)
+    .where({ estimate_id: estimateId, status: 'done' })
+    .orderBy(NEWEST)
+    .limit(MAX_HIDE_READS)
+    .select('id', 'hide_on_estimate', 'tech_pins');
+  return [reads[0], reads.find(hasSavedPoints)].some((r) => Boolean(r?.hide_on_estimate));
 }
 
 function cleanSnapshot(snapshot) {
@@ -115,14 +125,13 @@ async function roofPointsDocBlock(estimate, { knex = db } = {}) {
     if (await hiddenNow(estimate.id, row.read_id, knex)) return {};
     return { roofPoints: snapshot };
   } catch (err) {
-    logger.warn(`[estimate-roof-points] section skipped for estimate ${estimate.id}: ${err.message}`);
+    logger.warn(`[estimate-roof-points] section skipped for estimate ${estimate.id}: ${errCode(err)}`);
     return {};
   }
 }
 
 module.exports = {
   freezeRoofPointsForEstimate,
-  freezeRoofPointsForSend,
   roofPointsDocBlock,
   newestPointsRead,
 };

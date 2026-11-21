@@ -129,7 +129,7 @@ const base = (extra = {}) => ({
 
 describe('GET /:token/data: roofPoints', () => {
   test('a frozen, visible copy rides the page load as { imageUrl, imageYear, pins }', async () => {
-    dbRows = base({ tables: { estimate_roof_points: POINT, roof_entry_reads: READ } });
+    dbRows = base({ tables: { estimate_roof_points: POINT, roof_entry_reads: [READ] } });
     await withServer(async (baseUrl) => {
       const body = JSON.parse(await getText(baseUrl));
       expect(body.estimate).toBeDefined();
@@ -143,10 +143,10 @@ describe('GET /:token/data: roofPoints', () => {
     await withServer(async (baseUrl) => { none = await getText(baseUrl); });
     expect(none).not.toContain('roofPoints');
 
-    dbRows = base({ tables: { estimate_roof_points: POINT, roof_entry_reads: { ...READ, hide_on_estimate: true } } });
+    dbRows = base({ tables: { estimate_roof_points: POINT, roof_entry_reads: [{ ...READ, hide_on_estimate: true }] } });
     await withServer(async (baseUrl) => { expect(diffPaths(JSON.parse(await getText(baseUrl)), JSON.parse(none))).toEqual([]); });
 
-    dbRows = base({ estimate: { address: '99 Other Road, Sarasota, FL 34232' }, tables: { estimate_roof_points: POINT, roof_entry_reads: READ } });
+    dbRows = base({ estimate: { address: '99 Other Road, Sarasota, FL 34232' }, tables: { estimate_roof_points: POINT, roof_entry_reads: [READ] } });
     await withServer(async (baseUrl) => {
       const moved = JSON.parse(await getText(baseUrl));
       expect(moved.estimate).toBeDefined();
@@ -155,7 +155,7 @@ describe('GET /:token/data: roofPoints', () => {
   });
 
   test('the public block holds only the photo link, the year and the numbered points', async () => {
-    dbRows = base({ tables: { estimate_roof_points: { ...POINT, snapshot: { ...SNAPSHOT, staffNote: 'x' } }, roof_entry_reads: READ } });
+    dbRows = base({ tables: { estimate_roof_points: { ...POINT, snapshot: { ...SNAPSHOT, staffNote: 'x' } }, roof_entry_reads: [READ] } });
     await withServer(async (baseUrl) => {
       const body = JSON.parse(await getText(baseUrl));
       expect(Object.keys(body.roofPoints).sort()).toEqual(['imageUrl', 'imageYear', 'pins']);
