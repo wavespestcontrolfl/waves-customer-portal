@@ -28,7 +28,7 @@ const db = require('../models/db');
 const calc = require('./tech-rewards-calc');
 const scores = require('./tech-rewards-scores');
 const { countDeliveredAsksForTechnician } = require('./review-ask-history');
-const { weeksOfLine, lineOvertimePremium } = require('./payroll-regular-rate');
+const { weeksOfLine } = require('./payroll-regular-rate');
 const { TECH_REWARD_KINDS } = require('./payroll-pay-lines');
 const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
 const { SOURCE_TYPE: COMMISSION_SOURCE_TYPE } = require('./payroll-commission');
@@ -362,48 +362,35 @@ const GROSS_LINE_KINDS = ['review_bonus', 'commission', 'health_allowance'];
 
 /**
  * The overtime a finalized check paid for ORDINARY pay lines, taken out of the check's stored premium (a bonus never feeds a
- * bonus): the Tech Rewards lines' part is left out of the base. `lines`: every pay line of the check { kind, cents, weekStart,
- * coversFrom, coversTo }; `storedWeeks`: the snapshot's [{ weekStart, workedMinutes, overtimeMinutes, premiumCents }].
+ * bonus): the Tech Rewards lines' part is left out of the base. `lines`: every pay line of the check { kind, weekStart,
+ * coversFrom, coversTo }; `storedWeeks`: the snapshot's [{ weekStart, premiumCents, ordinaryPremiumCents }].
  * Returns { weeks: [{ weekStart, premiumCents }], excludedCents }. Pure.
  * ONE RULE: the ordinary part is what the check would have paid WITHOUT its Tech Rewards lines. So a Tech Rewards line on a
  * check never moves the base, up or down.
  * - A check with no Tech Rewards line keeps its stored premium.
  * - A week no Tech Rewards line of the check covers keeps its stored premium too (those lines did nothing there), a make-up
  *   for an older check's shortfall included.
- * - A week one covers: the check's ordinary lines are priced again by the pay run's own rule (payroll-regular-rate.js
- *   lineOvertimePremium, the employer HSA included because it counts in the regular rate), from the hours the CHECK stored for
- *   the week, never from timesheets as they are now, so an edit after the check was paid cannot move the base. The rest is
- *   the Tech Rewards lines' part. Never over what the check stored for the week.
- * The pay run's rule reads what earlier checks paid for the week (a week can be paid on more than one check), so this one
- * does: `earlier` = { lines: every pay line the technician's EARLIER finalized checks paid, paid: Map of week -> the line
- * premium those checks stored }.
+ * - A week one covers: the figure the pay run stored for that week when it priced the check (ordinaryPremiumCents,
+ *   payroll-pay-lines.js priceCheckLines: the check's other lines priced by the pay run's own rule, from the hours and the
+ *   earlier checks that pricing read). The rest is the Tech Rewards lines' part. Never over what the check stored for the
+ *   week. The figure is READ, never worked out again here: what earlier checks had paid for a week when the check was priced
+ *   is not readable from today's rows, whatever order they are put in (a check with an earlier pay date can be finalized
+ *   later, across a tax year). A row with no figure (a check priced before the pay run stored one) has no ordinary part
+ *   for such a week: the base can only be lower for it, never higher.
  */
-function ordinaryPremium(lines, storedWeeks, earlier = {}) {
+function ordinaryPremium(lines, storedWeeks) {
   const techKinds = new Set(TECH_REWARD_KINDS);
-  const plain = storedWeeks.map((w) => ({ weekStart: w.weekStart, premiumCents: w.premiumCents }));
-  const rewards = lines.filter((line) => techKinds.has(line.kind));
-  if (!rewards.length || !storedWeeks.length) return { weeks: plain, excludedCents: 0 };
-  const spanOf = (line) => ({ amountCents: line.cents, weekStart: line.weekStart, coversFrom: line.coversFrom || null, coversTo: line.coversTo || null });
-  const rewardWeeks = new Set(rewards.flatMap((line) => weeksOfLine(spanOf(line))));
-  const ordinary = lines.filter((line) => !techKinds.has(line.kind) && line.cents > 0).map(spanOf);
-  const hours = storedWeeks.map((w) => ({
-    weekStart: w.weekStart,
-    regularMinutes: (Number(w.workedMinutes || 0) - Number(w.overtimeMinutes || 0)).toFixed(2),
-    overtimeMinutes: Number(w.overtimeMinutes || 0).toFixed(2),
-  }));
-  const without = new Map((ordinary.length ? lineOvertimePremium({
-    weeks: hours,
-    lines: ordinary,
-    earlierLines: (earlier.lines || []).filter((line) => line.cents > 0).map(spanOf),
-    earlierPremiums: [...(earlier.paid || [])].map(([weekStart, premiumCents]) => ({ weekStart, premiumCents })),
-  }).weeks : []).map((w) => [w.weekStart, w.premiumCents]));
+  const rewardWeeks = new Set(lines.filter((line) => techKinds.has(line.kind))
+    .flatMap((line) => weeksOfLine({ weekStart: line.weekStart, coversFrom: line.coversFrom || null, coversTo: line.coversTo || null })));
   const weeks = [];
-  for (const w of plain) {
-    if (!rewardWeeks.has(w.weekStart)) weeks.push(w);
-    else if (without.has(w.weekStart)) weeks.push({ weekStart: w.weekStart, premiumCents: Math.min(w.premiumCents, without.get(w.weekStart)) });
+  let excludedCents = 0;
+  for (const w of storedWeeks) {
+    const covered = rewardWeeks.has(w.weekStart);
+    const ordinary = covered ? Math.min(w.premiumCents, Math.max(0, toCents(w.ordinaryPremiumCents))) : w.premiumCents;
+    excludedCents += w.premiumCents - ordinary;
+    if (!covered || ordinary > 0) weeks.push({ weekStart: w.weekStart, premiumCents: ordinary });
   }
-  const sum = (list) => list.reduce((total, w) => total + w.premiumCents, 0);
-  return { weeks, excludedCents: sum(plain) - sum(weeks) };
+  return { weeks, excludedCents };
 }
 
 /**
@@ -411,7 +398,10 @@ function ordinaryPremium(lines, storedWeeks, earlier = {}) {
  * after `from`: a catch-up line or premium can be paid long after it was earned), with their dated parts, then
  * earnedGrossCents. Day records are read only for a week that straddles a window edge.
  * `throughWeek` (a Monday) leaves out every check for a later pay week (readStayPay).
- * Returns { cents, checkIds }: the figure, and the ids of the checks read, sorted.
+ * Returns { cents, checkIds }: the figure, and the ids, sorted, of the checks that put pay into it. Each check is read from
+ * its own rows only (its columns, its paid lines, its stored week rows, its week's day records), so the figure is a plain
+ * sum over the checks and the order they are read in changes nothing. A check that adds nothing (one of an edge week whose
+ * paid days all fall outside `from`..`to`) is not in checkIds: the figure is the same with and without it.
  */
 async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = null } = {}) {
   const query = conn('payroll_checks as c')
@@ -420,7 +410,7 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
     .whereRaw('c.week_start + 6 >= ?::date', [from]);
   if (throughWeek) query.whereRaw('c.week_start <= ?::date', [throughWeek]);
   const rows = await query
-    .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), conn.raw("to_char(r.pay_date, 'YYYY-MM-DD') AS pay_date"), 'c.gross_cents', 'c.regular_pay_cents',
+    .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents', 'c.regular_pay_cents',
       'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents', 'c.tech_rewards_cents',
       conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"));
   if (!rows.length) return { cents: 0, checkIds: [] };
@@ -430,21 +420,15 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
     .select('l.check_id', 'l.kind', 'l.amount_cents', conn.raw("to_char(l.earned_week_start, 'YYYY-MM-DD') AS week_start"),
       conn.raw("to_char(l.covers_from, 'YYYY-MM-DD') AS covers_from"), conn.raw("to_char(l.covers_to, 'YYYY-MM-DD') AS covers_to"),
       conn.raw(`to_char(${LINE_DAY_SQL}, 'YYYY-MM-DD') AS earned_on`, lineEarnedOnBindings()));
-  const checks = [];
-  // In pay order (pay date, then pay week: the order finalize keeps within a tax year), so each check is read with what the
-  // checks before it paid (ordinaryPremium `earlier`), as the pay run priced it. Every check that paid a line for a week of
-  // the window is in `rows`: a line is paid by its own week's run or a later one.
-  rows.sort((a, b) => (a.pay_date || '').localeCompare(b.pay_date || '') || a.week_start.localeCompare(b.week_start));
-  const earlier = { lines: [], paid: new Map() };
+  let cents = 0;
+  const checkIds = [];
   for (const row of rows) {
     const ownLines = lineRows.filter((line) => line.check_id === row.id);
-    const paidLines = ownLines.map((line) => ({ kind: line.kind, cents: toCents(line.amount_cents), weekStart: line.week_start, coversFrom: line.covers_from, coversTo: line.covers_to }));
+    const paidLines = ownLines.map((line) => ({ kind: line.kind, weekStart: line.week_start, coversFrom: line.covers_from, coversTo: line.covers_to }));
     const storedWeeks = (Array.isArray(row.line_overtime_weeks) ? row.line_overtime_weeks : []).map((w) => ({
-      weekStart: w.weekStart, workedMinutes: w.workedMinutes, overtimeMinutes: w.overtimeMinutes, premiumCents: toCents(w.premiumCents),
+      weekStart: w.weekStart, premiumCents: toCents(w.premiumCents), ordinaryPremiumCents: w.ordinaryPremiumCents,
     }));
-    const premium = ordinaryPremium(paidLines, storedWeeks, earlier);
-    earlier.lines.push(...paidLines);
-    for (const w of storedWeeks) earlier.paid.set(w.weekStart, (earlier.paid.get(w.weekStart) || 0) + w.premiumCents);
+    const premium = ordinaryPremium(paidLines, storedWeeks);
     const check = {
       weekStart: row.week_start,
       grossCents: toCents(row.gross_cents),
@@ -464,9 +448,11 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
       check.dayMinutes = await readDayMinutes(conn, technicianId, check.weekStart);
       Object.assign(check, await readTimeOffRecords(conn, technicianId, check.weekStart));
     }
-    checks.push(check);
+    const earned = earnedGrossCents([check], from, to);
+    cents += earned;
+    if (earned !== 0) checkIds.push(row.id);
   }
-  return { cents: earnedGrossCents(checks, from, to), checkIds: rows.map((row) => row.id).sort() };
+  return { cents, checkIds: checkIds.sort() };
 }
 
 const readGross = async (conn, technicianId, from, to) => (await readGrossAndChecks(conn, technicianId, from, to)).cents;

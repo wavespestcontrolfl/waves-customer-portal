@@ -685,7 +685,8 @@ async function waitNotes(conn, runId) {
 
 /**
  * True when a PAID line on another pay run was worked out from a check of this finalized run (counted_check_ids: the checks
- * priceStay read for a stay bonus, each one for a pay week of its 12 months, kept on the line by the sync that priced it;
+ * that put pay into a stay bonus's base, each one for a pay week of its 12 months, kept on the line by the sync that priced it.
+ * A check that was read and added nothing is not one, so it is voided as before;
  * finalize syncs first, so they are the checks the paid amount came from). payroll-runs.js voidRun asks it and refuses the void: the bonus would stay on its check, worked
  * out from pay that is gone. Voiding the run that paid the bonus first takes the bonus line off (dropRewardLinesOfWeek), and
  * the next run dated for it works it out again. The pay dates of the two runs do not matter: within a tax year the pay run's

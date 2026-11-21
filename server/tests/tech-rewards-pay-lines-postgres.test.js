@@ -35,6 +35,7 @@ const express = require('express');
 const router = require('../routes/admin-payroll');
 const { syncTechRewardLines } = require('../services/tech-rewards-pay-lines');
 const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
+const { readGross, readStayPay } = require('../services/tech-rewards-scoreboard');
 const { workedWeeks } = require('../services/payroll-runs');
 const { staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
@@ -94,11 +95,13 @@ postgres('tech rewards pay lines: the December gift', () => {
   };
   // A finalized check of the run of `runWeek` that already paid a commission line earned in `lineWeek` (45 h worked, 5 of them
   // overtime), with the premium the check stored for that week: its column and its week row. `premiumCents` is whatever that
-  // check paid, by whatever rule it was priced. A finalized check cannot be edited, so it is written whole. { runId, lineId }
-  const paidLine = async (technicianId, runWeek, cents, lineWeek, premiumCents) => {
+  // check paid, by whatever rule it was priced. A finalized check cannot be edited, so it is written whole (`stored`: any
+  // other column of it). { runId, lineId }
+  const paidLine = async (technicianId, runWeek, cents, lineWeek, premiumCents, stored = {}) => {
     const runId = await paidWeek(technicianId, runWeek, {
       line_overtime_premium_cents: premiumCents,
       calc_snapshot: JSON.stringify({ lineOvertimeWeeks: [{ weekStart: lineWeek, workedMinutes: 2700, overtimeMinutes: 300, allocatedCents: cents, premiumCents }] }),
+      ...stored,
     });
     const check = await trx('payroll_checks').where({ run_id: runId, technician_id: technicianId }).first('id');
     const [line] = await trx('payroll_pay_lines').insert({
@@ -322,8 +325,9 @@ postgres('tech rewards pay lines: the December gift', () => {
       const check = checkOf(giftRun, tech);
       expect(check).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 34 });
       const stored = await trx('payroll_checks').where({ id: check.id }).first();
+      // the row also holds what the check would have paid for the week without the gift: nothing, the gift is its only line
       expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
-        allocatedCents: 600, premiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33,
+        allocatedCents: 600, premiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33, ordinaryPremiumCents: 0,
       });
       // a week nobody paid for carries no earlier figures
       const plain = stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === '2026-11-02');
@@ -384,6 +388,36 @@ postgres('tech rewards pay lines: the December gift', () => {
       // the January check is final and whole: 34 is what its 6.03 line earns alone (1/2 x 603 / 45 h x 5 h = 33.5 -> 34)
       const kept = await trx('payroll_checks').where({ run_id: january.id, technician_id: tech, status: 'finalized' }).first();
       expect(Number(kept.line_overtime_premium_cents)).toBe(34);
+    });
+
+    it('keeps a commission\'s overtime in a bonus base as the pay run priced it, when a check with a LATER pay date was finalized first', async () => {
+      const tech = await readyTech('Sample Alpha');
+      const WEEK = '2026-11-09'; // 45 h worked, 5 of them overtime
+      await approvedWeek(tech, WEEK, '2400.00', '300.00');
+      await paidWeek(tech, WEEK); // the week's own check: 880.00 of wages and no line
+      // The week of Nov 16 was paid late: its check is dated Jan 4, 2027, and it was final BEFORE the gift's run. It paid a 6.00
+      // commission earned in WEEK, the first check to pay line pay for that week: 33.33 -> 33.
+      await trx('payroll_runs').insert({ week_start: '2026-11-16', pay_date: '2027-01-04', status: 'finalized' });
+      await paidLine(tech, '2026-11-16', 600, WEEK, 33, { pay_date: '2027-01-04', gross_cents: 88000 + 600 + 33 });
+      // The gift's run is dated Dec 18, 2026, EARLIER than that check, and is finalized after it. It carries another 6.00
+      // commission of WEEK beside the gift, whose share of WEEK is 6.00 too.
+      await trx('payroll_pay_lines').insert({ technician_id: tech, kind: 'commission', amount_cents: 600, earned_week_start: WEEK });
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(run.payDate).toBe('2026-12-18');
+      // the two lines pay 67 for WEEK: their floor, 66.67 up (the shortfall, 100 on the 18.00 less the 33 paid, is 67 too)
+      expect(checkOf(run, tech)).toMatchObject({ commissionCents: 600, techRewardsCents: GIFT, lineOvertimePremiumCents: 67 });
+      await finalize(run.id);
+      const stored = await trx('payroll_checks').where({ run_id: run.id, technician_id: tech, status: 'finalized' }).first();
+      // the check keeps what its commission alone would have paid as the later check it was: its floor, 33.33 up = 34
+      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
+        premiumCents: 67, ordinaryPremiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33,
+      });
+      // The pay earned in WEEK: its own 880.00, both commissions, and their overtime as it was PAID: 33, then 34. Put in pay
+      // date order the Dec 18 check looks like the first to pay for the week, where its commission would have earned 33.
+      expect(await readGross(trx, tech, WEEK, '2026-11-15')).toBe(88000 + 600 + 33 + 600 + 34);
+      // the stay bonus's reader takes the same figures: three weeks of wages, the commissions, 33 and 34; no gift, none of its 33
+      expect((await readStayPay(trx, tech, WEEK, '2026-12-13')).cents).toBe(3 * 88000 + 600 + 33 + 600 + 34);
     });
 
     it('makes a week whole that two older checks left 1 cent short: 33 + 33, then the gift\'s check pays 68 (134 on the three lines)', async () => {
@@ -1644,6 +1678,31 @@ postgres('tech rewards pay lines: the December gift', () => {
       process.env[STAY_GATE] = 'true';
       const again = await draft(EARLY_WEEK);
       expect(checkOf(again, alpha).techRewardsCents).toBe(5280);
+    });
+
+    it('holds only the paychecks that put pay into the bonus: one of an edge week whose paid days all fall before the 12 months is voided freely', async () => {
+      // 3 years on Sat Nov 28, 2026: the 12 months run Fri Nov 28, 2025 to Fri Nov 27, 2026, and the week of Nov 24, 2025 holds
+      // their first three days
+      const alpha = await stayTech('Sample Alpha', { hire_date: '2023-11-28' });
+      await paidWeeks(alpha);
+      // that week's check (a 2025 run): 880.00, all of it worked Monday to Thursday, before the 12 months
+      await approvedWeek(alpha, '2025-11-24');
+      await trx('time_entry_daily_summary').insert(['2025-11-24', '2025-11-25', '2025-11-26', '2025-11-27']
+        .map((workDate) => ({ technician_id: alpha, work_date: workDate, total_shift_minutes: 600, unpaid_meal_minutes: 0, status: 'approved' })));
+      const edge = await paidWeek(alpha, '2025-11-24');
+      const edgeCheck = await trx('payroll_checks').where({ run_id: edge, technician_id: alpha }).first('id');
+      await approvedWeek(alpha, EARLY_WEEK);
+      const run = await draft(EARLY_WEEK);
+      // 4% of 3 x 880.00: the edge week adds nothing (3 of its 7 days with no day records would add 377.14)
+      expect(checkOf(run, alpha).techRewardsCents).toBe(10560);
+      await finalize(run.id);
+      const line = await lineOf(alpha);
+      expect(line).toMatchObject({ status: 'paid', amount_cents: 10560 });
+      expect(line.counted_check_ids).toHaveLength(3);
+      expect(line.counted_check_ids).not.toContain(edgeCheck.id);
+      // the edge run was read and put nothing into the bonus: no later 2025 check holds it, and the paid bonus does not either
+      await voidRun(edge);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 10560 });
     });
 
     it('holds a counted run whatever the pay dates: a week of the 12 months whose check is dated in the next tax year, finalized before a December bonus', async () => {

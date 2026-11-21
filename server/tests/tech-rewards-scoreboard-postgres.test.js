@@ -363,10 +363,11 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     const [rho] = await db('technicians').insert({ name: 'Sample Rho', hire_date: '2024-01-15' }).returning('id');
     const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-06-01', pay_date: '2026-06-12' }).returning('id');
     // 70,000 of wages, a 10,000 commission and a 30,000 stay bonus both earned in the week of May 4 (50 hours, 10 of them
-    // overtime), and the 4,000 of overtime the two lines caused together: 1,000 from the commission, 3,000 from the bonus
+    // overtime), and the 4,000 of overtime the two lines caused together: 1,000 from the commission (the figure the pay run
+    // stores with the week), 3,000 from the bonus
     const [check] = await insertChecks([{
       run_id: run.id, technician_id: rho.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 114000, regular_pay_cents: 70000, tech_rewards_cents: 30000,
-      calc_snapshot: { lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 3000, overtimeMinutes: 600, premiumCents: 4000 }] },
+      calc_snapshot: { lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 3000, overtimeMinutes: 600, premiumCents: 4000, ordinaryPremiumCents: 1000 }] },
     }]).returning('id');
     await db('payroll_pay_lines').insert([
       { technician_id: rho.id, check_id: check.id, kind: 'commission', status: 'paid', earned_week_start: '2026-05-04', amount_cents: 10000 },
@@ -378,18 +379,18 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
 
   test('a week paid on two checks: a stay bonus on the second check never moves the season base', async () => {
     const [tau, twin] = await db('technicians').insert([{ name: 'Sample Tau', hire_date: '2024-01-15' }, { name: 'Sample Twin', hire_date: '2024-01-15' }]).returning('id');
-    // inserted newest first: the checks are read in pay order, whatever order they are stored in
+    // inserted newest first: each check is read from its own rows, so the order they are stored or dated in changes nothing
     const [later, own] = await db('payroll_runs').insert([
       { status: 'finalized', week_start: '2026-06-01', pay_date: '2026-06-12' },
       { status: 'finalized', week_start: '2026-05-04', pay_date: '2026-05-15' },
     ]).returning('id');
     // The week of May 4: 45 hours, 5 of them overtime. Its own check paid a 600 commission and 33 of premium (33.33).
     // The later check paid another 600 commission for that week. Alone that commission pays 34 (the twin). With a 600 stay
-    // bonus for the same week beside it the check paid 67 (Tau).
+    // bonus for the same week beside it the check paid 67 (Tau), and the pay run stored the commission's 34 with the week.
     const week = (premiumCents, extra = {}) => ({ lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 2700, overtimeMinutes: 300, premiumCents, ...extra }] });
     const earlierPay = { earlierAllocatedCents: 600, earlierPremiumCents: 33 };
     const [tauLater, tauOwn, twinLater, twinOwn] = await insertChecks([
-      { run_id: later.id, technician_id: tau.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 70000 + 600 + 600 + 67, regular_pay_cents: 70000, tech_rewards_cents: 600, calc_snapshot: week(67, earlierPay) },
+      { run_id: later.id, technician_id: tau.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 70000 + 600 + 600 + 67, regular_pay_cents: 70000, tech_rewards_cents: 600, calc_snapshot: week(67, { ...earlierPay, ordinaryPremiumCents: 34 }) },
       { run_id: own.id, technician_id: tau.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 70000 + 600 + 33, regular_pay_cents: 70000, calc_snapshot: week(33) },
       { run_id: later.id, technician_id: twin.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 70000 + 600 + 34, regular_pay_cents: 70000, calc_snapshot: week(34, earlierPay) },
       { run_id: own.id, technician_id: twin.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 70000 + 600 + 33, regular_pay_cents: 70000, calc_snapshot: week(33) },

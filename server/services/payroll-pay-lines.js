@@ -368,6 +368,31 @@ async function earlierLinePay(conn, ids, weeks) {
 }
 
 /**
+ * lineOvertimePremium for the lines of ONE check (same input, plus `kind` on each of `lines`), with one more figure on the
+ * row of every week a Tech Rewards line of the check covers: ordinaryPremiumCents, what the check would have paid for that
+ * week WITHOUT its Tech Rewards lines (its other lines priced by the same rule, from the same hours and the same earlier
+ * checks). A bonus never feeds a bonus, so a bonus base counts only that part of the week's premium
+ * (tech-rewards-scoreboard.js ordinaryPremium). It is stored with the check here, when the check is priced, because it
+ * cannot be worked out again later: what earlier checks had paid for a week when this check was priced is not readable
+ * from the rows of another day (a check with an earlier pay date can be finalized later, across a tax year, and a voided
+ * run's lines are no history). Never over the week's premium. A check with no Tech Rewards line is unchanged. Pure.
+ */
+function priceCheckLines(pricing) {
+  const priced = lineOvertimePremium(pricing);
+  const isReward = (line) => TECH_REWARD_KINDS.includes(line.kind);
+  const rewardWeeks = new Set(pricing.lines.filter(isReward).flatMap((line) => weeksOfLine(line)));
+  if (!rewardWeeks.size) return priced;
+  const without = new Map(lineOvertimePremium({ ...pricing, lines: pricing.lines.filter((line) => !isReward(line)) }).weeks
+    .map((week) => [week.weekStart, week.premiumCents]));
+  return {
+    ...priced,
+    weeks: priced.weeks.map((week) => (rewardWeeks.has(week.weekStart)
+      ? { ...week, ordinaryPremiumCents: Math.min(week.premiumCents, without.get(week.weekStart) || 0) }
+      : week)),
+  };
+}
+
+/**
  * The extra overtime the lines cause, for every technician in `byTech` (the map
  * openLinesFor returns). Each line's weeks are read from the APPROVED weekly
  * timesheets; a week with none counts as no hours worked. Returns a Map of
@@ -380,6 +405,8 @@ async function earlierLinePay(conn, ids, weeks) {
  * A week that finalized checks already paid line pay for is priced with what they paid (earlierLinePay): this check never
  * pays less than its own lines earn rounded up, and it makes up any shortfall of the week (payroll-regular-rate.js says
  * why). A caller that reads only the weeks, never the premium, passes history: false and skips those two reads.
+ * A check with a Tech Rewards line also gets the ordinary part of each week that line covers (priceCheckLines); the pay run
+ * stores the week rows with the check (calc_snapshot.lineOvertimeWeeks).
  */
 async function priceLines(conn, byTech, { lock = false, history = true } = {}) {
   const priced = new Map();
@@ -387,7 +414,7 @@ async function priceLines(conn, byTech, { lock = false, history = true } = {}) {
   const spansByTech = new Map();
   const weekSet = new Set();
   for (const [technicianId, { lines }] of byTech) {
-    const priceable = lines.map((line) => ({ amountCents: line.amountCents, ...lineSpan(line) }));
+    const priceable = lines.map((line) => ({ kind: line.kind, amountCents: line.amountCents, ...lineSpan(line) }));
     for (const line of priceable) for (const week of weeksOfLine(line)) weekSet.add(week);
     spansByTech.set(technicianId, priceable);
   }
@@ -405,7 +432,7 @@ async function priceLines(conn, byTech, { lock = false, history = true } = {}) {
     const approvedWeeks = new Set(rows.map((row) => row.week_start));
     const covered = [...new Set(lines.flatMap((line) => weeksOfLine(line)))].sort();
     priced.set(technicianId, {
-      ...lineOvertimePremium({
+      ...priceCheckLines({
         weeks, lines, earlierLines: earlier.get(technicianId)?.lines, earlierPremiums: earlier.get(technicianId)?.premiums,
       }),
       coveredWeeks: covered,
@@ -495,6 +522,7 @@ module.exports = {
   techRewardsOwnedSql,
   KIND_WORDS,
   payLinesOn,
+  priceCheckLines,
   listPayLines,
   listPayLineTechnicians,
   createPayLine,
