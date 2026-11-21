@@ -299,6 +299,31 @@ postgres('tech rewards pay lines: the December gift', () => {
     });
   });
 
+  describe('under the pay run lock', () => {
+    it('reads the technicians FOR SHARE and asks a bounded number of questions for a year of covered weeks', async () => {
+      // hired in December: almost every covered week of the year has no approved timesheet
+      const alpha = await readyTech('Sample Alpha', { hire_date: '2026-12-01' });
+      const bravo = await readyTech('Sample Bravo', { hire_date: '2026-12-01' });
+      await approvedWeek(alpha, GIFT_WEEK);
+      const statements = [];
+      const listen = (query) => statements.push(String(query.sql));
+      database.on('query', listen);
+      let run;
+      try {
+        run = await draft(GIFT_WEEK);
+      } finally {
+        database.removeListener('query', listen);
+      }
+      expect(checkOf(run, alpha).techRewardsCents).toBe(GIFT);
+      expect(checkOf(run, bravo).techRewardsCents).toBe(GIFT);
+      // a status, field work or hire date change waits for the pay run instead of slipping past a finalize
+      expect(statements.some((sql) => /from "technicians" where .*"employment_status" = .* for share/is.test(sql))).toBe(true);
+      // the covered-week guards read each technician's year at once, not one week at a time
+      const worked = statements.filter((sql) => /from "time_entry_daily_summary"/i.test(sql));
+      expect(worked.length).toBeLessThan(12);
+    });
+  });
+
   describe('a gift that is not ready waits and never holds the run', () => {
     it('waits, with a note, while an earlier week of the year is approved and has no finalized check; the next run claims it', async () => {
       const alpha = await readyTech('Sample Alpha');
@@ -374,6 +399,25 @@ postgres('tech rewards pay lines: the December gift', () => {
       await approvedWeek(bravo, NEXT_WEEK);
       const next = await draft(NEXT_WEEK);
       expect(checkOf(next, alpha)).toMatchObject({ techRewardsCents: GIFT, grossCents: GIFT });
+    });
+
+    it('waits when a later paycheck of the technician is already final, so a backdated run still finalizes for the others', async () => {
+      const alpha = await readyTech('Sample Alpha'); // no hours in the gift week, and a final check dated Dec 25
+      const bravo = await readyTech('Sample Bravo');
+      await paidWeek(alpha, NEXT_WEEK);
+      await approvedWeek(bravo, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK); // dated Dec 18, drafted after the Dec 25 run went final
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha)).toBeUndefined();
+      expect([run.waiting, run.blocked]).toEqual([[], []]);
+      expect(await notesOf(run.id)).toEqual(['December gift for Sample Alpha waits: a later paycheck of theirs is already final, so this pay run cannot hold one for them']);
+      const final = await finalize(run.id); // a gift-only check for Alpha would make finalize refuse the whole run
+      expect(checkOf(final, bravo).techRewardsCents).toBe(GIFT);
+      // a run dated after that paycheck writes the gift
+      const next = await draft('2026-12-21', '2026-12-30');
+      expect(next.payDate).toBe('2026-12-30');
+      expect(checkOf(next, alpha)).toMatchObject({ techRewardsCents: GIFT, grossCents: GIFT });
+      expect(await notesOf(run.id)).toEqual([]);
     });
 
     it('keeps ids, a reason code and a week on the run row, never an amount, and shows no note while the gate is off', async () => {
@@ -455,6 +499,30 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(stale.status).toBe(409);
       expect(checkOf((await api('GET', `/runs/${later.id}`)).body.run, tech)).not.toHaveProperty('techRewardsCents');
       expect(dateOf((await lineOf(tech)).earned_week_start)).toBe(GIFT_WEEK);
+    });
+
+    it('is not held back for a draft that can no longer pay it: the later run claims it and the earlier draft rebuilds', async () => {
+      const alpha = await readyTech('Sample Alpha'); // no hours in the gift week: the gift is the whole check
+      const bravo = await readyTech('Sample Bravo');
+      await approvedWeek(bravo, GIFT_WEEK);
+      const earlier = await draft(GIFT_WEEK); // dated Dec 18: it owns both gifts
+      expect(dateOf((await lineOf(alpha)).earned_week_start)).toBe(GIFT_WEEK);
+      // a later paycheck of Alpha goes final: the Dec 18 draft can no longer hold a check for Alpha
+      await paidWeek(alpha, NEXT_WEEK);
+      const later = await draft('2026-12-21', '2026-12-30');
+      expect(dateOf((await lineOf(alpha)).earned_week_start)).toBe('2026-12-21');
+      expect(checkOf(later, alpha).techRewardsCents).toBe(GIFT);
+      // Bravo's gift stays with the earlier draft, which can still pay it
+      expect(dateOf((await lineOf(bravo)).earned_week_start)).toBe(GIFT_WEEK);
+      expect(checkOf(later, bravo)).toBeUndefined();
+      // the earlier draft rebuilds without Alpha, shows no note (the gift has its line), and finalizes
+      const rebuilt = await recompute(earlier.id);
+      expect(checkOf(rebuilt, alpha)).toBeUndefined();
+      expect(await notesOf(earlier.id)).toEqual([]);
+      expect(dateOf((await lineOf(alpha)).earned_week_start)).toBe('2026-12-21');
+      await finalize(earlier.id);
+      expect((await lineOf(bravo)).status).toBe('paid');
+      expect((await lineOf(alpha)).status).toBe('open');
     });
 
     it('goes by pay date, not by week: the later week with the earlier pay date claims it', async () => {

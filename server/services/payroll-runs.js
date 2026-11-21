@@ -499,36 +499,47 @@ async function workedTechnicianIds(conn, start, end) {
   return [...new Set([...daily, ...entries].map((row) => row.technician_id))];
 }
 
-// The same test by day for one technician: the work dates in [start, end] that hold recorded work (a daily summary with worked
-// time, or a shift entry that has no summary yet). Tech Rewards asks it to see which weeks a line covers still need a
-// finalized check (tech-rewards-pay-lines.js).
-async function workedDates(conn, technicianId, start, end) {
+// The same test by day, for the technicians in `ids`: Map of technician id -> Set of the work dates in [start, end] that hold
+// recorded work (a daily summary with worked time, or a time entry that is not voided). Two queries, whatever the span.
+async function workedDatesByTechnician(conn, ids, start, end) {
+  const byTech = new Map(ids.map((id) => [id, new Set()]));
+  if (!ids.length) return byTech;
   const daily = await conn('time_entry_daily_summary')
-    .where({ technician_id: technicianId }).where('work_date', '>=', start).where('work_date', '<=', end)
+    .whereIn('technician_id', ids).where('work_date', '>=', start).where('work_date', '<=', end)
     .whereRaw(DAILY_WORK_SQL)
-    .select(conn.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"));
+    .select('technician_id', conn.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"));
   const entries = await conn('time_entries')
-    .where({ technician_id: technicianId }).where('status', '!=', 'voided')
+    .whereIn('technician_id', ids).where('status', '!=', 'voided')
     .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
-    .select(conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
-  return [...new Set([...daily, ...entries].map((row) => row.work_date))].sort();
+    .select('technician_id', conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
+  for (const row of [...daily, ...entries]) byTech.get(row.technician_id).add(row.work_date);
+  return byTech;
+}
+
+// One technician's work dates in [start, end], oldest first. Tech Rewards asks it to see which weeks a line covers still need
+// a finalized check (tech-rewards-pay-lines.js).
+async function workedDates(conn, technicianId, start, end) {
+  return [...(await workedDatesByTechnician(conn, [technicianId], start, end)).get(technicianId)].sort();
 }
 
 // GATE_PAYROLL_PAY_LINES: a line's overtime is priced from the approved hours of every
 // week it covers. A covered week that holds worked time but no approved timesheet would
 // price as no hours, and the line would be paid without that week's overtime for good.
 // Map of technician id -> the oldest such week; that technician waits until it is approved.
+// The worked time of every missing week is read at once (workedDatesByTechnician, the test workedTechnicianIds applies to
+// one week), so a line that covers a year costs the same two queries as a line that covers a week.
 async function lineWeeksWaiting(conn, priced) {
-  const techsByWeek = new Map();
-  for (const [technicianId, { missingWeeks = [] }] of priced) {
-    for (const week of missingWeeks) techsByWeek.set(week, [...(techsByWeek.get(week) || []), technicianId]);
-  }
+  const missing = [...priced].filter(([, { missingWeeks = [] }]) => missingWeeks.length)
+    .map(([technicianId, { missingWeeks }]) => [technicianId, [...missingWeeks].sort()]);
   const waitingOn = new Map();
-  for (const week of [...techsByWeek.keys()].sort()) {
-    const worked = new Set(await workedTechnicianIds(conn, week, addStaffWorkDays(week, 6)));
-    for (const technicianId of techsByWeek.get(week)) {
-      if (worked.has(technicianId) && !waitingOn.has(technicianId)) waitingOn.set(technicianId, week);
-    }
+  if (!missing.length) return waitingOn;
+  const weeks = missing.flatMap(([, own]) => own).sort();
+  const worked = await workedDatesByTechnician(conn, missing.map(([technicianId]) => technicianId),
+    weeks[0], addStaffWorkDays(weeks[weeks.length - 1], 6));
+  for (const [technicianId, own] of missing) {
+    const workedWeeks = new Set([...worked.get(technicianId)].map(staffWeekStartForWorkDate));
+    const week = own.find((candidate) => workedWeeks.has(candidate));
+    if (week) waitingOn.set(technicianId, week);
   }
   return waitingOn;
 }
@@ -1285,6 +1296,7 @@ module.exports = {
   workedDates,
   lineGuardWeek,
   lineOnlyCheckProblem,
+  laterFinalCheckExists,
   defaultPayDate,
   validateWeek,
   resolvePayDate,
