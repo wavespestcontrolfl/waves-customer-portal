@@ -4908,8 +4908,14 @@ per-recipient uuid `engagement_token` (newsletter_send_deliveries) — GET
 renders a confirm page only and the delivery-row write happens on a
 deliberate POST form submission (scanner-safe, mirrors confirm), answer/
 reaction keys validated against the server-side config allowlists
-(newsletter-quiz.js / newsletter-feedback.js), 30 req/min per IP, always
-returns 200 so it can't probe which tokens/answers are real),
+(newsletter-quiz.js / newsletter-feedback.js); a Waves Newsletter poll
+answer (an `nl-poll-*` quiz id) is written only when the token's own send
+carried that poll (`{{quiz:<id>}}` in its html_body or `{{quiz-text:<id>}}`
+in its text_body), so an older issue's token can neither record a poll its
+reader never saw nor overwrite that row's earlier answer; on a mismatch
+nothing is written and the POST still returns the same 200 thank-you page;
+30 req/min per IP, always returns 200 so it can't probe which
+tokens/answers are real),
 `/api/public/prep/:token` (32-hex token format gate,
 60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
 filters email-only blocks, server-side interpolation, generic 404; the

@@ -2,9 +2,10 @@
  * Waves Newsletter polls against real Postgres:
  * - newsletterIssuePolls reads one newsletter type's poll history from the
  *   issues readers got: the polls of the newest two, and every poll such an
- *   issue carried. A 'failed' send that reached readers before it stopped
- *   counts; a draft, a failed send that reached no reader and another type's
- *   issue never count. An issue with no send time sorts by its first delivery.
+ *   issue carried, in either body part. A 'failed' send that reached readers
+ *   before it stopped counts; a draft, a send that reached no reader (also a
+ *   'sent' one whose recipients all dropped out) and another type's issue
+ *   never count. An issue with no send time sorts by its first delivery.
  * - recordQuizResponse records a poll vote only from an issue that carried
  *   that poll.
  * Real Postgres, because these are a LIKE over the stored bodies, an EXISTS
@@ -39,11 +40,12 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
   const newType = () => `poll-test-${randomUUID()}`;
 
   // Inserts issues and their delivery rows; returns each issue's delivery rows
-  // ({ id, engagement_token }) in order.
+  // ({ id, engagement_token }) in order. A 'sent' issue gets one delivered row
+  // unless it lists its own. textOnly puts the poll in the plain-text part only.
   async function insertIssues(type, rows) {
     const inserted = await db('newsletter_sends').insert(rows.map((row) => ({
       subject: 'Synthetic poll issue',
-      html_body: `<p>Synthetic</p>${row.poll ? `{{quiz:${row.poll}}}` : ''}<p>End</p>`,
+      html_body: `<p>Synthetic</p>${row.poll && !row.textOnly ? `{{quiz:${row.poll}}}` : ''}<p>End</p>`,
       text_body: row.poll ? `Synthetic\n{{quiz-text:${row.poll}}}` : 'Synthetic',
       auto_share_social: false,
       newsletter_type: row.type || type,
@@ -53,7 +55,8 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     }))).returning(['id']);
     const out = [];
     for (const [i, row] of rows.entries()) {
-      const deliveries = (row.deliveries || []).map((d) => ({
+      const listed = row.deliveries || ((row.status || 'sent') === 'sent' ? [{ status: 'sent', sentAt: row.sentAt }] : []);
+      const deliveries = listed.map((d) => ({
         send_id: inserted[i].id,
         subscriber_id: d.subscriberId || null,
         email: `poll-test-${randomUUID().slice(0, 8)}@example.invalid`,
@@ -108,6 +111,8 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
       // None of these reached a reader of this newsletter.
       { poll: P3, status: 'draft' },
       { poll: P4, status: 'failed', sentAt: daysAgo(3), deliveries: [{ status: 'failed' }] },
+      // 'sent', but every recipient dropped out before dispatch.
+      { poll: P4, sentAt: daysAgo(2), deliveries: [] },
       { poll: P3, type: newType(), sentAt: daysAgo(1) },
     ]);
 
@@ -118,7 +123,7 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
 
     // A second issue without a poll opens the gap: the next poll is P3, even
     // though a draft and another newsletter type carried it, and P4 stays
-    // unused because no reader got the failed issue that carried it.
+    // unused because no reader got either issue that carried it.
     await insertIssues(TYPE, [{ poll: null, sentAt: new Date(Date.now() - HOUR) }]);
     const later = await newsletterIssuePolls({ newsletterType: TYPE });
     expect(later.recent).toEqual([null, null]);
@@ -137,6 +142,18 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     ]);
     const history = await newsletterIssuePolls({ newsletterType: TYPE });
     expect(history.recent).toEqual([P1, null]);
+    expect(chooseNewsletterPoll(history)).toBeNull();
+  });
+
+  test('a poll carried only in the plain-text part counts too', async () => {
+    const TYPE = newType();
+    await insertIssues(TYPE, [
+      { poll: null, sentAt: daysAgo(14) },
+      { poll: P1, textOnly: true, sentAt: daysAgo(7) },
+    ]);
+    const history = await newsletterIssuePolls({ newsletterType: TYPE });
+    expect(history.recent).toEqual([P1, null]);
+    expect(history.used).toEqual([P1]);
     expect(chooseNewsletterPoll(history)).toBeNull();
   });
 

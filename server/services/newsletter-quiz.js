@@ -500,11 +500,14 @@ const DELIVERY_REACHED_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
 /**
  * Reads what chooseNewsletterPoll needs from the issues of one newsletter type
  * that readers got: the polls of the newest POLL_ISSUE_GAP such issues, and
- * every poll such an issue carried. An issue counts when it is 'sent', or when
- * any of its delivery rows has a success signal: a send its deadline stopped,
- * or one the stale-claim recovery ended, is 'failed' although its first
- * batches reached readers. Sent bodies keep their quiz tokens (the per-reader
- * buttons are SendGrid substitutions), so the token in html_body is the record.
+ * every poll such an issue carried. An issue counts when any of its delivery
+ * rows has a success signal, whatever its status: a send its deadline
+ * stopped, or one the stale-claim recovery ended, is 'failed' although its
+ * first batches reached readers, and a 'sent' issue whose every recipient
+ * dropped out before dispatch reached no one (its recipient_count is no
+ * proof either way: a worker that stopped after a batch leaves it at 0).
+ * Sent bodies keep their quiz tokens (the per-reader buttons are SendGrid
+ * substitutions), so a token in html_body or text_body is the record.
  * An issue's time is its sent_at, else its first delivery's sent_at (a worker
  * that failed after a batch leaves sent_at empty, and a resume clears
  * scheduled_for), else its schedule, else its draft time.
@@ -519,25 +522,27 @@ const DELIVERY_REACHED_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
 async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
   const reached = () => knex('newsletter_sends as s')
     .where('s.newsletter_type', newsletterType)
-    .where((issue) => issue.where('s.status', 'sent').orWhereExists(function deliveredRow() {
+    .whereExists(function deliveredRow() {
       this.select(knex.raw('1')).from('newsletter_send_deliveries as d')
         .whereRaw('d.send_id = s.id')
         .where((d) => d.whereIn('d.status', DELIVERY_REACHED_STATUSES)
           .orWhereNotNull('d.sent_at').orWhereNotNull('d.delivered_at')
           .orWhereNotNull('d.opened_at').orWhereNotNull('d.clicked_at'));
-    }));
+    });
+  const pollOf = (row) => pollInBody(`${row.html_body || ''}\n${row.text_body || ''}`);
   const newest = await reached()
     .orderByRaw(`COALESCE(s.sent_at,
       (SELECT MIN(f.sent_at) FROM newsletter_send_deliveries f WHERE f.send_id = s.id),
       s.scheduled_for, s.created_at) DESC`)
     .limit(POLL_ISSUE_GAP)
-    .select('s.html_body');
+    .select('s.html_body', 's.text_body');
   const withPoll = await reached()
-    .where('s.html_body', 'like', `%{{quiz:${NEWSLETTER_POLL_PREFIX}%`)
-    .select('s.html_body');
+    .where((body) => body.where('s.html_body', 'like', `%{{quiz:${NEWSLETTER_POLL_PREFIX}%`)
+      .orWhere('s.text_body', 'like', `%{{quiz-text:${NEWSLETTER_POLL_PREFIX}%`))
+    .select('s.html_body', 's.text_body');
   return {
-    recent: newest.map((row) => pollInBody(row.html_body)),
-    used: withPoll.map((row) => pollInBody(row.html_body)).filter(Boolean),
+    recent: newest.map(pollOf),
+    used: withPoll.map(pollOf).filter(Boolean),
   };
 }
 
