@@ -8659,6 +8659,7 @@ export default function EstimateToolViewV2({
                       // belongs to the pre-draft context, so staff tap again and get this estimate's own copy.
                       key={`${roofReadEpoch}|${form.address}|${form.customerId || ""}|${form.leadId || ""}|${form.propertyId || ""}|${roofReadEstimateIdFor(savedId, editMode, form.address) || ""}|${lookupMeta?.roofSpot?.lat ?? ""},${lookupMeta?.roofSpot?.lng ?? ""}`}
                       spot={lookupMeta?.address === String(form.address || "").trim() ? lookupMeta?.roofSpot || null : null}
+                      address={lookupMeta?.address === String(form.address || "").trim() ? lookupMeta?.address || "" : ""}
                       addressDoubt={lookupMeta?.address === String(form.address || "").trim() && lookupMeta?.roofAddressDoubt === true}
                       estimateId={roofReadEstimateIdFor(savedId, editMode, form.address)}
                       customerId={form.customerId || null}

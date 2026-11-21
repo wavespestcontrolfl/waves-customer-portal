@@ -62,6 +62,7 @@ jest.mock('../models/db', () => {
       },
       orderBy() { return b; },
       forShare() { mockForShare(); return b; },
+      forUpdate() { mockEvents.push(`for-update:${name}`); return b; },
       async first() { return match()[0]; },
       async select() {
         if (mockSelectError && name === 'roof_entry_reads') { const err = mockSelectError; mockSelectError = null; throw err; }
@@ -477,6 +478,14 @@ describe('references and county text', () => {
   it('accepts existing references and stores them', async () => {
     const res = await post(home({ estimate_id: EST, customer_id: CUST }));
     expect(res.json.read).toEqual(expect.objectContaining({ estimate_id: EST, customer_id: CUST }));
+  });
+
+  it("names the customer who holds the read's estimate (estimate_customer_id), null for none, absent with no estimate", async () => {
+    // The panel sends this value back with a points save, so a save edited under another holder is refused.
+    expect((await post(home({ estimate_id: EST }))).json.read.estimate_customer_id).toBeNull();
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }, { id: EST2 }];
+    expect((await post(home({ estimate_id: EST }))).json.read.estimate_customer_id).toBe(CUST);
+    expect((await post(home({ lat: 27.47 }))).json.read).not.toHaveProperty('estimate_customer_id');
   });
 
   it('logs only the allowlisted county key, or the word unsupported, never the typed text', async () => {
@@ -957,11 +966,16 @@ describe('ownership check atomic with the insert', () => {
     expect(mockRows).toHaveLength(1);
   });
 
-  it('does not open a transaction when only one id (or none) is given', async () => {
-    await post(home({ estimate_id: EST }));
+  it('opens no transaction for a read with no estimate; an estimate alone takes the share lock for its insert', async () => {
+    const { transaction } = require('../models/db');
     await post(home({ customer_id: CUST }));
     await post(home());
-    expect(require('../models/db').transaction).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+    expect(mockForShare).not.toHaveBeenCalled();
+    // The estimate's hide-or-show choice must not change beside the insert (saveUnderEstimate locks the same row).
+    await post(home({ estimate_id: EST }));
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(mockForShare).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1440,6 +1454,7 @@ describe('validateTechPins', () => {
 describe('saveTechCount pins', () => {
   const PINS = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }, { x: 0.8, y: 0.7, type: 'other', note: null }];
   const CROP = { lat: 27.46, lng: -82.57 };
+  const ADDRESS = '12 Synthetic Way, Bradenton, FL 34203';
   beforeEach(() => {
     mockRows.push({
       id: READ_A, lookup_key: CROP_KEY(), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
@@ -1449,11 +1464,130 @@ describe('saveTechCount pins', () => {
   });
 
   it('saves the points with the crop centre that hashes to the row, and stores the rounded centre', async () => {
-    const read = await svc.saveTechCount(READ_A, { pins: PINS, crop: { lat: 27.460004, lng: -82.570004 } });
+    const read = await svc.saveTechCount(READ_A, { pins: PINS, crop: { lat: 27.460004, lng: -82.570004 }, address: ADDRESS });
     expect(read.tech_pins).toEqual(PINS);
     expect(read.hide_on_estimate).toBe(false);
     expect(mockRows[0].crop_lat).toBe(27.46);
     expect(mockRows[0].crop_lng).toBe(-82.57);
+  });
+
+  it("a points save writes the estimate's customer on a read that names none, under the estimate lock", async () => {
+    // The read was made with the estimate alone, so it names no customer. The estimate belongs to CUST.
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    mockEvents.length = 0;
+    const saved = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, expectedHolder: CUST });
+    expect(saved.customer_id).toBe(CUST);
+    expect(mockRows[0].customer_id).toBe(CUST);
+    // One transaction: the estimate row is locked before the write.
+    expect(mockEvents).toEqual(['tx', 'for-update:estimates', 'update:', 'tx-end']);
+  });
+
+  it('a points save is refused, and writes nothing, unless the editor, the estimate and the read agree on the customer', async () => {
+    const LATER_OWNER = '99999999-9999-4999-8999-999999999999';
+    const edit = { pins: [PINS[0]], crop: CROP, address: ADDRESS };
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    // The panel loaded this read while the estimate had no customer (or it is a tab from before this field): the
+    // points on screen were edited for a lead, and the estimate has a customer now.
+    await expect(svc.saveTechCount(READ_A, { ...edit, expectedHolder: null })).rejects.toMatchObject({ code: 'holder_changed' });
+    await expect(svc.saveTechCount(READ_A, edit)).rejects.toMatchObject({ code: 'holder_changed' });
+    expect(mockRows[0].customer_id).toBeUndefined();
+    expect(mockRows[0].tech_pins ?? null).toBeNull();
+    // Loaded for the estimate's customer (ids compare without case): saved, and the read names that customer.
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, expectedHolder: CUST.toUpperCase() });
+    expect(mockRows[0].customer_id).toBe(CUST);
+    // The estimate then goes to another customer. An editor still open from before is refused...
+    mockRefs.estimates = [{ id: EST, customer_id: LATER_OWNER }];
+    await expect(svc.saveTechCount(READ_A, { ...edit, expectedHolder: CUST })).rejects.toMatchObject({ code: 'holder_changed' });
+    // ...and so is one loaded for the new customer: the read is the first customer's, and it is never taken over or
+    // rewritten for another. A clear is a points save too.
+    await expect(svc.saveTechCount(READ_A, { ...edit, expectedHolder: LATER_OWNER })).rejects.toMatchObject({ code: 'read_other_customer' });
+    await expect(svc.saveTechCount(READ_A, { pins: null, expectedHolder: LATER_OWNER })).rejects.toMatchObject({ code: 'read_other_customer' });
+    expect(mockRows[0].customer_id).toBe(CUST);
+    expect(mockRows[0].tech_pins).toBe(JSON.stringify(PINS));
+    // A count or a hide save says nothing about the points and needs no agreement.
+    await svc.saveTechCount(READ_A, { count: 2 });
+    await svc.saveTechCount(READ_A, { hideOnEstimate: true });
+    expect(mockRows[0].tech_final_count).toBe(2);
+    // A read made for a customer on an estimate that has no customer yet (the two-part read) is saved as before.
+    mockRefs.estimates = [{ id: EST, customer_id: null }];
+    await svc.saveTechCount(READ_A, { ...edit, expectedHolder: null });
+    expect(mockRows[0].customer_id).toBe(CUST);
+    expect(mockRows[0].tech_pins).toBe(JSON.stringify([PINS[0]]));
+  });
+
+  it('a points save leaves the read as it is when the estimate has no customer, and when the read has no estimate', async () => {
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, customer_id: null }];
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
+    expect(mockRows[0].customer_id).toBeUndefined();
+    // A count save or a hide save says nothing about the points: it writes no customer, even on an owned estimate.
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    await svc.saveTechCount(READ_A, { count: 2 });
+    await svc.saveTechCount(READ_A, { hideOnEstimate: true });
+    expect(mockRows[0].customer_id).toBeUndefined();
+    // A clear is the technician's word on the points ("none") for the customer who holds the estimate, so it names that
+    // customer as a list does: the send then sees the clear as this customer's and brings no older list back.
+    await svc.saveTechCount(READ_A, { pins: null, expectedHolder: CUST });
+    expect(mockRows[0].customer_id).toBe(CUST);
+    delete mockRows[0].customer_id;
+    // No estimate on the read: nothing to lock and no customer to take.
+    mockRows[0].estimate_id = null;
+    mockEvents.length = 0;
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
+    expect(mockRows[0].customer_id).toBeUndefined();
+    expect(mockEvents).toEqual(['tx', 'update:', 'tx-end']);
+  });
+
+  it('a note goes on the customer estimate, so it passes the customer-copy screen where it is stored and where it is shown', async () => {
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    // An access code, or wording no customer surface may carry, is refused and nothing is written.
+    for (const note of ['gate code 1234', 'lockbox 4421', 'safe to enter', 'poison bait here']) {
+      await expect(svc.saveTechCount(READ_A, { pins: [{ ...PINS[0], note }], crop: CROP, address: ADDRESS, expectedHolder: CUST })).rejects.toMatchObject({ code: 'note_not_allowed' });
+    }
+    expect(mockRows[0].tech_pins ?? null).toBeNull();
+    // Where a point is on the roof is fine.
+    for (const note of ['front left', 'above the garage door', 'rear, 2nd story', 'left of chimney']) {
+      await svc.saveTechCount(READ_A, { pins: [{ ...PINS[0], note }], crop: CROP, address: ADDRESS, expectedHolder: CUST });
+      expect(JSON.parse(mockRows[0].tech_pins)[0].note).toBe(note);
+    }
+    // A note stored before this check is left out of the customer's label; the point keeps its standard label.
+    const stored = { ...mockRows[0], status: 'done', ai_tier: 'high', hide_on_estimate: false };
+    const labelOf = (note) => svc.customerPointsFromRow({ ...stored, tech_pins: JSON.stringify([{ ...PINS[0], note }]) }).pins[0].label;
+    expect(labelOf('front left')).toBe(`${labelOf(null)}, front left`);
+    expect(labelOf('gate code 1234')).toBe(labelOf(null));
+    expect(labelOf('safe to enter')).toBe(labelOf(null));
+  });
+
+  it('stores the address the panel sent with the points, never the address on the estimate row', async () => {
+    // The estimate moved to another home while this photo was open: the points keep the home the photo is of.
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, address: '99 Other Road, Sarasota, FL 34232' }];
+    // The staff answer says whether the points have their address: null until one is stored (the panel then asks for a save).
+    expect((await svc.saveTechCount(READ_A, { count: 1 })).points_address).toBeNull();
+    const saved = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: `  ${ADDRESS} ` });
+    expect(saved.points_address).toBe(ADDRESS);
+    expect(mockRows[0].points_address).toBe(ADDRESS);
+    // A count-only or hide-only save never rewrites it, with or without an address in the call.
+    await svc.saveTechCount(READ_A, { count: 2, hideOnEstimate: true, address: '99 Other Road, Sarasota, FL 34232' });
+    expect(mockRows[0].points_address).toBe(ADDRESS);
+    // A later points save from the right lookup replaces it.
+    await svc.saveTechCount(READ_A, { pins: [PINS[0]], crop: CROP, address: '14 Synthetic Way, Bradenton, FL 34203' });
+    expect(mockRows[0].points_address).toBe('14 Synthetic Way, Bradenton, FL 34203');
+  });
+
+  it.each([
+    ['no address', undefined],
+    ['a blank address', '   '],
+    ['an address that is not text', 12],
+    ['an address over 300 characters', 'a'.repeat(301)],
+  ])('refuses points with %s with address_missing and writes nothing', async (_name, address) => {
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address, count: 3 })).rejects.toMatchObject({ code: 'address_missing' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].tech_final_count).toBeNull();
+    expect(mockRows[0].points_address).toBeUndefined();
   });
 
   it.each([
@@ -1462,7 +1596,7 @@ describe('saveTechCount pins', () => {
     ['a crop without numbers', { lat: '27.46', lng: '-82.57' }],
     ['an out of range crop', { lat: 270, lng: -82.57 }],
   ])('refuses points drawn on %s with crop_mismatch and writes nothing', async (_name, c) => {
-    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: c, count: 3 })).rejects.toMatchObject({ code: 'crop_mismatch' });
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: c, address: ADDRESS, count: 3 })).rejects.toMatchObject({ code: 'crop_mismatch' });
     expect(mockRows[0].tech_pins).toBeNull();
     expect(mockRows[0].crop_lat).toBeNull();
     expect(mockRows[0].tech_final_count).toBeNull();
@@ -1470,45 +1604,45 @@ describe('saveTechCount pins', () => {
 
   it.each(['failed', 'pending'])('refuses points on a %s read with read_not_usable and writes nothing', async (status) => {
     mockRows[0].status = status;
-    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, count: 3 })).rejects.toMatchObject({ code: 'read_not_usable' });
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, count: 3 })).rejects.toMatchObject({ code: 'read_not_usable' });
     expect(mockRows[0].tech_pins).toBeNull();
     expect(mockRows[0].crop_lat).toBeNull();
     expect(mockRows[0].tech_final_count).toBeNull();
   });
 
   it('saves only while the row still holds the list the edit started from, else points_changed with no write', async () => {
-    const first = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, expectedPins: null });
+    const first = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, expectedPins: null });
     expect(first.tech_pins).toEqual(PINS);
     // A second window still holds the empty list it loaded: its save must not erase the first window's points.
-    await expect(svc.saveTechCount(READ_A, { pins: [PINS[1]], crop: CROP, expectedPins: null }))
+    await expect(svc.saveTechCount(READ_A, { pins: [PINS[1]], crop: CROP, address: ADDRESS, expectedPins: null }))
       .rejects.toMatchObject({ code: 'points_changed' });
     expect(JSON.parse(mockRows[0].tech_pins)).toEqual(PINS);
     // Started from the saved list (any key order), the save lands.
     const reordered = PINS.map((pt) => ({ note: pt.note, type: pt.type, y: pt.y, x: pt.x }));
-    const next = await svc.saveTechCount(READ_A, { pins: [PINS[0]], crop: CROP, expectedPins: reordered });
+    const next = await svc.saveTechCount(READ_A, { pins: [PINS[0]], crop: CROP, address: ADDRESS, expectedPins: reordered });
     expect(next.tech_pins).toEqual([PINS[0]]);
   });
 
   it('refuses points on a finished read whose tier is unknown (an unreadable roof is never reopened)', async () => {
     mockRows[0].ai_tier = 'unknown';
-    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, expectedPins: null })).rejects.toMatchObject({ code: 'read_not_usable' });
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, expectedPins: null })).rejects.toMatchObject({ code: 'read_not_usable' });
     expect(mockRows[0].tech_pins).toBeNull();
   });
 
   it('clears the points with null, and keeps the stored crop centre', async () => {
-    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
     const read = await svc.saveTechCount(READ_A, { pins: null });
     expect(read.tech_pins).toBeNull();
     expect(mockRows[0].crop_lat).toBe(27.46);
   });
 
   it('saves an empty list: the technician confirmed none', async () => {
-    const read = await svc.saveTechCount(READ_A, { pins: [], crop: CROP });
+    const read = await svc.saveTechCount(READ_A, { pins: [], crop: CROP, address: ADDRESS });
     expect(read.tech_pins).toEqual([]);
   });
 
   it('changes the hide flag alone, and leaves the points, count and flags alone', async () => {
-    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, count: 2 });
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS, count: 2 });
     const hidden = await svc.saveTechCount(READ_A, { hideOnEstimate: true });
     expect(hidden.hide_on_estimate).toBe(true);
     expect(hidden.tech_pins).toEqual(PINS);
@@ -1517,15 +1651,84 @@ describe('saveTechCount pins', () => {
   });
 
   it('leaves the points alone when only a count is saved', async () => {
-    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, address: ADDRESS });
     const read = await svc.saveTechCount(READ_A, { count: 5 });
     expect(read.tech_pins).toEqual(PINS);
     expect(read.tech_final_count).toBe(5);
   });
 
   it('returns null for an unknown id', async () => {
-    expect(await svc.saveTechCount(MISSING, { pins: PINS, crop: CROP })).toBeNull();
+    expect(await svc.saveTechCount(MISSING, { pins: PINS, crop: CROP, address: ADDRESS })).toBeNull();
     expect(await svc.saveTechCount(MISSING, { hideOnEstimate: true })).toBeNull();
+  });
+});
+
+describe('hide or show is one choice for the estimate', () => {
+  const row = (extra = {}) => ({
+    id: READ_A, lookup_key: CROP_KEY(), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
+    ai_flags: {}, ai_tier: 'med', status: 'done', tech_final_count: null, tech_final_flags: null, tech_pins: null,
+    hide_on_estimate: false, created_at: new Date().toISOString(), ...extra,
+  });
+  const OTHER = '66666666-6666-4666-8666-666666666666';
+  const THIRD = '77777777-7777-4777-8777-777777777777';
+  const ELSEWHERE = '88888888-8888-4888-8888-888888888888';
+
+  it('a hide on one read is written to every read of that estimate in one transaction, and to no other read', async () => {
+    mockRows.push(
+      row({ estimate_id: EST }),
+      row({ id: OTHER, estimate_id: EST, lookup_key: 'b'.repeat(64) }),
+      row({ id: THIRD, estimate_id: EST, lookup_key: 'c'.repeat(64), status: 'pending' }),
+      row({ id: ELSEWHERE, estimate_id: EST2, lookup_key: 'd'.repeat(64) }),
+    );
+    mockRefs.estimates = [{ id: EST, customer_id: null }, { id: EST2, customer_id: null }];
+    mockEvents.length = 0;
+    const hidden = await svc.saveTechCount(OTHER, { hideOnEstimate: true });
+    expect(hidden.hide_on_estimate).toBe(true);
+    expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([true, true, true, false]);
+    // The estimate row is locked before either write, inside the one transaction.
+    expect(mockEvents).toEqual(['tx', 'for-update:estimates', 'update:', 'update:', 'tx-end']);
+    // Showing again from another read clears it on every read of the estimate.
+    await svc.saveTechCount(READ_A, { hideOnEstimate: false });
+    expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([false, false, false, false]);
+  });
+
+  it('a hide on a read with no estimate stays on that read; a save without the hide flag writes no other read', async () => {
+    mockRows.push(row(), row({ id: OTHER, lookup_key: 'b'.repeat(64) }), row({ id: THIRD, estimate_id: EST }), row({ id: ELSEWHERE, estimate_id: EST, hide_on_estimate: true }));
+    mockEvents.length = 0;
+    await svc.saveTechCount(READ_A, { hideOnEstimate: true });
+    expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([true, false, false, true]);
+    expect(mockEvents).toEqual(['tx', 'update:', 'tx-end']);
+    mockEvents.length = 0;
+    await svc.saveTechCount(THIRD, { count: 4 });
+    expect(mockRows.map((r) => r.hide_on_estimate)).toEqual([true, false, false, true]);
+    expect(mockEvents).not.toContain('tx');
+  });
+
+  it('a read for an estimate alone is claimed under a share lock on the estimate row, with no lock across the slow steps', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: null }];
+    const res = await post(home({ estimate_id: EST }));
+    expect(res.status).toBe(200);
+    expect(mockEvents).toEqual(['prices', 'tx', 'claim', 'tx-end', 'image', 'renew', 'model', 'update:done']);
+    expect(mockForShare).toHaveBeenCalledTimes(1);
+  });
+
+  it('a new read of an estimate whose points are hidden starts hidden (a paid read and a reused copy alike)', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: null }, { id: EST2, customer_id: null }];
+    // EST hid its points on an earlier read of another photo.
+    mockRows.push(row({ id: OTHER, estimate_id: EST, lookup_key: 'b'.repeat(64), hide_on_estimate: true }));
+    const paid = await post(home({ estimate_id: EST }));
+    expect(paid.json.read.hide_on_estimate).toBe(true);
+    // The same photo for another estimate is a copy: that estimate hid nothing, so its copy shows.
+    const copy = await post(home({ estimate_id: EST2 }));
+    expect(copy.json.read.id).not.toBe(paid.json.read.id);
+    expect(copy.json.read.hide_on_estimate).toBe(false);
+    // And a copy for an estimate that hid its points starts hidden.
+    mockRows.length = 0;
+    mockRows.push(row({ id: OTHER, estimate_id: EST, lookup_key: 'b'.repeat(64), hide_on_estimate: true }));
+    await post(home());
+    expect((await post(home({ estimate_id: EST }))).json.read.hide_on_estimate).toBe(true);
+    // A read with no estimate never starts hidden.
+    expect(mockRows.find((r) => !r.estimate_id).hide_on_estimate).toBe(false);
   });
 });
 
@@ -1598,6 +1801,7 @@ describe('cropImageUrl and customerPointsFromRow', () => {
 describe('PATCH /:id/tech-count with points', () => {
   const PINS = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }, { x: 0.8, y: 0.7, type: 'other' }];
   const CROP = { lat: 27.46, lng: -82.57 };
+  const ADDRESS = '12 Synthetic Way, Bradenton, FL 34203';
   const patch = (body, opts) => call('PATCH', `/${READ_A}/tech-count`, { body, ...opts });
   beforeEach(() => {
     mockRows.push({
@@ -1607,9 +1811,10 @@ describe('PATCH /:id/tech-count with points', () => {
     });
   });
 
-  it('saves points with the crop and the hide flag, and answers with the normalized read', async () => {
-    const res = await patch({ pins: PINS, crop: CROP, expected_pins: null, hide_on_estimate: true });
+  it('saves points with the crop, the address and the hide flag, and answers with the normalized read', async () => {
+    const res = await patch({ pins: PINS, crop: CROP, address: ` ${ADDRESS} `, expected_pins: null, hide_on_estimate: true });
     expect(res.status).toBe(200);
+    expect(mockRows[0].points_address).toBe(ADDRESS);
     expect(res.json.read.tech_pins).toEqual([
       { x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' },
       { x: 0.8, y: 0.7, type: 'other', note: null },
@@ -1619,16 +1824,16 @@ describe('PATCH /:id/tech-count with points', () => {
   });
 
   it('stores and returns a point source, and refuses a bad one with 400', async () => {
-    const res = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'gable_vents:1' }], crop: CROP, expected_pins: null });
+    const res = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'gable_vents:1' }], crop: CROP, address: ADDRESS, expected_pins: null });
     expect(res.status).toBe(200);
     expect(res.json.read.tech_pins).toEqual([{ x: 0.2, y: 0.3, type: 'other', note: null, source: 'gable_vents:1' }]);
-    const bad = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'other:1' }], crop: CROP, expected_pins: null });
+    const bad = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'other:1' }], crop: CROP, address: ADDRESS, expected_pins: null });
     expect(bad.status).toBe(400);
     expect(mockRows[0].tech_pins).toBe(JSON.stringify([{ x: 0.2, y: 0.3, type: 'other', note: null, source: 'gable_vents:1' }]));
   });
 
   it('saves the hide flag alone without touching the points, and clears the points with null', async () => {
-    await patch({ pins: PINS, crop: CROP, expected_pins: null });
+    await patch({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null });
     const hide = await patch({ hide_on_estimate: true });
     expect(hide.status).toBe(200);
     expect(hide.json.read.tech_pins).toHaveLength(2);
@@ -1639,28 +1844,28 @@ describe('PATCH /:id/tech-count with points', () => {
   });
 
   it('answers 409 for a clear that started from an older list, and keeps the saved points', async () => {
-    expect((await patch({ pins: PINS, crop: CROP, expected_pins: null })).status).toBe(200);
+    expect((await patch({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null })).status).toBe(200);
     const stale = await patch({ pins: null, expected_pins: null });
     expect(stale.status).toBe(409);
     expect(JSON.parse(mockRows[0].tech_pins)).toHaveLength(2);
   });
 
   it('still takes a count and flags with the points in one save', async () => {
-    const res = await patch({ count: 3, flags: { gable_vents: 'yes' }, pins: PINS, crop: CROP, expected_pins: null });
+    const res = await patch({ count: 3, flags: { gable_vents: 'yes' }, pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null });
     expect(res.status).toBe(200);
     expect(res.json.read).toEqual(expect.objectContaining({ tech_final_count: 3, tech_final_flags: { gable_vents: 'yes' } }));
   });
 
   it.each([
-    ['nothing but a crop', { crop: CROP }],
-    ['points without a crop', { pins: PINS, expected_pins: null }],
-    ['points with a crop that has no numbers', { pins: PINS, crop: { lat: 'a', lng: 'b' }, expected_pins: null }],
-    ['points with a crop out of range', { pins: PINS, crop: { lat: 91, lng: 0 }, expected_pins: null }],
-    ['21 points', { pins: Array.from({ length: 21 }, () => PINS[0]), crop: CROP, expected_pins: null }],
-    ['a point outside the photo', { pins: [{ x: 1.2, y: 0.5, type: 'other' }], crop: CROP, expected_pins: null }],
-    ['an unknown point type', { pins: [{ x: 0.5, y: 0.5, type: 'attic_door' }], crop: CROP, expected_pins: null }],
-    ['a note over 40 characters', { pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'n'.repeat(41) }], crop: CROP, expected_pins: null }],
-    ['points as an object', { pins: { x: 0.5 }, crop: CROP, expected_pins: null }],
+    ['nothing but a crop and an address', { crop: CROP, address: ADDRESS }],
+    ['points without a crop', { pins: PINS, address: ADDRESS, expected_pins: null }],
+    ['points with a crop that has no numbers', { pins: PINS, crop: { lat: 'a', lng: 'b' }, address: ADDRESS, expected_pins: null }],
+    ['points with a crop out of range', { pins: PINS, crop: { lat: 91, lng: 0 }, address: ADDRESS, expected_pins: null }],
+    ['21 points', { pins: Array.from({ length: 21 }, () => PINS[0]), crop: CROP, address: ADDRESS, expected_pins: null }],
+    ['a point outside the photo', { pins: [{ x: 1.2, y: 0.5, type: 'other' }], crop: CROP, address: ADDRESS, expected_pins: null }],
+    ['an unknown point type', { pins: [{ x: 0.5, y: 0.5, type: 'attic_door' }], crop: CROP, address: ADDRESS, expected_pins: null }],
+    ['a note over 40 characters', { pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'n'.repeat(41) }], crop: CROP, address: ADDRESS, expected_pins: null }],
+    ['points as an object', { pins: { x: 0.5 }, crop: CROP, address: ADDRESS, expected_pins: null }],
     ['a string hide flag', { hide_on_estimate: 'true' }],
     ['a number hide flag', { hide_on_estimate: 1 }],
   ])('rejects %s with 400 and writes nothing', async (_name, body) => {
@@ -1670,31 +1875,85 @@ describe('PATCH /:id/tech-count with points', () => {
     expect(mockRows[0].hide_on_estimate).toBe(false);
   });
 
+  it.each([
+    ['no address', undefined],
+    ['a blank address', '   '],
+    ['an address that is not text', 12],
+    ['an address over 300 characters', 'a'.repeat(301)],
+  ])('answers 400 with the address message for points with %s, and writes nothing', async (_name, address) => {
+    const res = await patch({ pins: PINS, crop: CROP, address, expected_pins: null, hide_on_estimate: true });
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'The address is missing. Look up the address again before adding points.' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].hide_on_estimate).toBe(false);
+  });
+
   it('answers 400 with the photo message for a crop that is not this read\'s, and writes nothing', async () => {
-    const res = await patch({ pins: PINS, crop: { lat: 28.1, lng: -82.1 }, expected_pins: null, hide_on_estimate: true });
+    const res = await patch({ pins: PINS, crop: { lat: 28.1, lng: -82.1 }, address: ADDRESS, expected_pins: null, hide_on_estimate: true });
     expect(res.status).toBe(400);
     expect(res.json).toEqual({ error: 'These points were not drawn on this roof photo' });
     expect(mockRows[0].tech_pins).toBeNull();
     expect(mockRows[0].hide_on_estimate).toBe(false);
   });
 
+  it("the answers name the estimate's holder, and a points save sends it back: a save for another holder answers 409 and writes nothing", async () => {
+    const OTHER = '99999999-9999-4999-8999-999999999999';
+    mockRows[0].estimate_id = EST;
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    const body = (over = {}) => ({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null, ...over });
+    // The panel never loaded a holder (null), or names another customer: the estimate's holder is CUST.
+    for (const expected of [null, OTHER]) {
+      const res = await patch(body({ expected_holder: expected }));
+      expect(res.status).toBe(409);
+      expect(res.json).toEqual({ error: 'The customer on this estimate changed. Read the roof again, then save the points.' });
+    }
+    expect(mockRows[0].tech_pins).toBeNull();
+    // A value that is not an id is a bad request.
+    expect((await patch(body({ expected_holder: 'someone' }))).status).toBe(400);
+    // The holder the panel loaded: saved, and the answer carries the holder again (estimate_customer_id).
+    const saved = await patch(body({ expected_holder: CUST.toUpperCase() }));
+    expect(saved.status).toBe(200);
+    expect(saved.json.read).toEqual(expect.objectContaining({ customer_id: CUST, estimate_customer_id: CUST }));
+    // The estimate goes to another customer: the read stays the first customer's, and its points cannot be rewritten.
+    mockRefs.estimates = [{ id: EST, customer_id: OTHER }];
+    const taken = await patch(body({ expected_pins: PINS, expected_holder: OTHER }));
+    expect(taken.status).toBe(409);
+    expect(taken.json).toEqual({ error: 'This roof read was saved for another customer. Its points cannot be changed for the customer on this estimate.' });
+    expect(mockRows[0].customer_id).toBe(CUST);
+    // A save with no points (count, checkbox) carries no holder and still answers with it.
+    const count = await patch({ count: 3 });
+    expect(count.status).toBe(200);
+    expect(count.json.read.estimate_customer_id).toBe(OTHER);
+    // A read with no estimate has no holder: the field is absent.
+    mockRows[0].estimate_id = null;
+    expect((await patch({ count: 4 })).json.read).not.toHaveProperty('estimate_customer_id');
+  });
+
+  it('answers 400 with the note message for a note that cannot go on the customer estimate, and writes nothing', async () => {
+    const res = await patch({ pins: [{ ...PINS[0], note: 'gate code 1234' }], crop: CROP, address: ADDRESS, expected_pins: null, hide_on_estimate: true });
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'A note has words that cannot go on the customer estimate (a code, or words like safe, toxic, poison or infestation). Change the note, then save.' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].hide_on_estimate).toBe(false);
+  });
+
   it('answers 400 with the read-again message for points on a failed read, and writes nothing', async () => {
     mockRows[0].status = 'failed';
-    const res = await patch({ pins: PINS, crop: CROP, expected_pins: null });
+    const res = await patch({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null });
     expect(res.status).toBe(400);
     expect(res.json).toEqual({ error: 'This roof read did not work. Read the roof again before adding points.' });
     expect(mockRows[0].tech_pins).toBeNull();
   });
 
   it('answers 400 for a points list without expected_pins, and writes nothing', async () => {
-    const res = await patch({ pins: PINS, crop: CROP });
+    const res = await patch({ pins: PINS, crop: CROP, address: ADDRESS });
     expect(res.status).toBe(400);
     expect(mockRows[0].tech_pins).toBeNull();
   });
 
   it('answers 409 with the other-window message for a stale save, and keeps the saved points', async () => {
-    expect((await patch({ pins: PINS, crop: CROP, expected_pins: null })).status).toBe(200);
-    const stale = await patch({ pins: [PINS[0]], crop: CROP, expected_pins: null });
+    expect((await patch({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null })).status).toBe(200);
+    const stale = await patch({ pins: [PINS[0]], crop: CROP, address: ADDRESS, expected_pins: null });
     expect(stale.status).toBe(409);
     expect(stale.json).toEqual({ error: 'These points were changed in another window. Read the roof again to load them.' });
     expect(JSON.parse(mockRows[0].tech_pins)).toHaveLength(2);
@@ -1703,7 +1962,7 @@ describe('PATCH /:id/tech-count with points', () => {
   it('logs and answers a database failure without the notes or the crop centre in either', async () => {
     logger.error.mockClear();
     mockUpdateError = Object.assign(new Error('update "roof_entry_reads" set "tech_pins" = $1 - SECRET NOTE 27.46 failed'), { code: '57014' });
-    const res = await patch({ pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'SECRET NOTE' }], crop: CROP, expected_pins: null });
+    const res = await patch({ pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'SECRET NOTE' }], crop: CROP, address: ADDRESS, expected_pins: null });
     expect(res.status).toBe(500);
     expect(JSON.stringify(res.json)).not.toMatch(/SECRET|27\.46/);
     const logged = logger.error.mock.calls.map((c) => String(c[0])).join('\n');
@@ -1712,8 +1971,8 @@ describe('PATCH /:id/tech-count with points', () => {
   });
 
   it('answers 404 for an unknown read, and keeps a technician out', async () => {
-    expect((await call('PATCH', `/${MISSING}/tech-count`, { body: { pins: PINS, crop: CROP, expected_pins: null } })).status).toBe(404);
-    expect((await patch({ pins: PINS, crop: CROP, expected_pins: null }, { role: 'technician' })).status).toBe(403);
+    expect((await call('PATCH', `/${MISSING}/tech-count`, { body: { pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null } })).status).toBe(404);
+    expect((await patch({ pins: PINS, crop: CROP, address: ADDRESS, expected_pins: null }, { role: 'technician' })).status).toBe(403);
     expect(mockRows[0].tech_pins).toBeNull();
   });
 });

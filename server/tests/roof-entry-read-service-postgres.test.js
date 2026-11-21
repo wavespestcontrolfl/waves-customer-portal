@@ -29,6 +29,9 @@ const m1 = require('../models/migrations/20261119140000_roof_entry_reads');
 const m2 = require('../models/migrations/20261119150000_roof_entry_read_claims');
 const m3 = require('../models/migrations/20261119160000_roof_entry_read_ctx_key');
 const m4 = require('../models/migrations/20261119170000_roof_entry_read_rollback_guard');
+const m5 = require('../models/migrations/20261120200000_roof_entry_read_tech_pins');
+const m6 = require('../models/migrations/20261120220000_roof_entry_read_points_address');
+const m7 = require('../models/migrations/20261120230000_roof_entry_read_hide_per_estimate');
 
 jest.setTimeout(60000);
 (SKIP ? describe.skip : describe)('roof entry read service on PostgreSQL', () => {
@@ -47,9 +50,9 @@ jest.setTimeout(60000);
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 5 } });
     mockDb = database;
     await database.raw('CREATE SCHEMA ??', [schema]);
-    await database.raw('CREATE TABLE ??.estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid)', [schema]);
+    await database.raw('CREATE TABLE ??.estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, address text)', [schema]);
     await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deleted_at timestamptz, phone text)', [schema]);
-    for (const m of [m1, m2, m3, m4]) await m.up(database);
+    for (const m of [m1, m2, m3, m4, m5, m6, m7]) await m.up(database);
   });
   beforeEach(() => {
     mockDispatch.mockReset().mockImplementation(async () => goodAnswer());
@@ -221,6 +224,237 @@ jest.setTimeout(60000);
     expect(merged).toEqual(expect.objectContaining({ tech_final_count: 3, tech_final_flags: { gable_vents: 'no', chimney_or_flue: 'yes' } }));
     const [stored] = await rows();
     expect(stored.tech_final_flags).toEqual({ gable_vents: 'no', chimney_or_flue: 'yes' });
+  });
+
+  test("a points save stores the address the panel sent, not the estimate row's; a count save leaves it", async () => {
+    // The estimate row already names another home (it moved while this photo was open).
+    const est = await insertId('estimates', { address: '99 Other Road, Sarasota, FL 34232' });
+    const { read } = await svc.runRoofEntryRead(home({ estimateId: est }));
+    const pins = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }];
+    const address = '12 Synthetic Way, Bradenton, FL 34203';
+    const saved = await svc.saveTechCount(read.id, { pins, crop: { lat: 27.46, lng: -82.57 }, address, expectedPins: null });
+    expect(saved.tech_pins).toEqual(pins);
+    const stored = () => database('roof_entry_reads').where({ id: read.id }).first('points_address');
+    expect((await stored()).points_address).toBe(address);
+    await svc.saveTechCount(read.id, { count: 2 });
+    expect((await stored()).points_address).toBe(address);
+    await expect(svc.saveTechCount(read.id, { pins, crop: { lat: 27.46, lng: -82.57 }, expectedPins: pins }))
+      .rejects.toMatchObject({ code: 'address_missing' });
+  });
+
+  test('hide is one choice for the estimate: a save writes every read of it, and a new read of it starts hidden', async () => {
+    const [est, other] = [await insertId('estimates'), await insertId('estimates')];
+    const a = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+    const elsewhere = (await svc.runRoofEntryRead(home({ estimateId: other }))).read;
+    const b = (await svc.runRoofEntryRead(home({ lat: 27.47, estimateId: est }))).read;
+    expect(new Set([a.id, b.id, elsewhere.id]).size).toBe(3);
+    const hidden = async () => Object.fromEntries((await rows()).map((r) => [r.id, r.hide_on_estimate]));
+    // Staff hide on read B: read A of the same estimate takes it, the other estimate's read does not.
+    expect((await svc.saveTechCount(b.id, { hideOnEstimate: true })).hide_on_estimate).toBe(true);
+    expect(await hidden()).toEqual({ [a.id]: true, [b.id]: true, [elsewhere.id]: false });
+    // A fresh read of the estimate (a third photo, then a reused photo) starts hidden; the other estimate's does not.
+    const c = (await svc.runRoofEntryRead(home({ lat: 27.48, estimateId: est }))).read;
+    expect(c.hide_on_estimate).toBe(true);
+    expect((await svc.runRoofEntryRead(home({ lat: 27.48, estimateId: other }))).read.hide_on_estimate).toBe(false);
+    // Showing again from read C clears it on every read of the estimate.
+    await svc.saveTechCount(c.id, { hideOnEstimate: false });
+    expect(Object.values(await hidden())).toEqual([false, false, false, false, false]);
+    // A save without the choice leaves the other reads alone.
+    await database('roof_entry_reads').where({ id: a.id }).update({ hide_on_estimate: true });
+    await svc.saveTechCount(b.id, { count: 3 });
+    expect((await hidden())[a.id]).toBe(true);
+    expect((await hidden())[b.id]).toBe(false);
+  });
+
+  describe("the send's choice of read (estimate-roof-points newestPointsRead) on real SQL", () => {
+    const { newestPointsRead } = require('../services/estimate-roof-points');
+    const ADDRESS = '12 Synthetic Way, Bradenton, FL 34203';
+    const pinsFor = (note) => [{ x: 0.2, y: 0.3, type: 'gable_vents', note }];
+    // `holder` is the customer the panel loaded as the estimate's holder (null for an estimate with no customer).
+    const savePoints = (read, lat, note, holder = null) => svc.saveTechCount(read.id, {
+      pins: pinsFor(note), crop: { lat, lng: -82.57 }, address: ADDRESS, expectedPins: null, expectedHolder: holder,
+    });
+
+    test("an estimate takes only its own customer's read, never the newer read another customer had on it", async () => {
+      const [custA, custB] = [await insertId('customers'), await insertId('customers')];
+      const est = await insertId('estimates');
+      // The estimate has no customer yet: each customer's read gets its own two-part key.
+      const forA = (await svc.runRoofEntryRead(home({ estimateId: est, customerId: custA }))).read;
+      const forB = (await svc.runRoofEntryRead(home({ estimateId: est, customerId: custB }))).read;
+      expect(forB.id).not.toBe(forA.id);
+      await savePoints(forA, 27.46, 'for A');
+      await savePoints(forB, 27.46, 'for B');
+      const chosen = async (customerId) => (await newestPointsRead({ id: est, customer_id: customerId }, database))?.id;
+      expect(await chosen(custA)).toBe(forA.id);
+      expect(await chosen(custB)).toBe(forB.id);
+      expect(await chosen(null)).toBeUndefined();
+      // The estimate's own plain read, saved while it had no customer, names none: it answers only while the estimate
+      // has none. For customer A the newest read that names A still wins.
+      const plain = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+      await savePoints(plain, 27.46, 'plain');
+      expect(await chosen(null)).toBe(plain.id);
+      expect(await chosen(custA)).toBe(forA.id);
+    });
+
+    test('a plain-key read taken while customer A held the estimate is not chosen once the estimate is B\'s or no one\'s', async () => {
+      const [custA, custB] = [await insertId('customers'), await insertId('customers')];
+      const est = await insertId('estimates', { customer_id: custA });
+      const read = (await svc.runRoofEntryRead(home({ estimateId: est, customerId: custA }))).read;
+      await savePoints(read, 27.46, 'for A', custA);
+      expect(await database('roof_entry_reads').where({ id: read.id }).first('context_key', 'customer_id')).toEqual({ context_key: `e:${est}`, customer_id: custA });
+      const chosen = async (customerId) => (await newestPointsRead({ id: est, customer_id: customerId }, database))?.id;
+      expect(await chosen(custA)).toBe(read.id);
+      expect(await chosen(custB)).toBeUndefined();
+      expect(await chosen(null)).toBeUndefined();
+    });
+
+    test("points confirmed on a read made with the estimate alone take the estimate's customer, so a later customer never gets them", async () => {
+      const [custA, custB] = [await insertId('customers'), await insertId('customers')];
+      const est = await insertId('estimates', { customer_id: custA });
+      // The request names the estimate only: the read is stored with no customer.
+      const read = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+      const stored = () => database('roof_entry_reads').where({ id: read.id }).first('context_key', 'customer_id');
+      expect(await stored()).toEqual({ context_key: `e:${est}`, customer_id: null });
+      const chosen = async (customerId) => (await newestPointsRead({ id: est, customer_id: customerId }, database))?.id;
+      // Confirming the points writes the customer who holds the estimate now.
+      // A save from a panel that loaded no holder is refused: the estimate has a customer.
+      await expect(savePoints(read, 27.46, 'for A')).rejects.toMatchObject({ code: 'holder_changed' });
+      expect((await savePoints(read, 27.46, 'for A', custA)).customer_id).toBe(custA);
+      expect(await stored()).toEqual({ context_key: `e:${est}`, customer_id: custA });
+      expect(await chosen(custA)).toBe(read.id);
+      expect(await chosen(custB)).toBeUndefined();
+      expect(await chosen(null)).toBeUndefined();
+      // The estimate goes to customer B. No later points save rewrites the read or takes it over: not from a panel
+      // still open from A's time, and not from one loaded for B.
+      await database('estimates').where({ id: est }).update({ customer_id: custB });
+      const edit = { pins: pinsFor('edited for B'), crop: { lat: 27.46, lng: -82.57 }, address: ADDRESS, expectedPins: pinsFor('for A') };
+      await expect(svc.saveTechCount(read.id, { ...edit, expectedHolder: custA })).rejects.toMatchObject({ code: 'holder_changed' });
+      await expect(svc.saveTechCount(read.id, { ...edit, expectedHolder: custB })).rejects.toMatchObject({ code: 'read_other_customer' });
+      await expect(svc.saveTechCount(read.id, { pins: null, expectedPins: pinsFor('for A'), expectedHolder: custB })).rejects.toMatchObject({ code: 'read_other_customer' });
+      const row = await database('roof_entry_reads').where({ id: read.id }).first('customer_id', 'tech_pins');
+      expect(row).toEqual({ customer_id: custA, tech_pins: pinsFor('for A') });
+      expect(await chosen(custB)).toBeUndefined();
+    });
+
+    test('points saved for a lead are hidden once the estimate has a customer, until a person saves them again; a second customer never gets them', async () => {
+      const [custA, custB] = [await insertId('customers'), await insertId('customers')];
+      const est = await insertId('estimates');
+      const read = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+      expect((await savePoints(read, 27.46, 'lead')).customer_id).toBeNull();
+      const holder = (customerId) => database('estimates').where({ id: est }).update({ customer_id: customerId });
+      const chosen = async () => (await newestPointsRead(await database('estimates').where({ id: est }).first('id', 'customer_id'), database))?.id;
+      expect(await chosen()).toBe(read.id);
+      // The estimate gets its first customer. Nothing recorded that a person confirmed these points for A.
+      await holder(custA);
+      expect(await chosen()).toBeUndefined();
+      // Lead, then A, then B, with no save in between: B gets nothing.
+      await holder(custB);
+      expect(await chosen()).toBeUndefined();
+      // Back with A, staff save the same list again. The save names A, and the points are A's alone.
+      await holder(custA);
+      const again = await svc.saveTechCount(read.id, { pins: pinsFor('lead'), crop: { lat: 27.46, lng: -82.57 }, address: ADDRESS, expectedPins: pinsFor('lead'), expectedHolder: custA });
+      expect(again.customer_id).toBe(custA);
+      expect(await chosen()).toBe(read.id);
+      await holder(custB);
+      expect(await chosen()).toBeUndefined();
+    });
+
+    test("a clear names the estimate's customer as a list does, so the clear counts for that customer", async () => {
+      const cust = await insertId('customers');
+      const est = await insertId('estimates');
+      const older = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+      const newer = (await svc.runRoofEntryRead(home({ lat: 27.47, estimateId: est }))).read;
+      await savePoints(newer, 27.47, 'newer, saved for the lead');
+      await database('estimates').where({ id: est }).update({ customer_id: cust });
+      await savePoints(older, 27.46, 'older, saved for the customer', cust);
+      const chosen = () => newestPointsRead({ id: est, customer_id: cust }, database);
+      // The newer read still names no customer, so the customer's list is the older one.
+      expect((await chosen()).id).toBe(older.id);
+      // Staff clear the newer read: the clear is this customer's, and the older list does not come back.
+      await svc.saveTechCount(newer.id, { pins: null, expectedPins: pinsFor('newer, saved for the lead'), expectedHolder: cust });
+      const row = await chosen();
+      expect(row.id).toBe(newer.id);
+      expect(row.customer_id).toBe(cust);
+      expect(row.tech_pins).toBeNull();
+    });
+
+    test('a cleared read stays the newest read set, so an older list does not come back; a read never set does not count', async () => {
+      const est = await insertId('estimates');
+      const older = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+      await savePoints(older, 27.46, 'older');
+      const newer = (await svc.runRoofEntryRead(home({ lat: 27.47, estimateId: est }))).read;
+      const chosen = () => newestPointsRead({ id: est, customer_id: null }, database);
+      // Not set yet: the older list is still the newest one set.
+      expect((await chosen()).id).toBe(older.id);
+      await savePoints(newer, 27.47, 'newer');
+      await svc.saveTechCount(newer.id, { pins: null, expectedPins: pinsFor('newer') });
+      const row = await chosen();
+      expect(row.id).toBe(newer.id);
+      expect(row.tech_pins).toBeNull();
+      expect(svc.customerPointsFromRow(row)).toBeNull();
+    });
+  });
+
+  // Settles to 'waiting' when the promise is still pending after `ms` (it is blocked on a row lock).
+  const stateAfter = (promise, ms) => Promise.race([
+    promise.then(() => 'done', () => 'failed'),
+    new Promise((resolve) => { setTimeout(() => resolve('waiting'), ms); }),
+  ]);
+
+  test('a new read waits for a hide-or-show save in flight on its estimate, then starts with the saved choice', async () => {
+    const est = await insertId('estimates');
+    const a = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+    await svc.saveTechCount(a.id, { hideOnEstimate: true });
+    // A "show" save in flight: it holds the estimate row and has written every read, but has not committed.
+    const save = await database.transaction();
+    try {
+      await save('estimates').where({ id: est }).forUpdate().first('id');
+      await save('roof_entry_reads').where({ estimate_id: est }).update({ hide_on_estimate: false });
+      const fresh = svc.runRoofEntryRead(home({ lat: 27.49, estimateId: est }));
+      expect(await stateAfter(fresh, 400)).toBe('waiting');
+      await save.commit();
+      // Without the lock it would have read the old "hidden" and stayed hidden after staff chose Show.
+      expect((await fresh).read.hide_on_estimate).toBe(false);
+    } finally {
+      if (!save.isCompleted()) await save.rollback();
+    }
+    expect((await rows()).map((r) => r.hide_on_estimate)).toEqual([false, false]);
+  });
+
+  test('a hide-or-show save waits for a read being created for its estimate, then writes that read too', async () => {
+    const est = await insertId('estimates');
+    const a = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+    await svc.saveTechCount(a.id, { hideOnEstimate: true });
+    // A read in creation: it holds the estimate row FOR SHARE and has inserted its row (hidden, as inherited), uncommitted.
+    const creating = await database.transaction();
+    let show;
+    try {
+      await creating('estimates').where({ id: est }).forShare().first('id');
+      await creating('roof_entry_reads').insert({
+        estimate_id: est, context_key: `e:${est}`, lookup_key: 'f'.repeat(64), county: 'manatee', image_source: 'manatee_2025_rgb',
+        image_year: 2025, model: 'm', ai_tier: 'med', hide_on_estimate: true,
+      });
+      show = svc.saveTechCount(a.id, { hideOnEstimate: false });
+      expect(await stateAfter(show, 400)).toBe('waiting');
+      await creating.commit();
+      expect((await show).hide_on_estimate).toBe(false);
+    } finally {
+      if (!creating.isCompleted()) await creating.rollback();
+    }
+    // Without the lock the save would have missed the uncommitted row and left it hidden.
+    expect((await rows()).map((r) => r.hide_on_estimate)).toEqual([false, false]);
+  });
+
+  test('two hide-or-show saves on two reads of one estimate both land, and every read ends with one choice', async () => {
+    const est = await insertId('estimates');
+    const a = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+    const b = (await svc.runRoofEntryRead(home({ lat: 27.47, estimateId: est }))).read;
+    for (let round = 0; round < 5; round += 1) {
+      const [x, y] = await Promise.all([svc.saveTechCount(a.id, { hideOnEstimate: true }), svc.saveTechCount(b.id, { hideOnEstimate: false })]);
+      expect(typeof x.hide_on_estimate).toBe('boolean');
+      expect(typeof y.hide_on_estimate).toBe('boolean');
+      expect(new Set((await rows()).map((r) => r.hide_on_estimate)).size).toBe(1);
+    }
   });
 
   test('a customer retired by a duplicate merge (deleted_at + merged- phone) is refused; an archived one is not', async () => {
