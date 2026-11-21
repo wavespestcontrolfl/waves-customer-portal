@@ -172,7 +172,8 @@ function approvedVersion({ invoice, via, who, memo, closeout, sentAt }) {
     // The opt-out the card disclosed: one set since the card is drift.
     opted_out: who.optedOut === true,
     memo,
-    // The linked visit the closeout would complete (null = none).
+    // The linked visit the closeout would complete (null = none). The writer reads this key by name and
+    // hands it to the closeout as the only visit it may complete (invoice-receipt-resend.js runCloseout).
     closeout_visit: closeout?.visitId || null,
     // The instant the card showed (null = unsent): a stamp since is drift.
     receipt_state: sentAt ? `sent:${sentAt.getTime()}` : 'unsent',
@@ -377,8 +378,9 @@ function callWriter(version, pinned, matches, actionContext) {
     sawUnsent: version.receipt_state === 'unsent',
     // The writer's final check: under its claim, ahead of the closeout and both legs, it re-derives
     // this approved version (receipt_sent_at, recipients, amount, linked visit, channels) and refuses
-    // on any difference; and `matches` binds each sender's resolved recipient and amount to the approved
-    // ones at the provider boundary.
+    // on any difference; the closeout then runs only for the approved `closeout_visit`, or for none; and
+    // `matches` binds each sender's resolved recipient and amount to the approved ones at the provider
+    // boundary.
     expect: {
       approved: pinned,
       matches,

@@ -79,9 +79,10 @@ describe('source contracts', () => {
     expect(source).toMatch(/receipt can only be sent for paid invoices[\s\S]{0,1200}withReceiptSendLock\(invoiceId, \(owner\) => lockedSend\(s, owner\)\)/);
     expect(source).toMatch(/async function lockedSend\(s, owner\) \{[\s\S]{0,900}await acquireClaim\(s, stillHeld\)[\s\S]{0,500}await verifyApproved\(s, claim\)[\s\S]{0,200}await deliver\(s, claim, stillHeld\)/);
     expect(source).toMatch(/async function deliver\(s, claim, stillHeld\) \{\s*await runCloseout\(s, stillHeld\);[\s\S]{0,300}await runEmailLeg\(s, claim, stillHeld\);[\s\S]{0,200}await runTextLeg\(s, claim, stillHeld\)/);
-    // The claim is taken before anything else, and the closeout is the paid trigger.
+    // The claim is taken before anything else, and the closeout is the paid trigger. A send a card drove (`expect`) hands the
+    // closeout that card's visit, or 'none', for this run only; the route's send names no target.
     expect(source).toMatch(/async function acquireClaim\(s, stillHeld\) \{[\s\S]{0,900}claimReceiptJobForOperatorSend\(s\.id, \{ sawUnsent: s\.sawUnsent \?\? !s\.invoice\.receipt_sent_at, requirePaid: true \}\)/);
-    expect(source).toMatch(/async function runCloseout\(s, stillHeld\) \{[\s\S]{0,400}closeOutVisitForIssuedInvoice\(\{ invoiceId: s\.id, trigger: 'paid', actorTechnicianId: s\.actorTechnicianId, recordHold: false \}\)/);
+    expect(source).toMatch(/async function runCloseout\(s, stillHeld\) \{[\s\S]{0,400}closeOutVisitForIssuedInvoice\(\{\s*invoiceId: s\.id,\s*trigger: 'paid',\s*actorTechnicianId: s\.actorTechnicianId,\s*recordHold: false,\s*\.\.\.\(s\.expect \? \{ approvedTarget: s\.expect\.approved\.closeout_visit \|\| 'none', targetBindsRetries: false \} : \{\}\),\s*\}\)/);
   });
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
