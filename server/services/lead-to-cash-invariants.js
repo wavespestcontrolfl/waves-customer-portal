@@ -35,8 +35,13 @@
  *      read a MOVING WINDOW (registry `moving`). A finding there can leave
  *      the window with nothing fixed: nothing reads yesterday's closeouts
  *      again. A record is an immutable row. The sweep never closes, replaces
- *      or rewrites it. One posts when the failing records differ from the
- *      last ones posted, so a 14-day window does not post 14 copies.
+ *      or rewrites it. One posts when a moving-window check has a finding
+ *      that the last run did not have, so a 14-day window does not post 14
+ *      copies and a finding that cleared and came back posts again.
+ * The run state (one system_settings row) holds what the last run found. A
+ * state that is missing or cannot be read never hides a finding: it posts.
+ * The state moves forward only for an alert the feed holds, so a failed
+ * write is tried again on the next run.
  * Rows written before this split are full reports under RECORD_KEY. They get
  * the record treatment: the sweep never touches them.
  * The email path (the in-app feed off) is unchanged: one email a run.
@@ -71,10 +76,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // cron fires at 06:55 with a few seconds of jitter, so the limit is 6.5 days:
 // an exact 7 days could miss the 7th run by a second and wait for the 8th.
 const REPEAT_AFTER_MS = 6.5 * DAY_MS;
-// The same failing records are not posted twice inside this time. Longer than
-// the longest moving window (14 days), so a finding that sits in its window
-// unchanged is one record, not one a day.
-const RECORD_DEDUPE_MS = 15 * DAY_MS;
+// The most findings of one moving-window check the run state keeps (as short
+// hashes). Past this number only the count can show a new finding.
+const ITEM_KEYS_CAP = 300;
 const SAMPLE_IDS = 25;
 const CLOSEOUT_VISIT_CAP = 150;
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
@@ -91,7 +95,9 @@ const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcon
 // in the standing list (see the header). Set it on every new detector whose
 // query is bound to a look-back or look-ahead date. `freshEachRun: true` (with
 // `moving`) = each run reads a different window, so two failing runs never
-// report the same thing.
+// report the same thing. A moving check's run() may return `itemKeys`: one
+// stable key for each finding, when the id text holds a number that moves
+// (default: the ids). A new key is what makes a new record.
 // ---------------------------------------------------------------------------
 const DETECTORS = Object.freeze([
   {
@@ -223,11 +229,14 @@ const DETECTORS = Object.freeze([
           ORDER BY upcoming DESC`,
         [etDateString(now)],
       );
-      const ghosts = (Array.isArray(ghost?.rows) ? ghost.rows : []).map((g) => {
+      const lanes = Array.isArray(ghost?.rows) ? ghost.rows : [];
+      const ghosts = lanes.map((g) => {
         const { lane, flags } = classifyCatalogRow(g);
         return `${g.service_key} (${lane}: ${[`${g.is_archived ? 'archived' : 'inactive'}_service_with_upcoming_visits:${Number(g.upcoming) || 0}`, ...flags].join(',')})`;
       });
-      return { count: ghosts.length, ids: ghosts };
+      // The id text holds the upcoming-visit count, which falls as visits
+      // pass. The finding is the service: one record for one ghost lane.
+      return { count: ghosts.length, ids: ghosts, itemKeys: lanes.map((g) => String(g.service_key)) };
     },
   },
   {
@@ -348,6 +357,10 @@ async function runDetectors({ now = new Date(), detectors = DETECTORS } = {}) {
       const ids = Array.isArray(out.ids) ? out.ids.map(String) : [];
       results.push({
         key: d.key, label: d.label, href: d.href, moving: d.moving === true, freshEachRun: d.freshEachRun === true, ok: out.count === 0, unavailable: false,
+        // EVERY finding's key, not the display sample below: a record is new
+        // when a key is new, and the 26th finding must count like the first.
+        // `listCapped` = the check itself returned a part of its list.
+        itemKeys: Array.isArray(out.itemKeys) ? out.itemKeys.map(String) : ids, listCapped: out.truncated === true,
         // A detector that already capped its sample in SQL reports the cap
         // itself (out.truncated) — the length test alone cannot see it.
         count: Number(out.count) || 0, sample: ids.slice(0, SAMPLE_IDS), truncated: ids.length > SAMPLE_IDS || out.truncated === true,
@@ -361,6 +374,7 @@ async function runDetectors({ now = new Date(), detectors = DETECTORS } = {}) {
       logger.error(`[l2c-invariants] ${d.key} unavailable: ${scrubSentryText(err?.message || err)}`);
       results.push({
         key: d.key, label: d.label, href: d.href, moving: d.moving === true, freshEachRun: d.freshEachRun === true, ok: false, unavailable: true,
+        itemKeys: [], listCapped: false,
         count: 0, sample: [], truncated: false, detail: null,
         error: safeErrorToken(err?.code) || safeErrorToken(err?.name) || 'error', ms: Date.now() - started,
       });
@@ -426,27 +440,35 @@ function failingItems(results) {
   return results.filter((r) => !r.ok).map((r) => (r.unavailable ? `${r.key}:unavailable` : r.key)).sort();
 }
 
-// The standing list's last run: { items: string[], alertedAt: ISO|null }, or
-// null when there is none or it cannot be read (the caller then posts: a
-// state fault never hides a finding).
+// The last run, from the run state: { items, alertedAt, seen }.
+//   items     the standing checks that failed (failingItems)
+//   alertedAt the time of the last standing alert the feed holds, or null
+//   seen      for each failing moving-window check, its findings (itemHashes)
+// null when there is none or it cannot be read. The callers then post: a
+// state fault never hides a finding.
 async function readRunState() {
   try {
     const row = await db('system_settings').where({ key: RUN_STATE_KEY }).first('value');
     const state = row?.value ? JSON.parse(row.value) : null;
     if (!state || !Array.isArray(state.items)) return null;
     const alertedAt = Number.isFinite(Date.parse(state.alertedAt)) ? state.alertedAt : null;
-    return { items: state.items.map(String), alertedAt };
+    const seen = state.seen && typeof state.seen === 'object' && !Array.isArray(state.seen) ? state.seen : {};
+    return {
+      items: state.items.map(String),
+      alertedAt,
+      seen: Object.fromEntries(Object.entries(seen).filter(([, hashes]) => Array.isArray(hashes)).map(([key, hashes]) => [key, hashes.map(String)])),
+    };
   } catch (err) {
     logger.warn(`[l2c-invariants] run-state read failed (${err.message}) — treating every item as new`);
     return null;
   }
 }
 
-async function writeRunState(items, alertedAt) {
+async function writeRunState({ items, alertedAt, seen }) {
   try {
-    const value = JSON.stringify({ items, alertedAt: alertedAt || null });
+    const value = JSON.stringify({ items, alertedAt: alertedAt || null, seen: seen || {} });
     await db('system_settings')
-      .insert({ key: RUN_STATE_KEY, value, category: 'ops_digest', description: 'Lead-to-cash sweep: the failing standing checks of the last run and the time of the last standing alert' })
+      .insert({ key: RUN_STATE_KEY, value, category: 'ops_digest', description: 'Lead-to-cash sweep: what the last run found (failing standing checks, time of the last standing alert, moving-window findings as hashes)' })
       .onConflict('key')
       .merge({ value, updated_at: new Date() });
   } catch (err) {
@@ -463,19 +485,27 @@ function nothingNew(state, items, now) {
   return (now.getTime() - Date.parse(state.alertedAt)) < REPEAT_AFTER_MS;
 }
 
-// What a record reports, as one short hash: the failing moving-window checks
-// with their sampled ids. The same hash = the same records, already posted.
-// A check that reads a different window each run (yesterday's closeouts) adds
-// the date, so "could not run" on two days is two records. Past the sample
-// only the count can show a change, so a truncated list adds its count.
-function recordIdentity(results, now) {
-  const parts = results.filter((r) => !r.ok).map((r) => [
-    r.key,
-    r.freshEachRun ? etDateString(now) : null,
-    r.unavailable ? 'unavailable' : [...r.sample].sort(),
-    r.truncated ? r.count : null,
-  ]).sort((a, b) => a[0].localeCompare(b[0]));
-  return crypto.createHash('sha1').update(JSON.stringify(parts)).digest('hex').slice(0, 20);
+const shortHash = (text) => crypto.createHash('sha1').update(String(text)).digest('hex').slice(0, 16);
+
+// The findings of one failing moving-window check, as short hashes: what the
+// run state keeps to tell a new finding from one already posted (it holds no
+// record id). A check that reads a different window on each run (yesterday's
+// closeouts) adds the date, so the same visit id, or "could not run", on two
+// days is two findings. A list that does not name every finding (the check
+// returned a part, the cap cut it, or it gave no ids) cannot show a new one,
+// so its count joins the list and any change of the count is a new finding.
+function itemHashes(r, now) {
+  const scope = `${r.freshEachRun ? etDateString(now) : ''}|${r.key}|`;
+  if (r.unavailable) return [shortHash(`${scope}unavailable`)];
+  const all = [...new Set(r.itemKeys)].sort();
+  const keys = all.slice(0, ITEM_KEYS_CAP);
+  if (r.listCapped || all.length > keys.length || !keys.length) keys.push(`count:${r.count}`);
+  return keys.map((key) => shortHash(scope + key)).sort();
+}
+
+function hasNewItem(hashes, seen) {
+  const known = new Set(Array.isArray(seen) ? seen : []);
+  return hashes.some((hash) => !known.has(hash));
 }
 
 const emailSender = (mailer, to, report) => () => mailer.sendOne({
@@ -484,70 +514,123 @@ const emailSender = (mailer, to, report) => () => mailer.sendOne({
   categories: ['ops', 'lead-to-cash-invariants'], suppressErrorLog: true,
 });
 
-// Every standing check ran and passed, so the open standing alert is fixed.
-// Records are never retired here: a clean later window does not prove an older
-// closeout failure (including license facts) was fixed, and retireIfClean
-// names the standing key only. It never throws.
-async function closeStandingList() {
-  await retireIfClean(STANDING_KEY);
-  await writeRunState([], (await readRunState())?.alertedAt);
+// One alert through the digest seam. 'in_app' = the feed holds the row.
+// 'email' = the feed write failed and the seam's fallback email went out.
+// An alert that reached nobody throws.
+async function deliver(options) {
+  const out = await deliverOpsDigest(options);
+  if (out?.ok === false) throw new Error(out.error || 'send failed');
+  return out?.channel === 'in_app' ? 'in_app' : 'email';
 }
 
-// The standing list. Returns true when an alert was posted. A clean list
-// closes the open alert; an unchanged one posts nothing.
-async function postStandingList(standing, { now, mailer, to }) {
+// The standing list. Returns { posted, error, items, alertedAt }: the last two
+// are what the run state keeps. It never throws, so a failure here cannot
+// stop the records of the same run.
+async function postStandingList(standing, state, { now, mailer, to }) {
   const items = failingItems(standing);
+  const alertedAt = state?.alertedAt || null;
   if (!items.length) {
-    // A moving-window failure in this run does not matter here: it is a record.
-    await closeStandingList();
-    return false;
+    // Every standing check ran and passed, so the open standing alert is
+    // fixed. A moving-window failure in this run does not matter here (it is
+    // a record), and retireIfClean names the standing key only, so it can
+    // never close a record. It never throws.
+    await retireIfClean(STANDING_KEY);
+    return { posted: false, items: [], alertedAt: null }; // an empty list: the next failing check is new
   }
-  const state = await readRunState();
   if (nothingNew(state, items, now)) {
     logger.info(`[l2c-invariants] standing list: no new item since the last alert (${state.alertedAt}) — not posted again`);
-    await writeRunState(items, state.alertedAt);
-    return false;
+    return { posted: false, items, alertedAt };
   }
+  // What the state keeps when the feed did not get the alert: the checks that
+  // failed before and still fail. A new item stays new for the next run.
+  const known = new Set(state?.items || []);
+  const unposted = { items: items.filter((item) => known.has(item)), alertedAt };
   const report = composeReport(standing, {
     now,
     title: 'lead-to-cash standing list',
     note: 'Standing list: one open alert. A new one replaces it when a check newly fails, or after a week. A clean run closes it.',
   });
-  await deliverOpsDigest({
-    key: STANDING_KEY,
-    subject: report.subject,
-    html: report.html,
-    text: report.text,
-    link: '/admin/invoices',
-    fallOff: true, // retired by retireIfClean (closeStandingList), or replaced by the next standing alert
-    supersedePrior: true,
-    sendEmail: emailSender(mailer, to, report),
-  });
-  await writeRunState(items, now.toISOString());
-  return true;
+  try {
+    const channel = await deliver({
+      key: STANDING_KEY,
+      subject: report.subject,
+      html: report.html,
+      text: report.text,
+      link: '/admin/invoices',
+      fallOff: true, // retired by retireIfClean above, or replaced by the next standing alert
+      supersedePrior: true,
+      sendEmail: emailSender(mailer, to, report),
+    });
+    // After the fallback email the feed holds no standing alert: the state
+    // stays, so the next run writes it.
+    return channel === 'in_app' ? { posted: true, items, alertedAt: now.toISOString() } : { posted: true, ...unposted };
+  } catch (error) {
+    return { posted: false, error, ...unposted };
+  }
 }
 
-// The records. Returns true when a record was handed to the feed (the feed
-// keeps one row for one identity, so a repeat writes nothing).
-async function postRecords(moving, { now, mailer, to }) {
-  if (!moving.some((r) => !r.ok)) return false;
+// The records. Returns { posted, error, seen }: `seen` is what the run state
+// keeps. It never throws.
+async function postRecords(moving, state, { now, mailer, to }) {
+  const failing = moving.filter((r) => !r.ok);
+  const before = state?.seen || {};
+  const current = Object.fromEntries(failing.map((r) => [r.key, itemHashes(r, now)]));
+  // A finding that left is dropped here, so the same finding posts again if
+  // it comes back.
+  if (!failing.some((r) => hasNewItem(current[r.key], before[r.key]))) return { posted: false, seen: current };
+  // What the state keeps when the feed did not get the record: the findings
+  // posted before that still stand. A new finding stays new for the next run.
+  const unposted = Object.fromEntries(failing.map((r) => [r.key, current[r.key].filter((hash) => (before[r.key] || []).includes(hash))]));
   const report = composeReport(moving, { now });
-  await deliverOpsDigest({
-    key: RECORD_KEY,
-    subject: report.subject,
-    html: report.html,
-    text: report.text,
-    link: '/admin/invoices',
-    // One immutable row for one set of failing records: no refresh, no
-    // fall-off, no supersede. closeout_failed_facts checks yesterday only, so
-    // rewriting or closing a row could replace an unresolved closeout failure
-    // (and its IDs) with today's OK line. The dedupe finds a row a person
-    // already closed too, so a handled record does not come back as a copy.
-    dedupeKey: `ops-digest:lead-to-cash-record:${recordIdentity(moving, now)}`,
-    dedupeWindowMs: RECORD_DEDUPE_MS,
-    sendEmail: emailSender(mailer, to, report),
-  });
-  return true;
+  try {
+    const channel = await deliver({
+      key: RECORD_KEY,
+      subject: report.subject,
+      html: report.html,
+      text: report.text,
+      link: '/admin/invoices',
+      // One immutable row: no dedupe key, no refresh, no fall-off, no
+      // supersede. closeout_failed_facts checks yesterday only, so rewriting
+      // or closing a row could replace an unresolved closeout failure (and
+      // its IDs) with today's OK line.
+      sendEmail: emailSender(mailer, to, report),
+    });
+    return { posted: true, seen: channel === 'in_app' ? current : unposted };
+  } catch (error) {
+    return { posted: false, error, seen: unposted };
+  }
+}
+
+// In the app: both alerts, each tried by itself, then one write of the run state.
+async function postInApp(results, context) {
+  const state = await readRunState();
+  const standing = await postStandingList(results.filter((r) => !r.moving), state, context);
+  const records = await postRecords(results.filter((r) => r.moving), state, context);
+  await writeRunState({ items: standing.items, alertedAt: standing.alertedAt, seen: records.seen });
+  return { posted: standing.posted || records.posted, errors: [standing.error, records.error].filter(Boolean) };
+}
+
+// The email path is unchanged: one email a run with the whole report, paced
+// by sentRecently(). The seam sends it (the in-app feed is off).
+async function sendWholeReport(report, { mailer, to }) {
+  try {
+    await deliverOpsDigest({
+      key: RECORD_KEY, subject: report.subject, html: report.html, text: report.text, link: '/admin/invoices',
+      sendEmail: emailSender(mailer, to, report),
+    });
+    return { posted: true, errors: [] };
+  } catch (error) {
+    return { posted: false, errors: [error] };
+  }
+}
+
+// A run with every check clean, in the app: the standing list is fixed and no
+// finding stands. Records are never retired: closeout_failed_facts checks
+// yesterday only, and a clean later window does not prove older failures
+// (including license facts) were fixed.
+async function recordCleanRun() {
+  await retireIfClean(STANDING_KEY);
+  await writeRunState({ items: [], alertedAt: null, seen: {} });
 }
 
 /**
@@ -562,10 +645,7 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   const exceptions = results.filter((r) => !r.ok);
   if (!exceptions.length) {
     logger.info(`[l2c-invariants] clean: ${JSON.stringify(summary)}`);
-    // closeout_failed_facts checks yesterday only. A clean later window
-    // does not prove older failures (including license facts) were fixed,
-    // so this run closes the standing list only, never a record.
-    if (inAppEnabled()) await closeStandingList();
+    if (inAppEnabled()) await recordCleanRun();
     return { skipped: 'clean', results: summary };
   }
   const report = composeReport(results, { now });
@@ -575,25 +655,14 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   const to = sweepEmail();
   if (!isInternalEmailRecipient(to)) return { skipped: 'recipient', results: summary };
   if (await sentRecently()) return { skipped: 'recent_send', results: summary };
-  let posted = false;
-  try {
-    if (inAppEnabled()) {
-      const standingPosted = await postStandingList(results.filter((r) => !r.moving), { now, mailer, to });
-      const recordPosted = await postRecords(results.filter((r) => r.moving), { now, mailer, to });
-      posted = standingPosted || recordPosted;
-    } else {
-      // The email path is unchanged: one email a run with the whole report,
-      // paced by sentRecently(). The seam sends it (the in-app feed is off).
-      await deliverOpsDigest({
-        key: RECORD_KEY, subject: report.subject, html: report.html, text: report.text, link: '/admin/invoices',
-        sendEmail: emailSender(mailer, to, report),
-      });
-      posted = true;
-    }
-  } catch (err) {
-    logger.error(`[l2c-invariants] send failed: ${scrubSentryText(err?.message || err)}`);
-    return { error: 'send_failed', results: summary };
-  }
+  const { posted, errors } = inAppEnabled()
+    ? await postInApp(results, { now, mailer, to })
+    : await sendWholeReport(report, { mailer, to });
+  for (const err of errors) logger.error(`[l2c-invariants] send failed: ${scrubSentryText(err?.message || err)}`);
+  // One alert of two can fail. The run then reads as failed (job_health), and
+  // the send marker stays unset so a rerun can post what is missing; the run
+  // state stops a second copy of the alert that did post.
+  if (errors.length) return { error: 'send_failed', results: summary };
   if (!posted) return { skipped: 'no_new_item', results: summary };
   await stampSendMarker();
   return { sent: true, violations: report.total, unavailable: report.unavailable, results: summary };
@@ -603,7 +672,7 @@ module.exports = {
   runLeadToCashInvariantSweep,
   DETECTORS,
   _private: {
-    runDetectors, composeReport, sentRecently, stampSendMarker, failingItems, nothingNew, recordIdentity, readRunState, writeRunState,
-    SEND_MARKER_KEY, RECORD_KEY, STANDING_KEY, RUN_STATE_KEY, REPEAT_AFTER_MS, RECORD_DEDUPE_MS, SAMPLE_IDS, CLOSEOUT_VISIT_CAP,
+    runDetectors, composeReport, sentRecently, stampSendMarker, failingItems, nothingNew, itemHashes, hasNewItem, readRunState, writeRunState,
+    SEND_MARKER_KEY, RECORD_KEY, STANDING_KEY, RUN_STATE_KEY, REPEAT_AFTER_MS, ITEM_KEYS_CAP, SAMPLE_IDS, CLOSEOUT_VISIT_CAP,
   },
 };
