@@ -1,13 +1,16 @@
 // The pre-push hook's round log (scripts/hooks/pre-push: round_log_row,
-// write_round_log). Each commit the hook audits, or passes un-audited, gets
-// one JSON line in codex-review-rounds-YYYY-MM.jsonl in the clone's COMMON
-// git dir, so a branch that takes ten local audit rounds can be told from
-// one that takes one.
+// round_log_unaudited_push, write_round_log). Each pushed commit that has
+// something to audit gets one JSON line in codex-review-rounds-YYYY-MM.jsonl
+// in the clone's COMMON git dir: "audited" with its counts, or "unaudited"
+// with the reason. So a branch that takes ten local audit rounds can be told
+// from one that takes one, and a push that passed with no audit is on record.
 // Credible regressions this pins:
 // - the log changing the hook's exit code (it runs from the EXIT trap, and
 //   that code is the push verdict), or a failed write printing or blocking;
 // - a block on one branch of a two-branch push booked to the other branch;
 // - a push with nothing to audit counted as a round;
+// - a push that skipped the audit, or met no auditor, leaving no line (an
+//   outage would look like a quiet week);
 // - a linked worktree writing its own private file;
 // - a month file rewritten (a second worktree's line can be lost), or the
 //   files growing without limit.
@@ -202,9 +205,15 @@ describe('pre-push round log', () => {
     expect(monthFiles(path.join(gitDir(), 'worktrees', 'linked'))).toEqual([]);
   }, 120000);
 
-  test('a push that skips the audit, and CODEX_REVIEW_ROUND_LOG=off, log nothing', () => {
-    expect(runHook({ env: { SKIP_CODEX_REVIEW: '1' } }).status).toBe(0);
-    expect(monthFiles()).toEqual([]);
+  test('a push that skips the audit is logged as un-audited, and CODEX_REVIEW_ROUND_LOG=off logs nothing', () => {
+    const skipped = runHook({ env: { SKIP_CODEX_REVIEW: '1' } });
+    expect(skipped.stderr).toContain('SKIP_CODEX_REVIEW=1 set');
+    expect(skipped.status).toBe(0);
+    const [round, ...rest] = rounds();
+    expect(rest).toEqual([]);
+    expect(round).toMatchObject({ ref: 'refs/heads/feature', refs: ['refs/heads/feature'], sha, outcome: 'unaudited', why: 'skipped', p0: 0, p1: 0, exit: 0 });
+    expect(round).not.toHaveProperty('auditor');
+    for (const name of monthFiles()) fs.rmSync(path.join(gitDir(), name), { force: true });
     // "off" is a switch, not a directory name: a folder called off in the repo root gets no file either.
     const off = path.join(work, 'off');
     fs.mkdirSync(off);
@@ -212,6 +221,7 @@ describe('pre-push round log', () => {
       const run = runHook({ env: { CODEX_REVIEW_ROUND_LOG: 'off' } });
       expect(run.stderr).toContain('clean — push allowed');
       expect(run.status).toBe(0);
+      expect(runHook({ env: { CODEX_REVIEW_ROUND_LOG: 'off', SKIP_CODEX_REVIEW: '1' } }).status).toBe(0);
       expect(fs.readdirSync(off)).toEqual([]);
       expect(monthFiles()).toEqual([]);
     } finally {
@@ -219,19 +229,69 @@ describe('pre-push round log', () => {
     }
   }, 120000);
 
-  test('a log directory that cannot be written changes neither the verdict nor the output', () => {
+  test('a push with no auditor on PATH passes and is logged as un-audited; a commit with nothing to audit still gets no line', () => {
+    // PATH without the fake codex. The system folders hold git and the shell tools; jq is linked in when it lives elsewhere.
+    const systemDirs = ['/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+    const inSystemDirs = (tool) => systemDirs.some((dir) => fs.existsSync(path.join(dir, tool)));
+    expect(inSystemDirs('codex')).toBe(false);
+    const tools = path.join(root, 'tools');
+    fs.mkdirSync(tools);
+    if (!inSystemDirs('jq')) {
+      const found = process.env.PATH.split(path.delimiter).map((dir) => path.join(dir, 'jq')).find((file) => fs.existsSync(file));
+      fs.symlinkSync(fs.realpathSync(found), path.join(tools, 'jq'));
+    }
+    const run = runHook({
+      pushes: [['refs/heads/main', baseSha, 'refs/heads/same-as-main'], ['refs/heads/feature', sha, 'refs/heads/feature']],
+      env: { PATH: [tools, ...systemDirs].join(path.delimiter) },
+    });
+    expect(run.stderr).toContain('no LLM auditor on PATH');
+    expect(run.status).toBe(0);
+    const [round, ...rest] = rounds();
+    expect(rest).toEqual([]);
+    expect(round).toMatchObject({ ref: 'refs/heads/feature', sha, outcome: 'unaudited', why: 'no_auditor', p0: 0, p1: 0, exit: 0 });
+  }, 120000);
+
+  test('each other preflight exit passes the push and logs its own reason', () => {
+    const withoutFile = (relative, fn) => {
+      const file = path.join(work, relative);
+      fs.renameSync(file, `${file}.moved`);
+      try { return fn(); } finally { fs.renameSync(`${file}.moved`, file); }
+    };
+    const cases = [
+      ['no_base', "base ref 'origin/nope' not found", () => runHook({ env: { CODEX_REVIEW_BASE: 'origin/nope' } })],
+      ['no_agents_md', 'missing AGENTS.md', () => withoutFile('AGENTS.md', () => runHook())],
+      ['no_schema', 'missing .github/codex-review-schema.json', () => withoutFile(path.join('.github', 'codex-review-schema.json'), () => runHook())],
+    ];
+    for (const [why, message, run] of cases) {
+      for (const name of monthFiles()) fs.rmSync(path.join(gitDir(), name), { force: true });
+      const result = run();
+      expect(result.stderr).toContain(message);
+      expect(result.stderr).toContain('push allowed (advisory check skipped)');
+      expect(result.status).toBe(0);
+      expect(rounds()).toEqual([expect.objectContaining({ ref: 'refs/heads/feature', sha, outcome: 'unaudited', why, exit: 0 })]);
+    }
+  }, 120000);
+
+  test('a log that cannot be written changes neither the verdict nor the output', () => {
     const missing = path.join(root, 'no-such-dir');
     const clean = runHook({ env: { CODEX_REVIEW_ROUND_LOG: missing } });
     expect(clean.status).toBe(0);
     expect(clean.stderr).toContain('clean — push allowed');
-    expect(clean.stderr).not.toMatch(/No such file|Permission denied|codex-review-rounds|no-such-dir/);
-    const readOnly = path.join(root, 'read-only');
-    fs.mkdirSync(readOnly, { mode: 0o555 });
-    const blocked = runHook({ env: { CODEX_REVIEW_ROUND_LOG: readOnly, FAKE_CODEX_VERDICT: BLOCKING } });
-    expect(blocked.status).toBe(1);
-    expect(blocked.stderr).not.toMatch(/No such file|Permission denied|codex-review-rounds|read-only/);
+    expect(clean.stderr).not.toMatch(/No such file|codex-review-rounds|no-such-dir/);
     expect(fs.existsSync(missing)).toBe(false);
-    expect(monthFiles(readOnly)).toEqual([]);
+    // A directory sits where the month file goes, so the append fails for any user, root too. Both this month's
+    // name and the next one's: a run across midnight UTC on the last day of a month must not pass by luck.
+    const blockedDir = path.join(root, 'blocked');
+    fs.mkdirSync(blockedDir);
+    const monthName = (date) => `codex-review-rounds-${date.toISOString().slice(0, 7)}.jsonl`;
+    const names = [...new Set([monthName(new Date()), monthName(new Date(Date.now() + 36 * 3600 * 1000))])];
+    for (const name of names) fs.mkdirSync(path.join(blockedDir, name));
+    const blocked = runHook({ env: { CODEX_REVIEW_ROUND_LOG: blockedDir, FAKE_CODEX_VERDICT: BLOCKING } });
+    expect(blocked.stderr).toContain('blocking push');
+    expect(blocked.status).toBe(1);
+    expect(blocked.stderr).not.toMatch(/[Ii]s a directory|Permission denied|codex-review-rounds/);
+    expect(fs.readdirSync(blockedDir).sort()).toEqual([...names].sort());
+    for (const name of names) expect(fs.readdirSync(path.join(blockedDir, name))).toEqual([]);
     expect(monthFiles()).toEqual([]);
   }, 120000);
 

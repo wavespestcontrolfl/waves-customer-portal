@@ -35,8 +35,8 @@
 #   CLAUDE_REVIEW_MODEL=opus           — fallback auditor model (default sonnet)
 #   SPLIT_WARN_FILES=25                — advisory split threshold, files (0 disables)
 #   SPLIT_WARN_BYTES=120000            — advisory split threshold, bytes (0 disables)
-#   CODEX_REVIEW_ROUND_LOG=off         — do not log this run's audit rounds; or a
-#                                         directory to log them in (default: the
+#   CODEX_REVIEW_ROUND_LOG=off         — do not log this push in the round log; or
+#                                         a directory to log it in (default: the
 #                                         clone's common git dir)
 #
 # ── Two LLM auditors ─────────────────────────────────────────────────────
@@ -324,63 +324,11 @@ ${hits}
   fi
 fi
 
-if [ "$SKIP_AUDIT" = "1" ]; then
-  exit 0
-fi
-
-SCHEMA=".github/codex-review-schema.json"
-AGENTS_MD="AGENTS.md"
-CODEX_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-180}"
-# Pinned, not inherited: the audit budget above was sized for medium effort.
-# A personal ~/.codex/config.toml at `max` (set 2026-09-24 for interactive
-# use) made nearly every audit time out and fall back to Claude — 2 of 33
-# pushes on 2026-09-25 got a Codex verdict, against 54 of 62 the day before.
-CODEX_EFFORT="${CODEX_REVIEW_EFFORT:-medium}"
-MAX_DIFF_BYTES="${CODEX_REVIEW_MAX_DIFF_BYTES:-500000}"
-# 300s was not enough once the AGENTS.md rubric joined the prompt: a real
-# push of this branch timed out and went UN-AUDITED, which is the failure
-# this feature exists to prevent. The budget covers BOTH attempts for a ref.
-CLAUDE_TIMEOUT="${CLAUDE_REVIEW_TIMEOUT:-600}"
-CLAUDE_MODEL="${CLAUDE_REVIEW_MODEL:-sonnet}"
-SPLIT_WARN_FILES="${SPLIT_WARN_FILES:-25}"
-SPLIT_WARN_BYTES="${SPLIT_WARN_BYTES:-120000}"
-
-# ── Preflight: required tools / files ────────────────────────────────────
-warn_and_pass() {
-  echo "[codex-review] $1" >&2
-  echo "[codex-review] push allowed (advisory check skipped)." >&2
-  exit 0
-}
-
-# Either auditor alone is enough to keep round 0 alive; only the loss of
-# BOTH is a preflight failure.
-HAVE_CODEX=0
-HAVE_CLAUDE=0
-command -v codex  >/dev/null 2>&1 && HAVE_CODEX=1
-command -v claude >/dev/null 2>&1 && HAVE_CLAUDE=1
-[ "${SKIP_CLAUDE_FALLBACK:-0}" = "1" ] && HAVE_CLAUDE=0
-
-if [ "$HAVE_CODEX" = "0" ] && [ "$HAVE_CLAUDE" = "0" ]; then
-  warn_and_pass "no LLM auditor on PATH — install codex (npm i -g @openai/codex) or claude"
-fi
-if [ "$HAVE_CODEX" = "0" ]; then
-  echo "[codex-review] codex CLI not found — the Claude fallback auditor will run instead." >&2
-fi
-
-command -v jq    >/dev/null 2>&1 || warn_and_pass "jq not found on PATH — install with: brew install jq"
-[ -f "$SCHEMA" ]    || warn_and_pass "missing $SCHEMA"
-[ -f "$AGENTS_MD" ] || warn_and_pass "missing $AGENTS_MD"
-
-# ── Resolve base ref ─────────────────────────────────────────────────────
-if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
-  warn_and_pass "base ref '$BASE' not found locally — try: git fetch origin"
-fi
-
 # ── Round log ────────────────────────────────────────────────────────────
-# One line for each commit this hook audits (or passes un-audited), in the
-# clone's COMMON git dir, so every worktree of this clone appends to the same
-# files. Why: local rounds were invisible. The artifact dir below keeps only
-# the last run, so a branch that took ten audit rounds looked the same as one
+# One line for each pushed commit that has something to audit, in the clone's
+# COMMON git dir, so every worktree of this clone appends to the same files.
+# Why: local rounds were invisible. The artifact dir below keeps only the
+# last run, so a branch that took ten audit rounds looked the same as one
 # that took one, and nobody could see a branch looping (waves-ship §4's round
 # cap counts GitHub rounds only). A weekly read shows rounds per branch, P0
 # blocks and un-audited pushes.
@@ -388,11 +336,17 @@ fi
 #   CODEX_REVIEW_ROUND_LOG=<dir>   write the month files there instead
 #   CODEX_REVIEW_ROUND_LOG=off     write nothing
 # Rules it keeps:
-# - Each line carries its own commit's destination ref(s) and its own P0/P1
-#   counts. A push of two branches writes two lines, so a block on one is
-#   never booked to the other. `exit` is the verdict of the whole push.
+# - A commit is "audited" (with its P0/P1 counts and its auditor) or
+#   "unaudited" with the reason: skipped (SKIP_CODEX_REVIEW=1), no_auditor,
+#   no_schema, no_agents_md, no_base, diff_too_large, auditors_failed. A push
+#   that passes with no audit must not look like no push at all.
+# - Each line carries its own commit's destination ref(s) and its own counts.
+#   A push of two branches writes two lines, so a block on one is never
+#   booked to the other. `exit` is the verdict of the whole push.
 # - A commit with nothing to audit (no diff vs the base, or not reachable)
-#   writes no line: it is not a round.
+#   writes no line: it is not a round. Nor does a push the applied-migration
+#   guard above blocks (no audit ran, nothing was pushed), a delete-only
+#   push, or a machine without jq (the lines are built with it).
 # - A file is only ever appended to, in one write per push, and never
 #   rewritten: a second worktree's line cannot be lost to a trim. Size is
 #   bounded by deleting whole month files past the newest ROUND_LOG_KEEP.
@@ -424,6 +378,26 @@ round_log_row() {
   return 0
 }
 
+# round_log_unaudited_push <why>: the audit will not start for this push, so
+# each pushed commit that has something to audit is queued as un-audited. It
+# skips the same commits the per-ref loop skips (not reachable, no diff vs
+# the base); with no base to diff against, every reachable commit counts.
+round_log_unaudited_push() {
+  local k sha base_ok=0
+  command -v jq >/dev/null 2>&1 || return 0
+  git rev-parse --verify "$BASE" >/dev/null 2>&1 && base_ok=1
+  for k in "${!REF_SHAS[@]}"; do
+    sha="${REF_SHAS[$k]}"
+    git cat-file -e "$sha" 2>/dev/null || continue
+    if [ "$base_ok" = "1" ]; then
+      git diff --quiet "$BASE...$sha" >/dev/null 2>&1
+      [ "$?" = "1" ] || continue
+    fi
+    round_log_row "$sha" "${REF_LABELS[$k]}" unaudited "$1" 0 0 ""
+  done
+  return 0
+}
+
 # write_round_log <hook exit code>: appends the queued lines. EXIT trap only.
 write_round_log() {
   local rc="$1" dir="${CODEX_REVIEW_ROUND_LOG:-}" lines=""
@@ -447,6 +421,64 @@ write_round_log() {
   done
   return 0
 }
+# From here on every exit writes the queued lines: the skip and the preflight
+# exits below queue theirs and leave, and the per-ref loop queues one per commit.
+trap 'ROUND_LOG_RC=$?; write_round_log "$ROUND_LOG_RC" 2>/dev/null || true' EXIT
+
+if [ "$SKIP_AUDIT" = "1" ]; then
+  round_log_unaudited_push skipped
+  exit 0
+fi
+
+SCHEMA=".github/codex-review-schema.json"
+AGENTS_MD="AGENTS.md"
+CODEX_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-180}"
+# Pinned, not inherited: the audit budget above was sized for medium effort.
+# A personal ~/.codex/config.toml at `max` (set 2026-09-24 for interactive
+# use) made nearly every audit time out and fall back to Claude — 2 of 33
+# pushes on 2026-09-25 got a Codex verdict, against 54 of 62 the day before.
+CODEX_EFFORT="${CODEX_REVIEW_EFFORT:-medium}"
+MAX_DIFF_BYTES="${CODEX_REVIEW_MAX_DIFF_BYTES:-500000}"
+# 300s was not enough once the AGENTS.md rubric joined the prompt: a real
+# push of this branch timed out and went UN-AUDITED, which is the failure
+# this feature exists to prevent. The budget covers BOTH attempts for a ref.
+CLAUDE_TIMEOUT="${CLAUDE_REVIEW_TIMEOUT:-600}"
+CLAUDE_MODEL="${CLAUDE_REVIEW_MODEL:-sonnet}"
+SPLIT_WARN_FILES="${SPLIT_WARN_FILES:-25}"
+SPLIT_WARN_BYTES="${SPLIT_WARN_BYTES:-120000}"
+
+# ── Preflight: required tools / files ────────────────────────────────────
+# warn_and_pass <message> <round-log reason>
+warn_and_pass() {
+  echo "[codex-review] $1" >&2
+  echo "[codex-review] push allowed (advisory check skipped)." >&2
+  round_log_unaudited_push "$2"
+  exit 0
+}
+
+# Either auditor alone is enough to keep round 0 alive; only the loss of
+# BOTH is a preflight failure.
+HAVE_CODEX=0
+HAVE_CLAUDE=0
+command -v codex  >/dev/null 2>&1 && HAVE_CODEX=1
+command -v claude >/dev/null 2>&1 && HAVE_CLAUDE=1
+[ "${SKIP_CLAUDE_FALLBACK:-0}" = "1" ] && HAVE_CLAUDE=0
+
+if [ "$HAVE_CODEX" = "0" ] && [ "$HAVE_CLAUDE" = "0" ]; then
+  warn_and_pass "no LLM auditor on PATH — install codex (npm i -g @openai/codex) or claude" no_auditor
+fi
+if [ "$HAVE_CODEX" = "0" ]; then
+  echo "[codex-review] codex CLI not found — the Claude fallback auditor will run instead." >&2
+fi
+
+command -v jq    >/dev/null 2>&1 || warn_and_pass "jq not found on PATH — install with: brew install jq" no_jq
+[ -f "$SCHEMA" ]    || warn_and_pass "missing $SCHEMA" no_schema
+[ -f "$AGENTS_MD" ] || warn_and_pass "missing $AGENTS_MD" no_agents_md
+
+# ── Resolve base ref ─────────────────────────────────────────────────────
+if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+  warn_and_pass "base ref '$BASE' not found locally — try: git fetch origin" no_base
+fi
 
 # ── Per-ref audit ────────────────────────────────────────────────────────
 TMPDIR_RUN="$(mktemp -d -t codex-review.XXXXXX)"
