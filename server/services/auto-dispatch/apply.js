@@ -70,7 +70,8 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS);
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed',
+      'reservation_service_mix', ...LOCATION_FIELDS);
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -85,6 +86,9 @@ async function revalidatePlacement(service) {
   }
   if (fresh.customer_confirmed === true) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this visit after scoring' };
+  }
+  if (fresh.reservation_service_mix?.version === 2) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Visit joined a version-2 allocation after scoring' };
   }
   const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
     || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
@@ -353,6 +357,11 @@ function makeMoveGuard({ service, best, config = {} }) {
     trx, technicianId, service: movingRow, destination,
   }) => {
     const row = movingRow || service;
+    // Candidate scoring excludes v2 allocations, but this transaction guard
+    // closes stale/direct apply paths. There is no allocation-unit writer.
+    if (row.reservation_service_mix?.version === 2) {
+      throw refuse(row.id, 'belongs to a version-2 allocation that must move as one unit');
+    }
     if (row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
@@ -915,7 +924,10 @@ async function stampMovedRow({ id, slot, previousStatus, landedStatus, runId, la
  */
 async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config) {
   const newWindow = { start: best.start_time, end: best.end_time };
-  const options = {};
+  // Group members currently commit in separate rebooker transactions. A
+  // cross-day automatic move must therefore fail closed under the locked unit
+  // plan; staff surfaces keep their explicit partial-move repair contract.
+  const options = { requireAtomicUnit: true };
   // Remaining per-run change budget (orchestrator): a grouped visit whose
   // LOCKED member count exceeds it is refused inside the unit move before
   // any write (VISIT_UNIT_OVER_CAP) — the pre-read reservation is advisory.
@@ -960,7 +972,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
     // location fields, null when absent. customer_confirmed for every visit
     // (owner 2026-10-09): a confirmation that lands between the read above
     // and the move fails the atomic match.
-    ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS]
+    ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', 'reservation_service_mix', ...LOCATION_FIELDS]
       .map((field) => [field, fresh[field] ?? null])),
   };
 
@@ -1224,8 +1236,22 @@ async function previewGroupMove(service, best, config, conn = db) {
     const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
     const members = await conn('scheduled_services').where({ visit_id: service.visit_id })
       .whereNotIn('status', TERMINAL_ROW_STATUSES)
-      .select('id', 'status', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+      .select('id', 'status', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'reservation_service_mix');
+    const allocated = members.find((member) => member.reservation_service_mix?.version === 2);
+    if (allocated) {
+      return {
+        code: 'VERSION_2_ALLOCATION',
+        description: `Grouped visit would be refused at apply — service ${allocated.id} belongs to a version-2 allocation`,
+      };
+    }
     if (members.length < 2) return null;
+    const targetDate = String(best.date || '').slice(0, 10);
+    if (members.some((member) => toDateStr(member.scheduled_date) !== targetDate)) {
+      return {
+        code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD',
+        description: 'Grouped visit would be refused at apply — cross-day grouped moves are not atomic',
+      };
+    }
     const visit = await conn('service_visits').where({ id: service.visit_id }).first('window_start');
     const predicted = predictMemberWindows({
       members, primaryId: service.id, visitWindowStart: visit ? visit.window_start : null,

@@ -316,6 +316,14 @@ function skipEvaluation(code, message, cause) {
 // the tapped row — so the evaluation is abandoned (GROUP_CONTEXT_UNAVAILABLE,
 // which the orchestrator records as a no-change skip).
 const GROUP_CONTEXT_UNAVAILABLE = 'GROUP_CONTEXT_UNAVAILABLE';
+const VERSION_2_ALLOCATION = 'VERSION_2_ALLOCATION';
+function refuseVersion2Allocation(row) {
+  if (row?.reservation_service_mix?.version !== 2) return;
+  throw skipEvaluation(
+    VERSION_2_ALLOCATION,
+    `Service ${row.id} belongs to a version-2 allocation that auto-dispatch cannot move as a single row`,
+  );
+}
 async function loadGroupContext(db, service) {
   const selfId = String(service.id);
   const standalone = { excludeIds: new Set([selfId]), siblings: [], visitWindowStart: null };
@@ -332,15 +340,18 @@ async function loadGroupContext(db, service) {
         .select(
           'id', 'scheduled_date', 'technician_id', 'window_start', 'window_end', 'route_order', 'created_at',
           'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback', 'reservation_policy_version',
+          'reservation_service_mix',
         ),
       db('service_visits').where({ id: service.visit_id }).first('window_start'),
     ]);
+    siblings.forEach(refuseVersion2Allocation);
     return {
       excludeIds,
       siblings: siblings.map((sib) => ({ ...sib, preserveCapacity: preservesCapacity(sib) })),
       visitWindowStart: (visit && visit.window_start) || null,
     };
   } catch (err) {
+    if (err?.skipEvaluation === true) throw err;
     throw skipEvaluation(GROUP_CONTEXT_UNAVAILABLE, 'Visit group could not be read', err);
   }
 }
@@ -351,9 +362,10 @@ async function loadGroupContext(db, service) {
 // current placement for one unit against candidates for another. Gate on,
 // findValidCandidateSlots reads the group once into an evaluation-scoped
 // copy of ctx (never the caller's ctx, which a later re-evaluation reuses
-// and must read afresh); gate off, nothing is read and ctx passes through.
+// and must read afresh). A grouped visit needs that read even on legacy
+// scoring to keep cross-date moves out of the candidate list.
 async function withGroupContext(service, ctx) {
-  if (!autoDispatchSharedModelLive()) return ctx;
+  if (!autoDispatchSharedModelLive() && (!service.visit_id || ctx.groupContext)) return ctx;
   return { ...ctx, groupContext: await loadGroupContext(ctx.db, service) };
 }
 
@@ -877,6 +889,7 @@ const slotTechId = (slot) => slot.technician && slot.technician.id;
 const isTerritoryHolder = (techId, h) => String(techId) === String(h.territoryTechId)
   || (!!h.territoryCoverId && String(techId) === String(h.territoryCoverId));
 const HARD_FILTERS = [
+  ['group_cross_date', (slot, h) => h.ctx.groupContext?.siblings?.length > 0 && slot.date !== toDateStr(h.service.scheduled_date)],
   ['after_hours', (slot) => hhmmToMin(slot.end_time) > DAY_CLOSE],
   ['blackout', (slot, h) => inBlackout(slot.date, h.prefs.blackout)],
   ['sibling', (slot, h) => h.siblingDates.has(slot.date)],
@@ -1059,6 +1072,12 @@ function searchWindow(service, ctx) {
       if (dateTo > round.end) dateTo = round.end;
     }
   }
+  // The move writer commits a group's members separately. Search only dates
+  // on which the automatic writer can keep this group together.
+  if (ctx.groupContext?.siblings?.length) {
+    if (dateFrom < origDate) dateFrom = origDate;
+    if (dateTo > origDate) dateTo = origDate;
+  }
   return { dateFrom, dateTo };
 }
 
@@ -1218,6 +1237,10 @@ async function unitTerritory(service, geo, ctx) {
 }
 
 async function findValidCandidateSlots(service, prefs, baseCtx) {
+  // Allocation rows have no single-row auto-dispatch writer. Refuse the
+  // primary before geo lookup / slot generation; loadGroupContext below
+  // applies the same gate to every open sibling before any ranking work.
+  refuseVersion2Allocation(service);
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
   // The visit group is read ONCE for this evaluation and shared by the
@@ -1309,6 +1332,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
   const { territoryTechId } = ctx;
   const drops = {
+    ...(ctx.groupContext?.siblings?.length ? { group_cross_date: 0 } : {}),
     blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0,
     ...(ctx.keepTech === true ? { other_tech: 0 } : {}),
     ...(territoryTechId ? { other_territory: 0 } : {}),

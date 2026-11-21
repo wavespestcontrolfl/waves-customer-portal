@@ -60,6 +60,7 @@ jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitReschedule
 const db = require('../models/db');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { assignDispatchJob } = require('../services/dispatch-assignment');
+const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { moveVisitAsUnit, visitSummaryForService, _test: { shiftClock, expectMatchesRow } } = require('../services/visit-groups');
 
 const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', technician_id: 't1', window_start: '09:00', window_end: '11:00' };
@@ -110,12 +111,14 @@ describe('moveVisitAsUnit', () => {
   // and the RETARGET read (no forUpdate) with `landed`.
   // The pre-primary REVALIDATION read (whereIn id, no forUpdate) answers with
   // `revalidate` (default: the members as planned, i.e. unchanged).
-  const script = ({ visit = VISIT, members, landed = null, maxSeq = 0, revalidate = null }) => ({
+  const script = ({ visit = VISIT, members, landed = null, maxSeq = 0, revalidate = null, first = null }) => ({
     service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: maxSeq } : visit) },
     scheduled_services: { select: (ops) => (ops.some((o) => o[0] === 'orderBy') ? (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' }))) // retarget read (FOR UPDATE + ORDER BY)
         : ops.some((o) => o[0] === 'forUpdate') ? members
       : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? (revalidate || members.map((m) => ({ ...m, visit_id: 'v1' })))
-        : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))) },
+        : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
+      first: (ops, cols) => (first ? first(ops, cols) : null),
+    },
   });
 
   test('ungrouped row / dissolved visit / single live member ⇒ null (plain move); a non-open non-dissolved visit REFUSES (P0 r36)', async () => {
@@ -152,6 +155,42 @@ describe('moveVisitAsUnit', () => {
     expect(out.visitMove.failed).toEqual([
       expect.objectContaining({ id: 'b', movedButUnassigned: true, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' }),
     ]);
+  });
+
+  test('a v2 allocation appearing after the time move is read FOR UPDATE and refuses technician assignment', async () => {
+    const allocation = { version: 2, allocatedServiceIds: ['b', 'capacity-peer'] };
+    const members = [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })];
+    db.__script = script({ members, landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', technician_id: 't2' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00', technician_id: 't1' },
+    ], first: (ops) => {
+      const where = ops.find((op) => op[0] === 'where' && op[1]?.id);
+      if (!ops.some((op) => op[0] === 'forUpdate') || !where) return null;
+      return {
+        window_start: where[1].id === 'a' ? '13:00' : '14:00', window_end: where[1].id === 'a' ? '14:00' : '15:00',
+        estimated_duration_minutes: 60, service_type: 'Pest Control',
+        reservation_service_mix: where[1].id === 'b' ? allocation : null,
+      };
+    } });
+    const moveGuard = jest.fn(async ({ service }) => {
+      if (service.reservation_service_mix?.version === 2) {
+        throw Object.assign(new Error('allocation must move as one unit'), { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+      }
+    });
+
+    const out = await moveVisitAsUnit({
+      rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00',
+      initiatedBy: 'auto_dispatch', options: { technicianId: 't2', moveGuard },
+    });
+
+    const bRead = db.__calls.find((call) => call.table === 'scheduled_services' && call.op === 'first'
+      && call.ops.some((op) => op[0] === 'where' && op[1]?.id === 'b')
+      && call.cols.includes('reservation_service_mix'));
+    expect(bRead.ops).toContainEqual(['forUpdate']);
+    expect(bRead.cols).toContain('reservation_service_mix');
+    expect(moveGuard).toHaveBeenCalledWith(expect.objectContaining({ service: expect.objectContaining({ id: 'b', reservation_service_mix: allocation }) }));
+    expect(assignDispatchJob).toHaveBeenCalledTimes(1);
+    expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'b', movedButUnassigned: true })]);
   });
 
   test('date + window move: members moved first (primary with caller options, siblings with their OWN fence), then the parent retargeted from the rows that landed', async () => {
@@ -357,7 +396,7 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b')] });
     let rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(rebooker.reschedule.mock.calls[0][5].expect).toEqual({ scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', visit_id: 'v1', technician_id: 't1', status: 'confirmed' });
+    expect(rebooker.reschedule.mock.calls[0][5].expect).toEqual({ scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', visit_id: 'v1', technician_id: 't1', status: 'confirmed', reservation_service_mix: null });
     jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
     rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { expectAnchor: { scheduled_date: '2026-08-30' } } });
@@ -444,9 +483,9 @@ describe('moveVisitAsUnit', () => {
     const rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
     // status rides in the contract too (local audit): a sibling gone en_route/terminal after the plan aborts the primary's move
-    expect(rebooker.reschedule.mock.calls[0][5].excludeExpect).toEqual([{ id: 'b', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1', status: 'confirmed' }]);
+    expect(rebooker.reschedule.mock.calls[0][5].excludeExpect).toEqual([{ id: 'b', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', reservation_service_mix: null }]);
     // the sibling's own move verifies the PRIMARY at its landed target (codex r6)
-    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' }]);
+    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', reservation_service_mix: null }]);
     expect(rebooker.reschedule.mock.calls[1][5].excludeServiceIds).toEqual(['a']);
     // a stale snapshot is the rebooker's 409 (VISIT_PLAN_STALE) — the primary never commits, nothing moved
     db.__script = script({ members: [member('a'), member('b')] });
@@ -468,6 +507,133 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b', { auto_dispatch_locked: true })] });
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' });
     expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
+  });
+
+  test('auto-dispatch preflights every grouped member allocation before the first write', async () => {
+    db.__script = script({ members: [
+      member('a'),
+      member('b', { reservation_service_mix: { version: 2, allocatedServiceIds: ['b', 'c'] } }),
+    ] });
+    const rebooker = fakeRebooker();
+
+    await expect(moveVisitAsUnit({
+      rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'auto_dispatch',
+    })).rejects.toMatchObject({
+      statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 'b',
+    });
+
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(db.__calls.some((call) => call.op === 'update')).toBe(false);
+  });
+
+  test('a conflict unique to a later sibling rejects before the primary write', async () => {
+    db.__script = script({ members: [
+      member('a', { window_start: '09:00', window_end: '10:00' }),
+      member('b', { window_start: '10:00', window_end: '11:00' }),
+    ] });
+    findConflictingVisits
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'outside-job' }]);
+    const rebooker = fakeRebooker();
+
+    await expect(moveVisitAsUnit({
+      rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'auto_dispatch',
+    })).rejects.toMatchObject({
+      statusCode: 409, code: 'SLOT_TAKEN', memberId: 'b', conflictId: 'outside-job',
+    });
+
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(db.__calls.some((call) => call.op === 'update')).toBe(false);
+  });
+
+  test('rejecting a clear-end-only move does not count the unchanged end as a landed move', async () => {
+    const before = member('a', { window_start: '09:00', window_end: '10:00' });
+    db.__script = script({ members: [before, member('b')], landed: [before, member('b')] });
+    const rebooker = fakeRebooker({ a: 'throw' });
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE,
+      newDate: before.scheduled_date, newWindow: { start: '09:00', end: null },
+      initiatedBy: 'admin', options: { clearWindowEnd: true },
+    })).rejects.toThrow('member a boom');
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  test('null-end preflight honors the writer rollback switch and clearWindowEnd reaches the primary write', async () => {
+    process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
+    try {
+      db.__script = script({ members: [
+        member('a', { window_end: '10:00' }),
+        member('b', { window_start: null, window_end: null }),
+      ] });
+      findConflictingVisits.mockResolvedValue([{ id: 'outside-job' }]);
+      const rebooker = fakeRebooker();
+
+      await moveVisitAsUnit({
+        rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02',
+        newWindow: { start: '13:00', end: null }, initiatedBy: 'admin',
+        options: { clearWindowEnd: true },
+      });
+
+      expect(findConflictingVisits).not.toHaveBeenCalled();
+      expect(rebooker.reschedule.mock.calls[0].slice(0, 3)).toEqual(['a', '2026-09-02', { start: '13:00', end: null }]);
+    } finally {
+      delete process.env.REBOOKER_NULL_END_OCCUPANCY;
+    }
+  });
+
+  test('a cleared preflight advisory is absent from the final committed-writer report', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    findConflictingVisits
+      .mockResolvedValueOnce([{ id: 'a', warning: 'The promised arrival window cannot be reached in route order.' }])
+      .mockResolvedValue([]);
+
+    const out = await moveVisitAsUnit({
+      rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02',
+      initiatedBy: 'admin', options: { overlapAdvisory: true, adminWindowRules: true },
+    });
+
+    expect(out.warnings).toBeUndefined();
+  });
+
+  test('a persistent advisory is reported once from the committed member writer, not duplicated from preflight', async () => {
+    const warning = 'The promised arrival window cannot be reached in route order.';
+    db.__script = script({ members: [member('a'), member('b')] });
+    findConflictingVisits
+      .mockResolvedValueOnce([{ id: 'outside-job', warning }])
+      .mockResolvedValue([]);
+    const rebooker = fakeRebooker({ a: { warnings: [warning] } });
+
+    const out = await moveVisitAsUnit({
+      rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02',
+      initiatedBy: 'admin', options: { overlapAdvisory: true, adminWindowRules: true },
+    });
+
+    expect(out.warnings).toEqual([warning]);
+  });
+
+  test('auto-dispatch cross-day groups fail closed when atomic unit commit is required; same-day and manual moves remain', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    const automatic = fakeRebooker();
+    await expect(moveVisitAsUnit({
+      rebooker: automatic, serviceId: 'a', service: SERVICE, newDate: '2026-09-02',
+      initiatedBy: 'auto_dispatch', options: { requireAtomicUnit: true },
+    })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 'a' });
+    expect(automatic.reschedule).not.toHaveBeenCalled();
+
+    db.__script = script({ members: [member('a'), member('b')] });
+    const sameDay = fakeRebooker();
+    await moveVisitAsUnit({
+      rebooker: sameDay, serviceId: 'a', service: SERVICE, newDate: '2026-08-30',
+      newWindow: '13:00-14:00', initiatedBy: 'auto_dispatch', options: { requireAtomicUnit: true },
+    });
+    expect(sameDay.reschedule).toHaveBeenCalledTimes(2);
+
+    db.__script = script({ members: [member('a'), member('b')] });
+    const manual = fakeRebooker();
+    await moveVisitAsUnit({
+      rebooker: manual, serviceId: 'a', service: SERVICE, newDate: '2026-09-02',
+      initiatedBy: 'admin', options: { requireAtomicUnit: true },
+    });
+    expect(manual.reschedule).toHaveBeenCalledTimes(2);
   });
 
   test('a row that joined the visit after the plan snapshot is detached at retarget, with a warning — by the full target stop, not the date alone', async () => {
@@ -516,7 +682,7 @@ describe('moveVisitAsUnit', () => {
     expect(out.visitMove.failed.map((f) => f.id)).toEqual(['b']);
     const cOpts = rebooker.reschedule.mock.calls[2][5];
     expect(cOpts.excludeServiceIds).toEqual(['a']);
-    expect(cOpts.excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' }]);
+    expect(cOpts.excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', reservation_service_mix: null }]);
   });
 
   test('auto-dispatch: the opt-out flags ride in every exclusion contract and in each sibling CAS; previousStatus follows the status the rebooker actually matched', async () => {
@@ -650,12 +816,12 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
     const rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' }]);
+    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', reservation_service_mix: null }]);
     // start-only landing: the end is the rebooker's derivation — left out of the contract, not asserted null
     db.__script = script({ members: [member('a', { window_start: null, window_end: null }), member('b', { window_start: '10:00', window_end: '11:00' })] });
     const rb2 = fakeRebooker();
     await moveVisitAsUnit({ rebooker: rb2, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: { start: '13:00', end: null } });
-    expect(rb2.reschedule.mock.calls[1][5].excludeExpect[0]).toEqual({ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00' });
+    expect(rb2.reschedule.mock.calls[1][5].excludeExpect[0]).toEqual({ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', reservation_service_mix: null });
   });
 
   test('date-only move: a sibling whose own window breaks the admin rules cannot ride it onto the new date', async () => {
@@ -901,6 +1067,12 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     expect(expectMatchesRow(row, { technician_id: 't1' })).toBe(false);
     expect(expectMatchesRow(row, { auto_dispatch_locked: true })).toBe(false);
     expect(expectMatchesRow(row, { estimated_duration_minutes: 60 })).toBe(false);
+    expect(expectMatchesRow({ ...row, reservation_service_mix: { version: 1, services: ['pest', 'lawn'] } }, {
+      reservation_service_mix: { services: ['pest', 'lawn'], version: 1 },
+    })).toBe(true);
+    expect(expectMatchesRow({ ...row, reservation_service_mix: { version: 2 } }, {
+      reservation_service_mix: { version: 1 },
+    })).toBe(false);
     expect(expectMatchesRow(null, {})).toBe(false);
     expect(expectMatchesRow(row, {})).toBe(true);
   });
@@ -982,7 +1154,7 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     db.__script = withClash(true, onTech('t9'));
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9', overlapAdvisory: true } });
     expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-    expect(out.warnings.filter((w) => /overlaps another job on the destination technician/.test(w)).length).toBeGreaterThanOrEqual(2);
+    expect(out.warnings.filter((w) => /overlaps another job on the destination technician/.test(w)).length).toBe(2);
     expect(assignDispatchJob).toHaveBeenCalledTimes(2);
     expect(db.__rawCalls.filter((c) => c[1] && c[1][0] === 'slot-reserve' && c[1][1] === 't9:2026-09-02').length).toBe(2);
     // a FAILED member is real occupancy again: it is NOT hidden from the assignment probes (local audit r32)
@@ -1005,6 +1177,65 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
       expect.objectContaining({ id: 'a', code: 'SLOT_TAKEN' }), expect.objectContaining({ id: 'b', code: 'SLOT_TAKEN' }),
     ]);
     expect(assignDispatchJob).not.toHaveBeenCalled();
+  });
+
+  test('an unchanged member keeps its advisory destination warning while changed members use their assignment writer', async () => {
+    const members = [
+      member('a'),
+      member('b', { technician_id: 't9', window_start: '10:00', window_end: '11:00' }),
+    ];
+    const base = script({ members, landed: [
+      { id: 'a', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+      { id: 'b', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't9' },
+    ] });
+    db.__script = {
+      ...base,
+      scheduled_services: {
+        ...base.scheduled_services,
+        first: (ops) => (ops.some((op) => op[0] === 'whereRaw') ? { id: 'outside-job' } : null),
+      },
+    };
+
+    const rebooker = fakeRebooker();
+    const out = await moveVisitAsUnit({
+      rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-08-30',
+      initiatedBy: 'admin', options: { technicianId: 't9', overlapAdvisory: true },
+    });
+
+    expect(out.visitMove).toMatchObject({ moved: ['a'], unchanged: ['b'], failed: [] });
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(assignDispatchJob).toHaveBeenCalledTimes(1);
+    expect(out.warnings.filter((warning) => /service a overlaps/.test(warning))).toHaveLength(1);
+    expect(out.warnings.filter((warning) => /service b overlaps/.test(warning))).toHaveLength(1);
+  });
+
+  test('an all-unchanged manual no-op still reports each advisory destination clash once', async () => {
+    const members = [
+      member('a', { technician_id: 't9' }),
+      member('b', { technician_id: 't9', window_start: '10:00', window_end: '11:00' }),
+    ];
+    const base = script({ members, landed: members });
+    db.__script = {
+      ...base,
+      scheduled_services: {
+        ...base.scheduled_services,
+        first: (ops) => (ops.some((op) => op[0] === 'whereRaw') ? { id: 'outside-job' } : null),
+      },
+    };
+    const rebooker = fakeRebooker();
+
+    const out = await moveVisitAsUnit({
+      rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-08-30',
+      initiatedBy: 'admin', options: { technicianId: 't9', overlapAdvisory: true, seriesPolicy: 'single' },
+    });
+
+    expect(out.visitMove).toMatchObject({ moved: [], unchanged: ['a', 'b'], alreadyAtTarget: true });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(assignDispatchJob).not.toHaveBeenCalled();
+    expect(out.warnings).toEqual([
+      'service a overlaps another job on the destination technician\'s route (outside-job)',
+      'service b overlaps another job on the destination technician\'s route (outside-job)',
+    ]);
   });
 
   test('a durable move_hold_until is stamped on every member reminder row before the first write, released only on full success, kept on a partial, and its failure ABORTS the move (owner ruling; codex r28/r29)', async () => {
