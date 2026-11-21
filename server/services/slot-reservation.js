@@ -861,11 +861,12 @@ function slotTaken(slotId) {
 // check covers exactly the holds that list funneled, and a refused write's next list no longer offers that truck that
 // day. A hold with no stamp (its estimate in no zone when held) is not checked: its list did not funnel it, and a
 // check would refuse a time that list offers again. true when the rule does not apply, with no read: a hold with no
-// stamp or a stamp outside the far south (funnelSlugOf) never reads the zone table.
+// stamp or a stamp outside the far south never reads the zone table (isFunnelZone of the stamp's slug: the lists' and
+// the new hold's own test, funnel gate included).
 async function holdKeepsSouthDay(conn, { stamp, date, techId }) {
   const funnel = require('./scheduling/zone-day-funnel');
   const slug = String(stamp || '').trim().toLowerCase();
-  if (techId == null || !funnel.perTruckLive() || !funnel.funnelOn() || !funnel.funnelSlugOf(slug)) return true;
+  if (techId == null || !funnel.perTruckLive() || !funnel.isFunnelZone({ zone_name: slug })) return true;
   const zones = await conn('service_zones').select('id', 'cities', 'zone_name');
   const estimateZone = funnel.zoneOfHoldStamp(zones, slug);
   return funnel.truckMayTakeDate(conn, { estimateZone, date, technicianId: techId });
