@@ -57,10 +57,9 @@ const stubStorage = () => {
 };
 const stubFetch = (data) => vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => data })));
 
-// A canvas context that records what is drawn, and a frame loop the test steps by hand.
+// A canvas context and a frame loop that never runs by itself: the misting card on this page needs both to mount.
 let ctx;
 let frames;
-let rafCalls;
 let widthPx;
 function stubCanvas() {
   ctx = {
@@ -69,20 +68,11 @@ function stubCanvas() {
   };
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ctx);
   frames = new Map();
-  rafCalls = 0;
   let id = 0;
-  vi.stubGlobal('requestAnimationFrame', (cb) => { rafCalls += 1; id += 1; frames.set(id, cb); return id; });
+  vi.stubGlobal('requestAnimationFrame', (cb) => { id += 1; frames.set(id, cb); return id; });
   vi.stubGlobal('cancelAnimationFrame', (n) => { frames.delete(n); });
   widthPx = 640;
   Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get() { return widthPx; } });
-}
-// Run the queued frames at a fake clock, `count` times.
-function stepFrames(count, startAt = 1000) {
-  for (let i = 0; i < count; i += 1) {
-    const queued = [...frames.entries()];
-    frames.clear();
-    queued.forEach(([, cb]) => cb(startAt + i * 50));
-  }
 }
 const stubMotion = (reduce) => vi.stubGlobal('matchMedia', (q) => ({
   matches: reduce && q.includes('prefers-reduced-motion'),
@@ -95,7 +85,6 @@ async function renderPage(data) {
   render(<EstimateViewPage />);
   await screen.findByRole('heading', { level: 1 });
 }
-const loadPicture = () => act(() => { fireEvent.load(screen.getByAltText(/Proposed misting layout for/)); });
 
 // The default observer reports the card on screen as soon as it is watched.
 class VisibleObserver {
