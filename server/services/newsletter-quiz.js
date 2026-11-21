@@ -416,17 +416,18 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
       .first('id', 'subscriber_id', 'send_id');
     if (!delivery) return { ok: false, reason: 'no-delivery' };
 
-    // A Waves Newsletter poll counts only from an issue that carried it: any
-    // older issue's engagement token must not record a poll its reader never
-    // saw, nor overwrite that delivery row's earlier answer. The public route
-    // answers the same either way.
-    if (isNewsletterPoll(quizId)) {
-      const carried = await db('newsletter_sends')
-        .where({ id: delivery.send_id })
-        .where((body) => body.where('html_body', 'like', `%{{quiz:${quizId}}}%`)
-          .orWhere('text_body', 'like', `%{{quiz-text:${quizId}}}%`))
-        .first('id');
-      if (!carried) return { ok: false, reason: 'not-in-issue' };
+    // A Waves Newsletter poll answer counts only from an issue that showed
+    // that poll, and an issue that showed a poll takes answers only to the
+    // quizzes it showed: an older issue's token must not record a poll its
+    // reader never saw, and a hand-made link must not overwrite a poll vote
+    // (or add service tags) with another quiz's answer. An issue with no poll
+    // keeps the old rule. The public route answers the same either way.
+    const answeredQuiz = quizId || DEFAULT_QUIZ_ID;
+    const issue = await db('newsletter_sends').where({ id: delivery.send_id }).first('html_body', 'text_body');
+    const bodies = `${issue?.html_body || ''}\n${issue?.text_body || ''}`;
+    if ((isNewsletterPoll(answeredQuiz) || pollInBody(bodies))
+      && !parseQuizTokens(bodies).some((shown) => shown.quizId === answeredQuiz)) {
+      return { ok: false, reason: 'not-in-issue' };
     }
 
     // Stamp the answer on the delivery row regardless (engagement record).
@@ -508,9 +509,11 @@ function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
  * batch leaves it at 0).
  * Sent bodies keep their quiz tokens (the per-reader buttons are SendGrid
  * substitutions), so a token in html_body or text_body is the record.
- * An issue's time is its sent_at, else its first delivery's sent_at (a worker
- * that failed after a batch leaves sent_at empty, and a resume clears
- * scheduled_for), else its schedule, else its draft time.
+ * An issue's time is its sent_at, else the earliest time any of its delivery
+ * rows records (a worker that failed after a batch leaves sent_at empty, a
+ * lost SendGrid answer leaves a row's sent_at empty while the webhook still
+ * stamps the delivery, and a resume clears scheduled_for), else its schedule,
+ * else its draft time.
  *
  * An issue no reader got yet never counts. The autopilot drafts a week's issue
  * on its Monday, and last week's unsent issue can no longer go out by then: an
@@ -533,7 +536,9 @@ async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
   const pollOf = (row) => pollInBody(`${row.html_body || ''}\n${row.text_body || ''}`);
   const newest = await reached()
     .orderByRaw(`COALESCE(s.sent_at,
-      (SELECT MIN(f.sent_at) FROM newsletter_send_deliveries f WHERE f.send_id = s.id),
+      (SELECT LEAST(MIN(f.sent_at), MIN(f.delivered_at), MIN(f.opened_at), MIN(f.clicked_at),
+          MIN(f.complained_at), MIN(f.unsubscribed_at))
+        FROM newsletter_send_deliveries f WHERE f.send_id = s.id),
       s.scheduled_for, s.created_at) DESC`)
     .limit(POLL_ISSUE_GAP)
     .select('s.html_body', 's.text_body');

@@ -9,7 +9,8 @@
  *   every message hard-bounced) and another type's issue never count. An
  *   issue with no send time sorts by its first delivery.
  * - recordQuizResponse records a poll vote only from an issue that carried
- *   that poll.
+ *   that poll; an issue that carried a poll takes no other quiz's answer; an
+ *   issue with no poll keeps the old rule.
  * Real Postgres, because these are a LIKE over the stored bodies, an EXISTS
  * and a subquery over the delivery rows, and the vote's row update.
  * Runs in CI's DB-gated step or this worktree's private QA database; every
@@ -66,6 +67,7 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
         sent_at: d.sentAt || null,
         bounced_at: d.bouncedAt || null,
         complained_at: d.complainedAt || null,
+        delivered_at: d.deliveredAt || null,
         ...(d.answered ? { quiz_id: d.answered.quizId, quiz_answer: d.answered.answer, quiz_answered_at: d.answered.at } : {}),
       }));
       out.push(deliveries.length
@@ -136,14 +138,17 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     expect(later.used).not.toContain(P4);
   });
 
-  test('a partly delivered issue with no send time sorts by its first delivery, not its draft time', async () => {
+  test.each([
+    ['its first accepted batch (a worker failed after it)', { status: 'sent', sentAt: daysAgo(1) }],
+    ['the webhook\'s delivery stamp (SendGrid\'s answer was lost)', { status: 'delivered', deliveredAt: daysAgo(1) }],
+  ])('an issue with no send time sorts by %s, not its draft time', async (_name, firstRow) => {
     const TYPE = newType();
     await insertIssues(TYPE, [
       { poll: null, sentAt: daysAgo(14) },
       { poll: null, sentAt: daysAgo(7) },
-      // Drafted 40 days ago; a worker failed after its first batch yesterday,
-      // so the issue row has no sent_at and no schedule.
-      { poll: P1, status: 'failed', createdAt: daysAgo(40), deliveries: [{ status: 'sent', sentAt: daysAgo(1) }, { status: 'queued' }] },
+      // Drafted 40 days ago, reached readers yesterday; the issue row has no
+      // sent_at and no schedule.
+      { poll: P1, status: 'failed', createdAt: daysAgo(40), deliveries: [firstRow, { status: 'queued' }] },
     ]);
     const history = await newsletterIssuePolls({ newsletterType: TYPE });
     expect(history.recent).toEqual([P1, null]);
@@ -176,7 +181,7 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     expect(history.recent).toEqual([P2, null]);
   });
 
-  test('a poll vote counts only from an issue that carried that poll', async () => {
+  test('a poll vote counts only from an issue that carried that poll; a poll issue takes no other quiz\'s answer', async () => {
     const TYPE = newType();
     const [sub] = await db('newsletter_subscribers')
       .insert({ email: `poll-test-${randomUUID().slice(0, 8)}@example.invalid`, status: 'active', source: 'public_form' })
@@ -188,6 +193,8 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     ]);
     const answerOf = async (row) => db('newsletter_send_deliveries').where({ id: row.id })
       .first('quiz_id', 'quiz_answer', 'quiz_answered_at');
+    const tagsOf = async () => (await db('newsletter_subscribers').where({ id: sub.id }).first('tags')).tags;
+    const tagsBefore = await tagsOf();
 
     // The older issue never showed P2: its token records nothing, and the
     // answer already on that row stays.
@@ -198,5 +205,18 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     await expect(recordQuizResponse({ token: withPoll.engagement_token, quizId: P2, answerKey: 'road-trip' }))
       .resolves.toEqual({ ok: true, reason: 'tagged' });
     expect(await answerOf(withPoll)).toEqual(expect.objectContaining({ quiz_id: P2, quiz_answer: 'road-trip' }));
+
+    // A hand-made link with another quiz's answer neither replaces the poll
+    // vote nor adds service tags.
+    await expect(recordQuizResponse({ token: withPoll.engagement_token, quizId: 'pest-pressure-v1', answerKey: 'ants' }))
+      .resolves.toEqual({ ok: false, reason: 'not-in-issue' });
+    expect(await answerOf(withPoll)).toEqual(expect.objectContaining({ quiz_id: P2, quiz_answer: 'road-trip' }));
+    expect(await tagsOf()).toEqual(tagsBefore);
+
+    // An issue with no poll keeps the old rule: any quiz's answer counts.
+    await expect(recordQuizResponse({ token: withoutPoll.engagement_token, quizId: 'pest-pressure-v1', answerKey: 'roaches' }))
+      .resolves.toEqual({ ok: true, reason: 'tagged' });
+    expect(await answerOf(withoutPoll)).toEqual(expect.objectContaining({ quiz_id: 'pest-pressure-v1', quiz_answer: 'roaches' }));
+    expect(await tagsOf()).toEqual(expect.arrayContaining(['pest-interested', 'pest:roaches']));
   });
 });
