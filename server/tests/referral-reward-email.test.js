@@ -214,7 +214,7 @@ describe('the credit itself sends nothing; the scheduler sends the email', () =>
   });
 });
 
-describe('step2FriendCreditCents (GATE_REFERRAL_STEP2: the newsletter line and the wallet label)', () => {
+describe('step2FriendCreditCents (GATE_REFERRAL_STEP2: the newsletter line and the invitation email)', () => {
   const { gates } = require('../config/feature-gates');
   afterEach(() => { gates.referralStep2 = false; });
 

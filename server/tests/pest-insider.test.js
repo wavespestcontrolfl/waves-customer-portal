@@ -171,7 +171,7 @@ describe('pest-insider assemblePestInsiderNewsletter', () => {
       jest.spyOn(engine, 'step2FriendCreditCents').mockResolvedValue(5000);
       const html = await assemblePestInsiderNewsletter({ ...baseDraft });
       expect(html).toContain('Know a neighbor fighting the same bugs? <a href="https://www.wavespestcontrol.com/referral/"');
-      expect(html).toContain('Send them our way</a>. They get a $50 credit after their first plan service, and we thank you with a credit.</p>');
+      expect(html).toContain('Send them our way</a>. They get a $50 credit after their first plan service.</p>');
       expect(html).not.toContain('nicest compliment');
     });
     test('amount 0 (paused, no amount or unreadable settings): today\'s line', async () => {

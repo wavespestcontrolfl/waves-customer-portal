@@ -78,11 +78,9 @@ const friendInviteOfferLine = (refereeCents) => `Start a Waves plan and get a ${
 // The share text's clause, inside "We use Waves and ..." (SMS) and "We use Waves Pest Control and ..." (email).
 const friendShareClause = (refereeCents, code) => `they'll give you a ${dollars(refereeCents)} credit after your first plan service with my code ${code}`;
 
-// The Pest Insider newsletter's referral sentence about what the friend gets.
-const newsletterFriendLine = (refereeCents) => `They get a ${dollars(refereeCents)} credit after their first plan service, and we thank you with a credit.`;
-
-// The Apple Wallet pass back label.
-const walletReferralLabel = (refereeCents) => `SHARE WAVES: FRIENDS GET A ${dollars(refereeCents)} CREDIT`;
+// The Pest Insider newsletter's referral sentence about what the friend gets. It promises the member nothing: the
+// newsletter is one text for every reader, and a member at the yearly limit gets no credit.
+const newsletterFriendLine = (refereeCents) => `They get a ${dollars(refereeCents)} credit after their first plan service.`;
 
 // The member's credit email, account-credit destination. Account credit is used only after the customer turns the
 // switch on, so the line says how (true with the gate on or off).
@@ -90,5 +88,5 @@ const memberCreditEmailLine = (rewardDollars) => `Your ${formatDollars(rewardDol
 
 module.exports = {
   STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars,
-  friendInviteOfferLine, friendShareClause, newsletterFriendLine, walletReferralLabel, memberCreditEmailLine,
+  friendInviteOfferLine, friendShareClause, newsletterFriendLine, memberCreditEmailLine,
 };
