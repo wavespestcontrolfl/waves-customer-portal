@@ -557,6 +557,8 @@ describe('slot reservation helpers', () => {
       describe('a far-south stamp whose zone row is gone', () => {
         const PC_EMPTY = { id: 'zone-pc', zone_name: 'Port Charlotte', cities: [] };
         const PC_FULL = { id: 'zone-pc', zone_name: 'Port Charlotte', cities: ['Port Charlotte', 'Punta Gorda'] };
+        // A second row with the Venice slug (zoneSlugOf drops what follows the first '/'): the stamp cannot tell them apart.
+        const VENICE_B = { id: 'zone-ven-b', zone_name: 'Venice / Englewood', cities: ['Englewood'] };
         // A zone row whose own slug is a legacy compound: isFunnelZone does not funnel it.
         const COMPOUND_ROW = { id: 'zone-x', zone_name: 'venice_north_port', cities: ['Venice'] };
         const stopConn = (stopRows, zones = [SARASOTA, VENICE]) => jest.fn((table) => {
@@ -582,9 +584,26 @@ describe('slot reservation helpers', () => {
           await expect(holdKeepsSouthDay(stopConn(stopRows, zones), { ...ARGS, stamp: 'port charlotte' })).resolves.toBe(kept);
         });
 
+        // Two rows share the hold's slug (pre-push P1 on 6b533119b1): the check reads the cities of both, in either
+        // row order, so a rival truck's unstamped stop in a city of either row holds the day.
+        test.each([
+          ['Englewood', [VENICE, VENICE_B]], ['Englewood', [VENICE_B, VENICE]], ['North Port', [VENICE, VENICE_B]], ['North Port', [VENICE_B, VENICE]],
+        ])('the real check with two rows of one slug, a rival truck\'s unstamped %s stop: refused', async (city, zones) => {
+          process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+          await expect(holdKeepsSouthDay(stopConn([cityStop('tech-2', city)], zones), ARGS)).resolves.toBe(false);
+        });
+
         const { zoneOfHoldStamp } = funnel;
 
-        test('zoneOfHoldStamp: the funneled row with the stamp\'s slug; else that slug with the cities of every funneled row left', () => {
+        test('zoneOfHoldStamp: several funneled rows with the stamp\'s slug give the cities of all of them, in either order', () => {
+          for (const zones of [[VENICE, VENICE_B, PC_FULL], [PC_FULL, VENICE_B, VENICE]]) {
+            const zone = zoneOfHoldStamp(zones, 'venice');
+            expect(zone).toMatchObject({ id: null, zone_name: 'venice' });
+            expect([...zone.cities].sort()).toEqual(['Englewood', 'North Port', 'Venice']);
+          }
+        });
+
+        test('zoneOfHoldStamp: the one funneled row with the stamp\'s slug; else that slug with the cities of every funneled row left', () => {
           // Its own row, even with no cities and whatever the row order: the row its list funneled by.
           expect(zoneOfHoldStamp([VENICE, PC_EMPTY], 'port charlotte')).toBe(PC_EMPTY);
           expect(zoneOfHoldStamp([PC_FULL, SARASOTA, VENICE], ' Venice ')).toBe(VENICE);
@@ -600,7 +619,7 @@ describe('slot reservation helpers', () => {
         // far-south exactly when isFunnelZone funnels the zone row reserveSlot took that stamp from. So a far-south
         // stamp is always checked, for every zone table, and any other stamp never is: a legacy compound too, whose
         // row the lists do not funnel and whose new hold was not checked either.
-        const TABLES = [[], [SARASOTA], [SARASOTA, VENICE], [PC_EMPTY], [VENICE, PC_EMPTY], [PC_FULL, VENICE], [COMPOUND_ROW], [COMPOUND_ROW, VENICE]];
+        const TABLES = [[], [SARASOTA], [SARASOTA, VENICE], [PC_EMPTY], [VENICE, PC_EMPTY], [PC_FULL, VENICE], [COMPOUND_ROW], [COMPOUND_ROW, VENICE], [VENICE_B, VENICE]];
         test.each([VENICE, PC_EMPTY, PC_FULL, SARASOTA, COMPOUND_ROW])('the stamp of zone row %j is checked exactly when the lists funnel that row', (row) => {
           const stamp = row.zone_name.split('/')[0].trim().toLowerCase();
           for (const zones of TABLES) {

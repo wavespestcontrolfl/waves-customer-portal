@@ -344,16 +344,19 @@ async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
 // hold with such a stamp was funneled and checked when it was written, and it is ALWAYS checked again, whatever
 // happened to the zone rows since. Any other stamp names no zone (null) and is never checked: none, another zone, or
 // a legacy compound ('venice_north_port'), which isFunnelZone does not funnel either, so no list and no new hold
-// treated that hold as far-south. The zone is the funneled row with that slug, the row the list funneled by. With that
-// row renamed or removed, the slug stands for the whole pool, because every funneled slug names the one consolidated
-// south pool the stop read counts that stamp in: it takes the cities of every funneled row left, so their unstamped
-// stops match by city (none left: no cities, and the stamped stops still count). No row is picked by its order.
+// treated that hold as far-south. The zone is the ONE funneled row with that slug, the row the list funneled by. With
+// that row renamed or removed, the slug stands for the whole pool, because every funneled slug names the one
+// consolidated south pool the stop read counts that stamp in: it takes the cities of every funneled row left, so their
+// unstamped stops match by city (none left: no cities, and the stamped stops still count). When several rows share
+// the slug (zoneSlugOf drops what follows the first '/'), the stamp cannot tell them apart, so it takes the cities of
+// all of them. No row is ever picked by its order in the table.
 function zoneOfHoldStamp(zones, stamp) {
   const slug = String(stamp || '').trim().toLowerCase();
   if (!isFunnelZone({ zone_name: slug })) return null;
   const pool = zones.filter(isFunnelZone);
-  return pool.find((zone) => zoneSlugOf(zone) === slug)
-    || { id: null, zone_name: slug, cities: pool.flatMap((zone) => zone.cities || []) };
+  const own = pool.filter((zone) => zoneSlugOf(zone) === slug);
+  if (own.length === 1) return own[0];
+  return { id: null, zone_name: slug, cities: (own.length ? own : pool).flatMap((zone) => zone.cities || []) };
 }
 
 // The funnel for an offer pool that is not built by the estimate page (the lead assessment link:
