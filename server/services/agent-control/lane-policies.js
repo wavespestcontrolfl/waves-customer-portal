@@ -467,6 +467,9 @@ const LANE_RUNTIME = {
   job_screen: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification', maturity: 'M1' },
   // draft_for_human: the answer only pre-fills taps a technician reviews and completes themselves; nothing is saved or sent. offline: one Anthropic call, no second provider; a failure leaves the typed sheet.
   fast_complete_voice_fill: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M0' },
+  // SiteOne deals bell end date (GATE_SITEONE_DEAL_AI_END_DATE): one Haiku read per deal email on the Monday run; the answer is a
+  // line in the admin bell. offline: no second provider; a miss keeps the bell's date-pattern line.
+  siteone_deal_end_date: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 10_000, stall_after_ms: 60_000, hard_timeout_ms: 60_000 },
 };
 
 /**

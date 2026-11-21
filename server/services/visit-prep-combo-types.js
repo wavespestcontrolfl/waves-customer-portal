@@ -56,4 +56,11 @@ function isComboServiceType(serviceType) {
   return comboSubjectForType(serviceType) !== null;
 }
 
-module.exports = { comboSubjectForType, isComboServiceType };
+// Whether a label names pest as its own segment ("Pest Control", "Lawn + Pest",
+// "Pest Control + Lawn Care + Rodent Control"), not only inside a plant-line
+// segment ("Tree & Shrub Pest Control", "Lawn Pest Control").
+function hasStandalonePestSegment(serviceType) {
+  return normalizedLabel(serviceType).split(JOINER_RE).some((s) => s.includes('pest') && !PLANT_WORD_RE.test(s));
+}
+
+module.exports = { comboSubjectForType, isComboServiceType, hasStandalonePestSegment };

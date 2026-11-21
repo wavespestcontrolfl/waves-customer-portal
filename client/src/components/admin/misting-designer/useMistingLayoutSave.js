@@ -10,6 +10,7 @@ import { pumpChecklistDone } from '../../../lib/mistingLayoutExtras';
 import { buildLayoutPayload, layoutForExport, putLayout } from '../../../lib/mistingLayoutPersist';
 import { buildSketchModel } from '../../../lib/mistingLayoutSketch';
 import { composeSketchPng } from '../../../lib/mistingLayoutSketchCanvas';
+import { holdReloadWhileSending } from '../../../lib/reloadHolds';
 
 export default function useMistingLayoutSave({ estimateId, mapState, address, layout, saved }) {
   const ready = mapState.status === 'ready';
@@ -36,7 +37,7 @@ export default function useMistingLayoutSave({ estimateId, mapState, address, la
     }
   }, [saved, payload, signature]);
 
-  const save = async () => {
+  const saveLayout = async () => {
     if (!payload || !estimateId || !pumpChecklistDone(pump) || phase.state === 'saving') return;
     setPhase({ state: 'saving', message: '' });
     const sentSignature = signature;
@@ -61,6 +62,10 @@ export default function useMistingLayoutSave({ estimateId, mapState, address, la
       setPhase({ state: 'error', message: err?.message || 'The layout could not be saved.' });
     }
   };
+  // The sketch is drawn into an image before its upload starts, so no save is
+  // open yet: the save holds an out-of-date tab's reload until it settles
+  // (lib/reloadHolds.js).
+  const save = () => holdReloadWhileSending('misting-layout', saveLayout);
 
   let status = 'none';
   if (savedSignature !== null) status = signature === savedSignature ? 'saved' : 'dirty';

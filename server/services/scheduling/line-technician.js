@@ -71,13 +71,14 @@ const placeOf = (opts = {}) => ({
 /**
  * The technician who owns the place's territory, or null: gate off, no place, a ZIP
  * with no territory technician, or an unreadable territory (logged; the map alone
- * decides then).
+ * decides then). `strict`: an unreadable territory throws instead.
  */
-async function territoryTechnicianOf(db, place) {
+async function territoryTechnicianOf(db, place, { strict = false } = {}) {
   if (!territoryOn() || !place) return null;
   try {
     return await territory.territoryTechnicianFor(db, place);
   } catch (err) {
+    if (strict) throw err;
     logger.warn(`[line-technician] territory read failed (the line map alone decides): ${err.message}`);
     return null;
   }
@@ -273,13 +274,15 @@ async function loadLineMap(db, lines) {
  * assignable) stay with the slot finders, which never build a slot on such a
  * day, so the gap technician's slots fill exactly the starts the home technician
  * has none for: the owner's "i cover all gaps the tech cant fullfill" (2026-10-25).
- * Reads only; throws only on an unreadable database.
+ * Reads only; throws only on an unreadable database. An unreadable territory leaves
+ * the map alone to decide, unless `strict` (a caller that counts openings: the
+ * hourly route check's asks, routes/booking.js loadLineOfferRanking): then it throws.
  */
-async function lineOfferRanking(conn, { lines = [], place = null } = {}) {
+async function lineOfferRanking(conn, { lines = [], place = null, strict = false } = {}) {
   if (!lineMapLive()) return null;
   const db = conn || defaultDb;
   const map = await loadLineMap(db, lines);
-  const territoryTechId = await territoryTechnicianOf(db, place);
+  const territoryTechId = await territoryTechnicianOf(db, place, { strict });
   for (const line of new Set((lines || []).filter((value) => LINES.includes(value)))) {
     const entry = withTerritory(map.get(line) || null, line, territoryTechId);
     if (entry) map.set(line, entry);

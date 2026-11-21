@@ -4652,4 +4652,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName, getVoiceProfileTextNonBlocking };

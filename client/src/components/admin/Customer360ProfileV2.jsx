@@ -49,7 +49,8 @@
 import useCustomerHistory from "../../hooks/useCustomerHistory";
 import { OfficeLikeButton, SmsLikeBadges } from "./SmsLikeControls";
 import { smsLikeThread } from "../../lib/smsLikes";
-import { Fragment, useState, useEffect, useRef, useId, useCallback, lazy, Suspense } from "react";
+import { Fragment, useState, useEffect, useRef, useId, useCallback, Suspense } from "react";
+import { lazyPanel } from "../LazyPanel";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { createPortal } from "react-dom";
 import "./customer360-workspace.css";
@@ -160,12 +161,12 @@ import { archiveConfirmMessage } from "../../lib/customerArchiveCopy";
 import { NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY } from "../../lib/pretreatWarrantyValues";
 import { sendWithNoticedAmountConfirm } from "../../lib/noticedRenewalAmount";
 import { labelNamesRetiredSale } from "../../constants/retiredSaleLabels";
-import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS } from "@waves/irrigation-runtime";
+import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS, CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS, controllerAsksAboutApp } from "@waves/irrigation-runtime";
 
 // Reuse the Communications composer without loading the whole Messages page
 // until a profile opens Comms. Its send, attachment, and AI guards stay shared.
-const CustomerMessageMedia = lazy(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.MessageMediaV2 })));
-const CustomerSmsComposer = lazy(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.SmsTab })));
+const CustomerMessageMedia = lazyPanel(() => import("./MessageMediaV2").then((module) => ({ default: module.MessageMediaV2 })));
+const CustomerSmsComposer = lazyPanel(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.SmsTab })));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -6200,7 +6201,7 @@ function CustomerProfileOverview({
       {/* GET/PATCH /admin/requests are owner-only: a technician would only
           see a 403 here. */}
       {isAdmin && <CustomerRequestsPanel customerId={customerId} />}
-      {/* GET /admin/customers/:id/moves is requireAdmin and answers enabled:false while GATE_MOVING_FLOW is dark: the card then renders nothing. */}
+      {/* GET /admin/customers/:id/moves is requireAdmin: the card renders nothing until that read succeeds. */}
       {isAdmin && <CustomerMovingCardV2 customerId={customerId} />}
       {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
@@ -6922,6 +6923,11 @@ const ACCESS_PREFS_IRRIGATION_TYPE_OPTIONS = [
   ["drip", "Drip"],
   ["rotor", "Rotor"],
 ];
+// The sprinkler timer on file: the same keys and labels the customer's card uses.
+const accessPrefsTimerOptions = (labels) => [["", "Not set"], ...Object.entries(labels)];
+const ACCESS_PREFS_TIMER_BRAND_OPTIONS = accessPrefsTimerOptions(CONTROLLER_BRANDS);
+const ACCESS_PREFS_TIMER_MODEL_OPTIONS = accessPrefsTimerOptions(CONTROLLER_MODELS);
+const ACCESS_PREFS_TIMER_APP_OPTIONS = accessPrefsTimerOptions(CONTROLLER_APP_ANSWERS);
 const ACCESS_PREFS_HOA_ROWS = [
   ["HOA Name", "hoa_name"],
   ["HOA Company", "hoa_company"],
@@ -6986,6 +6992,9 @@ const ACCESS_PREFS_FIELDS = {
   awayWatchFrom: "date",
   awayWatchUntil: "date",
   irrigationControllerLocation: "text",
+  irrigationControllerBrand: "optional",
+  irrigationControllerModel: "optional",
+  irrigationControllerApp: "optional",
   irrigationZones: "number",
   irrigationInchesPerWeek: "number",
   irrigationRunMinutes: "number",
@@ -7189,7 +7198,12 @@ const ACCESS_PREFS_COUPLED = {
   awayWatchFrom: ["awayWatchUntil"],
   awayWatchUntil: ["awayWatchFrom"],
   chemicalSensitivityDetails: ["chemicalSensitivities"],
+  // The sprinkler timer on file is one record: the server saves the three together or not at all.
+  irrigationControllerBrand: ["irrigationControllerModel", "irrigationControllerApp"],
+  irrigationControllerModel: ["irrigationControllerBrand", "irrigationControllerApp"],
+  irrigationControllerApp: ["irrigationControllerBrand", "irrigationControllerModel"],
 };
+const ACCESS_PREFS_TIMER_KEYS = ["irrigationControllerBrand", "irrigationControllerModel", "irrigationControllerApp"];
 // The sod fields are NOT coupled: the server merges the sod fields a save sends
 // with the stored record under the customer lock (resolveSodRecord), so each
 // save sends only the sod fields changed in this edit and cannot overwrite
@@ -7367,6 +7381,13 @@ function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo, awayWatchEnabled }) 
       <AccessPrefRow label="Run Minutes / Zone" value={p.irrigation_run_minutes} />
       <AccessPrefRow label="Watering Days" value={p.watering_days} />
       <AccessPrefRow label="Controller Location" value={p.irrigation_controller_location} />
+      <AccessPrefRow label="Timer Brand" value={CONTROLLER_BRANDS[p.irrigation_controller_brand]} />
+      {p.irrigation_controller_brand === "hunter" && (
+        <AccessPrefRow label="Timer Model" value={CONTROLLER_MODELS[p.irrigation_controller_model]} />
+      )}
+      {controllerAsksAboutApp(p.irrigation_controller_brand, p.irrigation_controller_model) && (
+        <AccessPrefRow label="Runs From Phone App" value={CONTROLLER_APP_ANSWERS[p.irrigation_controller_app]} />
+      )}
       <AccessPrefRow label="Zones" value={p.irrigation_zones} />
       <AccessPrefRow label="Rain Sensor" value={p.rain_sensor ? "Yes" : "No"} />
       <AccessPrefRow label="Irrigation Notes" value={p.irrigation_schedule_notes} />
@@ -7529,6 +7550,31 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
   );
 }
 
+// The timer on file. A new brand or a new model is a new box: what was recorded under it starts empty. Only a
+// Hunter has a model, and the phone-app question shows for the timers the customer card asks it for.
+function AccessPrefsTimer({ d, set, setDraft, fieldErrors }) {
+  const f = { d, set, fieldErrors };
+  const setBrand = () => (brand) =>
+    setDraft((prev) => (brand === prev.irrigationControllerBrand
+      ? prev
+      : { ...prev, irrigationControllerBrand: brand, irrigationControllerModel: "", irrigationControllerApp: "" }));
+  const setModel = () => (model) =>
+    setDraft((prev) => (model === prev.irrigationControllerModel
+      ? prev
+      : { ...prev, irrigationControllerModel: model, irrigationControllerApp: "" }));
+  return (
+    <>
+      <AccessPrefsSelect {...f} set={setBrand} label="Timer Brand" field="irrigationControllerBrand" options={ACCESS_PREFS_TIMER_BRAND_OPTIONS} />
+      {d.irrigationControllerBrand === "hunter" && (
+        <AccessPrefsSelect {...f} set={setModel} label="Timer Model" field="irrigationControllerModel" options={ACCESS_PREFS_TIMER_MODEL_OPTIONS} />
+      )}
+      {controllerAsksAboutApp(d.irrigationControllerBrand, d.irrigationControllerModel) && (
+        <AccessPrefsSelect {...f} label="Runs From Phone App" field="irrigationControllerApp" options={ACCESS_PREFS_TIMER_APP_OPTIONS} />
+      )}
+    </>
+  );
+}
+
 function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets, isAdmin, sodInfo, hasSavedSod, sodUnchanged, awayWatchEnabled }) {
   const f = { d, set, fieldErrors };
   // Entering sensitivity details turns the flag on — techs only see the
@@ -7591,6 +7637,7 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets,
       </div>
       <AccessPrefsPills {...f} label="Watering Days" field="wateringDays" options={DAY_KEYS} />
       <AccessPrefsTextInput {...f} label="Controller Location" field="irrigationControllerLocation" maxLength={200} />
+      <AccessPrefsTimer {...f} setDraft={setDraft} />
       <AccessPrefsTextInput {...f} label="Zones" field="irrigationZones" type="number" min="0" max="100" />
       <AccessPrefsSwitchRow label="Rain Sensor" checked={d.rainSensor} onChange={set("rainSensor")} />
       <AccessPrefsTextInput {...f} multiline label="Irrigation Notes" field="irrigationScheduleNotes" />
@@ -8031,6 +8078,12 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
   // The home stamp the form rendered from (irrigation_home_changed_at). A sod
   // date set after the home changed is refused unless the save echoes it back.
   const renderStampRef = useRef(null);
+  // The sprinkler timers this editor's saves sent that got no answer from the server: they may have landed. Until the
+  // server answers a timer save, every save sends the timer (a change back to the opening values is never skipped)
+  // and names these beside the timer the form opened with (controllerTimerSeen). Opening the editor again starts an
+  // empty list from the values on screen: a screen that may be stale never sends its timer unasked, and a timer change
+  // over a lost save's timer is refused with a request to reload.
+  const timerTriedRef = useRef([]);
   // Read-only hold lines for the saved sod record from GET /new-sod.
   const [sodInfo, setSodInfo] = useState(null);
   const sodSeq = useRef(0);
@@ -8061,6 +8114,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
     const snapshot = accessPrefsDraftFromRow(prefs);
     initialDraftRef.current = snapshot;
     renderStampRef.current = prefs?.irrigation_home_changed_at ?? null;
+    timerTriedRef.current = [];
     setDraft(snapshot);
     setFieldErrors({});
     setErr("");
@@ -8075,13 +8129,36 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
   // Resolves to the per-field rejections, or throws when the request failed.
   const submit = async (dirtyKeys) => {
     const body = accessPrefsSavePayload(draft, dirtyKeys);
-    if (ACCESS_PREFS_SOD_KEYS.some((k) => dirtyKeys.includes(k))) {
+    // The sod record and the sprinkler timer are facts about one home: the server takes them only from a form
+    // rendered against the current home.
+    if ([...ACCESS_PREFS_SOD_KEYS, ...ACCESS_PREFS_TIMER_KEYS].some((k) => dirtyKeys.includes(k))) {
       body.confirmedAsOf = renderStampRef.current;
     }
-    const response = await adminFetch(
-      `/admin/customers/${customerId}/property-preferences`,
-      { method: "PUT", body: JSON.stringify(body) },
-    );
+    // The timers the row may hold, as brand|model|app: the one this form opened with (or last saved), and any a failed
+    // save sent. The server sets the timer only over one of them, so a change the customer made while the form was
+    // open is never overwritten.
+    const sendsTimer = ACCESS_PREFS_TIMER_KEYS.some((k) => dirtyKeys.includes(k));
+    const timerKey = (values) => {
+      const shown = accessPrefsSavePayload(values, ACCESS_PREFS_TIMER_KEYS);
+      return ACCESS_PREFS_TIMER_KEYS.map((k) => shown[k] ?? "").join("|");
+    };
+    if (sendsTimer) body.controllerTimerSeen = [...new Set([timerKey(initialDraftRef.current), ...timerTriedRef.current])];
+    let response;
+    try {
+      response = await adminFetch(
+        `/admin/customers/${customerId}/property-preferences`,
+        { method: "PUT", body: JSON.stringify(body) },
+      );
+    } catch (e) {
+      // A refusal is an answer (nothing saved). Anything else (a lost response, a 5xx) leaves the timer unknown: it
+      // may have landed.
+      if (sendsTimer) {
+        timerTriedRef.current = Array.isArray(e?.body?.rejected) ? [] : [...new Set([...timerTriedRef.current, timerKey(draft)])];
+      }
+      throw e;
+    }
+    // The server answered: the timer is saved, or refused with a reason.
+    if (sendsTimer) timerTriedRef.current = [];
     return { failed: accessPrefsRejectedMap(response?.rejected), preferences: response?.preferences };
   };
 
@@ -8092,9 +8169,12 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
       setErr(blackoutError);
       return;
     }
-    const dirtyKeys = accessPrefsSodClearKeys(
+    const changedKeys = accessPrefsSodClearKeys(
       initialDraftRef.current, draft, accessPrefsDirtyKeys(initialDraftRef.current, draft),
     );
+    // While a timer save's outcome is unknown, the timer goes with every save: a change back to the opening values
+    // must still reach a row that may hold the lost save's timer.
+    const dirtyKeys = timerTriedRef.current.length ? [...new Set([...changedKeys, ...ACCESS_PREFS_TIMER_KEYS])] : changedKeys;
     if (!dirtyKeys.length) return closeEditor();
 
     setSaving(true);

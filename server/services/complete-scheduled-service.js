@@ -67,7 +67,8 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
-const { buildPlanForService, isDateInWindow, resolveOrdinanceJurisdiction } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
+const { getApplicableOrdinances, resolveOrdinanceJurisdiction } = require('../services/fertilizer-jurisdiction');
 const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -121,11 +122,11 @@ const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-repo
 const { correctedMethod: correctedGranularMethod } = require('./service-report/report-cleanup-1020');
 const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { freezePestCheck } = require('./tree-shrub-pest-check');
-const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments, dropSprayGallonsWithoutLiquidApplication } = require('../services/tree-shrub-closeout');
+const { inferTreeShrubOrdinanceZone, validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments, dropSprayGallonsWithoutLiquidApplication } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
-const { technicianReportCustomerCopy, fourSectionReport } = require('../services/service-report/technician-report-copy');
+const { technicianReportCustomerCopy, fourSectionReport, customerCopyViolations } = require('../services/service-report/technician-report-copy');
 const { writerRulesRejection, groundedTimeframePhrases, draftDatePhrases, activeIngredientsMentioned } = require('../services/service-report/report-writer-rules');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 
@@ -139,6 +140,7 @@ const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../service
 const areaAddOnGovernedRate = require('./area-addon-governed-rate');
 const areaAddOnLimits = require('./area-addon-limits');
 const tsOrnamental = require('./tree-shrub-ornamental-fertilizer-limits');
+const tsFertilizerEvidence = require('./tree-shrub-fertilizer-evidence');
 
 const { COMPLETION_ACCESS_CODE_RE } = require('./completion-access-code');
 
@@ -724,6 +726,61 @@ function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(
   return { active: true, serviceDate };
 }
 
+// Whether this completion makes the visit-time review ask. A kept late-close ask reads ONLY its frozen verdict; every other
+// completion keeps its live decision. Exported for testability.
+function effectiveReviewAskDecision({ lateCloseReviewKept, packetEffects, standardRequestReview }) {
+  return lateCloseReviewKept === true ? !packetEffects : standardRequestReview;
+}
+
+// A backdated closeout never has its first ask forced on (a never-asked customer's reason-less turn-off stays an ask for a
+// normal completion): the forced-on answer is dropped, the off reason (when sent) is kept. Exported for testability.
+function lockForBackdatedCloseout(lock, backfill) {
+  return backfill === true && lock?.forcedOn ? null : lock;
+}
+
+// The explicit-choice rule for a kept late-close ask: eligible, the client sent requestReview === true (a missing, false or
+// "true" string is no ask), the re-service verdict allows it, and no blocking client suppression. Exported for testability.
+function lateCloseChoiceKept({ lateCloseEligible, requestReview, reviewAskAllowed, reviewSuppression }) {
+  return lateCloseEligible === true && requestReview === true && reviewAskAllowed === true
+    && !(reviewSuppression && reviewSuppression !== 'invoice_created');
+}
+
+// The late-close ask is kept only when the pre-read eligibility (which also ran the first-ask rules), the unchanged customer and
+// the locked verdict ALL say so. The verdict is not even asked otherwise. Exported for testability.
+async function lateCloseEligibleAfterPreRead({ preReadEligible, customerMoved, verdict }) {
+  if (preReadEligible !== true || customerMoved !== false) return false;
+  return (await verdict()) === true;
+}
+
+// The first-ask check ran against the visit as read before its row was locked. Reads the same predicates again (firstAskLockVisit:
+// not a callback, not a re-service, same customer) under the lock; no longer matching, or unreadable, voids a forced first ask.
+// Exported for testability.
+async function firstAskVisitStillApplies({ checkedCustomerId, serviceId, database, readVisit }) {
+  if (checkedCustomerId == null) return true;
+  const read = readVisit || ((id, db2) => require('./review-request').firstAskLockVisit(id, db2));
+  const visit = await read(serviceId, database);
+  return !!visit && String(visit.customer_id) === String(checkedCustomerId);
+}
+
+// The first-ask check ran for one customer before the visit row was locked. A locked visit that belongs to another customer
+// (or whose customer cannot be read) voids that choice: no "already reviewed" mark, no kept late-close ask. Exported for testability.
+function firstAskCustomerMoved(checkedCustomerId, lockedVisit) {
+  if (checkedCustomerId == null) return false;
+  const lockedId = lockedVisit?.customer_id;
+  return lockedId == null || String(lockedId) !== String(checkedCustomerId);
+}
+
+// Whether a backdated closeout of this visit would keep the review ask, asked BEFORE the visit row is loaded: the first
+// review ask rule (a never-asked customer's "no ask" needs a reason) then applies to it as to a normal completion. The same
+// read the panel's preview uses; the commit re-derives the verdict from the locked row, and a stricter answer there drops
+// the lock (see lateCloseAskVerdict). Exported for testability.
+async function lateCloseFirstAskEligible({ backfill, completionInput, database = db } = {}) {
+  if (backfill !== true || completionInput?.actor?.techRole !== 'admin') return false;
+  if (completionInput.systemQuietCloseout === true || completionInput.issuedInvoiceCloseout) return false;
+  if (!require('../config/feature-gates').reviewLateCloseAskLive()) return false;
+  return (await require('./review-visit-day').lateCloseAskKeptForVisit(completionInput.serviceId, database)) === true;
+}
+
 // Backfill duration policy (Codex P1, fix round): a stale row's lifecycle
 // timestamps are artifacts of the forgotten closeout — a check-in from
 // days/weeks ago against an office checkout stamped today — so the shared
@@ -1291,12 +1348,8 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
   // uses. Rejecting a numeric id here restored undefined, which skipped
   // enforcement and let a post-commit payer change mint the frozen rate
   // for the wrong party.
-  const backfillMintPayerId = backfillMintRequired
-    && ('backfillMintPayerId' in frozen)
-    && (frozenPayer === null
-      || (typeof frozenPayer === 'string' && frozenPayer)
-      || (typeof frozenPayer === 'number' && Number.isFinite(frozenPayer)))
-    ? (frozenPayer === null ? null : String(frozenPayer))
+  const backfillMintPayerId = backfillMintRequired && 'backfillMintPayerId' in frozen
+    ? restoredFrozenPayerId(frozenPayer)
     : undefined;
   return {
     isBackfillCompletion,
@@ -1305,8 +1358,19 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
     backfillMintAmount,
     backfillMintTaxRate,
     backfillMintPayerId,
+    // A backdated record that froze requestReview true is a kept late-close ask (a backfill otherwise freezes it false).
+    lateCloseReviewKept: isBackfillCompletion && frozen.requestReview === true,
     bodyDisagreed: Boolean(requestBackfill) !== isBackfillCompletion,
   };
+}
+
+// A frozen Bill-To id as the resume compares it: null (frozen self-pay) or the id as a string; undefined for garbage.
+function restoredFrozenPayerId(frozenPayer) {
+  const valid = frozenPayer === null
+    || (typeof frozenPayer === 'string' && frozenPayer)
+    || (typeof frozenPayer === 'number' && Number.isFinite(frozenPayer));
+  if (!valid) return undefined;
+  return frozenPayer === null ? null : String(frozenPayer);
 }
 
 async function loadSubmittedCatalogProducts(submittedProducts = [], database = db) {
@@ -1378,24 +1442,8 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = [], database
   // Same jurisdiction resolution as the plan (stamped visit address outranks
   // the profile; a county-less profile falls back to the treated address's
   // county via address-county).
-  const { county, city } = resolveOrdinanceJurisdiction(profile, {
-    stampedCity: svc.service_address_city,
-    stampedZip: svc.service_address_zip,
-    customerCity: svc.city,
-    customerZip: svc.customer_zip,
-  });
-  if (!county && !city) return [];
-
-  const ordinances = await failSoftRead(database, (k) => k('municipality_ordinances')
-    .where({ active: true })
-    .where(function () {
-      if (county) this.orWhere(function () {
-        this.where({ jurisdiction_type: 'county' }).whereILike('county', county);
-      });
-      if (city) this.orWhere(function () {
-        this.where({ jurisdiction_type: 'city' }).whereILike('city', city);
-      });
-    }), []);
+  const jurisdiction = resolveOrdinanceJurisdiction(svc, profile);
+  const ordinances = await failSoftRead(database, (k) => getApplicableOrdinances(k, jurisdiction), []);
   if (!ordinances.length) return [];
 
   const productById = new Map(catalogProducts.map((product) => [String(product.id), product]));
@@ -2342,6 +2390,7 @@ const limitFigure = (finding) => {
   if (finding.limitType === tsOrnamental.RATE_LIMIT_TYPE) return `${finding.current} lb per 1,000 sq ft, county limit ${finding.max}`;
   if (finding.limitType === tsOrnamental.HISTORY_LIMIT_TYPE) return finding.reason;
   if (tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType)) return tsOrnamental.uncheckedClause(finding.reason);
+  if (finding.limitType === tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE) return finding.reason;
   return `${finding.current} of ${finding.max} already used`;
 };
 
@@ -2360,6 +2409,7 @@ const FINDING_WHY = {
   [tsOrnamental.UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [tsOrnamental.AUDIT_UNAVAILABLE_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
+  [tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE]: () => 'A technician reported an earlier NutriRoot application that needs an ordinance review.',
   [areaAddOnLimits.YEARLY_LIMIT_TYPE]: (name, f) => `${name} is over its add-on yearly limit: ${f.current} before it in 12 months, limit ${f.max}.`,
 };
 // The long form (the "Show full text" detail) of the same.
@@ -2376,6 +2426,7 @@ const tsUncheckedDetail = (fullName, f, svc) => (f.reason === 'history_unavailab
 FINDING_DETAIL[tsOrnamental.UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
 FINDING_DETAIL[tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
 FINDING_DETAIL[tsOrnamental.AUDIT_UNAVAILABLE_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was submitted on a ${svc.service_type || 'tree & shrub'} visit, but its ${tsOrnamental.uncheckedClause(f.reason)}: the record's products could not be read back. Check the 13-0-13 amount, treated area and history on the application record and report it if needed.`;
+FINDING_DETAIL[tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded as already applied on a ${svc.service_type || 'tree & shrub'} visit. ${f.reason}. Review the application with the technician.`;
 for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
@@ -2388,6 +2439,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
     try {
       const over = finding.code === 'application_limit_exceeded';
       const unchecked = tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType);
+      const nutriRootReview = finding.limitType === tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE;
       const fullName = finding.productName || 'a product';
       // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
       const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
@@ -2399,7 +2451,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : over ? `review ${name} over its limit` : 'review product limits not checked',
+        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
         why,
         severity: 'needs-you',
         who: 'person',
@@ -3398,8 +3450,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior.
     let requestReview = requestReviewPosted;
     let reviewFirstAskLock = null;
+    // The customer the first-ask check ran for; the commit discards the choice when the locked visit belongs to another.
+    let firstAskLockCustomerId = null;
     let reviewTimingBody = completionInput.body || {};
-    if (requestReviewPosted === false && visitOutcome === 'completed' && !oneTimeRecapOnly && backfill !== true
+    // A backdated closeout that keeps the ask (GATE_REVIEW_LATE_CLOSE_ASK) gets the same first-ask rule as a normal completion.
+    // The pre-read runs for every backdated closeout: the ask is kept only when it AND the locked verdict agree (a failed or
+    // false pre-read leaves the visit quiet, today's backfill behavior).
+    const lateClosePreRead = backfill === true && visitOutcome === 'completed'
+      && await lateCloseFirstAskEligible({ backfill, completionInput, database: db });
+    const lateCloseFirstAsk = requestReviewPosted === false && lateClosePreRead === true;
+    if (requestReviewPosted === false && visitOutcome === 'completed' && !oneTimeRecapOnly && (backfill !== true || lateCloseFirstAsk)
       && (!reviewSuppression || reviewSuppression === 'invoice_created')
       && customerRecapMode !== require('./reservice-fixed-recap').MODE
       && !completionInput.issuedInvoiceCloseout && completionInput.systemQuietCloseout !== true
@@ -3409,10 +3469,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // `db` is the packet transaction in a visit-closeout records phase: the reads ride it.
       const lockVisit = await reviewRequest.firstAskLockVisit(completionInput.serviceId, db);
       if (lockVisit) {
+        firstAskLockCustomerId = lockVisit.customer_id ?? null;
         reviewFirstAskLock = await reviewRequest.firstAskLockChoice({
           customerId: lockVisit.customer_id, requestReview: requestReviewPosted, optOutReason: reviewOptOutReason,
         }, db);
       }
+      // A backdated closeout never has its ask forced on: a reason-less turn-off stays silent, today's backfill behavior.
+      // The off reason, when sent ("Already left a review"), is still kept and marks the customer reviewed.
+      reviewFirstAskLock = lockForBackdatedCloseout(reviewFirstAskLock, backfill);
       if (reviewFirstAskLock?.forcedOn) {
         requestReview = true;
         // The tech cleared the box, so a timing left in the form is not a choice: Automatic.
@@ -3729,7 +3793,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
-        'customers.city', 'customers.zip as customer_zip', 'customers.property_type',
+        'customers.address_line1 as customer_address_line1', 'customers.city', 'customers.zip as customer_zip', 'customers.property_type',
         // Report application-conditions (weather) capture at the TREATED
         // parcel: stamped visit coords first, the primary home only for
         // non-divergent stamps (codex round-10 P2).
@@ -3808,6 +3872,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       return ({ status: backfillPlan.status || 400, body: backfillPlan.error });
     }
     let isBackfillCompletion = backfillPlan.active;
+    // Whether this backdated closeout keeps the normal review ask (lateCloseAskVerdict): decided once, at the commit
+    // below, and restored from the committed record on a resume.
+    let lateCloseReviewKept = false;
     // Invoice-issued closeout: the invoice it names must still be THIS
     // visit's live invoice, or nothing is written (pre-push P0) — a voided
     // or re-pointed invoice means the office changed its mind, and a
@@ -4675,6 +4742,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
     ]);
+    // Provenance-kept copy of ONLY the picked action labels: the merged list
+    // above folds in [Protocol] / [Protocol optional] / [Action] note lines.
+    // A record that carries the technician's own note shows only this list
+    // (report-data buildProtocolPayload), so a label that fails the complete
+    // customer-copy screen is left out as it stores (AGENTS.md). Persisted
+    // beside the merged list as structured_notes.formProtocolActions.
+    const formProtocolActions = normalizeCompletionTextArray(
+      Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : [],
+    ).filter((label) => !customerCopyViolations(label).length);
     // Structured scope for each completed action — authoritative interior/
     // exterior signal for the re-entry advisory (see report-data treatmentScope).
     // Specialty preset lanes replace this list with server-derived metadata
@@ -4701,10 +4777,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // merged list above folds in [Next] technician-note lines, and the
     // customer report's "What we recommend" section may never render raw
     // note text (AGENTS.md egress; codex P1 on #3516). Persisted beside
-    // the merged list as structured_notes.formRecommendations.
+    // the merged list as structured_notes.formRecommendations. A value that
+    // fails the complete customer-copy screen is left out as it stores, as
+    // formProtocolActions above: every customer reader screens the list again
+    // as it renders (report-data.js), so a report shows the same values, and
+    // the stored list never holds one. The merged list keeps it.
     const formRecommendations = normalizeCompletionTextArray(
       Array.isArray(recommendations) ? recommendations : [],
-    );
+    ).filter((value) => !customerCopyViolations(value).length);
     // Tips from your tech: the client sends ids (+ an optional line in the
     // tech's own words); the registry copy is resolved and frozen here so
     // the report shows what the customer was told on the day, and a custom
@@ -5871,6 +5951,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         products: products || [],
         productRows: typedProductRows,
         completionPhotos,
+        treeShrubReview: completionInput.body?.treeShrubReview,
       });
       if (!typedCompliance.ok) {
         const complianceErr = new Error('tree_shrub_typed_compliance');
@@ -5899,6 +5980,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // ledger never records actuals for a visit nobody attested.
     const lawnLedgerVisit = lawnActualsLedgerEnabled() && detectServiceLine(svc?.service_type) === 'lawn' && !issuedInvoiceCloseout;
     const waveguardCloseout = !isIncompleteVisit && isWaveGuardLawnCompletion(svc) && !issuedInvoiceCloseout;
+    const normalizedTetrinoScout = require('./lawn-fast-complete').normalizedTetrinoScout(lawnFast?.tetrinoScout);
+    const hasTetrinoScoutInput = normalizedTetrinoScout.tetrinoApplied
+      || ['tetrinoTarget', 'tetrinoCurrentObservations', 'tetrinoPressure', 'grubTimingEvidence']
+        .some((key) => normalizedTetrinoScout[key]);
+    const tetrinoPlannerOptions = hasTetrinoScoutInput ? {
+      ...normalizedTetrinoScout,
+      ...(normalizedTetrinoScout.tetrinoApplied ? { selectedConditionalProductNames: ['Tetrino Insecticide'] } : {}),
+    } : {};
     if (claim.action === 'proceed' && (waveguardCloseout || lawnLedgerVisit)) {
       try {
         // Under a packet closeout `db` is the packet's outer transaction: a
@@ -5932,6 +6021,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // P2), and the lane recheck under the customer lock compares the
           // same column under the same probe (a failed probe aborted above).
           billingModeColumnExists: billingModeColumnsExist,
+          ...tetrinoPlannerOptions,
         }));
       } catch (planErr) {
         if (waveguardCloseout) throw planErr;
@@ -6332,6 +6422,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } });
       }
       const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      treeShrubCloseoutSummary = resumedStructuredNotes.treeShrubCloseout || null;
       servicePhotoVisit = resumedStructuredNotes.servicePhotoVisit || null;
       // An authorized correction can land after the packet committed its
       // records but before an effects replay. Its durable revision and notes
@@ -7312,6 +7403,28 @@ async function completeScheduledService(completionInput, packetContext = null) {
               treatmentEvidence: !isIncompleteVisit
                 || (Array.isArray(products) && products.some((product) => product && product.productId)),
             });
+          // THE verdict (review-visit-day.js lateCloseAskVerdict, also the panel preview's): the locked row against the
+          // pre-lock row, a strict profile read, every closeout kind. Anything unknown fails closed.
+          const lateCloseEligible = await lateCloseEligibleAfterPreRead({
+            preReadEligible: lateClosePreRead,
+            // The customer and the first-ask visit predicates (callback, re-service) are checked again on the LOCKED row.
+            customerMoved: firstAskCustomerMoved(firstAskLockCustomerId, lockedSvcRow)
+              || (isBackfillCompletion && !(await firstAskVisitStillApplies({ checkedCustomerId: firstAskLockCustomerId, serviceId: svc.id, database: trx }))),
+            verdict: () => require('./review-visit-day').lateCloseAskVerdict({
+              isBackfill: isBackfillCompletion, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, recapReviewOnly,
+              isInternalOnlyCompletion, deliverySuppressed: deliveryPosture.suppressCustomerComms,
+              // The wall-clock closeout time, never completionEndedAt: a combined-visit packet's end can be a member's historical end.
+              visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: new Date(),
+            }),
+          });
+          // The review choice resolved once, as the initial enrollment reads it (an omitted requestReview is no ask): the one
+          // boolean frozen below and restored on a resume. A backdated closeout the commit finds ineligible drops the
+          // first-ask lock the earlier read applied, so only a kept ask can mark the customer reviewed.
+          // The same verdict immediate enrollment reads (effectiveRequestReview): a blocking client suppression or a refused
+          // re-service ask freezes false, so the paid-invoice enrollment, which reads only the frozen boolean, cannot send it.
+          // Strict: only an explicit true counts (a server-forced first ask sets it true above); anything else is no ask.
+          lateCloseReviewKept = lateCloseChoiceKept({ lateCloseEligible, requestReview, reviewAskAllowed, reviewSuppression });
+          if (isBackfillCompletion && !lateCloseEligible) reviewFirstAskLock = null;
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
             // Frozen with the record itself, so no reader (recap-delivery's
@@ -7341,7 +7454,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // Backfill completions freeze it off for the same reason: a
             // review ask days after the visit (or from the later payment)
             // must never fire from a quiet backlog closeout.
-            requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
+            // A late backdated closeout inside the 3-day window (GATE_REVIEW_LATE_CLOSE_ASK) is decided once here and
+            // keeps the normal decision: requestReview true beside backfill true IS the frozen "kept" (resume reads it).
+            requestReview: (isIncompleteVisit || isInternalOnlyCompletion || (isBackfillCompletion && !lateCloseReviewKept)) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             // First review ask audit: a never-asked customer's "no ask" was kept on (forcedOn) or
@@ -7356,7 +7471,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // carried through the paid-invoice deferral (enrollForPaidInvoice).
             // Frozen off with requestReview: an incomplete / internal-only /
             // backfill completion never carries a customer request either.
-            customerRequestedReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion)
+            customerRequestedReview: (isIncompleteVisit || isInternalOnlyCompletion || (isBackfillCompletion && !lateCloseReviewKept))
               ? null : (customerRequestedReview || null),
             incompleteReason,
             customerConcernText: concernText || null,
@@ -7455,6 +7570,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...(treeShrubPestCheckFreeze || {}),
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
+            formProtocolActions,
             protocolActionScopesCompleted: reportProtocolActionScopes,
             observations: reportObservations,
             recommendations: reportRecommendations,
@@ -7465,6 +7581,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // GATE_LAWN_TREATMENT_GUIDE: which guide cards showed and what the technician did, validated
             // from the lawnFast echo and frozen here; no customer or public path reads it.
             ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, { products }),
+            // May Tetrino is never inferred from sunlight or an old map. Keep
+            // the technician's named target and current field evidence with
+            // the closeout that used (or deliberately skipped) it.
+            ...require('./lawn-fast-complete').tetrinoScoutFreeze(lawnFast),
             // GATE_LAWN_REPORT_FACTS: which spot rows' area the technician recorded as the spot's extent (a typed amount
             // is not an area), so the card never states a whole-lawn fallback as the spot.
             ...require('./service-report/lawn-report-facts').spotAreaFreeze(lawnFast),
@@ -9426,6 +9546,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       backfillFrozenMintAmount = frozenResume.backfillMintAmount;
       backfillFrozenMintTaxRate = frozenResume.backfillMintTaxRate;
       backfillFrozenMintPayerId = frozenResume.backfillMintPayerId;
+      // The committed record's frozen ask decides, never a fresh derivation (gate, window and toggles may have moved since).
+      lateCloseReviewKept = frozenResume.lateCloseReviewKept;
+      if (lateCloseReviewKept) requestReview = true;
       isBackfillCompletion = frozenResume.isBackfillCompletion;
       effectiveTimeOnSite = frozenResume.effectiveTimeOnSite;
     }
@@ -10073,6 +10196,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // hand-added row as well as the suggestion.
     if (!issuedInvoiceCloseout) {
       applicationLimitAdvisory = await tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings, submittedProductNames, submittedProductIds: payloadProductIds(products) });
+      applicationLimitAdvisory = await tsFertilizerEvidence.flagNutriRootApplication({
+        svc,
+        record,
+        database: db,
+        advisory: applicationLimitAdvisory,
+        notify: notifyOfficeOfLimitFindings,
+        basis: treeShrubCloseoutSummary?.[tsFertilizerEvidence.NUTRIROOT_FIELD]
+          || treeShrubComplianceValues?.[tsFertilizerEvidence.NUTRIROOT_FIELD],
+        zone: inferTreeShrubOrdinanceZone(svc),
+        submittedProductNames,
+      });
     }
 
     // The add-on's OWN yearly limit (maxPerYear / minDaysApart, the place-based history the booking used; the add-ons carry no
@@ -14019,7 +14153,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // (enrollPostService below). The link still never rides inside the pay-link text:
     // shouldBundleReview keeps refusing an unpaid invoice.
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
-    const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview
+    const standardRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview
       && !suppressTypedCustomerComms
       // The fixed re-service text is the ONE text: no review ask rides it or
       // follows it (scope: "leave it off on re-services"). A re-service asks for
@@ -14028,6 +14162,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // enrollPostService below (shouldBundleReview refuses fixed mode). Decided once,
       // above, by ReserviceFixedRecap.reviewAskAllowed.
       && reviewAskAllowed;
+    // A kept late-close ask (backdated closeout, GATE_REVIEW_LATE_CLOSE_ASK) reads ONLY its frozen verdict: the same answer
+    // the first close made, a resumed completion restores from the record, and the paid-invoice enrollment reads. A live
+    // re-check of the suppression or the re-service recap gate could not agree with it. The packet-effects guard stays.
+    const effectiveRequestReview = effectiveReviewAskDecision({ lateCloseReviewKept, packetEffects, standardRequestReview });
     // NOTE: includePayLink (the "report only, no pay link" operator choice) is
     // deliberately NOT folded in here. suppressCompletionInvoiceLink also drives
     // invoicePaymentActionRequired (the mobile in-person payment sheet), so
@@ -16522,6 +16660,13 @@ module.exports = {
   invoiceDueBaseDay,
   lateFormArrivalDay,
   backfillCompletionPlan,
+  lateCloseFirstAskEligible,
+  firstAskCustomerMoved,
+  lateCloseEligibleAfterPreRead,
+  lockForBackdatedCloseout,
+  lateCloseChoiceKept,
+  firstAskVisitStillApplies,
+  effectiveReviewAskDecision,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   backfillTimeOnSiteMinutes,
   BACKFILL_INFERRED_START_FIELDS,

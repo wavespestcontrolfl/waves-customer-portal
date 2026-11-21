@@ -41,6 +41,7 @@ const logger = require('../logger');
 const { dayReplanMode } = require('../../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
+const { bookedVisitOrLiveHold } = require('../scheduling/reservation-occupancy');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { workDuration, currentOrder, promisedWindowOrder, staleOrderReasons } = require('../route-reorder-window-fit');
@@ -111,9 +112,9 @@ const TOLD_LOCK_SELECT = [
   'scheduled_services.date_exception', 'scheduled_services.date_exception_source', 'scheduled_services.date_exception_at',
 ];
 
-async function loadDayStops(conn, dateStr) {
+async function loadDayStops(conn, dateStr, makeRoomWriteProof = false) {
   const { _internals, CUSTOMER_PREMISE_ALIASES } = require('../route-reorder');
-  return dayStopsQuery(conn, {
+  const query = dayStopsQuery(conn, {
     dateStr,
     excludeStatuses: EXCLUDED_STATUSES,
     select: [
@@ -139,7 +140,11 @@ async function loadDayStops(conn, dateStr) {
       ...guardedCoordSelects(conn),
       ...TOLD_LOCK_SELECT,
     ],
-  }).whereRaw(_internals.LIVE_HOLD_SQL);
+  });
+  // A make-room write checks its destination against every visit staff have booked.
+  return makeRoomWriteProof
+    ? query.where(bookedVisitOrLiveHold)
+    : query.whereRaw(_internals.LIVE_HOLD_SQL);
 }
 
 /** Ids whose 24-hour reminder is recorded as sent. Throws when the read fails (the caller skips the day). */
@@ -222,8 +227,8 @@ async function loadPersonPlaced(conn, rows) {
 }
 
 /** The date's live rows and the facts every tech-day plan of that date reads. Null when the date has no rows. Throws on a failed read. */
-async function loadDayContext(conn, dateStr, now) {
-  const rows = await loadDayStops(conn, dateStr);
+async function loadDayContext(conn, dateStr, now, makeRoomWriteProof = false) {
+  const rows = await loadDayStops(conn, dateStr, makeRoomWriteProof);
   if (!rows || rows.length === 0) return null;
   const sent24 = await loadReminder24hSent(conn, rows.map((r) => r.id));
   const reminder24hOff = await loadReminder24hOffIds(conn, rows);
@@ -335,14 +340,16 @@ function blockedHoursFor(rows, techId, techBlind) {
  * (technician_id NULL), every block_type but 'available'. The same read arrival-route.js makes, but always (it
  * loads them only in capacity mode). Throws when the read fails.
  */
-async function loadBlocks(conn, dateStr, techId) {
+// keepInvalid: every block, also one with no valid span, as dispatch reads them (arrival-route.js), so a caller can
+// leave the day unmeasured where dispatch's simulation refuses it (the route check). Unset: unchanged.
+async function loadBlocks(conn, dateStr, techId, { keepInvalid = false } = {}) {
   const rows = await conn('tech_schedule_blocks')
     .where({ date: dateStr }).whereNot('block_type', 'available')
     .where((q) => q.where('technician_id', techId).orWhereNull('technician_id'))
     .select('id', 'start_time', 'end_time');
-  return rows
-    .map((r) => ({ startMin: hhmmToMin(r.start_time), endMin: hhmmToMin(r.end_time) }))
-    .filter((b) => Number.isFinite(b.startMin) && Number.isFinite(b.endMin) && b.endMin > b.startMin);
+  const blocks = rows.map((r) => ({ startMin: hhmmToMin(r.start_time), endMin: hhmmToMin(r.end_time) }));
+  return keepInvalid ? blocks
+    : blocks.filter((b) => Number.isFinite(b.startMin) && Number.isFinite(b.endMin) && b.endMin > b.startMin);
 }
 
 /** True when one block covers the whole working day (open to close). */

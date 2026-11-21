@@ -384,5 +384,14 @@ async function commitCompletionPricingReview(database, plan, { role, technicianI
       witness: fresh.view.witness, discounts: fresh.proposals }) });
 }
 
-module.exports = { loadCompletionPricing, prepareCompletionPricingReview, lockCompletionPricingEstimate,
+// Whether a visit row carries a price decision completion pricing honors over estimated_price (scheduledLines): a
+// primary-line price, or a recorded line or appointment discount. A caller that prices a visit by estimated_price alone
+// (the phone-yes tap) refuses such a row, since the bill would not be the price it set.
+function visitPriceDecisionRecorded(service) {
+  const [primary] = scheduledLines(service, []);
+  return primary.base !== null || primary.discountRecorded
+    || [service.discount_id, service.discount_type, storedDiscount(service)].some(Boolean);
+}
+
+module.exports = { MONEY_FIELDS, visitPriceDecisionRecorded, loadCompletionPricing, prepareCompletionPricingReview, lockCompletionPricingEstimate,
   commitCompletionPricingReview, lockCompletionPricingParent, committedCompletionPrice, acceptedPricing, matchServiceLine, propertyMatches, money };

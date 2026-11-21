@@ -34,7 +34,8 @@ const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
 } = require('../../utils/datetime-et');
-const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps } = require('../customer-stages');
+const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps, whereLiveCustomer } = require('../customer-stages');
+const { controllerTimerCounts } = require('../controller-timer');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { effectiveServiceAddress } = require('../stamped-address');
 const { formatAddress } = require('../../utils/address-normalizer');
@@ -360,6 +361,13 @@ property_id: a customer with more than one active property needs one — the too
     },
   },
   {
+    name: 'get_sprinkler_timer_counts',
+    description: `Sprinkler timer (irrigation controller) counts for live customers: each timer on file (brand, Hunter model) and the answer to "do you run it from the maker's app?". Totals only.
+Use for: "how many customers have a Hunter X2?", "how many use the Hydrawise app?", "Rain Bird timer count".
+Waves records the timer and links a guide; nothing connects to a timer. These are planning figures: never say a timer is connected.`,
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
     name: 'get_recent_completions',
     description: `The most recently completed visits, newest first — resolves "the customer we just finished" and "what did we complete today". Returns customer, service, technician, and completion time.
 Use for: "build the report for the customer we just finished", "who did we finish today?", "what was the last completed stop?"`,
@@ -458,6 +466,7 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'cancel_plan': return await cancelPlan(input, actionContext);
       case 'create_appointment': return await createAppointment(input, actionContext);
       case 'get_recent_completions': return await getRecentCompletions(input);
+      case 'get_sprinkler_timer_counts': return await getSprinklerTimerCounts();
       case 'reschedule_appointment': return await rescheduleAppointment(input, actionContext);
       case 'cancel_appointment': return await cancelAppointment(input, actionContext);
       case 'draft_sms': return await draftSms(input);
@@ -3072,6 +3081,17 @@ const CLOSED_OUT_AT_SQL = `COALESCE(
   (SELECT MAX(jsh.transitioned_at) FROM job_status_history jsh
     WHERE jsh.job_id = ss.id AND jsh.to_status = 'completed'),
   ss.completed_at)`;
+
+// Live customers' sprinkler timers on file, totalled by timer and phone-app answer (controllerTimerCounts).
+async function getSprinklerTimerCounts() {
+  const rows = await db('property_preferences')
+    .whereNotNull('irrigation_controller_brand')
+    .whereIn('customer_id', db('customers').modify(whereLiveCustomer).select('id'))
+    .groupBy('irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app')
+    .select({ brand: 'irrigation_controller_brand', model: 'irrigation_controller_model', app: 'irrigation_controller_app' })
+    .count({ customers: '*' });
+  return controllerTimerCounts(rows);
+}
 
 async function getRecentCompletions(input = {}) {
   // Floor defensively even though the schema says integer — a fractional

@@ -596,6 +596,9 @@ describe('the default reads', () => {
     expect(typeof require('../services/push-notifications').customerStatus).toBe('function');
     expect(typeof deps.pushRouteFor('cust-1', 'reminder_72h')).toBe('string');
     expect(typeof deps.techBlind()).toBe('boolean');
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    expect(deps.loadArrivalRouteContext).toBe(arrivalRoute.loadArrivalRouteContext);
+    expect(_internals.defaultDeps({ writeProof: true }).loadArrivalRouteContext).toBe(arrivalRoute.loadSavedRouteContext);
   });
 });
 

@@ -88,6 +88,9 @@ async function resolveEstimate(token) {
 // Shared with /data's offer (assessmentFirstFor), so the page never offers what this page refuses.
 async function assessmentEligibility(estimate, data, conn = db) {
   if (estimate.estimate_group_id || data?.scheduled_service_id || !estimate.customer_id) return { state: 'gone' };
+  // A customer's own plan quote that staff changed: its accept refuses it and its page books nothing, so no visit is
+  // booked from it here either (codex pre-push P1). Judged on the row this read has: the booking re-check's is locked.
+  if (require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(estimate)) return { state: 'gone' };
   const customer = await conn('customers').where({ id: estimate.customer_id }).whereNull('deleted_at').first(...CUSTOMER_COLUMNS);
   if (!customer?.address_line1) return { state: 'gone' };
   const { sameProperty } = require('../services/estimate-consultation-offer');

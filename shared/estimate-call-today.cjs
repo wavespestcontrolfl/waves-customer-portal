@@ -1,0 +1,68 @@
+'use strict';
+
+// The "Call today" estimate list rule, in ONE place (owner 2026-11-19, plan page "Lead to Customer Plan",
+// phase 1). The Estimates page filters its rows with isCallTodayEstimate, and the 9 AM push
+// (server/services/estimate-call-today-push.js) counts the same rows with the same function, so the push and
+// the page cannot disagree. Plain CommonJS so the server requires it and the Vite client imports it through the
+// `@estimate-call-today` alias (client/vite.config.js), like shared/estimate-monthly-average.cjs.
+
+const HOUR = 3600000;
+
+// The outcome a person taps on a Call today row (owner 2026-11-20, D1 A): one tap saves it with who and when, and the
+// row leaves the list. The server accepts only these keys (POST /api/admin/estimates/:id/call-outcome); the page shows
+// the labels in this order.
+const CALL_OUTCOMES = Object.freeze([
+  Object.freeze({ key: 'booked', label: 'Booked' }),
+  Object.freeze({ key: 'call_back', label: 'Call back' }),
+  Object.freeze({ key: 'not_interested', label: 'Not interested' }),
+  Object.freeze({ key: 'no_answer', label: 'No answer' }),
+]);
+
+// Most recent customer touch on the estimate. First-view timestamps alone
+// misclassify customers who re-open or click days later, so idle-time checks
+// must key off the latest of view/re-view/click.
+function lastEngagementMs(estimate) {
+  const stamps = [
+    estimate?.lastViewedAt,
+    estimate?.viewedAt,
+    estimate?.lastClickedAt,
+  ]
+    .map((iso) => (iso ? new Date(iso).getTime() : NaN))
+    .filter((ts) => !Number.isNaN(ts));
+  return stamps.length ? Math.max(...stamps) : null;
+}
+
+// The row checks every Call today row passes, held rows on the page too: a VIEWED, unarchived offer someone delivered,
+// with a phone to call.
+function isCallableEstimate(estimate) {
+  if (estimate?.status !== 'viewed' || estimate.archivedAt || estimate.undeliveredSelfServe) return false;
+  return !!String(estimate.customerPhone || '').trim();
+}
+
+// Call today = the hot window the 48h "Going cold" check misses: a VIEWED
+// offer whose last customer touch was 2h–48h ago and that nobody has phoned, followed up on or logged a call outcome
+// for since. Every outcome counts (owner 2026-11-20, D1 A), No answer and Call back too: the row comes back only when
+// the customer opens or taps the estimate again.
+// The upper edge is inclusive and isGoingColdEstimate starts strictly past 48h, so the two never
+// share an offer (and the 7d+ overdue bucket sits further out still). Needs a phone to call.
+// Never a self-serve quote nobody delivered (undeliveredSelfServe: plan restart, plan start, report
+// card). The list route and the 9 AM push both set it through callTodayFields, from one rule
+// (server/services/self-serve-estimates.js): the customer opened it from the portal, and the
+// mint promises no follow-up.
+// A row whose call outcomes could not be read (callOutcomeUnknown: the list route's batched read failed) is withheld:
+// a failed read must not put a row someone already logged back on the list. The 9 AM push sends nothing then.
+function isCallTodayEstimate(estimate, nowMs = Date.now()) {
+  if (!isCallableEstimate(estimate) || estimate.callOutcomeUnknown) return false;
+  const last = lastEngagementMs(estimate);
+  if (last == null) return false;
+  const age = nowMs - last;
+  if (age < 2 * HOUR || age > 48 * HOUR) return false;
+  // Any contact AFTER the customer's last touch takes the offer off the list.
+  for (const contact of [estimate.lastCalledAt, estimate.lastFollowUpAt, estimate.lastCallOutcome?.at]) {
+    const ts = contact ? new Date(contact).getTime() : NaN;
+    if (!Number.isNaN(ts) && ts > last) return false;
+  }
+  return true;
+}
+
+module.exports = { HOUR, CALL_OUTCOMES, lastEngagementMs, isCallableEstimate, isCallTodayEstimate };

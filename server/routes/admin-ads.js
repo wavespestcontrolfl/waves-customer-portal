@@ -680,12 +680,11 @@ router.get('/sync-status', async (req, res, next) => {
 
 // GET /api/admin/ads/health — the read-only Ad health card on Ads → Dashboard (owner 2026-11-04, PPC gap page
 // option A): live serving status, disapprovals, conversion uploads and a 30-day who-changed-what timeline. It only
-// reads. GATE_ADS_HEALTH_CARD off: 404, and the card renders nothing.
+// reads.
 let _adsHealth;
 function getAdsHealth() { return _adsHealth || (_adsHealth = require('../services/ads/ads-health')); }
 router.get('/health', async (req, res, next) => {
   try {
-    if (require('../config/feature-gates').adsHealthCardLive?.() !== true) return res.status(404).json({ error: 'ads_health_off' });
     return res.json(await getAdsHealth().buildAdsHealth());
   } catch (err) { return next(err); }
 });
@@ -1279,13 +1278,16 @@ async function fetchChannelAttribution(since, months = 1, exclude = null) {
     } catch { /* settings unreadable — keep the default */ }
     // Same exclusions as the completed rows — an excluded internal/deleted
     // "conversion" must not add reward cost the card's rows don't show.
-    const [{ n }] = await applyAttributionExclusions(
+    const completedReferrals = () => applyAttributionExclusions(
       db('ad_service_attribution as asa')
         .where({ 'asa.lead_source': 'referral', 'asa.funnel_stage': 'completed' })
         .where('asa.lead_date', '>=', since),
       exclude,
-    ).countDistinct({ n: 'asa.customer_id' });
-    const refCost = round((Number(n) || 0) * perConversion, 2);
+    );
+    // The recorded amounts for a referral with a Step 2 settlement (a $25 or a capped $0 member credit, plus the
+    // friend's credit), whatever the gate says now; the flat settings for every other referral.
+    const ids = (await completedReferrals().distinct('asa.customer_id')).map((r) => r.customer_id).filter(Boolean);
+    const refCost = round(await require('../services/referral-engine').referralAcquisitionCost(db, ids, perConversion), 2);
     if (refCost > 0) fixedCostBySource.referral = (fixedCostBySource.referral || 0) + refCost;
   } catch { /* ad_service_attribution shape / no referrals — no-op */ }
 

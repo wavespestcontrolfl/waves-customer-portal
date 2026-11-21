@@ -37,7 +37,6 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
 
   afterAll(async () => {
     jest.restoreAllMocks();
-    restoreEnv();
     if (!db) return;
     if (created.notifications.length) await db('notifications').whereIn('id', created.notifications).del();
     if (created.sms.length) await db('sms_log').whereIn('id', created.sms).del();
@@ -46,15 +45,6 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     if (created.visits.length) await db('scheduled_services').whereIn('id', created.visits).del();
     if (created.customers.length) await db('customers').whereIn('id', created.customers).del();
   }, 60000);
-
-  // Gates the sweep honors, set for one test and put back.
-  const savedEnv = {};
-  const setEnv = (name, value) => { if (!(name in savedEnv)) savedEnv[name] = process.env[name]; process.env[name] = value; };
-  const restoreEnv = () => {
-    for (const [name, value] of Object.entries(savedEnv)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
-    for (const name of Object.keys(savedEnv)) delete savedEnv[name];
-  };
-  afterEach(restoreEnv);
 
   const phone = () => `+1555${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`;
 
@@ -220,7 +210,7 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     });
   });
 
-  test('a text from a number with no customer on file: judged only while its own gate is on, answered by a reply to that number', async () => {
+  test('a text bell from a number with no customer on file is not judged: it is listed and says so', async () => {
     const stranger = phone();
     const sid = `SM${RUN}${randomUUID().replace(/-/g, '').slice(0, 20)}`;
     const sentAt = ago(5);
@@ -229,19 +219,9 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
       category: 'inbound_sms', title: `SMS from Lima Fell${RUN}`, link: `/admin/communications?message=${sid}`, created_at: sentAt,
       metadata: { triggerKey: 'sms_reply', dedupeKey: `sms-reply:${sid}`, payload: { twilioSid: sid } },
     });
-    // Its class is off: not judged, so it is listed and says so.
-    const off = await listed();
-    expect(off.names).toContain('Lima');
-    expect(off.out.entries.find((e) => e.title.includes('Lima'))).toMatchObject({ name: '', unchecked: true });
-    // Class on, nobody replied: listed, and checked.
-    setEnv('GATE_PROMISE_PHONE_MATCH_CLOSE', 'true');
-    const on = await listed();
-    expect(on.out.entries.find((e) => e.title.includes('Lima'))).toMatchObject({ unchecked: false });
-    await addSms({
-      direction: 'outbound', from_phone: '+15550000002', to_phone: stranger, twilio_sid: `SM${RUN}${randomUUID().replace(/-/g, '').slice(0, 20)}`, status: 'delivered',
-      message_type: 'manual', metadata: JSON.stringify({ human_authored: 'true' }), created_at: new Date(sentAt.getTime() + 3 * HOUR),
-    });
-    expect((await listed()).names).not.toContain('Lima');
+    const listing = await listed();
+    expect(listing.names).toContain('Lima');
+    expect(listing.out.entries.find((e) => e.title.includes('Lima'))).toMatchObject({ name: '', unchecked: true });
   });
 
   test('a repeat-form alert is answered by an estimate handed over after the form, never by one handed over before', async () => {

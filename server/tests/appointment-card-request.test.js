@@ -184,6 +184,7 @@ jest.mock('../services/in-person-handoff', () => ({ assertTermsRecorded: (...a) 
 
 const {
   requestCardForAppointment,
+  visitCardLinkClosedReason,
   completeSecureCardCapture,
   loadSecureCardPageData,
   _test,
@@ -254,6 +255,19 @@ describe('requestCardForAppointment — gate and visit eligibility', () => {
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, scheduled_date: '2020-01-01' });
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
     expect(res.reason).toBe('visit_in_past');
+  });
+
+  // The schedule panel's GET reads visitCardLinkClosedReason to hide the
+  // send button (owner 2026-11-19: three taps on an on-site visit were each
+  // refused). The panel and the funnel must give the same answer.
+  test('visitCardLinkClosedReason gives the reason the funnel skips with', async () => {
+    const onSite = { ...VISIT, status: 'on_site' };
+    mockTableHandlers.scheduled_services.first = () => onSite;
+    expect(visitCardLinkClosedReason(onSite)).toBe('visit_not_live:on_site');
+    expect((await requestCardForAppointment({ scheduledServiceId: 'svc-1' })).reason).toBe('visit_not_live:on_site');
+    expect(visitCardLinkClosedReason({ ...VISIT, scheduled_date: '2020-01-01' })).toBe('visit_in_past');
+    expect(visitCardLinkClosedReason(VISIT)).toBeNull();
+    expect(visitCardLinkClosedReason({ ...VISIT, status: 'pending' })).toBeNull();
   });
 
   test('unpriced visit (NULL price = quote pending) never texts — owner directive 2026-07-30', async () => {

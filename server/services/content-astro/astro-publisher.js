@@ -844,6 +844,10 @@ function imageExtFromSource(url) {
 // legitimate wrap text/branding gets reported as forbidden).
 const LOGO_REFERENCE_PARAM = 'waves-logo=1';
 const VAN_WRAP_REFERENCE_PARAM = 'waves-van-wrap=1';
+// An editor-made hero planned for an identification post (planFor's
+// identification flag) carries this marker; publish refuses an unmarked one
+// on an identification post (owner 2026-11-19 picture rules).
+const IDENTIFICATION_PLAN_PARAM = 'waves-id-plan=1';
 function stampDataUrlParam(dataUrl, param) {
   const s = String(dataUrl || '');
   const m = s.match(/^data:(image\/[a-z0-9.+-]+)((?:;[a-z0-9-]+=[a-z0-9-]+)*);base64,/i);
@@ -855,6 +859,9 @@ function stampLogoReference(dataUrl) {
 }
 function stampVanWrapReference(dataUrl) {
   return stampDataUrlParam(dataUrl, VAN_WRAP_REFERENCE_PARAM);
+}
+function stampIdentificationPlan(dataUrl) {
+  return stampDataUrlParam(dataUrl, IDENTIFICATION_PLAN_PARAM);
 }
 function parseImageDataUrl(url) {
   const s = String(url || '');
@@ -870,6 +877,7 @@ function parseImageDataUrl(url) {
     base64: s.slice(comma + 1),
     logoReference: params.includes(LOGO_REFERENCE_PARAM),
     vanWrapReference: params.includes(VAN_WRAP_REFERENCE_PARAM),
+    identificationPlan: params.includes(IDENTIFICATION_PLAN_PARAM),
   };
 }
 
@@ -925,17 +933,17 @@ async function compressToWebp(buffer, { width = 1600 } = {}) {
 // blog list does SELECT *, so persisting it would break/bloat both.
 // Generate one image under a variation plan, then screen it for readable text
 // and logos (hero-alt-vision.screenGeneratedImage). A failed screen
-// regenerates ONCE in the retry style; a second failure ships the image with
+// regenerates ONCE under a fresh seed; a second failure ships the image with
 // a warning rather than parking the publish (the screen is a vision judgment
 // and must not become a hard gate on its own — owner direction 2026-09-05).
-async function generatePlannedImage({ title, topic, keyword, city, mode, shot, avoid, slug, index, captions = [], avoidDepicting = [], deadlineAt = null }) {
+async function generatePlannedImage({ title, topic, keyword, city, mode, shot, avoid, slug, index, identification = false, avoidDepicting = [], deadlineAt = null }) {
   const imageGenerator = require('../content/image-generator');
   const { screenGeneratedImage } = require('../content/hero-alt-vision');
   // The plan's subject is what the picture is about — title + keyword (the
   // section heading for a body slot) — not the lead, which may mention
   // equipment in passing (Codex r2 P2).
   const subject = [title, keyword].filter(Boolean).join(' ');
-  let plan = imageGenerator.planFor({ slug, mode, index, captions, subject });
+  let plan = imageGenerator.planFor({ slug, mode, index, subject, identification });
   // One deadline for the whole slot, screen retry included — a second call
   // must not start a second budget (Codex r6 P2). A caller that re-frames a
   // slot (the near-duplicate retry) passes the slot's deadline in.
@@ -950,7 +958,7 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
       // 2026-09-24 for the logo, owner ruling 2026-09-24 for the van wrap).
       // Each has its own kill switch and attaches independently — the van
       // wrap only rides along when the plan actually places a van (plan.van).
-      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, deadlineAt, uniformLogo: true, vanWrap: true });
+      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, avoidDepicting, deadlineAt, uniformLogo: true, vanWrap: true });
       img = await fetchImageBuffer(gen.dataUrl);
       if (!img?.buffer) throw new Error(`${mode} image generation produced no usable image`);
     } catch (err) {
@@ -968,7 +976,6 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
       }
       throw err;
     }
-    const allowedText = plan.style === 'infographic' ? captions : [];
     // The screen runs inside the same slot deadline as the generation.
     // The uniform logo is allowed on the cap/chest, and the van wrap on the
     // one van, only when the generator actually attached that reference
@@ -976,23 +983,22 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     // screened as before.
     const allowUniformLogo = gen.logoReference === true;
     const allowVanWrap = gen.vanWrapReference === true;
-    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, avoidDepicting, allowUniformLogo, allowVanWrap, timeoutMs: deadlineAt - Date.now() });
+    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', avoidDepicting, allowUniformLogo, allowVanWrap, timeoutMs: deadlineAt - Date.now() });
     // deadlineAt rides along so the caller's alt-text vision pass runs
     // inside the same slot budget (Codex r9 P2).
     const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen, logoReference: allowUniformLogo, vanWrapReference: allowVanWrap, deadlineAt };
     if (screen.ok) return candidate;
     candidates.push(candidate);
     if (attempt === 0) {
-      // Retry in a style no sibling slot uses (a fresh style shakes a repeated
-      // defect) under a fresh seed — never a fixed swap into a sibling's style.
-      const retryStyle = imageGenerator.retryStyleFor({ slug, mode, index, captions });
-      logger.warn(`[astro-publisher] ${mode} image for ${slug} failed the text/logo screen (${screen.reasons.join('; ')}) — regenerating once as ${retryStyle}`);
-      plan = imageGenerator.planFor({ slug, mode, index: index + 1000, captions, subject, style: retryStyle });
+      // Retry the same slot under a fresh seed: a new setting, time of day and
+      // vantage with the slot's own style and cast (index + 1000 is the same
+      // slot, see planFor) — never a sibling slot's style or its technician.
+      logger.warn(`[astro-publisher] ${mode} image for ${slug} failed the text/logo screen (${screen.reasons.join('; ')}) — regenerating once as ${plan.style}`);
+      plan = imageGenerator.planFor({ slug, mode, index: index + 1000, subject, identification });
     }
   }
   // Both failed: ship the safer one — no logo beats a logo, then fewer
-  // screen violations (stray strings, missing/incomplete captions, forbidden
-  // scenes — an allowed caption the image rendered is not one; Codex r11 P2)
+  // screen violations (stray strings, forbidden scenes; Codex r11 P2)
   // — with the reviewer note (Codex r6/r7 P2).
   const safest = [...candidates].sort((a, b) => (a.screen.logos.length > 0) - (b.screen.logos.length > 0) || a.screen.violations - b.screen.violations)[0];
   logger.warn(`[astro-publisher] ${mode} image for ${slug} still failed the text/logo screen after a retry (${safest.screen.reasons.join('; ')}) — shipping the safer candidate with a reviewer note`);
@@ -1007,6 +1013,8 @@ async function generateHeroBuffer(post) {
     mode: 'blog-hero',
     slug: post.slug,
     index: 0,
+    // An identification post never gets a people-free hero (see planFor).
+    identification: isIdentificationPost(post),
     avoidDepicting: Array.isArray(post.image_avoid) ? post.image_avoid : [],
   });
   logger.info(`[astro-publisher] generated hero image for ${post.slug || post.title} via ${hero.model} (${hero.plan.style}, ${hero.plan.setting.split(',')[0]})`);
@@ -1357,6 +1365,19 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
     //     prior merged publish; reference it as-is, don't re-fetch.
     let heroImage = null;
     if (post.featured_image_url && !isCommittedHeroUrl(post.featured_image_url)) {
+      // A hero made in the editor was planned for the post type the row had
+      // then. A post made an identification post since must not ship a hero
+      // planned without that type's picture limits (no people-free hero, no
+      // pest close-up): the run parks, and the editor regenerates the hero.
+      // Only a row whose column can hold a multi-MB data URL reaches this,
+      // and there the editor's regenerate save works too. (In production
+      // featured_image_url is varchar(255), so no row holds one: 11-19.)
+      const stored = parseImageDataUrl(post.featured_image_url);
+      if (stored && isIdentificationPost(post) && !stored.identificationPlan) {
+        const e = new Error('featured image was generated before this post became an identification post: regenerate it in the editor, then publish again');
+        e.code = 'BLOG_HERO_MEDIA_FAILED';
+        throw e;
+      }
       // Tagged BLOG_HERO_MEDIA_FAILED so the scheduler parks it with the
       // other deterministic publish errors: a curated featured_image_url
       // that 404s or isn't an image fails identically every attempt, and
@@ -2027,6 +2048,8 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile, imageAvo
       meta_description: frontmatter.meta_description,
       keyword: frontmatter.primary_keyword,
       slug,
+      post_type: frontmatter.post_type,
+      page_type: frontmatter.page_type,
       image_avoid: imageAvoid,
     });
     let buffer;
@@ -2952,6 +2975,29 @@ function legacyHeroRefs(body, heroSrc, { mdx = true } = {}) {
   return out;
 }
 
+// A managed body picture plans under one of two logical slots (the slot picks
+// the style and the cast, see image-generator slotFor), and the slot is read
+// from the file NAME: odd names are slot 1, even names slot 2. A kept
+// picture's slot is then known on every later refresh with no stored record.
+// A new picture takes a free name whose slot no kept or new picture of the
+// post holds, so two body pictures never share a style or a cast and neither
+// takes the hero's style (three styles: hero 0, body 1 and 2). Counting the
+// loop position instead planned a picture added beside a kept body-1 as slot
+// 1 again; planning by the raw name number gave body-3 the hero's style.
+function bodySlotOfName(n) {
+  const k = Math.max(1, Math.trunc(Number(n)) || 1); // names start at body-1
+  return ((k - 1) % 2) + 1;
+}
+// The body slots held by the given picture paths (managed names only).
+function heldBodySlots(managedPrefix, srcs) {
+  const held = new Set();
+  for (const src of srcs) {
+    const name = String(src).startsWith(managedPrefix) ? String(src).slice(managedPrefix.length).match(/^(\d+)\.webp$/) : null;
+    if (name) held.add(bodySlotOfName(name[1]));
+  }
+  return held;
+}
+
 // `siblings` = already-resolved images with bytes (the freshly generated
 // hero) that every body image must differ from.
 // `mdx`: the TARGET file's flavour (false for the scheduler's flat `.md`
@@ -3147,6 +3193,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   // the name cap parks the post).
   let n = 0;
   const superseded = [];
+  const heldSlots = heldBodySlots(managedPrefix, [...draftSrcs, ...taken]);
   for (let k = 0; k < slots.length; k++) {
     const slot = slots[k];
     const reuse = reusedBySlot.get(k) || null;
@@ -3169,9 +3216,12 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
       repoPath = `${ASTRO_HERO_DIR}/${slug}/body-${n}.webp`;
       if (draftSrcs.has(src) || taken.has(src)) continue;
       const onMain = await gh.getFile(repoPath);
-      if (!onMain) break; // free name → generate here
-      superseded.push({ repoPath, sha: onMain.sha || null });
+      if (onMain) { superseded.push({ repoPath, sha: onMain.sha || null }); continue; }
+      // A free name — passed over while its slot is held and the other one is open.
+      if (heldSlots.size < 2 && heldSlots.has(bodySlotOfName(n))) continue;
+      break; // generate here
     }
+    heldSlots.add(bodySlotOfName(n));
 
     let gen;
     let buffer;
@@ -3184,10 +3234,6 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     for (let attempt = 0; ; attempt++) {
       const shot = BODY_IMAGE_SHOTS[(k + attempt) % BODY_IMAGE_SHOTS.length];
       try {
-        // An infographic slot may carry ONE caption: the section heading,
-        // when it is short enough to letter legibly.
-        const heading = String(slot.heading || '').trim();
-        const captions = heading && heading.length <= 40 ? [heading] : [];
         gen = await generatePlannedImage({
           title: frontmatter.title,
           topic: slot.lead || frontmatter.meta_description,
@@ -3197,8 +3243,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
           shot,
           avoid: heroSubject,
           slug,
-          index: k + 1 + attempt * 100,
-          captions,
+          index: bodySlotOfName(n) + attempt * 100,
           avoidDepicting: imageExclusionsFor(brief),
           deadlineAt: slotDeadline,
         });
@@ -4805,7 +4850,7 @@ function describeImageProvenance(label, img) {
   if (!img) return null;
   if (img.reused) return `- ${label}: reused from main`;
   if (!img.model && !img.plan) return null;
-  const plan = img.plan ? `${img.plan.style}, ${String(img.plan.setting || '').split(',')[0]}, ${img.plan.timeOfDay}` : 'unplanned';
+  const plan = img.plan ? `${img.plan.style}, ${img.plan.cast ? `${img.plan.cast}, ` : ''}${String(img.plan.setting || '').split(',')[0]}, ${img.plan.timeOfDay}` : 'unplanned';
   const screen = img.screen
     ? (img.screen.checked ? (img.screen.ok ? 'screen clean' : `**screen flagged after retry: ${img.screen.reasons.join('; ')}**`) : 'screen unavailable (fail-open)')
     : 'not screened';
@@ -5568,6 +5613,7 @@ module.exports = {
     committedImageBuffer,
     assertDistinctPictures,
     BODY_IMAGE_SHOTS,
+    bodySlotOfName,
     NEAR_DUPLICATE_MAX_DISTANCE,
     reusableLiveBodyImage,
     BODY_IMAGE_MIN,
@@ -5577,6 +5623,7 @@ module.exports = {
     parseImageDataUrl,
     stampLogoReference,
     stampVanWrapReference,
+    stampIdentificationPlan,
     defaultHeroForCategory,
     describeHeroFailure,
     inferServiceAreas,

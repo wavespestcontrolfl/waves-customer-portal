@@ -26,7 +26,7 @@ const RULE = {
 // Catalog rows as production stores them (product facts only).
 const CATALOG = [
   { name: 'Taurus SC', display_name: null, active_ingredient: 'Fipronil', category: 'termiticide / insecticide', product_type: null, active: true },
-  { name: 'Atticus Talak 7.9 F', display_name: null, active_ingredient: 'Bifenthrin 7.9%', category: 'insecticide', product_type: 'pesticide', active: true },
+  { name: 'LESCO Crosscheck Plus', display_name: null, active_ingredient: 'Bifenthrin 7.9%', category: 'insecticide', product_type: 'pesticide', active: true },
   { name: 'Alpine WSG', display_name: null, active_ingredient: 'Dinotefuran 40.0%', category: 'insecticide', product_type: 'pesticide', active: true },
   { name: 'Advion Ant Bait Gel', display_name: null, active_ingredient: 'Indoxacarb', category: 'insecticide', product_type: null, active: true },
 ];
@@ -177,7 +177,7 @@ describe('the product list', () => {
   test('catalog names with the active ingredient, no rate; the dinotefuran row inside only', async () => {
     const products = section(await build(), 'products');
     expect(products.bullets).toEqual([
-      'Outside band: Taurus SC (fipronil); Atticus Talak 7.9 F (bifenthrin)',
+      'Outside band: Taurus SC (fipronil); LESCO Crosscheck Plus (bifenthrin)',
       'Inside: Alpine WSG (dinotefuran)',
       'Bait: Advion Ant Bait Gel (indoxacarb)',
     ]);
@@ -193,12 +193,12 @@ describe('the product list', () => {
   test('an inactive duplicate never prints, and the first active row per name wins', async () => {
     // Production holds an inactive duplicate row with another product's ingredients (the shared read in lawn-service-outline.js).
     const catalog = [
-      { name: 'Atticus Talak 7.9 F', display_name: null, active_ingredient: 'Fipronil 0.5%', category: 'insecticide', product_type: 'pesticide', active: false },
+      { name: 'LESCO Crosscheck Plus', display_name: null, active_ingredient: 'Fipronil 0.5%', category: 'insecticide', product_type: 'pesticide', active: false },
       ...CATALOG,
-      { name: 'Atticus Talak 7.9 F', display_name: null, active_ingredient: 'Imidacloprid 21.4%', category: 'insecticide', product_type: 'pesticide', active: true },
+      { name: 'LESCO Crosscheck Plus', display_name: null, active_ingredient: 'Imidacloprid 21.4%', category: 'insecticide', product_type: 'pesticide', active: true },
     ];
     const products = section(await build({ catalog }), 'products');
-    expect(products.bullets[0]).toBe('Outside band: Taurus SC (fipronil); Atticus Talak 7.9 F (bifenthrin)');
+    expect(products.bullets[0]).toBe('Outside band: Taurus SC (fipronil); LESCO Crosscheck Plus (bifenthrin)');
     expect(products.bullets.join(' ')).not.toMatch(/imidacloprid/);
   });
 
@@ -206,7 +206,7 @@ describe('the product list', () => {
     const catalog = CATALOG.map((row) => (row.name === 'Advion Ant Bait Gel' ? { ...row, active: false } : row));
     const products = section(await build({ catalog }), 'products');
     expect(products.bullets).toEqual([
-      'Outside band: Taurus SC (fipronil); Atticus Talak 7.9 F (bifenthrin)',
+      'Outside band: Taurus SC (fipronil); LESCO Crosscheck Plus (bifenthrin)',
       'Inside: Alpine WSG (dinotefuran)',
     ]);
   });

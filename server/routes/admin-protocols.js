@@ -29,12 +29,15 @@ const {
   loadVisitForPlan,
   loadVisitCity,
   holdNorthPortProducts,
+  holdTetrinoWithoutScoutEvidence,
+  holdUnresolvedTurfHerbicides,
   roundRouting,
   roundsNitrogenHold,
   v13HoldWarnings,
   v13NorthPortReferenceWarnings,
   v13VisitLimits,
   settleCatchUpForVisit,
+  normalizeOptionList,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
@@ -945,7 +948,8 @@ function lawnMixWarnings({ calibration, items, selectedItems, municipality, cade
     });
   }
   warnings.push(...v13SelectedGateWarnings(selectedItems));
-  warnings.push(...(municipality ? v13HoldWarnings(items) : v13NorthPortReferenceWarnings(items)));
+  warnings.push(...v13HoldWarnings(items));
+  if (!municipality) warnings.push(...v13NorthPortReferenceWarnings(items));
   warnings.push(...cadenceWarnings, ...limitCheck.warnings);
   return warnings;
 }
@@ -1039,7 +1043,14 @@ router.get('/lawn-mix', async (req, res, next) => {
     // The visit the sheet reads: the recipe step, or (the November large patch cut, GATE_LAWN_RECLAIMED_HALF_N, GATE_LAWN_DEC_LARGE_PATCH_K) its copy
     // with the cut nitrogen or the swapped bag stated, so the line text, the objective and the amount agree. Only a visit the planner would also
     // plan on v13, and only for the month of the window the plan reads (a visit pinned to an older version, or to another month's window, gets no cut here).
-    const nitrogen = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }) });
+    const scout = {
+      conditionFlags: req.query.conditionFlags,
+      tetrinoTarget: req.query.tetrinoTarget,
+      tetrinoCurrentObservations: req.query.tetrinoCurrentObservations,
+      tetrinoPressure: req.query.tetrinoPressure,
+      grubTimingEvidence: req.query.grubTimingEvidence,
+    };
+    const nitrogen = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }), scout });
     const { visit, targets: nutrientTargets, chinchRate, productSwap } = nitrogen;
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
@@ -1093,7 +1104,10 @@ router.get('/lawn-mix', async (req, res, next) => {
     // back as in the plan: not selected, no amount, the plan's warning.
     const municipality = await loadVisitCity(db, scheduled);
     const holdRoundsNitrogen = roundsNitrogenHold(rounds, municipality);
-    let resolvedLines = holdNorthPortProducts(matchedLines, v13Rows, municipality, ...(holdRoundsNitrogen ? [{ nitrogen: true }] : []));
+    const unresolvedTurf = ['mixed', 'unknown'].includes(normalizeText(req.query.grassType || req.query.lawnType));
+    let resolvedLines = holdTetrinoWithoutScoutEvidence(matchedLines, v13Rows, scout);
+    resolvedLines = holdUnresolvedTurfHerbicides(resolvedLines, v13Rows, unresolvedTurf);
+    resolvedLines = holdNorthPortProducts(resolvedLines, v13Rows, municipality, ...(holdRoundsNitrogen ? [{ nitrogen: true }] : []));
     const { carrier, tankCoverageSqft, equipment } = lawnMixRig(calibration);
     const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, ...roundsGateContext(rounds, holdRoundsNitrogen), municipality };
     const areaContext = {
@@ -1127,7 +1141,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       // no quantity at all; a capped line none either).
       const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped, gateContext, line) : null;
       const lineCarrier = roundsCatchUp.carrierFor(line, v13Line?.row, carrier);
-      const canMix = Boolean(product && lineCarrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
+      const canMix = Boolean(product && !line.fieldHold && lineCarrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
         product, lawnSqft: sqft, carrierGalPer1000: lineCarrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),
       });
@@ -1826,6 +1840,14 @@ router.get('/product-label/:productId', async (req, res, next) => {
 // router. Raw access codes ride ONLY in strip.access.codes (tap-to-reveal).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// The Plan tab's "Use" ticks on "if needed" lawn lines, as the treatment-plan
+// route reads them (the engine's own comma-list parse); null = not a list of product ids.
+const MAX_SELECTED_CONDITIONAL_IDS = 50;
+function selectedConditionalIds(raw) {
+  const ids = normalizeOptionList(raw);
+  return ids.length <= MAX_SELECTED_CONDITIONAL_IDS && ids.every((id) => UUID_RE.test(id)) ? ids : null;
+}
+
 // GET /api/admin/protocols/job-card/mix?serviceId=&productId=&gallons=110|1 —
 // the Tank section's search helper: amount of one product for that much
 // water on the visit's rig (the appointment's assigned equipment), or with
@@ -1863,8 +1885,11 @@ router.get('/job-card/mix', async (req, res, next) => {
     if (rig && !UUID_RE.test(rig)) return res.status(400).json({ error: 'rig must be an equipment system id' });
     const gallons = rig ? null : Number(req.query.gallons);
     if (!rig && ![110, 1].includes(gallons)) return res.status(400).json({ error: 'gallons must be 110 or 1' });
+    // The Tank search reads the plan the card shows: the Use ticks ride along.
+    const selectedConditionalProductIds = selectedConditionalIds(req.query.selectedConditionalProductIds);
+    if (!selectedConditionalProductIds) return res.status(400).json({ error: 'Invalid selectedConditionalProductIds' });
     if (!(await techOwnsVisit(req, serviceId))) return res.status(404).json({ error: 'Product or visit not found' });
-    const mix = await jobCard.mixForProduct(productId, gallons, { serviceId, includePricing: viewerSeesPricing(req), ...(rig ? { equipmentSystemId: rig, technicianId: isTechnicianRequest(req) ? req.technicianId : null } : {}) });
+    const mix = await jobCard.mixForProduct(productId, gallons, { serviceId, includePricing: viewerSeesPricing(req), selectedConditionalProductIds, ...(rig ? { equipmentSystemId: rig, technicianId: isTechnicianRequest(req) ? req.technicianId : null } : {}) });
     if (!mix) return res.status(404).json({ error: 'Product or visit not found' });
     res.json({ enabled: true, ...mix });
   } catch (err) {
@@ -1924,8 +1949,10 @@ router.get('/job-card/:serviceId', async (req, res, next) => {
   try {
     if (!jobCard.jobCardEnabled()) return res.json({ enabled: false });
     if (!UUID_RE.test(req.params.serviceId)) return res.status(400).json({ error: 'Invalid service id' });
+    const selectedConditionalProductIds = selectedConditionalIds(req.query.selectedConditionalProductIds);
+    if (!selectedConditionalProductIds) return res.status(400).json({ error: 'Invalid selectedConditionalProductIds' });
     if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
-    const card = await jobCard.buildJobCard(req.params.serviceId, { includePricing: viewerSeesPricing(req) });
+    const card = await jobCard.buildJobCard(req.params.serviceId, { includePricing: viewerSeesPricing(req), selectedConditionalProductIds });
     if (!card) return res.status(404).json({ error: 'Service not found' });
     if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
     res.json(card);

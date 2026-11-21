@@ -198,6 +198,13 @@ const DOMAIN_TERM_PAIRS = new Set([
   // Lawn amendment. 'Moss' is a real surname, so it is cleared only as
   // this exact pair: "Peat Moss" passes, "Kate Moss" still blocks.
   'peat moss', 'sphagnum peat', 'sphagnum moss',
+  // Two-word animal names the 2026-11-18 customer-question briefs are
+  // about. A post on hammerhead worms cannot avoid the name in its title
+  // and headings. Each is cleared only as the exact pair, so a first name
+  // in front of either second word still blocks.
+  'hammerhead worm', 'hammerhead worms', 'hammerhead flatworm',
+  'hammerhead flatworms', 'land planarian', 'land planarians',
+  'mud dauber', 'mud daubers',
 ]);
 
 function looksLikeFalsePositiveName(first, last, allowPairs) {

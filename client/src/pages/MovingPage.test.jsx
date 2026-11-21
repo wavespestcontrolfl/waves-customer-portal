@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Moving page (GATE_MOVING_FLOW): the customer checks a new address, confirms
+// Moving page: the customer checks a new address, confirms
 // it, gives dates and sends. The page never posts an address or a verdict on
 // submit (only the confirmed check's id), shows no price, and answers a dead
 // link with the not-found card.

@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
 }));
-jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn(), v13VisitLimits: jest.fn(), v13ProtocolRows: jest.fn(() => new Map()), v13GateNotes: jest.fn(() => []) }));
+jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn(), v13VisitLimits: jest.fn(), v13ProtocolRows: jest.fn(() => new Map()), v13GateNotes: jest.fn(() => []), tetrinoScoutDecision: jest.fn(() => ({ eligible: false, highRateEligible: false })) }));
 jest.mock('../services/property-coordinates', () => ({ resolvePropertyCoordinates: jest.fn() }));
 jest.mock('../services/fawn-weather', () => ({ getCurrent: jest.fn() }));
 
@@ -26,6 +26,8 @@ const {
   buildLawnTreatmentGuide,
   takeAllProductIdsFor,
   preflightLawnFastCompletion,
+  normalizedTetrinoScout,
+  tetrinoScoutFreeze,
   assertLawnFastVisitTypeUnderLock,
 } = require('../services/lawn-fast-complete');
 const reportData = require('../services/service-report/report-data');
@@ -1680,6 +1682,22 @@ describe('buildLawnFastWateringPreview', () => {
   });
 });
 
+describe('May Tetrino completion record', () => {
+  test('normalizes the sheet fields and freezes the truthful applied/scout-only decision', () => {
+    const value = normalizedTetrinoScout({ target: ' Chinch ', currentObservations: ' 8 counted ', pressure: 'HIGH', applied: true });
+    expect(value).toEqual({ tetrinoTarget: 'chinch', tetrinoCurrentObservations: '8 counted', tetrinoPressure: 'high', grubTimingEvidence: '', tetrinoApplied: true });
+    expect(tetrinoScoutFreeze({ tetrinoScout: value })).toEqual({ lawnTetrinoScout: {
+      v: 1, target: 'chinch', currentObservations: '8 counted', pressure: 'high', grubTimingEvidence: null, applied: true,
+    } });
+    expect(tetrinoScoutFreeze({ tetrinoScout: { target: 'none', currentObservations: 'No current insects found', applied: false } }))
+      .toEqual({ lawnTetrinoScout: { v: 1, target: 'none', currentObservations: 'No current insects found', pressure: null, grubTimingEvidence: null, applied: false } });
+  });
+
+  test('an absent decision adds no structured-note key', () => {
+    expect(tetrinoScoutFreeze(null)).toEqual({});
+  });
+});
+
 describe('preflightLawnFastCompletion', () => {
   const savedGate = process.env.GATE_LAWN_FAST_COMPLETE;
   beforeEach(() => {
@@ -1736,6 +1754,34 @@ describe('preflightLawnFastCompletion', () => {
   ])('a confirmed assessment on a %s visit passes, even with no photos at all (advisory floor)', async (label, profile) => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
     expect(await run({ lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [] }, { lawnFast: { visitType: label === 'one-time' ? 'one_time' : 'recurring' } })).toBeNull();
+  });
+
+  test('Tetrino evidence is required only for the resolved v13 May step; an off-round manual actual remains recordable', async () => {
+    const savedDefaults = process.env.GATE_LAWN_COMPLETION_DEFAULTS;
+    const savedHistory = process.env.GATE_LAWN_PROPERTY_HISTORY;
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const assessmentHistory = require('../services/lawn-assessment-history');
+    const installed = jest.spyOn(assessmentHistory, 'installedForVisit').mockResolvedValue({ id: ASSESSMENT });
+    const scoped = jest.spyOn(assessmentHistory, 'historyForAssessment').mockResolvedValue({ current: { id: ASSESSMENT } });
+    const confirmed = { lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, products_catalog: { id: P_HERB, name: 'Tetrino Insecticide' } };
+    const plan = (month) => ({
+      propertyGate: { month },
+      protocol: { structured: { version: '2026.10-v13', window: { month } } },
+      completionDefaults: { eligible: true, items: [], addOns: [] },
+      mixCalculator: { items: [], conditionalOptions: [{ selected: false, product: { id: P_HERB, name: 'Tetrino Insecticide' }, mix: { ratePer1000: 0.367, rateUnit: 'fl oz' } }] },
+    });
+    try {
+      buildPlanForService.mockResolvedValueOnce(plan('May')).mockResolvedValueOnce(plan('Jun'));
+      const actual = [{ productId: P_HERB, rate: 0.367 }];
+      expect(await run(confirmed, { products: actual })).toMatchObject({ status: 400, payload: { code: 'tetrino_scout_evidence_required' } });
+      expect(await run(confirmed, { products: actual })).toBeNull();
+    } finally {
+      installed.mockRestore();
+      scoped.mockRestore();
+      if (savedDefaults === undefined) delete process.env.GATE_LAWN_COMPLETION_DEFAULTS; else process.env.GATE_LAWN_COMPLETION_DEFAULTS = savedDefaults;
+      if (savedHistory === undefined) delete process.env.GATE_LAWN_PROPERTY_HISTORY; else process.env.GATE_LAWN_PROPERTY_HISTORY = savedHistory;
+    }
   });
 
   describe('the places (GATE_LAWN_TROUBLE_AREAS)', () => {

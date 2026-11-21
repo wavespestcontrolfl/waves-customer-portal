@@ -559,6 +559,36 @@ describe('mixed-estimate approval microcopy', () => {
     expect(footer.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
   });
 
+  it('the headless PDF capture never releases the hold a refused plan quote still lists (codex pre-push P1)', async () => {
+    window.history.replaceState({}, '', '/estimate/mixed-termite-token?mode=pdf');
+    const payload = documentPayload(false, false);
+    const fetchMock = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({
+        ...payload,
+        estimate: {
+          ...payload.estimate,
+          quoteRefusal: { code: 'PLAN_START_STATE_CHANGED', error: 'This estimate changed since it was created.' },
+          acceptance: {
+            mode: 'existing_appointment',
+            appointment: {
+              id: 'hold-1', isHold: true, reservationExpiresAt: '2099-01-01T12:00:00.000Z',
+              scheduledDate: '2099-01-01', windowStart: '09:00',
+            },
+          },
+        },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<WavesShell><EstimateViewPage /></WavesShell>);
+
+    await screen.findByText('Pest Control');
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/reserve/'))).toEqual([]);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
+  });
+
   it('scopes the server no-guarantee decision to the estimate shell beside one-time termite work', async () => {
     const frequency = {
       key: 'standard',
@@ -1049,6 +1079,23 @@ describe('OneTimeBreakdownCard', () => {
     fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
     expect(screen.getByText('Annual inspection during the warranty period')).toBeInTheDocument();
     expect(screen.queryByText(/Unlimited free callbacks/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps an included re-entry guarantee in the satisfaction scope for the flagged exclusion row only', () => {
+    const flagged = {
+      service: 'rodent_exclusion', label: 'Rodent Exclusion', amount: 595,
+      includesReentryGuarantee: true, guaranteeRenewalPrice: 249,
+    };
+    const plain = { service: 'rodent_exclusion', label: 'Rodent Exclusion — Wire Mesh Points', amount: 150 };
+    render(<OneTimeBreakdownCard guaranteeScope="satisfaction" breakdown={{ total: 745, items: [
+      { ...flagged, copy: resolveOneTimeServiceCopy(flagged) },
+      // A stale saved copy that carries the bullet on a row without the flag never shows it.
+      { ...plain, copy: { ...resolveOneTimeServiceCopy(flagged), terms: 'Pay on service day. No contract.' } },
+    ] }} />);
+    for (const button of screen.getAllByRole('button', { name: /See everything included/i })) fireEvent.click(button);
+    expect(screen.getAllByText(/Includes a 1-year re-entry guarantee/)).toHaveLength(1);
+    expect(screen.getByText('Pay on service day. Renew the guarantee yearly for $249.')).toBeInTheDocument();
+    expect(screen.queryByText(/No contract/i)).not.toBeInTheDocument();
   });
 
   it.each([

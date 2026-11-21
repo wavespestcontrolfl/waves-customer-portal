@@ -9,11 +9,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 // Pin the drive-time model to the legacy (uncalibrated) estimator so this
 // suite's numbers don't depend on the ambient environment — matches
 // auto-dispatch-candidates.test.js's convention.
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 const ORIGINAL_CAPACITY_GATE = process.env.GATE_SCHEDULING_CAPACITY;
-beforeEach(() => { delete process.env.GATE_DRIVE_TIME_CALIBRATION; delete process.env.GATE_SCHEDULING_CAPACITY; });
+beforeEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
 afterAll(() => {
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION; else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
   if (ORIGINAL_CAPACITY_GATE === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = ORIGINAL_CAPACITY_GATE;
 });
 

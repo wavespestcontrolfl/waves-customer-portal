@@ -1,11 +1,11 @@
 import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useId, createContext, useContext } from 'react';
-import { createPortal, flushSync } from 'react-dom';
+import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useAuth, tokenCustomerId } from '../hooks/useAuth';
+import { useAuth, tokenCustomerId, tokenContactKey } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import usePortalActivity from '../hooks/usePortalActivity';
-import api from '../utils/api';
+import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
@@ -28,10 +28,11 @@ import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/Station
 import CancelFlow from '../components/portal/CancelFlow';
 import MovingEntry, { useMovingEntry } from '../components/portal/MovingEntry';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
+import SprinklerTimerCard from '../components/portal/SprinklerTimerCard';
 import MistingSystemCard from '../components/portal/MistingSystemCard';
 import YardWrappedCard from '../components/portal/YardWrappedCard';
 import PetNameAskCard from '../components/portal/PetNameAskCard';
-import PortalMessages, { MESSAGES_COPY, usePortalMessagesGate } from '../components/portal/PortalMessages';
+import PortalMessages, { MESSAGES_COPY, PortalChat, usePortalMessagesGate } from '../components/portal/PortalMessages';
 import PestFrequencyChange, { usePestFrequency } from '../components/portal/PestFrequencyChange';
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
@@ -3046,7 +3047,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
         // the Refer tab. No $25 fallback: a missing or zero reward means the
         // program currently grants nothing we can promise.
         totalEarned: d.totalEarned != null ? Number(d.totalEarned) / 100 : 0, // dollars
-        rewardPerReferral: Number(d.rewardPerReferral) || 0,
+        // A member at the yearly limit (Step 2) is promised nothing on the dashboard either.
+        rewardPerReferral: d.capReached === true ? 0 : Number(d.rewardPerReferral) || 0,
       });
       setReferralStatsStatus('ready');
     }).catch(err => {
@@ -3160,7 +3162,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Text us', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
-    { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${referralReward} credit` : 'View details', action: () => onSwitchTab?.('refer') },
+    { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${Number.isInteger(referralReward) ? referralReward : referralReward.toFixed(2)} credit` : 'View details', action: () => onSwitchTab?.('refer') },
   ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -8663,6 +8665,12 @@ const IRRIGATION_EDIT_FIELDS = new Set([
   'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationWaterSource', 'irrigationIssues',
 ]);
 
+// The sprinkler timer, and the same as one comparable value (a save response puts the server's timer on screen only
+// when it differs).
+const SPRINKLER_TIMER_FIELDS = ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'];
+const sprinklerTimerOf = (p) => Object.fromEntries(SPRINKLER_TIMER_FIELDS.map((field) => [field, p?.[field] ?? null]));
+const sprinklerTimerKey = (p) => SPRINKLER_TIMER_FIELDS.map((field) => p?.[field] ?? '').join('|');
+
 // Away Watch dates. The pair saves whole or not at all, so nothing is sent until both days are chosen (one autosave
 // carries both); clearing both, or Remove, sends two nulls. A draft that loses a day before its autosave leaves
 // withdraws the queued pair (withdrawPair), so a pair the screen no longer shows never saves.
@@ -8764,11 +8772,25 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   const debounceRef = useRef(null);
   const pendingRef = useRef({});
   const lastSavedRef = useRef(null);
+  // The home stamp of the data this screen shows: irrigation_home_changed_at as the load returned it. This tab loads
+  // once per mount ("Try Again" runs only before any data shows), so every edit queued here was made against it.
+  // Every save sends it as `confirmed_as_of`, through flushes and retries: never a newer stamp a later save response
+  // reported, because the customer has not seen that home's settings (pre-push audit on #8107).
+  const screenStampRef = useRef(null);
+  // The customer's own timer pick that the server refused: it stays on screen beside the reason, and no save response
+  // replaces it, until a later pick is sent and taken.
+  const timerRefusedRef = useRef(false);
+  // The timers the row may hold as far as the queued timer changes know (sprinklerTimerKey values): the one this screen
+  // showed before the first of them, and the timer of a failed save that went back in the queue (it may have landed). The save
+  // sends them as controller_timer_seen, and the server sets the timer only over one of them: a page left open never
+  // puts back a timer someone else replaced, and an app answer never lands on another box.
+  const timerSeenRef = useRef(null);
   const saveQueueRef = useRef(Promise.resolve());
   // Identity these edits belong to. The whole portal tree remounts on any
   // property/customer change, so capturing once at mount is sufficient.
   const editsCustomerIdRef = useRef(customer?.id);
   const [serverHasLawnCare, setServerHasLawnCare] = useState(null);
+  const [serverHasLawnService, setServerHasLawnService] = useState(null);
   // A legacy row stored "off" by the retired toggle: the report and Monday
   // email suppress derivation until the customer's next irrigation edit
   // stamps it on, so the card must not claim a figure they aren't counting.
@@ -8789,10 +8811,12 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
       .then(d => {
         setPrefs(d.preferences);
         lastSavedRef.current = d.preferences;
+        screenStampRef.current = d.preferences?.irrigationHomeChangedAt ?? null;
         // Server-side lawn eligibility (tier / turf type OR recurring lawn
         // service evidence) — the same test the PUT applies to Weekly
         // Inches, so the field never renders and then drops on save.
         if (typeof d.hasLawnCare === 'boolean') setServerHasLawnCare(d.hasLawnCare);
+        if (typeof d.hasLawnService === 'boolean') setServerHasLawnService(d.hasLawnService);
         setIrrigationSuppressed(d.irrigationSuppressed === true);
         setAwayWatchEnabled(d.awayWatchEnabled === true);
         setLoading(false);
@@ -8844,14 +8868,35 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // sprinkler field for the weekly watering plan only when this save
         // was rendered against the CURRENT home — a queued pre-move autosave
         // draining after an address change must not re-confirm the former
-        // home's settings. lastSavedRef tracks the server's latest view
-        // (load + every save response).
-        toSave.confirmed_as_of = lastSavedRef.current?.irrigationHomeChangedAt ?? null;
+        // home's settings. The stamp is the one this screen loaded with
+        // (screenStampRef), not the newest a save returned: a save that
+        // reports a move does not show the customer the new home's settings.
+        toSave.confirmed_as_of = screenStampRef.current;
+        const savingTimerSeen = timerSeenRef.current;
+        if (SPRINKLER_TIMER_FIELDS.some((field) => field in toSave)) {
+          toSave.controller_timer_seen = savingTimerSeen;
+          timerSeenRef.current = null;
+        }
         const savingIrrigationRevision = irrigationEditRevision.current;
         const savingAwayWatchRevision = awayWatchPairRevision.current;
         try {
           const result = await api.updatePropertyPreferences(toSave);
-          if (result && result.preferences) lastSavedRef.current = result.preferences;
+          const rejectedFields = Array.isArray(result?.rejected) ? result.rejected : [];
+          if (SPRINKLER_TIMER_FIELDS.some((field) => field in toSave)) {
+            timerRefusedRef.current = rejectedFields.some((r) => SPRINKLER_TIMER_FIELDS.includes(r.field));
+          }
+          if (result && result.preferences) {
+            lastSavedRef.current = result.preferences;
+            // After every save the card shows the timer the server holds: the customer's pick it took, or a timer
+            // staff saved in Customer 360 (it comes back in this row, even one saved just after this pick). Not while
+            // a pick of the customer's own waits in the queue (a batch leaves pendingRef only when its save starts, so
+            // every newer edit is still there) or was refused. Left stale, an app answer here would send the old
+            // timer back over the server's.
+            if (!timerRefusedRef.current && !SPRINKLER_TIMER_FIELDS.some((field) => field in pendingRef.current)) {
+              const timerNow = sprinklerTimerKey(result.preferences);
+              setPrefs((prev) => (sprinklerTimerKey(prev) === timerNow ? prev : { ...prev, ...sprinklerTimerOf(result.preferences) }));
+            }
+          }
           // A pair the member withdrew while this save was in flight saved anyway: show the window the server now
           // holds, so the summary (and the inputs, when the section reopens) never hide an active Away Watch. A newer
           // Away Watch edit still queued (Remove, a new pair) wins: saves run one after another, so it is still in
@@ -8865,7 +8910,6 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
               awayWatchUntil: result.preferences.awayWatchUntil ?? null,
             }));
           }
-          const rejectedFields = Array.isArray(result?.rejected) ? result.rejected : [];
           // A field the server validated and saved THIS round clears any
           // stale message from an earlier rejection of the same field; a
           // field the server names here gets (or keeps) its message.
@@ -8920,13 +8964,26 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           // still re-queues the whole batch, unchanged.
           const rejectedFields = Array.isArray(err?.rejected) ? err.rejected : [];
           // What a failure may re-queue: never an Away Watch pair the member withdrew after this save left, and never
-          // `confirmed_as_of` (every flush synthesizes it fresh), so a batch left with no real field queues nothing.
+          // `confirmed_as_of` or `controller_timer_seen` (every flush synthesizes them), so a batch left with no real
+          // field queues nothing.
           const requeueable = (fields) => {
             const kept = awayWatchPairRevision.current === savingAwayWatchRevision ? { ...fields } : withoutAwayWatchPair(fields);
             delete kept.confirmed_as_of;
+            delete kept.controller_timer_seen;
             return kept;
           };
+          // Re-queue UNDER newer edits (a field re-edited since this PUT left wins). A timer change goes back naming the
+          // timers its save named and the timer it sent: a save with no answer may have landed, and any timer change
+          // queued since was made over it.
+          const requeue = (fields) => {
+            if (!Object.keys(fields).length) return;
+            pendingRef.current = { ...fields, ...pendingRef.current };
+            if (SPRINKLER_TIMER_FIELDS.some((field) => field in fields)) {
+              timerSeenRef.current = [...new Set([...(savingTimerSeen || []), sprinklerTimerKey(toSave)])];
+            }
+          };
           if (rejectedFields.length) {
+            if (rejectedFields.some((r) => SPRINKLER_TIMER_FIELDS.includes(r.field))) timerRefusedRef.current = true;
             setFieldErrors(prev => {
               const next = { ...prev };
               for (const r of rejectedFields) next[r.field] = r.message;
@@ -8939,19 +8996,13 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
             // metadata-only request that the server 400s with no `rejected`
             // list — which re-queues it again, forever, and every
             // property-switch flush keeps failing on it.
-            const retryable = requeueable(Object.fromEntries(
+            requeue(requeueable(Object.fromEntries(
               Object.entries(toSave).filter(([k]) => k !== 'confirmed_as_of' && !rejectedSet.has(k)),
-            ));
-            if (Object.keys(retryable).length) {
-              pendingRef.current = { ...retryable, ...pendingRef.current };
-            }
+            )));
           } else {
-            // Re-queue UNDER newer edits (a field re-edited since this PUT
-            // left wins) so the next flush retries these without clobbering
-            // fresher input. The UI is not reverted, so queue and screen
-            // agree.
-            const retry = requeueable(toSave);
-            if (Object.keys(retry).length) pendingRef.current = { ...retry, ...pendingRef.current };
+            // The next flush retries these without clobbering fresher input.
+            // The UI is not reverted, so queue and screen agree.
+            requeue(requeueable(toSave));
           }
           throw err;
         }
@@ -9287,6 +9338,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // standalone lawn-plan customer with no turf type on file used to get no
   // Weekly Inches field at all (found on a customer's phone 2026-08-27).
   const hasLawnCare = tierHasLawnCare || !!String(customer.property?.lawnType || '').trim() || serverHasLawnCare === true;
+  // The sprinkler timer card is a lawn surface: the server's answer only, by the Lawn Health card's rule (owner ruling
+  // 2026-08-28). A tier counts any two services and a pest-only home can have a turf type on file, so neither counts.
+  const hasLawnService = serverHasLawnService === true;
   // Schema semantics (initial_schema.js): property_sqft IS the treated lawn
   // area and bed_sqft is the separate ornamental-bed measurement — never
   // subtract one from the other, that understates the service area.
@@ -9481,6 +9535,20 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         onOpenProperty={onOpenWateringProperty}
         pending={wateringPlanRevision !== savedWateringRevision}
         refreshKey={savedWateringRevision}
+      />}
+
+      {/* The timer on file for THIS home (step 1 of sprinkler timer connect). Lawn-service customers only; it saves
+          through this tab's autosave. Not in IRRIGATION_EDIT_FIELDS: a timer is not a watering input, so the plan does
+          not reload. */}
+      {hasLawnService && <SprinklerTimerCard
+        brand={prefs.irrigationControllerBrand}
+        model={prefs.irrigationControllerModel}
+        app={prefs.irrigationControllerApp}
+        error={fieldErrors.irrigationControllerBrand || fieldErrors.irrigationControllerModel || fieldErrors.irrigationControllerApp}
+        onChange={(fields) => {
+          if (!SPRINKLER_TIMER_FIELDS.some((field) => field in pendingRef.current)) timerSeenRef.current = [sprinklerTimerKey(prefs)];
+          Object.entries(fields).forEach(([field, value]) => updateField(field, value));
+        }}
       />}
 
       <ServicePrefsSection />
@@ -10977,6 +11045,30 @@ const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'S
 // Hidden badge types (engagement-tracking ones we don't show)
 const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'doc_downloader', 'responsive', 'early_adopter', 'feedback_hero', 'portal_explorer', 'feedback_champion'];
 
+// The pricing card's primary action: today's "Request This", or "See my price and book" when the
+// server offers a first plan (GATE_PORTAL_PLAN_START). One button, so both look and behave alike.
+function PricingActionButton({ onClick, busy, disabled = false, label, busyLabel, compact, primaryButton }) {
+  return (
+    <button type="button" onClick={onClick} disabled={busy || disabled} data-glass-accent="" data-glass-size="primary" style={{
+      ...primaryButton,
+      width: compact ? '100%' : 'fit-content',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 8,
+      opacity: busy || disabled ? 0.65 : 1,
+      cursor: busy ? 'wait' : (disabled ? 'not-allowed' : 'pointer'),
+    }}>
+      <Icon name="plus" size={15} strokeWidth={2} />
+      {busy ? busyLabel : label}
+    </button>
+  );
+}
+
+// Plan-start refusals that file today's request: the server could not price or book the option
+// online. Any other coded refusal shows the server's own message and files nothing; one is
+// delivery_in_flight, a quote staff are sending this customer right now (codex pre-push P1).
+const PLAN_START_REQUEST_CODES = ['pricing_unavailable', 'not_eligible', 'offer_changed'];
+
 function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secondaryButton, onExploreTiers }) {
   const [prompt, setPrompt] = useState("I'm interested in adding lawn care");
   const [result, setResult] = useState(null);
@@ -10985,41 +11077,160 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   const [error, setError] = useState('');
   const [requesting, setRequesting] = useState(false);
   const [requested, setRequested] = useState(false);
+  const [startingPlan, setStartingPlan] = useState(false);
+  const [planStartUrl, setPlanStartUrl] = useState('');
+  const planStartTimer = useRef(null);
+  // The tap's session check for the estimate on screen (codex pre-push P0): the hand-off, on the
+  // timer or on "Open it now", opens the estimate only while that session is active and drops it
+  // otherwise. "Open it now" is a button, so the page never holds the estimate link itself.
+  const planStartSession = useRef(null);
+  // A start the server is still minting, whatever option is on screen now. The mint archives
+  // the account's other live plan-start quote, so a second start before the first settles could
+  // archive the quote the browser then opens: starts run one at a time (codex pre-push P1).
+  const [minting, setMinting] = useState(false);
+  // Bumped whenever the answer or the option changes, and when the card goes away: a start still
+  // in flight for the old one is dropped, never opened, and a request that lands for the old one
+  // never marks the new one as sent (codex pre-push P1s).
+  const planStartSeq = useRef(0);
+  const dropPendingPlanStart = () => {
+    planStartSeq.current += 1;
+    clearTimeout(planStartTimer.current);
+    planStartSession.current = null;
+    setPlanStartUrl('');
+    setStartingPlan(false);
+  };
+  const openPlanStart = (url) => {
+    if (planStartSession.current?.()) window.location.assign(url);
+    else dropPendingPlanStart();
+  };
+  // Bumped on every pricing query and when the card goes away: only the latest
+  // answer may set the result, the option, the error or the loading state, so
+  // an older answer never turns booking on (codex pre-push P1).
+  const pricingSeq = useRef(0);
+  useEffect(() => () => {
+    planStartSeq.current += 1;
+    pricingSeq.current += 1;
+    clearTimeout(planStartTimer.current);
+  }, []);
+  useEffect(dropPendingPlanStart, [selectedId]);
 
   const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const options = result?.options || [];
   const selected = options.find((option) => option.id === selectedId) || options[0] || null;
+  // GATE_PORTAL_PLAN_START: a customer with no recurring plan books through a real estimate instead of
+  // filing a request. The server hint lists the options it can book; the start-plan route decides.
+  const canStartPlan = Boolean(selected) && (result.planStart?.optionIds || []).includes(selected.id);
 
   const runPricing = async (nextPrompt = prompt) => {
     const cleanPrompt = String(nextPrompt || '').trim();
+    pricingSeq.current += 1;
+    const seq = pricingSeq.current;
     setPrompt(cleanPrompt);
     setLoading(true);
     setError('');
     setRequested(false);
+    dropPendingPlanStart();
     try {
       const data = await api.queryCustomerPricing(cleanPrompt);
+      if (seq !== pricingSeq.current) return;
       setResult(data);
       setSelectedId(data?.options?.[0]?.id || '');
     } catch (err) {
+      if (seq !== pricingSeq.current) return;
       setError(err.message || 'Pricing unavailable.');
     } finally {
-      setLoading(false);
+      if (seq === pricingSeq.current) setLoading(false);
     }
   };
 
+  // Off while a new answer loads, as the start is: the option on screen is the old answer's, and
+  // the request would capture the new answer's sequence, so it could mark the new answer as sent
+  // (codex pre-push P1).
   const submitRequest = async () => {
-    if (requesting) return;
+    if (requesting || loading) return;
+    const seq = planStartSeq.current;
     setRequesting(true);
     try {
       const subject = selected?.requestSubject || 'Service pricing review requested';
       const description = selected?.requestDescription || `Customer asked WAVES AI: "${prompt}". ${result?.message || ''}`;
       await api.createRequest?.({ category: 'add_service', subject, description });
-      setRequested(true);
+      if (seq === planStartSeq.current) setRequested(true);
     } catch (err) {
       showCustomerAlert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
     } finally {
       setRequesting(false);
     }
+  };
+
+  // Sure refusals made no quote: a 4xx the mint coded (priced by hand, the price changed, a quote on
+  // its way), and the 404 the route answers before the mint while plan start is off. No answer, a
+  // server or gateway error, or any other 4xx with no code (a proxy timeout, a 409 whose body did
+  // not parse, which may be delivery_in_flight) may hide a quote the server already made, or one on
+  // its way (codex pre-push P1s).
+  const startRefused = (err) => Number.isInteger(err?.status) && err.status >= 400 && err.status < 500
+    && (Boolean(err.code) || err.status === 404);
+
+  // Opens the priced estimate (pick a time, save a card there). A pricing or eligibility refusal,
+  // or the 404 the route answers before the mint while plan start is off, falls back to today's
+  // request, so the customer never hits a dead end. A failure with no sure answer files nothing and asks for a new
+  // tap, which hands back the quote the first call may have made: one tap never makes both a quote
+  // and a request. The card never repeats a start on its own, because a late repeat would replace
+  // a quote another tab made since and free its slot hold (codex pre-push P1). Off while a new
+  // answer loads (the option on screen is the old answer's) and while an earlier start still mints
+  // (codex pre-push P1s).
+  //
+  // Everything stays with the tap's own session (codex pre-push P0/P1): the API client answers a
+  // request whose session changed while it waited, so a late reply could hand this account's
+  // estimate link, or file its request, under another account. The check is the API client's own
+  // (sameRequestSession); a requestSuperseded cancel means it already failed. It reads the stored
+  // credential too: a login or logout in another tab rewrites waves_token before this tab's storage
+  // handler updates api.token (codex pre-push P0). It compares the contact claim too, as useAuth does
+  // (tokenContactKey): the API client's check reads none, and it lets a same-customer token of any
+  // session stand in for a token from before durable sessions, so a contact signing in on the
+  // holder's row would pass it (codex pre-push P0).
+  const startPlan = async () => {
+    if (minting || startingPlan || requesting || loading || !selected) return;
+    const seq = planStartSeq.current;
+    const tapToken = api.token;
+    const tapSession = tokenSessionIdentity(tapToken);
+    const tapContact = tokenContactKey(tapToken);
+    const tapSessionActive = () => [api.token, localStorage.getItem('waves_token')]
+      .every((token) => token === tapToken
+        || (sameRequestSession(tapSession, tokenSessionIdentity(token)) && tokenContactKey(token) === tapContact));
+    // Another tab already changed the account, and this tab has not heard of it yet: the start would
+    // mint under the old token and could replace that account's quote and free its slot hold (codex
+    // pre-push P1). Send nothing; the storage handler brings this tab up to date.
+    if (!tapSessionActive()) return;
+    setMinting(true);
+    setStartingPlan(true);
+    const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;
+    let out = null;
+    let refusal = null;
+    try {
+      out = await api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
+    } catch (err) {
+      if (startRefused(err)) refusal = err;
+    } finally {
+      setMinting(false);
+    }
+    if (seq !== planStartSeq.current) return; // another option or a new answer took over
+    if (!tapSessionActive()) {
+      setStartingPlan(false); // another session is active now: this reply is not its own
+      return;
+    }
+    if (out?.url) {
+      // Same hand-off as the cancelled-plan restart: a beat on screen, plus a button if navigation is blocked.
+      planStartSession.current = tapSessionActive;
+      setPlanStartUrl(out.url);
+      planStartTimer.current = setTimeout(() => openPlanStart(out.url), 1500);
+      return;
+    }
+    setStartingPlan(false);
+    if (refusal && (!refusal.code || PLAN_START_REQUEST_CODES.includes(refusal.code))) {
+      await submitRequest();
+      return;
+    }
+    showCustomerAlert(refusal ? refusal.message : 'We could not confirm your estimate. Please tap again in a moment, or call us at (941) 297-5749.');
   };
 
   const promptChips = [
@@ -11216,6 +11427,9 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       // option's own price leads above; only setup / one-time
                       // / tier facts tile here.
                       selected.dueAtStart ? { label: 'Setup', value: money(selected.dueAtStart) } : null,
+                      // A bookable first plan shows the WaveGuard setup fee its estimate charges (codex pre-push
+                      // P1). Only with the plan-start button: the request flow keeps today's tiles.
+                      canStartPlan && selected.setupFee ? { label: 'WaveGuard setup', value: money(selected.setupFee) } : null,
                       selected.oneTime ? { label: 'One-time', value: money(selected.oneTime) } : null,
                       selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                     ].filter(Boolean).slice(0, 3).map((item) => (
@@ -11236,19 +11450,19 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
                       <Icon name="check" size={15} strokeWidth={2} /> Request sent
                     </span>
+                  ) : planStartUrl ? (
+                    <span style={{ color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
+                      Opening your estimate... <button type="button" onClick={() => openPlanStart(planStartUrl)} style={{ color: B.wavesBlue, background: 'none', border: 0, padding: 0, font: 'inherit', textDecoration: 'underline', cursor: 'pointer' }}>Open it now</button>
+                    </span>
+                  ) : canStartPlan ? (
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      <PricingActionButton onClick={startPlan} busy={requesting || startingPlan} disabled={loading || minting} label="See my price and book" busyLabel="Opening..." compact={compact} primaryButton={primaryButton} />
+                      <div style={{ color: '#475569', fontSize: 14, lineHeight: 1.45 }}>
+                        Your estimate shows the full price and open times. Pick a time to book.
+                      </div>
+                    </div>
                   ) : (
-                    <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" data-glass-size="primary" style={{
-                      ...primaryButton,
-                      width: compact ? '100%' : 'fit-content',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      opacity: requesting ? 0.65 : 1,
-                      cursor: requesting ? 'wait' : 'pointer',
-                    }}>
-                      <Icon name="plus" size={15} strokeWidth={2} />
-                      {requesting ? 'Sending...' : 'Request This'}
-                    </button>
+                    <PricingActionButton onClick={submitRequest} busy={requesting} disabled={loading} label="Request This" busyLabel="Sending..." compact={compact} primaryButton={primaryButton} />
                   )}
                 </div>
               )}
@@ -11256,7 +11470,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           )}
 
           {options.length === 0 && result && (
-            <button data-glass-accent="" type="button" onClick={submitRequest} disabled={requesting || requested} style={{
+            <button data-glass-accent="" type="button" onClick={submitRequest} disabled={requesting || requested || loading} style={{
               ...secondaryButton,
               width: compact ? '100%' : 'fit-content',
               display: 'inline-flex',
@@ -13970,7 +14184,8 @@ function ReferTab({ customer, onSwitchTab }) {
     padding: '10px 14px',
     fontSize: 14, minHeight: 44,
   };
-  const money = (n, digits = 0) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  // Whole dollars stay whole ($25); an amount with cents shows them ($25.50), never rounded to $26.
+  const money = (n, digits = Number.isInteger(Number(n || 0)) ? 0 : 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const cents = (n, digits = 0) => money(Number(n || 0) / 100, digits);
 
   if (loading) {
@@ -14028,12 +14243,16 @@ function ReferTab({ customer, onSwitchTab }) {
   // Server-authoritative only — 0 (paused/changed promotion) must not be
   // papered over with a default figure the program won't pay.
   const rewardPerReferral = Number(data?.rewardPerReferral) || 0;
+  // Step 2: a member at the yearly limit is told so instead of being promised another credit (the server sends
+  // capReached and annualCap only while the program is on Step 2).
+  const atYearlyLimit = data?.capReached === true;
+  const earnsCredit = rewardPerReferral > 0 && !atYearlyLimit;
   const lifetimeEarned = data?.totalEarned != null
     ? Number(data.totalEarned || 0) / 100
     : Number(stats.totalEarned || 0);
   const availableBalance = Number(data?.availableBalance || 0) / 100;
   const pendingEarnings = Number(data?.pendingEarnings || 0) / 100;
-  const shareText = `I use Waves Pest Control and thought you might want their info. Here is my referral link: ${shareLink}`;
+  const shareText = `I use Waves and thought you might want their info. Here is my referral link: ${shareLink}`;
   const customerFirstName = customer?.firstName || customer?.first_name || 'your friend';
 
   const statusConfig = {
@@ -14131,12 +14350,14 @@ function ReferTab({ customer, onSwitchTab }) {
               lineHeight: 1.1,
               letterSpacing: 0,
             }}>
-              {rewardPerReferral > 0 ? 'Refer and Earn' : 'Refer a Neighbor'}
+              {earnsCredit ? 'Refer and Earn' : 'Refer a Neighbor'}
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {rewardPerReferral > 0
-                ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
-                : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.'}
+              {atYearlyLimit && Number(data.creditsThisYear) > 0
+                ? `You earned ${Number(data.creditsThisYear)} credits this year, the most we give. Thank you! Credits start again January 1.`
+                : earnsCredit
+                  ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
+                  : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.'}
             </div>
           </div>
           <div style={{
@@ -14502,11 +14723,11 @@ function ReferTab({ customer, onSwitchTab }) {
         <div data-glass="chip" style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />How It Works</div>
         <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Share, they start, you earn</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Three steps from share to credit.</div>
-        <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : `repeat(${rewardPerReferral > 0 ? 3 : 2}, 1fr)`, gap: 10 }}>
+        <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : `repeat(${earnsCredit ? 3 : 2}, 1fr)`, gap: 10 }}>
           {[
             { icon: 'share', title: 'Share', text: 'Send your code or referral link to a neighbor.' },
             { icon: 'checkCircle', title: 'They start', text: 'We track the referral when they become a Waves customer.' },
-            rewardPerReferral > 0 && { icon: 'coins', title: 'You earn', text: `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
+            earnsCredit && { icon: 'coins', title: 'You earn', text: `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
           ].filter(Boolean).map(item => (
             <div key={item.title} style={{
               padding: 14,
@@ -17050,19 +17271,17 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
   );
 }
 
-// Help pill (owner 2026-11-05 mockups; 2026-11-13 "yes i want this to be
-// chat"): the one floating pill, bottom-right above the bottom nav. It opens
-// the Help sheet (Chat = the Messages thread, and Photo ID), or the single
-// feature this customer has, with no menu. A red dot shows an unread answer.
-// It stays mounted (hidden) while Photo ID is open so focus returns to it.
-function HelpFab({ onOpen, hasBottomNav, hidden = false, unread = 0, buttonRef = null }) {
+// Waves Chat pill (owner 2026-11-20: "it just needs to be chat"): the one
+// floating pill, bottom-right above the bottom nav. It opens the Waves Chat
+// sheet, the customer's thread with the office, ready to type into. A red
+// dot shows an unread answer. Photo ID stays under More and Learn.
+function WavesChatFab({ onOpen, hasBottomNav, hidden = false, unread = 0 }) {
   return (
     <button
-      ref={buttonRef}
       type="button"
       onClick={onOpen}
       hidden={hidden}
-      aria-label={unread > 0 ? `Help, ${unreadLabel(unread)}` : 'Help'}
+      aria-label={unread > 0 ? `${MESSAGES_COPY.chatTitle}, ${unreadLabel(unread)}` : MESSAGES_COPY.chatTitle}
       data-glass-accent=""
       style={{
         position: 'fixed',
@@ -17088,7 +17307,7 @@ function HelpFab({ onOpen, hasBottomNav, hidden = false, unread = 0, buttonRef =
       }}
     >
       <Icon name="message" size={19} strokeWidth={2.25} />
-      Help
+      {MESSAGES_COPY.chatTitle}
       {unread > 0 && (
         <span aria-hidden="true" data-help-unread-dot="" style={{
           position: 'absolute', top: 2, right: 2, width: 12, height: 12, borderRadius: 999,
@@ -17099,76 +17318,52 @@ function HelpFab({ onOpen, hasBottomNav, hidden = false, unread = 0, buttonRef =
   );
 }
 
-// The Help pill's menu. A row is listed only while its handler is passed
-// (the Messages probe answered 200 / Photo ID is available).
-function HelpSheet({ onClose, onChat, onOpenPhotoId, unread = 0 }) {
+// The Waves Chat sheet: the Messages thread in a sheet that fills the screen,
+// with the message box pinned above the keyboard (useSheetViewport).
+function WavesChatSheet({ onClose, onUnread, firstName }) {
   // Rendered only while open — lock the page behind the sheet.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
-  const row = (key, icon, label, description, onClick, badge = null) => (
-    <button key={key} type="button" onClick={onClick} style={{
-      width: '100%', minHeight: 56, display: 'flex', alignItems: 'center', gap: 12, padding: '11px 10px',
-      border: 'none', background: 'transparent', borderRadius: 8, cursor: 'pointer', textAlign: 'left',
-      color: B.grayDark, fontFamily: FONTS.body,
-    }}>
-      <span style={{
-        width: 38, height: 38, borderRadius: 8, background: PORTAL_SHELL.soft, color: PORTAL_SHELL.text,
-        display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-      }}>
-        <Icon name={icon} size={18} strokeWidth={2} />
-      </span>
-      <span style={{ minWidth: 0, flex: 1 }}>
-        <span style={{ display: 'block', fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text }}>{label}</span>
-        <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.35 }}>{description}</span>
-      </span>
-      {badge}
-      <Icon name="chevronRight" size={17} strokeWidth={2} style={{ color: PORTAL_SHELL.muted }} />
-    </button>
-  );
-
+  const compact = useIsMobile(760);
+  const viewport = useSheetViewport(true, dialogRef);
   return (
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       data-glass-scrim=""
       style={{
         position: 'fixed', inset: 0, zIndex: 150,
+        ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
         background: 'rgba(15,23,42,0.42)',
         backdropFilter: 'blur(5px)',
-        display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+        display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
+        padding: compact ? 0 : 24,
+        boxSizing: 'border-box',
       }}
     >
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Help" data-help-sheet="" data-glass="modal" style={{
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={MESSAGES_COPY.chatTitle} data-waves-chat-sheet="" data-glass="modal" style={{
         background: PORTAL_SHELL.page,
-        borderRadius: '8px 8px 0 0',
+        borderRadius: compact ? '8px 8px 0 0' : 8,
         position: 'relative',
-        padding: '12px calc(14px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))',
-        boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
-        animation: 'helpSheetUp 0.25s ease',
-        borderTop: `1px solid ${PORTAL_SHELL.border}`,
-        // dvh: 100vh over-measures behind the iOS Safari toolbar.
-        maxHeight: `calc(100${DVH} - 16px - env(safe-area-inset-top, 0px))`,
         boxSizing: 'border-box',
-        overflowY: 'auto',
-        WebkitOverflowScrolling: 'touch',
-        overscrollBehavior: 'contain',
+        width: '100%',
+        maxWidth: 640,
+        margin: '0 auto',
+        // The sheet keeps its full height from the first frame, so the message
+        // box sits at the bottom whether the thread is empty or long.
+        height: compact ? 'calc(100% - 16px - env(safe-area-inset-top, 0px))' : `min(760px, calc(100${DVH} - 48px))`,
+        display: 'flex', flexDirection: 'column',
+        overflow: 'hidden',
+        boxShadow: compact ? '0 -8px 40px rgba(15,23,42,0.18)' : PORTAL_SHELL.shadow,
+        animation: 'wavesChatUp 0.25s ease',
+        border: `1px solid ${PORTAL_SHELL.border}`,
+        borderBottom: compact ? 'none' : `1px solid ${PORTAL_SHELL.border}`,
         fontFamily: FONTS.body,
       }}>
-        <style>{`@keyframes helpSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+        <style>{`@keyframes wavesChatUp { from { transform: translateY(${compact ? '100%' : '16px'}); } to { transform: translateY(0); } }
 @media (prefers-reduced-motion: reduce) {
-  [data-help-sheet] { animation: none !important; }
+  [data-waves-chat-sheet] { animation: none !important; }
 }`}</style>
-        <div style={{ width: 36, height: 4, borderRadius: 999, background: '#D8D0C0', margin: '0 auto 12px' }} />
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
-          <div style={{ fontSize: 20, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.15 }}>How can we help?</div>
-          <ShellCloseButton onClick={onClose} label="Close help menu" />
-        </div>
-        <section data-glass="soft" style={{
-          background: PORTAL_SHELL.surface, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8,
-          boxShadow: PORTAL_SHELL.shadowSoft, position: 'relative', padding: 8,
-        }}>
-          {onChat && row('chat', 'message', 'Chat with Waves', MESSAGES_COPY.help, onChat, unread > 0 ? <UnreadCount count={unread} /> : null)}
-          {onOpenPhotoId && row('photoid', 'camera', 'Photo ID', 'Bugs, lawn, trees & shrubs', onOpenPhotoId)}
-        </section>
+        <PortalChat onUnread={onUnread} firstName={firstName} closeButton={<ShellCloseButton onClick={onClose} label="Close chat" />} />
       </div>
     </div>
   );
@@ -17752,8 +17947,10 @@ export default function PortalPage() {
   // Tab view beacon (server-gated by GATE_PORTAL_ACTIVITY; a dark gate stops it).
   usePortalActivity(activeTab, sessionKey);
   // Re-probe the Messages count when the customer changes tab (and for the first probe).
+  // The open Waves Chat sheet reports the count itself, as the Messages page does.
+  const [showWavesChat, setShowWavesChat] = useState(false);
   const { probe: probeMessages } = messagesGate;
-  useEffect(() => { probeMessages(activeTab); }, [probeMessages, activeTab, sessionEpoch]);
+  useEffect(() => { probeMessages(showWavesChat ? 'messages' : activeTab); }, [probeMessages, activeTab, showWavesChat, sessionEpoch]);
   const resetTabScroll = useRef(false);
   const moreButtonRef = useRef(null);
   useEffect(() => {
@@ -17935,25 +18132,9 @@ export default function PortalPage() {
     return () => { current = false; clearTimeout(timer); };
   }, [appRatingQuiet]);
   const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount && !contactSession;
-  // Help pill: Chat is the Messages thread (never probed for a cancelled or
-  // contact session, so `enabled` is already false there). With both features
-  // the pill opens the Help sheet; with one it opens that feature directly.
-  const [showHelp, setShowHelp] = useState(false);
-  const helpButtonRef = useRef(null);
+  // Waves Chat pill: the Messages thread (never probed for a cancelled or
+  // contact session, so `enabled` is already false there).
   const chatAvailable = messagesGate.enabled;
-  const helpAvailable = chatAvailable || photoIdAvailable;
-  // The pill is hidden on the Messages page, so keyboard focus moves to the
-  // page content there instead of being dropped with the hidden pill.
-  // flushSync: the Help sheet's own focus restore (to the pill) runs first.
-  const openChatPage = () => {
-    flushSync(() => { setShowHelp(false); switchTab('messages'); });
-    document.getElementById('portal-main')?.focus({ preventScroll: true });
-  };
-  const openHelp = () => {
-    if (chatAvailable && photoIdAvailable) setShowHelp(true);
-    else if (chatAvailable) openChatPage();
-    else setShowPhotoId(true);
-  };
   // reportIssuePrefill lives here, above the keyed PortalReadProvider, so a
   // property/account switch (sessionEpoch — another tab, or this one) does
   // NOT clear it on its own. Left alone, a still-open Photo ID handoff would
@@ -18637,11 +18818,11 @@ export default function PortalPage() {
           float) plus the iOS home-indicator inset — a flat 92px left the last
           card underneath the bar on notched phones. */}
       <main id="portal-main" tabIndex={-1} style={{
-        // The Help pill floats 20px above the nav (or the page bottom) and is
+        // The Waves Chat pill floats 20px above the nav (or the page bottom) and is
         // 48px tall: with it on screen the last card ends above the pill.
         padding: isMobileShell
-          ? `24px calc(16px + env(safe-area-inset-right, 0px)) calc(var(--portal-bottom-nav-height, 78px) + ${helpAvailable ? 78 : 30}px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))`
-          : `24px calc(16px + env(safe-area-inset-right, 0px)) ${helpAvailable ? 80 : 32}px calc(16px + env(safe-area-inset-left, 0px))`,
+          ? `24px calc(16px + env(safe-area-inset-right, 0px)) calc(var(--portal-bottom-nav-height, 78px) + ${chatAvailable ? 78 : 30}px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))`
+          : `24px calc(16px + env(safe-area-inset-right, 0px)) ${chatAvailable ? 80 : 32}px calc(16px + env(safe-area-inset-left, 0px))`,
         // shellMaxWidth is the content cap. Preserve the existing 760px
         // desktop content column now that safe-area padding is border-box.
         maxWidth: shellMaxWidth + 32,
@@ -18731,20 +18912,22 @@ export default function PortalPage() {
         />
       )}
 
-      {/* Help pill + its sheet. Hidden while Photo ID or Ask Waves AI is on
-          screen, and on the Messages page (the chat it leads to). Behind its
-          own sheet it stays focusable: the Photo ID row hands focus back to
-          the pill first, so closing Photo ID returns there (as More does). */}
-      {helpAvailable && (
-        <HelpFab onOpen={openHelp} hasBottomNav={isMobileShell} unread={messagesGate.unread} buttonRef={helpButtonRef}
+      {/* Waves Chat pill + its sheet. Hidden while Photo ID or Ask Waves AI is
+          on screen, and on the Messages page (the same thread). Behind its own
+          sheet it stays mounted, so closing the sheet returns focus to it. */}
+      {chatAvailable && (
+        <WavesChatFab onOpen={() => setShowWavesChat(true)} hasBottomNav={isMobileShell} unread={messagesGate.unread}
           hidden={showPhotoId || showChat || activeTab === 'messages'} />
       )}
-      {showHelp && (
-        <HelpSheet
-          onClose={() => setShowHelp(false)}
-          onChat={chatAvailable ? openChatPage : null}
-          onOpenPhotoId={photoIdAvailable ? () => { helpButtonRef.current?.focus({ preventScroll: true }); setShowPhotoId(true); setShowHelp(false); } : null}
-          unread={messagesGate.unread}
+      {showWavesChat && chatAvailable && (
+        <WavesChatSheet
+          // A session or property switch (another tab, or this one) reloads the
+          // thread and drops the draft: nothing typed under one account is
+          // sent into another's thread.
+          key={sessionEpoch}
+          onClose={() => setShowWavesChat(false)}
+          onUnread={messagesGate.setUnread}
+          firstName={[customer?.firstName, customer?.first_name].find(Boolean) || ''}
         />
       )}
       {/* Photo ID sheet (GATE_CUSTOMER_PHOTO_ID; unavailable on a 404 from
@@ -18790,4 +18973,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ReferTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

@@ -33,8 +33,7 @@
  *     today.
  *
  * Uses the ONE shared in-house drive-time estimator (route-optimizer.js's
- * haversine + milesToDriveMinutes, itself gated by GATE_DRIVE_TIME_CALIBRATION)
- * — no new Google API calls, no new estimator.
+ * haversine + milesToDriveMinutes) — no new Google API calls, no new estimator.
  */
 const { haversine, milesToDriveMinutes, HQ } = require('./route-optimizer');
 

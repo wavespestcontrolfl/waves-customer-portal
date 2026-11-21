@@ -1622,8 +1622,9 @@ describe('the nitrogen target on the lawn brief for a reclaimed property', () =>
   });
 });
 
-// GATE_LAWN_CHINCH_TETRINO_RATE (owner 2026-10-22): the brief states the May Tetrino rate the way the plan does.
-describe('the May Tetrino rate on the lawn brief', () => {
+// The brief is created before today's scouting. It can show the stored rate as
+// a reference, but historical maps cannot turn that into a treatment decision.
+describe('the May Tetrino scouting decision on the lawn brief', () => {
   const { LAWN_V13_VERSION } = require('../services/lawn-program');
   const areas = require('../services/lawn-trouble-areas');
   const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_CHINCH_TETRINO_RATE'];
@@ -1652,39 +1653,45 @@ describe('the May Tetrino rate on the lawn brief', () => {
   };
   const tetOf = (guidance) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === TET);
 
-  test('chinch mapped: Tetrino states 0.735 with the reason and the normal figure; Arena is unchanged', async () => {
+  test('a historical chinch map keeps the normal reference rate and says current scouting comes first', async () => {
     may();
     const guidance = await guidanceFor();
-    expect(tetOf(guidance).ratePer1000).toBe(0.735);
-    expect(tetOf(guidance).gates).toEqual({ sunnyTurfOnly: true, chinchRate: '0.735 fl oz/1000 (chinch bugs mapped; normal 0.367 fl oz/1000)' });
+    expect(tetOf(guidance).ratePer1000).toBe(0.367);
+    expect(tetOf(guidance).gates).toEqual({
+      sunnyTurfOnly: true,
+      trigger: 'current scouting evidence',
+      scoutEvidence: 'Record the target and current observations before selecting Tetrino; grubs also require local peak-flight or egg-hatch timing.',
+    });
+    expect(tetOf(guidance).trigger).toBe('current scouting evidence');
     expect(guidance.conditional_products.find((p) => p.name === 'Arena 50 WDG').ratePer1000).toBe(0.147);
-    expect(hasArea).toHaveBeenCalledWith(expect.anything(), PROPERTY, 'chinch', { withinDays: 365 });
+    expect(hasArea).not.toHaveBeenCalled();
   });
 
-  test('no change and no read when the gate is off, the program is not v13, the month is not May, or no chinch is mapped', async () => {
+  test('the scout-first message does not depend on the old high-rate gate or a historical map; non-v13 and non-May stay unchanged', async () => {
     may();
     delete process.env.GATE_LAWN_CHINCH_TETRINO_RATE;
     const off = await guidanceFor();
     expect(tetOf(off).ratePer1000).toBe(0.367);
-    expect(tetOf(off).gates).toEqual({ sunnyTurfOnly: true });
+    expect(tetOf(off).gates).toMatchObject({ sunnyTurfOnly: true, trigger: 'current scouting evidence' });
     process.env.GATE_LAWN_CHINCH_TETRINO_RATE = 'true';
     may('2026.05');
-    expect(tetOf(await guidanceFor()).ratePer1000).toBe(0.367);
+    expect(tetOf(await guidanceFor()).gates).toEqual({ sunnyTurfOnly: true });
     may(LAWN_V13_VERSION, 6);
-    expect(tetOf(await guidanceFor()).ratePer1000).toBe(0.367);
+    expect(tetOf(await guidanceFor()).gates).toEqual({ sunnyTurfOnly: true });
     expect(hasArea).not.toHaveBeenCalled();
     may();
     hasArea.mockResolvedValue(false);
-    expect(tetOf(await guidanceFor()).ratePer1000).toBe(0.367);
+    expect(tetOf(await guidanceFor()).gates).toMatchObject({ sunnyTurfOnly: true, trigger: 'current scouting evidence' });
+    expect(hasArea).not.toHaveBeenCalled();
   });
 
-  test('a failed area read aborts the generation: nothing is stored', async () => {
+  test('a historical-area outage cannot block or alter the scout-first brief', async () => {
     may();
     hasArea.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2027-05-10', property_id: PROPERTY }] }));
-    await expect(PrevisitBrief.generateVisitBrief('svc-1')).rejects.toThrow('db down');
-    expect(global.__dispatch).not.toHaveBeenCalled();
-    expect(state.updates.scheduled_services || []).toEqual([]);
+    await expect(PrevisitBrief.generateVisitBrief('svc-1')).resolves.toMatchObject({ generated: true });
+    expect(tetOf(storedBrief(state).brief.product_guidance).ratePer1000).toBe(0.367);
+    expect(hasArea).not.toHaveBeenCalled();
   });
 });
 

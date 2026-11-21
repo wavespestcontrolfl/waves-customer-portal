@@ -51,6 +51,7 @@ const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
   estimateReviseBlock,
+  selfServeMintEditRefusal,
   estimateEditVersion,
   estimateViewUrl,
   reviseAdminEstimate,
@@ -91,13 +92,10 @@ const {
 } = require('../services/lawn-service-outline');
 const { OUTLINE_PROGRAMS, outlineProgram } = require('../services/service-outline-programs');
 
-// Hard ceiling for limit=all list fetches. The estimates pipeline computes
-// all-time KPIs client-side from this list; if the table ever outgrows this
-// cap the analytics silently truncate to the newest rows, so keep generous
-// headroom (pricing-risk batch is pure compute after one inventory preload).
-const ESTIMATE_LIST_LIMIT = 2000;
+// ESTIMATE_LIST_LIMIT (the hard ceiling for limit=all list fetches) and SENT_ONLY_DELIVERY_ATTEMPT_STATUSES live with
+// the list's row selection in services/estimate-call-list.js, which the 9 AM Call today push shares.
+const { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, clickStatsByEstimateId } = require('../services/estimate-call-list');
 const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
-const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed'];
 
 function estimateMatchesSentOnlyScope(estimate = {}) {
   return !!estimate.sent_at || SENT_ONLY_DELIVERY_ATTEMPT_STATUSES.includes(String(estimate.status || ''));
@@ -1565,6 +1563,9 @@ router.get('/:id/edit-source', async (req, res, next) => {
           }).eligible === true || OfferTiers.offerTiersMarkedPestOnlyState(estData);
         } catch (_) { return false; }
       })(),
+      // GATE_CAGE_TWO_SIZES, read LIVE (never from the stored result): the Pool Cage
+      // Size box offers two sizes on a reopened estimate. Present only while the gate is on.
+      ...(require('../config/feature-gates').cageTwoSizesLive?.() === true ? { poolCageTwoSizes: true } : {}),
       billByInvoice: !!estimate.bill_by_invoice,
       satelliteUrl: estimate.satellite_url,
       propertyId: estimate.property_id || null,
@@ -4264,25 +4265,13 @@ router.get('/', async (req, res, next) => {
       ? 'all'
       : 'hide';
 
-    let query = db('estimates')
-      .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
-      .select('estimates.*', 'technicians.name as created_by_name')
-      .orderBy('estimates.created_at', 'desc');
-
-    if (status) query = query.where('estimates.status', status);
-    if (sentOnly) {
-      query = query.where(function () {
-        this.whereNotNull('estimates.sent_at')
-          .orWhereIn('estimates.status', SENT_ONLY_DELIVERY_ATTEMPT_STATUSES);
-      });
-    }
-    if (source) {
-      const sources = source.split(',');
-      query = query.whereIn('estimates.source', sources);
-    }
+    let query = estimateListQuery(db, {
+      status,
+      sentOnly,
+      sources: source ? source.split(',') : null,
+      archived,
+    });
     if (search) query = applyEstimateSearchFilter(query, search);
-    if (archived === 'only') query = query.whereNotNull('estimates.archived_at');
-    else if (archived !== 'all') query = query.whereNull('estimates.archived_at');
 
     let estimates;
     if (limit === 'all') {
@@ -4294,23 +4283,9 @@ router.get('/', async (req, res, next) => {
       estimates = await query.limit(lim).offset(offset);
     }
 
-    // Aggregate shortlink click telemetry per estimate. One estimate can
-    // accumulate multiple short_codes rows when /send is hit again (re-send
-    // / follow-up flows), so SUM the click counts and MAX the last-clicked
-    // timestamp. Bot UAs are filtered upstream in public-shortlinks so the
-    // numbers reflect real customer taps.
+    // Short-link click telemetry per estimate (summed counts, newest click), the read the Call today push shares.
     const ids = estimates.map((e) => e.id);
-    let clickStats = new Map();
-    if (ids.length) {
-      const rows = await db('short_codes')
-        .where({ entity_type: 'estimates' })
-        .whereIn('entity_id', ids)
-        .groupBy('entity_id')
-        .select('entity_id')
-        .sum({ click_count: 'click_count' })
-        .max({ last_clicked_at: 'last_clicked_at' });
-      clickStats = new Map(rows.map((r) => [r.entity_id, r]));
-    }
+    const clickStats = await clickStatsByEstimateId(db, ids);
 
     // The newest outline per estimate and program: each program's packets (service-outline-programs.js: Tree & Shrub,
     // Pest Control, Mosquito) apart; every other packet is lawn.
@@ -4482,13 +4457,23 @@ router.get('/', async (req, res, next) => {
     const soldByById = await loadSoldByForList(db, estimates);
     // Call list: the newest outbound call to each VIEWED row's phone, one batched read.
     // A failed read costs only the field (lastCalledAt stays null).
+    const { lastCalledAtByEstimateId, lastCallOutcomeByEstimateId, callTodayFields } = require('../services/estimate-call-list');
     let lastCalledById = new Map();
     try {
-      lastCalledById = await require('../services/estimate-call-list').lastCalledAtByEstimateId(db, estimates);
+      lastCalledById = await lastCalledAtByEstimateId(db, estimates);
     } catch (err) {
       // Never err.message: a Knex error carries the SQL with its bindings, i.e. every customer
       // phone in the batch's whereIn (AGENTS.md, PII in logs). The driver code is enough.
       logger.warn(`[estimates] call-list lastCalledAt read failed (${err?.code || 'no code'})`);
+    }
+    // The newest call outcome tapped on each row (POST /:id/call-outcome), one batched read. A failed read marks every
+    // row callOutcomeUnknown, and the shared rule then keeps it off Call today: a row someone logged must not come
+    // back because the read failed (the 9 AM push sends nothing then).
+    let lastCallOutcomeById = null;
+    try {
+      lastCallOutcomeById = await lastCallOutcomeByEstimateId(db, estimates.map((e) => e.id));
+    } catch (err) {
+      logger.warn(`[estimates] call-list call outcome read failed (${err?.code || 'no code'})`);
     }
 
     res.json({
@@ -4527,9 +4512,9 @@ router.get('/', async (req, res, next) => {
           ),
         } : null;
         return {
-          id: e.id, status: e.status, customerName: e.customer_name,
+          id: e.id, customerName: e.customer_name,
           customerId: e.customer_id,
-          customerPhone: e.customer_phone, address: e.address,
+          address: e.address,
           customerEmail: e.customer_email,
           updatedAt: e.updated_at,
           monthlyTotal,
@@ -4542,18 +4527,25 @@ router.get('/', async (req, res, next) => {
           // staff, so the card opens the staff PDF instead.
           staffPreviewable: staffPreviewableIds.has(e.id),
           tier: e.waveguard_tier, createdBy: e.created_by_name,
-          sentAt: e.sent_at,
-          viewedAt: hasBeenSent ? e.viewed_at : null,
           acceptedAt: e.accepted_at,
           scheduledAt: e.scheduled_at,
           expiresAt: e.expires_at,
           sendMethod: e.send_method,
           declinedAt: e.declined_at,
           viewCount: hasBeenSent ? e.view_count || 0 : 0,
-          lastViewedAt: hasBeenSent ? e.last_viewed_at : null,
           clickCount: parseInt(clickStats.get(e.id)?.click_count || 0, 10),
-          lastClickedAt: clickStats.get(e.id)?.last_clicked_at || null,
           createdAt: e.created_at,
+          // The follow-up fields (status, phone, archivedAt, sentAt, views, click, follow-up, newest answered
+          // call): one mapping shared with the 9 AM push (services/estimate-call-list.js callTodayFields).
+          // undeliveredSelfServe also keeps the quote out of Going cold and Follow-up overdue, and its
+          // mint stamp out of sentAt.
+          ...callTodayFields(e, {
+            lastClickedAt: clickStats.get(e.id)?.last_clicked_at,
+            lastCalledAt: lastCalledById.get(e.id),
+            lastCallOutcome: lastCallOutcomeById?.get(e.id),
+            callOutcomeUnknown: !lastCallOutcomeById,
+            undeliveredSelfServe: require('../services/self-serve-estimates').isUndeliveredSelfServe(e.source, estData),
+          }),
           source: e.source || 'manual',
           serviceInterest,
           serviceLines,
@@ -4563,9 +4555,6 @@ router.get('/', async (req, res, next) => {
           description: serviceInterest || e.notes,
           notes: e.notes,
           followUpCount: e.follow_up_count || 0,
-          lastFollowUpAt: e.last_follow_up_at,
-          // Call list: newest outbound call to a viewed row's phone; null otherwise.
-          lastCalledAt: lastCalledById.get(e.id) || null,
           declineReason: e.decline_reason,
           disposition: e.disposition || null,
           dispositionSource: e.disposition_source || null,
@@ -4573,7 +4562,6 @@ router.get('/', async (req, res, next) => {
           competitorName: e.competitor_name || null,
           competitorPrice: e.competitor_price != null ? parseFloat(e.competitor_price) : null,
           token: e.token,
-          archivedAt: e.archived_at,
           showOneTimeOption: e.show_one_time_option,
           billByInvoice: e.bill_by_invoice,
           // The row offers "Send booking link" only when the route would not refuse it
@@ -5901,6 +5889,36 @@ router.post('/:id/unarchive', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /:id/call-outcome — what a call from the Call today list came to (owner 2026-11-20, D1 A): Booked, Call back,
+// Not interested or No answer (shared/estimate-call-today.cjs CALL_OUTCOMES). One tap saves the outcome, who tapped and
+// when as an activity_log row on the estimate, and the row leaves Call today until the customer opens or taps the
+// estimate again. It only records: it texts, emails and calls nobody, books nothing and changes no estimate field.
+// "Not interested" also opens the page's Mark lost box, which saves through PATCH /:id as before. The log line carries
+// no customer name (the row's estimate_id and customer_id say whose it is), so a failed insert puts none in the error
+// log (AGENTS.md, PII in logs).
+router.post('/:id/call-outcome', async (req, res, next) => {
+  try {
+    const { CALL_OUTCOMES } = require('../../shared/estimate-call-today.cjs');
+    const { CALL_OUTCOME_ACTION, staffFirstName } = require('../services/estimate-call-list');
+    const outcome = CALL_OUTCOMES.find((o) => o.key === req.body?.outcome);
+    if (!outcome) return res.status(400).json({ error: 'Pick an outcome: Booked, Call back, Not interested or No answer.' });
+    const estimate = await db('estimates').where({ id: req.params.id }).first('id', 'customer_id', 'status');
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    // A draft was never sent, so no call came of it. Only a draft can be deleted, and an outcome row on it would block
+    // that delete (activity_log.estimate_id has no ON DELETE).
+    if (estimate.status === 'draft') return res.status(409).json({ error: 'A draft estimate has no call to log. Send it first.' });
+    const [row] = await db('activity_log').insert({
+      admin_user_id: req.technicianId || null,
+      customer_id: estimate.customer_id || null,
+      estimate_id: estimate.id,
+      action: CALL_OUTCOME_ACTION,
+      description: `Call outcome: ${outcome.label}`,
+      metadata: JSON.stringify({ outcome: outcome.key }),
+    }).returning(['created_at']);
+    res.status(201).json({ callOutcome: { outcome: outcome.key, at: row.created_at, by: staffFirstName(req.technician?.name) } });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/estimates/:id/follow-up — manually send a follow-up SMS
 router.post('/:id/follow-up', async (req, res, next) => {
   try {
@@ -6375,6 +6393,15 @@ router.patch('/:id', async (req, res, next) => {
       if (verdict.error) return res.status(400).json({ error: verdict.error });
       Object.assign(updates, verdict.updates);
     }
+    // A customer's own mint (plan_restart / plan_start) is never edited in place, and these two
+    // options change what its accept does (codex pre-push r29 on #8132): any change to either gets the
+    // revise refusal, in both directions. Turning one back OFF would make a quote the page already
+    // refused acceptable again on the same estimate, where a card that tab captured and dropped could
+    // be replayed (tenth pre-push audit). Such a quote is replaced instead: the customer's next portal
+    // tap archives it and mints a fresh one (reuseLiveQuote).
+    const mintRefusal = (req.body.showOneTimeOption !== undefined || req.body.billByInvoice !== undefined)
+      ? selfServeMintEditRefusal(estimate) : null;
+    if (mintRefusal) return res.status(409).json({ error: mintRefusal });
     if (req.body.showOneTimeOption !== undefined) {
       const nextShowOneTimeOption = !!req.body.showOneTimeOption;
       const deliveryError = nextShowOneTimeOption ? validateEstimateDeliveryOptions({

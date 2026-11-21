@@ -4,6 +4,7 @@
  *     every live row keeps the old refusal.
  *   - Reviving an expired row (extend, direct and grouped siblings) sheds a staff loss reason.
  *   - lastCalledAt: one batched call_log read for the viewed rows, phone matched as call_log.to_phone is stored.
+ *   - Call outcomes: POST /api/admin/estimates/:id/call-outcome saves one activity_log row; one batched read per list.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
@@ -59,7 +60,7 @@ jest.mock('../services/visual-service-notes', () => ({
 
 const db = require('../models/db');
 const adminEstimatesRouter = require('../routes/admin-estimates');
-const { lastCalledAtByEstimateId, callLogPhoneFor, CUSTOMER_ANSWERED_SQL } = require('../services/estimate-call-list');
+const { lastCalledAtByEstimateId, callLogPhoneFor, CUSTOMER_ANSWERED_SQL, estimateListQuery } = require('../services/estimate-call-list');
 const { extendEstimate } = require('../services/estimate-extension');
 
 function routeHandler(router, path, method) {
@@ -281,5 +282,231 @@ describe('lastCalledAt (one batched read)', () => {
   test('callLogPhoneFor refuses garbage', () => {
     expect(callLogPhoneFor({ customer_phone: 'abc' })).toBeNull();
     expect(callLogPhoneFor({ customer_phone: '(941) 555-0101' })).toBe('+19415550101');
+  });
+});
+
+// The list route's row selection, shared with the 9 AM Call today push (estimate-call-today-push.js).
+describe('estimateListQuery', () => {
+  const recorder = () => {
+    const calls = [];
+    const q = new Proxy({}, { get: (_t, name) => (...args) => { calls.push([name, ...args]); return q; } });
+    return { q, calls };
+  };
+
+  test('joins the creator, newest first, hides archived rows by default', () => {
+    const { q, calls } = recorder();
+    estimateListQuery(() => q);
+    expect(calls).toEqual([
+      ['leftJoin', 'technicians', 'estimates.created_by_technician_id', 'technicians.id'],
+      ['select', 'estimates.*', 'technicians.name as created_by_name'],
+      ['orderBy', 'estimates.created_at', 'desc'],
+      // A stable tie-breaker: the push and the page cut the newest 2,000 at the same rows.
+      ['orderBy', 'estimates.id', 'desc'],
+      ['whereNull', 'estimates.archived_at'],
+    ]);
+  });
+
+  test('status, source list and archived modes narrow the same query', () => {
+    const only = recorder();
+    estimateListQuery(() => only.q, { status: 'draft', sources: ['a', 'b'], archived: 'only' });
+    expect(only.calls).toContainEqual(['where', 'estimates.status', 'draft']);
+    expect(only.calls).toContainEqual(['whereIn', 'estimates.source', ['a', 'b']]);
+    expect(only.calls).toContainEqual(['whereNotNull', 'estimates.archived_at']);
+    const all = recorder();
+    estimateListQuery(() => all.q, { archived: 'all' });
+    expect(all.calls.map(([name]) => name)).not.toContain('whereNull');
+    expect(all.calls.map(([name]) => name)).not.toContain('whereNotNull');
+  });
+});
+
+describe('clickStatsByEstimateId (the click read the list route and the Call today push share)', () => {
+  const { clickStatsByEstimateId } = require('../services/estimate-call-list');
+
+  test('one grouped read: summed click counts and the newest click, keyed by estimate id', async () => {
+    const calls = [];
+    const q = {};
+    for (const name of ['where', 'whereIn', 'groupBy', 'select', 'sum', 'max']) q[name] = (...args) => { calls.push([name, ...args]); return q; };
+    q.then = (ok, no) => Promise.resolve([{ entity_id: 'e1', click_count: '3', last_clicked_at: '2026-11-19T15:00:00Z' }]).then(ok, no);
+    const database = jest.fn(() => q);
+    const stats = await clickStatsByEstimateId(database, ['e1', 'e2']);
+    expect(database).toHaveBeenCalledTimes(1);
+    expect(database).toHaveBeenCalledWith('short_codes');
+    expect(calls).toEqual([
+      ['where', { entity_type: 'estimates' }],
+      ['whereIn', 'entity_id', ['e1', 'e2']],
+      ['groupBy', 'entity_id'],
+      ['select', 'entity_id'],
+      ['sum', { click_count: 'click_count' }],
+      ['max', { last_clicked_at: 'last_clicked_at' }],
+    ]);
+    expect(stats.get('e1')).toMatchObject({ click_count: '3', last_clicked_at: '2026-11-19T15:00:00Z' });
+    expect(stats.has('e2')).toBe(false);
+  });
+
+  test('no ids = no query', async () => {
+    const database = jest.fn();
+    expect((await clickStatsByEstimateId(database, [])).size).toBe(0);
+    expect(database).not.toHaveBeenCalled();
+  });
+
+  // One click read: a change to which clicks count reaches the page and the push together.
+  test('the list route and the Call today push both read clicks through it', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const file of ['routes/admin-estimates.js', 'services/estimate-call-today-push.js']) {
+      const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+      expect(src).toContain('clickStatsByEstimateId(db, ');
+      expect(src).not.toMatch(/\.max\(\{ last_clicked_at: 'last_clicked_at' \}\)/);
+    }
+  });
+});
+
+// Call outcomes (owner 2026-11-20, D1 A): one tap on a Call today row saves Booked, Call back, Not interested or No
+// answer, with who and when, as an activity_log row on the estimate. It only records.
+describe('call outcomes', () => {
+  const { lastCallOutcomeByEstimateId, callTodayFields } = require('../services/estimate-call-list');
+  const handler = routeHandler(adminEstimatesRouter, '/:id/call-outcome', 'post');
+
+  function insertBuilder(createdAt) {
+    const q = {};
+    q.insert = jest.fn(() => q);
+    q.returning = jest.fn(async () => [{ created_at: createdAt }]);
+    return q;
+  }
+
+  beforeEach(() => { db.mockReset(); });
+
+  test('saves the outcome, who and when as one activity_log row, and changes nothing on the estimate', async () => {
+    const read = makeBuilder({ first: { id: 'e1', customer_id: 'c1', status: 'viewed' } });
+    const write = insertBuilder('2026-11-20T14:42:00.000Z');
+    db.mockImplementationOnce(() => read).mockImplementationOnce(() => write);
+    const res = makeRes();
+    const next = jest.fn();
+    await handler({ params: { id: 'e1' }, body: { outcome: 'no_answer' }, technicianId: 't1', technician: { name: 'Virginia Fixture' } }, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(db.mock.calls.map(([table]) => table)).toEqual(['estimates', 'activity_log']);
+    expect(read.where).toHaveBeenCalledWith({ id: 'e1' });
+    // No customer name is read or logged (AGENTS.md, PII in logs: a failed insert's error carries its bindings).
+    expect(read.first).toHaveBeenCalledWith('id', 'customer_id', 'status');
+    expect(read.update).not.toHaveBeenCalled();
+    expect(write.insert).toHaveBeenCalledWith({
+      admin_user_id: 't1',
+      customer_id: 'c1',
+      estimate_id: 'e1',
+      action: 'estimate_call_outcome',
+      description: 'Call outcome: No answer',
+      metadata: JSON.stringify({ outcome: 'no_answer' }),
+    });
+    expect(res.status).toHaveBeenCalledWith(201);
+    expect(res.json).toHaveBeenCalledWith({ callOutcome: { outcome: 'no_answer', at: '2026-11-20T14:42:00.000Z', by: 'Virginia' } });
+  });
+
+  test.each([undefined, '', 'voicemail', 'BOOKED', 'toString'])('an outcome outside the four (%p) is refused before any read', async (outcome) => {
+    const res = makeRes();
+    await handler({ params: { id: 'e1' }, body: { outcome }, technicianId: 't1' }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  // Only a draft can be deleted, and an outcome row would block that delete (activity_log.estimate_id has no ON DELETE).
+  test('a draft answers 409 and writes nothing', async () => {
+    db.mockImplementationOnce(() => makeBuilder({ first: { id: 'd1', customer_id: 'c1', status: 'draft' } }));
+    const res = makeRes();
+    await handler({ params: { id: 'd1' }, body: { outcome: 'booked' }, technicianId: 't1' }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(db).toHaveBeenCalledTimes(1);
+  });
+
+  test('an unknown estimate answers 404 and writes nothing', async () => {
+    db.mockImplementationOnce(() => makeBuilder({ first: null }));
+    const res = makeRes();
+    await handler({ params: { id: 'missing' }, body: { outcome: 'booked' }, technicianId: 't1' }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(db).toHaveBeenCalledTimes(1);
+  });
+
+  test('one read: the newest outcome per estimate, with the first name of who tapped it', async () => {
+    const calls = [];
+    const q = {};
+    for (const name of ['leftJoin', 'where', 'whereIn', 'distinctOn', 'orderBy', 'select']) q[name] = (...args) => { calls.push([name, ...args]); return q; };
+    q.then = (ok, no) => Promise.resolve([
+      { estimate_id: 'e1', created_at: '2026-11-20T14:42:00Z', metadata: { outcome: 'no_answer' }, by_name: 'Virginia Fixture' },
+      { estimate_id: 'e2', created_at: '2026-11-20T15:00:00Z', metadata: { outcome: 'voicemail' }, by_name: 'Adam' },
+      { estimate_id: 'e3', created_at: '2026-11-20T15:10:00Z', metadata: { outcome: 'booked' }, by_name: null },
+    ]).then(ok, no);
+    const database = jest.fn(() => q);
+    const out = await lastCallOutcomeByEstimateId(database, ['e1', 'e2', 'e3', 'e4']);
+    expect(database).toHaveBeenCalledTimes(1);
+    expect(database).toHaveBeenCalledWith('activity_log as a');
+    expect(calls).toEqual([
+      ['leftJoin', 'technicians as t', 't.id', 'a.admin_user_id'],
+      ['where', 'a.action', 'estimate_call_outcome'],
+      ['whereIn', 'a.estimate_id', ['e1', 'e2', 'e3', 'e4']],
+      ['distinctOn', 'a.estimate_id'],
+      ['orderBy', [{ column: 'a.estimate_id' }, { column: 'a.created_at', order: 'desc' }, { column: 'a.id', order: 'desc' }]],
+      ['select', 'a.estimate_id', 'a.created_at', 'a.metadata', 't.name as by_name'],
+    ]);
+    expect(out.get('e1')).toEqual({ outcome: 'no_answer', at: '2026-11-20T14:42:00Z', by: 'Virginia' });
+    expect(out.has('e2')).toBe(false); // not one of the four
+    expect(out.get('e3')).toEqual({ outcome: 'booked', at: '2026-11-20T15:10:00Z', by: null });
+    expect(out.has('e4')).toBe(false);
+  });
+
+  test('no ids = no query', async () => {
+    const database = jest.fn();
+    expect((await lastCallOutcomeByEstimateId(database, [])).size).toBe(0);
+    expect(database).not.toHaveBeenCalled();
+  });
+
+  test('the list row carries the newest outcome, and the shared rule takes the row off once it is newer than the last touch', () => {
+    const { isCallTodayEstimate } = require('../../shared/estimate-call-today.cjs');
+    const now = Date.parse('2026-11-20T15:00:00Z');
+    const stored = {
+      status: 'viewed', customer_phone: '+19415550101', archived_at: null, sent_at: '2026-11-19T12:00:00Z',
+      viewed_at: '2026-11-20T09:00:00Z', last_viewed_at: '2026-11-20T09:00:00Z', last_follow_up_at: null,
+    };
+    expect(isCallTodayEstimate(callTodayFields(stored), now)).toBe(true);
+    const tapped = { outcome: 'no_answer', at: '2026-11-20T14:00:00Z', by: 'Virginia' };
+    expect(callTodayFields(stored, { lastCallOutcome: tapped }).lastCallOutcome).toEqual(tapped);
+    expect(isCallTodayEstimate(callTodayFields(stored, { lastCallOutcome: tapped }), now)).toBe(false);
+    // An outcome from before the customer's last touch: the row is back on the list.
+    const older = { outcome: 'call_back', at: '2026-11-20T08:00:00Z', by: 'Virginia' };
+    expect(isCallTodayEstimate(callTodayFields(stored, { lastCallOutcome: older }), now)).toBe(true);
+    expect(callTodayFields(stored).lastCallOutcome).toBeNull();
+    // A failed outcome read (codex pre-push P1): the row says so, and the shared rule withholds it.
+    expect(callTodayFields(stored).callOutcomeUnknown).toBe(false);
+    expect(callTodayFields(stored, { callOutcomeUnknown: true }).callOutcomeUnknown).toBe(true);
+    expect(isCallTodayEstimate(callTodayFields(stored, { callOutcomeUnknown: true }), now)).toBe(false);
+  });
+
+  test('the list route and the 9 AM push both read outcomes through the one batched read', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const file of ['routes/admin-estimates.js', 'services/estimate-call-today-push.js']) {
+      const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+      expect(src).toContain('lastCallOutcomeByEstimateId(db, ');
+      expect(src).toContain('lastCallOutcome: ');
+    }
+  });
+});
+
+describe('callTodayFields: an undelivered self-serve quote carries no sentAt (codex pre-push P1)', () => {
+  const { callTodayFields } = require('../services/estimate-call-list');
+  const stored = {
+    status: 'viewed', customer_phone: '+19415550101', archived_at: null, sent_at: '2026-11-12T15:00:00.000Z',
+    viewed_at: '2026-11-12T15:05:00.000Z', last_viewed_at: '2026-11-13T15:00:00.000Z', last_follow_up_at: null,
+  };
+
+  test('its sent_at is the mint stamp, so the row shows no send; the customer\'s opens stay as stored', () => {
+    expect(callTodayFields(stored, { undeliveredSelfServe: true })).toMatchObject({
+      status: 'viewed', sentAt: null, viewedAt: stored.viewed_at, lastViewedAt: stored.last_viewed_at, undeliveredSelfServe: true,
+    });
+  });
+
+  test('any other row reads as stored', () => {
+    expect(callTodayFields(stored)).toMatchObject({
+      status: 'viewed', sentAt: stored.sent_at, viewedAt: stored.viewed_at, lastViewedAt: stored.last_viewed_at,
+      undeliveredSelfServe: false,
+    });
   });
 });

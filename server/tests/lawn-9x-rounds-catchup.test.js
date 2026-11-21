@@ -184,7 +184,7 @@ function planDb({ date, pattern = 'lawn_rounds_9', series = [], history = [], pa
   });
 }
 const NOW = new Date('2026-10-29T16:00:00Z');
-const planWith = (options) => engine.buildPlanForService('visit-1', { db: planDb(options), billingModeColumnExists: false, now: NOW });
+const planWith = (options) => engine.buildPlanForService('visit-1', { db: planDb(options), billingModeColumnExists: false, now: NOW, ...(options.planner || {}) });
 const itemsOf = (plan) => [...plan.protocol.base, ...plan.protocol.conditional];
 const selectedNames = (plan) => plan.mixCalculator.items.map((item) => item.product?.name);
 const DITHIOPYR_FEB = { id: 'h1', customer_id: 'cust-1', application_date: '2027-02-10', retracted_at: null, property_id: null, service_record_id: 'r-old', catalog_active_ingredient: 'dithiopyr', active_ingredient: 'dithiopyr' };
@@ -273,13 +273,27 @@ describe('the catch-up on a new customer\'s first round-3 visit', () => {
     expect(selectedNames(other)).toContain(NAMES.DIM2);
   });
 
-  test('a first visit in round 4 (May 5): no catch-up, and Tetrino still applies alone', async () => {
+  test('a first visit in round 4 (May 5): Tetrino is held until this visit records current evidence', async () => {
     const plan = await planWith({ date: '2027-05-05' });
     expect(plan.propertyGate.blocks).toEqual([]);
-    expect(selectedNames(plan)).toEqual([NAMES.TET]);
+    expect(selectedNames(plan)).toEqual([]);
+    expect(plan.mixCalculator.conditionalOptions.find((item) => item.product?.name === NAMES.TET))
+      .toMatchObject({ selected: false, fieldHold: 'tetrino_scout_evidence_required' });
+    expect(plan.propertyGate.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'lawn_v13_tetrino_scout_evidence_required', productName: NAMES.TET })]));
     expect(plan.roundStep).toEqual({ round: 4, month: 5, spotMonth: 5 });
     expect(plan).not.toHaveProperty('roundsCatchUp');
     expect(plan.protocol.structured.products.map((p) => p.protocolProductName)).not.toContain(NAMES.DIM2);
+  });
+
+  test.each(['st_augustine', 'bermuda', 'zoysia'])('%s: current chinch evidence can select the normal May Tetrino rate on 9x and 12x visits', async (track) => {
+    const planner = { selectedConditionalProductNames: [NAMES.TET], tetrinoTarget: 'chinch', tetrinoCurrentObservations: '4 counted at the damaged edge', tetrinoPressure: 'ordinary' };
+    for (const pattern of ['lawn_rounds_9', 'monthly']) {
+      const plan = await planWith({ date: '2027-05-05', track, pattern, planner });
+      const item = plan.mixCalculator.items.find((entry) => entry.product?.name === NAMES.TET);
+      expect(item).toMatchObject({ selected: true });
+      expect(item).not.toHaveProperty('fieldHold');
+      expect(item.mix.ratePer1000).toBe(0.367);
+    }
   });
 
   test('a first visit in round 2 (Feb 10) or round 5 (Jun 10): no catch-up either', async () => {

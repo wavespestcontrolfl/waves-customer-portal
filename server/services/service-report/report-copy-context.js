@@ -9,6 +9,7 @@
 // API, or a customer with no history must degrade to "less context", never an
 // error. The route always has the technician's notes to fall back on.
 
+const { provenFindingRows } = require('./finding-provenance');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildPressureTrendContext } = require('./pressure-trend');
@@ -330,10 +331,16 @@ async function loadPriorVisits({
     }).slice(0, limit);
     if (!visibleRows.length) return [];
     const ids = visibleRows.map((r) => r.id);
-    const loaded = await knex('service_findings')
+    const findingRows = await knex('service_findings')
       .whereIn('service_record_id', ids)
-      .select('service_record_id', 'severity', 'title', ...(excludeAutoNoActivity ? ['category'] : []))
+      .select('service_record_id', 'severity', 'title', 'detail', 'recommendation', ...(excludeAutoNoActivity ? ['category'] : []))
       .catch(() => []);
+    // Only the rows a customer may see, each against its own visit's form
+    // snapshot (finding-provenance.js): a bare title can be a line of the raw
+    // technician note, and these titles ground customer copy.
+    const loaded = visibleRows.flatMap((r) => provenFindingRows(
+      findingRows.filter((f) => String(f.service_record_id) === String(r.id)), r.structured_notes,
+    ));
     // Under GATE_REPORT_WRITER_RULES the automatic "No activity observed"
     // row (no-activity-finding.js, stamped whenever a visit recorded no
     // observation) stays out: it reads as a technician finding the tech

@@ -1,0 +1,285 @@
+'use strict';
+
+/**
+ * Builders list (admin, read only). Which builders pull permits in unincorporated Manatee County, from the two
+ * synced county tables: pool_permit_records (pool builders) and construction_permit_records (new homes). The owner
+ * uses it to pick builders to pitch pre-slab termite treatment to. It sends nothing and calls no AI.
+ *
+ * A big builder files under several license numbers and several spellings, so rows are grouped by builder NAME key
+ * (builderKey), not by license. Owner-builders (license OWN...) and permits with no contractor name are left out.
+ * Logs carry counts and elapsed time only, never an address, owner name or parcel id.
+ */
+
+const db = require('../../models/db');
+const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { dateOnlyString, dateOnlyAtNoonUtc } = require('../../utils/date-only');
+const { whereLiveCustomer } = require('../customer-stages');
+
+const KINDS = ['pool', 'home'];
+const COMPANY_WORDS = new Set(['LLC', 'INC', 'CORP', 'CORPORATION', 'CO', 'COMPANY', 'LTD', 'INCORPORATED']);
+const DEFAULT_PERMIT_LIMIT = 25;
+const MAX_PERMIT_LIMIT = 100;
+
+// Table and column names are fixed here and picked by a validated kind; every value is a bound parameter.
+// Pool: a canceled permit is not a pool (the table keeps them on purpose). Home: only new builds on a residential
+// permit count; the table also holds commercial permits ("New", "New Multi-Family Residential"), which are not homes.
+// Home: the county also drops a canceled or withdrawn permit from its report with no status update. The weekly sync
+// re-reads the whole report in ONE transaction, so every row it saw carries that run's last_seen_at, the newest in
+// the table. A permit with no certificate of occupancy that the newest sync did not see has vanished and is left
+// out; a finished home (co_date set) stays. A stale sync empties nothing: the newest run on file is the measure.
+const SOURCES = {
+  pool: {
+    table: 'pool_permit_records',
+    id: 'record_id',
+    status: 'record_status',
+    address: 'address_line1',
+    city: 'city',
+    typeOfWork: 'NULL',
+    where: "AND LOWER(COALESCE(record_status, '')) <> 'canceled'",
+  },
+  home: {
+    table: 'construction_permit_records',
+    id: 'permit_no',
+    status: 'status',
+    address: 'address_raw',
+    city: 'NULL',
+    typeOfWork: 'type_of_work',
+    where: "AND LOWER(COALESCE(permit_type, '')) = 'residential' AND type_of_work ILIKE 'New%' AND LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')"
+      + ' AND (co_date IS NOT NULL OR last_seen_at >= (SELECT MAX(last_seen_at) FROM construction_permit_records))',
+  },
+};
+
+// The base filter every query shares: a named builder, not an owner-builder.
+const BUILDER_ONLY = "AND BTRIM(COALESCE(contractor_name, '')) <> '' AND UPPER(COALESCE(contractor_license, '')) NOT LIKE 'OWN%'";
+
+// A listed kind only: an inherited name such as "constructor" is not a key of SOURCES and never reaches a query.
+function sourceFor(kind) {
+  if (!KINDS.includes(kind)) throw new Error('unknown builder kind');
+  return SOURCES[kind];
+}
+
+/**
+ * Upper case, accents on Latin letters dropped (PEÑA -> PENA, so it matches a customer typed without the accent),
+ * apostrophes and periods gone (straight or curly), commas and other punctuation a space (POOLS,LLC is POOLS LLC),
+ * trailing company words (LLC, INC, ...) dropped.
+ * Letters of any script, their marks and digits stay, so two names in another alphabet never share a key: in
+ * Japanese or Cyrillic a mark makes another letter (ガ is not カ, Й is not И), and in Devanagari a vowel sign is part
+ * of the word.
+ */
+function builderKey(name) {
+  const words = String(name == null ? '' : name)
+    .normalize('NFKD')
+    .replace(/(\p{Script=Latin})\p{M}+/gu, '$1')
+    .normalize('NFC')
+    .toUpperCase()
+    .replace(/['‘’.]/g, '')
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+  const kept = [...words];
+  while (kept.length > 1 && COMPANY_WORDS.has(kept[kept.length - 1])) kept.pop();
+  return kept.join(' ');
+}
+
+// A calendar day moved by whole days, with the shared helper: noon UTC is the same day in Eastern time.
+const shiftDay = (day, days) => dateOnlyString(addETDays(dateOnlyAtNoonUtc(day), days));
+
+// The county file arrives once a week (Mondays), so "the last 7 days from today" would fall to zero as the week goes on.
+// The week summary is the 7 days that end on the newest permit date on file (weekEnd), never a day after today.
+// The newest date can arrive as a pg DATE (a Date): it becomes a plain day before it is compared.
+function cutoffsFor(today, dataThrough = null) {
+  const newest = dateOnlyString(dataThrough);
+  const weekEnd = newest && newest < today ? newest : today;
+  return {
+    today,
+    weekStart: shiftDay(weekEnd, -6), // 7 days, weekEnd included
+    weekEnd,
+    d30: shiftDay(today, -29), // the last 30 days, today included
+    d90: shiftDay(today, -89),
+    d365: shiftDay(today, -364),
+  };
+}
+
+// The value with the highest weight; a tie goes to the smaller text so the answer never depends on row order.
+function heaviest(rows, field) {
+  const weight = new Map();
+  for (const row of rows) {
+    if (row[field]) weight.set(row[field], (weight.get(row[field]) || 0) + row.permits365);
+  }
+  const ranked = [...weight.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+  return ranked.length ? ranked[0][0] : null;
+}
+
+// A row as the database returns it: a COUNT arrives as text and a DATE can arrive as a Date. Every count becomes a
+// number and every day a plain 'YYYY-MM-DD' before anything is added, compared or sorted.
+function normalizeRow(row) {
+  return {
+    name: row.name,
+    license: row.license || null,
+    permits7: Number(row.permits7) || 0,
+    permits30: Number(row.permits30) || 0,
+    permits90: Number(row.permits90) || 0,
+    permits365: Number(row.permits365) || 0,
+    firstPermit: dateOnlyString(row.firstPermit),
+    lastPermit: dateOnlyString(row.lastPermit),
+  };
+}
+
+function mergeGroup(key, group, { newSince, customerKeys }) {
+  const sum = (field) => group.reduce((total, row) => total + row[field], 0);
+  const firsts = group.map((row) => row.firstPermit).filter(Boolean).sort();
+  const lasts = group.map((row) => row.lastPermit).filter(Boolean).sort();
+  const firstPermit = firsts[0] || null;
+  return {
+    key,
+    name: heaviest(group, 'name') || key,
+    license: heaviest(group, 'license'),
+    permits7: sum('permits7'),
+    permits30: sum('permits30'),
+    permits90: sum('permits90'),
+    permits365: sum('permits365'),
+    firstPermit,
+    lastPermit: lasts.length ? lasts[lasts.length - 1] : null,
+    isNew: Boolean(firstPermit && firstPermit >= newSince),
+    isCustomer: customerKeys.has(key),
+  };
+}
+
+/**
+ * Pure merge. rows: one per upper-cased name and license, as the database returns them (normalizeRow). Returns the
+ * builders (permits in the last 365 days only), sorted by 90-day permits, then 12-month permits, then name, and the
+ * newest-week summary. The week is counted before the 12-month cut: it ends on the newest permit on file, which can
+ * be older than 12 months.
+ */
+function mergeBuilders(rows, { newSince, customerKeys = new Set() }) {
+  const groups = new Map();
+  for (const raw of rows) {
+    const row = normalizeRow(raw);
+    const key = builderKey(row.name);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  const merged = [...groups.entries()].map(([key, group]) => mergeGroup(key, group, { newSince, customerKeys }));
+  const active = merged.filter((builder) => builder.permits7 > 0);
+  const builders = merged
+    .filter((builder) => builder.permits365 > 0)
+    .sort((a, b) => b.permits90 - a.permits90 || b.permits365 - a.permits365 || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return {
+    week: { permits: active.reduce((total, builder) => total + builder.permits7, 0), builders: active.length },
+    builders: builders.map(({ permits7, ...builder }) => builder),
+  };
+}
+
+// The newest-date read and the counts share one read-only snapshot: a Monday sync that commits between them could
+// otherwise leave a newest permit later than the week the answer names.
+const PERMIT_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
+
+// Counts are per name and license across the whole table, so the first permit really is the first one on file.
+// A permit dated after today (a county typing slip) is left out, so the counts and the first and newest dates agree.
+async function readGroups(conn, source, cut) {
+  const result = await conn.raw(
+    `SELECT UPPER(BTRIM(contractor_name)) AS name,
+            UPPER(BTRIM(contractor_license)) AS license,
+            COUNT(*) FILTER (WHERE issued_date >= ?::date AND issued_date <= ?::date) AS permits7,
+            COUNT(*) FILTER (WHERE issued_date >= ?::date) AS permits30,
+            COUNT(*) FILTER (WHERE issued_date >= ?::date) AS permits90,
+            COUNT(*) FILTER (WHERE issued_date >= ?::date) AS permits365,
+            MIN(issued_date) AS "firstPermit",
+            MAX(issued_date) AS "lastPermit"
+       FROM ${source.table}
+      WHERE issued_date IS NOT NULL AND issued_date <= ?::date ${BUILDER_ONLY} ${source.where}
+      GROUP BY 1, 2`,
+    [cut.weekStart, cut.weekEnd, cut.d30, cut.d90, cut.d365, cut.today],
+  );
+  return result.rows;
+}
+
+async function readDataThrough(conn, source, today) {
+  const result = await conn.raw(`SELECT MAX(issued_date) AS newest FROM ${source.table} WHERE issued_date <= ?::date`, [today]);
+  return dateOnlyString(result.rows[0] && result.rows[0].newest);
+}
+
+// The keys of every active payer and every live customer company. The caller gets booleans only. A failed read
+// fails the whole list (the office presses Try again): an empty set would show every customer as a fresh prospect.
+// A live customer is the shared rule itself (customer-stages.js whereLiveCustomer), so the two can never drift. The
+// customers table also holds CRM leads, and a lead's company is still a prospect.
+async function readCustomerKeys() {
+  const named = (column) => `BTRIM(COALESCE(${column}, '')) <> ''`;
+  const rows = await db('customers')
+    .modify(whereLiveCustomer)
+    .whereRaw(named('company_name'))
+    .select('company_name as name')
+    .union((qb) => qb.from('payers').where('active', true).whereRaw(named('company_name')).select('company_name as name'))
+    .union((qb) => qb.from('payers').where('active', true).whereRaw(named('display_name')).select('display_name as name'));
+  return new Set(rows.map((row) => builderKey(row.name)).filter(Boolean));
+}
+
+async function listBuilders({ kind, now = new Date() }) {
+  const source = sourceFor(kind);
+  const started = Date.now();
+  const today = etDateString(now);
+  const permitRead = db.transaction(async (trx) => {
+    const newest = await readDataThrough(trx, source, today);
+    const cutoffs = cutoffsFor(today, newest);
+    return { newest, cutoffs, groups: await readGroups(trx, source, cutoffs) };
+  }, PERMIT_SNAPSHOT);
+  const [{ newest: dataThrough, cutoffs: cut, groups: rows }, customerKeys] = await Promise.all([permitRead, readCustomerKeys()]);
+  const merged = mergeBuilders(rows, { newSince: cut.d30, customerKeys });
+  logger.info(`[builder-list] ${kind}: ${merged.builders.length} builders in ${Date.now() - started} ms`);
+  // No permit on file yet (before the first county sync): week is null, so the page says so instead of "0 permits".
+  const week = dataThrough ? { from: cut.weekStart, through: cut.weekEnd, ...merged.week } : null;
+  return { kind, dataThrough, week, builders: merged.builders };
+}
+
+// The names (upper-cased, trimmed) that fold into one builder key.
+async function namesForKey(conn, source, key, today) {
+  const result = await conn.raw(
+    `SELECT DISTINCT UPPER(BTRIM(contractor_name)) AS name FROM ${source.table}
+      WHERE issued_date IS NOT NULL AND issued_date <= ?::date ${BUILDER_ONLY} ${source.where}`,
+    [today],
+  );
+  return result.rows.map((row) => row.name).filter((name) => builderKey(name) === key);
+}
+
+// Job sites, newest first. Like the list, a permit dated after today is left out, so it can never push a real job
+// site off the page. The limit is a whole number from 1 to 100 (PostgreSQL refuses a fraction). The spellings and
+// the job sites share one snapshot, so a sync that renames a builder between the two reads cannot drop a permit.
+async function builderPermits({ kind, key, limit = DEFAULT_PERMIT_LIMIT, now = new Date() }) {
+  const source = sourceFor(kind);
+  // An empty key is no builder: the list skips a name that folds to nothing ("-", "."), and an empty key would
+  // match every such name.
+  if (!key) return [];
+  const started = Date.now();
+  const today = etDateString(now);
+  const take = Math.min(Math.max(Math.trunc(Number(limit)) || DEFAULT_PERMIT_LIMIT, 1), MAX_PERMIT_LIMIT);
+  const rows = await db.transaction(async (trx) => {
+    const names = await namesForKey(trx, source, key, today);
+    if (!names.length) return [];
+    const result = await trx.raw(
+      `SELECT ${source.id} AS id, issued_date, ${source.status} AS status, ${source.address} AS address,
+              ${source.city} AS city, zip, ${source.typeOfWork} AS type_of_work
+         FROM ${source.table}
+        WHERE issued_date IS NOT NULL AND issued_date <= ?::date ${BUILDER_ONLY} ${source.where}
+          AND UPPER(BTRIM(contractor_name)) IN (${names.map(() => '?').join(', ')})
+        ORDER BY issued_date DESC, ${source.id}
+        LIMIT ?`,
+      [today, ...names, take],
+    );
+    return result.rows;
+  }, PERMIT_SNAPSHOT);
+  logger.info(`[builder-list] ${kind} permits: ${rows.length} rows in ${Date.now() - started} ms`);
+  return rows.map((row) => ({
+    id: row.id,
+    issuedDate: dateOnlyString(row.issued_date),
+    status: row.status || null,
+    address: row.address || null,
+    city: row.city || null,
+    zip: row.zip || null,
+    typeOfWork: row.type_of_work || null,
+  }));
+}
+
+module.exports = { KINDS, builderKey, mergeBuilders, cutoffsFor, listBuilders, builderPermits };

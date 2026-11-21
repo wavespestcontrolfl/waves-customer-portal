@@ -39,6 +39,7 @@ import {
   UiSurface,
 } from "../../components/ui";
 import { leadAddressUnverifiedNotice } from "../../lib/leadAddressUnverified";
+import { quizAnswerLine } from "../../lib/leadQuizAnswers";
 import { etDateString, formatETDateTime } from "../../lib/timezone";
 import { isConsultationVisit } from "../../lib/consultationVisit";
 import ConsultationStatsPanel from "./ConsultationStatsPanel";
@@ -994,6 +995,15 @@ function leadFiltersFromParams(params) {
       params.get("builder_warranty") === "expiring" ? "expiring" : "",
   };
 }
+// Footnote for the "Reached in 15 min" card. A lead is left out of the counts when the record cannot
+// say who reached it or when (a call with no answer time, an estimate sent again after the app sent it).
+function reachedSub(reach) {
+  const base = "First contact by a person: call, text, email or estimate";
+  return reach.notJudged > 0
+    ? `${base}. ${reach.notJudged} left out: who reached them, or when, is not recorded`
+    : base;
+}
+
 export function LeadsSection({ newLeadRequest = 0 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -2410,15 +2420,28 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         ].filter(Boolean);
                                         const timelineLabel =
                                           TIMELINE_LABELS[ex.timeline];
+                                        const quizLine = quizAnswerLine(
+                                          ex.quiz,
+                                        );
                                         if (
                                           !ex.pain_points &&
                                           !ex.preferred_date_time &&
                                           !timelineLabel &&
+                                          !quizLine &&
                                           quoteFlags.length === 0
                                         )
                                           return null;
                                         return (
                                           <>
+                                            {quizLine && (
+                                              <div>
+                                                {quizLine.name}
+                                                {quizLine.answers ? ":" : ""}{" "}
+                                                <span className="text-zinc-900">
+                                                  {quizLine.answers}
+                                                </span>
+                                              </div>
+                                            )}
                                             {timelineLabel && (
                                               <div>
                                                 Wants service:{" "}
@@ -3946,6 +3969,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                 : undefined
             }
           />{" "}
+          {(ov.leadReach?.cohort > 0 || ov.leadReach?.notJudged > 0) && (
+            <>
+              <MetricCard
+                label="Reached in 15 min"
+                value={`${ov.leadReach.reachedWithin} of ${ov.leadReach.cohort}`}
+                sub={reachedSub(ov.leadReach)}
+              />{" "}
+              <MetricCard
+                label="Never reached"
+                value={ov.leadReach.neverReached}
+                sub="No call, text, email or estimate on record"
+              />{" "}
+            </>
+          )}
           <MetricCard label="Cost per Acquisition" value={fmtMoney(ov.cpa)} />{" "}
           <MetricCard
             label="Avg Speed to Lead"

@@ -4,18 +4,21 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { UiSurface } from "../../components/ui";
 import BidDeskPage from "./BidDeskPage";
 import BidKitPage from "./BidKitPage";
+import BuilderProspectsPage from "./BuilderProspectsPage";
+import RestaurantProspectsPage from "./RestaurantProspectsPage";
 
-// One menu entry, two tabs: Open bids (Bid Desk) and Bid kit. The tab lives in the URL
-// (?tab=kit; no tab = Open bids) so a link or a reload lands on the same view.
+// One menu entry, four tabs: Open bids (Bid Desk), Bid kit, Builders and Restaurants. The tab lives in the URL
+// (?tab=kit, ?tab=builders or ?tab=restaurants; no tab = Open bids) so a link or a reload lands on the same view.
 const TABS = [
   { key: "desk", label: "Open bids", param: null },
   { key: "kit", label: "Bid kit", param: "kit" },
+  { key: "builders", label: "Builders", param: "builders" },
+  { key: "restaurants", label: "Restaurants", param: "restaurants" },
 ];
 
 export default function BidsPage() {
   const [params, setParams] = useSearchParams();
-  const requested = params.get("tab") === "kit" ? "kit" : "desk";
-  const active = TABS.find((tab) => tab.key === requested);
+  const active = TABS.find((tab) => tab.param && tab.param === params.get("tab")) || TABS[0];
 
   const select = (key) => setParams((prev) => {
     const next = new URLSearchParams(prev);
@@ -34,9 +37,12 @@ export default function BidsPage() {
         activeKey={active.key}
         onSectionChange={select}
         ariaLabel="Bids view"
-        navGridClassName="grid-cols-2"
+        navGridClassName="grid-cols-2 lg:grid-cols-4"
       />
-      {active.key === "kit" ? <BidKitPage embedded /> : <BidDeskPage embedded />}
+      {active.key === "kit" && <BidKitPage embedded />}
+      {active.key === "builders" && <BuilderProspectsPage embedded />}
+      {active.key === "restaurants" && <RestaurantProspectsPage embedded />}
+      {active.key === "desk" && <BidDeskPage embedded />}
     </UiSurface>
   );
 }

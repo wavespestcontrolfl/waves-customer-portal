@@ -29,10 +29,12 @@ vi.setConfig({ testTimeout: 30000 });
 const P_TALAK = 'aaaaaaaa-0000-4000-8000-000000000001';
 const P_IRON = 'aaaaaaaa-0000-4000-8000-000000000002';
 const P_GRANULE = 'aaaaaaaa-0000-4000-8000-000000000003';
+const P_TETRINO = 'aaaaaaaa-0000-4000-8000-000000000004';
 const CATALOG = [
   { id: P_TALAK, name: 'Talak 7.9%', category: 'insecticide', formulation: 'SC', service_lines: ['lawn', 'pest'] },
   { id: P_IRON, name: 'Iron Plus', category: 'micronutrient', formulation: 'SC' },
   { id: P_GRANULE, name: 'Green Granules', category: 'fertilizer', formulation: 'granular' },
+  { id: P_TETRINO, name: 'Tetrino Insecticide', category: 'insecticide', formulation: 'SC', default_rate_per_1000: 0.367, rate_unit: 'fl_oz' },
 ];
 
 // The context's whole `service` object, nulls included (what /complete wants back).
@@ -128,7 +130,7 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
     requests.push({ path, options, body });
     if (path.split('?')[0].endsWith('/lawn-fast/context')) {
       if (contextError) throw contextError;
-      return ctx;
+      return typeof ctx === 'function' ? ctx(path) : ctx;
     }
     if (path.endsWith('/property-areas')) {
       const answer = typeof propertyAreasAnswer === 'function' ? await propertyAreasAnswer() : propertyAreasAnswer;
@@ -259,6 +261,39 @@ async function analyzeAndComplete() {
   await waitFor(() => expect(completeButton().disabled).toBe(false));
   await submit();
 }
+
+describe('May Tetrino scouting', () => {
+  const offer = { offered: true, selected: false, productId: P_TETRINO, productName: 'Tetrino Insecticide', ratePer1000: 0.367, rateUnit: 'fl oz' };
+  const plannedTetrino = (rate) => ({ productId: P_TETRINO, name: 'Tetrino Insecticide', applicationMethod: 'broadcast_spray', amount: rate * 5, amountUnit: 'fl_oz', treatedSqft: 5000, areaUnit: 'sqft', ratePer1000: rate, rateUnit: 'fl_oz' });
+
+  test('records current high chinch evidence, refreshes the plan, and submits the rationale with the high-rate row', async () => {
+    const ctx = (path) => path.includes('tetrinoTarget=chinch')
+      ? context({ plannedProducts: { source: 'plan', items: [...PLANNED, plannedTetrino(0.735)], tetrinoScout: { ...offer, selected: true, ratePer1000: 0.735 } } })
+      : context({ plannedProducts: { source: 'plan', items: PLANNED, tetrinoScout: offer } });
+    await openSheet({ request: makeRequest({ ctx }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Chinch bugs' }));
+    fireEvent.change(screen.getByPlaceholderText(/Counts at the damaged edge/), { target: { value: '14 counted at the south damaged edge' } });
+    fireEvent.click(screen.getByRole('button', { name: 'High' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use this decision in the plan' }));
+    await screen.findByRole('group', { name: 'Tetrino Insecticide' });
+    await analyzeAndComplete();
+    const body = completeCalls().at(-1).body;
+    expect(body.lawnFast.tetrinoScout).toEqual({ target: 'chinch', currentObservations: '14 counted at the south damaged edge', pressure: 'high', grubTimingEvidence: '', tetrinoApplied: true });
+    expect(body.products.find((row) => row.productId === P_TETRINO)).toMatchObject({ rate: 0.735, rateUnit: 'fl_oz' });
+  });
+
+  test('a recorded scout-only decision can complete without inventing a product', async () => {
+    const ctx = context({ plannedProducts: { source: 'plan', items: [], tetrinoScout: offer } });
+    await openSheet({ request: makeRequest({ ctx }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Scout only' }));
+    fireEvent.change(screen.getByPlaceholderText(/What you checked/), { target: { value: 'Checked damaged edges and roots; no current insects found' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Record scout-only decision' }));
+    await analyzeAndComplete();
+    const body = completeCalls().at(-1).body;
+    expect(body.products).toEqual([]);
+    expect(body.lawnFast.tetrinoScout).toMatchObject({ target: 'none', tetrinoApplied: false });
+  });
+});
 
 describe('opening the sheet', () => {
   test('a visit whose plan offers the bermuda removal mix (the server answers ineligible, bermuda_removal) opens the full form once', async () => {

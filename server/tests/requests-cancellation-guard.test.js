@@ -284,6 +284,97 @@ describe('POST /api/requests cancellation guard', () => {
     expect(processCancellationRequest).toHaveBeenCalledTimes(1);
   }));
 
+  test('the customer\'s pick and words reach the processor as the churn reason; the row marker stays the request id', () => withServer(async (baseUrl) => {
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    const description = 'Customer requested cancellation. Reason: Cost. Details: too much for us';
+    const res = await postCancellation(baseUrl, { reasonCode: 'price', description });
+    expect(res.status).toBe(201);
+    const arg = processCancellationRequest.mock.calls[0][0];
+    expect(arg.churnReasonCode).toBe('price');
+    expect(arg.churnReasonText).toBe(description);
+    expect(arg.reason).toMatch(/^Portal cancellation request /);
+    // The pick as submitted is on the request itself, for any retry to read.
+    expect(JSON.parse(mockState.service_requests_inserted[0].metadata)).toEqual({
+      cancelSubmission: { scope: [], reasonCode: 'price', adverseEvent: false, safetyComplaint: false },
+    });
+  }));
+
+  test('a dedupe retry takes the pick SUBMITTED with the original request, even "none", over a case a retry rebuilt', () => withServer(async (baseUrl) => {
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    mockState.service_requests = [{
+      id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, description: 'x', metadata: { cancelSubmission: { scope: [], reasonCode: null, adverseEvent: false, safetyComplaint: false } }, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal', scope: [], reason_code: 'price' }];
+    await postCancellation(baseUrl, { reasonCode: 'competitor' });
+    expect(processCancellationRequest.mock.calls[0][0].churnReasonCode).toBeNull();
+  }));
+
+  test('a case rebuilt on a retry takes the pick and incident verdict from the ORIGINAL submission, never the retry\'s', () => withServer(async (baseUrl) => {
+    const CancellationResolution = require('../services/cancellation-resolution');
+    const v2 = jest.spyOn(CancellationResolution, 'cancelFlowV2Enabled').mockReturnValue(true);
+    const openCase = jest.spyOn(CancellationResolution, 'openCancellationCase').mockResolvedValue({ id: 'case-1' });
+    try {
+      mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+      const original = (sub) => [{
+        id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+        source: null, description: 'x', metadata: sub ? { cancelSubmission: sub } : null, created_at: new Date(Date.now() - 10 * 1000),
+      }];
+      mockState.cancellation_cases = []; // both original writes lost
+      // A blank retry keeps the original scope and incident.
+      mockState.service_requests = original({ scope: ['mosquito'], reasonCode: 'service_experience', adverseEvent: false, safetyComplaint: true });
+      await postCancellation(baseUrl, { reasonCode: undefined });
+      expect(openCase).toHaveBeenLastCalledWith(expect.objectContaining({
+        families: ['mosquito'], reasonCode: 'service_experience', resolution: expect.objectContaining({ kind: 'hard_stop', reviewType: 'incident' }),
+      }));
+      // A retry reporting a safety complaint never marks a price cancel as one.
+      mockState.service_requests = original({ scope: [], reasonCode: 'price', adverseEvent: false, safetyComplaint: false });
+      await postCancellation(baseUrl, { reasonCode: 'service_experience', safetyComplaint: true });
+      expect(openCase).toHaveBeenLastCalledWith(expect.objectContaining({ families: [], reasonCode: 'price', resolution: null }));
+      // An older request: neither pick nor verdict is known.
+      mockState.service_requests = original(null);
+      await postCancellation(baseUrl, { reasonCode: 'service_experience', safetyComplaint: true });
+      expect(openCase).toHaveBeenLastCalledWith(expect.objectContaining({ reasonCode: null, resolution: null }));
+      expect(processCancellationRequest).not.toHaveBeenCalled(); // no case: every retry parked
+    } finally {
+      v2.mockRestore();
+      openCase.mockRestore();
+    }
+  }));
+
+  test('a case a retry built: the recorded submission\'s scope and pick run; with no submission the retry parks, never whole-account', () => withServer(async (baseUrl) => {
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    const original = (sub) => [{
+      id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, description: 'x', metadata: sub ? { cancelSubmission: sub } : null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    const retryBuiltCase = { service_request_id: 'req-portal', scope: [], reason_code: 'competitor', snapshot: { written_on_retry: true, degraded: true } };
+    mockState.cancellation_cases = [retryBuiltCase];
+    mockState.service_requests = original({ scope: ['mosquito'], reasonCode: 'price', adverseEvent: false, safetyComplaint: false });
+    await postCancellation(baseUrl, { reasonCode: 'competitor' });
+    expect(processCancellationRequest).toHaveBeenLastCalledWith(expect.objectContaining({ families: ['mosquito'], churnReasonCode: 'price' }));
+    processCancellationRequest.mockClear();
+    mockState.cancellation_cases = [retryBuiltCase];
+    mockState.service_requests = original(null);
+    await postCancellation(baseUrl, { reasonCode: 'competitor' });
+    expect(processCancellationRequest).not.toHaveBeenCalled();
+  }));
+
+  test('a dedupe retry of a request from before picks were recorded takes its case\'s pick, never the retry body', () => withServer(async (baseUrl) => {
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    mockState.service_requests = [{
+      id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, description: 'Customer requested cancellation. Reason: Cost. Details: None', created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal', scope: [], reason_code: 'price' }];
+    const res = await postCancellation(baseUrl, { reasonCode: 'competitor' });
+    expect((await res.json()).deduped).toBe(true);
+    const arg = processCancellationRequest.mock.calls[0][0];
+    expect(arg.requestId).toBe('req-portal');
+    expect(arg.churnReasonCode).toBe('price');
+    expect(arg.churnReasonText).toBe('Customer requested cancellation. Reason: Cost. Details: None');
+  }));
+
   test('truth gate: a fully processed cancel confirms "done"; a partial one says the office is finishing by hand', () => withServer(async (baseUrl) => {
     const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
     mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];

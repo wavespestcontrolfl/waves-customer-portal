@@ -98,6 +98,7 @@ import DocumentActionBar from '../components/DocumentActionBar';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import PayPromoCode from '../components/billing/PayPromoCode';
+import PayPlanChoice from '../components/billing/PayPlanChoice';
 import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE, CARD_SURCHARGE_NOTICE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
@@ -3119,6 +3120,25 @@ export default function PayPageV2() {
             </div>
               );
             })()}
+
+            {/* Pay per application or prepay the year (GATE_PAY_PLAN_CHOICE):
+                the server sends the block only on the first invoice of an
+                accepted plan. A pick goes to the prepay invoice's own pay
+                page; this invoice stays payable. */}
+            <PayPlanChoice
+              planChoice={data.planChoice}
+              panelStyle={subtlePanel}
+              onChosen={(payUrl) => window.location.assign(payUrl)}
+              choosePrepay={async () => {
+                const response = await fetch(`${API_BASE}/pay/${token}/plan-choice`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ plan: 'prepay_annual' }),
+                });
+                const result = await response.json().catch(() => ({}));
+                return response.ok ? { ok: true, payUrl: result.payUrl } : { ok: false };
+              }}
+            />
 
             {/* Promo code (GATE_PAY_PROMO_CODE): the server sends the block
                 only where a code can be entered or is already on the invoice.

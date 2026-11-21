@@ -9,6 +9,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('../services/logger');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const { isBotUserAgent: isKnownBotUserAgent } = require('../utils/bot-ua');
 
 // /r mounts OUTSIDE the global /api/ limiter and every hit below writes a
 // referral_clicks row — without a limiter this is an unauthenticated,
@@ -28,6 +29,15 @@ const referralClickLimiter = rateLimit({
 // all 120 rows). Gate before the first query; a malformed code behaves
 // exactly like an unknown one (redirect home, no DB touch).
 const CODE_RE = /^[A-Za-z0-9_-]{4,32}$/;
+
+// Crawlers, link-preview fetchers, scanners and scripts are not people: 21 of
+// 62 clicks May-Nov 2026. They still get the redirect and a click row
+// (device_type 'bot'), but never count as a unique click or raise the
+// promoter's click total. Shared classifier (utils/bot-ua.js), plus one
+// referral rule: an empty user agent is a script, not a phone.
+function isBotUserAgent(ua) {
+  return !ua || isKnownBotUserAgent(ua);
+}
 
 // =========================================================================
 // GET /r/:code — track click and redirect
@@ -84,11 +94,14 @@ router.get('/:code', referralClickLimiter, async (req, res) => {
       .where('created_at', '>=', twentyFourHoursAgo)
       .first();
 
-    const isUnique = !recentClick;
+    const isBot = isBotUserAgent(ua);
+    const isUnique = !isBot && !recentClick;
 
     // Detect device type
     let deviceType = 'desktop';
-    if (/mobile|android|iphone|ipad/i.test(ua)) {
+    if (isBot) {
+      deviceType = 'bot';
+    } else if (/mobile|android|iphone|ipad/i.test(ua)) {
       deviceType = /ipad|tablet/i.test(ua) ? 'tablet' : 'mobile';
     }
 
@@ -125,3 +138,4 @@ router.get('/:code', referralClickLimiter, async (req, res) => {
 });
 
 module.exports = router;
+module.exports._isBotUserAgent = isBotUserAgent;

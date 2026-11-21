@@ -48,6 +48,16 @@ const onNthFirstAfterHooks = {};
 let firstCallCount = 0;
 const onNthFirstHooks = {};
 const mockDb = jest.fn((table) => {
+  if (table === 'job_offers') {
+    // The withdraw route closes the application's live job offers in the same transaction.
+    const filter = {};
+    const offers = {
+      where(cond) { filter.where = cond; return offers; },
+      whereIn(_column, list) { filter.statuses = list; return offers; },
+      update: async (payload) => { mockDb.__closedOffers.push({ ...filter, payload }); return 1; },
+    };
+    return offers;
+  }
   if (table !== 'job_applications') throw new Error(`unexpected table in test: ${table}`);
   let whereCond = {};
   const builder = {
@@ -123,6 +133,7 @@ mockDb.schema = { hasTable: jest.fn(async () => true) };
 // every raw call is recorded so the test can prove the advisory lock is
 // taken BEFORE the slot listing.
 mockDb.__rawCalls = [];
+mockDb.__closedOffers = [];
 mockDb.transaction = async (fn) => fn(mockDb);
 // db.raw is only used for the jsonb history append; carry the bound entries
 // so update() above can apply them like Postgres would.
@@ -529,6 +540,23 @@ describe('POST /interview/:token/withdraw', () => {
 
     await new Promise((r) => setImmediate(r));
     expect(mockTriggerNotification).toHaveBeenCalledWith('job_application_withdrawn', { applicationId: 'app-1' });
+  });
+
+  test('withdrawing also withdraws the application\'s live job offers (an old offer link cannot revive on reopen)', async () => {
+    mockDb.__setRows([appRow()]);
+    mockDb.__closedOffers.length = 0;
+    await fetch(`${base}/api/public/careers/interview/${TOKEN}/withdraw`, { method: 'POST' });
+    expect(mockDb.__closedOffers).toEqual([expect.objectContaining({
+      where: { application_id: 'app-1' }, statuses: ['draft', 'sent', 'date_requested'], payload: expect.objectContaining({ status: 'withdrawn' }),
+    })]);
+  });
+
+  test('a withdraw that matches no row closes no offer', async () => {
+    mockDb.__setRows([appRow()]);
+    mockDb.__closedOffers.length = 0;
+    mockDb.__onFirstReadOnce(() => { mockDb.__rows()[0].status = 'offer'; });
+    await fetch(`${base}/api/public/careers/interview/${TOKEN}/withdraw`, { method: 'POST' });
+    expect(mockDb.__closedOffers).toEqual([]);
   });
 
   test('404 when the atomic update matches 0 rows (race)', async () => {

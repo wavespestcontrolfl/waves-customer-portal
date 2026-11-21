@@ -212,4 +212,4 @@ async function currentConflict(service, ctx, excludeIds) {
 
 // isOtherStop and samePlaceIdsAt are also the plan writers' taken-hour rule
 // (scheduling/plan-taken-hour.js).
-module.exports = { currentConflict, isOtherStop, samePlaceIdsAt, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds, mowingDayConflict } };
+module.exports = { currentConflict, isOtherStop, samePlace, samePlaceIdsAt, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds, mowingDayConflict } };

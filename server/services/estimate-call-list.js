@@ -12,6 +12,7 @@
 
 const { toE164 } = require('../utils/phone');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { CALL_OUTCOMES } = require('../../shared/estimate-call-today.cjs');
 
 // Only a call the customer ANSWERED counts. call_log.status and bridged_at describe the STAFF
 // leg (bridged_at = staff pressed 1, before the customer leg is dialed; status can read
@@ -66,6 +67,130 @@ async function lastCalledAtByEstimateId(database, estimates, nowMs = Date.now())
   return out;
 }
 
+// A call outcome (owner 2026-11-20, D1 A) is an activity_log row on the estimate: estimate_id, admin_user_id (who
+// tapped), created_at (when) and metadata.outcome (a CALL_OUTCOMES key). No new table: the action column is indexed.
+const CALL_OUTCOME_ACTION = 'estimate_call_outcome';
+const CALL_OUTCOME_KEYS = new Set(CALL_OUTCOMES.map((o) => o.key));
+
+// The first word of a staff name, as the row shows it: "No answer · 9:42 AM · Virginia".
+function staffFirstName(name) {
+  return String(name || '').trim().split(/\s+/)[0] || null;
+}
+
+/**
+ * The newest call outcome on each estimate, one batched query for the list route and the 9 AM push (the Call today
+ * rule takes a row off the list once an outcome is newer than the customer's last touch).
+ *
+ * @param {Function} database  knex-like handle
+ * @param {Array<string>} ids  estimate ids
+ * @returns {Promise<Map<string, {outcome: string, at: Date|string, by: string|null}>>} estimate id -> its newest
+ *   outcome; an estimate with none is absent.
+ */
+async function lastCallOutcomeByEstimateId(database, ids) {
+  const out = new Map();
+  if (!Array.isArray(ids) || !ids.length) return out;
+  const rows = await database('activity_log as a')
+    .leftJoin('technicians as t', 't.id', 'a.admin_user_id')
+    .where('a.action', CALL_OUTCOME_ACTION)
+    .whereIn('a.estimate_id', ids)
+    .distinctOn('a.estimate_id')
+    .orderBy([{ column: 'a.estimate_id' }, { column: 'a.created_at', order: 'desc' }, { column: 'a.id', order: 'desc' }])
+    .select('a.estimate_id', 'a.created_at', 'a.metadata', 't.name as by_name');
+  for (const row of rows) {
+    const outcome = row.metadata?.outcome;
+    if (CALL_OUTCOME_KEYS.has(outcome)) out.set(row.estimate_id, { outcome, at: row.created_at, by: staffFirstName(row.by_name) });
+  }
+  return out;
+}
+
+// Hard ceiling for limit=all list fetches. The estimates pipeline computes all-time KPIs client-side from this list; if
+// the table ever outgrows this cap the analytics silently truncate to the newest rows, so keep generous headroom
+// (pricing-risk batch is pure compute after one inventory preload).
+const ESTIMATE_LIST_LIMIT = 2000;
+const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed'];
+
+// Short-link click telemetry per estimate, one batched query. One estimate can hold several short_codes rows when
+// /send runs again (a re-send or a follow-up), so the click counts are SUMMED and the last-clicked time is the MAX.
+// Bot taps are filtered upstream in public-shortlinks, so the numbers are real customer taps. The list route reads
+// both fields and the Call today push reads last_clicked_at, so the page and the push count the same clicks.
+async function clickStatsByEstimateId(database, ids) {
+  if (!ids.length) return new Map();
+  const rows = await database('short_codes')
+    .where({ entity_type: 'estimates' })
+    .whereIn('entity_id', ids)
+    .groupBy('entity_id')
+    .select('entity_id')
+    .sum({ click_count: 'click_count' })
+    .max({ last_clicked_at: 'last_clicked_at' });
+  return new Map(rows.map((r) => [r.entity_id, r]));
+}
+
+/**
+ * The base row selection of GET /admin/estimates: ONE home for the list route and the 9 AM Call today push, so the
+ * push counts only rows the Estimates page can load. The page loads sentOnly rows (limit=all, the newest
+ * ESTIMATE_LIST_LIMIT by created_at) plus drafts; the caller applies the limit (`.limit(ESTIMATE_LIST_LIMIT)`) or a page.
+ *
+ * @param {Function} database  knex-like handle
+ * @param {{status?: string, sentOnly?: boolean, sources?: string[]|null, archived?: 'hide'|'only'|'all'}} [filters]
+ *   archived 'hide' (default) drops archived rows, 'only' keeps only them, 'all' keeps both.
+ */
+function estimateListQuery(database, { status, sentOnly = false, sources = null, archived = 'hide' } = {}) {
+  let query = database('estimates')
+    .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
+    .select('estimates.*', 'technicians.name as created_by_name')
+    // The id breaks created_at ties, so every caller's limit cuts at the same rows (the push's narrow select and the
+    // page's full one must count the same 2,000).
+    .orderBy('estimates.created_at', 'desc')
+    .orderBy('estimates.id', 'desc');
+  if (status) query = query.where('estimates.status', status);
+  if (sentOnly) {
+    query = query.where(function () {
+      this.whereNotNull('estimates.sent_at')
+        .orWhereIn('estimates.status', SENT_ONLY_DELIVERY_ATTEMPT_STATUSES);
+    });
+  }
+  if (sources) query = query.whereIn('estimates.source', sources);
+  if (archived === 'only') query = query.whereNotNull('estimates.archived_at');
+  else if (archived !== 'all') query = query.whereNull('estimates.archived_at');
+  return query;
+}
+
+/**
+ * The follow-up fields of an estimates row, in the shape the list API sends: what the "Call today" rule
+ * (shared/estimate-call-today.cjs) and the page's other follow-up checks read. ONE mapping for the list route
+ * and the 9 AM push, so the page and the push judge the same row. viewedAt and lastViewedAt stay null on a
+ * row that was never sent (the list's own rule). sentAt stays null on a self-serve quote nobody delivered:
+ * its sent_at is the mint stamp, not a send (codex pre-push P1). Once staff deliver one, it reads as
+ * stored, as any estimate does.
+ *
+ * @param {object} row  estimates row (snake_case columns)
+ * @param {{lastClickedAt?: *, lastCalledAt?: *, lastCallOutcome?: object, undeliveredSelfServe?: boolean}} [extra]  the
+ *   three values read in batches (short_codes, call_log, activity_log), and the self-serve rule's answer for the row
+ *   (services/self-serve-estimates.js)
+ */
+function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, lastCallOutcome = null, callOutcomeUnknown = false, undeliveredSelfServe = false } = {}) {
+  const hasBeenSent = !!row.sent_at;
+  return {
+    status: row.status,
+    customerPhone: row.customer_phone,
+    archivedAt: row.archived_at,
+    sentAt: undeliveredSelfServe ? null : row.sent_at,
+    viewedAt: hasBeenSent ? row.viewed_at : null,
+    lastViewedAt: hasBeenSent ? row.last_viewed_at : null,
+    lastClickedAt: lastClickedAt || null,
+    lastFollowUpAt: row.last_follow_up_at,
+    lastCalledAt: lastCalledAt || null,
+    // The newest outcome tapped on the row, { outcome, at, by }, or null.
+    lastCallOutcome: lastCallOutcome || null,
+    // The outcome read failed, so null above proves nothing: the shared rule withholds the row from Call today.
+    callOutcomeUnknown: Boolean(callOutcomeUnknown),
+    // A self-serve quote nobody delivered (plan restart, plan start, report card) never makes the
+    // list: the zero-follow-up contract (services/self-serve-estimates.js). The caller passes the
+    // rule's answer.
+    undeliveredSelfServe: Boolean(undeliveredSelfServe),
+  };
+}
+
 /**
  * May PATCH /api/admin/estimates/:id stamp a staff loss reason on this row WITHOUT a status change?
  * Only on a row whose status is `expired` (the request leaves the
@@ -79,4 +204,8 @@ function staffReasonOnExpiredAllowed(estimate, body = {}) {
   return (estimate.disposition || '') !== 'expired_unsent';
 }
 
-module.exports = { lastCalledAtByEstimateId, callLogPhoneFor, staffReasonOnExpiredAllowed, CUSTOMER_ANSWERED_SQL };
+module.exports = {
+  ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId,
+  CALL_OUTCOME_ACTION, staffFirstName, lastCallOutcomeByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed,
+  CUSTOMER_ANSWERED_SQL,
+};

@@ -499,21 +499,22 @@ async function projectProductSwap(dbh, svc, entries, summary) {
   }
 }
 
-// GATE_LAWN_CHINCH_TETRINO_RATE: the brief states the May Tetrino line's stored rate (0.367 fl oz per 1,000 sq ft); for a chinch-mapped lawn
-// the plan raises it (waveguard-plan-engine chinchTetrinoRate, the plan's own decision), so the brief states the raised rate and why and the
-// pocket reference agrees with the plan and the Fast Complete sheet. Gate off, not v13, not May or no raise: the entries are left as they are.
-// STRICT like the brief's other reads (see projectNitrogenCut).
-async function projectChinchTetrinoRate(dbh, svc, entries, summary) {
-  const { chinchTetrinoRate } = require('./waveguard-plan-engine');
+// A previsit brief exists before today's scouting can be recorded. Historical
+// trouble-area maps therefore never promote May Tetrino or its high rate here;
+// they are context, not current treatment evidence. Keep the stored rate as a
+// reference and make the conditional line say what the field decision needs.
+function projectTetrinoScoutFirst(entries, summary) {
   const { V13_CHINCH_TETRINO } = require('../config/lawn-v13-chinch-rate');
   const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
-  const rate = await chinchTetrinoRate(dbh, svc, { monthNumber: Number(summary.window?.month), v13Active, strict: true });
-  if (rate == null) return;
+  if (!v13Active || Number(summary.window?.month) !== V13_CHINCH_TETRINO.month) return;
   for (const entry of entries) {
-    const stated = Number(entry.shapedEntry.ratePer1000);
-    if (entry.shapedEntry.name !== V13_CHINCH_TETRINO.productName || !(stated > 0 && stated < rate)) continue;
-    entry.shapedEntry = { ...entry.shapedEntry, ratePer1000: rate };
-    entry.gates = { ...entry.gates, chinchRate: `${rate} fl oz/1000 (chinch bugs mapped; normal ${stated} fl oz/1000)` };
+    if (entry.shapedEntry.name !== V13_CHINCH_TETRINO.productName) continue;
+    entry.fixed = false;
+    entry.gates = {
+      ...entry.gates,
+      trigger: 'current scouting evidence',
+      scoutEvidence: 'Record the target and current observations before selecting Tetrino; grubs also require local peak-flight or egg-hatch timing.',
+    };
   }
 }
 
@@ -656,7 +657,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
     withoutOffSeasonNorthPortBlock(shaped, rounds);
     await projectNitrogenCut(dbh, svc, shaped, summary);
     await projectProductSwap(dbh, svc, shaped, summary);
-    await projectChinchTetrinoRate(dbh, svc, shaped, summary);
+    projectTetrinoScoutFirst(shaped, summary);
 
     // Customer-specific application limits (annual max apps, cumulative
     // rate, minimum interval, MOA rotation — application-limits.js, the

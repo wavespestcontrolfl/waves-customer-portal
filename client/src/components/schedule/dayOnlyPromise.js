@@ -2,7 +2,7 @@
 // the "Customer asked for this time" box and the "Told: ..." badge. Pure helpers, no styles, so the Tier 1 dialogs and the
 // legacy inline-style windows share one set of words. The gate reaches the client as the `day_only_promise` flag on
 // GET /api/admin/feature-flags (useFeatureFlag). Gate off: no box, no field, no badge.
-import { etDatetimeLocalToISO } from '../../lib/timezone';
+import { addETDays, etDateString, etDatetimeLocalToISO } from '../../lib/timezone';
 
 export const ASKED_TIME_LABEL = 'Customer asked for this time';
 export const PHONE_SCRIPT_HINT = "Promise the day only: 'We'll text your arrival window the day before.'";
@@ -20,11 +20,18 @@ export function startsBeyondCutoff(slot, now = new Date()) {
   return iso !== null && (Date.parse(iso) - now.getTime()) / 3600000 > DAY_PROMISE_CUTOFF_HOURS;
 }
 
+/** Is the slot's date today or tomorrow on the ET calendar? The server then always names the window (owner 2026-11-19):
+ *  "the day before" would be today. */
+function startsByTomorrow(slot, now) {
+  return String(slot.date || '').slice(0, 10) <= etDateString(addETDays(now, 1));
+}
+
 /** Will the office be able to promise only the day for this slot? The server's rule (time-promise.shouldPromiseDayOnly): the
- *  slot starts after the cutoff AND the customer's 24-hour reminder will go out (`slot.reminder24hOn === true`). A missing or
- *  unknown reminder answer reads as "will not go out", as the senders read unreadable preferences. */
+ *  slot starts after the cutoff, is not today or tomorrow, AND the customer's 24-hour reminder will go out
+ *  (`slot.reminder24hOn === true`). A missing or unknown reminder answer reads as "will not go out", as the senders read
+ *  unreadable preferences. */
 export function dayScriptApplies(slot, now = new Date()) {
-  return !!slot && slot.reminder24hOn === true && changesDate(slot) && startsBeyondCutoff(slot, now);
+  return !!slot && slot.reminder24hOn === true && changesDate(slot) && startsBeyondCutoff(slot, now) && !startsByTomorrow(slot, now);
 }
 
 /** The MOVE rule of time-promise.dayOnlyMoveDecision: a same-date re-time always names the new window, so only a change of

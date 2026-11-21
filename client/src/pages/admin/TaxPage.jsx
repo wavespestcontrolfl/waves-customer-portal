@@ -44,6 +44,7 @@ import SharedBillsPanel from "./tax/SharedBillsPanel";
 import ReturnTab from "./tax/ReturnTab";
 import SalesTaxTab from "./tax/SalesTaxTab";
 import Form1099Tab from "./tax/Form1099Tab";
+import { holdReloadWhileSending } from "../../lib/reloadHolds";
 function useTaxRead(path, setData, field) {
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -5154,7 +5155,7 @@ function PlaidAccountsForm({ item, existingLabels, busy, onSave, onCancel }) {
 // feedOn = GATE_PLAID_SYNC. Off, the panel only lists connections still in
 // place (each still counts as coverage for statement uploads on its label)
 // with Disconnect — no connect, sync, re-login or account edits.
-function PlaidFeedsPanel({ feedOn, onSynced }) {
+export function PlaidFeedsPanel({ feedOn, onSynced }) {
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState("");
@@ -5201,8 +5202,11 @@ function PlaidFeedsPanel({ feedOn, onSynced }) {
   // (addAccounts) changing which of the login's accounts it shares.
   // `resume` = returning from a bank's OAuth redirect: the stored token and
   // the URL the bank sent us back to.
+  // Plaid's own screens can take minutes with no request open, so the session
+  // holds an out-of-date tab's reload until it ends and its last request
+  // settles (lib/reloadHolds.js).
   const openLink = (itemId, resume = null, addAccounts = false) =>
-    run(itemId ? `${addAccounts ? "accounts" : "reconnect"}-${itemId}` : "connect", async () => {
+    run(itemId ? `${addAccounts ? "accounts" : "reconnect"}-${itemId}` : "connect", () => holdReloadWhileSending("bank-link", async () => {
       const [Plaid, tok] = await Promise.all([
         loadPlaidLink(),
         resume ||
@@ -5248,7 +5252,7 @@ function PlaidFeedsPanel({ feedOn, onSynced }) {
           text: "Connected. Confirm each account below, then save to start syncing.",
         });
       }
-    });
+    }));
 
   // back from a bank's OAuth page: finish the Link session it interrupted
   useEffect(() => {
@@ -5532,7 +5536,7 @@ function PayrollBankLineNotes({ r, claimable, busy, act }) {
   );
 }
 
-function BankImportTab() {
+export function BankImportTab() {
   // 14px floor on this financial-review surface (repo minimum readable
   // size) — the shared inputStyle stays 12px for the legacy tabs
 
@@ -5730,6 +5734,11 @@ function BankImportTab() {
     // would force-import rows from the PREVIOUS statement. The token is
     // retained only across forceImportDuplicates retries.
     setDupUpload(null);
+    // The CSV is read before its upload starts, so no save is open yet. The
+    // import holds an out-of-date tab's reload until the upload settles, or
+    // until a failed read ends (lib/reloadHolds.js).
+    let settleImport;
+    holdReloadWhileSending("bank-import", () => new Promise((settle) => { settleImport = settle; }));
     const reader = new FileReader();
     reader.onload = () => {
       const payload = {
@@ -5738,7 +5747,7 @@ function BankImportTab() {
         filename: file.name,
         csv: String(reader.result || ""),
       };
-      act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
+      settleImport(act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
         if (!r) return;
         // hashes scope a later force-import to EXACTLY these skipped rows
         // (on a re-post every previously imported row conflicts too), and
@@ -5784,8 +5793,10 @@ function BankImportTab() {
                   .join("; ")}${r.duplicates > 3 ? "…" : ""}`
               : ""),
         });
-      });
+      }));
     };
+    // Runs after onload, or alone when the read fails.
+    reader.onloadend = () => settleImport();
     reader.readAsText(file);
   };
 

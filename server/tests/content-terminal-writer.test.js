@@ -6,7 +6,14 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The editorial-evidence gate, switched per test.
 let mockEditorialOn = false;
-jest.mock('../services/content/editorial-evidence', () => ({ enabled: () => mockEditorialOn }));
+jest.mock('../services/content/editorial-evidence', () => ({
+  enabled: () => mockEditorialOn,
+  applicable: (filePath) => String(filePath).startsWith('src/content/blog/'),
+}));
+// The answer-plan reviewer (a model call), mocked per test. The Astro read the
+// refresh title uses goes through this client's getFile.
+jest.mock('../services/content/editorial-review', () => ({ reviewPlan: jest.fn() }));
+jest.mock('../services/content-astro/github-client', () => ({ getFile: jest.fn() }));
 
 const tw = require('../services/content/terminal-writer');
 
@@ -197,6 +204,290 @@ describe('draftSourceFor: the terminal as a draft source with the dispatcher\'s 
   });
 });
 
+describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)', () => {
+  const { reviewPlan } = require('../services/content/editorial-review');
+  const astro = require('../services/content-astro/github-client');
+  const saved = { ...process.env };
+  const blog = { id: BRIEF, action_type: 'new_supporting_blog', page_type: 'supporting-blog', working_title: 'Ghost ants in Bradenton' };
+  const refresh = { id: BRIEF, action_type: 'refresh_existing_page', page_type: 'refresh', target_url: '/blog/ghost-ants/' };
+  const sections = [
+    { heading: 'Why ghost ants trail', question: 'Why?', answer: 'They follow moisture.' },
+    { heading: 'What stops them', question: 'What?', answer: 'Bait and sealing.' },
+  ];
+  const planBody = `${body}\n\n## Why ghost ants trail\n\nText.\n\n## What stops them\n\nText.\n\n## Frequently Asked Questions\n\nText.\n`;
+  const withPlan = (over = {}) => good({ body: planBody, answer_plan: { sections }, ...over });
+  const run = (brief, content) => tw.draftSourceFor(ID, brief, { handed: true, gh: ghWith(content) }).runWithBrief();
+  // The Mac job runs under the Max-plan adapter, which marks itself on the global ('all' = every call).
+  const asMac = ({ adapter = true } = {}) => {
+    process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+    process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+    if (adapter) globalThis.__maxRunnerAdapter = { fetch: globalThis.fetch, answers: 'all' };
+  };
+  beforeEach(() => {
+    process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
+    delete process.env.CONTENT_EDITORIAL_REVIEW_HOST;
+    delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
+    mockEditorialOn = true;
+    reviewPlan.mockReset().mockResolvedValue({ pass: true, findings: [], model: 'claude-opus' });
+    astro.getFile.mockReset();
+  });
+  afterEach(() => { process.env = { ...saved }; mockEditorialOn = false; delete globalThis.__maxRunnerAdapter; });
+
+  test('the Mac job without the Max-plan adapter reads no draft: it waits, so no fact-check call can bill the API', async () => {
+    asMac({ adapter: false });
+    const gh = ghWith(withPlan());
+    const out = await tw.draftSourceFor(ID, blog, { handed: true, gh }).runWithBrief();
+    expect(out).toMatchObject({ ok: false, wait: true, code: tw.MAX_PLAN_MISSING });
+    expect(gh.getBranchSha).not.toHaveBeenCalled();
+    expect(reviewPlan).not.toHaveBeenCalled();
+  });
+
+  test('both switches are on only for exactly "mac", read at call time', () => {
+    expect([tw.editorialReviewOnMac(), tw.runningOnMac()]).toEqual([false, false]);
+    process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'Mac';
+    process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'true';
+    expect([tw.editorialReviewOnMac(), tw.runningOnMac()]).toEqual([false, false]);
+    asMac();
+    expect([tw.editorialReviewOnMac(), tw.runningOnMac()]).toEqual([true, true]);
+  });
+
+  test('switches unset: the fact-check briefs stay on the agent, as before', () => {
+    expect(tw.needsEditorialPlan(blog)).toBe(true);
+    expect(tw.draftSourceFor(ID, blog, { handed: true })).toBeNull();
+  });
+
+  test('host mac: the terminal keeps the briefs (needsEditorialPlan false), editorialPlanRequired is unchanged', () => {
+    process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+    expect(tw.needsEditorialPlan(blog)).toBe(false);
+    expect(tw.editorialPlanRequired(blog)).toBe(true);
+    expect(tw.editorialPlanRequired({ page_type: 'city-service' })).toBe(false);
+    expect(tw.draftSourceFor(ID, blog, { handed: true })).not.toBeNull();
+    mockEditorialOn = false;
+    expect(tw.editorialPlanRequired(blog)).toBe(false);
+  });
+
+  test('the server (host mac, not the runner) waits for the Mac and reads no GitHub branch, draft or hold', async () => {
+    process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+    for (const content of [withPlan(), good({ body: undefined, frontmatter: undefined, hold: { reason: 'duplicate', detail: 'x' } })]) {
+      const gh = ghWith(content);
+      const out = await tw.draftSourceFor(ID, blog, { handed: true, gh }).runWithBrief();
+      expect(out).toMatchObject({ ok: false, wait: true, code: 'terminal_draft_awaits_mac', agent_id: 'terminal-writer', session_id: null });
+      expect(out.reason).toEqual(expect.any(String));
+      expect(gh.getBranchSha).not.toHaveBeenCalled();
+      expect(gh.getFile).not.toHaveBeenCalled();
+    }
+    expect(reviewPlan).not.toHaveBeenCalled();
+  });
+
+  test('a blog without a fact check (a city page) also waits on the server in Mac mode', async () => {
+    process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+    const city = { id: BRIEF, action_type: 'create_or_refresh_city_service_page', page_type: 'city-service' };
+    expect(await run(city, good())).toMatchObject({ wait: true, code: tw.AWAITS_MAC });
+  });
+
+  test('host switch unset: a city draft is taken as before and carries no plan', async () => {
+    const city = { id: BRIEF, action_type: 'create_or_refresh_city_service_page', page_type: 'city-service' };
+    expect(await run(city, good())).toMatchObject({ ok: true });
+  });
+
+  test('the Mac job: a plan that passes review and matches the body gives an ok draft, plan outside the draft', async () => {
+    asMac();
+    const out = await run(blog, withPlan());
+    expect(out).toMatchObject({ ok: true, brief_id: BRIEF, revision: 'commit-1' });
+    expect(out.wait).toBeUndefined();
+    expect(Object.keys(out.draft).sort()).toEqual(['body', 'frontmatter', 'type']);
+    expect(reviewPlan).toHaveBeenCalledWith({ title: 'Ghost ants in Bradenton', sections });
+  });
+
+  test('a brief with no working title reviews against its target keyword', async () => {
+    asMac();
+    await run({ ...blog, working_title: null, target_keyword: 'ghost ant control' }, withPlan());
+    expect(reviewPlan).toHaveBeenCalledWith({ title: 'ghost ant control', sections });
+  });
+
+  test('a missing plan is INVALID so the terminal rewrites the draft', async () => {
+    asMac();
+    const out = await run(blog, good({ body: planBody }));
+    expect(out).toMatchObject({ ok: false, wait: true, code: tw.INVALID });
+    expect(out.reason).toMatch(/answer_plan is missing/);
+    expect(reviewPlan).not.toHaveBeenCalled();
+  });
+
+  test('a plan the reviewer fails is INVALID with the findings in the reason, bounded', async () => {
+    asMac();
+    reviewPlan.mockResolvedValue({ pass: false, model: 'claude-opus', findings: [{ sectionIndex: 1, detail: 'The answer dodges the question.', action: 'State the fix first. '.repeat(100) }] });
+    const out = await run(blog, withPlan());
+    expect(out).toMatchObject({ ok: false, wait: true, code: tw.INVALID });
+    expect(out.reason).toMatch(/section 2: The answer dodges the question\./);
+    expect(out.reason.length).toBeLessThan(900);
+  });
+
+  test('a rejected plan stays rejected at its commit: the listing makes it due with the reason until the branch tip changes', async () => {
+    asMac();
+    reviewPlan.mockResolvedValue({ pass: false, model: 'claude-opus', findings: [{ sectionIndex: 0, detail: 'Too vague.', action: 'Lead with the cause.' }] });
+    const rejected = await run(blog, withPlan());
+    expect(rejected).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/\[terminal revision commit-1\]$/) });
+    // rejected_notes: the newest rejection on the row's brief, which the listing query adds.
+    const rowFor = (over = {}) => ({ opportunity_id: ID, brief_id: BRIEF, outcome: tw.AWAITING_OUTCOME, skip_reason: tw.INVALID, reviewer_notes: rejected.reason, rejected_notes: rejected.reason, brief_created_at: new Date(), score: 50, ...over });
+    const list = (row, sha) => tw.awaitingTerminalDrafts({ deps: { db: { raw: jest.fn(async () => ({ rows: [row] })) }, gh: ghWith(withPlan(), { sha }) } });
+    const same = await list(rowFor(), 'commit-1');
+    expect(same.written).toHaveLength(0);
+    expect(same.due).toHaveLength(1);
+    expect(same.due[0].problem).toMatch(/^terminal draft rejected: the answer plan failed review: section 1: Too vague\./);
+    expect(same.due[0].problem).not.toMatch(/terminal revision/);
+    // Mismatch and missing-plan rejections carry the same marker.
+    expect((await run(blog, good({ body: planBody }))).reason).toMatch(/\[terminal revision commit-1\]$/);
+    expect((await run(blog, withPlan({ body: `${body}\n\n## Why ghost ants trail\n\nText.\n` }))).reason).toMatch(/\[terminal revision commit-1\]$/);
+    // A later wait (the server in Mac mode records AWAITS_MAC) does not hide the rejection: still due.
+    const afterWait = await list(rowFor({ skip_reason: tw.AWAITS_MAC, reviewer_notes: 'the Mac job takes this draft' }), 'commit-1');
+    expect(afterWait.written).toHaveLength(0);
+    expect(afterWait.due[0].problem).toMatch(/^terminal draft rejected: the answer plan failed review: section 1: Too vague\./);
+    // A rewrite (a new tip), a newest rejection that was not a plan rejection, or no rejection on this brief: written again.
+    expect((await list(rowFor(), 'commit-2')).written).toHaveLength(1);
+    expect((await list(rowFor({ rejected_notes: 'terminal draft rejected: the file is not valid JSON' }), 'commit-1')).written).toHaveLength(1);
+    expect((await list(rowFor({ skip_reason: tw.PLAN_UNAVAILABLE, rejected_notes: null }), 'commit-1')).written).toHaveLength(1);
+    // The fact check turned off: plans are no longer reviewed, so the same commit is written again.
+    mockEditorialOn = false;
+    expect((await list(rowFor(), 'commit-1')).written).toHaveLength(1);
+  });
+
+  test('the plan shape takes strings only: a number, an object or a toString trap is a row problem, never a throw', () => {
+    const shape = require('../services/content/editorial-plan-shape');
+    const ok = { heading: 'Why ghost ants trail', question: 'Why do they trail?', answer: 'They follow scent.' };
+    expect(shape.planSectionsProblem([ok])).toBeNull();
+    for (const bad of [{ ...ok, heading: 5 }, { ...ok, question: { text: 'Q?' } }, { ...ok, answer: ['A.'] }, { toString: 1 }, [ok]]) {
+      expect(() => shape.planSectionsProblem([bad])).not.toThrow();
+      expect(shape.planSectionsProblem([bad])).toMatch(/^answer_plan section 1 needs/);
+    }
+  });
+
+  describe('maxPlanAdapterCovers: the review lanes ride the Max plan', () => {
+    const context = require.resolve('../services/agent-control/context');
+    const target = (mark) => {
+      const fetch = () => {};
+      const g = { fetch };
+      if (mark) g.__maxRunnerAdapter = { fetch, ...mark };
+      return g;
+    };
+    test('true for the live adapter that answers every review lane from this context module, or every call', () => {
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: [...tw.MAC_MODEL_LANES, 'fact_check_gate'], contextModule: context }) })).toBe(true);
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: 'all' }) })).toBe(true);
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: 'all' }), env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' } })).toBe(true);
+    });
+    test('false when an Anthropic base-URL override would send the calls past the adapter', () => {
+      for (const base of ['https://gateway.ai.cloudflare.com/v1/acct/anthropic', 'http://localhost:8080', 'not a url']) {
+        expect(tw.maxPlanAdapterCovers({ target: target({ answers: 'all' }), env: { ANTHROPIC_BASE_URL: base } })).toBe(false);
+      }
+    });
+    test('false with no adapter, a replaced fetch, a lane missing, or another copy of the portal', () => {
+      expect(tw.maxPlanAdapterCovers({ target: target(null) })).toBe(false);
+      const replaced = target({ answers: 'all' });
+      replaced.fetch = () => {};
+      expect(tw.maxPlanAdapterCovers({ target: replaced })).toBe(false);
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: ['editorial_review', 'editorial_repair'], contextModule: context }) })).toBe(false);
+      // The publish-time fact check runs in its own lane: without it a publish bills the API.
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: ['editorial_review', 'editorial_repair', 'editorial_plan_review'], contextModule: context }) })).toBe(false);
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: [...tw.MAC_MODEL_LANES], contextModule: '/elsewhere/portal/server/services/agent-control/context.js' }) })).toBe(false);
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: [...tw.MAC_MODEL_LANES] }) })).toBe(false);
+      expect(tw.maxPlanAdapterCovers()).toBe(false); // the test process has no adapter
+    });
+    test('the lanes are the ones editorial-review.js and fact-check-gate.js dispatch in', () => {
+      const lanes = (mod) => [...require('fs').readFileSync(require.resolve(mod), 'utf8').matchAll(/laneId: '([a-z_]+)'/g)].map((m) => m[1]);
+      const used = [...lanes('../services/content/editorial-review'), ...lanes('../services/content/fact-check-gate')].sort();
+      expect(used).toEqual([...tw.MAC_MODEL_LANES].sort());
+      // One list: the adapter check and the dispatcher's Anthropic-only rule read the same one.
+      expect(tw.MAC_MODEL_LANES).toBe(require('../services/llm/max-plan-lanes').MAC_MODEL_LANES);
+    });
+  });
+
+  test('a reviewer that throws, or fails closed with no model, WAITS with a code that is not INVALID', async () => {
+    asMac();
+    reviewPlan.mockRejectedValue(new Error('claude -p down'));
+    expect(await run(blog, withPlan())).toMatchObject({ ok: false, wait: true, code: tw.PLAN_UNAVAILABLE });
+    reviewPlan.mockResolvedValue({ pass: false, model: null, findings: [{ sectionIndex: 0, detail: 'Plan review failed closed (timeout).', action: 'Retry.' }] });
+    const out = await run(blog, withPlan());
+    expect(out).toMatchObject({ wait: true, code: tw.PLAN_UNAVAILABLE });
+    expect(out.code).not.toBe(tw.INVALID);
+  });
+
+  test('a reviewer answer that failed validation rejects the plan at this commit instead of waiting', async () => {
+    asMac();
+    reviewPlan.mockResolvedValue({ pass: false, model: null, invalidResponse: true, findings: [{ sectionIndex: 0, detail: 'Plan review response failed validation: findings do not cover every section.', action: 'Retry.' }] });
+    const out = await run(blog, withPlan());
+    expect(out).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/could not give a valid review of this plan/) });
+  });
+
+  test('a body whose H2 headings differ from the plan is INVALID with emit_draft\'s directives', async () => {
+    asMac();
+    const missing = await run(blog, withPlan({ body: `${body}\n\n## Why ghost ants trail\n\nText.\n` }));
+    expect(missing).toMatchObject({ code: tw.INVALID });
+    expect(missing.reason).toMatch(/missing from the body as headings: What stops them\. Add each as its own heading/);
+    const extra = await run(blog, withPlan({ body: `${planBody}\n## A new topic\n\nText.\n` }));
+    expect(extra.reason).toMatch(/not part of the approved answer plan: A new topic/);
+  });
+
+  test('a bad answer_plan shape is INVALID before any review, and a good one never reaches a model in the listing', async () => {
+    asMac();
+    for (const bad of ['text', [], {}, { sections: [] }, { sections: 'x' }, { sections: Array.from({ length: 81 }, () => sections[0]) }]) {
+      expect(await run(blog, withPlan({ answer_plan: bad }))).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/answer_plan/) });
+    }
+    // Sections reviewPlan would reject with no model (it reads as an outage there) are INVALID here.
+    for (const bad of [[{}], [sections[0], { ...sections[1], answer: '  ' }], [{ ...sections[0], heading: 'x'.repeat(501) }], [null]]) {
+      expect(await run(blog, withPlan({ answer_plan: { sections: bad } }))).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/answer_plan section \d needs a heading/) });
+    }
+    expect(reviewPlan).not.toHaveBeenCalled();
+    const fetched = await tw.fetchTerminalDraft(ID, { gh: ghWith(withPlan()), expectedBriefId: BRIEF });
+    expect(fetched).toMatchObject({ ok: true, answer_plan: { sections } });
+    expect(Object.keys(fetched.draft)).not.toContain('answer_plan');
+    expect(tw.DRAFT_FIELDS).not.toContain('answer_plan');
+    const conn = { raw: jest.fn(async () => ({ rows: [{ opportunity_id: ID, brief_id: BRIEF, outcome: tw.AWAITING_OUTCOME, brief_created_at: new Date(), score: 50 }] })) };
+    const listing = await tw.awaitingTerminalDrafts({ deps: { db: conn, gh: ghWith(withPlan()) } });
+    expect(listing.written).toHaveLength(1);
+    // The fact check turned off: the plan is not read, so a malformed one no longer holds the body back.
+    mockEditorialOn = false;
+    const off = await tw.fetchTerminalDraft(ID, { gh: ghWith(withPlan({ answer_plan: { sections: [{}] } })), expectedBriefId: BRIEF });
+    expect(off).toMatchObject({ ok: true });
+    expect(reviewPlan).not.toHaveBeenCalled();
+  });
+
+  test('a refresh checks the plan against the existing page title, and headings only have to appear', async () => {
+    asMac();
+    astro.getFile.mockImplementation(async (filePath) => (filePath === 'src/content/blog/ghost-ants.md'
+      ? { content: '---\ntitle: Ghost Ant Guide\n---\n\nExisting body.' } : null));
+    const withExtras = withPlan({ body: `${body}\n\n## Old section\n\nText.\n\n### What stops them\n\nText.\n\n## Why ghost ants trail\n\nText.\n` });
+    expect(await run(refresh, withExtras)).toMatchObject({ ok: true });
+    expect(reviewPlan).toHaveBeenCalledWith({ title: 'Ghost Ant Guide', sections });
+    expect(await run(refresh, withPlan({ body: `${body}\n\n## Why ghost ants trail\n\nText.\n` }))).toMatchObject({ code: tw.INVALID });
+  });
+
+  test('a refresh whose target page cannot be read waits (not INVALID); a non-blog target needs no plan', async () => {
+    asMac();
+    astro.getFile.mockRejectedValue(Object.assign(new Error('Bad Gateway'), { status: 502 }));
+    expect(await run(refresh, withPlan())).toMatchObject({ wait: true, code: tw.PLAN_UNAVAILABLE });
+    // A target that is gone, or a brief with no title: no retry helps, so the writer is asked for a hold.
+    astro.getFile.mockReset().mockResolvedValue(null);
+    const gone = await run(refresh, withPlan());
+    expect(gone).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/Push a hold with reason brief_unusable.*\[terminal revision commit-1\]$/) });
+    // A target whose frontmatter does not parse is broken, not unreachable: the writer is asked for a hold too.
+    astro.getFile.mockResolvedValue({ content: '---\ntitle: [unclosed\n---\n\nBody.' });
+    expect(await run(refresh, withPlan())).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/brief_unusable/) });
+    astro.getFile.mockReset().mockResolvedValue(null);
+    const untitled = await run({ ...blog, working_title: '', target_keyword: '' }, withPlan());
+    expect(untitled).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/brief_unusable/) });
+    astro.getFile.mockImplementation(async (filePath) => (filePath === 'src/content/services/pest-control-venice-fl.md'
+      ? { content: '---\ntitle: Pest Control Venice\n---\n\nBody.' } : null));
+    expect(await run({ ...refresh, target_url: '/pest-control-venice-fl/' }, good())).toMatchObject({ ok: true });
+    expect(reviewPlan).not.toHaveBeenCalled();
+  });
+
+  test('the fact check gate off: a Mac-mode draft needs no plan', async () => {
+    asMac();
+    mockEditorialOn = false;
+    expect(await run(blog, good())).toMatchObject({ ok: true });
+    expect(reviewPlan).not.toHaveBeenCalled();
+  });
+});
+
 describe('retireTerminalDraft', () => {
   test('deletes the branch while it still points at the commit that was read', async () => {
     const gh = ghWith(good());
@@ -263,7 +554,7 @@ describe('waiting rows and the admin item', () => {
     expect(out.rebrief.map((r) => r.opportunity_id)).toEqual([R]);
     expect(out.due[0]).toMatchObject({ branch: `terminal-writer/${ID}`, draft_path: `terminal-drafts/${ID}.json`, brief_id: 'brief-aa' });
     // the latest run of each pending row: waiting ones, and gate retries of a terminal draft
-    expect(d.db.raw.mock.calls[0][1]).toEqual([7, 'deferred_publish_cap', tw.AWAITING_OUTCOME, tw.GATE_RETRY_OUTCOME, tw.TERMINAL_AGENT_ID]);
+    expect(d.db.raw.mock.calls[0][1]).toEqual([tw.INVALID, 'deferred_publish_cap', 7, 'deferred_publish_cap', tw.AWAITING_OUTCOME, tw.GATE_RETRY_OUTCOME, tw.TERMINAL_AGENT_ID]);
 
     branches[C] = draftFor(C);
     expect((await tw.awaitingTerminalDrafts({ deps: d })).written.map((r) => r.opportunity_id)).toEqual([B, C]);
@@ -274,6 +565,26 @@ describe('waiting rows and the admin item', () => {
     expect(withHold.held.map((r) => [r.opportunity_id, r.hold.reason])).toEqual([[ID, 'brief_unusable']]);
     expect(withHold.due.map((r) => r.opportunity_id)).toEqual([]);
     expect(withHold.written.map((r) => r.opportunity_id)).toEqual([B, C]);
+  });
+
+  test('a draft or hold pushed after a handoff wait is marked for the Mac pass; a reviewer outage or a later publish-cap deferral is not', async () => {
+    const [D, E] = ['00000000-0000-4000-8000-0000000000d1', '00000000-0000-4000-8000-0000000000e1'];
+    const t = new Date('2026-11-19T14:00:00Z');
+    const rows = [
+      waiting(ID, { skip_reason: tw.AWAITS_MAC, created_at: t }),
+      waiting(B, { skip_reason: tw.MISSING, created_at: t }),
+      waiting(C, { skip_reason: tw.REVIEW_UNAVAILABLE, created_at: t }),
+      waiting(D, { skip_reason: tw.PLAN_UNAVAILABLE, created_at: t }),
+      waiting(E, { skip_reason: tw.AWAITS_MAC, created_at: t, capped_at: new Date('2026-11-19T15:00:00Z') }),
+    ];
+    const F = '00000000-0000-4000-8000-0000000000f1';
+    rows.push(waiting(F, { skip_reason: tw.AWAITS_MAC, created_at: t }));
+    const branches = Object.fromEntries([ID, B, C, D, E].map((id) => [id, draftFor(id)]));
+    // A hold pushed during the handoff wait is marked too (a needs_owner question is raised that pass).
+    branches[F] = { opportunity_id: F, brief_id: `brief-${F.slice(-2)}`, hold: { reason: 'needs_owner', detail: 'Two services share this page.', question: 'Keep both services on one page?' } };
+    const out = await tw.awaitingTerminalDrafts({ deps: deps({ rows, branches }) });
+    expect(out.written.map((r) => [r.opportunity_id, r.handoff])).toEqual([[ID, true], [B, true], [C, false], [D, false], [E, false]]);
+    expect(out.held.map((r) => [r.opportunity_id, r.handoff])).toEqual([[F, true]]);
   });
 
   test('a waiting row whose brief is too old, or gone, is not offered for writing, nor listed written with its draft pushed: the next run briefs it again', async () => {
@@ -326,6 +637,26 @@ describe('waiting rows and the admin item', () => {
     expect(await tw.raiseTerminalDue({ now, deps: d })).toEqual({ due: 0, written: 1, rebrief: 1, delivered: false });
     expect(d.episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     expect(d.episodes.closeAdminAlertKeys.mock.calls[0][1]).toEqual(['content-terminal-due:2026-10-09']);
+  });
+
+  describe('macHoldsBlogDraft: a blog that waits for the Mac job is not a drought', () => {
+    const saved = { ...process.env };
+    beforeEach(() => { process.env.GATE_CONTENT_WRITER_TERMINAL = 'true'; process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac'; });
+    afterEach(() => { process.env = { ...saved }; });
+
+    test('true when a blog draft is pushed and waits; false for a refresh only, for no file, outside Mac mode and on a failed read', async () => {
+      const blog = () => deps({ rows: [waiting(B)], branches: { [B]: draftFor(B) } });
+      expect(await tw.macHoldsBlogDraft({ deps: blog() })).toBe(true);
+      expect(await tw.macHoldsBlogDraft({ deps: deps({ rows: [waiting(B, { action_type: 'refresh_existing_page' })], branches: { [B]: draftFor(B) } }) })).toBe(false);
+      expect(await tw.macHoldsBlogDraft({ deps: deps({ rows: [waiting(B)] }) })).toBe(false);
+      const failing = blog();
+      failing.db.raw.mockRejectedValue(new Error('db down'));
+      expect(await tw.macHoldsBlogDraft({ deps: failing })).toBe(false);
+      delete process.env.CONTENT_EDITORIAL_REVIEW_HOST;
+      const off = blog();
+      expect(await tw.macHoldsBlogDraft({ deps: off })).toBe(false);
+      expect(off.db.raw).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -441,6 +772,7 @@ describe('the gate as a kill switch, and the 1pm catch-up', () => {
       expect(await tw.blogDraftRequested({ now, deps: { episodes: episodes(['content-terminal-due:2026-10-09']), db: withBlog([{}]) } })).toBe(false);
     });
   });
+
 });
 
 describe('a needs_owner hold asks the owner once, and the item closes when the row no longer waits on the owner', () => {

@@ -3,10 +3,17 @@
  *
  *   GET   /                  list (status/role filters, newest first, ai fields)
  *   GET   /:id                full application detail, plus same_phone: the
- *                             person's other applications (same phone number)
- *   GET   /:id/stage-preview  rendered notify preview for a candidate status
+ *                             person's other applications (same phone number);
+ *                             ?peek=1 acknowledges no replies
+ *   GET   /:id/stage-preview  rendered notify preview for a candidate status, and what
+ *                             the move does to the application's job offers
  *   PATCH /:id/status         owner status transition + optional notify/resend;
- *                             optional expected_status refuses a stale decision (409)
+ *                             optional expected_status refuses a stale decision (409), and
+ *                             optional expected_offers a move whose offers changed (409)
+ *   GET   /:id/offer, POST /:id/offer, POST /:id/offer/:offerId/{send,withdraw,revise},
+ *   GET   /:id/offer/:offerId/signed-copy
+ *                             the job offer flow (GATE_JOB_OFFERS; 404 { enabled: false } while off).
+ *                             send / withdraw / revise are owner-account only (ibFullAccess)
  *
  * Owner-only (requireAdmin): applications hold applicant PII and hiring
  * decisions. Every real transition appends to status_history — the AI
@@ -27,6 +34,8 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { ROLES, STATUSES, lastTenDigits, CONTACT_PHONE_LAST_TEN_SQL } = require('../services/job-applications');
 const { isEnabled } = require('../config/feature-gates');
 const RecruitingComms = require('../services/recruiting-comms');
+const JobOffers = require('../services/job-offers');
+const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -189,6 +198,9 @@ router.get('/:id', async (req, res) => {
       replyMedia = {};
     }
     res.json({ application: await presentApplication(row), reply_media: replyMedia, same_phone: await samePhoneApplications(row) });
+    // A re-read the page makes on its own (?peek=1: after an offer action, or its Try again) acknowledges nothing: a
+    // reply that arrived meanwhile may sit behind a dialog the owner has open. Only an explicit open reads them.
+    if (req.query.peek === '1') return;
     // Opening the application IS reading its replies (Codex r7 P2): clear the
     // unread flags on the applicant's reply rows in both message stores so
     // the shared unread counts do not stay lit for messages the owner has
@@ -221,6 +233,19 @@ router.get('/:id', async (req, res) => {
 // only for 'interview' in this PR. Never mints a token — an application
 // with no token yet previews with the literal placeholder text; the PATCH
 // below mints lazily, only when it actually sends.
+// What a stage move does to the application's job offers, by the rule the move applies (applyStatusTransition), with
+// GATE_JOB_OFFERS on or off: whether it withdraws an offer the applicant holds or discards a draft, and whether this
+// account may make it (a held offer is withdrawn only by the owner account). The stage dialog says it before Confirm.
+// stamp: the offers this move withdraws, as the preview saw them (none, for a move that keeps them). The move sends it
+// back as expected_offers and is refused if it would withdraw anything else.
+async function stageOfferEffect(req, row, status) {
+  if (!JobOffers.stageMoveClosesOffers(row.status, status)) {
+    return { held: false, draft: false, owner_only: false, stamp: JobOffers.offerStampOf([]) };
+  }
+  const { held, draft, stamp } = await JobOffers.liveOfferStake(db, row.id);
+  return { held, draft, owner_only: held && !ibFullAccess(req), stamp };
+}
+
 router.get('/:id/stage-preview', async (req, res) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
@@ -232,11 +257,12 @@ router.get('/:id/stage-preview', async (req, res) => {
 
     const sendingEnabled = isEnabled('recruitingComms');
     const channels = await RecruitingComms.channelEligibility(row);
+    const offers = await stageOfferEffect(req, row, status);
 
     if (status !== 'interview') {
       return res.json({
         status, sending_enabled: sendingEnabled, templated: false,
-        channels, sms_body: null, email_subject: null, email_body: null, interview_url: null,
+        channels, sms_body: null, email_subject: null, email_body: null, interview_url: null, offers,
       });
     }
 
@@ -257,6 +283,7 @@ router.get('/:id/stage-preview', async (req, res) => {
       email_subject: emailContent.subject || null,
       email_body: emailContent.text || null,
       interview_url: hasToken ? RecruitingComms.interviewUrlFor(row.interview_token) : null,
+      offers,
     });
   } catch (err) {
     logger.error(`[admin-careers] stage-preview failed: ${RecruitingComms.errorSummary(err)}`);
@@ -281,6 +308,14 @@ function buildStatusPatchPlan(req) {
     return { error: { code: 400, body: { error: 'Unknown expected status' } } };
   }
 
+  // The job offers the stage dialog's preview showed (its offers.stamp). Optional, like expected_status: with it, a move
+  // whose offers changed since is refused; without it (a page loaded before the stamp), a move that would withdraw an
+  // offer is refused (applyStatusTransition).
+  const expectedOffers = req.body.expected_offers ?? null;
+  if (expectedOffers !== null && !(typeof expectedOffers === 'string' && /^[0-9a-f]{32}$/.test(expectedOffers))) {
+    return { error: { code: 400, body: { error: 'Unknown expected offers' } } };
+  }
+
   const note = typeof req.body.note === 'string'
     ? req.body.note.trim().slice(0, MAX_NOTE_CHARS)
     : '';
@@ -297,7 +332,7 @@ function buildStatusPatchPlan(req) {
 
   return {
     plan: {
-      status, expectedStatus, note, resend, notify,
+      status, expectedStatus, expectedOffers, note, resend, notify,
       ...overrides,
       wantSms, wantEmail,
     },
@@ -408,7 +443,7 @@ function buildStatusUpdatePayload(row, plan, { isResendOnly, willSend, technicia
 // Row lock inside one transaction: concurrent transitions must not both
 // derive from the same snapshot and silently drop a history entry, and a
 // token mint must land atomically with the status write it belongs to.
-async function applyStatusTransition(trx, applicationId, technicianId, plan) {
+async function applyStatusTransition(trx, applicationId, technicianId, plan, { ownerAccount = false } = {}) {
   const row = await trx('job_applications')
     .where({ id: applicationId })
     .forUpdate()
@@ -435,11 +470,30 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan) {
 
   if (willSend) assertNotifyBodiesKeepInterviewLink(row, plan);
 
+  // Leaving the offer stage (back to review or interview, or closed: rejected, withdrawn, hired) withdraws the application's
+  // outstanding job offers in the same transaction, so an old link cannot sign over the owner's newer decision or revive
+  // when the application is moved back (the offer flow, GATE_JOB_OFFERS).
+  const closesOffers = JobOffers.stageMoveClosesOffers(row.status, plan.status);
+  // The move withdraws exactly what its dialog showed. The preview's stamp names the offers it withdraws (none, for a
+  // move that keeps them); the same rule names them again here, under the lock. Any difference is refused before
+  // anything is written, and the dialog reads the preview again: another session sent, edited or withdrew an offer, or
+  // the preview read the application at another stage than this move leaves. A move without a stamp (a page loaded
+  // before the stamp) never showed an offer: it goes through only when it withdraws none.
+  const withdrawn = closesOffers ? await JobOffers.liveOffersOf(trx, applicationId, { lock: true }) : [];
+  if (!plan.expectedOffers && withdrawn.length) return { row, offersUnseen: true };
+  if (plan.expectedOffers && JobOffers.offerStampOf(withdrawn) !== plan.expectedOffers) return { row, offersChanged: true };
+  // An offer the applicant holds is withdrawn only by the owner account, as on POST .../withdraw: any other admin's
+  // stage move is refused here, before anything is written.
+  if (closesOffers && !ownerAccount && (await JobOffers.heldOffersOf(trx, applicationId)).length) {
+    return { row, ownerOnly: true };
+  }
+
   const updatePayload = buildStatusUpdatePayload(row, plan, { isResendOnly, willSend, technicianId });
   const [next] = await trx('job_applications')
     .where({ id: applicationId })
     .update(updatePayload)
     .returning('*');
+  if (closesOffers) await JobOffers.closeOffersWithApplication(trx, applicationId, technicianId);
 
   return { row: next, interviewApplicable, willSend };
 }
@@ -531,7 +585,7 @@ router.patch('/:id/status', async (req, res) => {
 
     let txResult;
     try {
-      txResult = await db.transaction((trx) => applyStatusTransition(trx, req.params.id, req.technicianId, plan));
+      txResult = await db.transaction((trx) => applyStatusTransition(trx, req.params.id, req.technicianId, plan, { ownerAccount: ibFullAccess(req) }));
     } catch (err) {
       if (err instanceof NotifyValidationError) {
         return res.status(400).json({ error: 'Message must keep the interview link.' });
@@ -540,6 +594,28 @@ router.patch('/:id/status', async (req, res) => {
     }
 
     if (!txResult) return res.status(404).json({ error: 'Not found' });
+    if (txResult.ownerOnly) {
+      return res.status(403).json({
+        error: 'This application has a job offer out. Only the owner account can move it out of Offer.',
+        code: 'OWNER_ONLY',
+        application: await presentApplication(txResult.row),
+      });
+    }
+    if (txResult.offersChanged) {
+      return res.status(409).json({
+        error: 'The job offer changed since this opened. Nothing was changed. Check the move again.',
+        code: 'OFFERS_CHANGED',
+        application: await presentApplication(txResult.row),
+      });
+    }
+    // A page loaded before the offers stamp sends none: it cannot show the offer, so it is told to reload.
+    if (txResult.offersUnseen) {
+      return res.status(409).json({
+        error: 'This application has a job offer this page does not show. Reload the page, then make the move again. Nothing was changed.',
+        code: 'OFFERS_UNSEEN',
+        application: await presentApplication(txResult.row),
+      });
+    }
     if (txResult.conflict) return res.status(409).json({ error: txResult.conflict, application: await presentApplication(txResult.row) });
     const { row: updated, interviewApplicable, willSend } = txResult;
 
@@ -558,5 +634,72 @@ router.patch('/:id/status', async (req, res) => {
     res.status(500).json({ error: 'Failed to update application' });
   }
 });
+
+// --- Job offers (GATE_JOB_OFFERS) ------------------------------------------
+// Dark: every offer endpoint answers 404 { enabled: false } before any database work. send / withdraw / revise
+// belong to the owner account (ibFullAccess, the check requireFullAccess uses); the read, the
+// draft save and the signed copy stay open to any admin. The offer token itself never rides in a response: only
+// the computed offer URL does, and only on the admin shape.
+router.use('/:id/offer', (req, res, next) => {
+  if (!isEnabled('jobOffers')) return res.status(404).json({ enabled: false });
+  if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Not found', code: 'NOT_FOUND' });
+  next();
+});
+router.param('offerId', (req, res, next, offerId) => {
+  if (!UUID_RE.test(offerId)) return res.status(404).json({ error: 'Not found', code: 'NOT_FOUND' });
+  next();
+});
+
+// Owner-account only (the same predicate as requireFullAccess), answering with a code the page reads.
+function requireOwnerAccount(req, res, next) {
+  if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.', code: 'OWNER_ONLY' });
+  next();
+}
+
+function offerActor(req) {
+  return { id: req.technicianId, name: (req.technician && req.technician.name) || null, ownerAccount: ibFullAccess(req) };
+}
+
+// One answer for every offer handler: the service's own refusals carry status, code and detail; anything else is a 500.
+function offerHandler(label, work) {
+  return async (req, res) => {
+    try {
+      return res.json(await work(req));
+    } catch (err) {
+      if (err instanceof JobOffers.OfferError) {
+        return res.status(err.status).json({ error: err.message, code: err.code, ...err.extra });
+      }
+      logger.error(`[admin-careers] offer ${label} failed: ${RecruitingComms.errorSummary(err)}`);
+      return res.status(500).json({ error: 'Failed to update the offer' });
+    }
+  };
+}
+
+// viewer.ownerActions: whether this login passes the owner-only check Send / Withdraw / Revise use (the page hides
+// those buttons from other admins; the server still refuses them).
+router.get('/:id/offer', offerHandler('read', async (req) => ({
+  ...(await JobOffers.adminPanel(req.params.id, offerActor(req))),
+  viewer: { ownerActions: ibFullAccess(req) },
+})));
+
+router.post('/:id/offer', offerHandler('save', async (req) => ({
+  offer: await JobOffers.saveDraft(req.params.id, req.body && typeof req.body === 'object' ? req.body : {}, offerActor(req)),
+})));
+
+router.post('/:id/offer/:offerId/send', requireOwnerAccount, offerHandler('send', (req) => JobOffers.sendOffer(
+  req.params.id, req.params.offerId, offerActor(req), req.body && req.body.draftHash, new Date(), { expectedOut: req.body && req.body.expectedOut },
+)));
+
+router.post('/:id/offer/:offerId/withdraw', requireOwnerAccount, offerHandler('withdraw', async (req) => ({
+  offer: await JobOffers.withdrawOffer(req.params.id, req.params.offerId, offerActor(req), {
+    expectedStatus: req.body && req.body.expectedStatus, draftHash: req.body && req.body.draftHash,
+  }),
+})));
+
+router.post('/:id/offer/:offerId/revise', requireOwnerAccount, offerHandler('revise', async (req) => ({
+  offer: await JobOffers.reviseOffer(req.params.id, req.params.offerId, req.body && typeof req.body === 'object' ? req.body : {}, offerActor(req)),
+})));
+
+router.get('/:id/offer/:offerId/signed-copy', offerHandler('signed copy', (req) => JobOffers.signedCopy(req.params.id, req.params.offerId)));
 
 module.exports = router;

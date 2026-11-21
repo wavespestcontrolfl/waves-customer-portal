@@ -11,7 +11,7 @@
 // against America/New_York — the business is in SW Florida. No UTC.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, Leaf, MapPin, ShieldCheck } from 'lucide-react';
+import { BookOpen, MapPin, ShieldCheck } from 'lucide-react';
 import WavesMark from '../brand/WavesMark';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
@@ -123,11 +123,6 @@ function canMarkEnRoute(service) {
   return ['pending', 'confirmed', 'rescheduled'].includes(service?.status);
 }
 
-function isLawnService(service) {
-  return /lawn|turf/.test(String(service?.serviceType || '').toLowerCase());
-}
-
-
 // The drive into a stop, drawn as a thin line above its card (owner
 // 2026-10-05): "59 min drive from <previous stop>". The server stamps each
 // leg on one card only (driveInShown) and names the stop it comes from, so
@@ -217,7 +212,7 @@ function ButtonLabel({ children }) {
   return <span className="block max-w-full text-center leading-tight" style={{ fontSize: 14 }}>{children}</span>;
 }
 
-function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
+function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
   const needsAttention =
@@ -259,7 +254,6 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
     clearTimeout(longPressTimer.current);
   }, []);
 
-  const showTreatmentPlan = isLawnService(service) && Boolean(onTreatmentPlan);
   const showProtocol = Boolean(onProtocol);
   const showAudit =
     service.status === 'completed' &&
@@ -269,7 +263,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   const showNavigate = Boolean(service.address);
   const canAssignTechnician = (technicians || []).length > 0 || Boolean(service.technicianId);
   const hasActions =
-    canAssignTechnician || showTreatmentPlan || showProtocol || showAudit || showEnRoute || showNavigate;
+    canAssignTechnician || showProtocol || showAudit || showEnRoute || showNavigate;
 
   // Icon over a one-word label (owner 2026-10-05), so a new tech can tell
   // the buttons apart.
@@ -398,19 +392,6 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                   />
                 )}
               </div>
-            )}
-            {showTreatmentPlan && (
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); onTreatmentPlan(service); }}
-                className={actionBtnClass}
-                style={btnStyle}
-                title="Treatment plan"
-                aria-label="Treatment plan"
-              >
-                <Leaf size={16} strokeWidth={1.75} />
-                <ButtonLabel>Plan</ButtonLabel>
-              </button>
             )}
             {showProtocol && (
               <button
@@ -546,7 +527,7 @@ function withOpenHours(sorted, openHours) {
   return rows;
 }
 
-function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds, bookingHours }) {
+function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds, bookingHours }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const now = useHourClock();
   // Techs marked out for the day can't take a booking; with the whole roster
@@ -632,7 +613,6 @@ function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute,
             onEdit={onEdit}
             onEnRoute={onEnRoute}
             onProtocol={onProtocol}
-            onTreatmentPlan={onTreatmentPlan}
             onViewAudit={onViewAudit}
             owesCompletion={owesCompletion}
             technicians={technicians}
@@ -658,7 +638,7 @@ function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute,
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, bookingHours }) {
+export default function MobileDispatchList({ mode, date, services, refreshKey, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, bookingHours }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -717,7 +697,6 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
           onEdit={onEdit}
           onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}
-          onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
           owesCompletion={owesCompletion}
           technicians={technicians}
@@ -756,7 +735,6 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
           onEdit={onEdit}
           onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}
-          onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
           owesCompletion={owesCompletion}
           technicians={technicians}

@@ -1797,7 +1797,7 @@ async function runAutoDispatch(opts = {}) {
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {
-    // One push per tech for the whole run (GATE_AUTO_DISPATCH_PUSH_SUMMARY),
+    // One push per tech for the whole run (owner ruling 2026-10-03),
     // after the per-visit cards it summarizes — sent even when the audit
     // update fails, since the per-visit pushes were held (Codex #5786 P2).
     // Best-effort; never throws.

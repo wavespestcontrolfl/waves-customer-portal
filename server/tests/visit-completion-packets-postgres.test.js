@@ -555,6 +555,32 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(day(invoices[0].due_date)).toBe(etDateString(addETDays(new Date(), 30)));
   });
 
+  test("a record keeps the picked action labels apart from the note lines, and a record with the technician's own note reads only those", async () => {
+    const input = submission({ actor: { techRole: 'admin', technicianId: fixture.techId } });
+    input.items[0].body = { ...input.items[0].body,
+      protocolActionsCompleted: ['Granular bait in beds', 'Treatment is safe for pets'], technicianNotes: '[Action] Treated along the side gate',
+      recommendations: ['Trim the hedge back from the wall', 'Toxic residue on the sill'] };
+    expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202 });
+    const record = await mockPg('service_records').where({ scheduled_service_id: input.items[0].serviceId }).first();
+    // The form-only copy also leaves out a label that fails the complete
+    // customer-copy screen; the merged list keeps today's content.
+    expect(record.structured_notes).toMatchObject({
+      protocolActionsCompleted: ['Granular bait in beds', 'Treatment is safe for pets', 'Treated along the side gate'],
+      formProtocolActions: ['Granular bait in beds'],
+    });
+    // The form's recommendations store the same way (pre-push audit on
+    // d9da442dba): the refused value stays in the merged list only.
+    expect(record.structured_notes.formRecommendations).toEqual(['Trim the hedge back from the wall']);
+    expect(record.structured_notes.recommendations).toEqual(expect.arrayContaining(['Trim the hedge back from the wall', 'Toxic residue on the sill']));
+    // The report's reader (report-data buildProtocolPayload) on the saved
+    // record, then on the same record once it carries the technician's own note.
+    const { buildProtocolPayload } = require('../services/service-report/report-data');
+    expect(buildProtocolPayload(record).actions).toEqual(['Granular bait in beds', 'Treatment is safe for pets', 'Treated along the side gate']);
+    const reportNote = { v: 1, text: 'I put bait in the beds.', source: 'cleaned' };
+    expect(buildProtocolPayload({ ...record, structured_notes: { ...record.structured_notes, reportNote } }).actions)
+      .toEqual(['Granular bait in beds']);
+  });
+
   test.each([
     ['inspection only', false], ['inspection only', true], ['callback', true], ['always-free follow-up', true],
   ])('nonbillable estimate members (%s) leave unrelated acceptance invoices outside packet billing (lock=%s)', async (kind, heldLock) => {
@@ -1716,8 +1742,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .every((item) => item.status === 'done')).toBe(true);
   });
 
-  test('a Tree & Shrub member scores its assessment from the durable photos on replay', async () => {
-    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'Tree & Shrub Care' });
+  test('a Tree & Shrub member scores its durable photos and flags an already-applied product on replay', async () => {
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+      service_type: 'Custom Tree & Shrub Care', service_address_city: 'Lakewood Ranch', service_address_zip: '34240',
+    });
+    await mockPg('products_catalog').where({ id: fixture.productId }).update({ name: 'Fixture NutriRoot 2-2-3', category: 'fertilizer' });
     const config = require('../config');
     const priorBucket = config.s3.bucket;
     config.s3.bucket = 'fixture-photo-bucket';
@@ -1733,6 +1762,12 @@ postgres('visit completion packet records on PostgreSQL', () => {
         pestLifeStage: 'crawler', iracFracLogged: true, snapshotAppliedYtd: 2, fertilizerAppliedYtd: 'January palm fert',
         customerNote: 'Beds treated and palms inspected.' };
     }
+    const { alreadyAppliedBasis } = require('../../shared/tree-shrub-fertilizer-evidence.json').nutriRoot;
+    const applied = input.items[0];
+    applied.body.products = [{ productId: fixture.productId, totalAmount: 1, amountUnit: 'oz' }];
+    applied.body.treeShrubCompletion.nutriroot_application_basis = alreadyAppliedBasis;
+    const officeReviews = () => mockPg('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'limitType' = ? AND metadata->>'customerId' = ?", ['nutriroot_compliance_review', fixture.customerId]);
     const score = require('../services/tree-shrub-assessment').scoreAndStoreTreeShrubAssessment;
     score.mockReset().mockResolvedValue({ id: randomUUID() });
     const stored = jest.spyOn(require('../services/photos'), 'getPhotoBase64').mockResolvedValue({ data: 'Zml4dHVyZQ==', mimeType: 'image/png' });
@@ -1741,9 +1776,17 @@ postgres('visit completion packet records on PostgreSQL', () => {
       saved = await saveVisitCompletionPacket(input);
       expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
       expect(score).not.toHaveBeenCalled();
+      const record = await mockPg('service_records').where({ scheduled_service_id: applied.serviceId }).first('id', 'structured_notes');
+      expect(record.structured_notes.treeShrubCloseout.nutriroot_application_basis).toBe(alreadyAppliedBasis);
+      expect(await mockPg('service_products').where({ service_record_id: record.id, product_id: fixture.productId })).toHaveLength(1);
       expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+      expect((await officeReviews()).map(row => row.metadata)).toEqual([expect.objectContaining({
+        scheduledServiceId: applied.serviceId, serviceRecordId: record.id, productId: fixture.productId,
+        reason: expect.stringContaining('50% slow-release'),
+      })]);
     } finally {
       config.s3.bucket = priorBucket;
+      await officeReviews().del();
     }
     expect(score).toHaveBeenCalledTimes(2);
     for (const [call] of score.mock.calls) {

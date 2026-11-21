@@ -107,7 +107,7 @@ describe('transactional email provider retry classification', () => {
     if (final) expect(finals[0][3].metadata).toMatchObject({ cause: 'blocked', customer_id: 'c1' });
   });
 
-  describe('estimate follow-ups carrying the monthly average stay off the rail (their stored price line goes stale)', () => {
+  describe('estimate follow-ups stay off the rail (their stored copy goes stale)', () => {
     const marked = { template_key: 'estimate.unviewed_followup', categories: ['estimate_followup', 'estimate_followup_monthly_average'] };
 
     test('not eligible, so a provider block schedules no retry and raises no exhaustion alert', () => {
@@ -117,10 +117,12 @@ describe('transactional email provider retry classification', () => {
       expect(withPhase).toMatchObject({ provider_handoff_phase: 'rejected' });
     });
 
-    test('a follow-up without the average keeps today\'s retry behaviour exactly', () => {
-      const plain = message({ template_key: 'estimate.unviewed_followup', categories: ['estimate_followup', 'estimate_followup_unviewed'] });
-      expect(retry.isTransactionalRetryEligible(plain)).toBe(true);
-      expect(retry.retryStateForProviderBlock(plain)).toMatchObject({ provider_retry_next_at: expect.any(Date), provider_retry_exhausted_at: null });
+    test('a follow-up without the average stays off the rail too: the estimate may have been accepted since', () => {
+      const plain = { template_key: 'estimate.unviewed_followup', categories: ['estimate_followup', 'estimate_followup_unviewed'] };
+      expect(retry.isTransactionalRetryEligible(message(plain))).toBe(false);
+      const withPhase = retry.retryStateForProviderBlock(message({ ...plain, provider_handoff_phase: 'pending', send_attempt_token: 'a' }));
+      expect(withPhase).not.toHaveProperty('provider_retry_next_at');
+      expect(withPhase).toMatchObject({ provider_handoff_phase: 'rejected' });
     });
 
     test('a marked row that is somehow scheduled settles as not sent without reaching the provider', async () => {

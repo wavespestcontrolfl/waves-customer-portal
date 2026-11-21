@@ -4,7 +4,7 @@
 //
 // Pins: the layout's own content stamp, and none of it on the plain v13 outline; the approved section order; a rounds
 // estimate (its lawn line seeds as lawn_rounds_9) draws nine
-// year-bar blocks whose main steps are DERIVED from the protocol, the round the visit falls in, the Manatee summer band,
+// year-bar blocks whose main steps are DERIVED from the protocol, the round the visit falls in, the local summer band,
 // and no LESCO 44-0-0 in the products; a monthly estimate draws twelve blocks and today's month list; an estimate whose
 // plan is not known draws the month view and names no plan; every new section keeps text bullets; every word passes the
 // customer-copy checks.
@@ -32,12 +32,14 @@ async function withGates(values, fn) {
 }
 
 const RULES = {
-  sarasota_county_fl: 'Sarasota County, FL',
-  manatee_county_fl: 'Manatee County, FL',
-  charlotte_county_fl: 'Charlotte County, FL',
+  sarasota_county_fl: { name: 'Sarasota County, FL', startMonth: 6 },
+  north_port_fl: { name: 'City of North Port, FL', startMonth: 4 },
+  manatee_county_fl: { name: 'Manatee County, FL', startMonth: 6 },
+  charlotte_county_fl: { name: 'Charlotte County, FL', startMonth: 6 },
 };
 const ADDRESSES = {
   sarasota_county_fl: '100 Test Way, Sarasota, FL 34240',
+  north_port_fl: '100 Test Way, North Port, FL 34286',
   manatee_county_fl: '100 Test Way, Bradenton, FL 34202',
   charlotte_county_fl: '100 Test Way, Port Charlotte, FL 33948',
 };
@@ -54,10 +56,12 @@ const CATALOG = [
 function makeDb({ jurisdictionId = 'manatee_county_fl' } = {}) {
   const rule = {
     jurisdiction_id: jurisdictionId,
-    jurisdiction_name: RULES[jurisdictionId],
+    jurisdiction_name: RULES[jurisdictionId].name,
     version: '2026-05-30',
     public_summary: 'Local fertilizer rules may restrict nitrogen and phosphorus applications during the summer rainy season.',
-    restricted_start_month: 6,
+    nitrogen_restricted: true,
+    phosphorus_restricted: true,
+    restricted_start_month: RULES[jurisdictionId].startMonth,
     restricted_start_day: 1,
     restricted_end_month: 9,
     restricted_end_day: 30,
@@ -95,8 +99,8 @@ const estimateOf = (jurisdictionId, line) => ({
 });
 const ROUNDS_LINE = lawnLine(9, 'every_6_weeks');
 const MONTHLY_LINE = lawnLine(12, 'monthly');
-const build = ({ line, jurisdictionId = 'manatee_county_fl', now = OCT_26 } = {}) => outline.buildOutline({
-  db: makeDb({ jurisdictionId }), estimate: estimateOf(jurisdictionId, line), input: { month: 10 }, now,
+const build = ({ line, jurisdictionId = 'manatee_county_fl', month = 10, now = OCT_26 } = {}) => outline.buildOutline({
+  db: makeDb({ jurisdictionId }), estimate: estimateOf(jurisdictionId, line), input: { month }, now,
 });
 const section = (result, key) => result.content.sections.find((s) => s.key === key);
 const keys = (result) => result.content.sections.map((s) => s.key);
@@ -112,19 +116,19 @@ const AS_NEEDED = [
   ['disease', 'dry_spots', 'insects', 'weeds'], ['disease', 'dry_spots', 'insects', 'weeds'], ['disease', 'dry_spots', 'insects', 'weeds'],
   ['disease', 'dry_spots', 'insects', 'weeds'], ['disease', 'insects', 'weeds'],
 ];
-const DERIVED_MAIN = [['barrier', 'micros'], ['feeding', 'barrier'], ['feeding'], ['insects'], ['micros', 'barrier'], ['micros'], ['micros'], ['feeding', 'barrier'], ['feeding']];
+const DERIVED_MAIN = [['barrier', 'micros'], ['feeding', 'barrier'], ['feeding'], ['inspection'], ['micros', 'barrier'], ['micros'], ['micros'], ['feeding', 'barrier'], ['feeding']];
 
 describe('the stamp', () => {
   test('the detailed outline stamps the layout\'s version; the plain v13 outline draws no year bar or plan line', async () => {
     await withGates(DETAIL, async () => {
-      expect((await build({ line: ROUNDS_LINE })).meta.contentLibraryVersion).toBe('lawn-v13-visual-2');
-      expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-2');
+      expect((await build({ line: ROUNDS_LINE })).meta.contentLibraryVersion).toBe('lawn-v13-visual-4');
+      expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-4');
     });
     await withGates({ GATE_LAWN_V13: 'true' }, async () => {
       const plain = await build({ line: ROUNDS_LINE });
       expect(section(plain, 'year_bar')).toBeUndefined();
       expect(plain.content.property.planLabel).toBeUndefined();
-      expect(plain.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
+      expect(plain.meta.contentLibraryVersion).toBe('lawn-v13-copy-4');
     });
   });
 });
@@ -157,6 +161,7 @@ describe('a 9-visit rounds estimate', () => {
       expect(bar.blocks[0]).toMatchObject({ from: '12-25', to: '02-02', now: 'You are here: round 1 (Dec 25 – Feb 2).', aside: 'Round 1 · Dec 25 – Feb 2' });
       expect(bar.blocks[7]).toMatchObject({ from: '10-01', to: '11-09', now: 'You are here: round 8 (Oct 1 – Nov 9).', aside: 'Round 8 · Oct 1 – Nov 9' });
       expect(bar.blocks.map((b) => b.from)).toEqual(['12-25', '02-03', '03-15', '04-24', '06-03', '07-13', '08-22', '10-01', '11-10']);
+      expect(bar.blocks[3]).toMatchObject({ main: ['inspection'], short: 'Insect scouting' });
       expect(bar.blocks.some((b) => 'current' in b)).toBe(false);
       expect('nowLabel' in bar).toBe(false);
       expect(bar.anchors).toEqual(['Dec 25', 'Jul', 'Dec 24']);
@@ -164,7 +169,7 @@ describe('a 9-visit rounds estimate', () => {
       expect(bar.months[0]).toEqual({ label: 'J', offset: 7 });
       expect(bar.months[11]).toEqual({ label: 'D', offset: 341 });
       expect(bar.labels.micros).toBe('Micronutrients');
-      expect(bar.keySteps).toEqual(['feeding', 'barrier', 'micros', 'insects']);
+      expect(bar.keySteps).toEqual(['feeding', 'barrier', 'micros', 'inspection']);
     });
   });
 
@@ -187,6 +192,64 @@ describe('a 9-visit rounds estimate', () => {
     });
   });
 
+  test.each([
+    ['9-visit rounds', ROUNDS_LINE, 97, '9 visits a year, one per round'],
+    ['12-visit monthly', MONTHLY_LINE, 90, '12 visits a year, one a month'],
+  ])('a North Port %s estimate uses April 1 while Sarasota keeps June 1', async (_label, line, offset, planLabel) => {
+    await withGates(DETAIL, async () => {
+      const northPort = await build({ line, jurisdictionId: 'north_port_fl' });
+      const northPortBar = section(northPort, 'year_bar').visual;
+      expect(northPort.inputSnapshot.jurisdictionId).toBe('north_port_fl');
+      expect(northPortBar.caption).toMatch(/10 ft.*top of bank.*25 ft buffer.*swale/);
+      expect(northPort.contentHtml).toContain('25 ft buffer');
+      expect(northPort.content.localRule).toMatchObject({ jurisdictionId: 'north_port_fl', jurisdictionName: 'City of North Port, FL' });
+      expect(northPort.content.property.planLabel).toBe(planLabel);
+      expect(northPortBar.limit).toEqual({ offset, days: 183, label: 'No nitrogen or phosphorus (local summer rule)' });
+      expect(northPortBar.caption).toContain('City of North Port, FL. No nitrogen or phosphorus on turf from April 1 to September 30');
+
+      const sarasota = await build({ line, jurisdictionId: 'sarasota_county_fl' });
+      expect(sarasota.inputSnapshot.jurisdictionId).toBe('sarasota_county_fl');
+      expect(section(sarasota, 'year_bar').visual.caption)
+        .toBe('Your rule area: Sarasota County, FL. No nitrogen or phosphorus from June 1 to September 30; micronutrients keep the color instead.');
+    });
+  });
+
+  test('North Port April holds nutrient products in the monthly bar, cards, plain outline and stored HTML', async () => {
+    const input = { line: MONTHLY_LINE, jurisdictionId: 'north_port_fl', month: 4 };
+    await withGates(DETAIL, async () => {
+      const result = await build(input);
+      expect(section(result, 'year_bar').visual.blocks[3]).toMatchObject({ short: 'Inspection', main: ['inspection'] });
+      const april = section(result, 'program_year').visual.months[3];
+      expect(april).toMatchObject({ main: ['inspection'], visit: expect.stringContaining('hold fertilizer') });
+      expect(april.asNeeded).toEqual(expect.arrayContaining(['insects', 'disease', 'dry_spots']));
+      expect(april.asNeeded).not.toContain('barrier');
+      expect(result.contentHtml).toContain('April: Inspection');
+      expect(result.contentHtml).not.toContain('44-0-0');
+      const sarasota = await build({ ...input, jurisdictionId: 'sarasota_county_fl' });
+      expect(section(sarasota, 'year_bar').visual.blocks[3]).toMatchObject({ short: 'Feed', main: ['feeding'] });
+      expect(sarasota.contentHtml).toContain('44-0-0');
+    });
+    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
+      const result = await build(input);
+      expect(section(result, 'season_focus').body).toContain('April 1');
+      expect(section(result, 'season_focus').visual.items.map((i) => i.key)).not.toContain('feeding');
+      expect(section(result, 'program_year').visual.months[3].main).toEqual(['inspection']);
+      expect(result.contentHtml).toContain('April: Inspection');
+    });
+  });
+
+  test('the North Port nine-visit spring round distinguishes the March feeding window from April inspections', async () => {
+    await withGates(DETAIL, async () => {
+      const result = await build({ line: ROUNDS_LINE, jurisdictionId: 'north_port_fl' });
+      const bar = section(result, 'year_bar');
+      expect(bar.visual.blocks[1].main).toContain('feeding');
+      expect(bar.visual.blocks[2]).toMatchObject({ short: 'Feed in March only', main: ['inspection'] });
+      expect(bar.bullets[2]).toContain('Feed in March only');
+      expect(section(result, 'rounds').visual.rounds[2].why).toMatch(/March visit can include.*From April 1 we hold/);
+      expect(result.contentHtml).toContain('March feeding and April inspection');
+    });
+  });
+
   test('round cards: the words, derived steps, no frozen open card, the summer-rules post by rule area', async () => {
     await withGates(DETAIL, async () => {
       const result = await build({ line: ROUNDS_LINE });
@@ -201,6 +264,14 @@ describe('a 9-visit rounds estimate', () => {
       expect(rounds[0].atHome).toBe('Run your normal watering day: that waters in the weed barrier.');
       expect(rounds[2].extra).toMatch(/^Starting your plan in this round\?/);
       expect(rounds[0].extra).toBeUndefined();
+      expect(rounds[3]).toMatchObject({ title: 'Insect scouting', main: ['inspection'] });
+      expect(rounds[3].asNeeded).toContain('insects');
+      expect(rounds[3].why).toContain('Insect treatment is only as needed after current evidence is found; a scouting-only visit is valid.');
+      expect(rounds[3].why).not.toMatch(/whole-lawn insect treatment/i);
+      const insectFaq = section(result, 'faq').visual.items[6].a;
+      expect(insectFaq).toContain('In round 4, we scout and record the target and current observations.');
+      expect(insectFaq).toContain('Insect treatment is only as needed after evidence is found');
+      expect(insectFaq).toContain('A scouting-only visit is valid.');
       // As needed: the spot rows of the months the window covers, without the fire ant add-on or the weed mix surfactant (which
       // would put a wetting agent in every weed month). Round 2 reads February's rows in March (the green-up rule).
       expect(rounds.map((r) => [...r.asNeeded].sort())).toEqual(AS_NEEDED);
@@ -221,7 +292,7 @@ describe('a 9-visit rounds estimate', () => {
       expect(content.property.planLabel).toBe('9 visits a year, one per round');
       expect(content.intro).toContain('Your plan is nine visits a year, one in each round.');
       expect(content.intro).not.toContain('The program follows the time of year.');
-      expect(content.intro).toContain("What each visit applies is set on site: your grass, your county's fertilizer rules");
+      expect(content.intro).toContain('What each visit applies is set on site: your grass, your local fertilizer rules');
       expect(content.season.roundLabel).toBeUndefined();
     });
   });
@@ -262,7 +333,8 @@ describe('a 9-visit rounds estimate', () => {
       expect(faq.items).toHaveLength(12);
       expect(faq.more).toHaveLength(7);
       expect(faq.items[0].a).toMatch(/^Nine times a year/);
-      expect(faq.items[6].a).toContain('In round 4, the sunny turf');
+      expect(faq.items[6].a).toContain('In round 4, we scout and record the target and current observations.');
+      expect(faq.items[6].a).toContain('Insect treatment is only as needed after evidence is found');
       expect(faq.items[3].a).toContain('On our alkaline soil, yellow St. Augustine is often short on iron, not nitrogen.');
       expect(faq.more[1].a).toBe('When a lawn is not responding, yes, at no extra charge: we send one sample to the University of Florida soil lab. If the soil is too acidic or short on magnesium, we add lime or magnesium on a regular visit. Most results change nothing. You can also order a soil test any time for an added fee; it comes with the lab results and our notes. Topsoil and topdressing are separate work, quoted on their own.');
       expect(faq.more.map((m) => m.q)).toEqual(expect.arrayContaining(['Why did a visit look like nothing happened?', 'Can every spot be fixed?']));
@@ -291,13 +363,17 @@ describe('a 12-visit estimate', () => {
       expect('nowLabel' in bar).toBe(false);
       expect(bar.limit).toEqual({ offset: 151, days: 122, label: 'No nitrogen or phosphorus (local summer rule)' });
       expect(bar.blocks[3].main).toEqual(['feeding']);
+      expect(bar.blocks[4]).toMatchObject({ main: ['inspection'], short: 'Insect scouting' });
       expect(section(result, 'program_year').visual.type).toBe('months');
       expect(result.content.property.planLabel).toBe('12 visits a year, one a month');
       expect(result.content.intro).toContain('The program follows the time of year.');
       expect(result.content.season.roundLabel).toBeUndefined();
       const faq = section(result, 'faq').visual;
       expect(faq.items[0].a).toMatch(/^Once a month\./);
-      expect(faq.items[6].a).toContain('In May, the sunny turf');
+      expect(faq.items[6].a).toContain('In May, we scout and record the target and current observations.');
+      expect(faq.items[6].a).toContain('Insect treatment is only as needed after evidence is found');
+      expect(faq.items[6].a).toContain('A scouting-only visit is valid.');
+      expect(JSON.stringify(result.content)).not.toMatch(/whole-lawn insect treatment/i);
       expect(JSON.stringify(section(result, 'products'))).toContain('44-0-0');
       for (const key of ['year_bar', 'program_year', 'faq']) expect(section(result, key).bullets.length).toBeGreaterThan(0);
       expect(result.validation).toEqual({ status: 'passed', errors: [], warnings: [] });
@@ -314,7 +390,8 @@ function expectNoCadenceWords(result) {
   const faq = section(result, 'faq').visual;
   expect(faq.items[0].a).toMatch(/^Your plan sets how often we come, and each visit follows the step for the month it falls in\./);
   expect(faq.items[6].a).not.toMatch(/In May|round 4/);
-  expect(faq.items[6].a).toMatch(/^Yes\. We confirm chinch bugs/);
+  expect(faq.items[6].a).toMatch(/^Yes\. We scout and record the target and current observations\./);
+  expect(faq.items[6].a).toContain('Insect treatment is only as needed after evidence is found');
 }
 
 describe('an estimate whose plan is not known', () => {

@@ -40,6 +40,7 @@ import { formatETDateTime } from "../../lib/timezone";
 import { ASK_RECENTS_KEY } from "../../lib/adminAuth";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
 import AdminPageFinder from "./AdminPageFinder";
+import useAskDraftHold from "../../hooks/useAskDraftHold";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // Thread id the operator dismissed with "New chat" — a reload must not
@@ -69,6 +70,11 @@ function dismissedThreadKey() {
   return uid ? `${DISMISSED_THREAD_KEY}:${uid}` : DISMISSED_THREAD_KEY;
 }
 const RECENTS_MAX = 5;
+// The bar's mic may ask to resend a recording whose send got no answer (useSpeechDictation): the
+// prompt has no length limit and is never locked while the mic shows (the mic is gone while a
+// question runs, and remounts when the conversation is replaced: micEpoch), so the words can
+// always go in.
+const PROMPT_TAKES_WORDS = () => true;
 const D = {
   bg: "#F1F5F9",
   card: "#FFFFFF",
@@ -401,6 +407,15 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // Server-persisted thread id (GATE_IB_THREADS). Null = ephemeral/new chat;
   // the id is set from query responses and from resume-on-open.
   const [threadId, setThreadId] = useState(null);
+  // The bar's mics remount whenever the operator replaces the conversation (New chat, a thread
+  // picked from History: at the pick, before it loads; a context change that clears it): a
+  // recording or resend question from the old conversation never puts its words into the new
+  // one's prompt. Words already in the prompt stay, typed or dictated (a pick keeps the prompt).
+  // The automatic resume on open does not remount: it only fills in the conversation the bar
+  // opened on, so a recording started meanwhile is for it (on a slow phone connection the resume
+  // can land mid-recording).
+  const [micEpoch, setMicEpoch] = useState(0);
+  const renewMics = useCallback(() => setMicEpoch((n) => n + 1), []);
   // The thread tail seq this client last saw — sent with each query so the
   // server rejects an append that would interleave with another tab's.
   const threadSeqRef = useRef(null);
@@ -439,6 +454,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const [recents, setRecents] = useState(() => loadRecents(userId));
   const [attachments, setAttachments] = useState([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  useAskDraftHold(prompt, attachments.length, attachmentsLoading);
   // Why picked files did not attach (unreadable, or past the photo limit).
   const [attachmentNotice, setAttachmentNotice] = useState(null);
   const [dragY, setDragY] = useState(0);
@@ -595,9 +611,10 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       // thread.
       setThreadId(null);
       threadSeqRef.current = null;
+      renewMics();
     }
     resetAttachments();
-  }, [location.pathname, location.search, context, ibPageData?.customer_id, ibPageData?.property_id, ibPageData?.estimate_id, ibPageData?.appointment_id, ibPageData?.product_id, ibPageData?.viewed_date, resetAttachments]);
+  }, [location.pathname, location.search, context, ibPageData?.customer_id, ibPageData?.property_id, ibPageData?.estimate_id, ibPageData?.appointment_id, ibPageData?.product_id, ibPageData?.viewed_date, resetAttachments, renewMics]);
 
   // Load a server thread into the palette (resume-on-open and the picker
   // share this). Shows the thread's last reply — otherwise the palette
@@ -680,6 +697,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const openThread = (id) => {
     threadEpochRef.current += 1;
     const epoch = threadEpochRef.current;
+    // At the pick, not when the thread lands: a transcript that returns meanwhile must not reach
+    // the prompt the picked thread keeps.
+    renewMics();
     let reloading = false;
     setThreadsLoading(true);
     setThreadOpenError(null);
@@ -726,7 +746,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const startNewConversation = useCallback(() => {
     releaseThread();
     clearConversationView();
-  }, [releaseThread, clearConversationView]);
+    renewMics();
+  }, [releaseThread, clearConversationView, renewMics]);
 
   // A failed query shows its error. When the server rolled the request over (the
   // error body carries threadRolledOver, which this file's adminFetch keeps on err.details)
@@ -1115,6 +1136,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         accentColor={accentColor}
         appendTranscript={appendTranscript}
         dictationContext={dictationContext}
+        micEpoch={micEpoch}
         attachments={attachments}
         attachmentsLoading={attachmentsLoading}
         attachmentNotice={attachmentNotice}
@@ -1229,10 +1251,12 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
               )}
               {!loading && (
                 <DictationButton
+                  key={micEpoch}
                   onAppend={appendTranscript}
                   title="Dictate your question"
                   size={30}
                   dictationContext={dictationContext}
+                  resendWanted={PROMPT_TAKES_WORDS}
                   palette={{ accent: accentColor, muted: D.muted, red: D.red, card: "#fff" }}
                 />
               )}
@@ -1592,6 +1616,7 @@ function MobileSheet({
   accentColor,
   appendTranscript,
   dictationContext,
+  micEpoch,
   attachments,
   attachmentsLoading,
   attachmentNotice,
@@ -1771,10 +1796,12 @@ function MobileSheet({
                   disabled={attachmentsLoading}
                 />{" "}
                 <DictationButton
+                  key={micEpoch}
                   onAppend={appendTranscript}
                   title="Tap to talk"
                   size={44}
                   dictationContext={dictationContext}
+                  resendWanted={PROMPT_TAKES_WORDS}
                   palette={{ accent: accentColor, muted: "#A1A1AA", red: "#EF4444", card: "#fff" }}
                 />{" "}
               </div>

@@ -110,8 +110,8 @@ describe('the relevance sweep classes are not captured by the labels', () => {
         const dedupeKey = prefix ? `${prefix}x` : undefined;
         const base = { ...extra, ...(dedupeKey ? { dedupeKey } : {}) };
         const row = (meta) => ({ category: trigger.category, link: '/admin/communications?lead=' + UUID, metadata: meta });
-        const before = classify(row(metaFor(key, { labels: false, extra: base })), { anyMode: true });
-        const after = classify(row(metaFor(key, { extra: base })), { anyMode: true });
+        const before = classify(row(metaFor(key, { labels: false, extra: base })));
+        const after = classify(row(metaFor(key, { extra: base })));
         expect({ key, prefix, extra, cls: after?.key ?? null }).toEqual({ key, prefix, extra, cls: before?.key ?? null });
       }
     }
@@ -142,7 +142,7 @@ describe('retention: only an fyi type is shortened, never a customer row', () =>
 
   test('the fyi types that start to expire at 7 days are exactly these', () => {
     const fyi = entries.filter(([key]) => retention.judgeRow(rowFor(key, metaFor(key), 8), NOW).expire).map(([k]) => k).sort();
-    expect(fyi).toEqual(['job_application_withdrawn', 'job_complete', 'job_interview_booked', 'newsletter_proof_approved',
+    expect(fyi).toEqual(['estimate_call_today', 'job_application_withdrawn', 'job_complete', 'job_interview_booked', 'newsletter_proof_approved',
       'one_tap_purchase_completed', 'open_visits_nudge', 'payment_refunded', 'payment_succeeded', 'waiting_summary']);
   });
 

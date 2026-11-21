@@ -55,6 +55,15 @@ const LINKED_ESTIMATE = {
 };
 
 describe('VisitBriefPanel', () => {
+  it.each(['WaveGuard Lawn Care', 'Tree & Shrub Care'])('opens the shared map from a %s visit', async serviceType => {
+    const request = vi.fn().mockResolvedValue({ version: 'map-v1', map: null });
+    const scheduled = { ...BASE_SERVICE, serviceType, propertyId: 'p1' };
+    const sibling = { ...scheduled, id: 'svc-2', serviceType: 'Tree & Shrub Care' };
+    render(<VisitBriefPanel stop={stopOf(scheduled, sibling)} detail={detailFor({})} request={request} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open fertilizer map' }));
+    expect(await screen.findByRole('button', { name: 'Row 1, column 1, Unmapped' })).toBeInTheDocument();
+    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/property-areas/fertilizer-map');
+  });
   it.each(['sms', 'call'])('keeps pending %s state through route failure and retry', async (action) => {
     vi.useFakeTimers();
     vi.spyOn(window, 'confirm').mockReturnValue(true);

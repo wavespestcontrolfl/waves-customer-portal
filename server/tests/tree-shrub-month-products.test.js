@@ -35,7 +35,7 @@ const CATALOG = [
 const ids = (date, rows = CATALOG) => resolveMonthProducts(date, rows).map((entry) => entry.productId);
 
 describe('resolveMonthProducts', () => {
-  test('every month matches the protocol primary list; the ambiguous NutriRoot entry is skipped', () => {
+  test('every month matches the protocol primary list; NutriRoot is not program material', () => {
     // Every month card names Snapshot and a palm feed (program date rules,
     // owner 2026-10-05): Oct-May the 8-0-12 palm SKU, Jun-Sep the 0-0-16 one.
     // The due gates (60-day/quarter Snapshot, 3-month palm) decide what shows.
@@ -43,8 +43,9 @@ describe('resolveMonthProducts', () => {
     // the due rule picks the visit, so every cadence gets a spring and a fall feeding).
     expect(ids('2026-01-15')).toEqual(['snapshot', 'palm']);
     // TriTek is a secondary (live find) line in every month now (owner
-    // 2026-10-09), so it is never a suggestion. NutriRoot is ambiguous in
-    // this catalog; Mn Combo and the Sequestar/KPHITE lines are not primary.
+    // 2026-10-09), so it is never a suggestion. NutriRoot is retained in the
+    // catalog for truthful historical/manual records but is not a program line;
+    // Mn Combo and the Sequestar/KPHITE lines are not primary.
     expect(ids('2026-02-10')).toEqual(['snapshot', 'palm', 'orn']);
     expect(ids('2026-03-10')).toEqual(['snapshot', 'palm', 'orn', 'mainspring', 'distance']);
     expect(ids('2026-04-10')).toEqual(['snapshot', 'palm', 'orn']);
@@ -96,7 +97,7 @@ describe('resolveMonthProducts', () => {
     const withTriStar = protocols.tree_shrub.visits.filter((v) => /^TriStar/m.test(v.secondary)).map((v) => v.month);
     expect(withTriStar).toEqual(['Jan', 'Feb', 'Mar', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct']);
     for (const visit of protocols.tree_shrub.visits.filter((v) => withTriStar.includes(v.month))) {
-      expect(visit.secondary).toMatch(/^TriStar 8\.5 SL \(acetamiprid\): whitefly, mealybug, aphid or soft scale \(wax, cottony cushion\), live finds only; foliar only; not for armored scale \(use Distance, oil or a Zylam drench\); label rate$/m);
+      expect(visit.secondary).toMatch(/^TriStar 8\.5 SL \(acetamiprid\): whitefly, mealybug, aphid or soft scale \(wax, cottony cushion\), live finds only; foliar only; not for armored scale \(Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench\); label rate$/m);
     }
     expect(protocols.tree_shrub.notes.join('\n')).toMatch(/Visits start on the customer's signup date/);
   });
@@ -181,9 +182,11 @@ describe('resolveMonthProducts', () => {
     expect(NON_PRODUCT_LINE.test('Snapshot 2.5TG Q4: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16)')).toBe(false);
   });
 
-  test('NutriRoot resolves when the catalog carries exactly one active row', () => {
+  test('NutriRoot never resolves as a month recommendation even with one exact catalog row', () => {
     const single = CATALOG.filter((r) => !r.id.startsWith('nr-')).concat(row('nr', 'Arborjet NUTRIROOT'));
-    expect(resolveMonthProducts('2026-02-10', single)).toContainEqual({ productId: 'nr', method: 'soil_drench' });
+    expect(resolveMonthProducts('2026-02-10', single)).not.toContainEqual({ productId: 'nr', method: 'soil_drench' });
+    expect(JSON.stringify(protocols.tree_shrub.visits)).not.toMatch(/nutriroot/i);
+    expect(protocols.tree_shrub.notes.join('\n')).toMatch(/NutriRoot is a 2-2-3 liquid fertilizer.*nitrogen is all water-soluble/i);
   });
 
   test('zero matches: the entry is skipped, never substituted', () => {
@@ -291,7 +294,7 @@ describe('13-0-13 and Sequestar card lines (labels read 2026-10-22, owner approv
       expect(line).toMatch(/trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0\.75 lb per 100 sq ft of the area under it/);
       // Below the bag's 1 to 1½ lb because 1 lb per 100 sq ft is over the 1 lb N per 1,000 sq ft county limit.
       expect(line).toMatch(/below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft/);
-      expect(line).toMatch(/only when due \(2 a year, spring and late fall, at least 5 months apart; none June 1 to Sept\. 30\)/);
+      expect(line).toMatch(/only when a documented plant or site need supports feeding and history says it is due \(at most 2 a year, spring and late fall, at least 5 months apart; none June 1 to Sept\. 30\)/);
       expect(line).not.toMatch(/label needed|hold dose/i);
     }
     // 7.5 lb per 1,000 sq ft x 13% = 0.975 lb N, under the cap; the bag's 1 lb per 100 sq ft x 13% = 1.3 lb N, over it.

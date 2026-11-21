@@ -6,9 +6,9 @@
 // blocks Complete. The one block: Yes with armored scale and no soft scale or
 // whitefly, while Merit is on the visit. Rules live in lib/tree-shrub-pest-check.js.
 import React, { useCallback, useMemo, useState } from 'react';
-import { Button } from '../ui';
+import { Button, Input } from '../ui';
 import { Chip, ChoiceSection, toggleInSet } from './FastCompleteParts';
-import { INSECT_TYPES, evaluatePestCheck, pestCheckPayload } from '../../lib/tree-shrub-pest-check';
+import { INSECT_TYPES, LIFE_STAGES, evaluatePestCheck, pestCheckPayload } from '../../lib/tree-shrub-pest-check';
 
 // state: { enabled, found, types, evaluation, payload, setFound, toggleType }.
 // `types` is the lib's list of { key, label }; the server's list wins when it sends one.
@@ -16,6 +16,8 @@ export function usePestCheck({ context, rows }) {
   const enabled = !!context && typeof context === 'object';
   const [found, setFoundState] = useState(null);
   const [picked, setPicked] = useState(() => new Set());
+  const [lifeStage, setLifeStage] = useState('');
+  const [preventiveReason, setPreventiveReason] = useState('');
   const types = useMemo(() => {
     const sent = Array.isArray(context?.insectTypes) ? context.insectTypes : [];
     const known = new Map(INSECT_TYPES.map((type) => [type.key, type]));
@@ -26,13 +28,16 @@ export function usePestCheck({ context, rows }) {
     setFoundState((prev) => (prev === value ? null : value));
   }, []);
   const toggleType = useCallback((key) => setPicked((prev) => toggleInSet(prev, key)), []);
-  const answer = useMemo(() => ({ found, types: [...picked] }), [found, picked]);
+  const answer = useMemo(() => ({ found, types: [...picked], lifeStage, preventiveReason }), [found, picked, lifeStage, preventiveReason]);
   const evaluation = useMemo(
     () => (enabled ? evaluatePestCheck(answer, rows) : { blockMessage: '', noteMessages: [], blockedRows: [], blockedLabel: '' }),
     [enabled, answer, rows],
   );
   const payload = enabled ? pestCheckPayload(answer) : null;
-  return { enabled, found, picked, types, evaluation, payload, setFound, toggleType };
+  return {
+    enabled, found, picked, types, lifeStage, preventiveReason, evaluation, payload,
+    setFound, toggleType, setLifeStage, setPreventiveReason,
+  };
 }
 
 export function PestCheckSection({ state, locked, onRemoveBlocked }) {
@@ -45,11 +50,33 @@ export function PestCheckSection({ state, locked, onRemoveBlocked }) {
         <Chip disabled={locked} label="No" pressed={found === false} onClick={() => state.setFound(false)} />
       </ChoiceSection>
       {found === true && (
-        <ChoiceSection title="Which insects?" columns={2}>
-          {types.map((type) => (
-            <Chip disabled={locked} key={type.key} label={type.label} pressed={picked.has(type.key)} onClick={() => state.toggleType(type.key)} />
-          ))}
-        </ChoiceSection>
+        <>
+          <ChoiceSection title="Target found" columns={2}>
+            {types.map((type) => (
+              <Chip disabled={locked} key={type.key} label={type.label} pressed={picked.has(type.key)} onClick={() => state.toggleType(type.key)} />
+            ))}
+          </ChoiceSection>
+          <ChoiceSection title="Live stage observed" columns={2}>
+            {LIFE_STAGES.map((stage) => (
+              <Chip disabled={locked} key={stage.key} label={stage.label} pressed={state.lifeStage === stage.key} onClick={() => state.setLifeStage(state.lifeStage === stage.key ? '' : stage.key)} />
+            ))}
+          </ChoiceSection>
+        </>
+      )}
+      {found === false && (
+        <div className="tech-visit-choice-section">
+          <label className="tech-product-editor-label" htmlFor="tree-shrub-preventive-reason">Label-supported preventive reason</label>
+          <Input
+            id="tree-shrub-preventive-reason"
+            className="tech-visit-control"
+            value={state.preventiveReason}
+            maxLength={240}
+            disabled={locked}
+            placeholder="Label use and site/history reason"
+            onChange={(event) => state.setPreventiveReason(event.target.value)}
+          />
+          <p className="tech-visit-muted">Leave products off for a scout-only visit.</p>
+        </div>
       )}
       {evaluation.blockMessage && (
         <>

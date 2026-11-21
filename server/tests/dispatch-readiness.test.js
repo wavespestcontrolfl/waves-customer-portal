@@ -28,11 +28,30 @@ test('a product repeated by an add-on uses the same selected line as its Job Car
   expect(dispatchReadiness({ ...base, lines: [conditional, enough] }).issues).toEqual([]);
 });
 
-test('missing or unconvertible inventory evidence never becomes a stock clearance', () => {
-  for (const change of [{ inventory_on_hand: null }, { inventory_unit: 'each' }]) {
+// Owner 2026-11-19: "Stock unverified" flags only a product with no stock count; a planned amount is the protocol's.
+test('a product with no stock count reads Stock unverified', () => {
+  for (const change of [{ inventory_on_hand: null }, { inventory_on_hand: null, inventory_unit: 'each' }]) {
     const result = dispatchReadiness({ ...base, lines: [{ ...line, product: { ...product, ...change } }] });
     expect(result.issues).toContainEqual({ kind: 'stock', status: 'unknown', label: 'Stock unverified' });
   }
+  const counted = { ...line, planMix: { amount: 64, amountUnit: 'fl_oz' } };
+  const uncounted = { ...line, planMix: null, product: { ...product, id: 'uncounted', inventory_on_hand: null } };
+  expect(dispatchReadiness({ ...base, lines: [counted, uncounted] }).issues).toContainEqual({ kind: 'stock', status: 'unknown', label: 'Stock unverified' });
+});
+
+test('a counted product with no planned amount or an unconvertible unit raises no stock issue', () => {
+  const stockIssues = (input) => dispatchReadiness({ ...base, lines: [input] }).issues.filter((issue) => issue.kind === 'stock');
+  expect(stockIssues({ ...line, planMix: null })).toEqual([]);
+  expect(stockIssues({ ...line, product: { ...product, inventory_unit: 'each' } })).toEqual([]);
+  expect(stockIssues({ ...line, product: { ...product, inventory_unit: null } })).toEqual([]);
+});
+
+test('a count at or under zero, or at the low mark, still holds without a planned amount', () => {
+  const stockIssues = (change) => dispatchReadiness({ ...base, lines: [{ ...line, planMix: null, product: { ...product, ...change } }] })
+    .issues.filter((issue) => issue.kind === 'stock');
+  expect(stockIssues({ inventory_on_hand: 0 })).toEqual([{ kind: 'stock', status: 'hold', label: 'Company stock short' }]);
+  expect(stockIssues({ inventory_on_hand: -38.25 })).toEqual([{ kind: 'stock', status: 'hold', label: 'Company stock short' }]);
+  expect(stockIssues({ inventory_on_hand: 1, low_stock_threshold: 2 })).toEqual([{ kind: 'stock', status: 'hold', label: 'Company stock low' }]);
 });
 
 test('future weather stays on the visit day', () => {

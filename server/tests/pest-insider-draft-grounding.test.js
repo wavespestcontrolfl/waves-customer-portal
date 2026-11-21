@@ -15,7 +15,7 @@ jest.mock('../services/email-division/fact-register', () => ({
 }));
 
 const db = require('../models/db');
-const { createNewsletterDraft } = require('../services/newsletter-draft');
+const { createNewsletterDraft, persistNewsletterDraft } = require('../services/newsletter-draft');
 
 const STOP = new Error('stop after the prompt is built');
 
@@ -38,6 +38,7 @@ describe('Pest Insider draft grounding', () => {
     await expect(createNewsletterDraft({
       prompt: 'Monthly Pest Insider for September.',
       newsletterType: 'pest-insider-monthly',
+      persist: false,
     })).rejects.toBe(STOP);
 
     expect(mockFactsBlock).toHaveBeenCalledTimes(1);
@@ -74,8 +75,32 @@ describe('Pest Insider draft grounding', () => {
     await expect(createNewsletterDraft({
       prompt: 'Monthly Pest Insider for September.',
       newsletterType: 'pest-insider-monthly',
+      persist: false,
     })).rejects.toThrow(/fact register is empty/);
 
     expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('a Pest Insider draft that would be saved is refused before any facts load or paid writer call', async () => {
+    await expect(createNewsletterDraft({
+      prompt: 'Monthly Pest Insider for September.',
+      newsletterType: 'pest-insider-monthly',
+    })).rejects.toThrow(/planned audience/);
+
+    expect(mockFactsBlock).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('the draft writer refuses a Waves Pest Insider issue: it saves no planned audience, and the sender sends none without one', async () => {
+    const knex = jest.fn();
+
+    await expect(persistNewsletterDraft({
+      draft: { subject: 'Waves Pest Insider', htmlBody: '<p>Body</p>', textBody: 'Body' },
+      prompt: 'Pest Insider.',
+      newsletterType: 'pest-insider-monthly',
+      knex,
+    })).rejects.toThrow(/planned audience/);
+
+    expect(knex).not.toHaveBeenCalled();
   });
 });

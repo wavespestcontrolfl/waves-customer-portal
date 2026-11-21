@@ -25,15 +25,14 @@ import { Chip, ResultPhotos, V2_TIER_LABEL } from './photoIdShared';
 // Two pieces:
 //   usePhotoIdGate()  — one GET /api/photo-id at mount. 404 means the
 //                       feature is dark for this account: every entry point
-//                       (the Help pill, the More-sheet row, the Learn tab)
+//                       (the More-sheet row, the Learn tab)
 //                       must drop it, so this hook is the single source of
 //                       truth they all read.
 //   PhotoIdSheet      — the whole flow: pick a type -> add photos -> "your
 //                       photo id" analyzing state -> result card -> history.
 //
 // PortalPage owns the open/closed boolean and the gate hook so the entry
-// points can never disagree about whether the feature is live. The floating
-// pill itself is PortalPage's Help pill (HelpFab), shared with Messages.
+// points can never disagree about whether the feature is live.
 // =========================================================================
 
 // `value` is the subject the sheet tracks as `selectedType`. `palm` is its

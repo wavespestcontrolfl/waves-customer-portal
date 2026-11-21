@@ -41,9 +41,12 @@ describe('label rain rules config', () => {
       else expect(entry.label).toMatch(/^\d{6}-\d{5}-\d{8}\.pdf$/);
       const rules = ['duringRain', 'dryBeforeRain', 'waterIn', 'heat', 'wind', 'heavyRain'].filter((k) => entry[k]);
       expect(rules.length).toBeGreaterThan(0);
+      // A label with a wind line for each use lists them (LESCO Crosscheck Plus).
       for (const k of rules) {
-        expect(Number.isInteger(entry[k].page)).toBe(true);
-        expect(entry[k].quote.length).toBeGreaterThan(20);
+        for (const line of [].concat(entry[k])) {
+          expect(Number.isInteger(line.page)).toBe(true);
+          expect(line.quote.length).toBeGreaterThan(20);
+        }
       }
       if (entry.dryBeforeRain) expect(entry.dryBeforeRain.hours).toBeGreaterThan(0);
       if (entry.heat) {
@@ -51,10 +54,12 @@ describe('label rain rules config', () => {
         expect(entry.heat.text.length).toBeGreaterThan(5);
         expect(entry.heat.action.length).toBeGreaterThan(10);
       }
-      if (entry.wind) {
-        expect(entry.wind.mph).toBeGreaterThan(0);
-        expect(entry.wind.services?.global ?? false).toBe(false);
+      for (const line of [].concat(entry.wind || [])) {
+        expect(line.mph).toBeGreaterThan(0);
+        expect(line.services?.global ?? false).toBe(false);
       }
+      // Stricter first: only the last line of a list may name no services, or a line after it would never apply.
+      if (Array.isArray(entry.wind)) expect(entry.wind.slice(0, -1).every((line) => line.services)).toBe(true);
     }
   });
 
@@ -264,6 +269,11 @@ describe('buildSprayCheck with rain rules', () => {
     const cyper = { id: 'y', name: 'Cyper TC', category: 'insecticide', formulation: 'EC', epa_reg_number: '53883-92' };
     expect(windAt(cyper, [14, 14], [PEST]).verdict).toBe('ok');
     expect(windAt(cyper, [14, 14], ['Termite Treatment'])).toMatchObject({ verdict: 'caution', kind: 'wind', reason: 'wind 14 mph at 2 pm — label: no on-grade spraying above 10 mph' });
+    // LESCO Crosscheck Plus has a line for each use: 10 mph for on-grade termite work (page 32), 15 mph for the rest (page 5).
+    const crosscheck = { id: 'x', name: 'LESCO Crosscheck Plus', category: 'insecticide', formulation: 'SC', epa_reg_number: '10404-120' };
+    expect(windAt(crosscheck, [12, 12], ['Slab Pre-Treat Termite Service'])).toMatchObject({ verdict: 'caution', kind: 'wind', reason: 'wind 12 mph at 2 pm — label: no on-grade spraying above 10 mph' });
+    expect(windAt(crosscheck, [12, 12], [PEST]).verdict).toBe('ok');
+    expect(windAt(crosscheck, [16], [PEST])).toMatchObject({ verdict: 'caution', kind: 'wind', reason: 'wind 16 mph at 2 pm — label: no spraying above 15 mph' });
     // A catalog wind limit as well: one line, the label's.
     const bifen = { id: 'b', name: 'Bifen XTS', category: 'insecticide', formulation: 'EC', epa_reg_number: '53883-189', max_wind_mph: 15, label_verified_at: '2026-05-28' };
     expect(windAt(bifen, [18], [PEST]).reason).toBe('wind 18 mph at 2 pm — label: no spraying above 10 mph');

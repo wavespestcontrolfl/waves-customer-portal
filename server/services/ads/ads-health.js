@@ -1,6 +1,6 @@
 /**
- * Ad health card data (owner 2026-11-04, PPC gap page option A). GET /api/admin/ads/health serves it behind
- * GATE_ADS_HEALTH_CARD (routes/admin-ads.js). It only reads: Google Ads queries and portal tables. It sends
+ * Ad health card data (owner 2026-11-04, PPC gap page option A). GET /api/admin/ads/health serves it
+ * (routes/admin-ads.js). It only reads: Google Ads queries and portal tables. It sends
  * nothing, moves no money and changes no ad.
  *
  * Each source fails on its own. A Google section that cannot be read comes back as { error }, and a timeline

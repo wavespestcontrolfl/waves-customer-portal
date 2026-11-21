@@ -47,7 +47,7 @@ describe('decidePushRoute', () => {
   });
 
   it('routes critical templates to both channels', () => {
-    for (const t of ['appointment_reminder', 'reminder_72h', 'billing_reminder', 'payment_failure', 'autopay']) {
+    for (const t of ['billing_reminder', 'payment_failure', 'autopay']) {
       expect(decidePushRoute({ ...base, messageType: t })).toBe('push_and_sms');
     }
   });
@@ -71,8 +71,7 @@ describe('decidePushRoute', () => {
   });
 });
 
-describe('decidePushRoute with GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04)', () => {
-  const GATE = 'GATE_APP_FIRST_ANY_DEVICE';
+describe('decidePushRoute app first on any device (owner 2026-11-04)', () => {
   const MOVED = [
     'appointment_reminder', 'reminder_72h', 'tech_arrived', 'service_complete', 'service_complete_paid_receipt',
     'service_complete_prepaid', 'service_complete_annual_prepay', 'service_complete_annual_prepay_after_first_visit',
@@ -88,47 +87,24 @@ describe('decidePushRoute with GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04)', ()
     'service_complete_with_invoice', 'service_report_v1_with_invoice', 'review_request', 'invoice', 'payment_link',
     'manual', 'ai_assistant', 'appointment_confirmation', 'appointment_cancelled', 'internal_alert',
   ];
-  let saved;
-  beforeEach(() => { saved = process.env[GATE]; delete process.env[GATE]; });
-  afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
 
-  it('gate off: the moved types keep today policy (reminders both channels, the rest text only)', () => {
-    for (const t of MOVED) {
-      const expected = ['appointment_reminder', 'reminder_72h'].includes(t) ? 'push_and_sms' : 'sms_only';
-      expect(decidePushRoute({ ...base, messageType: t })).toBe(expected);
-    }
-  });
-
-  it('only exactly "true" turns the gate on', () => {
-    for (const v of ['1', 'on', 'TRUE', 'yes', '']) {
-      process.env[GATE] = v;
-      expect(decidePushRoute({ ...base, messageType: 'tech_arrived' })).toBe('sms_only');
-    }
-    process.env[GATE] = 'true';
-    expect(decidePushRoute({ ...base, messageType: 'tech_arrived' })).toBe('push_first');
-  });
-
-  it('gate on: every moved and every existing push-first type is push_first', () => {
-    process.env[GATE] = 'true';
+  it('every moved and every existing push-first type is push_first', () => {
     for (const t of [...MOVED, ...ALREADY_PUSH_FIRST]) {
       expect(decidePushRoute({ ...base, messageType: t })).toBe('push_first');
     }
   });
 
-  it('gate on: billing, payment-failure, autopay and ACH types stay push_and_sms', () => {
-    process.env[GATE] = 'true';
+  it('billing, payment-failure, autopay and ACH types stay push_and_sms', () => {
     for (const t of BILLING) expect(decidePushRoute({ ...base, messageType: t })).toBe('push_and_sms');
   });
 
-  it('gate on: invoice-carrying completions, review asks, links and staff helpers stay text only', () => {
-    process.env[GATE] = 'true';
+  it('invoice-carrying completions, review asks, links and staff helpers stay text only', () => {
     for (const t of [...STAYS_TEXT, 'made_up_type', undefined]) {
       expect(decidePushRoute({ ...base, messageType: t })).toBe('sms_only');
     }
   });
 
-  it('gate on: staff, human, media, bundled-review and missing-customer sends still go as text', () => {
-    process.env[GATE] = 'true';
+  it('staff, human, media, bundled-review and missing-customer sends still go as text', () => {
     for (const t of MOVED) {
       const input = { ...base, messageType: t };
       expect(decidePushRoute({ ...input, hasMedia: true })).toBe('sms_only');
@@ -141,7 +117,7 @@ describe('decidePushRoute with GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04)', ()
     }
   });
 
-  it('every gate-on type maps to a preference column (a saved Email / Both choice still vetoes) and has a real presentation', () => {
+  it('every moved type maps to a preference column (a saved Email / Both choice still vetoes) and has a real presentation', () => {
     for (const type of Object.keys(APP_FIRST_ANY_DEVICE_POLICY)) {
       expect(typeof _test.PREF_CHANNEL_COLUMN[type]).toBe('string');
       expect(_test.pushPresentation(type).link.startsWith('/')).toBe(true);

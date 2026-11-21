@@ -1,4 +1,4 @@
-// GATE_APP_FIRST_ANY_DEVICE, owner 2026-11-04: "only the customer can change back to
+// Owner 2026-11-04: "only the customer can change back to
 // text, if they prefer". The save route stamps an explicit-choice marker on each routed
 // channel the customer writes; the GET payload shows App for an untouched Text default
 // once the account holder has the phone app; a save that echoes the shown App stores
@@ -28,7 +28,7 @@ const notificationsRoute = require('../routes/notifications');
 
 const { notificationPrefsDbUpdates, loadPreferencePayload, settleShownAppChoices, CHANNEL_DB_COLUMNS } = notificationsRoute._private;
 
-const ENV_KEYS = ['GATE_APP_FIRST_ANY_DEVICE', 'GATE_PUSH_CHANNEL_ROUTING', 'GATE_CUSTOMER_APP_NOTIFICATIONS', 'GATE_APP_FIRST_STALE_TEXT'];
+const ENV_KEYS = ['GATE_PUSH_CHANNEL_ROUTING', 'GATE_CUSTOMER_APP_NOTIFICATIONS', 'GATE_APP_FIRST_STALE_TEXT'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -115,16 +115,13 @@ describe('save route: echoing the shown App stores nothing', () => {
     expect(updates).toEqual({});
   });
 
-  test('gate off, no app device, or a page that cannot render App: nothing is dropped', async () => {
+  test('no app device, or a page that cannot render App: nothing is dropped', async () => {
     const run = async (request = appReq('primary-1')) => {
       const updates = { paymentConfirmationChannel: 'push' };
       const shown = await settleShownAppChoices(request, updates, { payment_receipt_channel: 'sms' });
       return { shown, updates };
     };
     const untouched = { shown: false, updates: { paymentConfirmationChannel: 'push' } };
-    delete process.env.GATE_APP_FIRST_ANY_DEVICE;
-    expect(await run()).toEqual(untouched);
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
     mockCustomerStatus.mockResolvedValue({ enabled: true, registered: false, reachable: false });
     expect(await run()).toEqual(untouched);
     mockCustomerStatus.mockResolvedValue({ enabled: true, reachable: true });
@@ -226,7 +223,6 @@ describe('GET payload: App is shown for an untouched Text default', () => {
   });
 
   test.each([
-    ['gate off', () => { delete process.env.GATE_APP_FIRST_ANY_DEVICE; }],
     ['routing gate off', () => { delete process.env.GATE_PUSH_CHANNEL_ROUTING; }],
     ['no app device', () => { mockCustomerStatus.mockResolvedValue({ enabled: true, registered: false, reachable: false }); }],
     ['app alerts turned off', () => { mockCustomerStatus.mockResolvedValue({ enabled: false, registered: true, reachable: true }); }],

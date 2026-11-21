@@ -15,7 +15,7 @@
 //    name that product, and a recorded active ingredient must agree with
 //    the label's. Sharing an active ingredient is never enough — Topchoice
 //    (granular fipronil) is not Taurus SC, Distance IGR (pyriproxyfen) is not
-//    Gentrol IGR, LESCO Crosscheck Plus is not Talak 7.9 F.
+//    Gentrol IGR, LESCO Crosscheck Plus is not Talak 7.9 F (each has its own label here; owner ruling 2026-11-18).
 // 3. Nutrition wording names only nutrients the recorded active ingredient
 //    itself lists (see nutrientsListed) — never a family default.
 // Recorded `targets` (the technician's picks at completion) ride along as
@@ -49,15 +49,28 @@ const LABELS = {
   talak: {
     // Owner ruling 2026-09-11: Talak, Talstar P and Bifen I/T in the job
     // logs are the same bottle, Atticus Talak 7.9 F (product_aliases resolve
-    // them to Talak). LESCO Crosscheck Plus and Bifen XTS are different
+    // them to Talak). LESCO Crosscheck Plus (its own label below) and Bifen XTS are different
     // registrations and never match. The label states NO residual duration
     // and no mode-of-action description, so the family's neutral phrase is
-    // used; only the rain / dry-surface instruction is quoted.
-    name: ['talak', 'talstar p', 'bifen i/t', 'bifen it'], ai: ['bifenthrin'], source: 'Talak 7.9 F label (EPA 91234-145)',
+    // used; only the rain / dry-surface instruction is quoted. Owner 2026-11-18: those aliases resolve to
+    // LESCO Crosscheck Plus now, so an alias reaches the label of the bottle its visit row stored, and with
+    // no stored product only an application before 2026-11-18 (aliasOnlyBefore; aliasReaches).
+    name: ['talak'], aliases: ['talstar p', 'bifen i/t', 'bifen it'], aliasOnlyBefore: '2026-11-18', ai: ['bifenthrin'], source: 'Talak 7.9 F label (EPA 91234-145)',
     phrase: null,
     dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'Talak 7.9 F label (EPA 91234-145)' },
     notes: [],
     factSlugs: ['fact-bifenthrin-talak-label'],
+  },
+  crosscheck: {
+    // Owner ruling 2026-11-18: LESCO Crosscheck Plus (EPA 10404-120) is the house bifenthrin now. It is its own label, never
+    // merged with Talak above: a "Talak" name never matches it and it never matches Talak. Same rule as Talak: only the rain /
+    // dry-surface instruction is quoted, with no residual claim and no mode-of-action description. An alias reaches it only through a
+    // stored Crosscheck product (aliasReaches): from the switch on, an alias alone does not say which bottle was used.
+    name: ['lesco crosscheck plus', 'crosscheck plus'], aliases: ['talstar p', 'bifen i/t', 'bifen it'], ai: ['bifenthrin'], source: 'LESCO Crosscheck Plus label (EPA 10404-120)',
+    phrase: null,
+    dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'LESCO Crosscheck Plus label (EPA 10404-120)' },
+    notes: [],
+    factSlugs: ['fact-bifenthrin-crosscheck-label'],
   },
   gentrol_igr: {
     // "Gentrol IGR" exactly — Gentrol Complete EC3 (its own label below) and
@@ -95,7 +108,7 @@ const LABELS = {
 // "you may still see … for a while"), labeled or not.
 const FAMILIES = {
   non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg', 'antapex wsg'], phrase: 'an insecticide', customerVisible: true, labels: ['taurus_sc'] },
-  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'bifen it', 'talak', 'demand cs', 'delta dust'], phrase: 'an insecticide', customerVisible: true, labels: ['talak', 'gentrol_complete_ec3'] },
+  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'bifen it', 'talak', 'crosscheck plus', 'demand cs', 'delta dust'], phrase: 'an insecticide', customerVisible: true, labels: ['talak', 'crosscheck', 'gentrol_complete_ec3'] },
   igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'an insect growth regulator', customerVisible: true, labels: ['gentrol_igr', 'gentrol_complete_ec3'] },
   fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', customerVisible: true, labels: [] },
   herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', customerVisible: true, labels: [] },
@@ -264,17 +277,38 @@ function classifyProduct({ productName, activeIngredient, productCategory, catal
 // the labeled product; a recorded active ingredient must also agree (a
 // brand name never pulls a different chemistry into a label claim — e.g.
 // a "Taurus SC" row recorded as imidacloprid). A blank AI leaves the name
-// as the only evidence.
-function labelFor(family, productName, activeIngredient) {
+// as the only evidence. An alias ("Talstar P") is an older name, so it reaches
+// a label only with evidence of the bottle (aliasReaches).
+function labelFor(family, productName, activeIngredient, catalogName, appliedAt) {
   const name = String(productName || '').toLowerCase();
   const ai = String(activeIngredient || '').trim().toLowerCase();
+  const catalog = String(catalogName || '').toLowerCase();
+  const appliedOn = etDay(appliedAt);
   for (const key of FAMILIES[family].labels) {
     const label = LABELS[key];
-    if (!label.name.some((s) => name.includes(s))) continue;
+    const aliasNamed = (label.aliases || []).some((s) => name.includes(s));
+    if (!label.name.some((s) => name.includes(s)) && !(aliasNamed && aliasReaches(label, catalog, appliedOn))) continue;
     if (ai && !label.ai.some((s) => ai.includes(s))) continue;
     return label;
   }
   return null;
+}
+
+// Which bottle an alias ("Talstar P", "Bifen I/T") names. A catalog product stored under its own name decides: the alias reaches only
+// the label whose own name that product carries (owner 2026-11-18: the aliases resolve to LESCO Crosscheck Plus). With none stored, or
+// one stored under an older name itself (the inactive Talstar P row), the visit row's ET date is the evidence: an application before
+// the label's aliasOnlyBefore date reaches it (Talak: before 2026-11-18; owner ruling 2026-09-11, the job logs' aliases are the Talak
+// bottle). A later application, or one with no date, reaches no label, and the family's neutral wording stands.
+function aliasReaches(label, catalog, appliedOn) {
+  const olderName = (label.aliases || []).some((s) => catalog.includes(s));
+  if (catalog && !olderName) return label.name.some((s) => catalog.includes(s));
+  return Boolean(label.aliasOnlyBefore && appliedOn && appliedOn < label.aliasOnlyBefore);
+}
+
+function etDay(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : etDateString(date);
 }
 
 /** Every product applied at one visit, with `primary`/`secondary`
@@ -290,14 +324,14 @@ async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
     // is primary/secondary on repeated reads of the same visit. `sp.id` is a
     // stable secondary key (codex round 8 P2 on #5164).
     .orderBy([{ column: 'sp.applied_at', order: 'asc' }, { column: 'sp.id', order: 'asc' }])
-    .select('sp.*', 'pc.category as catalog_category', 'pc.product_type as catalog_product_type');
+    .select('sp.*', 'pc.name as catalog_name', 'pc.category as catalog_category', 'pc.product_type as catalog_product_type');
   const products = rows.map((row) => {
     const family = classifyProduct({
       productName: row.product_name, activeIngredient: row.active_ingredient, productCategory: row.product_category,
       catalogCategory: row.catalog_category, catalogProductType: row.catalog_product_type,
     });
     const def = FAMILIES[family];
-    const label = labelFor(family, row.product_name, row.active_ingredient);
+    const label = labelFor(family, row.product_name, row.active_ingredient, row.catalog_name, row.applied_at || row.created_at);
     const phrase = label?.phrase || (family === 'nutrition' ? nutritionPhrase(row.active_ingredient) : def.phrase);
     return {
       productName: row.product_name, activeIngredient: row.active_ingredient || null, family,

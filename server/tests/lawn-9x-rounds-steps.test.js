@@ -172,7 +172,9 @@ describe('visitForPlan gives each round its step', () => {
     expect(two.secondary).toBe(liveStep('st_augustine', 2).secondary);
     expect(lineNames(two.secondary)).not.toEqual(expect.arrayContaining(['Headway Fungicide']));
     expect(lineNames(two.secondary)).not.toContain('Arena 50 WDG');
-    // Round 4 in late April: May's Tetrino is the planned treatment; the chinch, take-all and dry-spot lines are April's own (April holds a dry-spot line since owner 2026-11-01).
+    // Round 4 in late April takes May's scout-first primary; April's own conditional
+    // lines stay in force. A May-dated round-4 visit receives May's optional Tetrino
+    // line, and the plan engine holds it until current scouting evidence is recorded.
     const four = (await forRound('2027-04-28')).visit;
     expect(four.primary).toBe(liveStep('st_augustine', 5).primary);
     expect(four.secondary).toBe(liveStep('st_augustine', 4).secondary);

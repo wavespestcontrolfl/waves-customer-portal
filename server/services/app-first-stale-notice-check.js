@@ -2,7 +2,7 @@
 /**
  * Daily read-only live check for the stale-app gap (owner 2026-11-18).
  *
- * The gap: with GATE_APP_FIRST_ANY_DEVICE on, a customer got every visit
+ * The gap: a customer got every visit
  * notice as an app push and no text, with no check of when the app was last
  * opened. One customer whose app had last been opened on Oct 10 got the 72 hour
  * reminder, the reminder, on-the-way and arrived notices for their Nov 18 visit

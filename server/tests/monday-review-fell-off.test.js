@@ -204,6 +204,16 @@ describe('which loader the gate picks for list 1', () => {
     expect(require('../services/logger').warn.mock.calls[0][0]).toContain('without it');
   });
 
+  test('on, the fell-off list cannot be read and no other list has work: not a zero, so nothing is raised or closed', async () => {
+    process.env.GATE_MONDAY_FELL_OFF_LINE = 'true';
+    episodes.openAdminAlertKeys.mockResolvedValue(['monday-review:2026-11-02']);
+    fellOff.loadFellOffAlerts.mockRejectedValue(new Error('connection reset'));
+    const out = await review.runMondayReview({ now: MONDAY, database: emptyDatabase(), loaders: rest });
+    expect(out).toEqual({ count: 0, outcome: 'unknown' });
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('a test that mocks feature-gates without the reader reads the gate as off', () => {
     jest.isolateModules(() => {
       jest.doMock('../config/feature-gates', () => ({}));
@@ -221,17 +231,16 @@ describe('the sweep\'s verdict decides who is listed', () => {
   const relevance = (over = {}) => ({
     classify: jest.fn(() => ({ key: 'inbound_sms', contact: 'sms' })),
     subjectFor: jest.fn(() => ({ contact: { anchor: new Date() }, contactUnknown: false })),
-    judge: jest.fn(() => ({ reason: null, would: null })),
+    judge: jest.fn(() => ({ reason: null })),
     ...over,
   });
   const state = () => ({ warned: false });
 
   beforeEach(() => logger.warn.mockClear());
 
-  test('a verdict of either kind (it would close, or it closes) means handled', () => {
-    for (const verdict of [{ reason: 'Answered by text', would: null }, { reason: null, would: 'Answered by text' }]) {
-      expect(judgeOne(relevance({ judge: jest.fn(() => verdict) }), row(), {}, '2026-11-02', state())).toEqual({ handled: true });
-    }
+  test('a verdict that closes means handled', () => {
+    const verdict = { reason: 'Answered by text' };
+    expect(judgeOne(relevance({ judge: jest.fn(() => verdict) }), row(), {}, '2026-11-02', state())).toEqual({ handled: true });
   });
 
   test('the sweep is asked for the row\'s class, and is handed the day in Eastern time', () => {

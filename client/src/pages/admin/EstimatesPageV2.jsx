@@ -10,6 +10,7 @@ import {
 //   - POST  /admin/estimates/:id/send
 //   - POST  /admin/estimates/:id/follow-up
 //   - POST  /admin/estimates/:id/mark-accepted
+//   - POST  /admin/estimates/:id/call-outcome  (a Call today row's outcome tap)
 // Scope (post PR #5c):
 //   PR #5a → tab chrome + Pipeline tab (stats bar + filter pills + list rows)
 //   PR #5b → Create Estimate tab now renders EstimateToolViewV2 (monochrome
@@ -24,7 +25,7 @@ import React, {
   useMemo,
   useRef,
 } from "react";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { useIntelligenceBarActions } from "../../hooks/useIntelligenceBarPageData";
 import {
@@ -49,12 +50,19 @@ import ServiceOutlineComposerModal from "../../components/admin/ServiceOutlineCo
 import WinLossSlicesCard from "./WinLossSlicesCard";
 import SourcePerformanceCard from "./SourcePerformanceCard";
 import PipelineAnalytics, {
-  isCallTodayEstimate,
   isFollowUpOverdueEstimate,
   isGoingColdEstimate,
   isPickReasonEstimate,
-  lastEngagementMs,
+  isSentGroupEstimate,
 } from "./PipelineAnalytics";
+// The Call today rule's one home, shared with the 9 AM push.
+import {
+  CALL_OUTCOMES,
+  isCallableEstimate,
+  isCallTodayEstimate,
+  lastEngagementMs,
+} from "@estimate-call-today";
+import { etDateString, formatETDate, formatETTime } from "../../lib/timezone";
 import {
   FollowUpModalV2,
   DeclineModalV2,
@@ -281,6 +289,46 @@ const CALL_LIST_MATCHERS = {
   call_today: (e) => isCallTodayEstimate(e),
   pick_reason: (e) => isPickReasonEstimate(e),
 };
+// The list filter, with ?view=call_today (the 9 AM push links here) selecting "Call today". Any other value does
+// nothing. The list takes the parameter once and drops it from the URL (replace: no new history entry), so a later
+// filter change, a refresh, or leaving and coming back is not pinned to it. The effect watches the URL, so the link
+// also works on a list that is already open. The third value counts the links taken on an open list: each one clears
+// the search, date filter and page (useClearControlsOnCallTodayLink), so nothing left from earlier hides a row the push
+// counted, and reloads the rows (with the filter already on Call today, the filter alone would not). The link a list
+// opens on belongs to the mount: its controls start clear and its own fetch loads it. Each navigation (location.key) is
+// taken once, so an effect replay (React StrictMode) never counts a link twice.
+function useCallTodayLinkFilter() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { key: navigationKey } = useLocation();
+  const linked = searchParams.get("view") === "call_today";
+  const [filter, setFilter] = useState(linked ? "call_today" : "all");
+  const [linksTaken, setLinksTaken] = useState(0);
+  const takenNavigation = useRef(linked ? navigationKey : null);
+  useEffect(() => {
+    if (!linked) return;
+    if (takenNavigation.current !== navigationKey) {
+      takenNavigation.current = navigationKey;
+      setFilter("call_today");
+      setLinksTaken((n) => n + 1);
+    }
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("view");
+      return next;
+    }, { replace: true });
+  }, [linked, navigationKey, setSearchParams]);
+  return [filter, setFilter, linksTaken];
+}
+// Each Call today link the list takes clears the controls that narrow it beyond the filter. Called after the paging
+// hook, with the state setters (stable) and the paging page setter (stable, a useState setter).
+function useClearControlsOnCallTodayLink(linksTaken, { setSearch, setDate, setPage }) {
+  useEffect(() => {
+    if (!linksTaken) return;
+    setSearch("");
+    setDate("all");
+    setPage(1);
+  }, [linksTaken, setSearch, setDate, setPage]);
+}
 function withCallListChips(chips, afterKey) {
   const at = chips.findIndex((c) => c.key === afterKey);
   if (at < 0) return [...chips, ...CALL_LIST_CHIPS];
@@ -297,49 +345,146 @@ function sortOldestEngagementFirst(rows) {
   const at = (e) => lastEngagementMs(e) ?? Infinity;
   return [...rows].sort((a, b) => at(a) - at(b));
 }
-// A click-to-call answers once the STAFF leg starts, before the customer picks up, so the
-// answered-call proof that takes an offer off Call today (lastCalledAt) lands only after the
-// call ends. While a call placed from Call today is pending, re-read the list quietly once a
-// minute, for at most 15 minutes, and stop as soon as that offer has left Call today.
-export const CALL_WATCH_INTERVAL_MS = 60 * 1000;
-export const CALL_WATCH_MAX_MS = 15 * 60 * 1000;
-export function useCallListWatch({ estimates, refresh }) {
-  const [pending, setPending] = useState(() => new Map());
+// Call today outcomes (owner 2026-11-20, D1 A). One tap on a row saves what the call came to (Booked, Call back,
+// Not interested, No answer) with who and when, and the saved outcome takes the row off the list by the shared rule
+// until the customer opens or taps the estimate again. A call placed from the Call today list keeps its row on screen
+// until someone taps an outcome, even after the call connects (the answered call alone takes a row off) or the
+// customer opens the estimate during the call, so whoever called can log it. A held row still passes the rule's row
+// checks (a viewed, unarchived offer with a phone): an estimate accepted during the call leaves. "Not interested" also
+// opens the Mark lost box. Only records: the route texts, emails and calls nobody.
+// While a row is held, the page re-reads the list quietly once a minute, for up to 15 minutes after the newest call, so
+// an estimate accepted during the call, or an outcome someone else logged, takes the row off without a reload.
+export const HELD_REFRESH_INTERVAL_MS = 60 * 1000;
+export const HELD_REFRESH_MAX_MS = 15 * 60 * 1000;
+function withoutKey(collection, key) {
+  if (!collection.has(key)) return collection;
+  const next = new collection.constructor(collection);
+  next.delete(key);
+  return next;
+}
+export function useCallOutcomes({ setEstimates, refresh, onNotInterested }) {
+  // estimate id -> { placedAt: when the call was placed (this browser's clock, for the re-read window only),
+  // outcomeAt: the newest outcome the row carried then (the server's clock) }, until an outcome is tapped
+  const [held, setHeld] = useState(() => new Map());
+  const [saving, setSaving] = useState(() => new Set());
+  const hold = useCallback((estimate) => {
+    if (estimate?.id)
+      setHeld((prev) =>
+        new Map(prev).set(estimate.id, {
+          placedAt: Date.now(),
+          outcomeAt: estimate.lastCallOutcome?.at ?? null,
+        }),
+      );
+  }, []);
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
-  const watch = useCallback((id) => {
-    if (id) setPending((prev) => new Map(prev).set(id, Date.now()));
-  }, []);
-  // Every re-read: an offer that left Call today, or whose window ran out, stops its watch.
+  const newestHold = held.size
+    ? Math.max(...[...held.values()].map((h) => h.placedAt))
+    : null;
   useEffect(() => {
-    if (!pending.size) return;
-    const now = Date.now();
-    const byId = new Map((estimates || []).map((e) => [e.id, e]));
-    const next = new Map(
-      [...pending].filter(
-        ([id, startedAt]) =>
-          now - startedAt < CALL_WATCH_MAX_MS &&
-          byId.has(id) &&
-          isCallTodayEstimate(byId.get(id), now),
-      ),
-    );
-    if (next.size !== pending.size) setPending(next);
-  }, [estimates, pending]);
-  useEffect(() => {
-    if (!pending.size) return undefined;
+    if (newestHold === null) return undefined;
     const timer = setInterval(() => {
-      const now = Date.now();
-      setPending((prev) => {
-        const next = new Map(
-          [...prev].filter(([, startedAt]) => now - startedAt < CALL_WATCH_MAX_MS),
-        );
-        return next.size === prev.size ? prev : next;
-      });
+      if (Date.now() - newestHold > HELD_REFRESH_MAX_MS) {
+        clearInterval(timer);
+        return;
+      }
       refreshRef.current({ silent: true });
-    }, CALL_WATCH_INTERVAL_MS);
+    }, HELD_REFRESH_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [pending.size]);
-  return watch;
+  }, [newestHold]);
+  const onCallToday = useCallback(
+    (e) => {
+      if (isCallTodayEstimate(e)) return true;
+      const h = held.get(e.id);
+      if (!h || !isCallableEstimate(e) || e.callOutcomeUnknown) return false;
+      // A held row leaves once anyone logs an outcome newer than the one it carried when the call was placed. Both
+      // times are the server's, so a browser clock that runs fast or slow changes nothing.
+      const latest = Date.parse(e.lastCallOutcome?.at);
+      if (Number.isNaN(latest)) return true;
+      return latest <= Date.parse(h.outcomeAt);
+    },
+    [held],
+  );
+  const save = useCallback(
+    async (estimate, outcome) => {
+      setSaving((prev) => new Set(prev).add(estimate.id));
+      try {
+        const r = await adminFetch(`/admin/estimates/${estimate.id}/call-outcome`, {
+          method: "POST",
+          body: JSON.stringify({ outcome }),
+        });
+        setHeld((prev) => withoutKey(prev, estimate.id));
+        setEstimates((prev) =>
+          prev.map((e) => (e.id === estimate.id ? { ...e, lastCallOutcome: r.callOutcome } : e)),
+        );
+        refresh({ silent: true });
+        if (outcome === "not_interested") onNotInterested(estimate);
+      } catch (err) {
+        window.alert("Could not save the call outcome: " + err.message);
+      } finally {
+        setSaving((prev) => withoutKey(prev, estimate.id));
+      }
+    },
+    [setEstimates, refresh, onNotInterested],
+  );
+  return useMemo(
+    () => ({ hold, onCallToday, save, saving }),
+    [hold, onCallToday, save, saving],
+  );
+}
+// The list filter, with Call today widened to the rows a call from the list still holds.
+function matchesListFilter(e, filter, callOutcomes) {
+  return filter === "call_today"
+    ? callOutcomes.onCallToday(e)
+    : estimateMatchesFilter(e, filter);
+}
+// The list route could not read the saved outcomes, so the shared rule withholds every row from Call today. Only a row
+// Call today could list counts: the page also merges the draft and archived reads, whose rows it never lists.
+export const CALL_OUTCOMES_UNREAD_NOTE =
+  "Call today is paused: the saved call outcomes could not be read. Reload the page to try again.";
+export function callOutcomesUnreadNote(estimates, filter) {
+  return filter === "call_today" &&
+    estimates.some((e) => e.callOutcomeUnknown && isCallableEstimate(e))
+    ? CALL_OUTCOMES_UNREAD_NOTE
+    : "";
+}
+// A row's newest outcome: "No answer · 9:42 AM · Virginia", with the date when it was not today (ET).
+export function callOutcomeLine(callOutcome, now = new Date()) {
+  const label = CALL_OUTCOMES.find((o) => o.key === callOutcome?.outcome)?.label;
+  if (!label || !callOutcome.at) return "";
+  const at = new Date(callOutcome.at);
+  const time = formatETTime(at);
+  const when =
+    etDateString(at) === etDateString(now)
+      ? time
+      : `${formatETDate(at, { month: "short", day: "numeric" })}, ${time}`;
+  return [label, when, callOutcome.by].filter(Boolean).join(" · ");
+}
+// The four outcome buttons on a Call today row.
+export function CallOutcomeButtons({ estimate, onPick, saving = false, className }) {
+  return (
+    <div
+      role="group"
+      aria-label={`Call outcome for ${estimate.customerName || "customer"}`}
+      className={cn("flex flex-wrap items-center gap-1.5", className)}
+    >
+      {CALL_OUTCOMES.map((o) => (
+        <Button
+          key={o.key}
+          size="sm"
+          variant="secondary"
+          className="whitespace-nowrap"
+          disabled={saving}
+          onClick={(evt) => {
+            evt.stopPropagation();
+            onPick(estimate, o.key);
+          }}
+        >
+          {o.label}
+        </Button>
+      ))}
+    </div>
+  );
 }
 function v3ChipMatches(e, chip) {
   if (chip === "all") return true;
@@ -358,6 +503,9 @@ function v3ChipMatches(e, chip) {
   if (chip === "closed")
     return e.status === "accepted" || e.status === "declined";
   if (chip === "action") {
+    // Never a self-serve quote nobody delivered (undeliveredSelfServe): the
+    // zero-follow-up contract.
+    if (e.undeliveredSelfServe) return false;
     if (e.status === "expired") return true;
     if (e.status === "viewed" && e.viewedAt) {
       const hrs = (Date.now() - new Date(e.viewedAt).getTime()) / 3.6e6;
@@ -394,12 +542,8 @@ function estimateMatchesFilter(e, filter) {
     return e._class === "won" || (!!e.archivedAt && e.status === "accepted");
   if (filter === "drafts")
     return e._class === "needs_estimate" || e._class === "ready_to_send";
-  if (filter === "sent_group")
-    return (
-      e._class === "awaiting" ||
-      e._class === "follow_up" ||
-      e._class === "scheduled"
-    );
+  // The Sent tile's rows (the tile counts the same predicate).
+  if (filter === "sent_group") return isSentGroupEstimate(e);
   if (filter === "follow_up_overdue") return isFollowUpOverdueEstimate(e);
   if (filter === "going_cold") return isGoingColdEstimate(e);
   if (Object.hasOwn(CALL_LIST_MATCHERS, filter)) return CALL_LIST_MATCHERS[filter](e);
@@ -2046,7 +2190,7 @@ function EstimatePipelineViewV2({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter, callTodayLinksTaken] = useCallTodayLinkFilter();
   const [dateRange, setDateRange] = useState("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState("newest");
@@ -2122,16 +2266,19 @@ function EstimatePipelineViewV2({
         }
       });
   }, []);
-  const watchCall = useCallListWatch({
-    estimates,
+  const callOutcomes = useCallOutcomes({
+    setEstimates,
     refresh: refreshEstimates,
+    onNotInterested: setDeclineTarget,
   });
+  // A Call today link taken on the open list (callTodayLinksTaken) loads it fresh too: with the filter already
+  // selected, the filter alone does not change, and the rows the push counted may have moved since the last load.
   useEffect(() => {
     refreshEstimates();
     return () => {
       estimatesRequestRef.current += 1;
     };
-  }, [filter, refreshEstimates, estimatesRefresh]);
+  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
   const archiveEstimate = useCallback(
     async (e) => {
       if (
@@ -2337,7 +2484,7 @@ function EstimatePipelineViewV2({
     estimateTableSortFn(sort, tableControlsEnabled),
   );
   const filteredRows = sorted
-    .filter((e) => estimateMatchesFilter(e, filter))
+    .filter((e) => matchesListFilter(e, filter, callOutcomes))
     .filter((e) => estimateMatchesTableSearch(e, search));
   // The Call today list runs oldest open first, whatever the table sort.
   const filtered =
@@ -2351,6 +2498,11 @@ function EstimatePipelineViewV2({
     deepLinkEstimateId,
     deepLinkToken,
   );
+  useClearControlsOnCallTodayLink(callTodayLinksTaken, {
+    setSearch,
+    setDate: setDateRange,
+    setPage: paging.setPage,
+  });
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
@@ -2554,6 +2706,10 @@ function EstimatePipelineViewV2({
               </Button>
             )}{" "}
           </div>
+          <ViewErrorNote
+            message={callOutcomesUnreadNote(estimates, filter)}
+            className="mb-2"
+          />
           {/* Estimates list */}
           {filtered.length === 0 ? (
             <div className="p-10 text-center text-ui-body text-ink-secondary">
@@ -2746,8 +2902,11 @@ function EstimatePipelineViewV2({
                                     "Call failed: " +
                                       (r?.error || "unknown error"),
                                   );
-                                else if (isCallTodayEstimate(e))
-                                  watchCall(e.id);
+                                else if (
+                                  filter === "call_today" &&
+                                  isCallTodayEstimate(e)
+                                )
+                                  callOutcomes.hold(e);
                               } catch (err) {
                                 alert("Call failed: " + err.message);
                               }
@@ -2893,6 +3052,9 @@ function EstimatePipelineViewV2({
                       {e.lastCalledAt && (
                         <div>Called {timeAgo(e.lastCalledAt)}</div>
                       )}
+                      {e.lastCallOutcome && (
+                        <div>{callOutcomeLine(e.lastCallOutcome)}</div>
+                      )}
                     </div>
                     {/* Actions — flag toggle + primary status action(s) +
                      overflow menu. Secondary tools (toggles, audit, preview,
@@ -2951,16 +3113,19 @@ function EstimatePipelineViewV2({
                           </Button>
                         )}
 
-                        {(e.status === "sent" || e.status === "viewed") && (
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            className="w-full sm:w-auto whitespace-nowrap"
-                            onClick={() => setFollowUpTarget(e)}
-                          >
-                            Follow Up
-                          </Button>
-                        )}
+                        {/* Never on a self-serve quote nobody delivered: the
+                            zero-follow-up contract. Sending it clears the flag. */}
+                        {["sent", "viewed"].includes(e.status) &&
+                          !e.undeliveredSelfServe && (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              className="w-full sm:w-auto whitespace-nowrap"
+                              onClick={() => setFollowUpTarget(e)}
+                            >
+                              Follow Up
+                            </Button>
+                          )}
 
                         {/* Schedule a verbal "yes" before formal acceptance: books
                             the visit and records the win on book (POST /admin/schedule
@@ -2968,7 +3133,8 @@ function EstimatePipelineViewV2({
                             modal stages the customer from the quote's contact and the
                             estimate is attached to them on book. */}
                         {(e.status === "sent" || e.status === "viewed") &&
-                          !e.archivedAt && (
+                          !e.archivedAt &&
+                          !isOpenPlanStartQuote(e) && (
                             <Button
                               size="sm"
                               variant="secondary"
@@ -3067,7 +3233,10 @@ function EstimatePipelineViewV2({
                                   `/admin/estimates?editEstimateId=${e.id}`,
                                 ),
                             },
-                            ["draft", "sent", "viewed"].includes(e.status) && {
+                            // A customer's own mint takes no staff delivery
+                            // option change in either direction (server 409).
+                            ["draft", "sent", "viewed"].includes(e.status) &&
+                              !EDIT_REFUSED_SOURCES.includes(e.source) && {
                               key: "one-time",
                               label: e.showOneTimeOption
                                 ? "1× Option: On"
@@ -3086,7 +3255,8 @@ function EstimatePipelineViewV2({
                               ),
                               onClick: () => toggleOneTimeOption(e),
                             },
-                            ["draft", "sent", "viewed"].includes(e.status) && {
+                            ["draft", "sent", "viewed"].includes(e.status) &&
+                              !EDIT_REFUSED_SOURCES.includes(e.source) && {
                               key: "invoice",
                               label: e.billByInvoice
                                 ? "Invoice mode: On"
@@ -3295,6 +3465,14 @@ function EstimatePipelineViewV2({
                       message={viewErrors[e.id]}
                       className="w-full"
                     />
+                    {filter === "call_today" && (
+                      <CallOutcomeButtons
+                        estimate={e}
+                        onPick={callOutcomes.save}
+                        saving={callOutcomes.saving.has(e.id)}
+                        className="w-full"
+                      />
+                    )}
                   </Card>
                 );
               })}
@@ -3562,16 +3740,30 @@ const EDITABLE_ESTIMATE_STATUSES = [
   "viewed",
   "send_failed",
 ];
+// The server refuses an in-place edit of a customer's own mint
+// (admin-estimate-persistence.js REVISE_REFUSED_MINT_SOURCES), so the menus
+// never offer one. It refuses any change to the 1× option or invoice mode too.
+const EDIT_REFUSED_SOURCES = ["plan_restart", "plan_start"];
 function canEditEstimateInPlace(estimate) {
   return (
     EDITABLE_ESTIMATE_STATUSES.includes(estimate.status) &&
+    !EDIT_REFUSED_SOURCES.includes(estimate.source) &&
     !!String(estimate.token || "").trim() &&
     !estimate.isCommercialProposal &&
     !estimate.archivedAt
   );
 }
+// An open portal plan-start quote is the customer's own booking: the server
+// refuses a staff accept and an accept-on-book on it (409
+// plan_start_self_serve), so its row offers neither Schedule nor Mark Won nor
+// Annual Prepay. Once the customer accepts it, it books like any accepted
+// estimate.
+function isOpenPlanStartQuote(estimate) {
+  return estimate.source === "plan_start" && estimate.status !== "accepted";
+}
 function canMarkEstimateWon(estimate) {
   if (!["sent", "viewed"].includes(estimate.status)) return false;
+  if (isOpenPlanStartQuote(estimate)) return false;
   // The server rejects any estimate with a one-time option from manual accept
   // (recurring-vs-one-time must be recorded via the customer link) — proposals
   // included. Don't offer a Mark Won that always 400s.
@@ -3645,6 +3837,8 @@ export function MobileEstimateRow({
   highlighted = false,
   onPickReason,
   onCalled,
+  onCallOutcome,
+  callOutcomeSaving = false,
 }) {
   const navigate = useNavigate();
   const sendEstimateFromPipeline = useEstimateSend();
@@ -3873,6 +4067,19 @@ export function MobileEstimateRow({
             </div>
           )}
           <EstimateSoldByRow estimate={estimate} onChanged={onSoldByChanged} />
+          {estimate.lastCallOutcome && (
+            <span className="text-ui-body text-ink-tertiary">
+              {callOutcomeLine(estimate.lastCallOutcome)}
+            </span>
+          )}
+          {onCallOutcome && (
+            <CallOutcomeButtons
+              estimate={estimate}
+              onPick={onCallOutcome}
+              saving={callOutcomeSaving}
+              className="mt-1"
+            />
+          )}
         </div>
         {estimate.customerPhone && (
           <Button
@@ -4112,12 +4319,13 @@ function EstimatesMobileListView({
   const sendEstimateFromPipeline = useEstimateSend();
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [reasonTarget, setReasonTarget] = useState(null);
+  const [declineTarget, setDeclineTarget] = useState(null);
   const [estimates, setEstimates] = useState([]);
   const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter, callTodayLinksTaken] = useCallTodayLinkFilter();
   const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -4149,9 +4357,10 @@ function EstimatesMobileListView({
         if (requestId === estimatesRequestRef.current) setLoading(false);
       });
   }, []);
-  const watchCall = useCallListWatch({
-    estimates,
+  const callOutcomes = useCallOutcomes({
+    setEstimates,
     refresh: refreshEstimates,
+    onNotInterested: setDeclineTarget,
   });
   useEffect(() => {
     setLoading(true);
@@ -4160,7 +4369,8 @@ function EstimatesMobileListView({
     return () => {
       estimatesRequestRef.current += 1;
     };
-  }, [filter, refreshEstimates, estimatesRefresh]);
+    // A Call today link taken on the open list loads it fresh, as on desktop.
+  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
   const markEstimateAccepted = useCallback(
     async (e) => {
       // A commercial proposal win auto-creates the customer when none is linked.
@@ -4323,7 +4533,9 @@ function EstimatesMobileListView({
       _class: classifyEstimateForPipeline(e),
     }));
     let list = classified;
-    if (v3Flag) {
+    if (filter === "call_today") {
+      list = list.filter((e) => callOutcomes.onCallToday(e));
+    } else if (v3Flag) {
       list = list.filter((e) => v3ChipMatches(e, filter));
     } else if (filter !== "all") {
       list = list.filter((e) => estimateMatchesFilter(e, filter));
@@ -4372,6 +4584,7 @@ function EstimatesMobileListView({
     sort,
     tableControlsEnabled,
     v3Flag,
+    callOutcomes,
   ]);
   const filterCounts = useMemo(() => {
     if (v3Flag) return v3ChipCounts(estimates, v3Chips());
@@ -4391,9 +4604,10 @@ function EstimatesMobileListView({
   }, [estimates, v3Flag]);
   const filterOptions = mobileFilterOptions(v3Flag, filterCounts);
 
-  // Reset filter when the v3 flag flips; keep chronological ordering stable.
+  // Reset filter when the v3 flag flips; keep chronological ordering stable. "Call today" is in both chip
+  // sets, so it stays: the flag loads after mount and must not undo the 9 AM push link (useCallTodayLinkFilter).
   useEffect(() => {
-    setFilter("all");
+    setFilter((current) => (current === "call_today" ? current : "all"));
   }, [v3Flag]);
 
   // Flat list across all days — mirrors CustomersPageV2 directory layout.
@@ -4406,6 +4620,11 @@ function EstimatesMobileListView({
     deepLinkEstimateId,
     deepLinkToken,
   );
+  useClearControlsOnCallTodayLink(callTodayLinksTaken, {
+    setSearch,
+    setDate: setDateFilter,
+    setPage: paging.setPage,
+  });
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
@@ -4537,6 +4756,10 @@ function EstimatesMobileListView({
       <div className="u-nums text-ui-body text-ink-tertiary text-right mb-3 mt-3">
         {flat.length} result{flat.length !== 1 ? "s" : ""}
       </div>
+      <ViewErrorNote
+        message={callOutcomesUnreadNote(estimates, filter)}
+        className="mb-3"
+      />
       {/* List */}
       {loading ? (
         <div className="p-10 text-center text-ui-body text-ink-secondary">
@@ -4592,8 +4815,11 @@ function EstimatesMobileListView({
               v3Flag={v3Flag}
               onPickReason={setReasonTarget}
               onCalled={(row) => {
-                if (isCallTodayEstimate(row)) watchCall(row.id);
+                if (filter === "call_today" && isCallTodayEstimate(row))
+                  callOutcomes.hold(row);
               }}
+              onCallOutcome={filter === "call_today" ? callOutcomes.save : undefined}
+              callOutcomeSaving={callOutcomes.saving.has(e.id)}
             />
           ))}
         </div>
@@ -4656,6 +4882,17 @@ function EstimatesMobileListView({
           onClose={() => setReasonTarget(null)}
           onSaved={() => {
             setReasonTarget(null);
+            refreshEstimates();
+          }}
+        />
+      )}
+      {/* Opened by a Call today row's "Not interested" tap (useCallOutcomes). */}
+      {declineTarget && (
+        <DeclineModalV2
+          estimate={declineTarget}
+          onClose={() => setDeclineTarget(null)}
+          onSaved={() => {
+            setDeclineTarget(null);
             refreshEstimates();
           }}
         />

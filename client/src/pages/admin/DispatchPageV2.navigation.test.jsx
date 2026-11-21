@@ -14,7 +14,7 @@ vi.mock('./SchedulePage', () => ({
   CompletionPanel: () => null,
   RescheduleModal: () => null,
   EditServiceModal: ({ service }) => <div>Editing service {service.id}</div>,
-  ProtocolPanel: () => null,
+  ProtocolPanel: ({ service, initialSection }) => <div>Protocol panel {service.id} on {String(initialSection)}</div>,
   completionResumeOwed: () => false,
 }));
 vi.mock('../../components/schedule/TimeGridDay', () => ({ default: ({ onEdit, services = [] }) => <div>Schedule visits {services.map((service) => service.customerName).join(', ')}
@@ -28,8 +28,9 @@ vi.mock('../../components/schedule/CreateAppointmentModal', () => ({
     return <div role="dialog">New booking for {props.defaultDate}</div>;
   },
 }));
-vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ services = [], onEdit }) => <div>
+vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ mode, services = [], onEdit, onProtocol }) => <div>
   {services.map((service) => <button key={service.id} aria-label={`Open mobile ${service.customerName}`} onClick={() => onEdit(service)}>Mobile visit</button>)}
+  {onProtocol && <button onClick={() => onProtocol({ id: `${mode}-visit` })}>Protocol from {mode} list</button>}
 </div> }));
 const projectModalState = vi.hoisted(() => ({ props: null }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
@@ -285,6 +286,15 @@ it('keeps the mobile board Day and Week switches available', async () => {
   render(<MemoryRouter><DispatchPageV2 activeTab="board" /></MemoryRouter>);
   expect(await screen.findByRole('button', { name: 'Week', exact: true })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Day', exact: true })).toBeInTheDocument();
+});
+
+it('the mobile Week list opens the Protocol panel, as the Day list does', async () => {
+  vi.stubGlobal('innerWidth', 390);
+  vi.mocked(adminFetch).mockResolvedValue({ services: [], technicians: [], products: [], types: [] });
+  render(<MemoryRouter><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Week', exact: true }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Protocol from week list' }));
+  expect(await screen.findByText('Protocol panel week-visit on null')).toBeInTheDocument();
 });
 
 it('carries a newly saved project through Details before completion is reopened', async () => {

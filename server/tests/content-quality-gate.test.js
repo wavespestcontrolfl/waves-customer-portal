@@ -386,6 +386,26 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
     expect(body.ok).toBe(false);
     expect(body.reason).toBe('unredacted_name_in_body');
   });
+  test('redaction: "Hammerhead Worms" and "Mud Daubers" clear as animal name pairs, a first name in front of either still blocks', () => {
+    // A post about hammerhead worms carries the name in its title and in
+    // most headings; unlisted, the pair read as a First+Last name there.
+    expect(checkRedactionPassed({
+      body: '## What Hammerhead Worms Look Like\n\nUF/IFAS calls them land planarians. They turn up in Sarasota after rain.',
+      frontmatter: { title: 'Hammerhead Worms in Southwest Florida Yards: What to Know' },
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: '## Land Planarians and Hammerhead Flatworms\n\nBoth names are in use. They are seen in Bradenton yards.',
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: '## Where Mud Daubers Nest\n\nMud daubers build mud nests in sheltered spots. They are common around Venice homes.',
+    }).ok).toBe(true);
+    const worm = checkRedactionPassed({ body: '## Kate Worm\n\nOur treatment schedule is weekly.' });
+    expect(worm.ok).toBe(false);
+    expect(worm.reason).toBe('unredacted_name_in_heading');
+    const dauber = checkRedactionPassed({ body: 'This is Kate Dauber and the wasps are back again this week. Call the office in Bradenton.' });
+    expect(dauber.ok).toBe(false);
+    expect(dauber.reason).toBe('unredacted_name_in_body');
+  });
   test('redaction: compact E.164 customer phones are caught (Codex round 8 — 11-digit runs had no interior boundary to match)', () => {
     const r = checkRedactionPassed({ body: 'Call our Sarasota line at (941) 297-2606 or the customer at +19415551234.' });
     expect(r.ok).toBe(false);
@@ -619,7 +639,9 @@ describe('evaluate (full gate)', () => {
   });
   test('perfect refresh draft passes its own threshold (prod 2026-06-12: 47/47 gate-failed under global 54)', () => {
     const r = evaluate(
-      fullDraft({ body: 'x'.repeat(1500) }),
+      // Real prose: the always-on privacy check (redaction_passed) fails an all-lowercase
+      // run like 'x'.repeat(), since the redactor cannot read it.
+      fullDraft({ body: 'Termite swarmers look like flying ants. They have straight antennae. Wings are equal length. '.repeat(17).slice(0, 1500) }),
       brief({ page_type: 'refresh' }),
       { previewBuildSuccess: true, sitemapHasUrl: true, previousVersion: { body: 'x'.repeat(1000) } }
     );
@@ -652,7 +674,8 @@ describe('evaluate (full gate)', () => {
     // signals.
     const r = evaluate(
       fullDraft({
-        body: 'Termites are insects. Read our [pest control services](/pest-control-services/) page.',
+        // Enough sentence capitals for the always-on privacy check to read the text.
+        body: 'Termites are insects. They eat wood. Read our [pest control services](/pest-control-services/) page. It lists treatment options.',
       }),
       brief({ page_type: 'supporting-blog' }),
       { previewBuildSuccess: true, sitemapHasUrl: true }

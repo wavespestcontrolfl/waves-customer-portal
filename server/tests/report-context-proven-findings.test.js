@@ -1,0 +1,181 @@
+/**
+ * The report's dynamic context (the AI summary card, the premium cards, the
+ * pressure trend and the since-last-visit line) and the report writer's
+ * prior-visit grounding show only the service_findings rows a customer may
+ * see (finding-provenance.js). Completion saves the form's free-text
+ * observations as rows with a bare title, a [Found] line of the raw
+ * technician note among them; the report document, the texting prompt and
+ * the voice relay already drop those rows, and these readers printed them.
+ */
+const { provenFindingRows } = require('../services/service-report/finding-provenance');
+const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../shared/service-completion-observations');
+const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
+const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
+
+const RECORD_ID = 'svc-proven-findings';
+const PRIOR_ID = 'svc-proven-prior';
+const row = (id, title, extra = {}) => ({
+  id, service_record_id: RECORD_ID, zone_id: null, category: 'observation', severity: 'high', title, detail: null, recommendation: null, ...extra,
+});
+// This visit: a [Found] line of the raw note saved as a bare title (the
+// highest severity, so an unfiltered reader leads with it), a finding with
+// its own detail, and an older row that stored the picked form label bare.
+// The prior visit: its own bare raw title, a detailed finding, a bare label
+// only its own snapshot lists (kept, and its main driver) and a bare label
+// only this visit's snapshot lists (dropped: each visit proves its own rows).
+const RAW = row('f-raw', 'Gate code 4471 by the side door', { severity: 'critical' });
+const DETAILED = row('f-detail', 'Ant trail at the slab', { detail: 'A trail along the north wall.', recommendation: 'Keep mulch back from the slab.' });
+const FORM_LABEL = row('f-form', 'Yellowjacket');
+const PRIOR_RAW = row('p-raw', 'Lockbox 2210 under the mat', { service_record_id: PRIOR_ID, severity: 'critical' });
+const PRIOR_DETAILED = row('p-detail', 'Roach activity in the garage', { service_record_id: PRIOR_ID, detail: 'Two adults under the water heater.' });
+const PRIOR_OWN_LABEL = row('p-own', 'Fire ant mounds', { service_record_id: PRIOR_ID, severity: 'critical' });
+const PRIOR_OTHER_LABEL = row('p-other', 'Paper wasp nest', { service_record_id: PRIOR_ID, severity: 'medium' });
+const BARE_TEXT = /4471|side door|2210|Lockbox|Paper wasp/;
+// The technician's own note (report-note-render.test.js): its record's form
+// labels pass the customer-copy screen before they prove a row.
+const NOTE_RECORD = { reportNote: { v: 1, text: 'I treated the perimeter and swept the webs.', source: 'cleaned' } };
+
+const visit = (id, date, pressure, notes) => ({
+  id, customer_id: 'cust-proven', service_line: 'pest', service_type: 'Quarterly Pest Control Service', status: 'completed',
+  service_date: date, started_at: `${date}T14:00:00Z`, pressure_index: pressure, structured_notes: notes,
+});
+// Both readings before the 2026-09-24 scale cutover, so the trend compares them.
+const TABLES = {
+  service_records: [
+    visit(RECORD_ID, '2026-09-10', 2.5, JSON.stringify({ formObservations: ['Yellowjacket', 'Paper wasp nest'], observations: ['Yellowjacket', RAW.title] })),
+    visit(PRIOR_ID, '2026-07-10', 3.1, { formObservations: ['Fire ant mounds'] }),
+  ],
+  service_findings: [RAW, DETAILED, FORM_LABEL, PRIOR_RAW, PRIOR_DETAILED, PRIOR_OWN_LABEL, PRIOR_OTHER_LABEL],
+};
+
+// Each query resolves its table's rows; plain-object, two-argument,
+// whereNot, whereIn and whereNotNull filters apply ("table.column" keys too).
+function fakeKnex(tables) {
+  const knex = (table) => {
+    let rows = [...(tables[table] || [])];
+    const col = (key) => String(key).split('.').pop();
+    const matches = (r, criteria) => Object.entries(criteria).every(([k, v]) => r[col(k)] === v);
+    const q = new Proxy(() => q, {
+      get(_, prop) {
+        if (prop === 'then') return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+        if (prop === 'catch') return () => Promise.resolve(rows);
+        if (prop === 'first') return () => Promise.resolve(rows[0] || null);
+        if (prop === 'columnInfo') return () => Promise.resolve({});
+        if (prop === 'where') {
+          return (a, ...rest) => {
+            if (a && typeof a === 'object') rows = rows.filter((r) => matches(r, a));
+            else if (typeof a === 'string' && rest.length === 1) rows = rows.filter((r) => r[col(a)] === rest[0]);
+            return q;
+          };
+        }
+        if (prop === 'whereNot') return (a) => { rows = rows.filter((r) => !matches(r, a)); return q; };
+        if (prop === 'whereIn') return (k, vals) => { rows = rows.filter((r) => vals.includes(r[col(k)])); return q; };
+        if (prop === 'whereNotNull') return (k) => { rows = rows.filter((r) => r[col(k)] != null); return q; };
+        return () => q;
+      },
+    });
+    return q;
+  };
+  knex.raw = (sql) => sql;
+  knex.fn = { now: () => new Date() };
+  return knex;
+}
+
+describe('provenFindingRows', () => {
+  test('keeps a row with a detail or a recommendation, or a title the form snapshot lists', () => {
+    const rows = [RAW, DETAILED, row('f-rec', 'Mulch on the slab', { recommendation: 'Pull mulch back.' }), FORM_LABEL];
+    expect(provenFindingRows(rows, { formObservations: [' yellowjacket '] }).map((r) => r.id)).toEqual(['f-detail', 'f-rec', 'f-form']);
+    expect(provenFindingRows(rows, JSON.stringify({ formObservations: ['Yellowjacket'] })).map((r) => r.id)).toEqual(['f-detail', 'f-rec', 'f-form']);
+    // Stored notes that cannot be read prove no label.
+    expect(provenFindingRows(rows, '{"formObservations":').map((r) => r.id)).toEqual(['f-detail', 'f-rec']);
+    expect(provenFindingRows(rows, null).map((r) => r.id)).toEqual(['f-detail', 'f-rec']);
+    expect(provenFindingRows(null, {})).toEqual([]);
+  });
+
+  test("on a record that carries the technician's own note, a label proves a row only when it passes the customer-copy screen", () => {
+    const formObservations = ['Yellowjacket', RAW.title];
+    expect(provenFindingRows([RAW, FORM_LABEL], { formObservations }).map((r) => r.id)).toEqual(['f-raw', 'f-form']);
+    expect(provenFindingRows([RAW, FORM_LABEL], { ...NOTE_RECORD, formObservations }).map((r) => r.id)).toEqual(['f-form']);
+    expect(provenFindingRows([RAW, FORM_LABEL], JSON.stringify({ ...NOTE_RECORD, formObservations })).map((r) => r.id)).toEqual(['f-form']);
+  });
+
+  test("on a note record, a row whose only text is the stock detail stands only when its label passes the screen", () => {
+    // Completion saves each picked form label with the stock detail.
+    const stock = (id, title, extra = {}) => row(id, title, { detail: STRUCTURED_OBSERVATION_FINDING_DETAIL, ...extra });
+    const refused = stock('f-stock-refused', 'Safe for pets once dry');
+    const label = stock('f-stock-label', 'Yellowjacket');
+    const formObservations = ['Yellowjacket', 'Safe for pets once dry'];
+    expect(provenFindingRows([refused, label], { ...NOTE_RECORD, formObservations }).map((r) => r.id)).toEqual(['f-stock-label']);
+    // A label the snapshot does not list proves nothing either.
+    expect(provenFindingRows([label], NOTE_RECORD).map((r) => r.id)).toEqual([]);
+    // A record with no note keeps both rows, as today.
+    expect(provenFindingRows([refused, label], { formObservations }).map((r) => r.id)).toEqual(['f-stock-refused', 'f-stock-label']);
+  });
+
+  test("on a note record, a title the screen refuses never prints, whatever else the row carries", () => {
+    const recommended = row('f-rec-refused', 'Safe for pets once dry', { recommendation: 'Keep pets off the lawn until it dries.' });
+    const detailed = row('f-detail-refused', 'Safe for pets once dry', { detail: 'Dry by noon.' });
+    const passing = row('f-rec-ok', 'Seal the slider', { recommendation: 'Replace the weatherstrip.' });
+    expect(provenFindingRows([recommended, detailed, passing, DETAILED], NOTE_RECORD).map((r) => r.id)).toEqual(['f-rec-ok', 'f-detail']);
+    // A record with no note keeps every row with its own text, as today.
+    expect(provenFindingRows([recommended, detailed, passing, DETAILED], {}).map((r) => r.id))
+      .toEqual(['f-rec-refused', 'f-detail-refused', 'f-rec-ok', 'f-detail']);
+  });
+
+  test("on a note record, a detail or a recommendation the screen refuses is left out of its row, and a row with no text left is not shown", () => {
+    const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
+    const gateCode = row('f-gate', 'Ant trail by the lanai', { detail: 'A trail along the lanai door.', recommendation: 'Gate code 4417 for the next visit' });
+    const safeOnly = row('f-safe', 'Ant trail', { recommendation: 'Keep pets off it, it is safe once dry' });
+    const toxic = row('f-toxic', 'Seal the slider', { detail: 'Toxic residue on the sill', recommendation: 'Replace the weatherstrip.' });
+    // The stored "no activity" row: its fixed pest detail ("were clear") fails the screen.
+    const noActivity = { ...row('f-none', ''), ...buildNoActivityFinding('pest') };
+    const rows = [gateCode, safeOnly, toxic, noActivity];
+    expect(provenFindingRows(rows, NOTE_RECORD).map((r) => [r.id, r.detail, r.recommendation])).toEqual([
+      ['f-gate', 'A trail along the lanai door.', null],
+      ['f-toxic', null, 'Replace the weatherstrip.'],
+    ]);
+    // A record with no note keeps every row whole, as today.
+    expect(provenFindingRows(rows, {})).toEqual(rows);
+  });
+});
+
+describe('customer readers of a visit\'s findings', () => {
+  test('the dynamic context the report sends, pressure on, never prints a bare title of this visit or the prior one', async () => {
+    const context = await buildServiceReportDynamicContext({ recordId: RECORD_ID, omitPestPressureContext: false, knex: fakeKnex(TABLES) });
+    // Every reader ran on the rows a customer may see.
+    expect(JSON.stringify(context.aiSummary)).toContain('Ant trail at the slab');
+    expect(JSON.stringify(context.aiSummary)).toContain('Yellowjacket');
+    expect(JSON.stringify(context.premiumExperience)).toContain('Ant trail at the slab');
+    const priorPoint = context.pressureTrend.points.find((point) => point.serviceRecordId === PRIOR_ID);
+    expect(priorPoint).toMatchObject({ mainDriver: 'Fire ant mounds', findingsCount: 2 });
+    expect(context.sinceLastVisit.activityLine).toContain('Ant trail at the slab');
+    expect(JSON.stringify(context)).not.toMatch(BARE_TEXT);
+  });
+
+  test("on a note record, a form label the customer-copy screen refuses never prints", async () => {
+    // The form snapshot lists the access code too; the record's report lists
+    // drop it (report-data buildProtocolPayload), and so does every reader here.
+    // Completion saved the refused label with the stock detail as well.
+    const notes = JSON.stringify({ ...NOTE_RECORD, formObservations: ['Yellowjacket', RAW.title] });
+    const stockRow = row('f-stock', RAW.title, { detail: STRUCTURED_OBSERVATION_FINDING_DETAIL });
+    const tables = {
+      ...TABLES,
+      service_records: [{ ...TABLES.service_records[0], structured_notes: notes }, TABLES.service_records[1]],
+      service_findings: [...TABLES.service_findings, stockRow],
+    };
+    const context = await buildServiceReportDynamicContext({ recordId: RECORD_ID, omitPestPressureContext: false, knex: fakeKnex(tables) });
+    expect(JSON.stringify(context.aiSummary)).toContain('Yellowjacket');
+    expect(context.sinceLastVisit.activityLine).toContain('Ant trail at the slab');
+    expect(JSON.stringify(context)).not.toMatch(BARE_TEXT);
+  });
+
+  test("the report writer's prior-visit grounding never carries a bare title", async () => {
+    const copy = await buildReportCopyContext({
+      customerId: 'cust-proven', serviceType: 'Quarterly Pest Control Service', serviceLine: 'pest', serviceDate: '2026-11-20', knex: fakeKnex(TABLES),
+    });
+    const priorLine = copy.contextText.split('\n').find((line) => line.startsWith('Earlier ('));
+    expect(priorLine).toContain('Roach activity in the garage');
+    expect(priorLine).toContain('Fire ant mounds');
+    expect(JSON.stringify(copy)).not.toMatch(BARE_TEXT);
+  });
+});

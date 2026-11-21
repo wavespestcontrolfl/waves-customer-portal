@@ -15,6 +15,7 @@
  */
 
 const logger = require('../logger');
+const { parse: parseCsvStream } = require('csv-parse');
 const { parse: parseCsvSync } = require('csv-parse/sync');
 const { normalizeUnitLine, unitLineValueKey } = require('../../utils/address-normalizer');
 
@@ -51,13 +52,60 @@ function seatsToSqft(seats) {
 // the extract is externally controlled, so malformed quoting and format
 // drift get the same handling as every other CSV import. A parse error
 // THROWS — loadDistrictRows treats it as a failed refresh (never cached).
+const DBPR_CSV_OPTIONS = { skip_empty_lines: true, relax_column_count: true, bom: true };
+const trimHeader = (header) => header.map((h) => String(h || '').trim());
+
 function parseDbprCsv(text) {
-  return parseCsvSync(String(text || ''), {
-    columns: (header) => header.map((h) => String(h || '').trim()),
-    skip_empty_lines: true,
-    relax_column_count: true,
-    bom: true,
+  return parseCsvSync(String(text || ''), { ...DBPR_CSV_OPTIONS, columns: trimHeader });
+}
+
+// The same parse for an extract read inside the web server (the weekly
+// restaurant sync). In one call, a fiscal year of district inspections
+// blocks requests for seconds and keeps every row. Here the text goes in
+// fixed-size slices, whatever its line ends (csv-parse carries a record
+// across slices; a cut never splits a character), requests get a turn
+// between slices, and onRow(row, { cells, columns }) sees each row as it is
+// read (an async onRow is awaited, row by row). cells counts the row's own
+// cells and columns the header names: csv-parse keeps a short row with only
+// its cells and leaves the cells past the header out of the row, so a caller
+// that checks a row's width reads it here. Resolves with the trimmed header
+// ([] for an empty file). A parse error, or an error onRow throws or rejects
+// with, rejects.
+const DBPR_SLICE_CHARS = 32 * 1024;
+
+async function eachDbprCsvRow(text, onRow) {
+  let header = [];
+  const parser = parseCsvStream({
+    ...DBPR_CSV_OPTIONS,
+    info: true, // each record comes with its cell count (info.index)
+    columns: (names) => { header = trimHeader(names); return header; },
   });
+  const reading = (async () => {
+    for await (const { info, record } of parser) await onRow(record, { cells: info.index, columns: header.length });
+  })();
+  // A failure is read from `reading` at the end; until then it must not count as an unhandled rejection.
+  reading.catch(() => {});
+  const source = String(text || '');
+  for (let at = 0; at < source.length && !parser.destroyed;) {
+    let end = Math.min(at + DBPR_SLICE_CHARS, source.length);
+    // Each write is encoded on its own: keep the two halves of a character outside the BMP together.
+    if (end < source.length && /[\uDC00-\uDFFF]/.test(source[end])) end -= 1;
+    const flowing = parser.write(source.slice(at, end));
+    at = end;
+    // A slow async onRow holds the parser back: once the parser's buffer is full, the next slice waits until it
+    // drains, or closes on a failure. So the parser holds a few slices at most, never the whole file.
+    if (!flowing && !parser.destroyed) {
+      await new Promise((resolve) => {
+        const done = () => { parser.off('drain', done); parser.off('close', done); resolve(); };
+        parser.on('drain', done);
+        parser.on('close', done);
+      });
+    }
+    await new Promise((resolve) => { setImmediate(resolve); });
+  }
+  if (!parser.destroyed) parser.end();
+  await reading;
+  return header;
 }
 
 // ── Address matching ────────────────────────────────────────────
@@ -276,11 +324,23 @@ function assertPlausibleExtract(rows, { minRows, lastGoodCount }) {
   }
 }
 
-async function defaultFetchText(url, timeoutMs = DBPR_FETCH_TIMEOUT_MS) {
+// A state extract is a few MB (the district 7 inspection file is about 3 MB).
+// A body past this cap is refused while it downloads, so a wrong or huge
+// answer cannot fill the web process's memory.
+const DBPR_MAX_BYTES = 32 * 1024 * 1024;
+
+async function defaultFetchText(url, timeoutMs = DBPR_FETCH_TIMEOUT_MS, maxBytes = DBPR_MAX_BYTES) {
   const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-  if (!res || !res.ok) throw new Error(`HTTP ${res && res.status}`);
-  const buf = await res.arrayBuffer();
-  return new TextDecoder('latin1').decode(buf);
+  // Only a whole file: a 206 (partial content) that ends on a row would pass every row check.
+  if (!res || res.status !== 200) throw new Error(`HTTP ${res && res.status}`);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of res.body || []) {
+    size += chunk.byteLength;
+    if (size > maxBytes) throw new Error('extract too large');
+    chunks.push(chunk);
+  }
+  return new TextDecoder('latin1').decode(Buffer.concat(chunks));
 }
 
 // timeoutMs (the admin lookup's remaining budget) caps only THIS caller's
@@ -436,6 +496,7 @@ module.exports = {
   DBPR_FOOD_LICENSE_DISTRICTS,
   dbprExtractUrl,
   parseDbprCsv,
+  eachDbprCsvRow,
   normalizeStreetName,
   parseAddressLine,
   matchDbprRow,
@@ -443,6 +504,7 @@ module.exports = {
   seatsToSqft,
   resolveViaDbprLicense,
   loadDistrictRows,
+  defaultFetchText,
   isEligibleDineInLicense,
   peekDistrictRows,
   warmDistrictRowsInBackground,

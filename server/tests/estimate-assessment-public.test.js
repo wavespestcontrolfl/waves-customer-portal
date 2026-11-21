@@ -243,6 +243,16 @@ describe('GET /:token', () => {
     expect(await router._internals.assessmentFirstFor(estimate(), { open: true })).toBeNull();
   });
 
+  test('a customer\'s own plan quote that staff changed: gone before any location work, and /data never offers it (codex pre-push P1)', async () => {
+    estimateRow = estimate({ source: 'plan_start', bill_by_invoice: true });
+    expect((await call(TOKEN)).body).toEqual({ state: 'gone' });
+    expect(mockBookingInternals.customerBookingLocation).not.toHaveBeenCalled();
+    expect(await router._internals.assessmentFirstFor(estimateRow, { open: true })).toBeNull();
+    // The same quote with neither option on is offered as before.
+    estimateRow = estimate({ source: 'plan_start' });
+    expect(await router._internals.assessmentFirstFor(estimateRow, { open: true })).toEqual({ url: `/estimate/${TOKEN}/assessment` });
+  });
+
   test('no booking location (a pin under review): the service-area notice, no times', async () => {
     mockBookingInternals.customerBookingLocation.mockResolvedValue(null);
     expect((await call(TOKEN)).body).toMatchObject({ state: 'ok', availability: null, service_area_unavailable: true });
@@ -286,6 +296,12 @@ describe('POST /:token (book)', () => {
   test('a time that is not in a fresh build: 409 SLOT_TAKEN with fresh times, nothing booked', async () => {
     const res = await book({ date: '2026-11-03', time: '13:00' });
     expect(res).toMatchObject({ status: 409, body: { code: 'SLOT_TAKEN', availability: { days: [{ date: '2026-11-03' }] } } });
+    expect(mockInspection.bookAssessmentVisit).not.toHaveBeenCalled();
+  });
+
+  test('a customer\'s own plan quote that staff changed: gone, and nothing booked (codex pre-push P1)', async () => {
+    estimateRow = estimate({ source: 'plan_restart', show_one_time_option: true });
+    expect(await book()).toMatchObject({ status: 200, body: { state: 'gone' } });
     expect(mockInspection.bookAssessmentVisit).not.toHaveBeenCalled();
   });
 
@@ -360,6 +376,7 @@ describe('the in-transaction estimate guard', () => {
     ['moved to another customer', () => { estimateRow = estimate({ customer_id: 'cust-2' }); }],
     ['blocked on the call side', () => { mockBlockedUnderLock.mockResolvedValueOnce(true); }],
     ['the customer moved off the estimate\'s property', () => { customerRow = { ...CUSTOMER, zip: '34236' }; }],
+    ['staff changed a customer\'s own plan quote meanwhile (codex pre-push P1)', () => { estimateRow = estimate({ source: 'plan_start', bill_by_invoice: true }); }],
   ])('%s: ineligible', async (_label, arrange) => {
     arrange();
     expect(await revalidate(fakeTrx().trx)).toBe('ineligible');

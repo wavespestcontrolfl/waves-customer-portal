@@ -6,7 +6,10 @@
 // after migrations 20261022120000 and 20261022160000 (fixture); a product the program names that the fixture lacks
 // fails here, so a new protocol product needs a watering rule first.
 const v13 = require('../config/lawn-protocol-v13.json');
-const RULES = require('./fixtures/lawn-watering-rules-v13-2026-10-22.json');
+const FIXTURE_RULES = require('./fixtures/lawn-watering-rules-v13-2026-10-22.json');
+// LESCO Crosscheck Plus (the house bifenthrin since owner ruling 2026-11-18) got its rule in 20261027190000, after the fixture was cut.
+const crosscheckFill = require('../models/migrations/20261027190000_watering_rule_lawn_label_pass_2').FILL.find((item) => item.name === 'LESCO Crosscheck Plus');
+const RULES = { ...FIXTURE_RULES, 'LESCO Crosscheck Plus': crosscheckFill.rule };
 const { validateRule, rulesForTargets } = require('../services/service-report/lawn-watering-rule');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const { V13_TROUBLE_PRODUCT_SWAPS } = require('../config/lawn-v13-trouble-product-swaps');
@@ -16,8 +19,12 @@ const LIQUIDS = ['LESCO K-Flow 0-0-25 17% S Turfgrass Liquid Fertilizer', 'LESCO
 const TIMES = ['2026-10-21T14:00:00Z', '2026-10-21T20:00:00Z'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const BANNED = /(keep[^.]{0,20}off|stay off|\bwait\b|\bdry\b)[^.]{0,30}\b\d+\s*(h|hour|min)/i;
-const namesOf = (text) => String(text || '').split('\n').map((line) => line.split(' — ')[0].trim())
-  .filter((name) => name && !name.startsWith('Scout visit'));
+// The recipe grammar uses the separator to identify a product line. Bare prose is an
+// inspection step (May and July), not a catalog name and therefore has no watering rule.
+const namesOf = (text) => String(text || '').split('\n')
+  .filter((line) => line.includes(' — '))
+  .map((line) => line.split(' — ')[0].trim())
+  .filter(Boolean);
 
 function visitMixes() {
   const mixes = [];
@@ -42,6 +49,8 @@ function visitMixes() {
 
 test('every product the program names has a valid watering rule', () => {
   const named = new Set(visitMixes().flatMap((mix) => mix.names));
+  expect(named).toContain('Tetrino Insecticide');
+  expect([...named].some((name) => name.startsWith('Scout May'))).toBe(false);
   for (const name of named) {
     expect({ name, valid: validateRule(RULES[name]).valid }).toEqual({ name, valid: true });
   }

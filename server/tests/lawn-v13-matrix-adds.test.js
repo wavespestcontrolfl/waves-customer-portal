@@ -49,6 +49,9 @@ describe('the three tracks carry the same adds', () => {
   });
 });
 
+// The recipe names the house bifenthrin LESCO Crosscheck Plus since owner ruling 2026-11-18; the staged Talak rows (N.TAL) are relinked by migration 20261119010000.
+const HOUSE_BIFENTHRIN = 'LESCO Crosscheck Plus';
+
 describe('1. mole crickets: Advion Insect Granule bait on nymph spots in June and the July scout visit (owner 2026-10-23; Talak is no longer the nymph product)', () => {
   test.each([6, 7])('month %i names the Advion bait, the 3 lb rate, the hand shaker and the 3-day no-irrigation rule', (month) => {
     const [line] = lineFor(month, 'Advion Insect Granule');
@@ -56,8 +59,8 @@ describe('1. mole crickets: Advion Insect Granule bait on nymph spots in June an
     expect(line).toMatch(/then no irrigation or rain-dependent watering for 3 days/);
   });
   test('July keeps the 24-hour customer hold on the Talak line and no month has a mole cricket Talak line; Dylox stays the fall adult product', () => {
-    expect(lineFor(7, N.TAL)[0]).toMatch(/delay watering 24 hours$/);
-    for (const month of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) expect(lineFor(month, N.TAL).filter((l) => /mole cricket/.test(l))).toEqual([]);
+    expect(lineFor(7, HOUSE_BIFENTHRIN)[0]).toMatch(/delay watering 24 hours$/);
+    for (const month of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) expect(lineFor(month, HOUSE_BIFENTHRIN).filter((l) => /mole cricket/.test(l))).toEqual([]);
     expect(lineFor(10, N.DYL)[0]).toMatch(/spreader visit only, water in/);
   });
   test('the notes and the safety rule keep "delay watering 24 hours" for every bifenthrin use and no longer send nymphs to Talak', () => {
@@ -65,7 +68,7 @@ describe('1. mole crickets: Advion Insect Granule bait on nymph spots in June an
     expect(track.notes.join(' ')).toContain('Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets');
     expect(track.notes.join(' ')).toMatch(/Mole cricket nymphs, June and the July scout visit/);
     expect(track.notes.join(' ')).not.toMatch(/Mole cricket nymphs, July and August/);
-    expect(track.safety_rules).toContain('Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours.');
+    expect(track.safety_rules).toContain('Bifenthrin (LESCO Crosscheck Plus): delay watering 24 hours; at least 25 ft from water.');
     expect(JSON.stringify(v13)).not.toMatch(/except mole cricket|water in at once/);
   });
   test('June is a hose visit and July the scout visit with backpack spots: the bait is a hand-shaker spot tool, never a second whole-lawn tool', () => {
@@ -108,7 +111,7 @@ describe('1b. no customer-report override for Talak on mole crickets (the code a
 describe('2. take-all: the second pass of each Artavia pair is Headway', () => {
   test('spring pair Mar (Artavia) then Apr (Headway); fall pair Sep (Artavia) then Oct (Headway)', () => {
     expect(lineFor(3, N.ART)[0]).toMatch(/take-all areas, first spring application/);
-    expect(lineFor(4, matrix.HEAD)[0]).toMatch(/take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 2 to 4 gal of water, 30 days after the first/);
+    expect(lineFor(4, matrix.HEAD)[0]).toMatch(/take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 5 gal of water, 30 days after the first/);
     expect(lineFor(4, N.ART)).toEqual([]);
     expect(lineFor(9, N.ART)[0]).toMatch(/take-all areas, first fall application/);
     expect(lineFor(10, matrix.HEAD)[0]).toMatch(/take-all areas, second fall application, 3 fl oz per 1,000 sq ft/);

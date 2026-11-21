@@ -550,3 +550,307 @@ describe('regional service-diversity manifest', () => {
     expect(plan).toContain('How we put this list together');
   });
 });
+
+// ── customer-question manifest, 2026-11-18 (CQ01-CQ12) ───────────────
+// A separate manifest, like the regional one above. Seed it with
+// `--file=server/data/customer-question-briefs-20261118.json`.
+describe('customer-question manifest 2026-11-18', () => {
+  const manifest = seeder.loadManifest(path.join(__dirname, '../data/customer-question-briefs-20261118.json'));
+  const gate = require('../services/content/topic-targeting-gate');
+  const { checkHubLinkPresent, checkRedactionPassed } = require('../services/content/content-quality-gate')._internals;
+  const ids = manifest.briefs.map((b) => b.id);
+
+  test('loads twelve briefs whose ids, slugs and drip windows are unique, also against the other shipped manifests', () => {
+    expect(ids).toEqual(['CQ01', 'CQ02', 'CQ03', 'CQ04', 'CQ05', 'CQ06', 'CQ07', 'CQ08', 'CQ09', 'CQ10', 'CQ11', 'CQ12']);
+    const windows = manifest.briefs.map((b) => b.window);
+    expect(new Set(windows).size).toBe(windows.length);
+    // The queue key is catseed:v1:<id>, so an id shared with another manifest
+    // would overwrite that manifest's row at seed time.
+    const others = [
+      ...seeder.loadManifest().briefs,
+      ...seeder.loadManifest(path.join(__dirname, '../data/service-diversity-briefs-20260924.json')).briefs,
+    ];
+    expect(ids.filter((id) => others.some((b) => b.id === id))).toEqual([]);
+    const slugs = manifest.briefs.map((b) => b.slug);
+    expect(slugs.filter((slug) => others.some((b) => b.slug === slug))).toEqual([]);
+  });
+
+  test('every pinned title and slug passes the framing gate, and every title passes the publish name check', () => {
+    const failures = [];
+    for (const brief of manifest.briefs) {
+      for (const [where, text] of [['working_title', brief.working_title], ['slug', gate._internals.slugWords(brief.slug)]]) {
+        const reason = gate.geoBlockReason(String(text || ''));
+        if (reason) failures.push(`${brief.id} ${where}: ${reason} — ${text}`);
+      }
+      // The runner hands the working title to the writer as the title
+      // direction; a title the name check reads as a person holds the draft.
+      const named = checkRedactionPassed({ body: 'Plain text for the check. It names Sarasota once.', frontmatter: { title: brief.working_title } });
+      if (!named.ok) failures.push(`${brief.id} working_title: ${named.reason} — ${brief.working_title}`);
+    }
+    expect(failures).toEqual([]);
+  });
+
+  // A post that is not on a blocked pest can still mention one (CQ01 covers
+  // roaches after a treatment). faq_required is the operator FAQ mandate the
+  // quality gate and the runner's guardrails honor, so the curated FAQ is not
+  // read as an FAQ on a blocked topic.
+  test('an FAQ is asked for, and composes as required, only on the seven topics clear of the FAQ-blocked pests', () => {
+    const blocked = manifest.briefs.filter((b) => seeder._internals.blockedTopicIdFor(b)).map((b) => b.id);
+    expect(blocked).toEqual(['CQ02', 'CQ03', 'CQ05', 'CQ07', 'CQ10']);
+    const faq = manifest.briefs.filter((b) => (b.schema_types || []).includes('FAQPage')).map((b) => b.id);
+    expect(faq).toEqual(['CQ01', 'CQ04', 'CQ06', 'CQ08', 'CQ09', 'CQ11', 'CQ12']);
+    for (const id of ids) {
+      expect([id, composeSeedBrief(manifest, id).voice_constraints.operator_brief.faq_required]).toEqual([id, faq.includes(id)]);
+    }
+  });
+
+  // The manifest notes tell the writer to use each outline label (the words
+  // before its first colon) and each FAQ question word for word as a heading,
+  // and the outline text is the writer's binding direction. The live publish
+  // name check reads two capitalized words in a heading as a person and holds
+  // the draft; a phrase the publish guardrails block ("EPA approval", even
+  // negated) fails it. Either one in a brief would stop every draft that
+  // follows the brief.
+  test('every outline heading passes the live name check, and no heading or outline direction trips the publish guardrails', () => {
+    const { checkRedactionPassedAllLanes } = require('../services/content/content-quality-gate')._internals;
+    const contentGuardrails = require('../services/content/content-guardrails');
+    const failures = [];
+    const asHeading = (heading) => `## ${heading}\n\nGuidance for homes in Sarasota and Bradenton.`;
+    const nameFails = (heading) => !checkRedactionPassedAllLanes({ body: asHeading(heading), frontmatter: {} }).ok;
+    const blocking = (body, service) => (contentGuardrails.evaluate({ body, frontmatter: {} }, { targetIsBlog: true, service }).findings || [])
+      .filter((f) => f.severity === 'P0' || f.severity === 'P1')
+      .map((f) => f.code);
+    for (const brief of manifest.briefs) {
+      const { service } = composeSeedBrief(manifest, brief.id);
+      for (const item of brief.outline) {
+        const colon = item.indexOf(':');
+        const label = (colon > 0 ? item.slice(0, colon) : item).trim();
+        const direction = colon > 0 ? item.slice(colon + 1) : '';
+        const isFaq = /^faq$/i.test(label);
+        const headings = isFaq
+          ? direction.split(';').map((q) => q.trim()).filter(Boolean).map((q) => `${q.charAt(0).toUpperCase()}${q.slice(1)}?`)
+          : [label];
+        for (const heading of headings) {
+          if (nameFails(heading)) failures.push(`${brief.id} name check: ${heading}`);
+          const codes = blocking(asHeading(heading), service);
+          if (codes.length) failures.push(`${brief.id} guardrails ${codes.join(',')}: ${heading}`);
+        }
+        if (!isFaq && direction) {
+          const codes = blocking(direction.replace(/\(link [^)]*\)/g, ''), service);
+          if (codes.length) failures.push(`${brief.id} guardrails ${codes.join(',')}: ${label}`);
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+    // Both checks are live in this test: a name in a heading still holds
+    // the draft, and a banned phrase in a heading still fails it.
+    expect(nameFails('What John Smith found')).toBe(true);
+    expect(blocking(asHeading('Do plug-in repellers need EPA approval?'), 'pest')).toContain('REENTRY_SAFETY_CLAIM');
+  });
+
+  // CQ10's Waves section gives what the pest identifier tells a customer with
+  // a honey bee wall colony: a referral to a bee removal and relocation
+  // specialist, with no Waves inspection offer (pre-push audit).
+  test('CQ10 gives the honey bee referral that the pest identifier gives', () => {
+    const { referralFor } = require('../services/photo-id-v2/pest-engine');
+    const colony = require('../data/species-catalog-v1/entries/wasps-bees.json')
+      .find((entry) => entry.slug === 'honey-bee-wall-colony' && entry.service);
+    expect(referralFor(colony)).toMatchObject({ kind: 'bee_relocation' });
+    expect(referralFor(colony).text).toContain('bee removal/relocation specialist');
+    const waves = manifest.briefs.find((b) => b.id === 'CQ10').outline
+      .find((item) => item.startsWith('What Waves does and does not do:'));
+    expect(waves).toContain('Waves refers you to a licensed bee removal and relocation specialist');
+    expect(waves).not.toMatch(/inspect/i);
+  });
+
+  // Section 482.227 lists "no warranty" among a contract's options, but
+  // Florida Administrative Code rule 5E-14.105(3) requires a retreatment
+  // warranty on preventive treatment for new construction, so the builder
+  // guide names no warranty type (pre-push audit).
+  test('CQ07 names no warranty type and no longer cites section 482.227', () => {
+    const b = manifest.briefs.find((brief) => brief.id === 'CQ07');
+    expect([b.thesis, ...b.outline].join(' ')).not.toMatch(/warrant|guarantee|482\.227/i);
+    expect(composeSeedBrief(manifest, 'CQ07').voice_constraints.operator_brief.required_sources.join(' ')).not.toContain('482.227');
+    expect(b.outline.join(' ')).toContain('read what it says about retreatment and repair');
+  });
+
+  // The UF/IFAS line on frequent inspections lived in IN1397, which CQ04
+  // dropped for the review's source budget; its FAQ must not still quote it.
+  test('CQ04 quotes no line from a guide it no longer cites', () => {
+    const b = manifest.briefs.find((brief) => brief.id === 'CQ04');
+    expect(b.sources).not.toContain('https://edis.ifas.ufl.edu/publication/IN1397');
+    expect(JSON.stringify(b)).not.toMatch(/inspected frequently|frequent inspections/i);
+  });
+
+  // CQ03 gives no Waves waiting time (no fetched source documents one), but a
+  // cleaner still needs an endpoint: the waits for vacuuming droppings and
+  // wet-mopping cabinet insides point to the prep guide the visit sent, not
+  // to "right away" (pre-push audit).
+  test('CQ03 gives the vacuum and wet-mop waits an endpoint', () => {
+    const b = manifest.briefs.find((brief) => brief.id === 'CQ03');
+    expect([b.thesis, ...b.outline].join(' ')).not.toMatch(/(?:vacuum|mop)[^;.]*right away/i);
+    const cleaner = b.outline.find((item) => item.startsWith('If you have a house cleaner:'));
+    expect(cleaner).toContain('show them the waiting times in your prep guide for vacuuming dead roaches and droppings and for wet-mopping the insides of cabinets');
+    expect(b.verify_notes.join(' ')).toContain('give an endpoint without a number');
+  });
+
+  // The topic-ownership check reads a new post's title, slug, keywords and
+  // headings, and two live posts own "Norway" there, so CQ05 names Norway
+  // rats in body prose only (pre-push audit).
+  test('CQ05 keeps Norway rats out of the fields the topic check reads', () => {
+    const b = manifest.briefs.find((brief) => brief.id === 'CQ05');
+    const labels = b.outline.map((item) => item.slice(0, item.indexOf(':')));
+    expect(labels).toContain('Which rats you may see');
+    expect([b.working_title, b.slug, b.primary_kw, ...b.secondary_kws, ...labels].join(' ')).not.toMatch(/norway/i);
+    expect(b.verify_notes.join(' ')).toContain('Keep the words Norway rats out of the title, the meta description, every heading and the keywords');
+  });
+
+  // MedlinePlus encyclopedia pages are A.D.A.M. content. Their terms bar
+  // automated extraction and any AI use without written consent, and
+  // editorial review sends each source's text to a model (pre-push audit).
+  test('no brief cites a MedlinePlus encyclopedia page', () => {
+    const cited = ids.flatMap((id) => composeSeedBrief(manifest, id).voice_constraints.operator_brief.required_sources);
+    expect(cited.length).toBeGreaterThan(0);
+    expect(cited.filter((url) => /medlineplus\.gov\/ency\//i.test(url))).toEqual([]);
+  });
+
+  // Global rule 3 bans prices outright. The completion gate and the publish
+  // guardrails turn a brief's ban on only for the wording they recognize
+  // ("no ... prices"), and under a ban nothing is exempt, so a price framed
+  // around the quote CTA still fails. "never state prices" left it off
+  // (pre-push audit).
+  test('every brief turns on the all-prices ban, so a price beside the quote CTA still fails', () => {
+    const { detectHardcodedPrice } = require('../services/content/seo-completion-gate')._internals;
+    const { findHardcodedPrice } = require('../services/content/content-guardrails');
+    const { deriveSyncGuardrailOptions, OPERATOR_INTERCEPT_BUCKET } = require('../services/content/guardrail-options');
+    const framed = 'Most homes pay about $123 for this; [request a pest control quote](/pest-control-quote/) for yours.';
+    // Control: without a ban, the quote framing exempts this price.
+    expect(findHardcodedPrice(framed, { forbidAllPrices: false })).toBeNull();
+    const failures = [];
+    for (const id of ids) {
+      const brief = composeSeedBrief(manifest, id);
+      if (deriveSyncGuardrailOptions({ bucket: OPERATOR_INTERCEPT_BUCKET, service: brief.service }, brief).forbidAllPrices !== true) failures.push(`${id} guardrails`);
+      if (detectHardcodedPrice(framed, brief) !== true) failures.push(`${id} completion gate`);
+    }
+    expect(failures).toEqual([]);
+  });
+
+  // Every source URL is a required citation the writer is told to cite, and
+  // a cited source is usually a link. A link the publish guardrails refuse
+  // (an "&" or "%" in the address is UNSUPPORTED_BODY_SYNTAX) parks the
+  // draft, so each one is linked here under the runner's own options.
+  test('linking any required source adds no blocking guardrail finding', () => {
+    const contentGuardrails = require('../services/content/content-guardrails');
+    const { deriveSyncGuardrailOptions, OPERATOR_INTERCEPT_BUCKET } = require('../services/content/guardrail-options');
+    const failures = [];
+    const base = 'Guidance for homes in Sarasota and Bradenton.';
+    const withLink = (url) => `${base} The [cited source](${url}) says so.`;
+    let blockingCodes = null;
+    for (const id of ids) {
+      const brief = composeSeedBrief(manifest, id);
+      const options = deriveSyncGuardrailOptions({ bucket: OPERATOR_INTERCEPT_BUCKET, service: brief.service }, brief);
+      blockingCodes = (body) => new Set((contentGuardrails.evaluate({ body, frontmatter: {} }, options).findings || [])
+        .filter((f) => f.severity === 'P0' || f.severity === 'P1')
+        .map((f) => f.code));
+      const before = blockingCodes(base);
+      const urls = brief.voice_constraints.operator_brief.required_sources;
+      expect(urls.length).toBeGreaterThan(0);
+      for (const url of urls) {
+        const added = [...blockingCodes(withLink(url))].filter((code) => !before.has(code));
+        if (added.length) failures.push(`${id} ${added.join(',')}: ${url}`);
+      }
+    }
+    expect(failures).toEqual([]);
+    // Control: the statute address form these briefs first used still parks.
+    expect(blockingCodes(withLink('https://www.leg.state.fl.us/statutes/index.cfm?App_mode=Display_Statute&URL=0000-0099/0083/Sections/0083.51.html')))
+      .toContain('UNSUPPORTED_BODY_SYNTAX');
+  });
+
+  // Editorial review fetches at most LIMITS.sourceUrls sources, reads only
+  // HTML or plain text, and fails a draft on any source it cannot read. A
+  // draft that links every required source must fit, so the review's own
+  // source list is built for such a draft (pre-push audit).
+  test('a draft that links every required source stays within the editorial review source limit, with no PDF source', () => {
+    const { LIMITS } = require('../services/content/editorial-review-contracts');
+    const { sourceUrls } = require('../services/content/editorial-evidence');
+    const failures = [];
+    for (const id of ids) {
+      const brief = composeSeedBrief(manifest, id);
+      const required = brief.voice_constraints.operator_brief.required_sources;
+      const body = required.map((url, i) => `Point ${i + 1}: the [cited source](${url}) says so.`).join('\n\n');
+      const urls = sourceUrls(`---\ntitle: "Draft"\n---\n\n${body}\n`, { ...brief, required_sources: required });
+      expect(urls.length).toBe(new Set(required).size);
+      if (urls.length > LIMITS.sourceUrls) failures.push(`${id}: ${urls.length} source URLs`);
+      for (const url of urls) if (/\.pdf$|\/pdf\/?$/i.test(new URL(url).pathname)) failures.push(`${id} PDF: ${url}`);
+    }
+    expect(failures).toEqual([]);
+  });
+
+  // The review checks a claim only against the fetched sources, so a statute
+  // section a brief cites by number must be one of its required sources
+  // (pre-push audit on CQ06 and CQ07).
+  test('every statute section a brief cites by number is one of its required sources', () => {
+    const failures = [];
+    const citing = [];
+    for (const payload of manifest.briefs) {
+      const text = [payload.thesis, ...payload.outline].join(' ');
+      const sections = [...new Set([...text.matchAll(/\bsections? (\d{2,3}\.\d{2,4})\b/g)].map((m) => m[1]))];
+      if (sections.length) citing.push(payload.id);
+      const required = composeSeedBrief(manifest, payload.id).voice_constraints.operator_brief.required_sources;
+      for (const section of sections) {
+        // florida.public.law copies end in _<section>; the Florida Senate's pages end in /<section>.
+        if (!required.some((url) => url.endsWith(`_${section}`) || url.endsWith(`/${section}`))) failures.push(`${payload.id} section ${section}`);
+      }
+    }
+    expect(citing).toEqual(['CQ06', 'CQ07']);
+    expect(failures).toEqual([]);
+  });
+
+  // A writer copies the brief's own wording into the body. "Call Poison
+  // Control" reads as a person's name to the live all-lanes check (pre-push
+  // audit), so CQ09 names the poison control center in lowercase.
+  test('CQ09 gives its exposure line in wording the live name check accepts', () => {
+    const { checkRedactionPassedAllLanes } = require('../services/content/content-quality-gate')._internals;
+    const verify = composeSeedBrief(manifest, 'CQ09').voice_constraints.operator_brief.verify_notes.join(' ');
+    expect(verify).toContain('your local poison control center');
+    expect(verify).not.toMatch(/Poison Control/);
+    const draft = (line) => ({ body: `Guidance for homes in Sarasota and Bradenton.\n\n${line}\n`, frontmatter: {} });
+    expect(checkRedactionPassedAllLanes(draft('For an exposure, call your local poison control center or 911, or see a doctor.')).ok).toBe(true);
+    // Control: the capitalized form holds the draft.
+    expect(checkRedactionPassedAllLanes(draft('Call Poison Control or 911.')).ok).toBe(false);
+  });
+
+  // The completion gate's conversion CTA is judged on the link anchor: it
+  // must ask for an estimate or quote and name the brief's own service
+  // ("the contact page" does not qualify). Each Waves section names the
+  // anchor and the path, so the composed brief is checked with both.
+  test.each(['CQ01', 'CQ02', 'CQ03', 'CQ04', 'CQ05', 'CQ06', 'CQ07', 'CQ08', 'CQ09', 'CQ10', 'CQ11', 'CQ12'])('%s names a CTA anchor that the conversion CTA and name checks accept on its CTA path', (id) => {
+    const { hasConversionCta } = require('../services/content/seo-completion-gate')._internals;
+    const { checkRedactionPassedAllLanes } = require('../services/content/content-quality-gate')._internals;
+    const brief = composeSeedBrief(manifest, id);
+    const waves = brief.voice_constraints.operator_brief.outline.find((item) => /^What Waves does and does not do:/.test(item));
+    const named = /call to action: link "([^"]+)" to (\/[a-z-]+\/)/.exec(waves || '');
+    expect(named).not.toBeNull();
+    const [, anchor, href] = named;
+    const payload = manifest.briefs.find((b) => b.id === id);
+    expect(href).toBe(payload.cta.includes('CONTACT') ? '/contact/' : '/pest-control-quote/');
+    const body = `Guidance for homes in Sarasota and Bradenton.\n\n[${anchor}](${href})\n`;
+    expect(hasConversionCta(body, brief)).toBe(true);
+    // Control: the wording this replaced does not qualify.
+    expect(hasConversionCta(`Guidance for homes in Sarasota and Bradenton.\n\n[the contact page](${href})\n`, brief)).toBe(false);
+    expect(checkRedactionPassedAllLanes({ body, frontmatter: {} }).ok).toBe(true);
+  });
+
+  test.each(['CQ01', 'CQ02', 'CQ03', 'CQ04', 'CQ05', 'CQ06', 'CQ07', 'CQ08', 'CQ09', 'CQ10', 'CQ11', 'CQ12'])('%s composes as a regional post with a hub link the gate accepts, a CTA route and the series rule', (id) => {
+    const brief = composeSeedBrief(manifest, id);
+    expect(brief.city).toBeNull();
+    const writerBody = brief.internal_links_to_add.map((href) => `[required link](${href})`).join('\n');
+    expect(checkHubLinkPresent({ body: writerBody }, brief)).toEqual({ ok: true });
+    const operatorBrief = brief.voice_constraints.operator_brief;
+    const binding = operatorBrief.binding_instructions.join(' ');
+    expect(binding).toContain('Southwest-Florida-regional');
+    expect(binding).toContain('CUSTOMER-QUESTION SERIES');
+    expect(operatorBrief.cta_directives.join(' ')).toMatch(/\/pest-control-quote\/|\/contact\//);
+    expect(operatorBrief.outline.join(' ')).toMatch(/what waves does and does not do/i);
+  });
+});

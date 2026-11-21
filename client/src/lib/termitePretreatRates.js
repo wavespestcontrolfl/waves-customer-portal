@@ -4,7 +4,7 @@
 // project form to auto-fill `concentration_pct` and `gallons_applied` from
 // the treatment dimensions the tech already records.
 //
-// Rate basis (identical volume standard across the three soil-liquid labels):
+// Rate basis (identical volume standard across the four soil-liquid labels):
 //   - Horizontal barrier: 1 gallon of finished dilution per 10 sq ft.
 //   - Vertical barrier (trench/rod): 4 gallons per 10 linear feet per foot
 //     of depth.
@@ -42,6 +42,13 @@ export const PRETREAT_PRODUCT_RATES = {
   },
   'talstar p': {
     label: 'Talstar P',
+    kind: 'soil_liquid',
+    concentrationPct: '0.060',
+  },
+  // The house bifenthrin since owner 2026-11-18 (EPA 10404-120). Label pages 29-32: a 0.06% dilution for subterranean
+  // termites, 1 gal per 10 sq ft horizontal and 4 gal per 10 linear ft per foot of depth.
+  'lesco crosscheck plus': {
+    label: 'LESCO Crosscheck Plus',
     kind: 'soil_liquid',
     concentrationPct: '0.060',
   },

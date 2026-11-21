@@ -52,7 +52,7 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
-    for (const key of ['GATE_MOVING_FLOW', 'GATE_MOVING_ESTIMATE', 'GATE_MOVING_AUTO_ESTIMATE']) OLD_ENV[key] = process.env[key];
+    for (const key of ['GATE_MOVING_ESTIMATE', 'GATE_MOVING_AUTO_ESTIMATE']) OLD_ENV[key] = process.env[key];
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
     Auto = require('../services/moving-auto-estimate');
     Lookup = require('../routes/property-lookup-v2');
@@ -112,7 +112,6 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_MOVING_FLOW = 'true';
     process.env.GATE_MOVING_ESTIMATE = 'true';
     process.env.GATE_MOVING_AUTO_ESTIMATE = 'true';
     Lookup.performPropertyLookup.mockResolvedValue(countyLookup());

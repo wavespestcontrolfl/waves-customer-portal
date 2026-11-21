@@ -131,6 +131,19 @@ describe('MobileDispatchList protocol opener', () => {
     expect(onProtocol).toHaveBeenCalledWith(SERVICE);
     expect(focusedAtOpen).toBe(trigger);
   });
+
+  it('gives a lawn stop one Protocol button and no separate Plan button (the Plan lives in the panel)', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[{ ...SERVICE, serviceType: 'Lawn Care' }]}
+        onProtocol={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Protocol' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Treatment plan' })).not.toBeInTheDocument();
+  });
 });
 
 describe('MobileDispatchList tie-proximity display order', () => {

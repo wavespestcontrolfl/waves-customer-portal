@@ -141,11 +141,18 @@ function hoursUntil(startAt, now) {
   return (start - at) / 3600000;
 }
 
+/** Is the visit today or tomorrow on the ET calendar? The day before a visit is then today (or gone). */
+function startsByTomorrowET(startAt, now) {
+  return etDateString(new Date(startAt)) <= etDateString(addETDays(new Date(now), 1));
+}
+
 /**
  * May a sender promise only the DAY of this visit? Pure. True only when ALL of these hold:
  *  - `gateOn`: GATE_DAY_ONLY_PROMISE is on.
  *  - `startAt` is a valid time more than DAY_PROMISE_CUTOFF_HOURS after `now`: the 24-hour text will still go out and
  *    give the window. A windowless visit (startAt null) is false: today's windowless copy stays.
+ *  - the visit is not today or tomorrow on the ET calendar (owner 2026-11-19): "we'll text your arrival window the day
+ *    before" sent ON the day before reads wrong, so a visit booked or moved to the next day always names the window.
  *  - `reminder24hEnabled` is not false: the customer will actually get that 24-hour text.
  *  - `customerPicked` is not true: the hour is the customer's own set time (online booking, the AI call agent) or an
  *    office booking marked "customer asked for this time", so it stays an hour.
@@ -157,6 +164,7 @@ function shouldPromiseDayOnly({
   if (gateOn !== true) return false;
   const hours = hoursUntil(startAt, now);
   if (!Number.isFinite(hours) || hours <= DAY_PROMISE_CUTOFF_HOURS) return false;
+  if (startsByTomorrowET(startAt, now)) return false;
   if (reminder24hEnabled === false) return false;
   if (customerPicked === true) return false;
   return level !== 'hour';

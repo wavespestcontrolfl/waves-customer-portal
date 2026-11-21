@@ -4,7 +4,14 @@ const APP_CACHE_PREFIX = 'waves-customer-';
 // caches.open() after a cold start — an 11 s blank screen). Bumping the
 // name drops that bucket once via the activate sweep; pruneStaleAssets
 // keeps the new one bounded to the current build.
-const CACHE_NAME = 'waves-customer-v12-shell-pruned';
+// v13: a v12 worker stores each page it opens as the shell, and any other
+// same-origin GET under its URL, so its bucket can hold a job-offer link,
+// the applicant's signing credential. Bumping the name drops that bucket
+// whole in the activate sweep, before this worker claims a page.
+const CACHE_NAME = 'waves-customer-v13-private-links';
+// A bucket of a lower version is an older worker's, never a newer
+// installer's, so a page load may drop it at any time (sweepOlderCaches).
+const CACHE_VERSION = Number(/^waves-customer-v(\d+)-/.exec(CACHE_NAME)[1]);
 // Pre-prefix buckets (e.g. 'waves-v10-admin-activation-stable') that the
 // APP_CACHE_PREFIX sweep never matched and so outlived every update.
 const LEGACY_CACHE_PATTERN = /^waves-v\d+-/;
@@ -38,6 +45,17 @@ const OFFLINE_FALLBACK_HTML = `<!doctype html>
   // Re-attempt periodically in case the offline event misses (iOS sometimes does).
   setTimeout(() => { if (navigator.onLine) location.reload(); }, 4000);
 </script></body></html>`;
+
+// What the worker may store: a static file, under its own path. The path is the cache key, so only a plain one is
+// kept: segments of letters, digits, dot, dash and underscore that do not start with a dot (no encoding, no dot
+// segment, no query or fragment), a static file type, and no run of 32 hex (an offer token is 64). Any other path,
+// which could carry an offer link or its token, is left to the browser.
+const STATIC_PATH_RE = /^(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+\.(?:js|mjs|css|map|json|webmanifest|png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|txt|pdf|mp4|webm|mp3|wav|wasm)$/i;
+function isStorablePath(pathname) {
+  return STATIC_PATH_RE.test(pathname) && !/[0-9a-f]{32}/i.test(pathname);
+}
+// A shell's asset reference becomes a cache key the same way, and it must sit under /assets/.
+const isPlainAssetPath = (ref) => ref.startsWith('/assets/') && isStorablePath(ref);
 
 function shellAssetUrls(html) {
   const urls = new Set();
@@ -346,10 +364,13 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   // is never superseded: the worker needs a shell.
   if (await isSuperseded()) throw new Error('Shell refresh superseded by a newer navigation');
   if (!shellResponse.ok) throw new Error(`Shell request failed (${shellResponse.status})`);
+  // A redirected response holds another URL's page; it is served, never stored.
+  if (shellResponse.redirected) throw new Error('Shell request redirected');
 
   const html = await shellResponse.clone().text();
   const assets = shellAssetUrls(html);
   if (!assets.length) throw new Error('Shell contains no build assets');
+  if (!assets.every(isPlainAssetPath)) throw new Error('Shell asset reference is not a plain /assets/ path');
   const buildId = buildIdOf(assets);
 
   // Fetch every hashed dependency before storing the new HTML. If any fetch
@@ -358,6 +379,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   const assetResponses = await Promise.all(assets.map(async assetUrl => {
     const response = await fetch(new Request(assetUrl, { cache: 'reload' }));
     if (!response.ok) throw new Error(`Shell asset failed (${response.status}): ${assetUrl}`);
+    if (response.redirected) throw new Error(`Shell asset redirected: ${assetUrl}`);
     return [assetUrl, response];
   }));
   // Fetched with the assets, not after the commit: a later deploy would
@@ -425,7 +447,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
       if (previousShell) await putShell(cache, previousShell.clone(), previousBuildId).catch(() => {});
     };
     try {
-      await putShell(cache, shellResponse.clone(), buildId);
+      await putShell(cache, withoutUrl(shellResponse.clone()), buildId);
       if (!supersedable) await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(startedAt) } }));
     } catch (err) {
       await restorePreviousShell();
@@ -597,17 +619,80 @@ self.addEventListener('install', event => {
   event.waitUntil(precacheCompleteShell().then(() => self.skipWaiting()));
 });
 
+// A bucket an older worker filled: a pre-prefix legacy one, or this prefix
+// at a lower version. Never the current bucket, nor a newer installer's.
+function isOlderCacheName(k) {
+  if (LEGACY_CACHE_PATTERN.test(k)) return true;
+  const version = /^waves-customer-v(\d+)-/.exec(k);
+  return Boolean(version) && Number(version[1]) < CACHE_VERSION;
+}
+
+// The activate sweep drops every older bucket before this worker claims a
+// page. A page load drops any it finds again: one the sweep failed to drop,
+// or one an older worker opened again after the sweep (its last shell
+// refresh, still in flight at the takeover). A whole bucket needs no lock.
+async function sweepOlderCaches() {
+  const keys = await caches.keys();
+  await Promise.all(keys.filter(isOlderCacheName).map(k => caches.delete(k)));
+}
+
 self.addEventListener('activate', event => {
   event.waitUntil(sweepStaleCaches().then(() => self.clients.claim()));
 });
 
+// An API call, in any letter case (the server routes /API/ as /api/).
+function isApiPath(pathname) {
+  return pathname.toLowerCase().startsWith('/api/');
+}
+
+// A job-offer link page: its path is the applicant's private signing link.
+// The page router matches each percent-decoded segment in any case, so the
+// path is read percent-decoded (repeatedly) and in any letter case, and any
+// path that holds "careers/offer/" counts. The browser resolves dot segments
+// before a request reaches the worker.
+function isOfferLinkPath(pathname) {
+  let text = pathname;
+  for (let pass = 0; pass < 4; pass += 1) {
+    let next;
+    try {
+      next = decodeURIComponent(text);
+    } catch {
+      next = text.replace(/%([0-9a-f]{2})/gi, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
+    }
+    if (next === text) break;
+    text = next;
+  }
+  return text.toLowerCase().includes('careers/offer/');
+}
+
+// The storage rule. A stored response keeps the URL it came from, and a
+// stored request keeps its own, so either could hold a job-offer link: a
+// redirect's target, a query or a fragment. So every response this worker
+// stores is rebuilt without its URL, and it is stored only under a plain key:
+// the shell under '/' (from any page), and a static file under its own path
+// (isStorablePath), when that response was not redirected (its body is
+// another URL's; the shell and its assets the same). Any other request that
+// is not a page load is left to the browser. tagWithBuild rebuilds assets too.
+function withoutUrl(response) {
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
-  // Never intercept: external requests, API calls, WebSocket
+  // Never intercept: external requests, API calls (in any letter case: the
+  // server routes /API/ as /api/), WebSocket
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith('/api/')) return;
+  if (isApiPath(url.pathname)) return;
   if (url.pathname.startsWith('/ws/')) return;
+  // Each page load, an offer page's included, drops any older bucket it finds.
+  if (event.request.mode === 'navigate' || event.request.destination === 'document') {
+    event.waitUntil(sweepOlderCaches().catch(() => {}));
+  }
+  // Nor a job-offer link page, in any request mode: an offline shell served
+  // in its place would carry another page's headers, without no-referrer.
+  // The browser fetches it, with the server's privacy headers.
+  if (isOfferLinkPath(url.pathname)) return;
 
   // HTML navigation requests: network-first with offline fallback.
   // ALWAYS return a Response (never undefined) so iOS standalone PWAs
@@ -649,6 +734,9 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+  // Any other request with a query or fragment: its key would keep them.
+  if (url.search || url.hash || !isStorablePath(url.pathname)) return;
+
   // Hashed assets (/assets/index-CRewFOq2.js) — immutable, so cache on first
   // use; pruneStaleAssets evicts them once the shell moves to a newer build.
   if (url.pathname.startsWith('/assets/')) {
@@ -677,7 +765,7 @@ self.addEventListener('fetch', event => {
           return cached;
         }
         return fetch(event.request).then(response => {
-          if (response.ok) {
+          if (response.ok && !response.redirected) {
             const clone = response.clone();
             // Tag the chunk with the build it was loaded for, so the prune
             // keeps it with that build's shell instead of guessing from HTML.
@@ -708,9 +796,9 @@ self.addEventListener('fetch', event => {
   // Everything else (manifest, icons, etc.) — network first, cache fallback
   event.respondWith(
     fetch(event.request).then(response => {
-      if (response.ok) {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+      if (response.ok && !response.redirected) {
+        const copy = withoutUrl(response.clone());
+        caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
       }
       return response;
     }).catch(() => caches.match(event.request))

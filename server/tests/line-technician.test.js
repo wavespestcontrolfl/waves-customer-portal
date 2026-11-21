@@ -528,6 +528,19 @@ describe('a territory needs a cover (owner 2026-10-30; GATE_TERRITORY_ROUTING ov
     expect(ranking.rankOf('tech-third')).toBeNull();
   });
 
+  test('lineOfferRanking: an unreadable territory leaves the card alone to decide; strict (a caller counting openings) throws', async () => {
+    const card = () => fakeDb({ lines: [cardRow('general', OWNER.id, null)], zips: ZIPS });
+    const read = jest.spyOn(territoryService, 'territoryTechnicianFor').mockRejectedValue(new Error('zip table down'));
+    try {
+      const ranking = await lineOfferRanking(card(), { lines: ['general'], place });
+      expect(ranking.rankOf(OWNER.id)).toBe(0);
+      expect(ranking.rankOf(HIRE.id)).toBeNull();
+      await expect(lineOfferRanking(card(), { lines: ['general'], place, strict: true })).rejects.toThrow('zip table down');
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   test('pickLineTechnician: the territory technician\'s day off goes to the cover, with no cover nothing is mapped', async () => {
     process.env.GATE_TECH_WORK_DAYS = 'true';
     const ask = (db, date) => pickLineTechnician(db, { serviceType: 'General Pest Control', date, zip: '34293' });

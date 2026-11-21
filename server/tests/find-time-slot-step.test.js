@@ -31,18 +31,9 @@ jest.mock('../services/route-optimizer', () => ({
 }));
 
 const db = require('../models/db');
+const { milesToDriveMinutes } = require('../services/route-optimizer');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 
-// These assertions assume LEGACY drive times (see the mocked haversine above),
-// and the mock deliberately pulls the REAL gate-sensitive estimator. Pin the
-// gate off so the suite does not depend on the ambient environment; the
-// calibrated model is covered by drive-time-calibration.test.js.
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
-beforeAll(() => { delete process.env.GATE_DRIVE_TIME_CALIBRATION; });
-afterAll(() => {
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
-});
 
 
 function chain(result) {
@@ -66,12 +57,15 @@ const FUTURE_DATE_VALUE = nextBookableDate(Date.now() + 29 * 24 * 60 * 60 * 1000
 const NEXT_FUTURE_DATE_VALUE = nextBookableDate(FUTURE_DATE_VALUE);
 const FUTURE_DATE = FUTURE_DATE_VALUE.toISOString().slice(0, 10);
 const NEXT_FUTURE_DATE = NEXT_FUTURE_DATE_VALUE.toISOString().slice(0, 10);
+// Each leg is 0.5 mocked miles: the drive clock's minutes for it (9).
+const DRIVE = milesToDriveMinutes(0.5);
+const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 const BASE = { lat: 27.4, lng: -82.5, durationMinutes: 60, dateFrom: FUTURE_DATE, dateTo: FUTURE_DATE, topN: 5 };
 
 test('default (no step) returns the exact earliest-feasible minute', async () => {
   const { slots } = await findAvailableSlots(BASE);
   expect(slots.length).toBeGreaterThan(0);
-  expect(slots[0].start_time).toBe('08:01'); // 08:00 open + 1 min drive from HQ
+  expect(slots[0].start_time).toBe(hhmm(480 + DRIVE)); // 08:00 open + the drive from HQ
 });
 
 test('slotStepMinutes:60 snaps every start up to the hour', async () => {
@@ -80,7 +74,7 @@ test('slotStepMinutes:60 snaps every start up to the hour', async () => {
   for (const s of slots) {
     expect(s.start_time.endsWith(':00')).toBe(true);
   }
-  expect(slots[0].start_time).toBe('09:00'); // 08:01 rounded up to the next hour
+  expect(slots[0].start_time).toBe('09:00'); // 08:00 + drive rounded up to the next hour
 });
 
 test('earliestStartMin floors the gap start so a later preferred-time slot is generated', async () => {
@@ -99,9 +93,9 @@ test('earliestStartMin past what fits before day close yields no slot (correctly
 
 test('emits latest_start_min — the last start whose end still clears the drive to the next anchor', async () => {
   const { slots } = await findAvailableSlots(BASE);
-  // Empty day: HQ→HQ gap with 1-min mocked drives → latestEnd 16:59 (17:00
-  // close minus the drive back), minus the 60-min duration.
-  expect(slots[0].latest_start_min).toBe(16 * 60 + 59 - 60);
+  // Empty day: HQ→HQ gap → latestEnd is the 17:00 close minus the drive back,
+  // minus the 60-min duration.
+  expect(slots[0].latest_start_min).toBe(17 * 60 - DRIVE - 60);
 });
 
 test('startFloorByDate floors only its own date; other dates keep their earliest start', async () => {
@@ -109,7 +103,7 @@ test('startFloorByDate floors only its own date; other dates keep their earliest
     ...BASE, dateTo: NEXT_FUTURE_DATE, topN: 10, startFloorByDate: { [FUTURE_DATE]: 15 * 60 + 1 },
   });
   expect(slots.find((s) => s.date === FUTURE_DATE).start_time).toBe('15:01');
-  expect(slots.find((s) => s.date === NEXT_FUTURE_DATE).start_time).toBe('08:01');
+  expect(slots.find((s) => s.date === NEXT_FUTURE_DATE).start_time).toBe(hhmm(480 + DRIVE));
 });
 
 test('startFloorByDate and earliestStartMin combine by max (the preferred-time floor is never lowered)', async () => {
@@ -121,7 +115,7 @@ test('startFloorByDate and earliestStartMin combine by max (the preferred-time f
 
 test('earliestStartMin default (0) is a no-op — identical legacy behavior', async () => {
   const { slots } = await findAvailableSlots(BASE);
-  expect(slots[0].start_time).toBe('08:01');
+  expect(slots[0].start_time).toBe(hhmm(480 + DRIVE));
 });
 
 test('a coordless stop (divergent stamped rental) degrades to zero drive, not hidden gaps (round-9 P2)', async () => {
@@ -219,8 +213,8 @@ describe('technician pool (Field Team Program, Phase 0)', () => {
 test('every gap names its two legs and the anchor the van leaves from (picked-hour hint)', async () => {
   const stop = {
     id: 's1', scheduled_date: FUTURE_DATE, technician_id: 't1',
-    // 11:00 stop: a 9:00 hour still clears the 1-min leg into it; the next
-    // gap opens at 12:01 and snaps to 13:00.
+    // 11:00 stop: a 9:00 hour still clears the leg into it; the next gap
+    // opens at 12:00 + the drive and snaps to 13:00.
     window_start: '11:00', window_end: '12:00', service_type: 'pest',
     estimated_duration_minutes: 60,
     svc_lat: 27.41, svc_lng: -82.41, cust_lat: null, cust_lng: null,
@@ -236,16 +230,16 @@ test('every gap names its two legs and the anchor the van leaves from (picked-ho
   const { slots: around } = await findAvailableSlots({ ...BASE, slotStepMinutes: 60, topN: 10 });
   const afterCoordless = around.find((s) => s.insertion.after_stop_id === 's1');
   expect(afterCoordless.drive_in_minutes).toBeNull();
-  expect(afterCoordless.drive_out_minutes).toBe(1); // to home base, which has coords
+  expect(afterCoordless.drive_out_minutes).toBe(DRIVE); // to home base, which has coords
   expect(around.find((s) => s.insertion.after_stop_id == null).drive_out_minutes).toBeNull();
-  // Mocked geometry: every leg is 0.5 mi → 1 legacy minute.
+  // Mocked geometry: every leg is 0.5 mi → DRIVE minutes.
   const first = byStart['09:00'];
-  expect(first.drive_in_minutes).toBe(1);
-  expect(first.drive_out_minutes).toBe(1);
+  expect(first.drive_in_minutes).toBe(DRIVE);
+  expect(first.drive_out_minutes).toBe(DRIVE);
   expect(first.insertion.after_name).toBeNull(); // home base
   expect(first.insertion.after_stop_id).toBeNull();
   const second = byStart['13:00'];
-  expect(second.drive_in_minutes).toBe(1);
+  expect(second.drive_in_minutes).toBe(DRIVE);
   expect(second.insertion.after_name).toBe('Fixture Stop');
   expect(second.insertion.after_stop_id).toBe('s1');
 });

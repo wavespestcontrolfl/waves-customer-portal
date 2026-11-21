@@ -252,6 +252,13 @@ function excludeInternalEstimateRows(qb) {
 }
 
 const ET_TS = "?::timestamp AT TIME ZONE 'America/New_York'";
+// The durable first-delivery stamp, cast wherever PostgreSQL can read it, as
+// main's direct cast did, but NULL where the cast would throw, so one bad
+// row never aborts the card query (codex pre-push P1). A superset prefilter:
+// a staff quote's stamp with no zone or no time stays a candidate, because
+// sentAnchorMs still reads it (codex pre-push P1); sentAnchorMs anchors.
+const FIRST_DELIVERED_STAMP = "(e.estimate_data #>> '{deliveryState,firstDeliveredAt}')";
+const FIRST_DELIVERED_SQL = `(CASE WHEN pg_input_is_valid(${FIRST_DELIVERED_STAMP}, 'timestamptz') THEN ${FIRST_DELIVERED_STAMP}::timestamptz END)`;
 const RESOLVED_AT_SQL = `CASE e.status
   WHEN 'accepted' THEN COALESCE(e.accepted_at, e.created_at)
   WHEN 'declined' THEN COALESCE(e.declined_at, e.updated_at, e.created_at)
@@ -271,12 +278,12 @@ async function fetchEstimateRows(win, nowMs) {
       // deliveryState.firstDeliveredAt; the precise anchoring happens in JS.
       this.whereRaw(`(e.sent_at >= ${ET_TS} AND e.sent_at < ${ET_TS})`, [fromTs, toTs])
         .orWhereRaw(`(e.viewed_at >= ${ET_TS} AND e.viewed_at < ${ET_TS})`, [fromTs, toTs])
-        .orWhereRaw(`((e.estimate_data #>> '{deliveryState,firstDeliveredAt}')::timestamptz >= ${ET_TS} AND (e.estimate_data #>> '{deliveryState,firstDeliveredAt}')::timestamptz < ${ET_TS})`, [fromTs, toTs])
+        .orWhereRaw(`(${FIRST_DELIVERED_SQL} >= ${ET_TS} AND ${FIRST_DELIVERED_SQL} < ${ET_TS})`, [fromTs, toTs])
         .orWhereRaw(
           `(e.status IN ('accepted','declined','expired') AND (${RESOLVED_AT_SQL}) >= ${ET_TS} AND (${RESOLVED_AT_SQL}) < ${ET_TS})`,
           [fromTs, toTs],
         )
-        .orWhereRaw("(e.status IN ('sent','viewed') AND (e.sent_at < ? OR e.viewed_at < ? OR (e.estimate_data #>> '{deliveryState,firstDeliveredAt}')::timestamptz < ?))", [agingTs, agingTs, agingTs]);
+        .orWhereRaw(`(e.status IN ('sent','viewed') AND (e.sent_at < ? OR e.viewed_at < ? OR ${FIRST_DELIVERED_SQL} < ?))`, [agingTs, agingTs, agingTs]);
     });
   return excludeInternalEstimateRows(qb).select(
     'e.id', 'e.status', 'e.sent_at', 'e.accepted_at', 'e.declined_at', 'e.expires_at',

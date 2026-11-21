@@ -45,7 +45,8 @@ const {
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { dayOnlyIds, dayOnlyFields } = require('../time-display');
 const { applyRodentReportNarrative, applyTypedReportNarrative, isTypedNarrativeFallback } = require('./rodent-report-narrative');
-const { technicianReportCustomerCopy } = require('./technician-report-copy');
+const { visitReportCustomerCopy, carriesReportNote, printedReportSummary, noteRecordCopyViolations } = require('./technician-report-copy');
+const { findingHasOwnText, provenFindingRows } = require('./finding-provenance');
 const {
   PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
 } = require('./same-line-visit');
@@ -2083,14 +2084,24 @@ function buildProtocolPayload(record) {
   const structured = parseJsonObject(record.structured_notes);
   const serviceData = parseJsonObject(record.service_data);
   const protocol = parseJsonObject(serviceData.protocol);
-  const structuredObservations = uniqueStrings(parseJsonArray(structured.formObservations));
+  // A record that carries the technician's own note keeps the raw note in
+  // technician_notes, and the merged lists fold in its tagged lines and the
+  // parked [Next] lines: such a record's lists hold only what the completion
+  // form recorded (formProtocolActions, formObservations, formRecommendations;
+  // docs/public-route-contracts.md), and each value passes the note's own
+  // screen as it renders (noteRecordCopyViolations: the complete
+  // customer-copy screen and any time figure; AGENTS.md).
+  const formOnly = carriesReportNote(record.structured_notes);
+  const formList = (key) => uniqueStrings(parseJsonArray(structured[key]))
+    .filter((value) => !formOnly || !noteRecordCopyViolations(value).length);
+  const structuredObservations = formList('formObservations');
   return {
-    actions: withoutAccessCodeLines(uniqueStrings([
+    actions: withoutAccessCodeLines(formOnly ? formList('formProtocolActions') : uniqueStrings([
       ...parseJsonArray(protocol.actions),
       ...parseJsonArray(structured.protocolActionsCompleted),
       ...taggedNoteLines(record.technician_notes, ['protocol', 'protocol optional', 'action']),
     ])),
-    observations: withoutAccessCodeLines(uniqueStrings([
+    observations: withoutAccessCodeLines(formOnly ? structuredObservations : uniqueStrings([
       ...parseJsonArray(protocol.observations),
       ...parseJsonArray(structured.observations),
       ...taggedNoteLines(record.technician_notes, ['found']),
@@ -2107,7 +2118,7 @@ function buildProtocolPayload(record) {
     ...(structuredObservations.length ? {
       structuredObservationsProvenance: 'completion_form_snapshot',
     } : {}),
-    recommendations: withoutAccessCodeLines(uniqueStrings([
+    recommendations: withoutAccessCodeLines(formOnly ? formList('formRecommendations') : uniqueStrings([
       ...parseJsonArray(protocol.recommendations),
       ...parseJsonArray(structured.recommendations),
       ...taggedNoteLines(record.technician_notes, ['next']),
@@ -2120,7 +2131,7 @@ function buildProtocolPayload(record) {
     // egress on a customer report (AGENTS.md; codex P1 r3 + inline on
     // #3516). Records predating the field render findings recommendations
     // only. The merged list above stays for its internal/recap consumers.
-    structuredRecommendations: uniqueStrings(parseJsonArray(structured.formRecommendations)),
+    structuredRecommendations: formList('formRecommendations'),
     // Tips from your tech, frozen at completion (freezeTechTips): registry
     // copy resolved server-side from ids, plus at most one screened line in
     // the technician's own words. Read verbatim — the note shows what the
@@ -2226,14 +2237,17 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
   return pest ? { city: nearYouCity, pest } : null;
 }
 
-// A frozen card's four-section body (stamped bodyFormat 'four_section' at
-// completion) shows only while GATE_REPORT_WRITER_RULES is on: with it off
-// (the kill switch) the card keeps its headline and drops that body
-// (Codex #5500).
-function withoutDarkFourSectionBody(snapshot) {
+// On a record that carries the technician's own note, no Today's Result card
+// carries report text: the note never stands on a typed visit (activity-
+// indicators technicianReportDrivesSummary, ownNote), and a body a card froze
+// from report text beside it is not customer copy. Such a card keeps its
+// headline, as the dark four-section transform leaves one.
+function withoutReportTextBody(snapshot) {
   const result = snapshot?.todaysResult;
-  if (!result || result.bodyFormat !== 'four_section' || featureGates.reportWriterRulesLive()) return snapshot;
-  const { body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, ...rest } = result;
+  if (result?.bodySource !== 'technician_report') return snapshot;
+  const {
+    body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, reconcileConfirmed: _reconcileConfirmed, ...rest
+  } = result;
   return { ...snapshot, todaysResult: rest };
 }
 
@@ -4255,16 +4269,40 @@ async function lawnNextVisitAtProperty(service, afterIso, knex, readFailures) {
   return row ? { state: 'scheduled', row } : noneOrUnknown();
 }
 
-// The lawn protocol version a completed visit's plan RECORDED: its completion ledger
-// row when one exists (a row with no version, attribution 'none', is authoritative:
-// nothing was followed), else the scheduled visit's pin only when there is no
-// completion row at all. null = no recorded version. Throws on a failed read.
+// What a completed visit's plan RECORDED about its lawn protocol: version and window. THE rule, in one place: the
+// completion ledger row when one exists (a row with no version, attribution 'none', is authoritative: nothing was
+// followed), else the scheduled visit's pin only when there is no completion row at all. Each field null = not recorded.
+function recordedProtocolAssignment(ledger, pin) {
+  const source = ledger
+    ? { version: ledger.protocol_version, windowKey: ledger.window_key, windowTitle: ledger.window_title }
+    : { version: pin?.lawn_protocol_version, windowKey: pin?.lawn_protocol_window_key, windowTitle: pin?.lawn_protocol_window_title };
+  return { version: source.version || null, windowKey: source.windowKey || null, windowTitle: source.windowTitle || null };
+}
+
+// The lawn protocol version a completed visit's plan RECORDED (recordedProtocolAssignment). null = no recorded
+// version. Throws on a failed read.
 async function resolveRecordedProtocolVersion(knex, service) {
   const completion = await knex('lawn_protocol_service_completions').where({ service_record_id: service.id }).first('protocol_version');
-  if (completion) return completion.protocol_version || null;
-  if (!service.scheduled_service_id) return null;
-  const scheduled = await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('lawn_protocol_version');
-  return scheduled?.lawn_protocol_version || null;
+  if (!completion && !service.scheduled_service_id) return null;
+  const scheduled = completion ? null : await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('lawn_protocol_version');
+  return recordedProtocolAssignment(completion, scheduled).version;
+}
+
+// The same recorded assignment (version, windowKey, windowTitle) for MANY visits in two reads: every ledger row, then the
+// pins of the visits that have none. services: [{ id (the service record), scheduled_service_id }]. Returns a Map of
+// service record id to the assignment. Throws on a failed read.
+async function resolveRecordedProtocolAssignments(knex, services) {
+  const out = new Map();
+  if (!services.length) return out;
+  const ledger = new Map((await knex('lawn_protocol_service_completions').whereIn('service_record_id', services.map((sv) => sv.id))
+    .select('service_record_id', 'protocol_version', 'window_key', 'window_title')).map((row) => [row.service_record_id, row]));
+  const pinIds = services.filter((sv) => !ledger.has(sv.id) && sv.scheduled_service_id).map((sv) => sv.scheduled_service_id);
+  const pins = new Map(pinIds.length
+    ? (await knex('scheduled_services').whereIn('id', pinIds)
+      .select('id', 'lawn_protocol_version', 'lawn_protocol_window_key', 'lawn_protocol_window_title')).map((row) => [row.id, row])
+    : []);
+  for (const sv of services) out.set(sv.id, recordedProtocolAssignment(ledger.get(sv.id), pins.get(sv.scheduled_service_id)));
+  return out;
 }
 
 // The lawn round (1-9) of a visit on a 9-visit rounds series, else null: the program line follows the round for those
@@ -4512,6 +4550,18 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
+  // The dark four-section transform (the kill switch), shared with every
+  // other reader of the summary rule (activity-indicators.js), and on a
+  // record that carries the technician's own note the report-text transform
+  // (withoutReportTextBody): every frozen card below goes through both.
+  const { withoutDarkFourSectionBody } = require('./activity-indicators');
+  // The stored value, not `structured`: stored notes that cannot be read
+  // count as a note (carriesReportNote), and parseJsonObject reads them as {}.
+  const ownNote = carriesReportNote(service.structured_notes);
+  const reportCard = (snapshot) => {
+    const card = withoutDarkFourSectionBody(snapshot);
+    return ownNote ? withoutReportTextBody(card) : card;
+  };
   // Typed specialty completion snapshot (persisted at completion — the
   // immutable source for Today's Result + customer-labeled findings). Its
   // presence suppresses Pest Pressure for this report and swaps in the
@@ -4519,7 +4569,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const typedSnapshot = serviceData.typedReportSnapshot
     && typeof serviceData.typedReportSnapshot === 'object'
     && serviceData.typedReportSnapshot.type
-    ? withoutDarkFourSectionBody(serviceData.typedReportSnapshot)
+    ? reportCard(serviceData.typedReportSnapshot)
     : null;
 
   // GATE_TS_TECH_FINDINGS_COPY: the technician's frozen decisions for a tree &
@@ -4612,7 +4662,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const geometry = parseJsonObject(geometryRow?.geometry);
   const effectiveGeometry = Object.keys(geometry).length ? geometry : defaultGeometry();
 
-  const findings = dbFindings.map((finding) => ({
+  let findings = dbFindings.map((finding) => ({
     id: finding.id,
     zoneId: finding.zone_id || null,
     category: finding.category,
@@ -4630,8 +4680,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // "all clear" right after they flagged something (John Kelleher audit
   // 2026-07-29). PEST ONLY — other lines have their own no-activity copy, and
   // the softened sentence must not claim treatment or a scheduled follow-up
-  // the record doesn't evidence (codex P2 #3043 ×2).
-  if (serviceLine === 'pest') {
+  // the record doesn't evidence (codex P2 #3043 ×2). Never on a record that
+  // carries the technician's own note: there the stored row reaches the
+  // provenance screen as completion stored it (below), as in every other
+  // findings reader, and its "were clear" detail drops it. The softened copy
+  // passes that screen, so it would print a no-activity claim beside the
+  // technician's own account (pre-push audit on c020cecb69).
+  if (serviceLine === 'pest' && !ownNote) {
     const renderConcern = structuredCustomerConcern(structured);
     if (renderConcern) {
       for (const finding of findings) {
@@ -4657,7 +4712,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // snapshot proves its provenance, upgrade that row for customer egress.
       // Unmatched bare rows stay bare so the document's raw-note guard keeps
       // filtering them.
-      if (!persistedFinding.detail && !persistedFinding.recommendation) {
+      // A detail or recommendation of only spaces is none (findingHasOwnText).
+      if (!findingHasOwnText(persistedFinding)) {
         persistedFinding.detail = STRUCTURED_OBSERVATION_FINDING_DETAIL;
       }
       continue;
@@ -4672,6 +4728,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       recommendation: '',
     });
   }
+  // A record that carries the technician's own note: a row with a bare title
+  // (no detail, no recommendation; a value of spaces counts as none) is free
+  // text the form's observations carried, a [Found] line of the raw note among
+  // them, never proven form copy. It never reaches the report
+  // (ServiceReportDocument drops it too). The screened form labels above
+  // already carry their detail. A stored row whose only text is the stock
+  // detail is the picked label alone: it stands only when that label passes
+  // the screen, as in every other findings reader (finding-provenance.js).
+  if (ownNote) findings = provenFindingRows(findings.filter(findingHasOwnText), service.structured_notes);
 
   let lawnHistory = opts.lawnHistory || null;
   if (propertyHistoryEnabled && serviceLine === 'lawn' && !lawnHistory) {
@@ -4860,8 +4925,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
 
   // Typed reports carry their real findings in the snapshot (rendered by
   // TypedFindingsCard) — the legacy no-activity fallback would contradict
-  // e.g. an active cockroach visit's snapshot.
-  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal
+  // e.g. an active cockroach visit's snapshot. A record that carries the
+  // technician's own note never gets it either: its lists hold only the
+  // form's values, so their being empty proves nothing (a [Found] line of
+  // the raw note is not among them). Completion writes its own no-activity
+  // row from the merged lists.
+  if (!typedSnapshot && !ownNote && !findings.length && !hasLawnAssessmentSignal
     && !(serviceLine === 'lawn' && productsLoadFailed)
     && shouldAddNoActivityFinding({ service, structured, protocol, interiorOnlyLane })) {
     findings.push({
@@ -4972,7 +5041,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // bad history must not take down the report.
   const staffViewer = opts.staffViewer === true;
   const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
-    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type).map(withoutDarkFourSectionBody)
+    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type).map(reportCard)
     : [];
   const companionReports = await Promise.all(
     companionSnapshots
@@ -7186,7 +7255,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   //  - typed specialty reports (cockroach cleanout etc.) keep the plain
   //    recap, same as the pressure card.
   // Best-effort: never blocks the report.
-  let visitSummary = structured.customerRecap || '';
+  // A record that carries the technician's own note never falls back to the
+  // recap: completion writes the recap from the raw note, and it can repeat a
+  // note the screens refuse. Its summary is the note, the lawn visit summary
+  // (fixed sentences) or empty.
+  let visitSummary = (ownNote ? '' : structured.customerRecap) || '';
   let visitSummarySource = visitSummary ? 'recap' : null;
   // The typed narrative is the fixed fallback, not model prose (isTypedNarrativeFallback).
   let typedNarrativeIsFallback = false;
@@ -7218,21 +7291,25 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // (Codex P2 #2709) — and a body the snapshot rejected (zero state, old
   // snapshot) never resurfaces via the summary.
   {
-    const technicianReport = technicianReportCustomerCopy(service.technician_notes);
+    // The technician's own note when the record carries one (structured_notes
+    // .reportNote, owner 2026-11-19; a refused or malformed one is no text),
+    // else the titled report (visitReportCustomerCopy).
+    const technicianReport = visitReportCustomerCopy(service);
     // THE rule (activity-indicators technicianReportDrivesSummary): the
     // completion-time rejection frozen into service_data (codex r58), the
     // governing typed story's acceptance (codex r26/r42/r78/r80) and the
     // rodent trapping screens for this viewer (codex P1 r18; pre-push P1 on
-    // 256c1f9), on the snapshots this report already normalised. Every
-    // other customer render of the note (context-aggregator.js
-    // customerSafeVisitNotes) runs the same rule, so none can show a body
-    // this report refuses.
+    // 256c1f9), on the snapshots this report already normalised; the own
+    // note only on a visit with no typed card. Every other customer render
+    // of the note (context-aggregator.js customerSafeVisitNotes) runs the
+    // same rule, so none can show a body this report refuses.
     const drivesSummary = technicianReport?.body
       && require('./activity-indicators').technicianReportDrivesSummary({
-        serviceData, body: technicianReport.body, staffViewer, typedSnapshot, companionSnapshots,
+        serviceData, body: technicianReport.body, staffViewer, typedSnapshot, companionSnapshots, ownNote,
       });
     if (drivesSummary) {
-      visitSummary = technicianReport.body;
+      // Signed with the technician's first name when it is their own words.
+      visitSummary = printedReportSummary(technicianReport, service);
       visitSummarySource = 'technician_report';
       reportSections = Array.isArray(technicianReport.sections) ? technicianReport.sections : null;
     }
@@ -7664,6 +7741,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // leave it out, since their status line, rows and next-step section
     // already print each of its facts (owner 2026-10-22: say a thing once).
     summaryIsTemplate: visitSummarySource === 'typed_narrative' && typedNarrativeIsFallback,
+    // Present (true) only when the summary is the technician's own note: on a
+    // note record a technician_report summary is always the note
+    // (visitReportCustomerCopy). The page and the PDF print it as stored,
+    // never through cleanVisitSummary's recap fixes: it is their signed words.
+    ...(ownNote && visitSummarySource === 'technician_report' ? { summaryIsOwnNote: true } : {}),
     // Present only for the four-section report (see reportSections above).
     ...(reportSections && visitSummarySource === 'technician_report' ? { reportSections } : {}),
     // Customer concern captured at completion — feeds the pest V2 "what you
@@ -7917,8 +7999,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     legacy: {
       // No raw technician_notes here (owner ruling 2026-07-16): the field is
       // internal — access codes, billing notes — and the only sanctioned path
-      // to customer copy is technicianReportCustomerCopy's reviewed parse,
-      // which already feeds the summary slot. The client never read this key.
+      // to customer copy is visitReportCustomerCopy (the stored own note on a
+      // record that carries one, else technicianReportCustomerCopy's reviewed
+      // parse), which already feeds the summary slot. The client never read
+      // this key.
       measurements: {
         soilTemp: service.soil_temp,
         thatch: service.thatch_measurement,
@@ -7943,6 +8027,7 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 module.exports = {
   buildReportV1Data,
   resolveRecordedProtocolVersion,
+  resolveRecordedProtocolAssignments,
   resolveVisitRound,
   termiteStationPinsFlag,
   resolveApplicatorFdacsId,

@@ -270,6 +270,16 @@ describe('pest-insider claim validation at the send gates', () => {
     expect(errors.some((e) => e.includes('Unverified claim (non_flea_vacuum_advice)'))).toBe(true);
   });
 
+  test('UF\'s own Formosan April-to-June window (Pest Insider fact T02) does not block the send', () => {
+    const { factById } = require('../services/pest-insider/facts');
+    const t02 = factById('T02');
+    const draft = { ...baseSend, html_body: `${baseSend.html_body}<p>${t02.statement}</p><p>${t02.quotes[0]}</p>` };
+    const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(false);
+    const repeat = { ...baseSend, html_body: `${baseSend.html_body}<p>Formosan termites swarm again in June.</p>` };
+    expect(validateNewsletterDraft(repeat, { recipientCount: 100 }).errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(true);
+  });
+
   test.each([
     ['a curly apostrophe', 'Termites don’t have a second swarm after storms.'],
     ['an &rsquo; entity', 'Termites don&rsquo;t have a second swarm after storms.'],

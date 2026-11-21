@@ -3,8 +3,9 @@
  * uniform-image-regenerate.js — MUTATES (the astro worktree it is pointed at; nothing in
  * this repo and nothing in prod). Regenerates ONLY the blog images that
  * uniform-image-audit.js flagged (a technician out of uniform), through the
- * publisher's own generatePlannedImage path (same plan/style/setting/caption
- * per slug+slot, now with WAVES_UNIFORM_LINE in the prompt), compress to webp,
+ * publisher's own generatePlannedImage path (same plan per slug+slot: style,
+ * cast, setting; a slot whose cast is not the technician comes back with no
+ * technician, which the uniform check passes), compress to webp,
  * and write them into an astro WORKTREE (never the bare checkout). Alt text is
  * re-derived from the new picture (hero-alt-vision) and vetted by the same
  * content guardrails the publisher applies, so the shipped alt never describes
@@ -34,6 +35,7 @@ const { etDateString } = require('../../server/utils/datetime-et');
 const { classifyUniform, outOfUniform } = require('./uniform-image-audit');
 const contentGuardrails = require('../../server/services/content/content-guardrails');
 const fmParser = require('../../server/services/content-astro/frontmatter');
+const { isIdentificationPost } = require('../../server/services/content/licensed-photo-library');
 
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
@@ -50,7 +52,6 @@ if (!isLinkedWorktree) { console.error(`${ASTRO} is not a linked git worktree (a
 
 const HERO_WIDTH = 1600; const BODY_WIDTH = 1200; const EST_COST = 0.17;
 const MAX_ATTEMPTS = 2; // one retry, like the publisher's screen/near-duplicate retry
-const CAPTION_MAX = 40; // astro-publisher: an infographic slot carries the heading when it is this short
 
 // audit key → repo path: "termite__wdo-inspection-bradenton-fl__hero.webp".
 // The extension is preserved (the audit also lists jpg/png); `body-N` is a
@@ -142,7 +143,7 @@ function replaceHeroAlt(text, alt) {
 // ── plan ────────────────────────────────────────────────────────────
 // One audit key → the exact generatePlannedImage inputs the publisher used
 // for that slot (frontmatter via the publisher's YAML reader; city from the
-// authoritative service_areas_tag; body slot + caption from the rendered
+// authoritative service_areas_tag; body slot and section from the rendered
 // body-image order), or { skip } with the reason.
 function planItem(t, publisher, audited) {
   const { dir, file, ext, kind } = repoPathFor(t);
@@ -152,6 +153,9 @@ function planItem(t, publisher, audited) {
   if (!postFile) return { t, skip: 'post file not found' };
   const text = fs.readFileSync(postFile, 'utf8');
   const fm = fmParser.parse(text).data || {};
+  // The publisher never generates an in-article picture for an identification
+  // post (its body pictures are licensed photos), so this sweep must not either.
+  if (kind === 'body' && isIdentificationPost(fm)) return { t, skip: 'identification post: in-article pictures are licensed photos, never generated — replace by hand' };
   const { body } = splitPost(text);
   const imagePath = `/images/blog/${dir}/${file}${ext}`;
   const target = path.join(ASTRO, 'public/images/blog', dir, `${file}${ext}`);
@@ -161,7 +165,7 @@ function planItem(t, publisher, audited) {
   // on a stale verdict.
   const stale = auditBindingProblem(audited.get(t), target);
   if (stale) return { t, skip: stale };
-  const item = { t, kind, postFile: path.relative(ASTRO, postFile), imagePath, target, index: 0, captions: [], ...postFields(fm, dir), siblings: siblingAssets(dir, `${file}${ext}`) };
+  const item = { t, kind, postFile: path.relative(ASTRO, postFile), imagePath, target, index: 0, ...postFields(fm, dir), siblings: siblingAssets(dir, `${file}${ext}`) };
   if (kind === 'hero') {
     // Only the post's ACTIVE hero is regenerated: a stale hero.webp beside a
     // curated/migrated hero_image.src would otherwise get the live alt + date.
@@ -181,9 +185,11 @@ function planItem(t, publisher, audited) {
   const ref = hits[0]; const sec = sectionFor(body, ref.line);
   const heading = String(sec.heading || '').trim();
   return {
-    ...item, index: ref.ordinal + 1, ordinal: ref.ordinal,
+    // The planner slot comes from the file name, as in the publisher (odd
+    // names 1, even names 2): the replacement keeps the style and the cast
+    // its slot had. The ordinal still picks the framing.
+    ...item, index: publisher._internals.bodySlotOfName(imagePath.match(/body-(\d+)\.webp$/i)[1]), ordinal: ref.ordinal,
     keyword: heading || item.keyword, topic: sec.lead || item.topic,
-    captions: heading && heading.length <= CAPTION_MAX ? [heading] : [],
     avoid: item.heroAlt || fm.title,
   };
 }
@@ -204,6 +210,9 @@ function postFields(fm, dir) {
     city: String(first(fm.service_areas_tag) || ''),
     domains: Array.isArray(fm.domains) ? fm.domains : null,
     heroAlt: typeof fm.hero_image?.alt === 'string' ? fm.hero_image.alt : null,
+    // The publisher's own flag: an identification post never gets a
+    // people-free picture (image-generator planFor).
+    identification: isIdentificationPost(fm),
   };
 }
 // The post's OTHER images on disk, for the near-duplicate check.
@@ -215,7 +224,7 @@ function siblingAssets(dir, exceptFile) {
 function describe(p) {
   if (p.skip) return `  skip ${p.t}: ${p.skip}`;
   const shot = p.kind === 'body' ? ` (${shotFor(p, 0)})` : '';
-  return `  ${p.kind === 'hero' ? 'HERO' : 'BODY' + p.index} ${p.slug} — subject "${p.keyword || p.title}"${shot}${p.captions.length ? ` caption "${p.captions[0]}"` : ''}${p.city ? ` [${p.city}]` : ''}`;
+  return `  ${p.kind === 'hero' ? 'HERO' : 'BODY' + p.index} ${p.slug} — subject "${p.keyword || p.title}"${shot}${p.city ? ` [${p.city}]` : ''}`;
 }
 
 // ── generate + verify ───────────────────────────────────────────────
@@ -239,7 +248,7 @@ async function generateVerified(p, ctx) {
   const siblings = [];
   for (const s of p.siblings) siblings.push({ label: s.label, hash: await ctx.publisher._internals.imageDHash(fs.readFileSync(s.file)) });
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const gen = await ctx.generatePlannedImage({ title: p.title, topic: p.topic, keyword: p.keyword, city: p.city, mode: p.kind === 'hero' ? 'blog-hero' : 'blog-body', shot: shotFor(p, attempt), avoid: p.avoid, slug: p.slug, index: p.index + attempt * 100, captions: p.captions, avoidDepicting: AVOID });
+    const gen = await ctx.generatePlannedImage({ title: p.title, topic: p.topic, keyword: p.keyword, city: p.city, mode: p.kind === 'hero' ? 'blog-hero' : 'blog-body', shot: shotFor(p, attempt), avoid: p.avoid, slug: p.slug, index: p.index + attempt * 100, identification: p.identification, avoidDepicting: AVOID });
     const webp = await ctx.compressToWebp(gen.buffer, { width: p.kind === 'hero' ? HERO_WIDTH : BODY_WIDTH });
     const problem = await candidateProblem(p, gen, webp, siblings, ctx.publisher);
     if (!problem) return { gen, webp };

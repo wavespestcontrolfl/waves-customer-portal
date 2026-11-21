@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { FIELD_VIEW_ASSETS_ID } from './lib/fieldViewAssets';
 
 const source = fs.readFileSync(path.resolve(process.cwd(), 'public/sw.js'), 'utf8');
 
@@ -45,11 +46,15 @@ class FakeResponse {
     this.headers = new Headers(init.headers);
     this.body = body;
     this.bodyUsed = false;
+    // A fetched response keeps its URL, through clone() and Cache Storage; one
+    // the worker builds has none. Only a test passes `url`, for the first kind.
+    this.url = init.url || '';
+    this.redirected = Boolean(init.redirected);
   }
   clone() {
     // The real Response throws once its body is locked by a consumer.
     if (this.bodyUsed) throw new TypeError('Response body is already used');
-    return new this.constructor(this.body, { status: this.status, statusText: this.statusText, headers: this.headers, gate: this.gate });
+    return new this.constructor(this.body, { status: this.status, statusText: this.statusText, headers: this.headers, gate: this.gate, url: this.url, redirected: this.redirected });
   }
   async text() { if (this.gate) await this.gate; this.bodyUsed = true; return String(this.body); }
   async json() { return JSON.parse(await this.text()); }
@@ -176,6 +181,17 @@ const serveBuild = (shellAssets, owns = shellAssets) => async (request) => {
 const cachedAssets = async (cache) => (await cache.keys()).map(r => new URL(r.url).pathname).filter(p => p.startsWith('/assets/')).sort();
 
 describe('customer service-worker update contract', () => {
+  // Field view writes Today's files into index.html for the page to warm
+  // (src/lib/fieldViewAssets.js). The worker must not read that list as the
+  // shell's own files, or every phone would download Today with each deploy.
+  it('does not read the Field view file list in index.html as shell files', () => {
+    const worker = loadWorker(fakeCache());
+    const files = ['/assets/TodayShell-b2.js', '/assets/TechHomePage-d4.css'];
+    const html = '<head><script type="module" crossorigin src="/assets/index-a1.js"></script>'
+      + `<script type="application/json" id="${FIELD_VIEW_ASSETS_ID}">${JSON.stringify(files)}</script></head>`;
+    expect([...worker.shellAssetUrls(html)]).toEqual(['/assets/index-a1.js']);
+  });
+
   it('reloads shell assets and finishes their writes before replacing the shell or activating', async () => {
     const cache = fakeCache();
     const previous = shellHtml(['/assets/index-OLD.js']);
@@ -256,11 +272,11 @@ describe('customer service-worker update contract', () => {
   it('activates by sweeping only stale Waves buckets and preserving current, badge, and unrelated caches', async () => {
     const worker = loadWorker(fakeCache(), { cacheNames: [
       'waves-v10-admin-activation-stable', 'waves-customer-v11-shell-atomic',
-      'waves-customer-v12-shell-pruned', 'waves-badge-state', 'another-app-cache',
+      'waves-customer-v12-shell-pruned', 'waves-customer-v13-private-links', 'waves-badge-state', 'another-app-cache',
     ] });
     await worker.dispatchActivate();
     expect([...worker.cacheNames].sort()).toEqual([
-      'another-app-cache', 'waves-badge-state', 'waves-customer-v12-shell-pruned',
+      'another-app-cache', 'waves-badge-state', 'waves-customer-v13-private-links',
     ]);
     expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
   });
@@ -368,6 +384,176 @@ describe('customer service-worker update contract', () => {
 
     expect(visible.postMessage).toHaveBeenCalledWith({ type: 'waves:push-received' });
     expect(hidden.postMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('service-worker private link pages', () => {
+  // A job-offer URL is the applicant's private signing link. The worker never
+  // handles it, in any request mode: nothing stored (a stored response or
+  // request keeps its URL), and no offline shell served in its place (that
+  // shell carries another page's headers, without no-referrer).
+  const token = 'a'.repeat(64);
+  const offerPaths = [`/careers/offer/${token}`, `/Careers/Offer/${token}/`, `/careers/%6Fffer/${token}`, `/careers/offer/${token}//`];
+
+  it('leaves a job-offer URL to the browser in every request mode, online and offline', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
+    setFetch(serveBuild(['/assets/index-AAA.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    const before = await (await cache.match('/')).text();
+    expect(before).toContain('index-AAA');
+    setFetch(serveBuild(['/assets/index-BBB.js']));
+    for (const offerPath of offerPaths) {
+      for (const mode of ['navigate', 'cors']) {
+        const { response } = await dispatchFetch(offerPath, { mode });
+        expect(response).toBeUndefined(); // no respondWith: the browser fetches it
+      }
+    }
+    setFetch(async () => { throw new TypeError('Failed to fetch'); }); // offline
+    for (const offerPath of offerPaths) {
+      const { response } = await dispatchFetch(offerPath, { mode: 'navigate' });
+      expect(response).toBeUndefined(); // never the cached shell of another page
+    }
+    expect(await (await cache.match('/')).text()).toBe(before);
+    expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(false);
+  });
+
+  // The server routes /API/ as /api/, so an offer read in another letter case
+  // returns the applicant's offer, with the token in its URL.
+  it('leaves an API call in any letter case to the browser', async () => {
+    const cache = fakeCache();
+    const worker = loadWorker(cache);
+    worker.setFetch(async () => fakeResponse('{"state":"open"}'));
+    for (const path of [`/API/public/careers/offer/${token}`, `/aPi/public/careers/offer/${token}`, `/api/public/careers/offer/${token}`]) {
+      for (const mode of ['cors', 'same-origin', 'no-cors']) {
+        const { response } = await worker.dispatchFetch(path, { mode });
+        expect(response).toBeUndefined(); // no respondWith: the browser fetches it
+      }
+    }
+    expect([...cache.store.keys()]).toEqual([]);
+  });
+
+  // The worker on main stores each page it opens as the shell, and any other
+  // same-origin GET under its URL, so its bucket can hold the link. This
+  // worker's bucket has a new name, so the activate sweep drops that bucket
+  // whole, before this worker claims a page.
+  it('drops the bucket an older worker filled, offer links and all, before it claims a page', async () => {
+    const older = fakeCache();
+    for (const key of ['/', ...offerPaths, `/API/public/careers/offer/${token}`, '/manifest.json']) {
+      await older.put(key, new FakeResponse('stored', { url: `https://portal.test/careers/offer/${token}` }));
+    }
+    const worker = loadWorker(fakeCache(), {
+      cachesByName: { 'waves-customer-v12-shell-pruned': older },
+      cacheNames: ['waves-customer-v13-private-links', 'waves-badge-state'],
+    });
+    let namesAtClaim = null;
+    worker.workerClients.claim.mockImplementation(async () => { namesAtClaim = [...worker.cacheNames].sort(); });
+    await worker.dispatchActivate();
+    expect(namesAtClaim).toEqual(['waves-badge-state', 'waves-customer-v13-private-links']);
+  });
+
+  // A sweep can fail, and an older worker's last shell refresh, in flight at
+  // the takeover, can open its bucket again after the sweep. Each page load
+  // drops such a bucket, and never this worker's or a newer installer's.
+  it('drops an older bucket a page load finds, an offer page included, and keeps its own and newer ones', async () => {
+    const worker = loadWorker(fakeCache(), { cacheNames: ['waves-customer-v13-private-links', 'waves-badge-state'] });
+    worker.setFetch(serveBuild(['/assets/index-AAA.js']));
+    await worker.dispatchActivate();
+    worker.cacheNames.add('waves-customer-v12-shell-pruned');
+    worker.cacheNames.add('waves-customer-v14-next'); // a newer worker installing
+    const { response } = await worker.dispatchFetch(offerPaths[1], { mode: 'navigate' });
+    expect(response).toBeUndefined(); // still left to the browser
+    expect([...worker.cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v13-private-links', 'waves-customer-v14-next']);
+    worker.cacheNames.add('waves-v10-admin-activation-stable');
+    worker.cacheNames.add('waves-customer-v9-old');
+    await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
+    expect([...worker.cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v13-private-links', 'waves-customer-v14-next']);
+  });
+
+  // A stored response keeps the URL it came from and a stored request keeps
+  // its own, so the link could sit in a query, a fragment or a redirect's
+  // target. The worker stores no such URL: every entry is rebuilt without its
+  // URL, under a key with no query or fragment, and a redirected response is
+  // served but not stored.
+  it('stores no URL that could carry the link: no query or fragment key, no response URL, no redirected response', async () => {
+    const cache = fakeCache();
+    const worker = loadWorker(cache);
+    const nested = [`/careers/./offer/${token}`, `/careers/x/../offer/${token}`, `/Careers/Offer/${token}`];
+    for (const [i, inner] of nested.entries()) {
+      const path = `/login?next=${encodeURIComponent(inner)}`;
+      worker.setFetch(async (request) => (String(request.url).includes('/assets/')
+        ? fakeResponse('asset')
+        : new FakeResponse(shellHtml([`/assets/index-${i}.js`]), { url: `https://portal.test${path}` })));
+      const { response } = await worker.dispatchFetch(path, { mode: 'navigate' });
+      expect(response.url).toBe(`https://portal.test${path}`); // the page still loads
+    }
+    expect(await (await cache.match('/')).text()).toContain('index-2');
+    // A shell whose asset answers with a redirect is not stored either.
+    worker.setFetch(async (request) => (String(request.url).includes('/assets/')
+      ? new FakeResponse('asset', { url: `https://portal.test/careers/offer/${token}`, redirected: true })
+      : fakeResponse(shellHtml(['/assets/index-9.js']))));
+    await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
+    expect(await (await cache.match('/')).text()).toContain('index-2');
+    // Nor a shell that itself answers with a redirect: its page is another URL's. It is served; the shell stays.
+    worker.setFetch(async (request) => (String(request.url).includes('/assets/')
+      ? fakeResponse('asset')
+      : new FakeResponse(shellHtml(['/assets/index-8.js']), { url: `https://portal.test/careers/offer/${token}`, redirected: true })));
+    const redirected = await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
+    expect(redirected.response.redirected).toBe(true);
+    await tick();
+    expect(await (await cache.match('/')).text()).toContain('index-2');
+    // Nor a shell whose asset reference is not a plain /assets/ path: each reference becomes a cache key.
+    for (const ref of [
+      `/assets/index-7.js?next=/careers/offer/${token}`, `/assets/index-7.js#/careers/offer/${token}`,
+      `/assets/../careers/offer/${token}`, `/assets/%2e%2e/careers/offer/${token}`, `/assets/careers/offer/${token}`,
+    ]) {
+      worker.setFetch(async (request) => (String(request.url).includes('/assets/') ? fakeResponse('asset') : fakeResponse(shellHtml([ref]))));
+      await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
+      await tick();
+      expect(await (await cache.match('/')).text()).toContain('index-2');
+    }
+    for (const inner of nested) {
+      for (const path of [`/go?next=${inner}`, `/assets/chunk.js?next=${inner}`, `/manifest.json#${inner}`]) {
+        const { response } = await worker.dispatchFetch(path, { mode: 'cors' });
+        expect(response).toBeUndefined(); // no respondWith: the browser fetches it
+      }
+    }
+    const offerUrl = `https://portal.test/careers/offer/${token}`;
+    worker.setFetch(async () => new FakeResponse('body', { url: offerUrl, redirected: true }));
+    for (const path of ['/images/go-1.png', '/assets/chunk-1.js']) {
+      const { response } = await worker.dispatchFetch(path, { mode: 'cors' });
+      expect(response.url).toBe(offerUrl); // served, not stored
+    }
+    // Only a plain static file path is a key. Any other path is left to the browser, so an offer link encoded inside
+    // it (dotted or not) or a token used as a file name never becomes a key.
+    worker.setFetch(async () => fakeResponse('body'));
+    for (const path of [
+      `/go/careers%2Fx%2F..%2Foffer%2F${token}`, `/images/careers%2F..%2Fcareers%2Foffer%2F${token}.png`,
+      `/images/${token}.png`, `/assets/x%2Fcareers%2Foffer%2F${token}.js`, '/go/1',
+    ]) {
+      const { response } = await worker.dispatchFetch(path, { mode: 'cors' });
+      expect(response).toBeUndefined();
+    }
+    worker.setFetch(async () => new FakeResponse('{}', { url: 'https://portal.test/manifest.json' }));
+    await worker.dispatchFetch('/manifest.json', { mode: 'cors' });
+    await tick();
+    const keys = [...cache.store.keys()].map(url => url.replace('https://portal.test', ''));
+    expect(keys.filter(key => !/^\/assets\/index-\d\.js$/.test(key)).sort()).toEqual(['/', '/manifest.json']);
+    expect([...cache.store.values()].map(response => response.url).filter(Boolean)).toEqual([]);
+  });
+
+  it('still serves and refreshes the shell for every other page', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
+    setFetch(serveBuild(['/assets/index-AAA.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    setFetch(serveBuild(['/assets/index-BBB.js']));
+    const { response } = await dispatchFetch('/careers/offers', { mode: 'navigate' });
+    expect(response.ok).toBe(true);
+    expect(await (await cache.match('/')).text()).toContain('index-BBB');
+    setFetch(async () => { throw new TypeError('Failed to fetch'); });
+    const { response: offline } = await dispatchFetch('/careers/offers', { mode: 'navigate' });
+    expect(await offline.text()).toContain('index-BBB');
   });
 });
 
@@ -1033,7 +1219,7 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
 
     await dispatchInstall();
 
-    expect([...cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v11-shell-atomic', 'waves-customer-v12-shell-pruned', 'waves-v10-admin-activation-stable']);
+    expect([...cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v11-shell-atomic', 'waves-customer-v13-private-links', 'waves-v10-admin-activation-stable']);
     expect([...v11.store.keys()].map(u => new URL(u).pathname).sort()).toEqual(['/', '/assets/index-OLD.js', '/waves-logo.png']);
     expect([...v10.store.keys()].map(u => new URL(u).pathname).sort()).toEqual(['/', '/assets/index-V10.js']);
     expect(await cache.match('/')).toBeTruthy();

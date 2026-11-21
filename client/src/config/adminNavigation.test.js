@@ -81,6 +81,23 @@ describe("getAdminMobileTabs", () => {
     expect(getAdminMobileTabs("admin").map(({ id }) => id)).toEqual(["dashboard", "schedule", "customers", "communications", "more"]);
     expect(getAdminMobileTabs("technician").map(({ id }) => id)).toEqual(["today", "schedule", "customers", "communications", "more"]);
   });
+
+  it("Field view gives an admin Today in Dashboard's slot, and Dashboard leaves the tabs", () => {
+    expect(getAdminMobileTabs("admin", { fieldView: true }).map(({ id }) => id)).toEqual(["today", "schedule", "customers", "communications", "more"]);
+    expect(getAdminMobileTabs("admin", { fieldView: false }).map(({ id }) => id)).toEqual(["dashboard", "schedule", "customers", "communications", "more"]);
+  });
+
+  it("Field view changes nothing for any other role", () => {
+    for (const role of ["technician", "owner", undefined]) {
+      expect(getAdminMobileTabs(role, { fieldView: true }).map(({ id }) => id), String(role)).toEqual(getAdminMobileTabs(role).map(({ id }) => id));
+    }
+  });
+
+  it("the Settings tab owns Dashboard only while Field view is on", () => {
+    const more = ADMIN_MOBILE_TABS.find(({ id }) => id === "more");
+    expect(isAdminNavItemActive(more, "/admin/dashboard")).toBe(false);
+    expect(isAdminNavItemActive(more, "/admin/dashboard", "", { fieldView: true })).toBe(true);
+  });
 });
 
 describe("isAdminNavItemEnabled", () => {

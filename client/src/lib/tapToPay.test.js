@@ -13,6 +13,7 @@ vi.mock('./tapToPayReturn', () => ({ snapshotForHandoff: vi.fn() }));
 import { adminFetch } from './adminFetch';
 import { snapshotForHandoff } from './tapToPayReturn';
 import { launchTapToPay, prepareInAppReader } from './tapToPay';
+import { reloadHoldName } from './reloadHolds';
 
 const DEEP_LINK = 'wavespay://collect?t=header.payload.sig';
 // The app's web view keeps the iPhone WebKit user agent and adds WavesAdmin/<version>.
@@ -49,6 +50,8 @@ describe('launchTapToPay inside the Waves Admin app', () => {
     });
     const message = postMessage.mock.calls[0][0];
     expect(message).toEqual({ type: 'tapToPay', requestId: expect.any(String), deepLink: DEEP_LINK });
+    // Only this page hears the answer, so the open payment holds a reload.
+    expect(reloadHoldName()).toBe('tap-to-pay');
 
     let settled = false;
     pending.then(() => { settled = true; });
@@ -66,6 +69,7 @@ describe('launchTapToPay inside the Waves Admin app', () => {
     });
     expect(window.location.href).toBe(hrefBefore);
     expect(snapshotForHandoff).not.toHaveBeenCalled();
+    expect(reloadHoldName()).toBeNull();
   });
 
   it('passes a failure message through to the caller', async () => {

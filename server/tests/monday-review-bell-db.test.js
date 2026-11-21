@@ -160,6 +160,48 @@ maybeDescribe('monday review bell (live Postgres)', () => {
     });
   });
 
+  describe('list 5: parked Google reviews with no reply', () => {
+    test('counts parked reviews with no real reply, oldest first, and none of the rows that do not belong', async () => {
+      const before = await Review._private.loadParkedReviews();
+      const ids = [];
+      const review = async (over = {}) => {
+        const id = randomUUID();
+        ids.push(id);
+        await db('google_reviews').insert({
+          id, google_review_id: id, reviewer_name: `Monday Fixture ${RUN.slice(0, 8)}`, location_id: 'bradenton', star_rating: 5,
+          review_created_at: ago(2), review_text: 'Synthetic review', auto_reply_status: 'parked', ...over,
+        });
+        return id;
+      };
+      try {
+        await review({ review_created_at: new Date('2000-01-01T12:00:00Z') });
+        await review({ review_reply: '[DRAFT] Hi, thanks.' }); // a draft is not a reply
+        await review({ review_reply: 'Thank you!' }); // answered
+        await review({ dismissed: true });
+        await review({ missing_since: ago(1) });
+        await review({ reviewer_name: '_stats' });
+        await review({ reviewer_name: null }); // the Reviews page hides a review with no name, so the list does too
+        await review({ location_id: 'retired-office' });
+        await review({ auto_reply_status: 'queued' });
+        // A reply may already be on Google for these: listed with "check Google first". No park reason drops off the list.
+        await review({ auto_reply_reason: 'google_uncertain', review_created_at: new Date('2001-01-01T12:00:00Z') });
+        await review({ auto_reply_reason: 'persist_failed', review_created_at: new Date('2002-01-01T12:00:00Z') });
+        // An exhausted reconciliation parks as google_failed with the reconcile message.
+        await review({ auto_reply_reason: 'google_failed', auto_reply_error: 'Google shows an owner reply but recording it failed: ECONNRESET', review_created_at: new Date('2004-01-01T12:00:00Z') });
+        await review({ auto_reply_reason: 'google_failed', auto_reply_error: 'GBP replyToReview failed: 503', review_created_at: new Date('2005-01-01T12:00:00Z') });
+        const after = await Review._private.loadParkedReviews();
+        expect(after.count - before.count).toBe(6);
+        // Only this case's rows: the shared CI database may hold other parked reviews.
+        const mine = after.entries.filter((e) => e.name === `Monday Fixture ${RUN.slice(0, 8)}`);
+        expect(mine.map((e) => new Date(e.at).getUTCFullYear())).toEqual([2000, 2001, 2002, 2004, 2005, new Date(ago(2)).getUTCFullYear()]);
+        expect(mine.map((e) => e.checkGoogle)).toEqual([false, true, true, true, false, false]);
+        expect(mine.map((e) => e.location)).toEqual(Array(6).fill('Lakewood Ranch'));
+      } finally {
+        await db('google_reviews').whereIn('id', ids).del();
+      }
+    });
+  });
+
   describe('list 2: overdue promises', () => {
     test('reads without error and without writing (no callback card preparation)', async () => {
       const out = await Review._private.loadOverduePromises({ now: NOW });
@@ -176,10 +218,12 @@ maybeDescribe('monday review bell (live Postgres)', () => {
       promises: async () => ({ count: 4, oldestAt: ago(9) }),
       drafts: async () => ({ count: 0, total: 0 }),
       visits: async () => ({ count: 1, priced: 80, oldestDate: '2026-10-01' }),
+      parked: async () => ({ count: 0, entries: [] }),
     };
     const empty = {
       alerts: async () => ({ count: 0, headlines: [] }), promises: async () => ({ count: 0 }),
       drafts: async () => ({ count: 0, total: 0 }), visits: async () => ({ count: 0, priced: 0 }),
+      parked: async () => ({ count: 0, entries: [] }),
     };
     const rowsFor = (key) => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]);
     const run = (loaders, now) => Review.runMondayReview({ now, loaders });

@@ -80,7 +80,8 @@ describePg('intake source evidence SQL (PostgreSQL 16)', () => {
        ) AS leads
        LEFT JOIN (SELECT
          ?::text AS source_type, ?::text AS channel, ?::text AS name
-       ) AS lead_sources ON TRUE`,
+       ) AS lead_sources ON TRUE
+       LEFT JOIN (SELECT ?::text AS to_phone) AS lead_call ON TRUE`,
       [
         ...expression.bindings,
         JSON.stringify(row.extracted_data || {}),
@@ -89,6 +90,7 @@ describePg('intake source evidence SQL (PostgreSQL 16)', () => {
         row.lead_type || null, row.first_contact_channel || null,
         row.twilio_call_sid || null, row.heard_about || null,
         row.source_type || null, row.source_channel || null, row.source_name || null,
+        row.call_dialed_phone || null,
       ],
     );
     return rows[0].label;
@@ -212,6 +214,70 @@ describePg('intake source evidence SQL (PostgreSQL 16)', () => {
     ['generic historical Facebook call without placement proof', {
       lead_type: 'inbound_call', first_contact_channel: 'call',
       source_type: 'facebook', source_channel: 'paid', source_name: 'Facebook Ads call line',
+    }],
+    ['call to the website-only line (E.164)', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site web-only line', call_dialed_phone: '+19412542617',
+    }],
+    ['call to a spoke-site line stored with 10 digits', {
+      lead_type: 'voicemail', first_contact_channel: 'phone',
+      source_type: 'phone_tracking', source_channel: 'website_organic', source_name: 'Spoke line', call_dialed_phone: '9412402066',
+    }],
+    ['call to the main line stored in display format', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '(941) 297-5749',
+    }],
+    ['call to a city line, website-channel source', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'phone_tracking', source_channel: 'website_organic', source_name: 'City line', call_dialed_phone: '+19413187612',
+    }],
+    ['call to the toll-free line on an office-made website-channel source', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'phone_tracking', source_channel: 'website_organic', source_name: 'Office-made website row', call_dialed_phone: '+18559260203',
+    }],
+    ['call lead with no source row that dialed a website-only line', {
+      lead_type: 'inbound_call', first_contact_channel: 'call', call_dialed_phone: '+19412535279',
+    }],
+    ['call lead with an office-set referral source that dialed a website-only line', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'referral', source_name: 'Neighbor referral', call_dialed_phone: '+19412542617',
+    }],
+    ['website-line source row whose call dialed the main line', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'phone_tracking', source_channel: 'website_organic', source_name: 'Spoke line', call_dialed_phone: '+19412975749',
+    }],
+    ['call to a number that only ends in a website line\'s digits', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '+449412542617',
+    }],
+    ['call to a foreign number written with + and a website line\'s 10 digits', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '+9412542617',
+    }],
+    ['call to a website source whose number is too short to read', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '555',
+    }],
+    ['call to the web-only line on an office-typed source type', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'Main Site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '+19412542617',
+    }],
+    ['web form on an office-typed source with spaces and a hyphen', {
+      lead_type: 'quote_wizard', first_contact_channel: 'form',
+      source_type: ' Spoke-Site ', source_channel: 'organic', source_name: 'Spoke',
+    }],
+    ['web form on an office-typed Google Ads source', {
+      lead_type: 'quote_wizard', first_contact_channel: 'form', source_type: 'Google Ads', source_name: 'Ads',
+    }],
+    ['offline source whose name has surrounding spaces', {
+      lead_type: 'manual', first_contact_channel: 'manual', source_type: 'Walk In', source_name: '  Truck wrap  ',
+    }],
+    ['contact channel typed with a hyphen and no source row', {
+      lead_type: 'quote_wizard', first_contact_channel: 'website-quote',
+    }],
+    ['web form on a website source with the main line number', {
+      lead_type: 'quote_wizard', first_contact_channel: 'form',
+      source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '+19412975749',
     }],
   ])('display and pre-pagination sort agree for %s', async (_name, row) => {
     expect(await sortedSourceLabel(row)).toBe(sourceEvidenceForLead(row).label.toLowerCase());

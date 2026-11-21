@@ -43,8 +43,6 @@ jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: je
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((g) => ['autopayCustomerSms', 'composerReceiptLinks'].includes(g)),
   leadInspectionLinkLive: jest.fn(() => true),
-  // Dark by default, as in prod; the moving suites turn it on.
-  movingFlowLive: jest.fn(() => false),
 }));
 jest.mock('../services/appointment-card-request', () => ({
   claimCardLinkSend: jest.fn(),
@@ -140,7 +138,10 @@ jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, fn) 
 let mockBuilders = {};
 // short_codes defaults to an empty lookup: the stray-credential scan
 // (Codex #4709 r20) checks code-shaped windows in every message.
-const mockDb = jest.fn((table) => mockBuilders[table] || (table === 'short_codes' ? chainBuilder({ rows: [] }) : undefined));
+// A moving page is always live, so the stray-token scan reads customer_moves for any 48-hex run in a body:
+// default to no live move unless a test wires one.
+const mockDb = jest.fn((table) => mockBuilders[table]
+  || (table === 'short_codes' ? chainBuilder({ rows: [] }) : (table === 'customer_moves' ? chainBuilder({ firstRow: null }) : undefined)));
 jest.mock('../models/db', () => mockDb);
 
 const { openBalanceSummary } = require('../services/open-balance');
@@ -1461,17 +1462,11 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck('Moving? wavespest.co/l/mv1')).toEqual({ present: true, label: 'Moving' });
     mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
     expect(await immediateOnlyLinkSendCheck(`Tips: https://example.com/moving/${MOVE}`)).toEqual({ present: false });
-    // Gate on: a live moving token outside a canonical link is fenced too.
-    const { movingFlowLive } = require('../config/feature-gates');
-    movingFlowLive.mockReturnValue(true);
-    try {
-      mockBuilders = { short_codes: chainBuilder({ firstRow: null }), customer_moves: chainBuilder({ firstRow: { id: 'move-1' } }) };
-      expect(await immediateOnlyLinkSendCheck(`Moving? https://attacker.example/moving/${MOVE}`)).toEqual({ present: true, label: 'Moving' });
-      mockBuilders = { short_codes: chainBuilder({ firstRow: null }), customer_moves: chainBuilder({ firstRow: null }) };
-      expect(await immediateOnlyLinkSendCheck(`Tips: https://example.com/moving/${MOVE}`)).toEqual({ present: false });
-    } finally {
-      movingFlowLive.mockReturnValue(false);
-    }
+    // A live moving token outside a canonical link is fenced too.
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }), customer_moves: chainBuilder({ firstRow: { id: 'move-1' } }) };
+    expect(await immediateOnlyLinkSendCheck(`Moving? https://attacker.example/moving/${MOVE}`)).toEqual({ present: true, label: 'Moving' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }), customer_moves: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`Tips: https://example.com/moving/${MOVE}`)).toEqual({ present: false });
   });
 
   test('a project report link (vanity or full-token form) is immediate-only; the project form is not mistaken for a service report', async () => {
@@ -3496,7 +3491,7 @@ describe('wrappedOwnedLinkIn', () => {
   });
 });
 
-describe('moving page links (GATE_MOVING_FLOW): owned by the move\'s customer at every send check (GH Codex security review on #7486)', () => {
+describe('moving page links: owned by the move\'s customer at every send check (GH Codex security review on #7486)', () => {
   const { bearerLinkSendCheck } = require('../services/composer-customer-links');
   const MOVE_TOKEN = 'ab'.repeat(24);
   const acct = (id, account_id = 'acct') => ({ id, account_id });
@@ -3507,10 +3502,6 @@ describe('moving page links (GATE_MOVING_FLOW): owned by the move\'s customer at
       short_codes: chainBuilder({ firstRow: shortRow }),
     };
   }
-  const { movingFlowLive } = require('../config/feature-gates');
-  beforeEach(() => { movingFlowLive.mockReturnValue(true); });
-  afterEach(() => { movingFlowLive.mockReturnValue(false); });
-
   test('linkOwnersInBody names the move\'s customer, reports an unknown token, and ignores a look-alike host', async () => {
     wireMoving();
     expect(await linkOwnersInBody(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`))
@@ -3544,15 +3535,10 @@ describe('moving page links (GATE_MOVING_FLOW): owned by the move\'s customer at
       .toMatch(/moving link no longer opens/);
   });
 
-  test('a closed move or a dark gate refuses at the send: the page would answer 404', async () => {
+  test('a closed move refuses at the send: the page would answer 404', async () => {
     wireMoving({ move: { id: 'move-1', customer_id: 'c2', status: 'closed' } });
     expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
       .toMatch(/moving link no longer opens/);
-    movingFlowLive.mockReturnValue(false);
-    wireMoving();
-    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
-      .toMatch(/Moving links are switched off/);
-    expect(mockBuilders.customer_moves.first).not.toHaveBeenCalled();
   });
 
   test('a live moving token outside a canonical Waves link (foreign host, nested or encoded) is refused (GH Codex security review)', async () => {
@@ -3599,12 +3585,6 @@ describe('moving page links (GATE_MOVING_FLOW): owned by the move\'s customer at
     expect(mockBuilders.customer_moves.whereIn).not.toHaveBeenCalled();
   });
 
-  test('gate off: no moving lookup at all for a message without a canonical moving link', async () => {
-    movingFlowLive.mockReturnValue(false);
-    wireMoving();
-    expect(await bearerLinkSendCheck(`Tips: https://example.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
-    expect(mockBuilders.customer_moves.whereIn).not.toHaveBeenCalled();
-  });
 });
 
 describe('linkOwnersInBody', () => {

@@ -34,6 +34,7 @@ const bermudaRemoval = require('./lawn-bermuda-removal');
 const { FUNGUS_NITROGEN_NOTE_KEY, RECLAIMED_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
 const { PRODUCT_SWAP_NOTE_KEY } = require('../config/lawn-v13-trouble-product-swaps');
 const { CHINCH_TETRINO_NOTE_KEY } = require('../config/lawn-v13-chinch-rate');
+const { LAWN_V13_VERSION } = require('./lawn-program');
 const BERMUDA_FULL_FORM_REASON = 'Bermuda removal mix this visit: use the full form';
 
 const LAWN_CATEGORY = 'lawn_care';
@@ -733,17 +734,89 @@ const visitMonthOf = (svc) => Number(String(etCalendarDayOf(svc.scheduled_date) 
 // The plan's lists for a recurring visit, raw: `{ plan, items, addOns }` (the completion defaults'
 // planned rows and opt-in rows that name a product), or null when the completion-defaults gates are
 // off. A failed plan read throws.
-async function loadPlan(svc, knex) {
+const TETRINO_NAME = 'Tetrino Insecticide';
+
+function normalizedTetrinoScout(value) {
+  const block = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  return {
+    tetrinoTarget: String(block.tetrinoTarget || block.target || '').trim().toLowerCase(),
+    tetrinoCurrentObservations: String(block.tetrinoCurrentObservations || block.currentObservations || '').trim().slice(0, 1000),
+    tetrinoPressure: String(block.tetrinoPressure || block.pressure || '').trim().toLowerCase(),
+    grubTimingEvidence: String(block.grubTimingEvidence || '').trim().slice(0, 1000),
+    tetrinoApplied: block.tetrinoApplied === true || block.applied === true,
+  };
+}
+
+function tetrinoScoutFreeze(lawnFast) {
+  const scout = normalizedTetrinoScout(lawnFast?.tetrinoScout);
+  if (!scout.tetrinoTarget) return {};
+  return { lawnTetrinoScout: {
+    v: 1,
+    target: scout.tetrinoTarget,
+    currentObservations: scout.tetrinoCurrentObservations,
+    pressure: scout.tetrinoPressure || null,
+    grubTimingEvidence: scout.grubTimingEvidence || null,
+    applied: scout.tetrinoApplied,
+  } };
+}
+
+async function loadPlan(svc, knex, tetrinoScout) {
   if (!require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled()) return null;
-  const plan = await require('./waveguard-plan-engine').buildPlanForService(svc.id, { db: knex, includeCompletionDefaults: true });
+  const scout = normalizedTetrinoScout(tetrinoScout);
+  const planner = require('./waveguard-plan-engine');
+  const decision = typeof planner.tetrinoScoutDecision === 'function'
+    ? planner.tetrinoScoutDecision(scout) : { eligible: false, highRateEligible: false };
+  const plan = await planner.buildPlanForService(svc.id, {
+    db: knex,
+    includeCompletionDefaults: true,
+    ...scout,
+    ...(decision.eligible ? { selectedConditionalProductNames: [TETRINO_NAME] } : {}),
+  });
   const withProduct = (list) => (Array.isArray(list) ? list : []).filter((item) => item?.product?.id);
+  const tetrinoLine = [...withProduct(plan?.mixCalculator?.items), ...withProduct(plan?.mixCalculator?.conditionalOptions)]
+    .find((item) => item.product?.name === TETRINO_NAME);
   return {
     plan,
     // The plan's own eligibility for this visit: the rule behind the items and the add-ons.
     eligible: plan?.completionDefaults?.eligible === true,
     items: withProduct(plan?.completionDefaults?.items),
     addOns: withProduct(plan?.completionDefaults?.addOns),
+    tetrinoScout: tetrinoLine ? {
+      offered: true,
+      decision,
+      selected: tetrinoLine.selected === true,
+      productId: tetrinoLine.product.id,
+      productName: tetrinoLine.product.name,
+      ratePer1000: tetrinoLine.mix?.ratePer1000 ?? null,
+      rateUnit: tetrinoLine.mix?.rateUnit ?? null,
+      warning: (plan?.propertyGate?.warnings || []).find((warning) => warning.productName === TETRINO_NAME)?.message || null,
+    } : null,
   };
+}
+
+// The May scouting block belongs to the resolved v13 May program step (round 4
+// on lawn_rounds_9 resolves to the same step). Tetrino can still be entered as
+// a truthful manual actual on another visit, including an older/non-v13 plan;
+// those paths never showed the scouting block and must not be retrofitted with
+// its evidence requirement merely because the catalog product name matches.
+function isV13MayTetrinoPlan(loaded) {
+  const plan = loaded?.plan;
+  const month = plan?.roundStep?.month ?? plan?.protocol?.structured?.window?.month ?? plan?.propertyGate?.month;
+  return loaded?.tetrinoScout?.offered === true
+    && plan?.protocol?.structured?.version === LAWN_V13_VERSION
+    && (Number(month) === 5 || String(month || '').trim().toLowerCase() === 'may');
+}
+
+async function requiresTetrinoScoutEvidence(svc, knex, tetrinoScout) {
+  try {
+    return isV13MayTetrinoPlan(await loadPlan(svc, knex, tetrinoScout));
+  } catch (err) {
+    // Planning evidence is advisory to a manually entered actual. If the plan
+    // cannot be resolved at submit, retain the truthful application instead of
+    // turning this new scope check into a completion outage.
+    logger.warn(`[lawn-fast] Tetrino evidence scope unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return false;
+  }
 }
 
 // The plan's lists as the sheet reads them: `{ items, addOns }`, in the plan's order.
@@ -796,7 +869,7 @@ async function sheetPlanned({ plan, items, addOns }, knex) {
  * than a loaded plan: the tech adds what they applied. Nothing here blocks
  * opening the sheet.
  */
-async function loadPlannedProducts(svc, knex, visitType, readFailures) {
+async function loadPlannedProducts(svc, knex, visitType, readFailures, tetrinoScout) {
   const empty = (unavailable = null) => ({ source: null, items: [], addOns: [], unavailable });
   if (visitType === 'unknown') return empty('billing_mode_lookup_failed');
   // buildPlanForService keys the program off the CUSTOMER (tier / billing mode),
@@ -804,7 +877,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
   // per-application appointment. Only a recurring program appointment gets it.
   if (visitType !== 'recurring') return empty();
   try {
-    const loaded = await loadPlan(svc, knex);
+    const loaded = await loadPlan(svc, knex, tetrinoScout);
     if (!loaded) return empty();
     const sheet = await sheetPlanned(loaded, knex);
     const weed = await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures });
@@ -819,6 +892,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
       // substitute, the plan's mix and method), offered as one-tap add-ons, with
       // the protocol's own words for when they go down and the plan's gate notes.
       addOns: sheet.addOns,
+      ...(loaded.tetrinoScout ? { tetrinoScout: loaded.tetrinoScout } : {}),
       ...weed,
       ...chinch,
       ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet, await group11PassOver({ svc, knex }))),
@@ -962,7 +1036,7 @@ async function fullFormOutcome(knex, svc, reason) {
   return mixOffered ? { reason: 'bermuda_removal', needsFullForm: BERMUDA_FULL_FORM_REASON } : null;
 }
 
-async function buildLawnFastContext(serviceId, { knex = db, technicianId = null, productIds, sodAware } = {}) {
+async function buildLawnFastContext(serviceId, { knex = db, technicianId = null, productIds, sodAware, tetrinoScout } = {}) {
   const base = await resolveLawnFastEligibility(serviceId, knex);
   if (!base.ok) return { ok: false, reason: base.reason };
   const { svc, profile, reason, visitType, readFailures } = base;
@@ -977,7 +1051,7 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
   const { assessmentRow, assessmentReadFailed, assessmentUnusable } = await loadAssessmentState(svc, knex, readFailures);
   const photos = assessmentRow ? await loadAssessmentPhotos(assessmentRow.id, knex, readFailures) : null;
   const typed = !!profile.findingsType;
-  const { unavailable: plannedProductsUnavailable, troubleSeed, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
+  const { unavailable: plannedProductsUnavailable, troubleSeed, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures, tetrinoScout);
   const turfHeightCapture = typed ? false : await loadTurfHeightCapture(technicianId, knex, readFailures);
   const reCheck = await loadReCheckNote(svc, knex);
   // The visit's new-sod holds, for a sod-aware sheet only (lawn-sod-sheet.js: `sodContextParts`).
@@ -1357,6 +1431,25 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       },
     };
   }
+  const productIds = (Array.isArray(products) ? products : []).map((row) => row?.productId).filter(isUuid);
+  const tetrino = productIds.length ? await knex('products_catalog').whereIn('id', productIds).where({ name: TETRINO_NAME }).first('id') : null;
+  if (tetrino && await requiresTetrinoScoutEvidence(svc, knex, lawnFast?.tetrinoScout)) {
+    const scout = normalizedTetrinoScout(lawnFast?.tetrinoScout);
+    const decision = require('./waveguard-plan-engine').tetrinoScoutDecision(scout);
+    if (!decision.eligible || !scout.tetrinoApplied) {
+      return { status: 400, payload: {
+        error: 'Record the May target and current observations before using Tetrino. Grubs also need local peak-flight or egg-hatch timing.',
+        code: 'tetrino_scout_evidence_required',
+      } };
+    }
+    const applied = (products || []).find((row) => String(row?.productId).toLowerCase() === String(tetrino.id).toLowerCase());
+    if (Number(applied?.rate) > 0.367 && !decision.highRateEligible) {
+      return { status: 400, payload: {
+        error: 'The high Tetrino rate needs high current chinch pressure recorded on this visit.',
+        code: 'tetrino_high_pressure_required',
+      } };
+    }
+  }
   // An empty list that claims "every planned product is held by new sod" is re-judged by the server
   // (lawn-sod-sheet.js checkNoProductNote), else the rest of the preflight:
   // a row still carrying gallons sprayed is refused (legacyGallonsRefusal), then
@@ -1424,5 +1517,7 @@ module.exports = {
   takeAllProductIdsFor,
   troubleTypeIdsFor,
   preflightLawnFastCompletion,
+  normalizedTetrinoScout,
+  tetrinoScoutFreeze,
   assertLawnFastVisitTypeUnderLock,
 };
