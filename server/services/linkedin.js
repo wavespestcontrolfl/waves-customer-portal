@@ -39,10 +39,6 @@ const ORG_ACLS_URL = 'https://api.linkedin.com/rest/organizationAcls';
 // Article thumbnails are our own CDN-rehosted heroes (~100-300 KB); anything
 // bigger is a misconfiguration, not a legitimate thumbnail.
 const MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024;
-// Upload errors name the caller-supplied image URL (admin publish routes accept
-// any trusted-host URL, query string included); warnings keep the status and
-// reason but never the address.
-const withoutUrls = (msg) => String(msg || '').replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>');
 
 // LinkedIn-API specifics — confirmed against Microsoft Learn Posts API docs
 // (defaultMoniker li-lms-2026-06) on 2026-06. LinkedIn sunsets monthly versions,
@@ -405,9 +401,11 @@ class LinkedInService {
   // renders with no picture at all. Throws on any failure — the createPost
   // call site treats the thumbnail as best-effort and never lets it block the
   // post.
+  // Errors name the failure and status, never the caller-supplied URL: the
+  // callers log err.message, and an admin-supplied URL can carry a token.
   async _uploadImageFromUrl(imageUrl, token) {
     if (!this._isTrustedImageUrl(imageUrl)) {
-      throw new Error(`untrusted thumbnail URL host: ${String(imageUrl).slice(0, 120)}`);
+      throw new Error('untrusted thumbnail URL host');
     }
     const owner = `urn:li:organization:${this.companyId}`;
     const initRes = await fetch(`${IMAGES_URL}?action=initializeUpload`, {
@@ -440,10 +438,10 @@ class LinkedInService {
     let bytes;
     try {
       const imgRes = await fetch(imageUrl, { signal: controller.signal, redirect: 'error' });
-      if (!imgRes.ok) throw new Error(`thumbnail image fetch ${imgRes.status} for ${imageUrl}`);
+      if (!imgRes.ok) throw new Error(`thumbnail image fetch ${imgRes.status}`);
       const declared = Number(imgRes.headers?.get?.('content-length') || 0);
       if (declared > MAX_THUMBNAIL_BYTES) {
-        throw new Error(`thumbnail too large (${declared} bytes declared) for ${imageUrl}`);
+        throw new Error(`thumbnail too large (${declared} bytes declared)`);
       }
       // Enforce the byte cap DURING the read — a body that omits or
       // underreports Content-Length must not buffer past the cap before the
@@ -458,7 +456,7 @@ class LinkedInService {
           total += value.length;
           if (total > MAX_THUMBNAIL_BYTES) {
             controller.abort();
-            throw new Error(`thumbnail exceeds ${MAX_THUMBNAIL_BYTES} bytes mid-read for ${imageUrl}`);
+            throw new Error(`thumbnail exceeds ${MAX_THUMBNAIL_BYTES} bytes mid-read`);
           }
           chunks.push(Buffer.from(value));
         }
@@ -471,9 +469,9 @@ class LinkedInService {
     } finally {
       clearTimeout(timeout);
     }
-    if (!bytes.length) throw new Error(`thumbnail image fetch returned empty body for ${imageUrl}`);
+    if (!bytes.length) throw new Error('thumbnail image fetch returned empty body');
     if (bytes.length > MAX_THUMBNAIL_BYTES) {
-      throw new Error(`thumbnail too large (${bytes.length} bytes) for ${imageUrl}`);
+      throw new Error(`thumbnail too large (${bytes.length} bytes)`);
     }
 
     // ALWAYS re-encode to a clean JPEG before the PUT, for two reasons:
@@ -558,7 +556,7 @@ class LinkedInService {
         try {
           article.thumbnail = await this._uploadImageFromUrl(imageUrl, token);
         } catch (err) {
-          logger.warn(`[linkedin] article thumbnail upload failed (posting without image): ${withoutUrls(err.message)}`);
+          logger.warn(`[linkedin] article thumbnail upload failed (posting without image): ${err.message}`);
         }
       }
       body.content = { article };
@@ -571,7 +569,7 @@ class LinkedInService {
       try {
         body.content = { media: { id: await this._uploadImageFromUrl(imageUrl, token) } };
       } catch (err) {
-        logger.warn(`[linkedin] image upload failed (posting text only): ${withoutUrls(err.message)}`);
+        logger.warn(`[linkedin] image upload failed (posting text only): ${err.message}`);
       }
     }
 

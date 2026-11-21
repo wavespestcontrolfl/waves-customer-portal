@@ -291,8 +291,8 @@ describe('createPost article thumbnail (Images API)', () => {
     const calls = mockRoutes();
     const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
 
-    // An untrusted host throws with the URL in the message.
-    const res = await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: 'https://evil.example.org/x.jpg?token=s3cret' });
+    // An untrusted, scheme-relative URL is refused before any fetch.
+    const res = await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: '//evil.example.org/x.jpg?token=s3cret' });
 
     expect(res).toMatchObject({ platform: 'linkedin', success: true });
     expect(res.imageUrl).toBeUndefined();
