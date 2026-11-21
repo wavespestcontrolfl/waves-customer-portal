@@ -23,6 +23,26 @@ export const PREP_GUIDE_LINKS = [
   description: "Send by email, text, or both",
 }));
 
+// "Send it again" rows: an email the customer already had, through the same
+// send form, email only. `path` is the communications route that sends it.
+const EMAIL_AGAIN = {
+  "email:welcome": {
+    name: "Welcome email", path: "send-welcome", noun: "the email",
+    keywords: "welcome new customer email resend again never got app sign in start",
+    description: "Send the welcome email again",
+    about: "Sends the new-customer welcome email again: how to get the app, sign in and turn on notifications.",
+  },
+  "email:receipt": {
+    name: "Latest receipt email", path: "send-latest-receipt", noun: "the receipt",
+    keywords: "receipt paid payment email resend again never got invoice proof",
+    description: "Email the newest paid receipt again",
+    about: "Emails the receipt for this customer's newest paid invoice again. It goes to the receipt email on file, which can differ from the one shown here. Admin only.",
+  },
+};
+export const EMAIL_AGAIN_LINKS = Object.entries(EMAIL_AGAIN).map(([key, row]) => ({
+  key, name: row.name, keywords: row.keywords, description: row.description, category: "customer", sendForm: true,
+}));
+
 const CHANNELS = [
   { value: "both", label: "Email and text", action: "Send email and text" },
   { value: "email", label: "Email only", action: "Send by email" },
@@ -34,8 +54,14 @@ function customerName(customer) {
     .filter(Boolean).join(" ") || customer.name || customer.phone || "Customer";
 }
 
-export default function PrepGuideForm({ active, guide, initialSearch = "", initialChannel = "both", onSendingChange }) {
+// `guide` is a prep guide row (pestType) or a how-to guide row (steps). A
+// how-to guide goes by email only (owner 2026-11-20): it has no page a text
+// could link to, so `onInsertSteps` puts its steps in the draft instead.
+export default function PrepGuideForm({ active, guide, initialSearch = "", initialChannel = "both", onSendingChange, onInsertSteps }) {
   const formId = useId();
+  const howTo = Array.isArray(guide.steps);
+  const again = EMAIL_AGAIN[guide.key];
+  const emailOnly = howTo || Boolean(again);
   const [channel, setChannel] = useState(initialChannel);
   const [search, setSearch] = useState(initialSearch);
   const [results, setResults] = useState([]);
@@ -80,10 +106,12 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
     onSendingChange(true);
     setResult(null);
     try {
-      const response = await adminFetch("/admin/communications/send-prep", {
-        method: "POST",
-        body: { customerId: selected.id, pestType: guide.pestType, channel },
-      });
+      const [path, body] = again
+        ? [again.path, { customerId: selected.id }]
+        : howTo
+        ? ["send-howto", { customerId: selected.id, guideKey: guide.key.replace(/^howto:/, "") }]
+        : ["send-prep", { customerId: selected.id, pestType: guide.pestType, channel }];
+      const response = await adminFetch(`/admin/communications/${path}`, { method: "POST", body });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || "Couldn't confirm guide delivery.");
       setResult({ ok: !data.partial, text: data.message || "Guide sent." });
@@ -101,7 +129,11 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
       <div>
         <h2 className="text-16 font-medium mb-2">{guide.name}</h2>
         <p className="text-zinc-600 leading-relaxed">
-          {guide.pestType === "sprinkler_timer"
+          {again
+            ? again.about
+            : howTo
+            ? "Sends this guide as an email, with a button that opens the right app screen. It is for customers with an active plan."
+            : guide.pestType === "sprinkler_timer"
             ? "A one-time seasonal tip for recurring lawn customers. The text carries the website guide link and needs no visit. Seasonal Lawn Tips preferences apply."
             : "Email sends the full guide. Text uses the upcoming visit's guide link when available; some guides need a matching visit to be texted."}
         </p>
@@ -145,19 +177,26 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
           </>
         )}
       </fieldset>
-      <fieldset disabled={sending} className="flex flex-col gap-3 min-w-0 border-0 p-0 m-0">
-        <legend className="font-medium mb-2 p-0">Send by</legend>
-        {CHANNELS.map((choice) => (
-          <Radio key={choice.value} id={`${formId}-prep-${choice.value}`} name={`${formId}-prep-channel`}
-            label={choice.label} checked={channel === choice.value} disabled={sending}
-            onChange={() => { setChannel(choice.value); setResult(null); }} />
-        ))}
-      </fieldset>
-      <p className="text-zinc-600 leading-relaxed">This sends the guide separately. Your message draft stays as written.</p>
+      {!emailOnly && (
+        <fieldset disabled={sending} className="flex flex-col gap-3 min-w-0 border-0 p-0 m-0">
+          <legend className="font-medium mb-2 p-0">Send by</legend>
+          {CHANNELS.map((choice) => (
+            <Radio key={choice.value} id={`${formId}-prep-${choice.value}`} name={`${formId}-prep-channel`}
+              label={choice.label} checked={channel === choice.value} disabled={sending}
+              onChange={() => { setChannel(choice.value); setResult(null); }} />
+          ))}
+        </fieldset>
+      )}
+      <p className="text-zinc-600 leading-relaxed">This sends {again ? again.noun : "the guide"} separately. Your message draft stays as written.</p>
       {result && <p role={result.ok ? "status" : "alert"} className={result.ok ? "text-zinc-900" : "text-alert-fg"}>{result.text}</p>}
       <Button type="submit" className="w-full text-14" disabled={!selected || sending || result?.ok}>
-        {sending ? "Sending…" : CHANNELS.find((choice) => choice.value === channel).action}
+        {sending ? "Sending…" : emailOnly ? "Send by email" : CHANNELS.find((choice) => choice.value === channel).action}
       </Button>
+      {howTo && onInsertSteps && (
+        <Button variant="secondary" className="w-full text-14" disabled={sending} onClick={onInsertSteps}>
+          Put the steps in my message instead
+        </Button>
+      )}
     </form>
   );
 }
