@@ -264,6 +264,20 @@ describe('pay run with pay lines', () => {
     expect(amounts.getByText('Tech rewards (season bonus, stay bonus or December gift)')).toBeInTheDocument();
   });
 
+  it('lists a gift that waits, and shows no such list on a run with none', async () => {
+    await openRun();
+    expect(screen.queryByRole('list', { name: 'Bonuses waiting' })).toBeNull();
+    cleanup();
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => {
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: { ...RUN, techRewardsNotes: ['December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a pay run dated Feb 16, 2027 or earlier can add it'] } });
+      return original(path, options);
+    });
+    await openRun();
+    const list = await screen.findByRole('list', { name: 'Bonuses waiting' });
+    expect(within(list).getByText('December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a pay run dated Feb 16, 2027 or earlier can add it')).toBeInTheDocument();
+  });
+
   it('shows the lines and the employer HSA contribution on the stub, outside gross pay', async () => {
     await openRun();
     fireEvent.click(await screen.findByRole('button', { name: 'Stub for Sample Alpha' }));
