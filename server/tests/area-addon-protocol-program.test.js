@@ -111,7 +111,7 @@ describe('the governed rate as numbers (Codex round 8): one place, pinned to the
   // The rate and unit cost each AREA_ADDONS comment states for the material assumption (materialPer1000).
   const STATED = {
     area_addon_bed_pre_emergent: { text: '3.45 lb/1,000 ($2.99/lb)', unitCost: 2.99 },
-    area_addon_lawn_insect_spot: { text: '0.147 oz/1,000 (6.4 oz/acre, $9.87/oz)', unitCost: 9.87 },
+    area_addon_lawn_insect_spot: { text: '0.147 oz/1,000 (6.4 oz/acre, $7.42/oz)', unitCost: 7.42 },
     area_addon_fire_ant_yard: { text: '2 lb/1,000 ($1.83/lb)', unitCost: 1.83 },
     area_addon_lawn_insect_preventive: { text: '0.184 fl oz/1,000 ($14.14/fl oz)', unitCost: 14.14 },
     area_addon_hardscape_weed: { text: '16 fl oz/1,000 ($1.155/fl oz)', unitCost: 1.155 },
