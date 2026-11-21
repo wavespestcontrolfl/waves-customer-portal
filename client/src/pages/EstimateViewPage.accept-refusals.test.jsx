@@ -113,6 +113,21 @@ describe('a refused plan quote (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED
     expect(pageSource).toContain('onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)}');
   });
 
+  it('hands both consumer-notice cards the same answer (codex pre-push P1): a stale tab\'s tap shows the banner', () => {
+    const cards = [];
+    for (let at = pageSource.indexOf('<ConsumerNoticeSign '); at !== -1; at = pageSource.indexOf('<ConsumerNoticeSign ', at + 1)) {
+      cards.push(pageSource.slice(at, pageSource.indexOf('/>', at)));
+    }
+    expect(cards).toHaveLength(2);
+    for (const card of cards) expect(card).toContain('onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)}');
+  });
+
+  it('shows the banner on the website flow\'s quote step, where booking is off (codex pre-push P1)', () => {
+    const at = pageSource.indexOf('<WebsiteEstimateFlow');
+    const flow = pageSource.slice(at, pageSource.indexOf('canBook={canShowSlotPicker && cta.canAccept}', at));
+    expect(flow).toContain('quoteNotice={staleQuoteNote ? slotIssueBanner : null}');
+  });
+
   it('reads a refused quote on a hold extension as a no-booking answer: the settle releases the hold and reloads into the banner', () => {
     const extend = pageSource.indexOf('/reserve/${encodeURIComponent(scheduledServiceId)}/extend`');
     const ok = pageSource.indexOf('if (r.ok) {', extend);

@@ -585,6 +585,39 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     expect(screen.queryByText('Looking further ahead…')).not.toBeInTheDocument();
   });
 
+  // A refused plan quote (codex pre-push P1): the look-ahead reads the same slot route, so its 409 goes to the page too.
+  const LOOKAHEAD_REFUSED = { error: 'This estimate changed since it was created — please go back to your portal for a current price.', code: 'PLAN_START_STATE_CHANGED' };
+  const refusedRead = () => ({ ok: false, status: 409, json: async () => LOOKAHEAD_REFUSED });
+
+  it('a 409 on the 90-day read goes to the page (onRefusal), and the look-ahead shows nothing more (codex pre-push P1)', async () => {
+    const fetchMock = vi.fn(async (url) => (String(url).includes('windowDays=90') ? refusedRead() : jsonResponse(EMPTY_14)));
+    vi.stubGlobal('fetch', fetchMock);
+    const onRefusal = vi.fn(() => true);
+    renderPicker({ onRefusal });
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledWith(409, LOOKAHEAD_REFUSED));
+    await waitFor(() => expect(screen.queryByText('Looking further ahead…')).not.toBeInTheDocument());
+    expect(screen.queryByText('The next 2 weeks are full. Here are open times after that:')).not.toBeInTheDocument();
+    expect(wideCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('a 409 on the first-open-day read goes to the page too, and the 90-day times are not shown over it (codex pre-push P1)', async () => {
+    const fetchMock = vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes('windowDays=90')) {
+        return jsonResponse({ primary: [SLOT_DEC06], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21', openCount: 1 } } });
+      }
+      if (u.includes('windowDays=14')) return jsonResponse(EMPTY_14);
+      return refusedRead();
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const onRefusal = vi.fn(() => true);
+    renderPicker({ onRefusal });
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledWith(409, LOOKAHEAD_REFUSED));
+    await waitFor(() => expect(screen.queryByText('Looking further ahead…')).not.toBeInTheDocument());
+    expect(screen.queryByText('The next 2 weeks are full. Here are open times after that:')).not.toBeInTheDocument();
+    expect(dateCalls(fetchMock)).toHaveLength(1);
+  });
+
   it('adds the true first open day (one ?date= read) when the capped list misses it', async () => {
     const fetchMock = stubFetch({
       wide: {

@@ -227,6 +227,8 @@ export default function SlotPicker({
     pickedDate,
     isStale: (slot) => glass && glassSlotIsStale(slot),
     formatTime: (slot) => String(formatSlotDate(slot.date, slot.windowStart).window).split('–')[0],
+    // Its reads hit the same slot route, so a 409 the page owns goes up from them too (codex pre-push P1).
+    onRefusal: (_status, body) => pageTookRefusal(body),
   });
 
   const selectSlot = (slot) => {

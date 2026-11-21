@@ -2181,9 +2181,12 @@ extension, a slot read, a 3DS return), is retired by its `setup_intent.succeeded
 and acks instead of waiting for an accept, even with the recurring-card kill switch off (Stripe unable to
 confirm = the event retries). The page
 answers that 409 from every card step (the modal mint, the replace-method call and the inline
-pre-mint), from the reserve and from its slot reads (the slot picker hands a 409 up through
-`onRefusal`: the list, a picked date and the date search) with the same banner, and reads it on a
-hold extension as a no-booking answer (release the hold, then reload into the banner). A load whose
+pre-mint), from the reserve, from its slot reads (the slot picker hands a 409 up through
+`onRefusal`: the list, a picked date, the date search and the 90-day look-ahead) and from the consumer
+notice tap (the card steps aside) with the same banner, and reads it on a
+hold extension as a no-booking answer (release the hold, then reload into the banner). In website mode
+(`?website=1`) a refused quote turns booking off, so the quote step shows the banner in place of the
+contact line. A load whose
 `/data` carries the mark and still lists a live hold releases that hold with the same
 release-then-refresh recovery, once per hold, and never adopts it; only the customer's own page does
 this, never a staff preview or the headless PDF capture (`?mode=pdf`). The office's stuck-booking

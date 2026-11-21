@@ -10398,7 +10398,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <>
           {/* The booking step (with the notice card) is hidden during review: a notice asked for after the customer
               reached review (the gate turned on, or a refused accept) is signed right here. */}
-          {consumerNoticeBlocked ? <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} /> : null}
+          {consumerNoticeBlocked ? <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)} /> : null}
           <ConsumerNoticeHint blocked={consumerNoticeBlocked} />
           {existingAppointment ? (
             <>
@@ -10760,7 +10760,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const bookingContent = (
     <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {/* Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): right above the accept controls; absent with the gate off. */}
-            <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} />
+            <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)} />
             {canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId
               ? <SlotIssueBanner key={pickTimePrompt} kind="pick_time" /> : null}
             {canShowSlotPicker ? (
@@ -10881,6 +10881,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
         bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
+        // A refused plan quote turns booking off, so the booking step (and its banner) is never offered: the quote
+        // step shows the banner with the portal link instead of "Our team will contact you" (codex pre-push P1).
+        quoteNotice={staleQuoteNote ? slotIssueBanner : null}
         reviewing={!!reservation && (ctaPhase === 'review' || (ctaPhase === 'submitting' && !!inlineCardIntent))}
         busy={ctaPhase === 'submitting'} timer={reservation?.expiresAt ? (
           <HoldCountdownBarWhenTimed
