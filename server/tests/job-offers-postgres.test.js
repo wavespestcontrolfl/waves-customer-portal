@@ -1706,6 +1706,16 @@ jest.setTimeout(120000);
         expect(mockRaise).not.toHaveBeenCalled();
       });
 
+      test('an email that is another staff row\'s Google sign-in address makes no row', async () => {
+        const email = applicantEmail();
+        await root('technicians').insert({ name: 'Linked Tech', email: applicantEmail(), google_email: email.toUpperCase() });
+        const { offer, token } = await openOffer({ contact_snapshot: contactOf(email) });
+        await sign(token);
+        expect(await offerRow(offer.id)).toMatchObject({ technician_id: null, checklist: { staff_record: { made: false, reason: 'email_in_use' } } });
+        expect(await root('technicians').where({ email }).first()).toBeUndefined();
+        expect(mockRaise.mock.calls.map(([, spec]) => spec.action)).toContain("Jordan Rivera's staff record was not made");
+      });
+
       test('an owner login address is never given to a new staff row', async () => {
         const saved = process.env.IB_FULL_ACCESS_EMAILS;
         const email = applicantEmail();

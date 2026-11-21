@@ -9395,7 +9395,13 @@ shows stays a failed read (the load error, or Check again). Here the paths witho
 for a tab that opened the page from before `/v2` (#8091 posts there with its version). A signature is also refused
 the same way (409 `{state:'open'}`, no write, a warning logged) when the frozen offer lacks a term the page shows (the
 job, a real start date, an hourly rate of whole cents, the week, who they report to, pay day, the Terms, and a pay step
-only with both its rate and its date; no raise is both sent as null), so no client signs a gap. The page never
+only with both its rate and its date; no raise is both sent as null), so no client signs a gap. A signature that is
+stored then makes the hire's staff record in a SECOND transaction, after the signature's commit (`makeStaffRecord`: a
+prospective `technicians` row and, when the offer has a pay step, a `payroll_rate_steps` row; `job_offers.technician_id`
+and `checklist.staff_record` record what it made). The answer to the applicant does not depend on it: an error there is
+logged, the answer is still `{state:'signed'}`, and the 15-minute `job-offer-staff-records` pass makes the record
+later, so a signed offer can stand for some minutes with no staff row. It waits at most 3 seconds for a lock, and an
+identical replay of a signature never runs it again. The page never
 applies an open read or a text-choice save without a `version` (a server from before it): such a read marks the page out
 of date (above), and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
 controls only for a read whose state is explicitly `open` and that carries the text choice, non-empty Terms and every

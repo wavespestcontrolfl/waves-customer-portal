@@ -1568,8 +1568,8 @@ async function addOfferPayStep(trx, technicianId, offer) {
  * writer takes. checklist.staff_record is written in the same transaction as what the step made, so a second call
  * does nothing, and an error leaves no mark: the 15-minute pass (makeDueStaffRecords) tries that offer again.
  *
- * No row is made when the application's email is already a staff login's (another staff row, of any status, or an
- * owner login address): a bell asks the owner to add the hire by hand. A pay step the payroll rules refuse leaves the
+ * No row is made when the application's email is already a staff login's (the staff email or the linked Google
+ * address of another staff row, of any status, or an owner login address): a bell asks the owner to add the hire by hand. A pay step the payroll rules refuse leaves the
  * row made, with a bell. Both bells are written in this transaction.
  *
  * Returns 'made' | 'refused' | null (nothing to do: not signed, the application is no longer Hired, the step already
@@ -1582,7 +1582,7 @@ async function makeStaffRecord(offerId) {
     const offer = application && await trx('job_offers').where({ id: offerId }).forUpdate().skipLocked().first();
     if (!offer || !staffRecordDue(application, offer)) return null;
 
-    const { canonicalStaffEmail, findStaffByCanonicalEmail, lockStaffIdentityWrites } = require('../utils/staff-identity');
+    const { canonicalStaffEmail, findStaffByLoginEmail, lockStaffIdentityWrites } = require('../utils/staff-identity');
     const hasStep = offer.step_rate != null && Boolean(offer.step_effective_on);
     await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(STAFF_LOCK_WAIT_MS)]);
     if (hasStep) await require('./payroll-lock').lockPayrollMutations(trx);
@@ -1595,7 +1595,7 @@ async function makeStaffRecord(offerId) {
     const contact = contactOf(application);
     const email = canonicalStaffEmail(contact.email);
     const emailTaken = Boolean(email) && (require('./intelligence-bar/ib-access').isFullAccessEmail(email)
-      || Boolean(await findStaffByCanonicalEmail(trx, email)));
+      || Boolean(await findStaffByLoginEmail(trx, email)));
     if (emailTaken) {
       await store({ made: false, reason: 'email_in_use' });
       await raiseBell('staff_record', offer, null, trx);

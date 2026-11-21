@@ -23,6 +23,15 @@ async function findStaffByCanonicalEmail(connection, email, excludeId) {
   return query.first('id');
 }
 
+// The staff row a sign-in address belongs to: its staff email (password sign-in), or its linked Google address
+// (staff-google-signin.js reads that column the same way). For a caller that must not give a new row an address
+// some staff member already signs in with.
+async function findStaffByLoginEmail(connection, email) {
+  if (!email) return null;
+  return (await findStaffByCanonicalEmail(connection, email))
+    || connection('technicians').whereRaw('LOWER(google_email) = ?', [email]).first('id');
+}
+
 // The staff table is small and identity mutations are rare. Serialize them to
 // make canonical-email uniqueness and last-admin checks race-safe.
 async function lockStaffIdentityWrites(trx) {
@@ -33,5 +42,6 @@ module.exports = {
   MAX_STAFF_EMAIL_LENGTH,
   canonicalStaffEmail,
   findStaffByCanonicalEmail,
+  findStaffByLoginEmail,
   lockStaffIdentityWrites,
 };
