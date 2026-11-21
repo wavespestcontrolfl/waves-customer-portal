@@ -6,7 +6,10 @@
  *
  * Eligible: a PAID invoice whose link reaches the account holder alone (no
  * third-party payer on the invoice or the account, no service contact on the
- * account — linkReachesOnlyAccountHolder), and not for a complaint-driven
+ * account — linkReachesOnlyAccountHolder; and the receipt email's own
+ * recipient resolver, getReceiptEmailRecipients, picks the account holder —
+ * a distinct notification_prefs.billing_email means the receipt goes to
+ * someone else), and not for a complaint-driven
  * visit (owner 2026-08-30, the report's rule: no upsell or referral ask after
  * a callback). The offer is the service report's
  * own composer over the visit the invoice is for; an invoice with no visit
@@ -23,10 +26,14 @@ function loadReceiptCardRow(where, database = db) {
   return database('invoices as i')
     .leftJoin('customers as c', 'i.customer_id', 'c.id')
     .leftJoin('service_records as sr', 'i.service_record_id', 'sr.id')
+    .leftJoin('notification_prefs as np', 'np.customer_id', 'i.customer_id')
     .where(where)
     .first(
       'i.id', 'i.customer_id', 'i.status', 'i.payer_id', 'i.service_record_id',
       'c.payer_id as customer_payer_id',
+      'c.email as customer_email', 'c.phone as customer_phone',
+      'c.first_name as customer_first_name', 'c.company_name as customer_company_name',
+      'np.billing_email', 'np.billing_contact_name',
       'sr.is_callback as visit_is_callback',
       ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
     );
@@ -41,6 +48,16 @@ function receiptCardsEligible(row) {
   if (!isEnabled('docCrossSell') || !row?.customer_id || row.status !== 'paid') return false;
   const { reserviceReportCopyGateOn } = require('./service-report/reservice-report');
   if (reserviceReportCopyGateOn() && row.visit_is_callback === true) return false;
+  // The receipt goes where the receipt email goes: the account holder, or a
+  // distinct billing contact (who must not start the plan or enroll as the
+  // homeowner's promoter). Same resolver as resolveReceiptEmailRecipient.
+  const { getReceiptEmailRecipients } = require('./customer-contact');
+  const holder = {
+    email: row.customer_email, phone: row.customer_phone,
+    first_name: row.customer_first_name, company_name: row.customer_company_name,
+  };
+  const prefs = { billing_email: row.billing_email, billing_contact_name: row.billing_contact_name };
+  if (getReceiptEmailRecipients(holder, prefs).some((r) => r.role !== 'primary')) return false;
   const { linkReachesOnlyAccountHolder } = require('./service-report/cross-sell-tap');
   return linkReachesOnlyAccountHolder(row, [row.payer_id, row.customer_payer_id]);
 }

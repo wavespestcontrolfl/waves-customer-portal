@@ -143,14 +143,17 @@ test('a callback visit gets neither card (the report\'s rule, with the re-servic
   }
 });
 
-// Codex #8262 P0: the router-wide 120/min limiter runs ahead of every route,
-// so the dark card taps must skip it — over the budget they still answer the
-// generic 404, never a revealing 429. Real HTTP through the real router.
+// Codex #8262 P0: every limiter (the global /api/ one and the tracker's
+// router-wide 120/min one) sits behind the dark guard index.js mounts first —
+// over the budget the dark taps still answer the generic 404, never a
+// revealing 429. Real HTTP through the guard + the real router.
 test('gate off: more than the router budget of card taps all answer 404, never 429', async () => {
   isEnabled.mockReturnValue(false);
   const express = require('express');
   const app = express();
   app.use(express.json());
+  const { docCardTapDarkGuard } = require('../middleware/doc-card-tap-dark-guard');
+  app.use('/t', (req, res, next) => docCardTapDarkGuard({ error: 'Not found' }, req, res, next));
   app.use('/t', router);
   const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
   try {

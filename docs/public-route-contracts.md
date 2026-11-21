@@ -3404,7 +3404,8 @@ composer over the invoice's or visit's service record
 which also applies the complaint-visit suppression). Only when the link
 reaches the account holder alone (`linkReachesOnlyAccountHolder`: no
 third-party payer on the invoice, job or account, no service contact on the
-account); otherwise, and with the gate off, the keys are absent and the
+account; for the receipt also no distinct `notification_prefs.billing_email`,
+via the receipt email's own `getReceiptEmailRecipients`); otherwise, and with the gate off, the keys are absent and the
 payload is unchanged. A receipt with no `service_record_id`, or a visit whose
 report is not customer-deliverable, carries `referral` alone. The taps
 (`POST /api/receipt/:token/cross-sell` | `/referral-link`, `POST
@@ -3415,9 +3416,10 @@ one shared `service_requests` row with source `invoice_receipt` / `tracker`,
 `estimateUrl` with `GATE_REPORT_CLICK_TO_ESTIMATE`) and its referral composer
 (enrolls on the tap only). 404 when off or ineligible; a dark gate or a
 malformed token (receipt: the pay route's `^[A-Za-z0-9_-]{20,64}$`; tracker:
-64-hex) is the generic 404 AHEAD of the limiter and any DB read, and the
-tracker's router-wide 120/min limiter skips the two taps while the gate is
-dark, so the dark routes never answer 429; 5 a minute per token; a
+64-hex) is the generic 404 AHEAD of the limiter and any DB read; while the
+gate is dark, `middleware/doc-card-tap-dark-guard.js` (mounted in
+`server/index.js` ahead of the global `/api/` limiter) answers both taps'
+generic 404 with the privacy headers, so the dark routes never answer 429; 5 a minute per token; a
 complaint-driven (callback) visit carries neither card and its taps 404 while
 `GATE_RESERVICE_REPORT_COPY` is on (the report's rule);
 a receipt tap never records a receipt view. The receipt page shows the

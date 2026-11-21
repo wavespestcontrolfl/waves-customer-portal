@@ -443,6 +443,12 @@ app.use('/api/public/lawn-assessment', (req, res, next) => {
   }
   next();
 });
+// Receipt and tracker card taps (GATE_DOC_CROSS_SELL): the same
+// unobservable-when-dark contract, ahead of the global /api/ limiter. Each
+// mount answers with its own route's not-found body.
+const { docCardTapDarkGuard } = require('./middleware/doc-card-tap-dark-guard');
+app.use('/api/receipt', (req, res, next) => docCardTapDarkGuard({ error: 'Receipt not found' }, req, res, next));
+app.use('/api/public/track', (req, res, next) => docCardTapDarkGuard({ error: 'Not found' }, req, res, next));
 // Interview self-scheduling family (GATE_RECRUITING_COMMS): token-route
 // privacy headers on EVERY response — mounted ahead of the outer careers
 // gate below so the dark 404 from either gate (jobApplications OR

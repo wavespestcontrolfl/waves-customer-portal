@@ -82,16 +82,14 @@ const SERVICE_PHOTO_TTL_SECONDS = PhotoService.CUSTOMER_DWELL_TTL_SECONDS;
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 
-// The two card taps (GATE_DOC_CROSS_SELL) skip this limiter while the gate
-// is dark (AGENTS.md: a dark route skips its limiter so a probe never sees
-// a revealing 429) — their route guard answers the generic 404.
-const CARD_TAP_PATH_RE = /^\/[^/]+\/(cross-sell|referral-link)\/?$/;
+// The two card taps (GATE_DOC_CROSS_SELL) never reach this limiter while
+// the gate is dark: middleware/doc-card-tap-dark-guard.js answers their 404
+// in server/index.js ahead of every limiter.
 router.use(rateLimit({
   windowMs: 60 * 1000,
   max: 120,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.method === 'POST' && CARD_TAP_PATH_RE.test(req.path || '') && !isEnabled('docCrossSell'),
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 

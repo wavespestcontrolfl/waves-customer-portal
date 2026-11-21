@@ -80,6 +80,7 @@ describe('GET /:token — the cards ride the receipt payload', () => {
     ['account billed to a third-party payer', () => mockFirst.mockResolvedValue({ ...INVOICE, customer_payer_id: 3 })],
     ['a service contact can also get this link', () => mockFirst.mockResolvedValue({ ...INVOICE, service_contact_name: 'Tenant Tina', service_contact_email: 't@example.com' })],
     ['not paid', () => mockFirst.mockResolvedValue({ ...INVOICE, status: 'refunded' })],
+    ['a distinct billing email gets this receipt', () => mockFirst.mockResolvedValue({ ...INVOICE, customer_email: 'pat@example.com', billing_email: 'books@example.com' })],
     ['a callback visit (the report\'s rule)', () => {
       process.env.GATE_RESERVICE_REPORT_COPY = 'true';
       mockFirst.mockResolvedValue({ ...INVOICE, visit_is_callback: true });
@@ -164,4 +165,10 @@ describe('the taps answer the generic 404 ahead of the limiter (a dark route nev
     expect(res.statusCode).toBe(404);
     expect(mockFirst).not.toHaveBeenCalled();
   });
+});
+
+test('a billing email that is the holder\'s own address keeps the cards', async () => {
+  mockFirst.mockResolvedValue({ ...INVOICE, customer_email: 'pat@example.com', billing_email: 'PAT@example.com' });
+  const { res } = await call('get', '/:token');
+  expect(res.json.mock.calls[0][0]).toEqual(expect.objectContaining({ crossSell: OFFER, referral: REFERRAL }));
 });
