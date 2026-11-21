@@ -971,6 +971,7 @@ module.exports = {
   normalizedEstimateStreet,
   makeEstimateScopeKeys,
   normalizedStampedStreet,
+  partialPartsHaveAddressEvidence,
   sameScopeKey,
   scopeKeyLacksLocality,
   scopeKeysShareLocality,
