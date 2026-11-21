@@ -42,11 +42,25 @@ jest.mock('../services/customer-credit', () => ({
   let sendCustomerMessage;
   let sendTemplate;
 
+  // Every fixture customer gets its own phone, outside the 555-01xx numbers some tests set by hand. Two customers
+  // with one phone are one household (sameHousehold), so a repeated random draw failed a confirm with "A customer
+  // cannot refer their own household" on unrelated runs (main, 2026-11-20, twice).
+  const usedPhones = new Set();
+  function freshPhone() {
+    for (;;) {
+      const phone = `+1941555${1000 + Math.floor(Math.random() * 9000)}`;
+      if (!usedPhones.has(phone)) {
+        usedPhones.add(phone);
+        return phone;
+      }
+    }
+  }
+
   async function customer(fields = {}) {
     const [row] = await db('customers').insert({
       first_name: 'Fixture',
       last_name: `Person${Math.floor(Math.random() * 1e6)}`,
-      phone: `+1941555${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`,
+      phone: freshPhone(),
       account_id: randomUUID(),
       active: true,
       ...fields,
