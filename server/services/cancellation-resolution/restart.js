@@ -33,6 +33,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { FAMILY_LABELS } = require('./templates');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
+const { holdLockSlot } = require('../../utils/cron-lock');
 
 const SOURCE = 'plan_restart';
 const HAND_PRICED_RESTART = 'This restart needs to be set up by hand — please call or text us and we will take care of it.';
@@ -1364,13 +1365,68 @@ async function publishMintedEstimate(mint, { offer, estimateData }) {
   return { estimateId: created.id, token, url: `/estimate/${token}`, reused: false };
 }
 
+// mintTransaction: the transaction both mints run in, with a cap on how many
+// run at once in this process (#8132 pre-push r26, r40). A mint holds its
+// transaction's connection from its first lock to the commit, and some of
+// its reads take a second one from the pool (the cached property lookup,
+// the verified-correction probe, the send snapshot's pricing bundle). With
+// no cap, as many mints as the pool has connections can each hold one and
+// wait for a second that no one can give. Every one of them fails when the
+// pool's wait ends, and until then no other request gets a connection.
+// One mint for every MINT_POOL_SHARE pool connections runs at once (5 on
+// the default 20), so the mints together use at most half of the pool.
+// A tap beyond that does not wait (#8256 pre-push r1, r3). It is refused at
+// once with a coded answer, which both cards show and neither turns into a
+// request: nothing was read, minted or archived, and the customer taps
+// again. cron-lock.js has the same rule for every request-scoped lock: a
+// request parked in a line does its work after its client gave up, and here
+// that work archives a quote and frees its slot hold. The words are the
+// ones this module's failed-read refusals already use.
+// A pool under four connections has no quarter to give (#8256 pre-push r2).
+// The cron locks (utils/cron-lock.js) may pin half of any pool, and at least
+// one connection: a mint beside one lock holder would pin both connections
+// of a pool of two, the floor in knexfile.js. There the mint takes one of
+// the lock holders' slots, so one holder of either kind runs at a time. On
+// four connections or more the two caps together leave a quarter of the
+// pool free, and the cron jobs, which do reach their cap in production,
+// never cost a mint its slot.
+const MINT_POOL_SHARE = 4;
+const MINT_SLOTS_UNKNOWN_POOL = 5;
+const MINT_BUSY_MESSAGE = 'We could not verify your services just now. Please try again in a moment.';
+let mintsRunning = 0;
+function mintSlotLimit(dbh) {
+  const poolMax = Number(dbh?.client?.pool?.max);
+  if (!Number.isFinite(poolMax) || poolMax <= 0) return MINT_SLOTS_UNKNOWN_POOL;
+  return Math.floor(poolMax / MINT_POOL_SHARE);
+}
+function giveBackMintSlot() {
+  mintsRunning -= 1;
+}
+// Answers the function that gives the slot back, or null when none is free.
+function takeMintSlot(dbh) {
+  const limit = mintSlotLimit(dbh);
+  if (limit === 0) return holdLockSlot();
+  if (mintsRunning >= limit) return null;
+  mintsRunning += 1;
+  return giveBackMintSlot;
+}
+async function mintTransaction(dbh, work) {
+  const giveBack = takeMintSlot(dbh);
+  if (!giveBack) throw new RestartUnavailableError('busy', MINT_BUSY_MESSAGE);
+  try {
+    return await dbh.transaction(work);
+  } finally {
+    giveBack();
+  }
+}
+
 async function mintRestartEstimate({ customer, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {} }) {
   if (!customer || !customer.id) throw new Error('mintRestartEstimate requires a customer row');
   const mintDeps = resolveMintDeps(deps);
   const dbh = deps.db || db;
   const nowDate = now();
 
-  return dbh.transaction(async (trx) => {
+  return mintTransaction(dbh, async (trx) => {
     // Customer-comms advisory lock FIRST (lock-order contract §1,
     // utils/customer-comms-lock.js — before this txn's own customers row
     // lock). It is also the FIRST lock the public accept transaction takes
@@ -1500,7 +1556,7 @@ async function mintPlanStartEstimate({
   const dbh = deps.db || db;
   const nowDate = now();
 
-  return dbh.transaction(async (trx) => {
+  return mintTransaction(dbh, async (trx) => {
     // Same lock order as the restart mint and the public accept (contract §1).
     await lockCustomerComms(trx, customer.id);
     const fresh = await trx('customers').where({ id: customer.id }).whereNull('deleted_at').forUpdate().first();
@@ -1800,6 +1856,7 @@ module.exports = {
   RestartUnavailableError,
   cancelledFamiliesFor,
   mintRestartEstimate,
+  mintTransaction,
   assertRestartAcceptEligible,
   PLAN_START_SOURCE,
   PLAN_START_SERVICE_KEYS,
