@@ -272,7 +272,11 @@ async function safeSelect(db, table, buildQuery) {
   }
 }
 
-async function loadCurrentServiceKeys(db, customer) {
+// strict (strictPriceSettings, a price nobody watches): a failed read of the
+// qualifying services is not "no current services". The reader's own strict
+// form throws where its default reads a failure as "not a member", and the
+// price is then withheld, as for a failed ownership read.
+async function loadCurrentServiceKeys(db, customer, { strict = false } = {}) {
   if (!db || !customer?.id) return { currentServiceKeys: [], ownedServiceKeys: [] };
   try {
     // Scope BOTH sets to the property being priced (codex #3253 r2): this
@@ -296,17 +300,18 @@ async function loadCurrentServiceKeys(db, customer) {
     // undercount earned tiers). ownedSet is unioned with the qualifying keys
     // downstream, so a failed ownership lookup degrades to qualifying-only.
     let currentServiceKeys = [];
+    let ownershipLookupFailed = false;
     try {
       // WaveGuard is count-based across the customer's actual active
       // recurring qualifying services. A tier label alone never identifies
       // which services the customer bought, so it must not seed a
       // Pest/Lawn/Mosquito basket.
-      currentServiceKeys = (await loadExistingQualifyingServiceKeys(db, customer.id, { streetScope })).map(mapKey);
+      currentServiceKeys = (await loadExistingQualifyingServiceKeys(db, customer.id, strict ? { streetScope, strict: true } : { streetScope })).map(mapKey);
     } catch (err) {
+      ownershipLookupFailed = strict;
       logger.warn(`[customer-pricing-ai] qualifying service lookup skipped: ${err.message}`);
     }
     let ownedServiceKeys = [];
-    let ownershipLookupFailed = false;
     try {
       // Ownership is BROADER than qualification (codex #3253 r2): recurring
       // rodent bait monitoring never raises a tier but absolutely means the
@@ -1187,10 +1192,85 @@ function buildQuoteOption({
   };
 }
 
-async function maybeSyncPricingEngine(db) {
+// The refresh of the engine's price settings, right before the engine prices.
+// Default: best-effort, the code as it was. The bridge answers a failed
+// refresh with the values it had (the code defaults on a cold start), and a
+// card a person reads may show a price from those.
+// strict (strictPriceSettings): see strictPriceSettingsRefresh.
+async function maybeSyncPricingEngine(db, { strict = false } = {}) {
+  if (strict) return strictPriceSettingsRefresh(db);
   if (!db || !db.schema || typeof db.schema.hasTable !== 'function') return;
   if (pricingEngine.needsSync && pricingEngine.needsSync()) {
     await pricingEngine.syncConstantsFromDB(db);
+  }
+}
+
+// strictPriceSettings (opt-in, for a caller that prices with nobody watching:
+// the plan offer after a one-time job). It is the price of the standard pest
+// plan for an account that may start a plan, from price settings that are
+// loaded and are the rows' own. Three rules. No caller passes it yet.
+//
+// 1. The account (strictPriceAccountBlocker). The bridge can say "from the
+//    rows" for the standard pest price only, and only for a customer who has
+//    no other service: the engine prices the qualifying services a customer
+//    has now too (the current plan, each option's plan total and its tier),
+//    from settings the bridge has no answer for. So strict asks the one
+//    shared answer to "may this account start a plan" (planStartBlocker:
+//    a live account, a home, no record of a plan), and refuses also when the
+//    pricer's own read of the calendar finds a recurring service. The error
+//    carries code PLAN_START_BLOCKED and the blocker, so a caller can tell
+//    the customer's state from its own mistake. A failed read of the shared
+//    answer throws as it is: an outage is never "this account has no plan".
+// 2. The refresh (strictPriceSettingsRefresh). A refresh that is due and
+//    does not succeed throws PRICING_CONFIG_UNAVAILABLE. A refresh that is
+//    RUNNING is waited for: it may have changed part of the settings
+//    already, and the bridge runs one refresh at a time, so the one asked for
+//    here starts after the running one and loads the settings again.
+// 3. The rows (assertStrictPriceRows), asked AFTER the engine priced and in
+//    the same turn, with no await in between. A refresh answers true when
+//    pricing_config holds any row at all; for a row or a field that is
+//    missing the engine keeps what it had (the in-code default on a cold
+//    start, an earlier value on a warm process). The bridge's answer
+//    (standardPestPriceRowsAreComplete) is yes when the rows of the last good
+//    refresh carried every input of the standard pest price and no refresh
+//    is running now. Asked in the turn the engine priced, a yes holds for
+//    the prices just computed: a refresh begins with a database read, so
+//    none can change the settings inside one turn. A refresh that started
+//    since reads as no, and the price is thrown away.
+function priceSettingsUnavailable(message) {
+  return Object.assign(new Error(message), { code: 'PRICING_CONFIG_UNAVAILABLE' });
+}
+async function strictPriceSettingsRefresh(db) {
+  const bridge = require('./pricing-engine/db-bridge');
+  const canSync = Boolean(db && db.schema && typeof db.schema.hasTable === 'function');
+  const due = Boolean(pricingEngine.needsSync && pricingEngine.needsSync());
+  if (due || bridge.isSyncInFlight()) {
+    const synced = canSync ? await pricingEngine.syncConstantsFromDB(db) : false;
+    if (synced !== true) throw priceSettingsUnavailable('live price settings could not be loaded');
+  }
+}
+// strict reads the customer's current services and the account's records.
+// Without a handle or a customer id the first would read as "none": a
+// caller's mistake, never a price.
+function assertStrictPriceCall(db, customer) {
+  if (!db || !customer?.id) throw new Error('strictPriceSettings needs a database handle and a customer id');
+}
+function assertStrictPriceRows() {
+  if (!require('./pricing-engine/db-bridge').standardPestPriceRowsAreComplete()) {
+    throw priceSettingsUnavailable('the pest price settings are not complete in their rows, or a refresh is running');
+  }
+}
+// Throws for a strict request the pricer must not price. `ownedSet` is the
+// pricer's own read of the recurring services at the priced property.
+async function assertStrictPriceAccount(db, customer, ownedSet, servicesToPrice) {
+  // A service to price other than pest control: a caller's mistake.
+  if (servicesToPrice.some((key) => key !== 'pest_control')) {
+    throw new Error('strictPriceSettings prices pest control only');
+  }
+  const blocker = (await require('./plan-start-eligibility').planStartBlocker(db, customer.id))
+    || (ownedSet.size ? 'has_plan' : null);
+  if (blocker) {
+    throw Object.assign(new Error(`strictPriceSettings: the account may not start a plan (${blocker})`), { code: 'PLAN_START_BLOCKED', blocker });
   }
 }
 
@@ -1215,9 +1295,16 @@ async function buildCustomerPricingResponse({
   // Its account reads serve the card's book button alone; the report cross-sell and portal-offer
   // builders would discard it (codex pre-push P1).
   includePlanStartHint = false,
+  // Opt-in ONLY (a caller that prices with nobody watching): the standard
+  // pest plan's price for an account that may start a plan, from price
+  // settings that are loaded and are the rows' own. It throws where the
+  // default answers from what the engine had (the three rules above
+  // strictPriceSettingsRefresh). No caller passes it yet.
+  strictPriceSettings = false,
 }) {
   const text = String(prompt || '').trim();
-  const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
+  if (strictPriceSettings) assertStrictPriceCall(db, customer);
+  const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer, { strict: strictPriceSettings });
   // Two sets on purpose (codex #3253 r2): currentServiceKeys (WaveGuard
   // qualifying) keeps modeling the baseline plan/tier exactly as before;
   // ownedSet is the superset every never-re-price decision reads, so a
@@ -1294,6 +1381,8 @@ async function buildCustomerPricingResponse({
   // geocoding/AI property lookup (cache writes, provider cost, latency).
   const alreadyIncluded = requestedServices.filter(key => ownedAndNotRepeatable(key, ownedSet));
   const servicesToPrice = requestedServices.filter(key => !alreadyIncluded.includes(key));
+  // Refused before any property lookup and before the refresh.
+  if (strictPriceSettings) await assertStrictPriceAccount(db, customer, ownedSet, servicesToPrice);
 
   let lookupFn = propertyLookup;
   if (!lookupFn && servicesToPrice.length) {
@@ -1343,7 +1432,7 @@ async function buildCustomerPricingResponse({
     };
   }
 
-  await maybeSyncPricingEngine(db);
+  await maybeSyncPricingEngine(db, { strict: strictPriceSettings });
 
   const context = {
     grassType: propertyContext.grassType,
@@ -1428,6 +1517,9 @@ async function buildCustomerPricingResponse({
       }
     }
   }
+  // Same turn as the engine calls above: nothing between the refresh and
+  // this line awaits (rule 3 above strictPriceSettingsRefresh).
+  if (strictPriceSettings) assertStrictPriceRows();
 
   // A mixed prompt ("upgrade my lawn care and add mosquito") must not lose the
   // owned half just because the new half priced (codex r1 P2).

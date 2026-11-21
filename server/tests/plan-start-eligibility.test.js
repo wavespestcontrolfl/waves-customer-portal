@@ -1231,6 +1231,8 @@ describe('planStartBlocker', () => {
         ['a payload that is a bare text', LEAD({ extracted_data: JSON.stringify('asked about pest control') })],
         ['a quiz answered for a house, a townhome or a condo', LEAD({ extracted_data: { quiz: { kind: 'pest', property: 'house' }, earlier: [{ quiz: { kind: 'lawn', property: 'townhome' } }, { quiz: { kind: 'pest', property: 'condo' } }] } })],
         ['a quiz with no property answer', LEAD({ extracted_data: { quiz: { kind: 'lawn', seeing: 'brown_patches' } } })],
+        // The 'business' answer is an answer of a quiz. The same word under the same name in another object is not one.
+        ["the word 'business' under `property` in an object that is not a quiz", LEAD({ extracted_data: { survey: { kind: 'pest', property: 'business' }, property: 'business' } })],
         ['a residential category beside a residential type', LEAD({ extracted_data: { enriched: { category: 'RESIDENTIAL', propertyType: 'single_family' }, quote: { commercialEstimatedPricing: false } } })],
         ['an open question about a business at the address, and the answer "not this business"', LEAD({ extracted_data: { enriched: { serviceScopeDecision: 'scope_unresolved', occupancyAnswer: 'none', commercialDetectionSource: null } } })],
         ['labels that name a home, in the column and in the payload', LEAD({ service_interest: 'Pest control for the home office', extracted_data: { stage: 'lead_webhook_received', service_interest: 'Lawn care for my house' } })],
