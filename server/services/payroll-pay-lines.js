@@ -36,36 +36,41 @@ const KINDS = ['review_bonus', 'commission', 'health_allowance', 'hsa_employer']
 const TECH_REWARD_KINDS = ['season_bonus', 'stay_bonus', 'december_gift'];
 // source_type of the lines the pay run's Tech Rewards sync writes (tech-rewards-pay-lines.js).
 const TECH_REWARDS_SOURCE = 'tech_rewards';
-// The kinds that sync writes today. The season bonus and the stay bonus come with part 3.
-const TECH_REWARDS_SYNC_KINDS = ['december_gift'];
-// The source id of the sync's line for one technician and one year.
-const techRewardsSourceId = (kind, technicianId, year) => `${kind}:${technicianId}:${year}`;
+// The kinds that sync writes, each with the form of its key (the last part of the source id). The season bonus comes later.
+//   december_gift   the year of the gift, 4 digits
+//   stay_bonus      the years of service of the milestone: 1, 3 or 5. One key for a milestone whatever its date, so a hire
+//                   date corrected after the bonus was paid never pays the same milestone again.
+const TECH_REWARDS_KEYS = { december_gift: { length: 4, pattern: '^[0-9]{4}$' }, stay_bonus: { length: 1, pattern: '^[135]$' } };
+const TECH_REWARDS_SYNC_KINDS = Object.keys(TECH_REWARDS_KEYS);
+// The source id of the sync's line for one technician and one key.
+const techRewardsSourceId = (kind, technicianId, key) => `${kind}:${technicianId}:${key}`;
 
 /**
  * OWNERSHIP of a Tech Rewards line: the one rule for every place that pays, moves, removes or counts one. The sync owns a
  * line only when its WHOLE source key is the sync's: the Tech Rewards source type, a kind the sync writes, and a source id
- * that is exactly techRewardsSourceId(the row's own kind, the row's own technician id as PostgreSQL prints it, a 4-digit
- * year). The comparison is exact, case included: the unique source key is case-sensitive text, so a key in another case is
- * another key. Any other row (no source, another source type, or the Tech Rewards source type with any other source id) is a
- * line somebody made by hand. It carries forward and is paid like every manual line, and the sync never matches, moves or
- * removes it.
- * techRewardsOwnKey(line): { kind, year } or null, for a row with technician_id, kind, source_type and source_id. Pure.
+ * that is exactly techRewardsSourceId(the row's own kind, the row's own technician id as PostgreSQL prints it, a key of the
+ * kind's form). The comparison is exact, case included: the unique source key is case-sensitive text, so a key in another
+ * case is another key. Any other row (no source, another source type, or the Tech Rewards source type with any other source
+ * id) is a line somebody made by hand. It carries forward and is paid like every manual line, and the sync never matches,
+ * moves or removes it.
+ * techRewardsOwnKey(line): { kind, key } or null, for a row with technician_id, kind, source_type and source_id. Pure.
  * techRewardsOwnedSql(alias): the same test as SQL text for payroll_pay_lines, a boolean that is never null (so NOT is safe
  * on a row with no source). It holds no value from a request: constants and column names only.
  */
 function techRewardsOwnKey(line) {
-  if (line.source_type !== TECH_REWARDS_SOURCE || !TECH_REWARDS_SYNC_KINDS.includes(line.kind)) return null;
-  const year = String(line.source_id || '').slice(-4);
-  if (!/^[0-9]{4}$/.test(year)) return null;
-  return line.source_id === techRewardsSourceId(line.kind, line.technician_id, year) ? { kind: line.kind, year } : null;
+  const form = line.source_type === TECH_REWARDS_SOURCE ? TECH_REWARDS_KEYS[line.kind] : null;
+  if (!form) return null;
+  const key = String(line.source_id || '').slice(-form.length);
+  if (!new RegExp(form.pattern).test(key)) return null;
+  return line.source_id === techRewardsSourceId(line.kind, line.technician_id, key) ? { kind: line.kind, key } : null;
 }
 
 function techRewardsOwnedSql(alias = null) {
   const col = (name) => (alias ? `${alias}.${name}` : name);
-  const kinds = TECH_REWARDS_SYNC_KINDS.map((kind) => `'${kind}'`).join(', ');
-  return `(${col('source_type')} IS NOT NULL AND ${col('source_type')} = '${TECH_REWARDS_SOURCE}' AND ${col('kind')} IN (${kinds})`
-    + ` AND right(${col('source_id')}, 4) ~ '^[0-9]{4}$'`
-    + ` AND ${col('source_id')} = ${col('kind')} || ':' || ${col('technician_id')}::text || ':' || right(${col('source_id')}, 4))`;
+  const ofKind = ([kind, { length, pattern }]) => `(${col('kind')} = '${kind}' AND right(${col('source_id')}, ${length}) ~ '${pattern}'`
+    + ` AND ${col('source_id')} = ${col('kind')} || ':' || ${col('technician_id')}::text || ':' || right(${col('source_id')}, ${length}))`;
+  return `(${col('source_type')} IS NOT NULL AND ${col('source_type')} = '${TECH_REWARDS_SOURCE}'`
+    + ` AND (${Object.entries(TECH_REWARDS_KEYS).map(ofKind).join(' OR ')}))`;
 }
 const STATUSES = ['open', 'paid', 'voided'];
 const KIND_WORDS = {

@@ -117,14 +117,18 @@ function seasonBonusBlock(score, multiplier, grossCents) {
   return { ...base, estimateCents, rateBps: score.band.rateBps, multiplierE4: multiplier.multiplierE4 };
 }
 
+// The 12 months a stay bonus due on `dueDate` is worked out from: the same day a year before, to the day before the due date.
+// The board's estimate and the pay line (tech-rewards-pay-lines.js) both take the period from here.
+const stayWindow = (dueDate) => ({ earningsStart: yearBefore(dueDate), earningsEnd: addStaffWorkDays(dueDate, -1) });
+
 function stayBonusBlock(hireDate, today, priorPayCents) {
   if (!hireDate || hireDate > today) return null;
   const next = calc.stayBonus({ hireDate, asOf: today, priorTwelveMonthsPayCents: priorPayCents });
   if (!next) return null;
   const years = next.rateBps === calc.STAY_BONUS_1_YEAR_BPS ? 1 : next.rateBps === calc.STAY_BONUS_3_YEAR_BPS ? 3 : 5;
-  const earningsStart = yearBefore(next.dueDate);
   // the 12 months of pay end the day before the anniversary: that is the day the estimate is final
-  const base = { dueDate: next.dueDate, years, rateBps: next.rateBps, estimate: true, earningsStart, earningsEnd: addStaffWorkDays(next.dueDate, -1) };
+  const { earningsStart, earningsEnd } = stayWindow(next.dueDate);
+  const base = { dueDate: next.dueDate, years, rateBps: next.rateBps, estimate: true, earningsStart, earningsEnd };
   // the 12 months that earn this bonus have not begun: no amount to show yet (never $0.00), only the date
   if (earningsStart > today) return { ...base, estimateCents: null };
   // the estimate is the pay recorded so far in the 12 months before the due date; the due date's own pay run decides
@@ -460,6 +464,28 @@ async function readGross(conn, technicianId, from, to) {
   return earnedGrossCents(checks, from, to);
 }
 
+// A pay line `l` whose pay, or the overtime it adds, can count in a window of days: its earning day and the weeks its overtime
+// is priced over all lie between the first day it covers (or its pay week) and the last (lineComponents, weeksOfLine). Never
+// narrower than what readGross counts. Takes the window's last day, then its first, as SQL: a binding each by default, or
+// the columns of a joined row (tech-rewards-pay-lines.js paidBonusCounting).
+const lineInWindowSql = (last = '?::date', first = '?::date') => `LEAST(l.covers_from, l.earned_week_start) <= ${last} AND GREATEST(l.covers_to, l.earned_week_start + 6) >= ${first}`;
+
+/**
+ * The oldest pay week of an OPEN pay line of the technician that readGross would count in [from, to] once a pay run pays it,
+ * or null. A Tech Rewards line is not pay earned by work (checkComponents), so it never counts. The pay run asks before it
+ * works a bonus out from the window: the bonus waits until that line is paid, so its base is complete
+ * (tech-rewards-pay-lines.js).
+ */
+async function oldestOpenLineWeek(conn, technicianId, from, to) {
+  const row = await conn('payroll_pay_lines as l')
+    .where({ 'l.technician_id': technicianId, 'l.status': 'open' })
+    .whereNotIn('l.kind', TECH_REWARD_KINDS)
+    .whereRaw(lineInWindowSql(), [to, from])
+    .select(conn.raw("to_char(MIN(l.earned_week_start), 'YYYY-MM-DD') AS week"))
+    .first();
+  return row && row.week ? row.week : null;
+}
+
 // Commission pay lines earned from Jan 1 to today: 'paid' on a finalized check, 'open' on a run not finalized yet,
 // dated by LINE_EARNED_ON_SQL.
 async function readCommission(conn, technicianId, today) {
@@ -545,5 +571,5 @@ async function listTechnicians(conn = db) {
 
 module.exports = {
   ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents,
-  ordinaryPremium,
+  ordinaryPremium, readGross, stayWindow, oldestOpenLineWeek, lineInWindowSql,
 };
