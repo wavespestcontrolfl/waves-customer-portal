@@ -165,6 +165,18 @@ function CheckNumberCell({ call, check, onSaved }) {
   </form>;
 }
 
+// A Tech Rewards line (December gift) that is due but not on this run (GATE_TECH_REWARDS_PAY_LINES). It holds nothing.
+function WaitingBonuses({ notes = [] }) {
+  if (!notes.length) return null;
+  return <div>
+    <h4 className="m-0 mb-1 text-ui-body font-medium">Bonuses waiting</h4>
+    <p className="m-0 mb-1 text-ui-caption text-ink-secondary">These are not on this pay run. Each line gives the last pay date that can add it. A draft also says what the bonus waited for when this pay run was last worked out. Press Recompute to check again.</p>
+    <ul className="m-0 grid list-none gap-1 p-0" aria-label="Bonuses waiting">
+      {notes.map(note => <li key={note} className="rounded-sm border-hairline border-zinc-200 p-2 text-ui-caption">{note}</li>)}
+    </ul>
+  </div>;
+}
+
 function Problems({ title, items }) {
   if (!items.length) return null;
   return <div>
@@ -502,6 +514,7 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
 
     <Problems title="Waiting for approval" items={run.waiting} />
     <Problems title="Blocked" items={run.blocked} />
+    <WaitingBonuses notes={run.techRewardsNotes} />
 
     <ChecksTable
       call={call} run={run} isFinal={isFinal} onStub={setStubFor}

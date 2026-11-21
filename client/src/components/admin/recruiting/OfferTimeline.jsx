@@ -15,7 +15,8 @@ import {
   DialogTitle,
 } from "../../ui";
 import SafeMarkdown from "../../SafeMarkdown";
-import { fetchSignedCopy, reviseOffer, withdrawOffer } from "./offerApi";
+import { fetchSignedCopy, reviseOffer, setChecklistItem, withdrawOffer } from "./offerApi";
+import OfferFirstDays from "./OfferFirstDays";
 import {
   dateRequestText,
   formatDay,
@@ -259,7 +260,7 @@ function closeStillValid(target, { offer, draft, canAct }) {
   return canAct && Boolean(now) && now.status === target.status && (target.status !== "draft" || now.draftHash === target.draftHash);
 }
 
-export default function OfferTimeline({ applicationId, firstName, offer, draft, history, outStamp, canMakeOffer, ownerActions, stale = false, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
+export default function OfferTimeline({ applicationId, firstName, offer, draft, history, firstDays = null, outStamp, canMakeOffer, ownerActions, stale = false, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [closing, setClosing] = useState(null); // the offer record being withdrawn or discarded
@@ -332,6 +333,15 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
       { write: false },
     );
 
+  // One first-days item, marked done or not done again; the card then re-reads (the timeline gets its row). The
+  // write names the checklist's own offer (the hire's newest signed offer), which is not always the card's offer:
+  // a later offer that was withdrawn or closed can be the one the card shows.
+  const setItem = (key, done, seenDoneAt) =>
+    act(async () => {
+      await setChecklistItem(applicationId, firstDays.offerId, key, done, seenDoneAt);
+      await onChanged();
+    });
+
   return (
     <div className="border-hairline border border-zinc-200 rounded p-3 mb-4" data-testid="offer-card">
       <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -340,6 +350,7 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
       </div>
       <Terms offer={offer} />
       <Timeline entries={offer.timeline} />
+      {firstDays && <OfferFirstDays firstDays={firstDays} busy={busy} canAct={canAct} onSet={setItem} />}
       <DateRequestNote
         offer={offer}
         busy={busy || Boolean(draft)}

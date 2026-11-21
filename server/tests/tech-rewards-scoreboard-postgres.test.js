@@ -376,6 +376,36 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.seasonBonus.grossCents).toBe(70000 + 10000 + 1000);
   });
 
+  test('a week paid on two checks: a stay bonus on the second check never moves the season base', async () => {
+    const [tau, twin] = await db('technicians').insert([{ name: 'Sample Tau', hire_date: '2024-01-15' }, { name: 'Sample Twin', hire_date: '2024-01-15' }]).returning('id');
+    // inserted newest first: the checks are read in pay order, whatever order they are stored in
+    const [later, own] = await db('payroll_runs').insert([
+      { status: 'finalized', week_start: '2026-06-01', pay_date: '2026-06-12' },
+      { status: 'finalized', week_start: '2026-05-04', pay_date: '2026-05-15' },
+    ]).returning('id');
+    // The week of May 4: 45 hours, 5 of them overtime. Its own check paid a 600 commission and 33 of premium (33.33).
+    // The later check paid another 600 commission for that week. Alone that commission pays 34 (the twin). With a 600 stay
+    // bonus for the same week beside it the check paid 67 (Tau).
+    const week = (premiumCents, extra = {}) => ({ lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 2700, overtimeMinutes: 300, premiumCents, ...extra }] });
+    const earlierPay = { earlierAllocatedCents: 600, earlierPremiumCents: 33 };
+    const [tauLater, tauOwn, twinLater, twinOwn] = await insertChecks([
+      { run_id: later.id, technician_id: tau.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 70000 + 600 + 600 + 67, regular_pay_cents: 70000, tech_rewards_cents: 600, calc_snapshot: week(67, earlierPay) },
+      { run_id: own.id, technician_id: tau.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 70000 + 600 + 33, regular_pay_cents: 70000, calc_snapshot: week(33) },
+      { run_id: later.id, technician_id: twin.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 70000 + 600 + 34, regular_pay_cents: 70000, calc_snapshot: week(34, earlierPay) },
+      { run_id: own.id, technician_id: twin.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 70000 + 600 + 33, regular_pay_cents: 70000, calc_snapshot: week(33) },
+    ]).returning('id');
+    const commissionOn = (technician, check) => ({ technician_id: technician.id, check_id: check.id, kind: 'commission', status: 'paid', earned_week_start: '2026-05-04', amount_cents: 600 });
+    await db('payroll_pay_lines').insert([
+      commissionOn(tau, tauOwn), commissionOn(tau, tauLater), commissionOn(twin, twinOwn), commissionOn(twin, twinLater),
+      { technician_id: tau.id, check_id: tauLater.id, kind: 'stay_bonus', status: 'paid', earned_week_start: '2026-06-01', covers_from: '2026-05-04', covers_to: '2026-05-10', amount_cents: 600 },
+    ]);
+    // both weeks' wages, both commissions, and the 67 the commissions were paid in overtime (33, then 34)
+    const base = 140000 + 1200 + 67;
+    expect((await service.getScoreboard(twin.id, { now: NOW })).seasonBonus.grossCents).toBe(base);
+    // Tau: the same, with the stay bonus and the other 33 of the second check's 67 left out
+    expect((await service.getScoreboard(tau.id, { now: NOW })).seasonBonus.grossCents).toBe(base);
+  });
+
   test('review asks are counted in SQL on each send time: an initial ask outside the season does not drag its in-season follow-up out', async () => {
     const [c1, c2] = [randomUUID(), randomUUID()];
     const rows = await db('review_requests').insert([

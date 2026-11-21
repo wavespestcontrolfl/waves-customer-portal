@@ -90,6 +90,67 @@ describe('ordinaryPremium: the overtime a check paid for its ordinary lines only
     // a check whose only line is the bonus: none of its premium is a base
     expect(ordinaryPremium([reward], stored)).toEqual({ weeks: [], excludedCents: 4000 });
   });
+
+  describe('one rule: the ordinary part is what the check would have paid without its Tech Rewards lines', () => {
+    // 45 hours, 5 of them overtime: premium = line pay x 5 / 90
+    const WEEK = '2026-11-09';
+    const commission = (cents) => ({ kind: 'commission', cents, weekStart: WEEK });
+    const gift = (cents) => ({ kind: 'december_gift', cents, weekStart: WEEK, coversFrom: WEEK, coversTo: '2026-11-15' });
+    const row = (premiumCents) => ({ weekStart: WEEK, workedMinutes: 2700, overtimeMinutes: 300, premiumCents });
+    // what the earlier checks paid for the week: their lines, and the premium they stored
+    const after = (lines, paidCents) => ({ lines, paid: new Map([[WEEK, paidCents]]) });
+    const ordinaryCents = (result) => result.weeks.reduce((total, w) => total + w.premiumCents, 0);
+
+    test('the first check for the week, a commission and the gift: the commission alone earns 33 of the 67', () => {
+      expect(ordinaryPremium([commission(600), gift(600)], [row(67)])).toEqual({ weeks: [{ weekStart: WEEK, premiumCents: 33 }], excludedCents: 34 });
+    });
+
+    test('a later check: the commission is priced as the pay run prices a later check, with what the earlier checks paid', () => {
+      // an earlier check paid a 6.00 commission and 33. This check's commission alone would pay 34 (its floor, 33.33 up; the
+      // shortfall of the two commissions, 67 - 33, is 34 too). The check stored 67 with the gift.
+      expect(ordinaryPremium([commission(600), gift(600)], [row(67)], after([commission(600)], 33)))
+        .toEqual({ weeks: [{ weekStart: WEEK, premiumCents: 34 }], excludedCents: 33 });
+    });
+
+    test('a gift on the check never moves the base: the same commission counts the same with and without it', () => {
+      // two 6.03 commissions on two checks earn 34 each under the pay rule (33.5 half up, then 33.5 up)
+      const earlier = after([commission(603)], 34);
+      const without = ordinaryPremium([commission(603)], [row(34)], earlier); // the second check with no gift stored 34
+      const withGift = ordinaryPremium([commission(603), gift(600)], [row(67)], earlier); // with the gift it stored 67
+      expect([ordinaryCents(without), ordinaryCents(withGift)]).toEqual([34, 34]);
+      expect(withGift.excludedCents).toBe(33);
+      // the same when the check also makes up what two older commission checks were short (6.02 each, 33 + 33 paid; with a
+      // 12.00 commission the three earn 133.56 -> 134): 68 without the gift, 68 of the 101 with it
+      const older = after([commission(602), commission(602)], 66);
+      expect(ordinaryCents(ordinaryPremium([commission(1200)], [row(68)], older))).toBe(68);
+      expect(ordinaryPremium([commission(1200), gift(600)], [row(101)], older)).toEqual({ weeks: [{ weekStart: WEEK, premiumCents: 68 }], excludedCents: 33 });
+    });
+
+    test('a check with only the gift for the week has no ordinary part there, whatever it made up', () => {
+      // without the gift this check would have paid nothing for the week
+      expect(ordinaryPremium([gift(1200)], [row(68)], after([commission(602), commission(602)], 66))).toEqual({ weeks: [], excludedCents: 68 });
+    });
+
+    test('never over what the check stored for the week; an earlier line of another week changes nothing', () => {
+      expect(ordinaryPremium([commission(600), gift(600)], [row(20)], after([commission(600)], 33))).toEqual({ weeks: [{ weekStart: WEEK, premiumCents: 20 }], excludedCents: 0 });
+      expect(ordinaryPremium([commission(600), gift(600)], [row(67)], { lines: [{ ...commission(600), weekStart: '2026-11-02' }], paid: new Map([['2026-11-02', 33]]) }))
+        .toEqual({ weeks: [{ weekStart: WEEK, premiumCents: 33 }], excludedCents: 34 });
+    });
+  });
+
+  test('a week no Tech Rewards line of the check covers keeps all of its stored premium, a make-up for an older shortfall included', () => {
+    // the check holds the gift for the week of Nov 9, and a 12.00 commission for the week of Nov 2 that paid 68: its own 67
+    // and 1 cent an older commission check was short
+    const lines = [
+      { kind: 'commission', cents: 1200, weekStart: '2026-11-02' },
+      { kind: 'december_gift', cents: 600, weekStart: '2026-11-09', coversFrom: '2026-11-09', coversTo: '2026-11-15' },
+    ];
+    const stored = [
+      { weekStart: '2026-11-02', workedMinutes: 2700, overtimeMinutes: 300, premiumCents: 68 },
+      { weekStart: '2026-11-09', workedMinutes: 2700, overtimeMinutes: 300, premiumCents: 33 },
+    ];
+    expect(ordinaryPremium(lines, stored)).toEqual({ weeks: [{ weekStart: '2026-11-02', premiumCents: 68 }], excludedCents: 33 });
+  });
 });
 
 describe('earnedGrossCents (by component earning date)', () => {

@@ -81,6 +81,7 @@ const {
 } = require('./payroll-pay-lines');
 const { syncReviewBonusLines } = require('./payroll-review-bonuses');
 const { syncCommissionLines } = require('./payroll-commission');
+const { syncTechRewardLines, dropRewardLinesOfWeek, waitNotes } = require('./tech-rewards-pay-lines');
 const { familyEmployeeOn, familyExemptIds } = require('./payroll-family-employee');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -132,7 +133,7 @@ const PAY_LINE_COLUMNS = {
   commission_cents: 'commissionCents',
   health_allowance_cents: 'healthAllowanceCents',
   hsa_employer_cents: 'hsaEmployerCents',
-  // Season bonus, stay bonus and December gift lines (Tech Rewards Plan); null on a check with none of them.
+  // Season bonus, stay bonus and December gift lines (Tech Rewards Plan, tech-rewards-pay-lines.js); null on a check with none of them.
   tech_rewards_cents: 'techRewardsCents',
   line_overtime_premium_cents: 'lineOvertimePremiumCents',
   qualified_overtime_cents: 'qualifiedOvertimeCents',
@@ -476,18 +477,20 @@ async function withPaperPayments(conn, rows) {
 
 // Technicians with worked time in the week, approved or not. Same test as the
 // timesheet approval screen, so "waiting" matches what the office sees there.
-async function workedTechnicianIds(conn, start, end) {
-  const daily = await conn('time_entry_daily_summary')
-    .where('work_date', '>=', start)
-    .where('work_date', '<=', end)
-    .whereRaw(`(
+const DAILY_WORK_SQL = `(
       COALESCE(total_shift_minutes, 0) <> 0
       OR COALESCE(total_job_minutes, 0) <> 0
       OR COALESCE(total_drive_minutes, 0) <> 0
       OR COALESCE(total_break_minutes, 0) <> 0
       OR COALESCE(total_admin_minutes, 0) <> 0
       OR COALESCE(job_count, 0) <> 0
-    )`)
+    )`;
+
+async function workedTechnicianIds(conn, start, end) {
+  const daily = await conn('time_entry_daily_summary')
+    .where('work_date', '>=', start)
+    .where('work_date', '<=', end)
+    .whereRaw(DAILY_WORK_SQL)
     .select('technician_id');
   const entries = await conn('time_entries')
     .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
@@ -496,21 +499,52 @@ async function workedTechnicianIds(conn, start, end) {
   return [...new Set([...daily, ...entries].map((row) => row.technician_id))];
 }
 
+// The Monday of a date's Monday-Sunday pay week, as a PostgreSQL date expression (staffWeekStartForWorkDate, in SQL).
+const weekStartSql = (dateSql) => `(${dateSql} - (EXTRACT(ISODOW FROM ${dateSql})::int - 1))`;
+
+// The same test by week, for the technicians in `ids`: Map of technician id -> Set of the pay weeks (their Mondays) in
+// [start, end] that hold recorded work (a daily summary with worked time, or a time entry that is not voided). `start` is a
+// Monday and `end` a Sunday. Two queries, whatever the span, and each returns at most one row per technician per week:
+// PostgreSQL finds the week, so a year of days and time entries is never read or converted here (the callers hold the
+// payroll lock).
+async function workedWeeksByTechnician(conn, ids, start, end) {
+  const byTech = new Map(ids.map((id) => [id, new Set()]));
+  if (!ids.length) return byTech;
+  const daily = await conn('time_entry_daily_summary')
+    .whereIn('technician_id', ids).where('work_date', '>=', start).where('work_date', '<=', end)
+    .whereRaw(DAILY_WORK_SQL)
+    .distinct('technician_id', conn.raw(`to_char(${weekStartSql('work_date')}, 'YYYY-MM-DD') AS week_start`));
+  const entries = await conn('time_entries')
+    .whereIn('technician_id', ids).where('status', '!=', 'voided')
+    .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
+    .distinct('technician_id', conn.raw(`to_char(${weekStartSql(STAFF_WORK_DATE_SQL)}, 'YYYY-MM-DD') AS week_start`));
+  for (const row of [...daily, ...entries]) byTech.get(row.technician_id).add(row.week_start);
+  return byTech;
+}
+
+// One technician's pay weeks with recorded work in [start, end] (a Monday to a Sunday), oldest first. Tech Rewards asks it to
+// see which weeks a line covers still need a finalized check (tech-rewards-pay-lines.js).
+async function workedWeeks(conn, technicianId, start, end) {
+  return [...(await workedWeeksByTechnician(conn, [technicianId], start, end)).get(technicianId)].sort();
+}
+
 // GATE_PAYROLL_PAY_LINES: a line's overtime is priced from the approved hours of every
 // week it covers. A covered week that holds worked time but no approved timesheet would
 // price as no hours, and the line would be paid without that week's overtime for good.
 // Map of technician id -> the oldest such week; that technician waits until it is approved.
+// The worked time of every missing week is read at once (workedWeeksByTechnician, the test workedTechnicianIds applies to
+// one week), so a line that covers a year costs the same two queries as a line that covers a week.
 async function lineWeeksWaiting(conn, priced) {
-  const techsByWeek = new Map();
-  for (const [technicianId, { missingWeeks = [] }] of priced) {
-    for (const week of missingWeeks) techsByWeek.set(week, [...(techsByWeek.get(week) || []), technicianId]);
-  }
+  const missing = [...priced].filter(([, { missingWeeks = [] }]) => missingWeeks.length)
+    .map(([technicianId, { missingWeeks }]) => [technicianId, [...missingWeeks].sort()]);
   const waitingOn = new Map();
-  for (const week of [...techsByWeek.keys()].sort()) {
-    const worked = new Set(await workedTechnicianIds(conn, week, addStaffWorkDays(week, 6)));
-    for (const technicianId of techsByWeek.get(week)) {
-      if (worked.has(technicianId) && !waitingOn.has(technicianId)) waitingOn.set(technicianId, week);
-    }
+  if (!missing.length) return waitingOn;
+  const weeks = missing.flatMap(([, own]) => own).sort();
+  const worked = await workedWeeksByTechnician(conn, missing.map(([technicianId]) => technicianId),
+    weeks[0], addStaffWorkDays(weeks[weeks.length - 1], 6));
+  for (const [technicianId, own] of missing) {
+    const week = own.find((candidate) => worked.get(technicianId).has(candidate));
+    if (week) waitingOn.set(technicianId, week);
   }
   return waitingOn;
 }
@@ -535,6 +569,17 @@ async function lineWeeksUnreviewed(conn, priced) {
     if (weeks.length) heldOn.set(technicianId, weeks[0]);
   }
   return heldOn;
+}
+
+// The oldest week for which the two guards above would make a run wait or hold a check, for ONE pay line of a technician
+// ({ amountCents, earnedWeekStart, coversFrom, coversTo }), or null. Tech Rewards asks before it writes a line
+// (tech-rewards-pay-lines.js waitOf), so a line it writes never holds a pay run.
+async function lineGuardWeek(conn, technicianId, line) {
+  // only the covered weeks are read here, never the premium, so what earlier checks paid is not read
+  const priced = await priceLines(conn, new Map([[technicianId, { lines: [line] }]]), { history: false });
+  const waitingOn = (await lineWeeksWaiting(conn, priced)).get(technicianId);
+  const unreviewed = shiftCloseReviewLive() ? (await lineWeeksUnreviewed(conn, priced)).get(technicianId) : undefined;
+  return [waitingOn, unreviewed].filter(Boolean).sort()[0] || null;
 }
 
 // GATE_PAYROLL_TIME_OFF: paid time off and holiday minutes of W-2 technicians
@@ -583,6 +628,53 @@ async function ytdBefore(conn, technicianIds, payDate, weekStart) {
     );
   for (const row of rows) byTech.set(row.technician_id, { gross: Number(row.ytd), unemployment: Number(row.ytd_unemployment) });
   return byTech;
+}
+
+// What every check on a run needs beside the technician's own row, for the technicians in `ids`: pay of the year before this
+// check, SIMPLE IRA savings of the year, and who skips FUTA and RT-6 on the pay date.
+async function checkInputs(conn, run, ids, { lock = false } = {}) {
+  return {
+    ytd: await ytdBefore(conn, ids, run.pay_date, run.week_start),
+    simpleYtd: await simpleYtdBefore(conn, ids, run.pay_date, run.week_start),
+    // GATE_PAYROLL_FAMILY_EMPLOYEE: technicians whose pay on the pay date skips FUTA and RT-6 (empty when off).
+    familyLive: familyEmployeeOn(),
+    familyExempt: await familyExemptIds(conn, ids, run.pay_date, { lock }),
+  };
+}
+
+// One technician's check on the run from those figures: { check } or { blocked } (buildCheck).
+async function buildFor(conn, run, tech, inputs) {
+  const id = tech.technician_id;
+  const yearToDate = inputs.ytd.get(id);
+  return buildCheck({
+    tech,
+    payDate: run.pay_date,
+    weekStart: run.week_start,
+    w4: await currentW4For(id, run.pay_date, conn),
+    ytdGrossCents: yearToDate.gross,
+    ytdUnemploymentCents: yearToDate.unemployment,
+    simple: await simpleInputFor(id, run.pay_date, inputs.simpleYtd.get(id), conn),
+    // GATE_PAYROLL_FAMILY_EMPLOYEE: decided and stored with the gate on, and also after it is turned
+    // off for anyone whose year already holds exempt pay, so that pay never uses up the $7,000 base.
+    unemploymentExempt: inputs.familyLive || yearToDate.unemployment !== yearToDate.gross
+      ? inputs.familyExempt.has(id) : undefined,
+  });
+}
+
+// Why a check that holds only this pay line ({ kind, amountCents }) and no hours cannot be worked out for the technician on this
+// run, in buildCheck's own words (no pay rate, a rate under the minimum wage, ...), or null when it can. It is the smallest check
+// the technician can get: when it fails, any check of theirs on this run fails. Tech Rewards asks before it writes a line
+// (tech-rewards-pay-lines.js waitOf), so a line it writes never makes a check that blocks the run.
+async function lineOnlyCheckProblem(conn, run, technicianId, line) {
+  const row = await conn('technicians').where({ id: technicianId, employment_type: 'w2' })
+    .first('id', 'name', 'pay_rate', 'pay_method', 'flsa_overtime_covered');
+  if (!row) return 'Not a W-2 employee';
+  const [tech] = await withWeekRates(conn, [{
+    technician_id: row.id, name: row.name, pay_rate: row.pay_rate, pay_method: row.pay_method,
+    flsa_overtime_covered: row.flsa_overtime_covered, regular_minutes: 0, overtime_minutes: 0, pto_minutes: 0, holiday_minutes: 0,
+  }], run.week_start);
+  const built = await buildFor(conn, run, { ...tech, pay_lines: [line] }, await checkInputs(conn, run, [technicianId]));
+  return built.blocked || null;
 }
 
 /**
@@ -663,12 +755,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
   // Each check pays the rate of ITS week (payroll-rate-steps.js); with no pay rate step the rows are unchanged.
   const payable = await withWeekRates(conn,
     [...withHours, ...timeOffOnlyRows, ...linesOnlyRows].filter((row) => !waitingIds.has(row.technician_id)), start);
-  const payableIds = payable.map((row) => row.technician_id);
-  const ytd = await ytdBefore(conn, payableIds, run.pay_date, start);
-  const simpleYtd = await simpleYtdBefore(conn, payableIds, run.pay_date, start);
-  // GATE_PAYROLL_FAMILY_EMPLOYEE: technicians whose pay on the pay date skips FUTA and RT-6 (empty when off).
-  const familyLive = familyEmployeeOn();
-  const familyExempt = await familyExemptIds(conn, payableIds, run.pay_date, { lock });
+  const inputs = await checkInputs(conn, run, payable.map((row) => row.technician_id), { lock });
   // GATE_SHIFT_CLOSE_REVIEW: a week holding a shift the system closed (the
   // 11 PM job or the 14-hour check) that no admin has edited or confirmed
   // cannot be paid yet. Minutes are not changed; the line is only held.
@@ -699,21 +786,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
       blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: hold });
       continue;
     }
-    const w4 = await currentW4For(tech.technician_id, run.pay_date, conn);
-    const yearToDate = ytd.get(tech.technician_id);
-    const built = buildCheck({
-      tech,
-      payDate: run.pay_date,
-      weekStart: start,
-      w4,
-      ytdGrossCents: yearToDate.gross,
-      ytdUnemploymentCents: yearToDate.unemployment,
-      simple: await simpleInputFor(tech.technician_id, run.pay_date, simpleYtd.get(tech.technician_id), conn),
-      // GATE_PAYROLL_FAMILY_EMPLOYEE: decided and stored with the gate on, and also after it is turned
-      // off for anyone whose year already holds exempt pay, so that pay never uses up the $7,000 base.
-      unemploymentExempt: familyLive || yearToDate.unemployment !== yearToDate.gross
-        ? familyExempt.has(tech.technician_id) : undefined,
-    });
+    const built = await buildFor(conn, run, tech, inputs);
     if (built.blocked) blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: built.blocked });
     else checks.push({ ...built.check, run_id: run.id });
   }
@@ -771,6 +844,9 @@ async function runView(conn, runId, { evaluation = null } = {}) {
     view.waiting = live.waiting;
     view.stale = tokenOf(run, live.checks) !== view.token;
   }
+  // plain notes about a December gift that waits (tech-rewards-pay-lines.js waitNotes); present only when there is one
+  const notes = run.status === 'voided' ? [] : await waitNotes(conn, runId);
+  if (notes.length) view.techRewardsNotes = notes;
   return view;
 }
 
@@ -836,6 +912,13 @@ const syncCommission = (trx, weekStart, actorId) => syncCommissionLines(trx, {
   weekEnd: addStaffWorkDays(weekStart, 6), lock: true, actorId,
 });
 
+// Tech Rewards lines (GATE_TECH_REWARDS_PAY_LINES), at the same three points. Takes the run row. It runs after applyDueSteps:
+// it asks whether a check can be worked out for the technician, and a pay rate step that is due changes that answer.
+const syncTechRewards = (trx, run, actorId) => syncTechRewardLines(run, trx, { actorId });
+// The Tech Rewards lines a void or a finalize took off (dropRewardLinesOfWeek), for that event's audit row: ids only. The key is
+// absent when there were none, so every other run's event is unchanged.
+const removedRewards = (ids) => (ids.length ? { tech_rewards_line_ids_removed: ids } : {});
+
 // The payroll lock comes before the run row, the order finalizeRun uses. Pay lines need it, and so does a pay
 // rate step that is due (applyDueSteps changes technicians.pay_rate). `today` is read once per run write, so
 // the answer here and in applyDueSteps is the same. With no step due and pay lines off, no lock is taken.
@@ -861,9 +944,13 @@ async function draftRun(input, actor, conn = db) {
       await syncReviewBonuses(trx, start, actorId);
       await syncCommission(trx, start, actorId);
       await applyDueSteps(trx, { today });
+      await syncTechRewards(trx, run, actorId);
       const evaluation = await evaluate(trx, run, { lock: true });
       if (!evaluation.checks.length && !evaluation.blocked.length && !evaluation.waiting.length) {
-        throw new PayrollError(409, 'No W-2 hours to pay for that week.');
+        // No run is kept (this rolls back), so there is no screen to list a waiting Tech Rewards line on: the message says
+        // each one, with its reason and the last pay date that can add it. Read before the rollback takes the run row.
+        const waitingRewards = await waitNotes(trx, id);
+        throw new PayrollError(409, ['No W-2 hours to pay for that week.', ...waitingRewards.map((note) => `${note}.`)].join(' '));
       }
       await replaceDraftChecks(trx, id, evaluation.checks);
       await audit(trx, actorId, 'payroll.run_drafted', 'payroll_runs', id, { run_id: id });
@@ -887,6 +974,7 @@ async function recomputeRun(runId, actor, conn = db) {
     await syncReviewBonuses(trx, run.week_start, actorId);
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx, { today });
+    await syncTechRewards(trx, run, actorId);
     const evaluation = await evaluate(trx, run, { lock: true });
     await replaceDraftChecks(trx, runId, evaluation.checks);
     await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
@@ -940,9 +1028,18 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await syncReviewBonuses(trx, run.week_start, actorId);
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx);
+    await syncTechRewards(trx, run, actorId);
     const evaluation = await evaluate(trx, run, { lock: true });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
-    if (!evaluation.checks.length) throw new PayrollError(409, 'There are no paychecks to finalize.');
+    if (!evaluation.checks.length) {
+      // A draft can still show checks that are gone: its only checks rode on a pay line that another run has paid since. Keep
+      // the fresh, empty numbers as the draft, as the token check below does, so the screen shows what changed.
+      if (!(await loadCheckRows(trx, runId)).length) throw new PayrollError(409, 'There are no paychecks to finalize.');
+      await replaceDraftChecks(trx, runId, []);
+      changed = true;
+      await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
+      return;
+    }
     if (await laterFinalCheckExists(trx, run, evaluation.checks.map((check) => check.technician_id))) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first, then finalize this one.');
     }
@@ -958,8 +1055,11 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await trx('payroll_checks').where({ run_id: runId, status: 'draft' }).update({ status: 'finalized' });
     // The lines this run paid stay locked from the evaluation above; mark them paid with their check.
     if (payLinesOn()) await markLinesPaid(trx, runId, evaluation.lines, actorId);
+    // A finalized run keeps no open Tech Rewards line: one this run did not pay (pay lines turned off since it was written)
+    // comes off, so the next run dated for it writes it. Not behind the gate.
+    const droppedRewards = await dropRewardLinesOfWeek(trx, run.week_start);
     await trx('payroll_runs').where({ id: runId }).update({ status: 'finalized', finalized_by: actorId, finalized_at: now });
-    await audit(trx, actorId, 'payroll.run_finalized', 'payroll_runs', runId, { run_id: runId });
+    await audit(trx, actorId, 'payroll.run_finalized', 'payroll_runs', runId, { run_id: runId, ...removedRewards(droppedRewards) });
   });
   if (changed) throw new PayrollError(409, 'Hours or settings changed. Review the new numbers.');
   // Tax calendar rows follow the finalized checks. Never fails the finalize.
@@ -984,10 +1084,13 @@ async function voidRun(runId, input, actor, conn = db) {
     await trx('payroll_checks').where({ run_id: runId }).whereIn('status', ['draft', 'finalized']).update({ status: 'voided' });
     // Not behind the gate: a line a finalized run paid must reopen even if the gate was turned off since.
     await reopenLinesOfRun(trx, runId);
+    // A Tech Rewards line belongs to the run that wrote it: voiding the run takes it off (open, or reopened from paid), and the next
+    // run dated for it writes it again. Not behind the gate: a voided run must never leave one waiting for another run.
+    const droppedRewards = await dropRewardLinesOfWeek(trx, run.week_start);
     await trx('payroll_runs').where({ id: runId }).update({
       status: 'voided', voided_by: actorId, voided_at: trx.fn.now(), void_reason: v.reason,
     });
-    await audit(trx, actorId, 'payroll.run_voided', 'payroll_runs', runId, { run_id: runId });
+    await audit(trx, actorId, 'payroll.run_voided', 'payroll_runs', runId, { run_id: runId, ...removedRewards(droppedRewards) });
   });
   await syncPayrollFilingsSafe({ conn });
   // Bank lines matched to this run's checks go back to review. Never fails the void.
@@ -1207,6 +1310,11 @@ async function exportCsv(runId, conn = db) {
 }
 
 module.exports = {
+  workedWeeks,
+  weekStartSql,
+  lineGuardWeek,
+  lineOnlyCheckProblem,
+  laterFinalCheckExists,
   defaultPayDate,
   validateWeek,
   resolvePayDate,
