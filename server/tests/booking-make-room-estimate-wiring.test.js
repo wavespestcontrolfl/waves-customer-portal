@@ -411,6 +411,7 @@ describe('makeRoomAdmit — the page\'s own offer rules for a tried hour', () =>
     dateFrom: '2027-05-14',
     dateTo: '2027-05-28',
     funnelDays: overrides.funnelDays || null,
+    funnelTechDays: overrides.funnelTechDays || null,
     funnel: overrides.funnel || null,
   });
   const slot = (date, start, end) => ({ date, windowStart: start, windowEnd: end, durationMinutes: 60, techId: 'tech-1' });
@@ -441,5 +442,20 @@ describe('makeRoomAdmit — the page\'s own offer rules for a tried hour', () =>
     // A cluster day still counts while the page seeded another day: had its hour been free, the page would offer it.
     const seededWithCluster = { funnelDays: new Set(['2027-05-20']), funnel: { mode: 'seeded', seedDate: '2027-05-21' } };
     expect(admit(seededWithCluster)(slot('2027-05-20', '09:00', '10:00'))).toBe(true);
+  });
+
+  // Owner rule B per truck (GATE_MULTI_TECH_CONFIRM, 2026-11-19): a cluster day admits only its own trucks. tech-1's
+  // hour on tech-2's zone day is refused, clustered or seeded; an unassigned zone stop admits every truck.
+  test('per truck: a cluster day admits its own truck only, an unassigned stop\'s day every truck', () => {
+    const days = new Set(['2027-05-20']);
+    const onTech2 = { funnelDays: days, funnelTechDays: new Map([['2027-05-20', new Set(['tech-2'])]]) };
+    const tech2 = { ...slot('2027-05-20', '09:00', '10:00'), techId: 'tech-2' };
+    expect(admit(onTech2)(slot('2027-05-20', '09:00', '10:00'))).toBe(false);
+    expect(admit(onTech2)(tech2)).toBe(true);
+    const seeded = { ...onTech2, funnel: { mode: 'seeded', seedDate: '2027-05-21' } };
+    expect(admit(seeded)(slot('2027-05-20', '09:00', '10:00'))).toBe(false);
+    expect(admit(seeded)(slot('2027-05-21', '09:00', '10:00'))).toBe(true);
+    const unassigned = { funnelDays: days, funnelTechDays: new Map([['2027-05-20', new Set([null])]]) };
+    expect(admit(unassigned)(slot('2027-05-20', '09:00', '10:00'))).toBe(true);
   });
 });
