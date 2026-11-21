@@ -467,7 +467,8 @@ function readReportTables(page) {
  *   report (any violations row labelled with its visit) each 35 row must be labelled, and its initial note is the
  *   first visit's citation;
  * - it lists at least as many 35A or 35B rows of the read visit as the file counted for it (violation35): the missing
- *   one could be 35A. Without the count only a 35A row answers.
+ *   one could be 35A. A row listed twice (the same code and text) counts once and is one finding. Without the
+ *   count only a 35A row answers.
  * findings holds the visit's 35A rows, each with its initial note first, cut at FINDING_TEXT_MAX.
  */
 function parseInspectionReport(html, { violation35 = null, visitDate = null, visitNumber = null } = {}) {
@@ -493,10 +494,19 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   // The read visit's own 35 rows: every row of a routine report; on a follow-up report, those with the initial note.
   const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => note.date === null));
   if (!ofVisit.length) return null;
-  const rows35A = ofVisit.filter((row) => /^35A-/.test(row.code));
-  // Fewer of the visit's 35 rows than the file counted: the missing one could be 35A. Without the count (a row stored
-  // before it was kept), only a 35A row answers: "no pests" needs the count.
-  if (Number.isInteger(violation35) ? ofVisit.length < violation35 : !rows35A.length) return null;
+  // A row listed twice (the same code, and the same text compact) counts once and is one finding.
+  const keys = new Set();
+  const distinct = ofVisit.filter((row) => {
+    const key = `${row.code} ${compact(row.text)}`;
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  });
+  const rows35A = distinct.filter((row) => /^35A-/.test(row.code));
+  // Fewer of the visit's distinct 35 rows than the file counted: the missing one could be 35A, and a copy cannot
+  // stand in for it. Without the count (a row stored before it was kept), only a 35A row answers: "no pests" needs
+  // the count.
+  if (Number.isInteger(violation35) ? distinct.length < violation35 : !rows35A.length) return null;
   const findings = rows35A.map((row) => ({ code: row.code, text: capText(initialNoteFirst(row)) }));
   return { inspectionType: visits[0].type, pestEvidence: findings.length > 0, findings };
 }

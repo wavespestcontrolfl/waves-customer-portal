@@ -380,10 +380,25 @@ describe('parseInspectionReport', () => {
     expect(parse(reportPage(door, '09/03/2026'), { violation35: 1, visitDate: '2026-09-03', visitNumber: 2 })).toBeNull();
   });
 
-  test('a page that lists fewer violation-35 rows than the file counted cannot answer: the missing one could be 35A', () => {
+  test('a page that lists fewer violation-35 rows than the file counted cannot answer: the missing one could be 35A, and a row listed twice counts once', () => {
     const b = fixture('report-35b.html');
     expect(parse(b, { violation35: 2 })).toBeNull();
     expect(parse(b, { violation35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    // A copy of the 35B row cannot stand in for the second citation the file counted: that one could be 35A. A copy
+    // that differs only in spacing, or in a character a browser draws as nothing, is the same row.
+    const row = '<tr><td><u>35B-03-4</u></td><td>Basic - Outer openings not protected with self-closing doors.'
+      + ' Observed back door propped open. **Warning**</td></tr>';
+    expect(b).toContain(row);
+    expect(parse(b.replace(row, `${row}\n${row}`), { violation35: 2 })).toBeNull();
+    expect(parse(b.replace(row, `${row}\n${row.replace('back door', 'back&zwj; \n door')}`), { violation35: 2 })).toBeNull();
+    expect(parse(b.replace(row, `${row}\n${row}`), { violation35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    // A second, different citation meets the count.
+    const other = '<tr><td><u>35B-03-4</u></td><td>Basic - Outer openings not protected. Observed side door open.</td></tr>';
+    expect(parse(b.replace(row, `${row}\n${other}`), { violation35: 2 })).toEqual({ pestEvidence: false, findings: [] });
+    // A 35A row listed twice is one finding.
+    const flies = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
+    expect(parse(reportPage(`${flies}${flies}`), { violation35: 1 }))
+      .toEqual({ pestEvidence: true, findings: [{ code: '35A-02-8', text: 'High Priority - Live flies at the bar.' }] });
     // A follow-up report may list more than the visit counted (earlier visits' rows).
     expect(parse(fixture('report-35a.html'), { violation35: 1 })).toMatchObject({ pestEvidence: true });
     // A row stored before the count was kept has none: a 35A row still answers, but "no pests" needs the count.
