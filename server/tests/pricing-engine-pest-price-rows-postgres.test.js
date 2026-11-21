@@ -26,9 +26,12 @@ postgres('recurring pest price rows (live Postgres)', () => {
 
   beforeAll(async () => {
     const target = new URL(process.env.DATABASE_URL);
-    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
+    // This worktree's OWN QA database, never another checkout's: the managed runner sets both marks and names
+    // the database after the worktree id (scripts/dev/context.js, scripts/qa/server.js). Or CI's database.
+    const worktreeId = String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '');
+    const privateQa = process.env.WAVES_LOCAL_DEV === '1' && /^[a-f0-9]{32}$/.test(worktreeId) && target.pathname === `/waves_qa_${worktreeId}`;
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
-    if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
+    if (!privateQa && !ci) throw new Error("Use this worktree's private QA database or the isolated CI database");
     // The driver copies every query parameter of a connection string into its settings, so ?host=, ?port= or
     // ?connectionString= would name another server than the one checked above. A URL with a query is refused,
     // and the pool gets the parts this guard read, never the URL text.
