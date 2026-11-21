@@ -1391,6 +1391,8 @@ describe('planStartBlocker', () => {
         // them on a property.
         for (const more of [{ propertyUse: 'MIXED' }, { commercialUseType: 'OFFICE_RETAIL' }, { propertyType: 'Multi-Family' }, { occupancyType: 'hotel' }, { categoryConflict: 'property_manager:condo' }, { notes: 'commercial_pest' }]) {
           expect(await blocker(withLeads([LEAD({ extracted_data: RENTAL('single_family', more) }), LEAD()]))).toBeNull();
+          // Nor on the record of a manager: a manager's single home stays a home by the call's rule.
+          expect(await blocker(withLeads([LEAD({ extracted_data: RENTAL('single_family', more) }), LEAD()], { customer: { contact_role: 'property_manager' } }))).toBeNull();
           expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { property: RENTAL('single_family', more).additional_properties[0] } })]))).toBe('commercial');
         }
         // The app's own classifier of a payload still gets the whole payload, as at a save, and its marks count
