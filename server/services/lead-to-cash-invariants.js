@@ -519,16 +519,23 @@ async function startRun(now) {
   return marked ? trustedState(last, now) : null;
 }
 
-// The last step: this run's result. It never throws. A failed save leaves the
-// start mark of startRun, so no later run trusts the older result; the cost
-// is a possible second copy of an alert.
+// The last step: this run's result, tried twice. Returns true when it is
+// saved; it never throws. A failed save leaves the start mark of startRun, so
+// no later run trusts the older result (the cost is a possible second copy
+// of an alert), and the run reads as failed (state_failed) so job_health
+// shows it.
 async function writeRunState(now, { items, alertedAt, alertId, seen }) {
   const at = now.toISOString();
-  await saveRunStateRow({ runAt: at, attempt: at, items, alertedAt: alertedAt || null, alertId: alertId || null, seen: seen || {} });
+  const row = { runAt: at, attempt: at, items, alertedAt: alertedAt || null, alertId: alertId || null, seen: seen || {} };
+  return (await saveRunStateRow(row)) || saveRunStateRow(row);
 }
 
 // True when this run's failing standing checks were all failing on the last
 // run too, and the last standing alert is younger than REPEAT_AFTER_MS.
+// An alert a person marked Done still counts, on purpose: that is a decision
+// about a list the person has seen. Posting again on the next run would bring
+// back the one-alert-a-day, closed-by-hand loop this split removes. The
+// weekly alert brings the list back.
 function nothingNew(state, items, now) {
   if (!state || !state.alertedAt) return false;
   const known = new Set(state.items);
@@ -701,8 +708,8 @@ async function postInApp(results, context) {
   const state = await startRun(context.now);
   const standing = await postStandingList(results.filter((r) => !isRecordResult(r)), state, context);
   const records = await postRecords(results.filter(isRecordResult), results.filter((r) => r.moving && !isRecordResult(r)), state, context);
-  await writeRunState(context.now, { items: standing.items, alertedAt: standing.alertedAt, alertId: standing.alertId, seen: records.seen });
-  return { posted: standing.posted || records.posted, errors: [standing.error, records.error].filter(Boolean) };
+  const saved = await writeRunState(context.now, { items: standing.items, alertedAt: standing.alertedAt, alertId: standing.alertId, seen: records.seen });
+  return { posted: standing.posted || records.posted, errors: [standing.error, records.error].filter(Boolean), saved };
 }
 
 // The email path: one email a run with the whole report, paced by
@@ -713,9 +720,9 @@ async function sendWholeReport(report, { mailer, to }) {
       key: RECORD_KEY, subject: report.subject, html: report.html, text: report.text, link: '/admin/invoices',
       sendEmail: emailSender(mailer, to, report),
     });
-    return { posted: true, errors: [] };
+    return { posted: true, errors: [], saved: true };
   } catch (error) {
-    return { posted: false, errors: [error] };
+    return { posted: false, errors: [error], saved: true };
   }
 }
 
@@ -723,16 +730,33 @@ async function sendWholeReport(report, { mailer, to }) {
 // finding stands. Records are never retired: closeout_failed_facts checks
 // yesterday only, and a clean later window does not prove older failures
 // (including license facts) were fixed.
+// Returns the run's outcome: clean, or state_failed when the clean result
+// could not be saved.
 async function recordCleanRun(now) {
   await startRun(now);
   await retireIfClean(STANDING_KEY);
-  await writeRunState(now, { items: [], alertedAt: null, alertId: null, seen: {} });
+  const saved = await writeRunState(now, { items: [], alertedAt: null, alertId: null, seen: {} });
+  return saved ? { skipped: 'clean' } : { error: 'state_failed' };
+}
+
+// Why a run with exceptions did not end as "sent", or null when it did.
+function unsentOutcome({ posted, errors, saved }) {
+  // One alert of two can fail. The run then reads as failed (job_health). A
+  // rerun posts what is missing; the run state stops a second copy of the
+  // alert that did post.
+  if (errors.length) return { error: 'send_failed' };
+  // The alerts are in the feed but this run's result is not saved. The next
+  // run posts instead of trusting an older result; job_health shows why.
+  if (!saved) return { error: 'state_failed' };
+  return posted ? null : { skipped: 'no_new_item' };
 }
 
 /**
  * Cron entry. Returns a plain summary; `error`/`skipped` values other than
  * 'gated' | 'clean' | 'recent_send' | 'no_new_item' mean the sweep did not do
- * its job and the scheduler rethrows so job_health records a failed run.
+ * its job and the scheduler rethrows so job_health records a failed run
+ * (`send_failed`: an alert reached nobody; `state_failed`: the run's result
+ * could not be saved).
  */
 async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid, detectors = DETECTORS } = {}) {
   if (!isEnabled('leadToCashInvariantSweep')) return { skipped: 'gated' };
@@ -741,8 +765,8 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   const exceptions = results.filter((r) => !r.ok);
   if (!exceptions.length) {
     logger.info(`[l2c-invariants] clean: ${JSON.stringify(summary)}`);
-    if (inAppEnabled()) await recordCleanRun(now);
-    return { skipped: 'clean', results: summary };
+    const outcome = inAppEnabled() ? await recordCleanRun(now) : { skipped: 'clean' };
+    return { ...outcome, results: summary };
   }
   const report = composeReport(results, { now });
   logger.warn(`[l2c-invariants] ${report.subject}`);
@@ -757,15 +781,12 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   // that day again.
   const inApp = inAppEnabled();
   if (!inApp && await sentRecently()) return { skipped: 'recent_send', results: summary };
-  const { posted, errors } = inApp
+  const delivery = inApp
     ? await postInApp(results, { now, mailer, to })
     : await sendWholeReport(report, { mailer, to });
-  for (const err of errors) logger.error(`[l2c-invariants] send failed: ${scrubSentryText(err?.message || err)}`);
-  // One alert of two can fail. The run then reads as failed (job_health). A
-  // rerun posts what is missing; the run state stops a second copy of the
-  // alert that did post.
-  if (errors.length) return { error: 'send_failed', results: summary };
-  if (!posted) return { skipped: 'no_new_item', results: summary };
+  for (const err of delivery.errors) logger.error(`[l2c-invariants] send failed: ${scrubSentryText(err?.message || err)}`);
+  const unsent = unsentOutcome(delivery);
+  if (unsent) return { ...unsent, results: summary };
   if (!inApp) await stampSendMarker();
   return { sent: true, violations: report.total, unavailable: report.unavailable, results: summary };
 }

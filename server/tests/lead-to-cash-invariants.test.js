@@ -523,10 +523,23 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(savedState()).toMatchObject({ items: ['b'], alertedAt: NOW.toISOString() });
     });
 
+    test('a result that cannot be saved is tried twice, then the run reads as failed', async () => {
+      lastRun(['b'], DAY);
+      mockTables.system_settings.merge = jest.fn().mockResolvedValueOnce(1).mockRejectedValueOnce(new Error('deadlock detected')).mockResolvedValue(1);
+      expect(await sweep([fails('a'), fails('b')])).toMatchObject({ sent: true }); // saved on the second try
+      lastRun(['b'], DAY);
+      mockTables.system_settings.merge = jest.fn().mockResolvedValueOnce(1).mockRejectedValue(new Error('deadlock detected'));
+      // The alert is in the feed, the result is not saved: a failed run for job_health. The next run posts again.
+      expect(await sweep([fails('a'), fails('b')])).toEqual({ error: 'state_failed', results: { a: 1, b: 1 } });
+      expect(keysPosted()).toEqual([STANDING_KEY, STANDING_KEY]);
+    });
+
     test('a clean run marks its start too, so a close with an unsaved result cannot leave the old result in force', async () => {
       lastRun(['b'], DAY);
       mockTables.system_settings.merge = jest.fn().mockResolvedValueOnce(1).mockRejectedValue(new Error('deadlock detected'));
-      expect(await sweep([ok('a'), ok('b')])).toEqual({ skipped: 'clean', results: { a: 0, b: 0 } });
+      // The result is not saved (two tries): the run reads as failed, so job_health shows it.
+      expect(await sweep([ok('a'), ok('b')])).toEqual({ error: 'state_failed', results: { a: 0, b: 0 } });
+      expect(mockTables.system_settings.merge).toHaveBeenCalledTimes(3);
       expect(resolve).toHaveBeenCalledTimes(1); // the standing alert is closed
       // The row now holds yesterday's result with today's start mark. The next run does not trust it: `b` posts.
       const row = stateWrites()[0];
