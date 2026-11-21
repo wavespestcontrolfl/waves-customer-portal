@@ -6340,6 +6340,14 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
             amount: setupFeeAmount,
           });
         }
+        if (!setupScheduledServiceId && !firstVisitDate) {
+          await require('../services/commercial-prepay-sale-record').recordUnbookedCoverageSale(trx, {
+            invoiceId: invoice.id,
+            customerId: customer.id,
+            coverageServiceType,
+            setupAmount: setupFeeAmount,
+          });
+        }
       }
       appliedDepositCredit = Number(invoice?.applied_deposit_credit) || 0;
       // The setup line's share of the GROSS year (invoice.total is already

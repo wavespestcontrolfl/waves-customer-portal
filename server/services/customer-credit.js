@@ -516,35 +516,10 @@ async function restoreAccountCreditForVoidedInvoice({ invoice, createdBy = 'syst
   return { restored: restore };
 }
 
-// Run `fn` once the OUTERMOST transaction has COMMITTED and ONLY if every
-// transaction from the originating handle up to it completed successfully.
-// A nested knex transaction's executionPromise settles when its SAVEPOINT is
-// released (or rolled back), before the outer transaction commits, so waiting on
-// the savepoint alone fires for work an outer rollback then discards, and waiting
-// on the outer alone fires for work whose own savepoint rolled back while the
-// outer caught the failure and committed. knex gives a nested transaction's
-// handle a `parentTransaction` (the outermost has none): each handle's
-// executionPromise is awaited from the inside out, and any rejection suppresses
-// the callback. Without a transaction handle (a bare test double) it runs inline.
-function transactionChain(trx) {
-  const chain = [];
-  for (let t = trx, hops = 0; t && hops < 32; t = t.parentTransaction, hops += 1) chain.push(t);
-  return chain;
-}
-function outermostTransaction(trx) {
-  const chain = transactionChain(trx);
-  return chain.length ? chain[chain.length - 1] : trx;
-}
-function afterCommit(trx, fn) {
-  const promises = transactionChain(trx)
-    .map((t) => t.executionPromise)
-    .filter((p) => p && typeof p.then === 'function');
-  if (promises.length) {
-    Promise.all(promises).then(fn).catch(() => {});
-  } else {
-    Promise.resolve().then(fn).catch(() => {});
-  }
-}
+// Canonical transaction-chain semantics are shared with dispatch broadcasts.
+// Keep these exports stable for existing callers while removing the duplicate
+// implementation which had already drifted once during review.
+const { afterCommit, outermostTransaction } = require('../utils/trx-commit-promise');
 
 /**
  * Settle a FULLY refunded invoice: TERMINALIZE it to 'refunded' AND (if it carried
