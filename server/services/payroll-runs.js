@@ -81,7 +81,7 @@ const {
 } = require('./payroll-pay-lines');
 const { syncReviewBonusLines } = require('./payroll-review-bonuses');
 const { syncCommissionLines } = require('./payroll-commission');
-const { syncTechRewardLines, dropRewardLinesOfWeek, waitNotes } = require('./tech-rewards-pay-lines');
+const { syncTechRewardLines, claimBeforeFinal, dropRewardLinesOfWeek, waitNotes } = require('./tech-rewards-pay-lines');
 const { familyEmployeeOn, familyExemptIds } = require('./payroll-family-employee');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1020,12 +1020,17 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx);
     await syncTechRewards(trx, run, actorId);
-    const evaluation = await evaluate(trx, run, { lock: true });
+    let evaluation = await evaluate(trx, run, { lock: true });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
     if (!evaluation.checks.length) throw new PayrollError(409, 'There are no paychecks to finalize.');
     if (await laterFinalCheckExists(trx, run, evaluation.checks.map((check) => check.technician_id))) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first, then finalize this one.');
     }
+    // These checks close every earlier-dated draft of the tax year to their technicians (laterFinalCheckExists), so a Tech
+    // Rewards line such a draft still holds for one of them moves here. The run is worked out again and the token check
+    // below sends the changed numbers back for review.
+    const claimed = await claimBeforeFinal(run, trx, evaluation.checks.map((check) => check.technician_id), { actorId });
+    if (claimed.length) evaluation = await evaluate(trx, run, { lock: true });
     await replaceDraftChecks(trx, runId, evaluation.checks);
     const rows = await loadCheckRows(trx, runId);
     if (tokenOf(run, rows) !== v.token) {

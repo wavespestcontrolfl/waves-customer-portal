@@ -27,8 +27,11 @@
  *   - voiding a run deletes its lines, open or reopened from paid (payroll-runs.js voidRun, dropRewardLinesOfWeek);
  *   - finalizing a run deletes any of its lines it did not pay (finalizeRun, the same call);
  *   - a sync claims a line open in another week, unless that week has a draft run that pays first (the earlier pay date; the
- *     earlier week on the same date) and can still pay it (ownerKeeps asks that run's own readiness). So the gift is on the
- *     first check that can carry it and no line is stranded.
+ *     earlier week on the same date) and can still pay it (ownerKeeps asks that run's own readiness);
+ *   - a run that is finalized BEFORE an earlier-dated draft takes that draft's lines for the technicians it pays
+ *     (claimBeforeFinal): its checks close the earlier draft to those technicians for the tax year, so the line could never
+ *     be paid there. The finalize then asks for a review of the changed numbers (the pay run's own token check).
+ * So the gift is on the first check that can carry it and no line is stranded.
  * A recompute works an OPEN line out again; a PAID line is never read or changed. Gate off: every open Tech Rewards line comes
  * off at the next sync (the kill switch) and paid lines stay. Pay lines off: nothing is read or written.
  *
@@ -300,6 +303,12 @@ async function ownerKeeps(trx, run, open, cand, tech, state) {
 const changed = (open, span, amountCents) => Number(open.amount_cents) !== amountCents
   || open.covers_from !== span.coversFrom || open.covers_to !== span.coversTo;
 
+// An open line gets the pay week, the span and the amount of the run that pays it now.
+const moveLine = (trx, id, span, amountCents) => trx('payroll_pay_lines').where({ id, status: 'open' }).update({
+  amount_cents: amountCents, earned_week_start: span.earnedWeekStart, covers_from: span.coversFrom, covers_to: span.coversTo,
+  updated_at: trx.fn.now(),
+});
+
 /**
  * Writes one candidate's line: insert, work out again, claim or remove. Returns { added, updated, removed, skip, wait } (ids /
  * reason / { reason, week }). A line open in another pay week stays that week's while that week's DRAFT run pays first and
@@ -321,10 +330,7 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
   const span = spanOf(cand.key, run.week_start);
   if (open) {
     if (here && !changed(open, span, priced.amountCents)) return {};
-    await trx('payroll_pay_lines').where({ id: open.id }).update({
-      amount_cents: priced.amountCents, earned_week_start: span.earnedWeekStart, covers_from: span.coversFrom, covers_to: span.coversTo,
-      updated_at: trx.fn.now(),
-    });
+    await moveLine(trx, open.id, span, priced.amountCents);
     return { updated: open.id };
   }
   const [inserted] = await trx('payroll_pay_lines').insert({
@@ -376,6 +382,44 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {
 }
 
 /**
+ * Finalize only (payroll-runs.js finalizeRun, after the run is worked out and before its checks are stored). A check that goes
+ * final closes every earlier-dated run of the same tax year to its technician (payroll-runs.js laterFinalCheckExists), so a
+ * Tech Rewards line that an earlier-dated DRAFT still holds for one of `technicianIds` (the technicians this run pays) could
+ * never be paid there once this run is final. Each such line that this run is dated for and ready to pay moves here. Returns
+ * the ids moved: the caller works the run out again, and its token check sends the changed numbers back for review, so nothing
+ * is paid that the office did not see. An owner dated in another tax year, or one that pays later, keeps its line.
+ */
+async function claimBeforeFinal(run, trx, technicianIds, { actorId = null } = {}) {
+  if (!payLinesOn() || !techRewardsOn() || !technicianIds.length) return [];
+  const lines = await trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' })
+    .whereIn('technician_id', technicianIds).whereNot({ earned_week_start: run.week_start })
+    .orderBy('source_id').forUpdate().select(lineColumns(trx));
+  if (!lines.length) return [];
+  const owners = new Map((await trx('payroll_runs').whereIn('week_start', lines.map((line) => line.earned_week_start)).where({ status: 'draft' })
+    .select(trx.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"), trx.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date")))
+    .map((row) => [row.week_start, row]));
+  const techs = new Map((await applyAssignable(trx('technicians').where({ employment_type: 'w2' }))
+    .whereIn('technicians.id', lines.map((line) => line.technician_id)).forShare()
+    .select('technicians.id', trx.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date"))).map((row) => [row.id, row]));
+  const due = dueInRun(run.pay_date);
+  const moved = [];
+  for (const line of lines) {
+    const owner = owners.get(line.earned_week_start);
+    const match = SOURCE_ID_RE.exec(line.source_id || '');
+    const tech = techs.get(line.technician_id);
+    const closes = owner && paysFirst(owner, run) && yearOf(owner.pay_date) === yearOf(run.pay_date);
+    if (!closes || !match || !tech || !due.some((d) => d.kind === line.kind && d.key === match[3])) continue;
+    const cand = { kind: line.kind, key: match[3], technicianId: line.technician_id };
+    const priced = await priceCandidate(trx, cand, tech, run);
+    if (!priced.amountCents) continue;
+    await moveLine(trx, line.id, spanOf(cand.key, run.week_start), priced.amountCents);
+    moved.push(line.id);
+  }
+  if (moved.length) await audit(trx, actorId, run, { claimed_before_final_line_ids: moved });
+  return moved;
+}
+
+/**
  * Plain notes for a run's summary: what waited at the run's latest sync and that no run has written since, e.g.
  * "December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet". Read from the run row (saveWaits). None with
  * either gate off, and none for a gift that has its line now (a later run claimed it), so an old run never says "waits" about a
@@ -403,6 +447,7 @@ module.exports = {
   spanOf,
   sourceIdOf,
   syncTechRewardLines,
+  claimBeforeFinal,
   dropRewardLinesOfWeek,
   waitNotes,
 };
