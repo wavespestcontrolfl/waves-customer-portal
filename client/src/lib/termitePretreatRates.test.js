@@ -95,7 +95,8 @@ describe("computePretreatChemistry", () => {
 
   it("puts LESCO Crosscheck Plus at 0.12% on the label chart's half volume, horizontal and vertical", () => {
     // Label page 31, Volume Adjustment Chart: 0.06% = 1 gal / 10 sq ft and 4 gal / 10 LF; 0.12% = 0.5 gal and 2 gal.
-    for (const typed of ["0.12", "0.120", "0.12%", " 0.12 % ", ".12"]) {
+    // Every value the certificate prints as 0.12 (new-construction-warranty.js withoutUnit + the amount check).
+    for (const typed of ["0.12", "0.120", "0.12%", " 0.12 % ", ".12", "0.12% dilution"]) {
       const result = computePretreatChemistry({
         productName: "LESCO Crosscheck Plus",
         squareFootage: "1,800",
@@ -120,8 +121,8 @@ describe("computePretreatChemistry", () => {
   });
 
   it("keeps the labeled volume at any other dilution, and for products whose chart was not read", () => {
-    // Only a bare percentage matches the chart: another unit or a range is not the 0.12% dilution.
-    for (const typed of [undefined, "", "0.060", "0.06", "0.1", "0.125", "1.2", "12", "0.12 fl oz/gal", "0.12-0.125"]) {
+    // Another dilution, or text the certificate cannot print as one number (another unit, a range), keeps the labeled volume.
+    for (const typed of [undefined, "", "0.060", "0.06", "0.1", "0.125", "1.2", "12", "0.12 fl oz/gal", "0.12-0.125", "0.12%-0.125%"]) {
       expect(computePretreatChemistry({
         productName: "LESCO Crosscheck Plus",
         linearFeet: "200",

@@ -105,12 +105,17 @@ function parseDepthFt(value) {
   return /\d[\s-]*(?:"|in\b|inch)/i.test(String(value)) ? n / 12 : n;
 }
 
-// "0.12" / "0.120" / "0.12%" / ".12" → 0.12. Anything else → null: a
-// Volume Adjustment Chart dilution matches only a bare percentage, so
-// "0.12 fl oz/gal" or a range never takes the chart's reduced volume.
+// The concentration the certificate prints, read the way its issuer reads
+// it (server/services/new-construction-warranty.js withoutUnit and the
+// amount check): a value naming "%" prints its one number ("0.12% dilution"
+// → 0.12), and a value without "%" must be a plain number ("0.12", ".12").
+// Anything else ("0.12 fl oz/gal", a range) cannot be issued → null, so it
+// never takes a chart's reduced volume.
 function parsePercent(value) {
-  const match = String(value ?? '').trim().match(/^(\d*\.?\d+)\s*%?$/);
-  return match ? Number(match[1]) : null;
+  const raw = String(value ?? '').trim();
+  const numbers = raw.match(/(\d{1,3}(,\d{3})+|\d+)(\.\d+)?|\.\d+/g) || [];
+  const printed = raw.includes('%') && numbers.length === 1 ? numbers[0] : raw;
+  return printed && /^(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?$/.test(printed) ? Number(printed.replace(/,/g, '')) : null;
 }
 
 function roundGallons(value) {
