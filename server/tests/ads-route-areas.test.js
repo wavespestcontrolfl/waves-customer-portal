@@ -6,12 +6,12 @@ jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../models/db', () => jest.fn(() => { throw new Error('the module must use the conn it is given'); }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn() }));
-jest.mock('../services/technician-eligibility', () => ({ applyAssignable: jest.fn((q) => q), absentTechDays: jest.fn() }));
+jest.mock('../services/technician-eligibility', () => ({ applyAssignable: jest.fn((q) => q), absentTechDays: jest.fn(), loadTechShifts: jest.fn() }));
 jest.mock('../services/scheduling/policy', () => ({ SHIFT: { startMinutes: 480, endMinutes: 1080 } }));
 jest.mock('../services/day-replan/close-gaps', () => ({ SLOT_MIN: 80 }));
 
 const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
-const { absentTechDays } = require('../services/technician-eligibility');
+const { absentTechDays, loadTechShifts } = require('../services/technician-eligibility');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../services/stops-ahead');
 const {
   buildRouteAreas, recordRouteAreas, LAST_KEY, HISTORY_KEY, HISTORY_MAX,
@@ -192,6 +192,19 @@ describe('buildRouteAreas: one technician', () => {
     const rec = buildRouteAreas(input({ nowMin: 19 * 60, stops: [stop({ date: WEEKDAYS[0] })] }));
     expect(dayOf(rec, T1, WEEKDAYS[0])).toMatchObject({ shift_min: 0, open_min: 0, room: false, zip_reason: 'full' });
     expect(dayOf(rec, T1, WEEKDAYS[1]).shift_min).toBe(600);
+  });
+
+  test('a technician\'s own shift replaces the default one for his day', () => {
+    // 16:00 today. The default day ends at 18:00 (120 minutes left); T1's own day ends at 16:00.
+    const techShifts = {
+      [`${T1}:${WEEKDAYS[0]}`]: { startMinutes: 420, endMinutes: 960, source: 'clock_in' },
+      [`${T1}:${WEEKDAYS[1]}`]: { startMinutes: 480, endMinutes: 960, source: 'roster' },
+    };
+    const rec = buildRouteAreas(input({ techIds: [T1, T2], nowMin: 16 * 60, techShifts, stops: [stop({ date: WEEKDAYS[0] }), stop({ technicianId: T2, date: WEEKDAYS[0] })] }));
+    expect(dayOf(rec, T1, WEEKDAYS[0])).toMatchObject({ shift_min: 0, shift_source: 'clock_in', open_min: 0, room: false });
+    expect(dayOf(rec, T1, WEEKDAYS[1])).toMatchObject({ shift_min: 480, shift_source: 'roster' });
+    expect(dayOf(rec, T2, WEEKDAYS[0])).toMatchObject({ shift_min: 120, shift_source: 'default', open_min: 40, room: false });
+    expect(dayOf(rec, T2, WEEKDAYS[1])).toMatchObject({ shift_min: 600, shift_source: 'default' });
   });
 
   test('today before the shift starts keeps the whole shift; mid-shift counts the rest', () => {
@@ -506,6 +519,8 @@ describe('recordRouteAreas', () => {
     jest.clearAllMocks();
     getBlackoutDates.mockResolvedValue(new Set());
     absentTechDays.mockResolvedValue(new Set());
+    // Gate off, or no set hours: no technician has a shift of his own.
+    loadTechShifts.mockResolvedValue(() => null);
   });
 
   test('reads the two dates and the gap rule row filter, writes both keys', async () => {
@@ -611,6 +626,16 @@ describe('recordRouteAreas', () => {
     }
   });
 
+  test('reads each technician\'s own shift for the two dates', async () => {
+    loadTechShifts.mockResolvedValue((id, date) => (id === T1 && date === '2026-11-24' ? { startMin: 480, endMin: 960, source: 'roster' } : null));
+    const { conn, store } = fakeConn();
+    const record = await recordRouteAreas({ now: NOW, conn });
+    expect(loadTechShifts).toHaveBeenCalledWith(conn, { technicianIds: [T1], now: NOW });
+    expect(dayOf(record, T1, '2026-11-24')).toMatchObject({ shift_min: 480, shift_source: 'roster', open_min: 480 });
+    expect(dayOf(record, T1, '2026-11-23')).toMatchObject({ shift_min: 1080 - 615, shift_source: 'default' });
+    expect(JSON.parse(store[HISTORY_KEY])[0].techs[0].days[1]).toMatchObject({ shift_min: 480, shift_source: 'roster' });
+  });
+
   test('reads which technicians are off for a line', async () => {
     const { conn, state } = fakeConn({
       techs: [{ id: T2 }, { id: T1 }],
@@ -679,7 +704,7 @@ describe('recordRouteAreas', () => {
     expect(entry.techs[0].days[1]).toEqual({
       date: '2026-11-24', staffed: true, reason: null, room: true, room_basis: 'minutes', route_slots: null, route_stops: null,
       stops: 1, stops_left: 1, limit: weekdayLimit, open_stops: weekdayLimit - 1,
-      shift_min: 600, booked_min: 60, drive_min: 20, open_min: 520, areas: { 'a-north': 1 }, zip_source: 'stops',
+      shift_min: 600, shift_source: 'default', booked_min: 60, drive_min: 20, open_min: 520, areas: { 'a-north': 1 }, zip_source: 'stops',
     });
     // The rule's numbers and the unassigned work stay with the entry: a past result can be counted again.
     expect(entry.rule).toEqual({

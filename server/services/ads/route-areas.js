@@ -24,6 +24,8 @@
  *   minutes      today, and a date the route check did not measure (no fresh run, or a day it skips): the open
  *                minutes of the day hold one more job with its drive (close-gaps SLOT_MIN). This is a daily total,
  *                so it is a ceiling: the route check does not measure today (its room depends on where the van is).
+ *                The day is the technician's own shift where he has one (GATE_TECH_SHIFT_HOURS), else the default.
+ *                The total does not take out technician time blocks or booked interviews; the route check does.
  * Work with no technician yet is held against every technician, in the stop count and in the minutes.
  *
  * Every input of the rule is in the record, so a run can be counted again from the rows: per technician-day the stops,
@@ -89,10 +91,13 @@ function closedReason(input, techId, date, bookedCount) {
 // The minutes a stop still needs: its not-completed services only (a visit with one service done keeps the rest).
 const minutesLeftOf = (stop) => (stop.minutesLeft === undefined ? stop.minutes : stop.minutesLeft);
 
+/** The technician's own shift that date (GATE_TECH_SHIFT_HOURS: his set hours, or today from his clock-in), else the default. */
+const shiftOf = (input, techId, date) => (input.techShifts || {})[`${techId}:${date}`] || input.shift;
+
 /** Minutes left in the shift: all of it for a later date, the part after now (and the start) for today. */
-function shiftMinutes(input, date) {
-  const { startMinutes, endMinutes } = input.shift;
-  if (date !== input.dates[0]) return endMinutes - startMinutes;
+function shiftMinutes(input, techId, date) {
+  const { startMinutes, endMinutes } = shiftOf(input, techId, date);
+  if (date !== input.dates[0]) return Math.max(0, endMinutes - startMinutes);
   return Math.max(0, endMinutes - Math.max(startMinutes, input.nowMin));
 }
 
@@ -165,7 +170,7 @@ function techDay(input, ctx, techId, date) {
   const reason = closedReason(input, techId, date, mine.filter((s) => s.booked !== false).length);
   const staffed = reason === null;
   const limit = limitFor(date, input.limits);
-  const shiftMin = shiftMinutes(input, date);
+  const shiftMin = shiftMinutes(input, techId, date);
   const bookedMin = sum(left, minutesLeftOf) + unassigned.minutes_left;
   const driveMin = (input.slotMin - JOB_MIN) * (left.length + unassigned.stops_left);
   const openMin = Math.max(0, shiftMin - bookedMin - driveMin);
@@ -194,6 +199,7 @@ function techDay(input, ctx, techId, date) {
     limit,
     open_stops: openStops,
     shift_min: shiftMin,
+    shift_source: shiftOf(input, techId, date).source || 'default',
     booked_min: bookedMin,
     drive_min: driveMin,
     open_min: openMin,
@@ -436,6 +442,24 @@ async function readRouteCheck(conn, now, today) {
   };
 }
 
+/**
+ * Each technician's own shift on the two dates, where he has one (technician-eligibility loadTechShifts: off, or no
+ * set hours, gives none): `<technician>:<date>` -> { startMinutes, endMinutes, source: 'roster' | 'clock_in' }.
+ */
+async function readTechShifts(conn, techIds, dates, now) {
+  const { loadTechShifts } = require('../technician-eligibility');
+  if (!techIds.length || typeof loadTechShifts !== 'function') return {};
+  const lookup = await loadTechShifts(conn, { technicianIds: techIds, now });
+  const shifts = {};
+  for (const id of techIds) {
+    for (const date of dates) {
+      const shift = typeof lookup === 'function' ? lookup(id, date) : null;
+      if (shift) shifts[`${id}:${date}`] = { startMinutes: shift.startMin, endMinutes: shift.endMin, source: shift.source };
+    }
+  }
+  return shifts;
+}
+
 /** The staffed rule's reads: blackout dates, assignable technicians and absences (the route check's eligibility). */
 async function readEligibility(conn, dates) {
   const { getBlackoutDates } = require('../scheduling/blackout-dates');
@@ -481,6 +505,7 @@ async function loadRouteAreasInput(conn, now) {
     territoryLive: territoryRoutingOn(),
     limits: normalizeGapSettings(targets?.metadata),
     shift: { startMinutes: SHIFT.startMinutes, endMinutes: SHIFT.endMinutes },
+    techShifts: await readTechShifts(conn, elig.techIds, dates, now),
     slotMin: SLOT_MIN,
   };
 }
@@ -538,6 +563,7 @@ function compactEntry(record) {
         limit: d.limit,
         open_stops: d.open_stops,
         shift_min: d.shift_min,
+        shift_source: d.shift_source,
         booked_min: d.booked_min,
         drive_min: d.drive_min,
         open_min: d.open_min,
