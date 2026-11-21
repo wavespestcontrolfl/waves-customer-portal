@@ -775,6 +775,9 @@ describe('planStartBlocker', () => {
         ['the commercial occupancy of a property row the payload keeps', { property: { occupancy_type: 'commercial', property_type: 'single_family' } }],
         ['the commercial occupancy in the other spelling, far down', farDown({ occupancyType: 'commercial' })],
         ['the commercial occupancy of an extra property', { additional_properties: [{ address_line1: '12 Example Test Way', occupancy: 'commercial', property_type: 'single_family' }] }],
+        // The two fields of a call's property that say commercial beside a home type.
+        ["the commercial occupancy of a call's main address, where a payload keeps the property", { property: { service_address_occupancy: 'commercial', property_type: 'single_family' } }],
+        ['a service of the common areas of an association, beside a condo type', { call: { property: { hoa_common_area_service: true, property_type: 'condo' } } }],
       ])('%s: commercial', async (_label, estimate_data) => {
         expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data }), ESTIMATE()]))).toBe('commercial');
       });
@@ -788,11 +791,24 @@ describe('planStartBlocker', () => {
         ['the word residential as an occupancy', { engineRequest: { services: { bedBug: { occupancyType: 'residential' } } } }],
         ['the home occupancies of a property', { properties: [{ occupancy_type: 'owner_occupied' }, { occupancyType: 'rental_investment' }, { occupancy: 'unknown' }, { occupancy: null }, { occupancy_type: '' }] }],
         ['a hotel under a name that keeps no occupancy', { inputs: { isCommercial: 'NO', bedbugNote: 'hotel', stayedAt: 'hotel' } }],
+        ["a home occupancy of a call's main address, with no common-area service, in an association", {
+          property: { service_address_occupancy: 'owner_occupied', hoa_common_area_service: false, hoa_community_flag: true, property_type: 'single_family' },
+          earlier: { property: { service_address_occupancy: null, hoa_common_area_service: null, property_type: 'condo' } },
+        }],
       ])('%s is not commercial', async (_label, estimate_data) => {
         expect(await blocker(withEstimates([ESTIMATE({ estimate_data }), ESTIMATE()]))).toBeNull();
       });
 
-      test.each([['bedbugOccupancyType'], ['occupancyType'], ['occupancy_type'], ['occupancy']])('a hotel under the name %s is a mark, and a single-family home under it is none', async (name) => {
+      // The marketing attribution of a web submission is not read, also where an estimate payload keeps a copy.
+      test('the attribution of a web submission in an estimate payload is not read, and the same key as a picked service is a mark', async () => {
+        const ad = { source: 'google', campaign: 'commercial_pest', label: 'Commercial Pest Control ad' };
+        const intake = { attribution: { utm: ad, formId: 'commercial_quote_form' }, utm: ad, clickIds: { gclid: 'commercial_click' }, source_evidence: ad, referrer: 'commercial_pest', landing_url: 'commercial_pest' };
+        const kept = (more) => ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Single Family' }, intake: { ...intake, ...more } } });
+        expect(await blocker(withEstimates([kept({}), ESTIMATE({ estimate_data: farDown(intake) }), ESTIMATE()]))).toBeNull();
+        expect(await blocker(withEstimates([ESTIMATE(), kept({ pickedServices: ['commercial_pest'] })]))).toBe('commercial');
+      });
+
+      test.each([['bedbugOccupancyType'], ['occupancyType'], ['occupancy_type'], ['occupancy'], ['service_address_occupancy']])('a hotel under the name %s is a mark, and a single-family home under it is none', async (name) => {
         const kept = (value) => ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Single Family' }, job: { [name]: value } } });
         expect(await blocker(withEstimates([ESTIMATE(), kept('hotel')]))).toBe('commercial');
         expect(await blocker(withEstimates([ESTIMATE(), kept('singleFamily')]))).toBeNull();
@@ -1028,6 +1044,45 @@ describe('planStartBlocker', () => {
         expect(await blocker(withLeads([lead, LEAD()]))).toBeNull();
       });
 
+      // The marketing attribution of a web submission says what the advertisement was, not what the premises is.
+      // The scan does not go into the six names the intakes save it under. A text that starts with the prefix
+      // and a label with the word are the two things a rule would read there.
+      const AD = { source: 'google', medium: 'cpc', campaign: 'commercial_pest', content: 'commercial_pest_ad_2', term: 'commercial pest control' };
+      test.each([['attribution'], ['utm'], ['clickIds'], ['source_evidence'], ['referrer'], ['landing_url']])('what the link of a visitor carried, under the name %s, is not read', async (name) => {
+        const kept = (value) => LEAD({ extracted_data: { stage: 'lead_webhook_received', service_interest: 'Pest Control', [name]: value } });
+        expect(await blocker(withLeads([kept('commercial_pest'), LEAD()]))).toBeNull();
+        expect(await blocker(withLeads([kept({ ...AD, label: 'Commercial Pest Control ad', kind: 'commercial_campaign' }), LEAD()]))).toBeNull();
+        expect(await blocker(withLeads([kept([{ deeper: [AD] }]), LEAD()]))).toBeNull();
+      });
+
+      test("a lead with the attribution a web form and the quote page save: not commercial, also far down in the payload", async () => {
+        const form = {
+          stage: 'lead_webhook_received',
+          service_interest: 'Pest Control',
+          attribution: {
+            leadSource: { source: 'Google Ads', channel: 'paid', detail: 'commercial_pest', area: 'Parrish' },
+            formId: 'commercial_quote_form',
+            formName: 'Quote form',
+            pageUrl: 'https://example.test/commercial-pest-control',
+            landingUrl: 'https://example.test/commercial-pest-control',
+            utm: AD,
+            clickIds: { gclid: 'commercial_click', wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null },
+          },
+          source_evidence: { kind: 'paid_search', label: 'Commercial Pest Control ad', detail: 'commercial_pest', basis: 'utm' },
+        };
+        const quotePage = { utm: AD, clickIds: { gclid: 'commercial_click' }, referrer: 'commercial_pest', landing_url: 'https://example.test/commercial-pest-control', source_evidence: form.source_evidence };
+        const farDown = Array.from({ length: 20 }).reduce((inner) => ({ next: [inner] }), form);
+        expect(await blocker(withLeads([LEAD({ extracted_data: form }), LEAD({ extracted_data: quotePage }), LEAD({ extracted_data: farDown }), LEAD()]))).toBeNull();
+      });
+
+      test('the campaign text of an advertisement is a mark where a payload keeps it as a picked service key, and a mark beside an attribution counts', async () => {
+        const attribution = { utm: AD };
+        expect(await blocker(withLeads([LEAD({ extracted_data: { attribution } }), LEAD()]))).toBeNull();
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, selectedServices: [AD.campaign] } })]))).toBe('commercial');
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, picked: { key: AD.campaign } } })]))).toBe('commercial');
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: { attribution, isCommercial: 'YES' } })]))).toBe('commercial');
+      });
+
       // The rule belongs to the quiz module. The proof asks it, so a new answer that means a business is followed.
       test("a mark only the quiz's own rule reads counts", async () => {
         const owner = require('../services/lead-quiz');
@@ -1051,6 +1106,27 @@ describe('planStartBlocker', () => {
 
       test.each([['owner_occupied'], ['rental_investment'], ['seasonal'], ['vacant'], ['unknown'], [null]])('a lead that keeps an extra property with the occupancy %j is not commercial', async (occupancy) => {
         expect(await blocker(withLeads([LEAD({ extracted_data: EXTRA_PROPERTY({ occupancy }) }), LEAD()]))).toBeNull();
+      });
+
+      // The lead's merge keeps every field of a property entry, so a field of a call's property can sit there.
+      test("a lead that keeps the commercial occupancy of a call's main address on a property: commercial, and a home occupancy is none", async () => {
+        const occupancies = require('../schemas/call-extraction.persisted.schema.json').properties.property.properties.service_address_occupancy.enum;
+        expect(occupancies).toContain('commercial');
+        const answers = [];
+        for (const service_address_occupancy of occupancies) {
+          answers.push([service_address_occupancy, await blocker(withLeads([LEAD(), LEAD({ extracted_data: EXTRA_PROPERTY({ service_address_occupancy }) })]))]);
+        }
+        expect(answers).toEqual(occupancies.map((occupancy) => [occupancy, occupancy === 'commercial' ? 'commercial' : null]));
+        // At the root of the payload too, where a lead keeps the main address.
+        expect(await blocker(withLeads([LEAD({ extracted_data: { address_line1: '12 Example Test Way', property_type: 'single_family', service_address_occupancy: 'commercial' } })]))).toBe('commercial');
+      });
+
+      test('a lead that keeps a service of the common areas of an association on a property: commercial', async () => {
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: EXTRA_PROPERTY({ property_type: 'condo', hoa_common_area_service: true }) }), LEAD()]))).toBe('commercial');
+      });
+
+      test.each([[false], [null], [undefined]])('a lead that keeps the common-area flag as %j on a home in an association is not commercial', async (hoa_common_area_service) => {
+        expect(await blocker(withLeads([LEAD({ extracted_data: EXTRA_PROPERTY({ hoa_common_area_service, hoa_community_flag: true }) }), LEAD()]))).toBeNull();
       });
 
       test('a lead about a condo: commercial on the account of a property manager or with a manager named in it, and a home with neither', async () => {
@@ -1461,6 +1537,33 @@ describe('planStartBlocker', () => {
         }
         expect(answers).toEqual(expected);
         expect(expected.map(([, answer]) => answer)).toContain('commercial');
+      });
+
+      // The class behind a lead's property entry: the lead's merge keeps every field of an entry, and an entry has
+      // the shape of a call's property. One field of a call's property, alone beside a home type and with no
+      // relationship stated: where the proof reads the CALL as commercial, it reads a lead that keeps the field on
+      // a property entry as commercial too.
+      test("every field of a call's property that makes a call commercial makes a lead that keeps it commercial", async () => {
+        const fields = require('../schemas/call-extraction.persisted.schema.json').properties.property.properties;
+        const caller = { relationship_to_property: 'unknown' };
+        const leadWith = (entry) => world({ tables: { leads: [{ is_commercial: false, is_residential: true, extracted_data: { additional_properties: [{ address_line1: '12 Example Test Way', property_type: 'single_family', occupancy: 'owner_occupied', ...entry }] } }] } });
+        const marks = [];
+        const answers = [];
+        for (const [name, field] of Object.entries(fields)) {
+          const values = field.enum ? field.enum.filter((value) => value !== null) : [];
+          if ([].concat(field.type).includes('boolean')) values.push(true);
+          for (const value of values) {
+            const property = { property_type: 'single_family', [name]: value };
+            if (await blocker(withCalls([CALL(extraction({ caller, property }))])) !== 'commercial') continue;
+            marks.push(`${name}=${value}`);
+            answers.push([`${name}=${value}`, await blocker(leadWith({ [name]: value }))]);
+          }
+        }
+        expect(marks).toEqual(expect.arrayContaining([
+          'property_type=commercial', 'property_type=hoa_common_area', 'hoa_common_area_service=true', 'commercial_subtype=office', 'service_address_occupancy=commercial',
+        ]));
+        expect(answers).toEqual(marks.map((mark) => [mark, 'commercial']));
+        expect(await blocker(leadWith({}))).toBeNull();
       });
 
       test('the call of a property manager about single homes only: homes', async () => {

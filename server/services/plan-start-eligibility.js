@@ -301,7 +301,8 @@ const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && N
 //   Area'), a commercial subtype, a commercial category, a commercial service
 //   pick. It is the rule that decides whether the engine prices a home;
 // - the kind of premises the object names (namesCommercialPremises below): a
-//   property type, an occupancy, or the estimator's verdict on its own draft;
+//   property type, an occupancy, the flag of a common-area service, or the
+//   estimator's verdict on its own draft;
 // - a commercial subtype in the engine's other spelling (commercial_subtype:
 //   the engine's intent, commercialSubtypeFromInput in estimate-engine.js);
 // - a commercial risk type (the business-type bucket that sets the visits per
@@ -424,11 +425,11 @@ const SERVICE_LABEL_NAMES = Object.freeze([
   'serviceType', 'service_type',
 ]);
 const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.map((name) => node[name]));
-// The kind of premises one object of a payload names. Three marks:
+// The kind of premises one object of a payload names. Four marks:
 // - a property type, under either spelling of the name (property_type,
 //   propertyType), by the rule for a saved type and with the manager of the
 //   record (isCommercialPropertyType);
-// - an occupancy, under one of the four names a payload keeps one. The
+// - an occupancy, under one of the five names a payload keeps one. The
 //   estimator form and the engine keep the occupancy of a bed bug job apart
 //   from the property type (bedbugOccupancyType in the form's inputs,
 //   occupancyType on the engine's service and on its priced line), and the
@@ -436,10 +437,20 @@ const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.m
 //   occupancies and reads the three that are not a single-family home as an
 //   explicit commercial scope (estimate-engine.js): an apartment, a hotel,
 //   student housing. Each one is a mark here, also where the bed bug service
-//   was not picked in the end: staff typed the premises. A lead keeps the
-//   occupancy of each extra property the intake named (occupancy), and a
-//   property's own vocabulary has one value that is not a home:
-//   'commercial';
+//   was not picked in the end: staff typed the premises. A lead keeps each
+//   extra property the intake named in the shape of a call's property, with
+//   its occupancy (occupancy). The lead's merge keeps every field of such an
+//   entry (unionAdditionalProperties in lead-extracted-data-merge.js), so
+//   the occupancy a call gives its main address (service_address_occupancy)
+//   is read under its own name too. A property's own vocabulary has one
+//   value that is not a home: 'commercial';
+// - the flag a call sets when the service is for the common areas of an
+//   association (hoa_common_area_service). The call system routes such a job
+//   commercial by definition: commercialCategoryConflict reads the flag
+//   before the type. It is the other field of a call's property that says
+//   commercial with a home type beside it, so it is read wherever a payload
+//   keeps a property in that shape. The flag of a home IN an association
+//   (hoa_community_flag) is another field, and it says nothing;
 // - the estimator's verdict on a draft it made (categoryConflict, in the
 //   property facts the draft keeps): the call or the lookup typed the
 //   premises commercial while the draft stayed residential. It is the saved
@@ -447,12 +458,13 @@ const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.m
 //   with the caller) or of the lookup's own (lookupCategoryConflict). A draft
 //   can be the only record of that call on the account. Any value that is
 //   set counts.
-const OCCUPANCY_NAMES = Object.freeze(['bedbugOccupancyType', 'occupancyType', 'occupancy_type', 'occupancy']);
+const OCCUPANCY_NAMES = Object.freeze(['bedbugOccupancyType', 'occupancyType', 'occupancy_type', 'occupancy', 'service_address_occupancy']);
 const COMMERCIAL_OCCUPANCIES = Object.freeze(['apartment', 'hotel', 'studenthousing', 'commercial']);
 const isCommercialOccupancy = (value) => COMMERCIAL_OCCUPANCIES.includes(String(value ?? '').trim().toLowerCase());
 function namesCommercialPremises(node, managed) {
   return [node.property_type, node.propertyType].some((type) => isCommercialPropertyType(type, managed))
     || OCCUPANCY_NAMES.some((name) => isCommercialOccupancy(node[name]))
+    || node.hoa_common_area_service === true
     || isSet(node.categoryConflict);
 }
 function nodeSaysCommercial(node, managed) {
@@ -488,14 +500,28 @@ function nodeSaysCommercial(node, managed) {
 // Not read at all: the listing of a business at the address, as the lookup
 // keeps it on a profile (lookupSaysBusiness above gives the reason). No rule
 // and no text under that name counts.
+// Nor the marketing attribution of a web submission, under the six names the
+// intakes save it (lead-webhook.js, public-quote.js,
+// public-property-lookup.js, booking-preferred-time.js,
+// public-lawn-assessment.js, lead-unverified-hold.js): the tags of the link
+// the visitor came by (utm), its click ids (clickIds), the page before and
+// the page landed on (referrer, landing_url), the object an intake keeps
+// them in (attribution), and the proof of the lead's source the server makes
+// from them (source_evidence). A campaign named 'commercial_pest' names an
+// advertisement, and the label of a source is no service line: neither says
+// what the premises of the visitor is. The scan does not go into those
+// names. The same text under any other name (a picked service key) is a
+// mark.
 const COMMERCIAL_KEY_PREFIX = 'commercial_';
 const LISTING_NAME = 'businessIdentity';
+const ATTRIBUTION_NAMES = Object.freeze(['attribution', 'utm', 'clickIds', 'source_evidence', 'referrer', 'landing_url']);
+const UNREAD_NAMES = Object.freeze([LISTING_NAME, ...ATTRIBUTION_NAMES]);
 function payloadSaysCommercial(value, managed) {
   if (typeof value === 'string') return value.trim().toLowerCase().startsWith(COMMERCIAL_KEY_PREFIX);
   if (!value || typeof value !== 'object') return false;
   if (Array.isArray(value)) return value.some((item) => payloadSaysCommercial(item, managed));
   return nodeSaysCommercial(value, managed)
-    || Object.entries(value).some(([name, item]) => name !== LISTING_NAME && payloadSaysCommercial(item, managed));
+    || Object.entries(value).some(([name, item]) => !UNREAD_NAMES.includes(name) && payloadSaysCommercial(item, managed));
 }
 
 // A value of a JSONB column, as the driver returns it. PostgreSQL checks a
@@ -559,9 +585,10 @@ function someText(value, test) {
 // - the classifier of the accept and slot routes
 //   (isCommercialAutoAcceptEstimate): commercial service rows;
 // - a mark on any object of the payload (nodeSaysCommercial above), or a text
-//   in it that starts with 'commercial_' (payloadSaysCommercial). A type in
-//   the payload is asked with a manager where the account has one, or where
-//   an object of the payload names one (hasManager);
+//   in it that starts with 'commercial_' (payloadSaysCommercial), outside the
+//   listing and the marketing attribution a payload keeps. A type in the
+//   payload is asked with a manager where the account has one, or where an
+//   object of the payload names one (hasManager);
 // - the reader the pipeline shows an estimate's service lines with
 //   (inferEstimateServiceLines in estimate-service-lines.js): a line whose
 //   key starts with 'commercial_'. For an estimate with no service line it
@@ -627,7 +654,11 @@ async function hasCommercialEstimate(database, customerId, managed) {
 //   estimate), the text prefix, and the payload scan of the save
 //   (isCommercialEstimateData). It keeps the same fields (isCommercial,
 //   category, commercialSubtype, propertyType), and a web form keeps the
-//   service label in it too (service_interest).
+//   service label in it too (service_interest). A web form also keeps the
+//   marketing attribution of the submission there: that part is not read
+//   (ATTRIBUTION_NAMES above). The intake's own commercial verdict reads the
+//   words and the service of the submission, never its campaign
+//   (lead-estimate-automation.js), and it is in the two flags above.
 function isCommercialLeadRow(lead, managed) {
   const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
   if (lead.is_commercial === true || lead.is_residential === false) return true;

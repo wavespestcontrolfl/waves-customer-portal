@@ -799,6 +799,17 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a lead whose payload keeps such a label, behind a home label in its column', {
         service_interest: 'Pest Control', extracted_data: JSON.stringify({ stage: 'lead_webhook_received', service_interest: 'Rodent control at the warehouse' }),
       }],
+      // A property entry of a lead has the shape of a call's property, and the merge keeps every field of it.
+      ["a lead that keeps the commercial occupancy of a call's main address on a property", {
+        extracted_data: JSON.stringify({ additional_properties: [{ address_line1: '12 Example Test Way', property_type: 'single_family', service_address_occupancy: 'commercial' }] }),
+      }],
+      ['a lead that keeps a service of the common areas of an association on a property', {
+        extracted_data: JSON.stringify({ additional_properties: [{ address_line1: '12 Example Test Way', property_type: 'condo', hoa_common_area_service: true }] }),
+      }],
+      // The campaign text of an advertisement, kept as a picked service key beside the attribution.
+      ['a lead that keeps a commercial key as a picked service, beside the attribution of an advertisement', {
+        extracted_data: JSON.stringify({ attribution: { utm: { source: 'google', campaign: 'commercial_pest' } }, selectedServices: ['commercial_pest'] }),
+      }],
     ])('%s, beside a home lead: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedLead(customer);
@@ -819,6 +830,22 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a lead whose label names a home', { service_interest: 'Pest control for the home office' }],
       ['a lead with a home service label and the words of a call in its payload', {
         extracted_data: JSON.stringify({ stage: 'lead_webhook_received', service_interest: 'Pest Control', pain_points: ['The commercial spray from the store did not work'] }),
+      }],
+      // What the link of the visitor carried names the advertisement, not the premises: the scan does not go into it.
+      ['a lead that came by an advertisement named for commercial pest control, with the attribution a web form and the quote page save', {
+        extracted_data: JSON.stringify({
+          stage: 'lead_webhook_received',
+          service_interest: 'Pest Control',
+          attribution: { formId: 'commercial_quote_form', landingUrl: 'https://example.test/commercial-pest-control', utm: { source: 'google', medium: 'cpc', campaign: 'commercial_pest' }, clickIds: { gclid: 'commercial_click' } },
+          source_evidence: { kind: 'paid_search', label: 'Commercial Pest Control ad', detail: 'commercial_pest', basis: 'utm' },
+          utm: { campaign: 'commercial_pest' },
+          clickIds: { gclid: 'commercial_click' },
+          referrer: 'commercial_pest',
+          landing_url: 'commercial_pest',
+        }),
+      }],
+      ['a lead that keeps a home occupancy of a main address on a property in an association', {
+        extracted_data: JSON.stringify({ additional_properties: [{ address_line1: '12 Example Test Way', property_type: 'single_family', service_address_occupancy: 'seasonal', hoa_common_area_service: false, hoa_community_flag: true }] }),
       }],
     ])('%s is not commercial', async (_label, change) => {
       expect(await blockerFor((customer) => seedLead(customer, change))).toBeNull();
