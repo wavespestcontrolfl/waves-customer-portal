@@ -172,6 +172,7 @@ for (const [id, label, question, answers] of NEWSLETTER_POLLS) {
 }
 /** The polls in the owner's order: the autopilot uses each once, then stops. */
 const NEWSLETTER_POLL_IDS = Object.freeze(NEWSLETTER_POLLS.map(([id]) => id));
+const isNewsletterPoll = (quizId) => NEWSLETTER_POLL_IDS.includes(quizId);
 /** Sent issues between two polls: a poll shows in at most every 3rd issue, never two in a row. */
 const POLL_ISSUE_GAP = 2;
 
@@ -412,8 +413,21 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
 
     const delivery = await db('newsletter_send_deliveries')
       .where({ engagement_token: token })
-      .first('id', 'subscriber_id');
+      .first('id', 'subscriber_id', 'send_id');
     if (!delivery) return { ok: false, reason: 'no-delivery' };
+
+    // A Waves Newsletter poll counts only from an issue that carried it: any
+    // older issue's engagement token must not record a poll its reader never
+    // saw, nor overwrite that delivery row's earlier answer. The public route
+    // answers the same either way.
+    if (isNewsletterPoll(quizId)) {
+      const carried = await db('newsletter_sends')
+        .where({ id: delivery.send_id })
+        .where((body) => body.where('html_body', 'like', `%{{quiz:${quizId}}}%`)
+          .orWhere('text_body', 'like', `%{{quiz-text:${quizId}}}%`))
+        .first('id');
+      if (!carried) return { ok: false, reason: 'not-in-issue' };
+    }
 
     // Stamp the answer on the delivery row regardless (engagement record).
     await db('newsletter_send_deliveries').where({ id: delivery.id }).update({
@@ -459,8 +473,6 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
   }
 }
 
-const isNewsletterPoll = (quizId) => NEWSLETTER_POLL_IDS.includes(quizId);
-
 // The first Waves Newsletter poll a body carries, or null.
 function pollInBody(content) {
   const found = parseQuizTokens(content).find((t) => isNewsletterPoll(t.quizId));
@@ -493,6 +505,16 @@ const DELIVERY_REACHED_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
  * or one the stale-claim recovery ended, is 'failed' although its first
  * batches reached readers. Sent bodies keep their quiz tokens (the per-reader
  * buttons are SendGrid substitutions), so the token in html_body is the record.
+ * An issue's time is its sent_at, else its first delivery's sent_at (a worker
+ * that failed after a batch leaves sent_at empty, and a resume clears
+ * scheduled_for), else its schedule, else its draft time.
+ *
+ * An issue no reader got yet never counts. The autopilot drafts a week's issue
+ * on its Monday, and last week's unsent issue can no longer go out by then: an
+ * approval needs the issue's own Tuesday still ahead (newsletter-proof.js
+ * resolveFlagshipCalendarContext), and the sender delivers a flagship issue
+ * only on its own Tuesday at 6:00 AM ET (newsletter-sender.js,
+ * isCurrentFlagshipTarget + isFlagshipDeliveryWindow).
  */
 async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
   const reached = () => knex('newsletter_sends as s')
@@ -505,7 +527,9 @@ async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
           .orWhereNotNull('d.opened_at').orWhereNotNull('d.clicked_at'));
     }));
   const newest = await reached()
-    .orderByRaw('COALESCE(s.sent_at, s.scheduled_for, s.created_at) DESC')
+    .orderByRaw(`COALESCE(s.sent_at,
+      (SELECT MIN(f.sent_at) FROM newsletter_send_deliveries f WHERE f.send_id = s.id),
+      s.scheduled_for, s.created_at) DESC`)
     .limit(POLL_ISSUE_GAP)
     .select('s.html_body');
   const withPoll = await reached()

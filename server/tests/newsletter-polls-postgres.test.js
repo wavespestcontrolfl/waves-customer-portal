@@ -1,66 +1,104 @@
 /**
- * newsletterIssuePolls reads one newsletter type's poll history from the
- * issues readers got: the polls of the newest two, and every poll such an
- * issue carried. A 'failed' send that reached readers before it stopped
- * counts; a draft, a failed send that reached no reader and another type's
- * issue never count. Real Postgres, because the history is a LIKE over the
- * stored html_body, an EXISTS over the delivery rows and a time order.
- * Self-skips unless DATABASE_URL is set (CI's DB-gated suites step).
- * Safe on a shared database: synthetic rows under newsletter types no real
- * issue uses, asserted by type, removed after.
+ * Waves Newsletter polls against real Postgres:
+ * - newsletterIssuePolls reads one newsletter type's poll history from the
+ *   issues readers got: the polls of the newest two, and every poll such an
+ *   issue carried. A 'failed' send that reached readers before it stopped
+ *   counts; a draft, a failed send that reached no reader and another type's
+ *   issue never count. An issue with no send time sorts by its first delivery.
+ * - recordQuizResponse records a poll vote only from an issue that carried
+ *   that poll.
+ * Real Postgres, because these are a LIKE over the stored bodies, an EXISTS
+ * and a subquery over the delivery rows, and the vote's row update.
+ * Runs in CI's DB-gated step or this worktree's private QA database; every
+ * test runs in one transaction that is rolled back, so no row stays.
  */
 jest.setTimeout(60000);
 
+// CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 
-jest.mock('../models/db', () => require('knex')({
-  client: 'pg',
-  connection: process.env.DATABASE_URL,
-  pool: { min: 0, max: 2 },
-}));
+jest.mock('../models/db', () => {
+  const db = (...args) => db.connection(...args);
+  db.raw = (...args) => db.connection.raw(...args);
+  return db;
+});
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
 
 const { randomUUID } = require('crypto');
 
-postgres('newsletterIssuePolls (real Postgres)', () => {
+postgres('Waves Newsletter polls (real Postgres)', () => {
   const db = require('../models/db');
-  const { newsletterIssuePolls, chooseNewsletterPoll, NEWSLETTER_POLL_IDS } = require('../services/newsletter-quiz');
+  const {
+    newsletterIssuePolls, chooseNewsletterPoll, recordQuizResponse, NEWSLETTER_POLL_IDS,
+  } = require('../services/newsletter-quiz');
   const [P1, P2, P3, P4] = NEWSLETTER_POLL_IDS;
-  const TYPE = `poll-test-${randomUUID()}`;
-  const OTHER_TYPE = `poll-test-${randomUUID()}`;
-  const created = [];
+  let database;
   const HOUR = 60 * 60 * 1000;
   const daysAgo = (days) => new Date(Date.now() - days * 24 * HOUR);
+  const newType = () => `poll-test-${randomUUID()}`;
 
-  async function insertIssues(rows) {
+  // Inserts issues and their delivery rows; returns each issue's delivery rows
+  // ({ id, engagement_token }) in order.
+  async function insertIssues(type, rows) {
     const inserted = await db('newsletter_sends').insert(rows.map((row) => ({
       subject: 'Synthetic poll issue',
       html_body: `<p>Synthetic</p>${row.poll ? `{{quiz:${row.poll}}}` : ''}<p>End</p>`,
-      text_body: 'Synthetic',
+      text_body: row.poll ? `Synthetic\n{{quiz-text:${row.poll}}}` : 'Synthetic',
       auto_share_social: false,
-      newsletter_type: row.type || TYPE,
+      newsletter_type: row.type || type,
       status: row.status || 'sent',
       sent_at: row.sentAt || null,
+      ...(row.createdAt ? { created_at: row.createdAt } : {}),
     }))).returning(['id']);
-    created.push(...inserted.map((r) => r.id));
-    // Delivery rows go with their issue (ON DELETE CASCADE).
-    const deliveries = rows.flatMap((row, i) => (row.deliveries || []).map((d) => ({
-      send_id: inserted[i].id,
-      email: `poll-test-${randomUUID().slice(0, 8)}@example.invalid`,
-      status: d.status,
-      sent_at: d.sentAt || null,
-    })));
-    if (deliveries.length) await db('newsletter_send_deliveries').insert(deliveries);
+    const out = [];
+    for (const [i, row] of rows.entries()) {
+      const deliveries = (row.deliveries || []).map((d) => ({
+        send_id: inserted[i].id,
+        subscriber_id: d.subscriberId || null,
+        email: `poll-test-${randomUUID().slice(0, 8)}@example.invalid`,
+        status: d.status,
+        sent_at: d.sentAt || null,
+        ...(d.answered ? { quiz_id: d.answered.quizId, quiz_answer: d.answered.answer, quiz_answered_at: d.answered.at } : {}),
+      }));
+      out.push(deliveries.length
+        ? await db('newsletter_send_deliveries').insert(deliveries).returning(['id', 'engagement_token'])
+        : []);
+    }
+    return out;
   }
 
-  afterAll(async () => {
-    if (created.length) await db('newsletter_sends').whereIn('id', created).del();
-    await db.destroy();
+  beforeAll(() => {
+    const target = new URL(process.env.DATABASE_URL);
+    const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname)
+      && target.pathname === '/waves_test';
+    const worktreeId = String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '');
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1' && /^[a-f0-9]{32}$/.test(worktreeId)
+      && target.pathname === `/waves_qa_${worktreeId}`;
+    if (!ci && !ownedQA) throw new Error('Use the isolated CI database or this worktree\'s private QA database');
+    // The driver copies every query parameter of a connection string into its
+    // settings, so the pool gets the parts checked above, never the URL text.
+    if (target.search) throw new Error('DATABASE_URL must not carry query parameters');
+    database = require('knex')({
+      client: 'pg',
+      connection: {
+        host: target.hostname,
+        port: target.port ? Number(target.port) : undefined,
+        user: decodeURIComponent(target.username) || undefined,
+        password: decodeURIComponent(target.password) || undefined,
+        database: target.pathname.slice(1),
+      },
+      pool: { min: 0, max: 2 },
+    });
   });
 
+  beforeEach(async () => { db.connection = await database.transaction(); });
+  afterEach(async () => { await db.connection?.rollback(); });
+  afterAll(async () => { await database?.destroy(); });
+
   test('only issues of this type that reached readers count; the newest two decide the gap', async () => {
-    await insertIssues([
+    const TYPE = newType();
+    await insertIssues(TYPE, [
       { poll: P1, sentAt: daysAgo(35) },
       { poll: null, sentAt: daysAgo(28) },
       { poll: null, sentAt: daysAgo(21) },
@@ -70,7 +108,7 @@ postgres('newsletterIssuePolls (real Postgres)', () => {
       // None of these reached a reader of this newsletter.
       { poll: P3, status: 'draft' },
       { poll: P4, status: 'failed', sentAt: daysAgo(3), deliveries: [{ status: 'failed' }] },
-      { poll: P3, type: OTHER_TYPE, sentAt: daysAgo(1) },
+      { poll: P3, type: newType(), sentAt: daysAgo(1) },
     ]);
 
     const history = await newsletterIssuePolls({ newsletterType: TYPE });
@@ -81,10 +119,48 @@ postgres('newsletterIssuePolls (real Postgres)', () => {
     // A second issue without a poll opens the gap: the next poll is P3, even
     // though a draft and another newsletter type carried it, and P4 stays
     // unused because no reader got the failed issue that carried it.
-    await insertIssues([{ poll: null, sentAt: new Date(Date.now() - HOUR) }]);
+    await insertIssues(TYPE, [{ poll: null, sentAt: new Date(Date.now() - HOUR) }]);
     const later = await newsletterIssuePolls({ newsletterType: TYPE });
     expect(later.recent).toEqual([null, null]);
     expect(chooseNewsletterPoll(later)).toBe(P3);
     expect(later.used).not.toContain(P4);
+  });
+
+  test('a partly delivered issue with no send time sorts by its first delivery, not its draft time', async () => {
+    const TYPE = newType();
+    await insertIssues(TYPE, [
+      { poll: null, sentAt: daysAgo(14) },
+      { poll: null, sentAt: daysAgo(7) },
+      // Drafted 40 days ago; a worker failed after its first batch yesterday,
+      // so the issue row has no sent_at and no schedule.
+      { poll: P1, status: 'failed', createdAt: daysAgo(40), deliveries: [{ status: 'sent', sentAt: daysAgo(1) }, { status: 'queued' }] },
+    ]);
+    const history = await newsletterIssuePolls({ newsletterType: TYPE });
+    expect(history.recent).toEqual([P1, null]);
+    expect(chooseNewsletterPoll(history)).toBeNull();
+  });
+
+  test('a poll vote counts only from an issue that carried that poll', async () => {
+    const TYPE = newType();
+    const [sub] = await db('newsletter_subscribers')
+      .insert({ email: `poll-test-${randomUUID().slice(0, 8)}@example.invalid`, status: 'active', source: 'public_form' })
+      .returning(['id']);
+    const earlier = { quizId: 'pest-pressure-v1', answer: 'ants', at: daysAgo(10) };
+    const [[withPoll], [withoutPoll]] = await insertIssues(TYPE, [
+      { poll: P2, sentAt: daysAgo(3), deliveries: [{ status: 'sent', sentAt: daysAgo(3), subscriberId: sub.id }] },
+      { poll: null, sentAt: daysAgo(10), deliveries: [{ status: 'sent', sentAt: daysAgo(10), subscriberId: sub.id, answered: earlier }] },
+    ]);
+    const answerOf = async (row) => db('newsletter_send_deliveries').where({ id: row.id })
+      .first('quiz_id', 'quiz_answer', 'quiz_answered_at');
+
+    // The older issue never showed P2: its token records nothing, and the
+    // answer already on that row stays.
+    await expect(recordQuizResponse({ token: withoutPoll.engagement_token, quizId: P2, answerKey: 'road-trip' }))
+      .resolves.toEqual({ ok: false, reason: 'not-in-issue' });
+    expect(await answerOf(withoutPoll)).toEqual({ quiz_id: earlier.quizId, quiz_answer: earlier.answer, quiz_answered_at: earlier.at });
+
+    await expect(recordQuizResponse({ token: withPoll.engagement_token, quizId: P2, answerKey: 'road-trip' }))
+      .resolves.toEqual({ ok: true, reason: 'tagged' });
+    expect(await answerOf(withPoll)).toEqual(expect.objectContaining({ quiz_id: P2, quiz_answer: 'road-trip' }));
   });
 });
