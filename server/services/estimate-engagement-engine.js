@@ -808,6 +808,13 @@ async function processDueBatch(now = new Date()) {
           continue;
         }
       }
+      // GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME: the service the delivery email named
+      // (owner 2026-11-21), in place of the two generic labels only. Gate off = no read; no proof = today's label.
+      // Read here, before the links and the final checks, so nothing awaits between those checks and the send.
+      const emailedName = typeof featureGates.estimateFollowupServiceNameLive === 'function'
+        && featureGates.estimateFollowupServiceNameLive()
+        ? await require('./estimate-emailed-service-name').emailedServiceName(est, followupEmailVars(est).service_label)
+        : null;
       const firstName = await estimateGreetingFirstName(db, est);
       const { emailUrl } = await followupShared.mintStageLinks(est, `estimate_engage_${rule.rule_key}`);
       // Accept-intent variant (owner 2026-07-15: as few clicks as possible)
@@ -868,12 +875,6 @@ async function processDueBatch(now = new Date()) {
         await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
         continue;
       }
-      // GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME: the service the delivery email named
-      // (owner 2026-11-21), in place of the two generic labels only. Gate off = no read; no proof = today's label.
-      const emailedName = typeof featureGates.estimateFollowupServiceNameLive === 'function'
-        && featureGates.estimateFollowupServiceNameLive()
-        ? await require('./estimate-emailed-service-name').emailedServiceName(est, followupEmailVars(est).service_label)
-        : null;
       const sendOutcome = {};
       const ok = await followupShared.sendDualChannel(est, {
         email: {

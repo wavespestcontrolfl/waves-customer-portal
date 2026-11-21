@@ -81,6 +81,10 @@ function summaryFromSnapshot(snapshot) {
   return payload.service_summary;
 }
 
+function emailShowed(row, summary) {
+  return [row.text_snapshot, row.html_snapshot].some((body) => typeof body === 'string' && body.includes(summary));
+}
+
 async function emailedServiceName(estimate, todayLabel) {
   try {
     if (!replaceableLabel(todayLabel)) return null;
@@ -93,12 +97,15 @@ async function emailedServiceName(estimate, todayLabel) {
       .whereRaw('LOWER(TRIM(recipient_email_snapshot)) = ?', [address])
       .orderByRaw('COALESCE(sent_at, queued_at) DESC NULLS LAST')
       .orderBy('created_at', 'desc')
-      .select('payload_snapshot', 'status', 'provider_retry_next_at', 'provider_retry_exhausted_at', 'provider_retry_count');
+      .select('payload_snapshot', 'text_snapshot', 'html_snapshot', 'status', 'provider_retry_next_at', 'provider_retry_exhausted_at', 'provider_retry_count');
     const newest = (rows || []).find(acceptedForSending);
     if (!newest) return null;
     const stored = summaryFromSnapshot(newest.payload_snapshot);
     const name = nameForTodayLabel(todayLabel, serviceNameFromSummary(stored));
     if (!name) return null;
+    // The payload holds the summary even when a template version does not print it. The customer
+    // must have been shown these words: the stored email text or HTML has to contain them.
+    if (!emailShowed(newest, stored)) return null;
     // Second proof: the same function the delivery email used must still give
     // the same words. A different or empty result means the estimate changed.
     const { inferEstimateServiceInterest } = require('./estimate-service-lines');

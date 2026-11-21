@@ -64,11 +64,19 @@ describe('emailedServiceName', () => {
       ...extra,
     };
   }
-  const row = (extra = {}) => ({
-    status: 'sent',
-    payload_snapshot: { service_summary: 'Lawn Care + Pest Control' },
-    ...extra,
-  });
+  // The stored email shows whatever summary its payload holds, unless a test overrides the text.
+  const row = (extra = {}) => {
+    const payload = extra.payload_snapshot ?? { service_summary: 'Lawn Care + Pest Control' };
+    let shown = payload;
+    if (typeof shown === 'string') { try { shown = JSON.parse(shown); } catch { shown = null; } }
+    return {
+      status: 'sent',
+      payload_snapshot: payload,
+      text_snapshot: `Service: ${shown?.service_summary ?? ''}`,
+      html_snapshot: null,
+      ...extra,
+    };
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -183,6 +191,23 @@ describe('emailedServiceName', () => {
     const logged = logger.warn.mock.calls[0].join(' ');
     expect(logged).toContain('57014');
     expect(logged).not.toContain('example.com');
+  });
+
+  describe('the stored email must show the summary', () => {
+    test('the words in the text or in the HTML count', async () => {
+      rows = [row({ text_snapshot: null, html_snapshot: '<p>Lawn Care + Pest Control</p>' })];
+      await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
+    });
+
+    test('a template version that did not print the summary gives no name', async () => {
+      rows = [row({ text_snapshot: 'Your estimate is ready.', html_snapshot: '<p>Your estimate is ready.</p>' })];
+      await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
+    });
+
+    test('a row with no stored text or HTML gives no name', async () => {
+      rows = [row({ text_snapshot: null, html_snapshot: null })];
+      await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
+    });
   });
 
   describe('only the two generic labels are replaced', () => {
