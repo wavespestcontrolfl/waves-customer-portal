@@ -331,6 +331,18 @@ describe('the capacity finder (findCapacitySlots: capacity mode, and the night s
     expect(result.rejections).toEqual({});
   });
 
+  test('a job length that is not positive offers nothing, and no hour past the day is tried', async () => {
+    // The night search passes a stored length through. The finder reads opts.customerFacing once for each hour it tries.
+    let hoursTried = 0;
+    const opts = Object.defineProperty({ ...CAPACITY, durationMinutes: -100000 }, 'customerFacing',
+      { enumerable: true, get() { hoursTried += 1; return false; } });
+    expect((await findAvailableSlots(opts)).slots).toEqual([]);
+    expect(evaluateArrivalPlacement).not.toHaveBeenCalled();
+    // A day has 24 hours. The job's end alone would allow about 1,700 of them.
+    expect(hoursTried).toBeGreaterThan(0);
+    expect(hoursTried).toBeLessThan(24);
+  });
+
   test('the shift only narrows the shared shift: 06:00 to 21:00 offers no hour before 08:00 or ending after 18:00', async () => {
     tables.technicians = [tech('t1', ['06:00:00', '21:00:00'])];
     expect(startsOf(await findAvailableSlots(CAPACITY))).toHaveLength(10);

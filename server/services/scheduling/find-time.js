@@ -199,8 +199,10 @@ function arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }) {
 // in its hour: a 14:00 hour reached at 14:20 ends at 15:20, not at 15:00. The
 // engine certifies only a stop order in which the visit ends by the shift
 // end and moves no other service to end after it (the next stop, or another
-// service of the same customer worked at the visit's stop). It refuses the
-// hour as 'shift_end' when no order does. No shift: the option is not passed.
+// service of the same customer worked at the visit's stop). An hour no order
+// fits is refused: as 'shift_end' when an order keeps every arrival promise
+// and only the shift end stops it (arrival-route.js limitRefusal names the
+// other cases). No shift: the option is not passed.
 const shiftEndOf = (shift) => (shift ? { shiftEndMin: shift.endMin } : {});
 
 async function findArrivalWindowSlots(opts) {
@@ -388,7 +390,7 @@ async function findCapacitySlots(opts) {
         // be able to do all of them.
         .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices || [context.target])).length) continue;
       // This technician's own hours inside the shared shift (shiftBounds): no
-      // set hours = the shared shift, and the loop below is as it was.
+      // set hours = the shared shift, and the loop below admits what it did.
       const shift = shiftOf(tech.id, date);
       const day = shiftBounds(shift, SHIFT.startMinutes, SHIFT.endMinutes);
       const floor = Math.max(day.openMin, startFloorFor(date, opts.earliestStartMin, opts.startFloorByDate),
@@ -409,9 +411,12 @@ async function findCapacitySlots(opts) {
       // the public route contract doesn't describe; staff/optimizer callers
       // that never pass customerFacing are unaffected and stay on the raw
       // shift bound below (Codex r3 P0, r4 P2 on #4663).
-      for (let start = Math.ceil(floor / 60) * 60; start + durationMinutes <= day.closeMin; start += 60) {
+      for (let start = Math.ceil(floor / 60) * 60; start < SHIFT.endMinutes; start += 60) {
         if (opts.customerFacing && !customerWindowAdmits({ startMin: start, endMin: start + durationMinutes })) continue;
-        if (!placementFitsShift(start, start + durationMinutes)) continue;
+        // The job must also end by this technician's own close. The hours tried stay those of
+        // the shared shift whatever the job's length is: a stored length that is not positive
+        // is refused hour by hour by placementFitsShift, as before.
+        if (start + durationMinutes > day.closeMin || !placementFitsShift(start, start + durationMinutes)) continue;
         candidates.push({ context, date, tech, start, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),
           // Owner policy: ordinary setup/closeout is already in the on-site allowance.
