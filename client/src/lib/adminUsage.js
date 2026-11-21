@@ -12,14 +12,14 @@
 // Privacy contract (mirrored server-side in routes/admin-usage.js): only
 // normalized route metadata leaves the browser — page key, ID-stripped path
 // pattern, a sanitized tab slug, and a navigation source. Never query
-// strings, search text, customer ids, or tokens. Three fields describe the
-// tab, not the page: its build tag, the start time of the newest server it
-// has heard from (lib/portalVersion.js), and the code name of what kept its
-// last page move from reloading it (lib/portalReload.js). The server keeps
-// that name only for a tab on an out-of-date build.
+// strings, search text, customer ids, or tokens. Four fields describe the
+// tab, not the page: its build tag, the start time and the build of the
+// newest server it has heard from (lib/portalVersion.js), and the code name
+// of what kept its last page move from reloading it (lib/portalReload.js).
+// The server keeps that name only for a tab on an out-of-date build.
 // =============================================================================
 
-import { heardServerBoot, loadedBuild } from './portalVersion';
+import { heardServerBoot, heardServerBuild, loadedBuild } from './portalVersion';
 import { moveBlockerFor } from './portalReload';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -228,7 +228,7 @@ function flushPendingBeacon() {
     },
     // Read as it goes out: an answer from a newer server during the settle
     // wait counts (routes/admin-usage.js).
-    body: JSON.stringify({ ...body, boot: heardServerBoot() || undefined }),
+    body: JSON.stringify({ ...body, boot: heardServerBoot() || undefined, liveBuild: heardServerBuild() || undefined }),
   }).catch(() => {});
 }
 

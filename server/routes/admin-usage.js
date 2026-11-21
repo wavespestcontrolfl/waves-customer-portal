@@ -158,19 +158,22 @@ const ET_DAY_SQL = "(created_at AT TIME ZONE 'America/New_York')::date";
 // the beacon sent one). reload_hold, the code name of what kept the tab's last
 // page move from reloading it, is kept only for a stale tab, and only when it
 // is on RELOAD_BLOCKERS. A server that started before the newest server the
-// tab has heard from (`boot`, client/src/lib/portalVersion.js) is an old one
-// still draining during a deploy: its build may not be the live one, so both
-// fields are unknown.
-function tabReloadFields(build, reloadHold, boot) {
+// tab has heard from (`boot`, client/src/lib/portalVersion.js) may be an old
+// one still draining during a deploy: its build may not be the live one, so
+// both fields are unknown. When that newer server serves this server's build
+// (`liveBuild`: a restart with no new build, or another replica), this
+// server's build is the live one, and it judges.
+function tabReloadFields(build, reloadHold, boot, liveBuild) {
   const served = servedPortalBuild();
-  const draining = typeof boot === 'number' && boot > Number(BOOT);
+  const sameBuild = typeof liveBuild === 'string' && liveBuild.toLowerCase() === served;
+  const draining = typeof boot === 'number' && boot > Number(BOOT) && !sameBuild;
   const stale = !draining && typeof build === 'string' && BUILD_RE.test(build) && served ? build.toLowerCase() !== served : null;
   return { stale_build: stale, reload_hold: stale && RELOAD_BLOCKERS.has(reloadHold) ? reloadHold : null };
 }
 
 router.post('/track', async (req, res, next) => {
   try {
-    const { pageKey, path, tab, source, eventType, build, boot, reloadHold } = req.body || {};
+    const { pageKey, path, tab, source, eventType, build, boot, liveBuild, reloadHold } = req.body || {};
 
     if (typeof pageKey !== 'string' || !PAGE_KEY_RE.test(pageKey) || isIdSegment(pageKey)) {
       return res.status(400).json({ error: 'Invalid pageKey' });
@@ -218,7 +221,7 @@ router.post('/track', async (req, res, next) => {
       path: cleanPath,
       tab: tab || null,
       source: source || null,
-      ...tabReloadFields(build, reloadHold, boot),
+      ...tabReloadFields(build, reloadHold, boot, liveBuild),
     });
     res.status(204).end();
   } catch (err) { next(err); }

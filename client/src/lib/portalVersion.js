@@ -52,12 +52,17 @@ export function newerBuild() {
   return own && live.build && live.build !== own ? live.build : null;
 }
 
-// The start time of the server whose answers the tab counts now (the newest
-// it has heard from, by the rule above), or 0 before any stamped answer. The
-// usage beacon sends it, so that an older server still draining during a
-// deploy does not judge the tab's build (server/routes/admin-usage.js).
+// The start time and the build of the server whose answers the tab counts now
+// (the newest it has heard from, by the rule above): 0 and null before any
+// stamped answer. The usage beacon sends both, so that an older server still
+// draining during a deploy does not judge the tab's build, and an older
+// server on the same build does (server/routes/admin-usage.js).
 export function heardServerBoot() {
   return live.boot;
+}
+
+export function heardServerBuild() {
+  return live.build;
 }
 
 export function heardFromServerWithin(ms, now = Date.now()) {

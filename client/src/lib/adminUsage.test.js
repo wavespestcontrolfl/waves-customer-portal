@@ -152,7 +152,7 @@ describe('trackAdminPageView', () => {
     return JSON.parse(opts.body);
   }
 
-  it('carries the tab build, the start time of the server it heard from, and what kept the last page move from reloading the tab for the page that move opened', () => {
+  it('carries the tab build, the start time and build of the server it heard from, and what kept the last page move from reloading the tab for the page that move opened', () => {
     resetPortalVersionForTests();
     document.head.insertAdjacentHTML('beforeend', '<meta name="portal-build" content="aaa111aaa111">');
     try {
@@ -160,13 +160,13 @@ describe('trackAdminPageView', () => {
       trackAdminPageView({ pathname: '/admin/pipeline', search: '' });
       settle();
       expect(lastBody()).toEqual({ pageKey: 'pipeline', path: '/admin/pipeline', source: 'load', build: 'aaa111aaa111', reloadHold: 'card-payment' });
-      // Once a server's answer counts, its start time goes too, read as the
-      // beacon goes out. Another page, and a page whose move was due a
+      // Once a server's answer counts, its start time and build go too, read
+      // as the beacon goes out. Another page, and a page whose move was due a
       // reload, carry no name.
       trackAdminPageView({ pathname: '/admin/dashboard', search: '' });
       noteServerAnswer(new Headers({ 'X-Portal-Build': 'bbb222bbb222', 'X-Portal-Boot': '1700000000000' }));
       settle();
-      expect(lastBody()).toEqual({ pageKey: 'dashboard', path: '/admin/dashboard', source: 'in-app', build: 'aaa111aaa111', boot: 1700000000000 });
+      expect(lastBody()).toEqual({ pageKey: 'dashboard', path: '/admin/dashboard', source: 'in-app', build: 'aaa111aaa111', boot: 1700000000000, liveBuild: 'bbb222bbb222' });
       noteMoveOutcome('/admin/customers', null);
       trackAdminPageView({ pathname: '/admin/customers', search: '' });
       settle();

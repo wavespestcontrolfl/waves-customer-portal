@@ -328,13 +328,25 @@ describe('admin usage: POST /track tab build', () => {
     const { BOOT } = require('../middleware/portal-build-header');
     setPortalBuildForTests('bbb222bbb222');
     const tab = { build: 'aaa111aaa111', reloadHold: 'card-payment' };
-    // The tab has heard from a server that started after this one.
+    // The tab has heard from a server that started after this one, on
+    // another build or on a build the tab does not name.
+    await expect(stored({ ...tab, boot: Number(BOOT) + 1, liveBuild: 'ccc333ccc333' })).resolves.toEqual({ stale_build: null, reload_hold: null });
     await expect(stored({ ...tab, boot: Number(BOOT) + 1 })).resolves.toEqual({ stale_build: null, reload_hold: null });
+    await expect(stored({ ...tab, boot: Number(BOOT) + 1, liveBuild: 7 })).resolves.toEqual({ stale_build: null, reload_hold: null });
     // It heard from this server, or from an older one: this server judges.
     await expect(stored({ ...tab, boot: Number(BOOT) })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
     await expect(stored({ ...tab, boot: Number(BOOT) - 60000 })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
     // A start time that is not a number is not read.
     await expect(stored({ ...tab, boot: String(Number(BOOT) + 1) })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+  });
+
+  test('a newer server on this server\'s build (a restart, another replica) leaves this server to judge', async () => {
+    const { BOOT } = require('../middleware/portal-build-header');
+    setPortalBuildForTests('bbb222bbb222');
+    // The newer server names this server's build, so this build is the live one.
+    const newer = { boot: Number(BOOT) + 1, liveBuild: 'BBB222bbb222' };
+    await expect(stored({ build: 'aaa111aaa111', reloadHold: 'card-payment', ...newer })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+    await expect(stored({ build: 'bbb222bbb222', reloadHold: 'current', ...newer })).resolves.toEqual({ stale_build: false, reload_hold: null });
   });
 
   test('without a build tag on the server, whether the tab is out of date is unknown', async () => {
