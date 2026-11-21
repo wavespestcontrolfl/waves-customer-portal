@@ -12379,8 +12379,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // against a linkage correction. One order everywhere:
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
-        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate()
-          .first('estimate_data', 'status', 'customer_id', 'bill_by_invoice', 'show_one_time_option');
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first(
+          'estimate_data', 'status', 'customer_id', 'bill_by_invoice', 'show_one_time_option',
+        );
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
