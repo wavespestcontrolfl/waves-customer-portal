@@ -85,6 +85,44 @@ describe('buildRouteAreas: one technician', () => {
     expect(d.areas).toEqual([{ area: 'a-north', stops: 7, stops_left: 7 }]);
   });
 
+  test('a date the route check measured takes its real openings: free time in pieces is not room', () => {
+    // Tomorrow: 3 stops, 360 open minutes in total, but the route check found no opening that holds a job.
+    const stops = [stop(), stop({ zip: '34203' }), stop({ zip: '34203' })];
+    const check = (slots, extra = {}) => ({ at: '2026-11-23T13:30:00.000Z', days: [{ date: WEEKDAYS[1], technicianId: T1, slots, skip: null, ...extra }] });
+    const none = buildRouteAreas(input({ stops, routeCheck: check(0) }));
+    expect(dayOf(none, T1, WEEKDAYS[1])).toMatchObject({
+      open_stops: 3, open_min: 360, room_basis: 'route_check', route_slots: 0, room: false, zips: [], zip_reason: 'full',
+    });
+    expect(none.rule.route_check_at).toBe('2026-11-23T13:30:00.000Z');
+
+    // One real opening is room, even where the minute total alone is under a slot.
+    const tight = Array.from({ length: 7 }, () => stop());
+    const one = buildRouteAreas(input({ stops: tight, limits: { ...LIMITS, weekday_limit: 9 }, routeCheck: check(1) }));
+    expect(dayOf(one, T1, WEEKDAYS[1])).toMatchObject({ open_min: 40, open_stops: 2, room_basis: 'route_check', route_slots: 1, room: true });
+
+    // The stop limit still applies to a measured date.
+    const atLimit = buildRouteAreas(input({ stops: tight, limits: { ...LIMITS, weekday_limit: 7 }, routeCheck: check(3) }));
+    expect(dayOf(atLimit, T1, WEEKDAYS[1])).toMatchObject({ open_stops: 0, route_slots: 3, room: false });
+  });
+
+  test('today, a skipped day and a day with no route check use the minute total', () => {
+    const stops = [stop({ date: WEEKDAYS[0] }), stop()];
+    const routeCheck = {
+      at: '2026-11-23T13:30:00.000Z',
+      days: [
+        // The route check does not measure today; an entry for it is never used.
+        { date: WEEKDAYS[0], technicianId: T1, slots: 0, skip: null },
+        { date: WEEKDAYS[1], technicianId: T1, slots: null, skip: 'UNASSIGNED_WORK' },
+      ],
+    };
+    const rec = buildRouteAreas(input({ stops, routeCheck }));
+    expect(dayOf(rec, T1, WEEKDAYS[0])).toMatchObject({ room_basis: 'minutes', route_slots: null, room: true });
+    expect(dayOf(rec, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'minutes', route_slots: null, room: true });
+    const noCheck = buildRouteAreas(input({ stops }));
+    expect(dayOf(noCheck, T1, WEEKDAYS[1])).toMatchObject({ room_basis: 'minutes', route_slots: null, room: true });
+    expect(noCheck.rule.route_check_at).toBeNull();
+  });
+
   test('a blackout date is closed, an absent technician is absent', () => {
     const rec = buildRouteAreas(input({ blackout: new Set([WEEKDAYS[0]]), absent: new Set([`${T1}:${WEEKDAYS[1]}`]) }));
     expect(dayOf(rec, T1, WEEKDAYS[0])).toMatchObject({ staffed: false, reason: 'closed', room: false, zips: [], zip_reason: 'not_staffed' });
@@ -259,6 +297,37 @@ describe('buildRouteAreas: service lines', () => {
     expect(none.lines.pest.days[1]).toMatchObject({ technician_ids: [], open_min: 0, zips: [] });
   });
 
+  test('a full home technician: the line follows the gap technician who has room', () => {
+    const card = { general: { homeId: T1, gapId: T2 }, lawn: null };
+    // T1 is at his limit on the second date; T2 has one stop there.
+    const full = Array.from({ length: 6 }, () => stop({ minutes: 30 }));
+    const rec = buildRouteAreas(input({ techIds: [T1, T2], lineCard: card, stops: [...full, stop({ technicianId: T2, zip: '34203' })] }));
+    expect(dayOf(rec, T1, WEEKDAYS[1]).room).toBe(false);
+    expect(rec.lines.pest.days[1]).toMatchObject({ technician_ids: [T2], zips: ['34203'] });
+    expect(rec.lines.pest.days[1].open_min).toBe(dayOf(rec, T2, WEEKDAYS[1]).open_min);
+    // The first date: T1 has room, so the line stays with the home technician.
+    expect(rec.lines.pest.days[0].technician_ids).toEqual([T1]);
+
+    // Both full: the line stays with the home technician and lists no ZIPs.
+    const both = buildRouteAreas(input({
+      techIds: [T1, T2], lineCard: card, stops: [...full, ...Array.from({ length: 6 }, () => stop({ technicianId: T2, minutes: 30, zip: '34203' }))],
+    }));
+    expect(both.lines.pest.days[1]).toMatchObject({ technician_ids: [T1], open_min: 0, zips: [] });
+  });
+
+  test('a technician who is off for a line is not followed by it', () => {
+    // With a card: the home technician is off for general pest, so pest follows the gap technician.
+    const carded = buildRouteAreas(twoTechs({ lineCard: { general: { homeId: T1, gapId: T2 }, lawn: null }, lineOff: [`${T1}:general`] }));
+    expect(carded.lines.pest.days.map((d) => d.technician_ids)).toEqual([[T2], [T2]]);
+    expect(carded.lines.pest.areas).toEqual(['b-mid']);
+    // With no card: lawn follows only the technician who can take lawn; pest still follows both.
+    const open = buildRouteAreas(twoTechs({ lineOff: [`${T2}:lawn`] }));
+    expect(open.lines.lawn.days.map((d) => d.technician_ids)).toEqual([[T1], [T1]]);
+    expect(open.lines.lawn.areas).toEqual(['a-north']);
+    expect(open.lines.pest.days[1].technician_ids).toEqual([T1, T2]);
+    expect(open.rule.line_off).toEqual([`${T2}:lawn`]);
+  });
+
   test('lawn follows its own card entry, apart from pest', () => {
     const rec = buildRouteAreas(twoTechs({ lineCard: { general: { homeId: T1, gapId: null }, lawn: { homeId: T2, gapId: T1 } } }));
     expect(rec.lines.pest.days[0].technician_ids).toEqual([T1]);
@@ -286,12 +355,15 @@ describe('buildRouteAreas: service lines', () => {
 // A fake knex for the save: the reads the loader makes, plus system_settings.
 // conn.transaction runs its body on the same fake and undoes the body's writes when it throws, as Postgres does.
 // failKey makes the write of that key fail. Every system_settings call outside a transaction is counted in `loose`.
-function fakeConn({ stopRows = [], history, last, targets = null, territory = TERRITORY, lineRows = [], techs = [{ id: T1 }], failKey = null } = {}) {
+function fakeConn({
+  stopRows = [], history, last, targets = null, territory = TERRITORY, lineRows = [], techs = [{ id: T1 }], failKey = null,
+  capRows = [], routeCheckRow = null,
+} = {}) {
   const store = {};
   if (history !== undefined) store[HISTORY_KEY] = history;
   if (last !== undefined) store[LAST_KEY] = last;
   const upserts = [];
-  const state = { inTransaction: false, loose: 0 };
+  const state = { inTransaction: false, loose: 0, routeCheckWhere: null, routeCheckStatuses: null, capIds: null };
   const conn = jest.fn((table) => {
     if (table === 'system_settings') {
       if (!state.inTransaction) state.loose += 1;
@@ -313,6 +385,17 @@ function fakeConn({ stopRows = [], history, last, targets = null, territory = TE
     if (table === 'territory_zips') return { select: () => Promise.resolve(territory.map((t) => ({ zip: t.zip, area: t.area, technician_id: t.technicianId }))) };
     if (table === 'ad_targets') return { first: () => Promise.resolve(targets) };
     if (table === 'service_line_techs') return { whereIn: () => ({ select: () => Promise.resolve(lineRows) }) };
+    if (table === 'technician_capabilities') {
+      return { whereIn: (_col, ids) => { state.capIds = ids; return { whereIn: () => ({ select: () => Promise.resolve(capRows) }) }; } };
+    }
+    if (table === 'route_check_runs') {
+      return {
+        where: (filter) => {
+          state.routeCheckWhere = filter;
+          return { whereIn: (_col, statuses) => { state.routeCheckStatuses = statuses; return { orderBy: () => ({ first: () => Promise.resolve(routeCheckRow) }) }; } };
+        },
+      };
+    }
     throw new Error(`Unexpected table in test: ${table}`);
   });
   conn.raw = jest.fn(() => Promise.resolve({ rows: stopRows }));
@@ -365,6 +448,8 @@ describe('recordRouteAreas', () => {
     expect(sql).toMatch(/COALESCE\(ss\.customer_id::text, 'hold:' \|\| ss\.id::text\)/);
     // The minutes left skip a completed service of a part-done visit.
     expect(sql).toMatch(/FILTER \(WHERE ss\.status <> 'completed'\), 0\)::int AS minutes_left/);
+    // A stored 0 is a missing estimate: the catalog's minutes, else 60.
+    expect(sql.match(/COALESCE\(NULLIF\(ss\.estimated_duration_minutes, 0\), NULLIF\(sv\.default_duration_minutes, 0\), 60\)/g)).toHaveLength(2);
     // A booked stop is the route check's: a claimed row that dispatch keeps.
     expect(sql).toMatch(/bool_or\(\(ss\.customer_id IS NOT NULL OR ss\.reservation_expires_at IS NULL\)\s+AND \(ss\.window_start IS NOT NULL OR COALESCE\(ss\.time_window, ''\) <> '' OR ss\.status IN \('completed', 'en_route', 'on_site'\)\)\) AS booked/);
 
@@ -391,6 +476,52 @@ describe('recordRouteAreas', () => {
     expect(conn.transaction).toHaveBeenCalledTimes(1);
     expect(state.loose).toBe(0);
     expect(upserts.map((u) => u.row.key)).toEqual([LAST_KEY, HISTORY_KEY]);
+  });
+
+  test('reads today\'s newest route check and uses it for tomorrow; a stale run is not used', async () => {
+    const stopRows = [{ technician_id: T1, day: '2026-11-24', zip: '34201', minutes: 60, minutes_left: 60, done: false, booked: true }];
+    const days = [{ date: '2026-11-24', technician_id: T1, staffed: true, stops: 1, slots: 0, openings: [] }];
+    // 45 minutes before the run; jsonb arrives parsed.
+    const fresh = fakeConn({ stopRows, routeCheckRow: { run_at: new Date('2026-11-23T14:30:00Z'), days } });
+    const record = await recordRouteAreas({ now: NOW, conn: fresh.conn });
+    expect(fresh.state.routeCheckWhere).toEqual({ service_date: '2026-11-23' });
+    expect(fresh.state.routeCheckStatuses).toEqual(['completed', 'completed_with_errors']);
+    expect(record.rule.route_check_at).toBe('2026-11-23T14:30:00.000Z');
+    expect(dayOf(record, T1, '2026-11-24')).toMatchObject({ open_min: 520, room_basis: 'route_check', route_slots: 0, room: false });
+
+    // A text value parses too; a day the route check skipped falls to the minute total.
+    const skipped = fakeConn({
+      stopRows,
+      routeCheckRow: { run_at: '2026-11-23T14:30:00Z', days: JSON.stringify([{ date: '2026-11-24', technician_id: T1, staffed: true, skip: 'NO_SIMULATION' }]) },
+    });
+    expect(dayOf(await recordRouteAreas({ now: NOW, conn: skipped.conn }), T1, '2026-11-24')).toMatchObject({ room_basis: 'minutes', route_slots: null, room: true });
+
+    // 195 minutes old: over the 150-minute limit.
+    const stale = fakeConn({ stopRows, routeCheckRow: { run_at: new Date('2026-11-23T12:00:00Z'), days } });
+    const old = await recordRouteAreas({ now: NOW, conn: stale.conn });
+    expect(old.rule.route_check_at).toBeNull();
+    expect(dayOf(old, T1, '2026-11-24')).toMatchObject({ room_basis: 'minutes', room: true });
+
+    // A run stamped after `now` is not used either.
+    const ahead = fakeConn({ stopRows, routeCheckRow: { run_at: new Date('2026-11-23T15:30:00Z'), days } });
+    expect((await recordRouteAreas({ now: NOW, conn: ahead.conn })).rule.route_check_at).toBeNull();
+  });
+
+  test('reads which technicians are off for a line', async () => {
+    const { conn, state } = fakeConn({
+      techs: [{ id: T2 }, { id: T1 }],
+      capRows: [
+        { technician_id: T2, service_category: 'lawn', capability_level: 'qualified', active: false },
+        { technician_id: T1, service_category: 'lawn', capability_level: 'review_required', active: true },
+      ],
+    });
+    const record = await recordRouteAreas({ now: NOW, conn });
+    // Technician ids are sorted, so the record has one order on every run.
+    expect(record.technicians.map((t) => t.id)).toEqual([T1, T2]);
+    expect(state.capIds).toEqual([T1, T2]);
+    expect(record.rule.line_off).toEqual([`${T2}:lawn`]);
+    expect(record.lines.lawn.days[1].technician_ids).toEqual([T1]);
+    expect(record.lines.pest.days[1].technician_ids).toEqual([T1, T2]);
   });
 
   test('a history write that fails leaves the latest record as it was, and throws', async () => {
@@ -428,7 +559,7 @@ describe('recordRouteAreas', () => {
     expect(entry.lines.pest.days[1]).toEqual({ date: '2026-11-24', technician_ids: [T1], open_min: 600 });
   });
 
-  test('history keeps the last 120 compact entries, newest last, with no ZIP lists', async () => {
+  test('history keeps the last 120 compact entries, newest last: every number of the room test, no ZIP lists', async () => {
     const old = Array.from({ length: HISTORY_MAX + 5 }, (_, i) => ({ at: `old-${i}` }));
     const { conn, store } = fakeConn({
       history: JSON.stringify(old),
@@ -442,8 +573,23 @@ describe('recordRouteAreas', () => {
     expect(entry.at).toBe(NOW.toISOString());
     const weekdayLimit = JSON.parse(store[LAST_KEY]).rule.limits.weekday_limit;
     expect(entry.techs[0].days[1]).toEqual({
-      date: '2026-11-24', staffed: true, room: true, stops: 1, stops_left: 1, open_stops: weekdayLimit - 1, open_min: 520, areas: { 'a-north': 1 }, zip_source: 'stops',
+      date: '2026-11-24', staffed: true, reason: null, room: true, room_basis: 'minutes', route_slots: null,
+      stops: 1, stops_left: 1, limit: weekdayLimit, open_stops: weekdayLimit - 1,
+      shift_min: 600, booked_min: 60, drive_min: 20, open_min: 520, areas: { 'a-north': 1 }, zip_source: 'stops',
     });
+    // The rule's numbers and the unassigned work stay with the entry: a past result can be counted again.
+    expect(entry.rule).toEqual({
+      now_min: 615, slot_min: 80, shift: { startMinutes: 480, endMinutes: 1080 },
+      limits: { weekday_limit: weekdayLimit, saturday_limit: expect.any(Number), sunday_limit: expect.any(Number) },
+      line_off: [], route_check_at: null,
+    });
+    expect(entry.unassigned).toEqual([
+      { date: '2026-11-23', stops_left: 0, minutes_left: 0 },
+      { date: '2026-11-24', stops_left: 0, minutes_left: 0 },
+    ]);
+    const d = entry.techs[0].days[1];
+    expect(d.open_stops).toBe(d.limit - d.stops - entry.unassigned[1].stops_left);
+    expect(d.open_min).toBe(d.shift_min - d.booked_min - d.drive_min);
     expect(Object.keys(entry.lines)).toEqual(['pest', 'lawn']);
     expect(entry.lines.pest).toEqual({
       areas: ['a-north'],
