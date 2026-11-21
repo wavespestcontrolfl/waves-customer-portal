@@ -300,6 +300,23 @@ describe('text arm: the stored phone and its E.164 form both match', () => {
     expect(messagesCall().groupWheres).toEqual([['orWhere', 'conversations.contact_phone', '555-0123']]);
   });
 
+  test('a foreign number typed without "+" never matches a US conversation by its last ten digits', async () => {
+    setRows({ messages: null });
+    const lead = { id: 'est-6', customer_id: null, customer_phone: '49 941 555 0123', customer_email: null };
+    expect(await hasRepliedSince(lead, CUTOFF)).toBe(false);
+    expect(messagesCall().groupWheres).toEqual([['orWhere', 'conversations.contact_phone', '49 941 555 0123']]);
+  });
+
+  test('a US number written as 1 + ten digits matches its E.164 form', async () => {
+    setRows({ messages: { id: 'm1' } });
+    const lead = { id: 'est-7', customer_id: null, customer_phone: '1-941-555-0123', customer_email: null };
+    expect(await hasRepliedSince(lead, CUTOFF)).toBe(true);
+    expect(messagesCall().groupWheres).toEqual([
+      ['orWhere', 'conversations.contact_phone', '1-941-555-0123'],
+      ['orWhere', 'conversations.contact_phone', '+19415550123'],
+    ]);
+  });
+
   test('a lead with a blank phone has no text match and no phone predicate', async () => {
     const lead = { id: 'est-5', customer_id: null, customer_phone: '   ', customer_email: null };
     expect(await hasRepliedSince(lead, CUTOFF)).toBe(false);

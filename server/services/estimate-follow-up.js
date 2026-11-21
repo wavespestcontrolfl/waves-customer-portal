@@ -167,13 +167,14 @@ async function hasInboundSmsSince(est, cutoff) {
   return !!(await q);
 }
 
-// The stored phone and its E.164 form (utils/phone toE164: US ten-digit numbers; it returns
-// the input unchanged when it cannot parse it), without blanks or repeats.
+// The stored phone and its E.164 form, without blanks or repeats. utils/phone phoneMatchDigits
+// gives the full digits only for an E.164 number or a plain US one (ten digits, or 1 + ten), so
+// a foreign number typed without "+" is never matched to a US conversation by its last ten digits.
 function replyPhoneForms(phone) {
   const stored = String(phone || "").trim();
   if (!stored) return [];
-  const e164 = String(require("../utils/phone").toE164(stored) || "").trim();
-  return [...new Set([stored, e164].filter(Boolean))];
+  const [full] = require("../utils/phone").phoneMatchDigits(stored);
+  return [...new Set([stored, full ? `+${full}` : null].filter(Boolean))];
 }
 
 // Email arm (owner 2026-11-02, option A: an email reply pauses the follow-up
