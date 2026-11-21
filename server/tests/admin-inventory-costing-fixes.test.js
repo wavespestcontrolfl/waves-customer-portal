@@ -369,6 +369,26 @@ describe('recalcBestPrice', () => {
     expect(flagged.where).toEqual([{ id: 'vp-a' }]);
   });
 
+  test('DELIVERED basis: a cheaper sticker price that loses once shipping is counted does not win, and the stored best price is the winner\'s own price', async () => {
+    // SiteOne ships free: $94.13 a gallon delivered. The other seller states no shipping, so the
+    // scan's rule for a seller with no published policy is added and it loses (owner 2026-11-21).
+    const { catalogUpdates, pricingUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-cheap', vendor_id: 'v-cheap', price: 91.98, quantity: '1 gal', vendor_name: 'Solutions Pest & Lawn', vendor_product_url: 'https://www.solutionsstores.com/x' },
+        { id: 'vp-siteone', vendor_id: 'v-siteone', price: 94.13, quantity: '1 gal', vendor_name: 'SiteOne', vendor_product_url: 'https://www.siteone.com/en/x/p/1' },
+      ],
+      product: { unit_size_oz: 128 },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates).toHaveLength(1);
+    expect(catalogUpdates[0].best_vendor).toBe('SiteOne');
+    expect(catalogUpdates[0].best_vendor_pricing_id).toBe('vp-siteone');
+    // The stored cost is the winner's price for the catalog container: no estimate is written into it.
+    expect(catalogUpdates[0].best_price).toBe(94.13);
+    expect(catalogUpdates[0].best_price_amount_cached).toBe(94.13);
+    expect(pricingUpdates.find((u) => u.update.is_best_price === true).where).toEqual([{ id: 'vp-siteone' }]);
+  });
+
   test('COUNT-BASED product: the cheapest PER-UNIT row wins, best_price scales to the catalog count and cost_per_unit follows — current, never the r19 stale guard', async () => {
     // Summit dunks: catalog "20 count", seeded cost_per_unit 1.344/tablet; Amazon $26.88/20, SiteOne $20.07/20.
     const { catalogUpdates } = wireBestPrice({
@@ -693,6 +713,30 @@ describe('recalcBestPrice', () => {
     expect(out.vendor_prices[1].landed_price_per_unit).toBe(2.344);
     // the spread runs to the last COMPARABLE vendor — the incompatible "1 case" row must not null it (r3 P2)
     expect(out.price_range).toBe('$1.3405/unit spread across 3 vendors'); // landed basis: 2.344 - 1.0035
+    // Each row says which shipping it was ranked with: the vendor's rule for a row that states none,
+    // nothing for a row that states its own, nothing for a row that could not be ranked.
+    expect(out.vendor_prices.map((v) => [v.vendor, v.shipping])).toEqual([['SiteOne', 'free shipping'], ['Amazon', null], ['Case Seller', null]]);
+  });
+
+  test('Intelligence Bar compare_vendor_pricing states the DELIVERED per-oz price and the shipping it counted (owner 2026-11-21)', async () => {
+    const tools = require('../services/intelligence-bar/procurement-tools');
+    const { shippingFor, shippingLabel } = require('../services/price-scan/shipping-rules');
+    const product = { id: 'prod-1', name: 'Example Concentrate', category: 'insecticide', container_size: '1 gal', unit_size_oz: 128, best_price: 91.98, best_vendor: 'Solutions Pest & Lawn' };
+    const rows = [
+      { id: 'vp-cheap', vendor_id: 'v-cheap', price: 91.98, quantity: '1 gal', vendor_name: 'Solutions Pest & Lawn', vendor_product_url: 'https://www.solutionsstores.com/x', is_best_price: true },
+      { id: 'vp-s1', vendor_id: 'v-s1', price: 94.13, quantity: '1 gal', vendor_name: 'SiteOne', vendor_product_url: 'https://www.siteone.com/en/x/p/1', is_best_price: false },
+    ];
+    const est = shippingFor({ vendor: { url: rows[0].vendor_product_url }, vendorName: rows[0].vendor_name, price: 91.98, quantity: '1 gal' });
+    db.mockImplementation((table) => makeChain(table, () => (table === 'products_catalog' ? product : rows)));
+    const out = await tools.executeProcurementTool('compare_vendor_pricing', { product_id: 'prod-1' });
+    // The cheaper sticker price loses once its shipping is counted.
+    expect(out.cheapest_vendor).toBe('SiteOne');
+    expect(out.comparison_basis).toMatch(/delivered per-oz/);
+    const [first, second] = out.vendor_prices;
+    expect(first).toMatchObject({ vendor: 'SiteOne', price_per_oz: 0.7354, delivered_price_per_oz: 0.7354, shipping: 'free shipping' });
+    expect(second).toMatchObject({ vendor: 'Solutions Pest & Lawn', price_per_oz: 0.7186, shipping: shippingLabel(est) });
+    expect(second.delivered_price_per_oz).toBeCloseTo((91.98 + est.amount) / 128, 4);
+    expect(second.shipping).toMatch(/est\. shipping/);
   });
 
   test('parsePackCount reads count packs with their noun; countUnitsCompatible refuses container-vs-item scaling', () => {
