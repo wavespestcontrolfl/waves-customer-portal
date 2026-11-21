@@ -598,6 +598,15 @@ describe('what would help a still-deciding customer', () => {
     expect(onList(stored(0.2, { status: 'accepted' }), { stillDeciding: told })).toBe(false);
   });
 
+  // The call read goes back 30 days, so an old reason can look unanswered. It must not skip the wait for a new open.
+  test('the skip lasts 48 h from the reason: after that a new open follows the plain rule', () => {
+    const old = { reason: 'person', at: ago(60) };
+    expect(onList(stored(0.5), { stillDeciding: old })).toBe(false);
+    expect(onList(stored(3), { stillDeciding: old })).toBe(true);
+    // Inside 48 h the reason still skips the wait for a new open.
+    expect(onList(stored(0.5), { stillDeciding: { reason: 'person', at: ago(40) } })).toBe(true);
+  });
+
   test('a reason the list does not know, or one with no time, changes nothing', () => {
     expect(onList(stored(0.2), { stillDeciding: { reason: 'constructor', at: ago(0.1) } })).toBe(false);
     expect(onList(stored(0.2), { stillDeciding: { reason: 'price', at: 'not a date' } })).toBe(false);

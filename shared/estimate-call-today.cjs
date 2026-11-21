@@ -74,7 +74,9 @@ function isCallableEstimate(estimate) {
 // a failed read must not put a row someone already logged back on the list. The 9 AM push sends nothing then.
 // A customer who sent a reason under "What would help you decide?" (stillDeciding) skips the 2h wait: that wait gives
 // a customer time to book alone, and this one has said what they need. The row shows at once and stays until someone
-// answers the reason (a call, a follow-up or an outcome after it) or 48h pass since the last touch.
+// answers the reason (a call, a follow-up or an outcome after it) or 48h pass since the last touch. The skip itself
+// lasts 48h from the reason: an older reason is not a pending request (the call read goes back 30 days only, so an
+// old reason could look unanswered), and a later open then follows the plain 2h rule.
 function isCallTodayEstimate(estimate, nowMs = Date.now()) {
   if (!isCallableEstimate(estimate) || estimate.callOutcomeUnknown) return false;
   const last = lastEngagementMs(estimate);
@@ -86,7 +88,7 @@ function isCallTodayEstimate(estimate, nowMs = Date.now()) {
   const age = nowMs - last;
   if (age > 48 * HOUR) return false;
   const told = stillDecidingMs(estimate);
-  const reasonWaits = told != null && !contacts.some((ts) => ts > told);
+  const reasonWaits = told != null && nowMs - told <= 48 * HOUR && !contacts.some((ts) => ts > told);
   return reasonWaits || age >= 2 * HOUR;
 }
 

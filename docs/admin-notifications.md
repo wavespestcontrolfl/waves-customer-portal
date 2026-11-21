@@ -711,7 +711,8 @@ today filter. N is that page's own list: `services/estimate-call-today-push.js` 
 `callTodayFields` in `services/estimate-call-list.js` (the same mapping the list route uses). A customer who sent a
 reason under "What would help you decide?" on the estimate page (owner 2026-11-21, estimate page changes, change 1) is
 on the list at once: the rule skips its 2-hour wait for that row and keeps it until a call, a follow-up or an outcome
-is newer than the reason, or 48 hours pass since the customer's last touch. The reason is the day's
+is newer than the reason, or 48 hours pass since the customer's last touch. The skip lasts 48 hours from the reason;
+after that a new open follows the plain 2-hour rule. The reason is the day's
 `estimate_customer_still_deciding` `activity_log` row (`metadata.reason`), read in one batch by
 `stillDecidingByEstimateId`; the row shows it as "Still deciding: wants a lower price · 9:42 AM". This list, not the
 `estimate_stuck` bell, is where a promised call waits: it does not depend on the bell category being on, and a later
