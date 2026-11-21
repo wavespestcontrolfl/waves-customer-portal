@@ -48,6 +48,18 @@ function loadCrossSellService(db, serviceRecordId) {
     .first();
 }
 
+// Who may see the cards on a link-based surface (receipt, tracker): only a
+// link that reaches the account holder alone. Those links can also go to
+// the account's service contacts (tenant, home buyer, property manager) or
+// to a third-party payer, who must never start the homeowner's plan or
+// enroll as the homeowner's promoter. `row` carries the customer's service
+// contact columns (SERVICE_CONTACT_COLUMNS) and any payer ids.
+function linkReachesOnlyAccountHolder(row, payerIds = []) {
+  if (!row || payerIds.some(Boolean)) return false;
+  const { getServiceContactSlots } = require('../customer-contact');
+  return !getServiceContactSlots(row).some((slot) => slot.phone || slot.email);
+}
+
 // The card a non-report surface renders for a visit: the report's own
 // composer over the same row the tap recomputes from, with the report's
 // complaint-visit suppression (owner 2026-08-30: no upsell after a
@@ -286,4 +298,6 @@ async function handleCrossSellTap({ db, serviceRecordId, metadata = {}, surface,
 
 }
 
-module.exports = { handleCrossSellTap, loadCrossSellService, buildCrossSellForServiceRecord };
+module.exports = {
+  handleCrossSellTap, loadCrossSellService, buildCrossSellForServiceRecord, linkReachesOnlyAccountHolder,
+};

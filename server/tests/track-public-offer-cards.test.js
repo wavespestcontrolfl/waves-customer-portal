@@ -14,6 +14,8 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(),
 }));
 jest.mock('../services/service-report/cross-sell-tap', () => ({
+  // The real who-may-see-it rule; only the offer and the tap are stubbed.
+  linkReachesOnlyAccountHolder: jest.requireActual('../services/service-report/cross-sell-tap').linkReachesOnlyAccountHolder,
   buildCrossSellForServiceRecord: jest.fn(),
   handleCrossSellTap: jest.fn(),
 }));

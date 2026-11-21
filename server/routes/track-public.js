@@ -989,8 +989,8 @@ async function loadTrackCardContext(token) {
     );
   if (!row?.customer_id || !isTrackTokenLive(row.track_token_expires_at)) return null;
   if (row.status !== 'completed') return null;
-  if (row.job_payer_id || row.customer_payer_id) return null;
-  if (serviceContactNamesOf(row).length > 0) return null;
+  const { linkReachesOnlyAccountHolder } = require('../services/service-report/cross-sell-tap');
+  if (!linkReachesOnlyAccountHolder(row, [row.job_payer_id, row.customer_payer_id])) return null;
   const record = await db('service_records')
     .where({ scheduled_service_id: row.id })
     .orderBy('created_at', 'desc')

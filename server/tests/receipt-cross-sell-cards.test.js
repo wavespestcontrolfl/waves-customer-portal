@@ -1,12 +1,13 @@
 // Receipt add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner
 // 2026-11-21). The receipt reuses the service report's composer and tap;
-// what this suite pins is the RECEIPT's own decisions: only the customer's
-// own PAID receipt carries the cards (a payer-billed link goes to a third
-// party), the offer needs the visit the invoice is for, the gate hides the
-// routes entirely, and a tap is not counted as a receipt view.
+// what this suite pins is the RECEIPT's own decisions: only a PAID receipt
+// whose link reaches the account holder alone carries the cards (no
+// third-party payer, no service contact), the offer needs the visit the
+// invoice is for, the gate hides the routes entirely, and a tap is not
+// counted as a receipt view.
 jest.mock('../models/db', () => jest.fn(() => {
   const query = {};
-  for (const method of ['where', 'whereIn', 'orderBy', 'whereRaw']) query[method] = () => query;
+  for (const method of ['where', 'whereIn', 'orderBy', 'whereRaw', 'leftJoin']) query[method] = () => query;
   query.first = (...args) => mockFirst(...args);
   return query;
 }));
@@ -18,6 +19,8 @@ jest.mock('../services/logger', () => ({ warn: jest.fn() }));
 jest.mock('../services/receipt-payment', () => ({ loadPaymentForInvoice: jest.fn(async () => null) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../services/service-report/cross-sell-tap', () => ({
+  // The real who-may-see-it rule; only the offer and the tap are stubbed.
+  linkReachesOnlyAccountHolder: jest.requireActual('../services/service-report/cross-sell-tap').linkReachesOnlyAccountHolder,
   buildCrossSellForServiceRecord: jest.fn(),
   handleCrossSellTap: jest.fn(),
 }));
@@ -71,8 +74,10 @@ describe('GET /:token — the cards ride the receipt payload', () => {
 
   test.each([
     ['gate off', () => isEnabled.mockReturnValue(false)],
-    ['payer-billed (the link goes to a third party)', () => InvoiceService.getByToken.mockResolvedValue({ ...INVOICE, payer_id: 'payer-1' })],
-    ['not paid', () => InvoiceService.getByToken.mockResolvedValue({ ...INVOICE, status: 'refunded' })],
+    ['payer-billed (the link goes to a third party)', () => mockFirst.mockResolvedValue({ ...INVOICE, payer_id: 'payer-1' })],
+    ['account billed to a third-party payer', () => mockFirst.mockResolvedValue({ ...INVOICE, customer_payer_id: 3 })],
+    ['a service contact can also get this link', () => mockFirst.mockResolvedValue({ ...INVOICE, service_contact_name: 'Tenant Tina', service_contact_email: 't@example.com' })],
+    ['not paid', () => mockFirst.mockResolvedValue({ ...INVOICE, status: 'refunded' })],
   ])('%s → no cards', async (_label, arrange) => {
     arrange();
     const { res } = await call('get', '/:token');
@@ -83,7 +88,7 @@ describe('GET /:token — the cards ride the receipt payload', () => {
   });
 
   test('an invoice with no visit carries the referral card alone', async () => {
-    InvoiceService.getByToken.mockResolvedValue({ ...INVOICE, service_record_id: null });
+    mockFirst.mockResolvedValue({ ...INVOICE, service_record_id: null });
     const { res } = await call('get', '/:token');
     const payload = res.json.mock.calls[0][0];
     expect(payload).not.toHaveProperty('crossSell');
