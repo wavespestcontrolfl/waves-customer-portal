@@ -141,3 +141,21 @@ describe('POST /:token/referral-link — enrolls on the tap only', () => {
     expect(referralShare.buildReferralShareForCustomer).not.toHaveBeenCalled();
   });
 });
+
+describe('the taps answer the generic 404 ahead of the limiter (a dark route never 429s)', () => {
+  test.each([
+    ['/:token/cross-sell', 'gate off', 'a'.repeat(64), false],
+    ['/:token/referral-link', 'gate off', 'a'.repeat(64), false],
+    ['/:token/cross-sell', 'malformed token', 'bad token!', true],
+  ])('%s, %s', async (path, _label, token, gateOn) => {
+    isEnabled.mockReturnValue(gateOn);
+    const layer = router.stack.find((l) => l.route?.path === path && l.route.methods.post);
+    const res = { statusCode: 200, json: jest.fn() };
+    res.status = jest.fn((code) => { res.statusCode = code; return res; });
+    const next = jest.fn();
+    layer.route.stack[0].handle({ params: { token } }, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(404);
+    expect(mockFirst).not.toHaveBeenCalled();
+  });
+});

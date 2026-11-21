@@ -28,6 +28,19 @@ const {
 // tap (POST /:token/referral-link), never on a GET.
 const RECEIPT_SURFACE = Object.freeze({ source: 'invoice_receipt', noun: 'receipt', title: 'invoice receipt' });
 
+// Ahead of the limiter on both taps: a dark gate or a malformed token is the
+// generic 404 before any limiter count or DB read, so a probe can never tell
+// the dark routes from missing ones by a 429. Token shape = the pay route's
+// (current 64-hex, legacy 25-32 url-safe).
+const RECEIPT_TOKEN_RE = /^[A-Za-z0-9_-]{20,64}$/;
+function receiptCardRouteOpen(req, res, next) {
+  if (!require('../config/feature-gates').isEnabled('docCrossSell')
+    || !RECEIPT_TOKEN_RE.test(String(req.params.token || ''))) {
+    return res.status(404).json({ error: 'Receipt not found' });
+  }
+  return next();
+}
+
 // Same posture as the report's crossSellActionLimiter: a permanent bearer
 // link must not drive pricing recomputes or promoter enrollment at volume.
 const receiptCardActionLimiter = rateLimit({
@@ -225,7 +238,7 @@ router.get('/:token/pdf', async (req, res, next) => {
 // GATE_REPORT_CLICK_TO_ESTIMATE on and a priced offer — an estimate URL to
 // open. 404 covers a dark gate, an ineligible receipt and an unknown token
 // alike, so the gate is not probeable.
-router.post('/:token/cross-sell', receiptCardActionLimiter, async (req, res, next) => {
+router.post('/:token/cross-sell', receiptCardRouteOpen, receiptCardActionLimiter, async (req, res, next) => {
   try {
     const data = await loadReceiptCardInvoice(req.params.token);
     if (!receiptCardsEligible(data) || !data.service_record_id) {
@@ -249,7 +262,7 @@ router.post('/:token/cross-sell', receiptCardActionLimiter, async (req, res, nex
 // POST /api/receipt/:token/referral-link — the referral card's tap
 // =========================================================================
 // Same composer as the report and estimate screens (enrolls on this tap).
-router.post('/:token/referral-link', receiptCardActionLimiter, async (req, res) => {
+router.post('/:token/referral-link', receiptCardRouteOpen, receiptCardActionLimiter, async (req, res) => {
   try {
     const data = await loadReceiptCardInvoice(req.params.token);
     if (!receiptCardsEligible(data)) return res.status(404).json({ error: 'Receipt not found' });

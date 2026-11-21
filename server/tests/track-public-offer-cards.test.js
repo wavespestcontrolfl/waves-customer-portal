@@ -111,3 +111,19 @@ test('a report that never reaches the customer gives no offer, but the referral 
   expect(res.statusCode).toBe(200);
   expect(referralShare.buildReferralShareForCustomer).toHaveBeenCalledWith('cust-1');
 });
+
+test.each([
+  ['/:token/cross-sell', 'gate off', TOKEN, false],
+  ['/:token/referral-link', 'gate off', TOKEN, false],
+  ['/:token/cross-sell', 'malformed token', 'nope', true],
+])('%s, %s → the generic 404 ahead of the limiter (a dark route never 429s)', async (path, _label, token, gateOn) => {
+  isEnabled.mockReturnValue(gateOn);
+  const layer = router.stack.find((l) => l.route?.path === path && l.route.methods.post);
+  const res = { statusCode: 200, set: jest.fn(), json: jest.fn() };
+  res.status = jest.fn((code) => { res.statusCode = code; return res; });
+  const next = jest.fn();
+  layer.route.stack[0].handle({ params: { token } }, res, next);
+  expect(next).not.toHaveBeenCalled();
+  expect(res.statusCode).toBe(404);
+  expect(mockDb).not.toHaveBeenCalled();
+});

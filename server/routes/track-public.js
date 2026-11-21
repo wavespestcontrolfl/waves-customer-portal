@@ -965,6 +965,17 @@ router.post('/:token/view', async (req, res) => {
 // visit's service record, and the tap is the report's own tap.
 const TRACK_CARD_SURFACE = Object.freeze({ source: 'tracker', noun: 'page', title: 'visit tracker' });
 
+// Ahead of the limiter on both taps: a dark gate or a malformed token is the
+// generic 404 before any limiter count or DB read, so a probe can never tell
+// the dark routes from missing ones by a 429.
+function trackCardRouteOpen(req, res, next) {
+  res.set(PRIVACY_HEADERS);
+  if (!isEnabled('docCrossSell') || !TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  return next();
+}
+
 const trackCardActionLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,
@@ -1028,7 +1039,7 @@ async function trackCards(token) {
 }
 
 // POST /:token/cross-sell — the add-a-service card's tap (the report's tap).
-router.post('/:token/cross-sell', trackCardActionLimiter, async (req, res) => {
+router.post('/:token/cross-sell', trackCardRouteOpen, trackCardActionLimiter, async (req, res) => {
   res.set(PRIVACY_HEADERS);
   try {
     const context = await loadTrackCardContext(req.params.token);
@@ -1047,7 +1058,7 @@ router.post('/:token/cross-sell', trackCardActionLimiter, async (req, res) => {
 });
 
 // POST /:token/referral-link — the referral card's tap (enrolls on the tap).
-router.post('/:token/referral-link', trackCardActionLimiter, async (req, res) => {
+router.post('/:token/referral-link', trackCardRouteOpen, trackCardActionLimiter, async (req, res) => {
   res.set(PRIVACY_HEADERS);
   try {
     const context = await loadTrackCardContext(req.params.token);

@@ -3413,7 +3413,10 @@ report is not customer-deliverable, carries `referral` alone. The taps
 report's own tap (`handleCrossSellTap`: recompute, 409 on any drift,
 one shared `service_requests` row with source `invoice_receipt` / `tracker`,
 `estimateUrl` with `GATE_REPORT_CLICK_TO_ESTIMATE`) and its referral composer
-(enrolls on the tap only). 404 when off or ineligible; 5 a minute per token;
+(enrolls on the tap only). 404 when off or ineligible; a dark gate or a
+malformed token (receipt: the pay route's `^[A-Za-z0-9_-]{20,64}$`; tracker:
+64-hex) is the generic 404 AHEAD of the limiter and any DB read, so the dark
+routes never answer 429; 5 a minute per token;
 a receipt tap never records a receipt view. The receipt page shows the
 per-application price; the report card stays price-free (owner 2026-10-05).
 
