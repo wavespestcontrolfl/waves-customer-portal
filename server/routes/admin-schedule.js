@@ -5884,6 +5884,9 @@ async function loadProjectCompletionContextByServiceId(services) {
       // payment must not hide the report still owed (pre-push audit round 6). Not the visit's profile: the hold is recorded only
       // where the completion sends the customer a report (invoice-issued-closeout.js reportAfterPayWouldHold, round 12).
       reportAfterPayHeld: heldForReport.has(String(service.id)),
+      // A Dispatch bundle loaded before that change shows the badge only when this second flag is true as well. It carries the
+      // same hold, so a tab that has not reloaded keeps its badge. No current client reads it: it goes when the gate is removed.
+      reportAfterPayEnabled: heldForReport.has(String(service.id)),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -7200,6 +7203,7 @@ router.get('/', async (req, res, next) => {
         // GATE_FAST_COMPLETE_INVOICED_VISITS — see loadProjectCompletionContextByServiceId.
         invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
         // GATE_REPORT_AFTER_PAY — see loadProjectCompletionContextByServiceId.
+        reportAfterPayEnabled: projectCompletionContext.reportAfterPayEnabled === true,
         reportAfterPayHeld: projectCompletionContext.reportAfterPayHeld === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
@@ -7878,6 +7882,7 @@ router.get('/week', async (req, res, next) => {
           assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
+          reportAfterPayEnabled: projectCompletionContext.reportAfterPayEnabled === true,
           reportAfterPayHeld: projectCompletionContext.reportAfterPayHeld === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,

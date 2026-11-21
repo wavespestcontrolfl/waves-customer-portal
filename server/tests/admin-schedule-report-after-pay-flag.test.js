@@ -8,9 +8,11 @@
  *    does not hide the report still owed (pre-push audit round 6);
  *  - not the visit's completion profile. The hold is recorded only for a visit
  *    whose completion sends the customer a report (reportAfterPayWouldHold),
- *    so the row carries no second flag that could disagree with the hold
- *    (round 12: a held visit showed no badge when the row's own profile read
- *    said no report, or failed).
+ *    so no second reading of the profile can disagree with the hold (round
+ *    12: a held visit showed no badge when the row's own profile read said no
+ *    report, or failed).
+ * The row still carries `reportAfterPayEnabled`, for a Dispatch bundle loaded
+ * before that change (it needs both flags true). It is the same hold.
  * A failed hold lookup shows no badge.
  */
 jest.mock('../models/db', () => jest.fn(() => { throw new Error('linked-project lookup is optional'); }));
@@ -47,8 +49,8 @@ describe('reportAfterPayHeld', () => {
     spy = jest.spyOn(closeout, 'reportAfterPayHeldVisitIds').mockResolvedValue(new Set(['svc-1']));
     const map = await loadProjectCompletionContextByServiceId(two);
     expect(spy).toHaveBeenCalledWith(expect.anything(), ['svc-1', 'svc-2']);
-    expect(map.get('svc-1').reportAfterPayHeld).toBe(true);
-    expect(map.get('svc-2').reportAfterPayHeld).toBe(false);
+    expect(map.get('svc-1')).toMatchObject({ reportAfterPayHeld: true, reportAfterPayEnabled: true });
+    expect(map.get('svc-2')).toMatchObject({ reportAfterPayHeld: false, reportAfterPayEnabled: false });
   });
 
   test('a failed lookup shows no badge and does not fail the schedule', async () => {
@@ -56,23 +58,24 @@ describe('reportAfterPayHeld', () => {
     logger.warn.mockClear();
     const map = await loadProjectCompletionContextByServiceId(two);
     expect([map.get('svc-1').reportAfterPayHeld, map.get('svc-2').reportAfterPayHeld]).toEqual([false, false]);
+    expect([map.get('svc-1').reportAfterPayEnabled, map.get('svc-2').reportAfterPayEnabled]).toEqual([false, false]);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('report-after-pay hold lookup failed'));
   });
 
   test('the hold is the badge\'s only source: a failed profile lookup, or a profile that sends no report, does not hide a held visit', async () => {
     spy = jest.spyOn(closeout, 'reportAfterPayHeldVisitIds').mockResolvedValue(new Set(['svc-1', 'svc-2']));
     mockProfile.fail = true;
-    expect((await loadProjectCompletionContextByServiceId(two)).get('svc-1')).toMatchObject({ reportAfterPayHeld: true, completionProfileLookupFailed: true });
+    expect((await loadProjectCompletionContextByServiceId(two)).get('svc-1'))
+      .toMatchObject({ reportAfterPayHeld: true, reportAfterPayEnabled: true, completionProfileLookupFailed: true });
     mockProfile.fail = false;
     mockProfile.current = { ...ROUTINE, deliveryMode: 'disabled' };
-    const entry = (await loadProjectCompletionContextByServiceId(two)).get('svc-2');
-    expect(entry.reportAfterPayHeld).toBe(true);
-    expect(entry).not.toHaveProperty('reportAfterPayEnabled');
+    // The flag an older Dispatch bundle also needs follows the hold too, not the profile.
+    expect((await loadProjectCompletionContextByServiceId(two)).get('svc-2')).toMatchObject({ reportAfterPayHeld: true, reportAfterPayEnabled: true });
   });
 
-  test('the day and the week payload both carry the hold flag, strictly true, and no second flag', () => {
+  test('the day and the week payload both carry the hold flag and the older bundle\'s flag, strictly true', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     expect(src.match(/reportAfterPayHeld: projectCompletionContext\.reportAfterPayHeld === true/g)).toHaveLength(2);
-    expect(src).not.toContain('reportAfterPayEnabled');
+    expect(src.match(/reportAfterPayEnabled: projectCompletionContext\.reportAfterPayEnabled === true/g)).toHaveLength(2);
   });
 });
