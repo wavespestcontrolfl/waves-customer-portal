@@ -111,9 +111,9 @@ describe('registry contract', () => {
 
   // A check whose query is bound to a look-back or look-ahead date can lose a finding with nothing fixed, so its failures
   // post as records, never in the standing list a clean run closes. A new detector with such a date filter joins this list.
-  test('the moving-window checks are the closeout day, the 14-day welcome audit and the ghost lanes', () => {
+  test('the moving-window checks are the closeout day, the 14-day welcome audit, the ghost lanes and churned upcoming visits', () => {
     expect(DETECTORS.filter((d) => d.moving).map((d) => d.key).sort())
-      .toEqual(['closeout_failed_facts', 'completion_lane_ghost_lanes', 'new_plan_without_welcome']);
+      .toEqual(['churned_upcoming_visits', 'closeout_failed_facts', 'completion_lane_ghost_lanes', 'new_plan_without_welcome']);
     // Only the closeout check reads a different window on each run (yesterday).
     expect(DETECTORS.filter((d) => d.freshEachRun).map((d) => d.key)).toEqual(['closeout_failed_facts']);
     for (const d of DETECTORS) if (d.freshEachRun) expect(d.moving).toBe(true);
@@ -519,7 +519,9 @@ describe('two alerts, not one a day (in the app)', () => {
     test('a start that cannot be marked: the run trusts nothing, posts, and closes nothing', async () => {
       lastRun(['b'], DAY);
       mockTables.system_settings.merge = jest.fn().mockRejectedValueOnce(new Error('deadlock detected')).mockResolvedValue(1);
-      expect(await sweep([fails('b')])).toMatchObject({ sent: true });
+      // The alert posts (the unchanged list is not trusted). The run still reads as failed: a state write failed.
+      expect(await sweep([fails('b')])).toEqual({ error: 'state_failed', results: { b: 1 } });
+      expect(keysPosted()).toEqual([STANDING_KEY]);
       expect(savedState()).toMatchObject({ items: ['b'], alertedAt: NOW.toISOString() });
       // A clean run that cannot write the row at all leaves the standing alert open: with it closed, a later run
       // could trust the older result that still names `b`. The run reads as failed.
@@ -883,6 +885,20 @@ describe('detector adapters', () => {
     const out = await byKey('churned_live_state').run({ now: NOW });
     expect(auditChurnedAccountsLiveState).toHaveBeenCalledWith({ db });
     expect(out).toEqual({ count: 2, ids: ['c1', 'c2'], detail: { tier: 2 } });
+  });
+
+  test('churned accounts: the date-bound upcoming-visit flag is its own moving-window check', async () => {
+    // c1: plan state only. c2: plan state and an upcoming visit. c3: an upcoming visit only (it leaves the audit
+    // when the visit date passes, with nothing fixed).
+    auditChurnedAccountsLiveState.mockResolvedValue({
+      churned: 9, withLiveState: 3, counts: { tier: 2, upcoming_visit: 2 },
+      findings: [{ id: 'c1', flags: ['tier=Gold'] }, { id: 'c2', flags: ['tier=Bronze', 'upcoming_visit'] }, { id: 'c3', flags: ['upcoming_visit'] }],
+    });
+    expect(await byKey('churned_live_state').run({ now: NOW })).toEqual({ count: 2, ids: ['c1', 'c2'], detail: { tier: 2 } });
+    expect(await byKey('churned_upcoming_visits').run({ now: NOW })).toEqual({ count: 2, ids: ['c2', 'c3'] });
+    expect(auditChurnedAccountsLiveState).toHaveBeenCalledWith({ db });
+    expect(byKey('churned_upcoming_visits').moving).toBe(true);
+    expect(byKey('churned_live_state').moving).toBeUndefined();
   });
 
   test('waveguard_alignment_drift invokes the scan with NO onRepair and no enrollment pass', async () => {

@@ -91,6 +91,8 @@ const REPEAT_AFTER_MS = 6.5 * DAY_MS;
 // what the feed shows, so the run reads it as "no state" and posts. The runs
 // are 24 hours apart (23 or 25 on a clock change).
 const STATE_FRESH_MS = 36 * 60 * 60 * 1000;
+// The one date-bound flag of audit-churned-accounts-live-state.
+const UPCOMING_VISIT_FLAG = 'upcoming_visit';
 const SAMPLE_IDS = 25;
 const CLOSEOUT_VISIT_CAP = 150;
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
@@ -113,10 +115,9 @@ const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcon
 // ---------------------------------------------------------------------------
 const DETECTORS = Object.freeze([
   {
-    // A standing check. One of its flags (`upcoming_visit`) reads visits dated
-    // today or later, but that finding does not leave with nothing fixed: when
-    // the date passes, the visit was completed or cancelled (a real change),
-    // or it is still open and stale_open_visits reads it.
+    // An account stands here for its plan-state flags. The audit's
+    // `upcoming_visit` flag reads visits dated today or later, so it is its
+    // own check below (churned_upcoming_visits).
     key: 'churned_live_state',
     label: 'Churned/inactive accounts still carrying live plan state',
     href: '/admin/customers',
@@ -124,7 +125,27 @@ const DETECTORS = Object.freeze([
     async run() {
       const { auditChurnedAccountsLiveState } = require('../scripts/audit-churned-accounts-live-state');
       const res = await auditChurnedAccountsLiveState({ db });
-      return { count: res.withLiveState, ids: res.findings.map((f) => f.id), detail: res.counts };
+      const standing = res.findings.filter((f) => f.flags.some((flag) => flag !== UPCOMING_VISIT_FLAG));
+      const counts = Object.fromEntries(Object.entries(res.counts || {}).filter(([flag]) => flag !== UPCOMING_VISIT_FLAG));
+      return { count: standing.length, ids: standing.map((f) => f.id), detail: counts };
+    },
+  },
+  {
+    // Its own check since the 2026-11-21 alert split (it was one flag of
+    // churned_live_state): the audit reads visits dated today or later, so
+    // the finding leaves when the visit date passes, with nothing fixed. The
+    // audit reads the statuses `scheduled` and `rescheduled` too, which
+    // stale_open_visits does not, so no other check takes the visit over.
+    key: 'churned_upcoming_visits',
+    moving: true,
+    label: 'Churned/inactive accounts that still have an upcoming visit',
+    href: '/admin/customers',
+    provenance: 'cancellation scope 2026-08-29 — audit-churned-accounts-live-state `upcoming_visit` flag',
+    async run() {
+      const { auditChurnedAccountsLiveState } = require('../scripts/audit-churned-accounts-live-state');
+      const res = await auditChurnedAccountsLiveState({ db });
+      const upcoming = res.findings.filter((f) => f.flags.includes(UPCOMING_VISIT_FLAG));
+      return { count: upcoming.length, ids: upcoming.map((f) => f.id) };
     },
   },
   {
@@ -735,7 +756,9 @@ async function postInApp(results, context) {
   const standing = await postStandingList(results.filter((r) => !isRecordResult(r)), state, { ...context, marked });
   const records = await postRecords(results.filter(isRecordResult), results.filter((r) => r.moving && !isRecordResult(r)), state, context);
   const saved = await writeRunState(context.now, { items: standing.items, alertedAt: standing.alertedAt, alertId: standing.alertId, seen: records.seen });
-  return { posted: standing.posted || records.posted, errors: [standing.error, records.error].filter(Boolean), saved };
+  // A start that could not be marked is a state fault too (and a clean
+  // standing list was then not closed): the run reads as failed.
+  return { posted: standing.posted || records.posted, errors: [standing.error, records.error].filter(Boolean), saved: saved && marked };
 }
 
 // The email path: one email a run with the whole report, paced by
@@ -756,13 +779,14 @@ async function sendWholeReport(report, { mailer, to }) {
 // finding stands. Records are never retired: closeout_failed_facts checks
 // yesterday only, and a clean later window does not prove older failures
 // (including license facts) were fixed.
-// Returns the run's outcome: clean, or state_failed when the clean result
-// could not be saved.
+// Returns the run's outcome: clean, or state_failed when the run start or the
+// clean result could not be saved.
 async function recordCleanRun(now) {
   const { marked } = await startRun(now);
   await closeStandingAlert(marked);
   const saved = await writeRunState(now, { items: [], alertedAt: null, alertId: null, seen: {} });
-  return saved ? { skipped: 'clean' } : { error: 'state_failed' };
+  // Without the start mark the standing alert was not closed: not a clean run yet.
+  return saved && marked ? { skipped: 'clean' } : { error: 'state_failed' };
 }
 
 // Why a run with exceptions did not end as "sent", or null when it did.
