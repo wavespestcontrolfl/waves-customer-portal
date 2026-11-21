@@ -685,6 +685,8 @@ describe('updateProductPage', () => {
       { id: 'o-no-visit-own', service_record_id: null, treatment_date: '2026-12-06', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] },
       { id: 'o-typed-stable', service_record_id: 'sr-5', treatment_date: '2026-07-07', grass_track: 'st_augustine', products_applied: [{ name: 'Crosscheck Plus' }] },
       { id: 'o-no-visit-stable', service_record_id: null, treatment_date: '2026-07-08', grass_track: 'st_augustine', products_applied: [{ name: 'Crosscheck Plus' }] },
+      // An alias the swap moved from Talak: no visit stored it and only Crosscheck carries it now, but its move names Talak.
+      { id: 'o-no-visit-moved', service_record_id: null, treatment_date: '2026-07-09', grass_track: 'st_augustine', products_applied: [{ name: 'Bifen I/T 7.9%' }] },
     ];
     const servicePrd = [
       { service_record_id: 'sr-1', product_id: 'pc-talak', product_name: 'Talstar P' },
@@ -696,9 +698,15 @@ describe('updateProductPage', () => {
     const state = useDb({
       products_catalog: [{ id: 'pc-cross', name: 'LESCO Crosscheck Plus' }],
       // an exact catalog name: the only alias read is the product's alias listing
-      product_aliases: [{ alias_name: 'Talstar P' }, { alias_name: 'Crosscheck Plus' }],
+      product_aliases: [{ alias_name: 'Talstar P' }, { alias_name: 'Crosscheck Plus' }, { alias_name: 'Bifen I/T 7.9%' }],
       treatment_outcomes: outcomes,
       service_products: servicePrd,
+      // The alias moves' audit events: one that left Talak, and one that left this product itself, which is no evidence against it.
+      // (pg hands jsonb back parsed; a text copy is read the same way.)
+      audit_log: [
+        { metadata: JSON.stringify({ kind: 'moved', alias_name: 'Bifen I/T 7.9%', from: 'pc-talak', to: 'pc-cross' }) },
+        { metadata: { kind: 'moved', alias_name: 'Crosscheck Plus', from: 'pc-cross', to: 'pc-other' } },
+      ],
       knowledge_entries: [],
     });
 
@@ -708,19 +716,28 @@ describe('updateProductPage', () => {
     // The outcome query also takes every visit that recorded the product by id, whatever name it carried then.
     const outcomeOps = state.calls.treatment_outcomes[0].ops.filter(([m]) => m === 'orWhereRaw').map(([, a]) => a);
     expect(outcomeOps).toContainEqual(['service_record_id IN (SELECT service_record_id FROM service_products WHERE product_id = ?)', ['pc-cross']]);
+    // The move evidence is read from the alias events only, whatever migration wrote them.
+    const moveRead = state.calls.audit_log.find((rec) => rec.ops.some(([m, a]) => m === 'where' && a[0]?.resource_type === 'product_aliases'));
+    expect(moveRead.ops).toContainEqual(['whereRaw', ["metadata->>'kind' IN ('moved', 'removed')"]]);
   });
 
-  test('a variant page under a name another product carried is kept: the Crosscheck refresh folds only its own names', async () => {
+  test.each([
+    // The visits that recorded "Talstar P" stored Talak (production: 147 rows, read 2026-11-18).
+    ['a visit stored it under Talak', 'Talstar P', 'product/talstar-p', { service_products: [{ product_id: 'pc-talak', product_name: 'Talstar P' }] }],
+    ['the swap moved it from Talak, and no visit stored it', 'Bifen I/T 7.9%', 'product/bifen-i-t-7-9', { audit_log: [{ metadata: { kind: 'moved', alias_name: 'Bifen I/T 7.9%', from: 'pc-talak' } }] }],
+    // Where Crosscheck already carried the name, the swap deleted Talak's row whole into its event.
+    ['the swap removed Talak\'s copy of it, and no visit stored it', 'Bifen IT', 'product/bifen-it', { audit_log: [{ metadata: { kind: 'removed', alias_name: 'bifen it', row: { id: 'a3', product_id: 'pc-talak', alias_name: 'bifen it' } } }] }],
+  ])('a variant page under a name another product carried is kept (%s): the Crosscheck refresh folds only its own names', async (_label, alias, kept, evidence) => {
     const pageOf = (rec) => rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0]?.slug;
     const state = useDb({
       products_catalog: (rec) => (rec.ops.some(([m, a]) => m === 'whereRaw' && a[1]?.[0] === 'lesco crosscheck plus')
         ? [{ id: 'pc-cross', name: 'LESCO Crosscheck Plus' }] : []),
       product_aliases: (rec) => (rec.ops.some(([m, a]) => m === 'where' && a[0]?.product_id === 'pc-cross')
-        ? [{ alias_name: 'Talstar P' }, { alias_name: 'Crosscheck Plus' }] : []),
-      // The visits that recorded "Talstar P" stored Talak (production: 147 rows, read 2026-11-18).
-      service_products: [{ product_id: 'pc-talak', product_name: 'Talstar P' }],
+        ? [{ alias_name: alias }, { alias_name: 'Crosscheck Plus' }] : []),
+      service_products: [],
+      ...evidence,
       treatment_outcomes: [{ id: 'o-1', service_record_id: null, treatment_date: '2026-12-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] }],
-      knowledge_entries: (rec) => (['product/talstar-p', 'product/crosscheck-plus'].includes(pageOf(rec)) ? [{ id: `ke-${pageOf(rec)}`, slug: pageOf(rec), source_treatment_ids: ['o-1'] }] : []),
+      knowledge_entries: (rec) => ([kept, 'product/crosscheck-plus'].includes(pageOf(rec)) ? [{ id: `ke-${pageOf(rec)}`, slug: pageOf(rec), source_treatment_ids: ['o-1'] }] : []),
       knowledge_base: [],
       knowledge_bridge: [],
       knowledge_contradictions: [],
@@ -728,7 +745,7 @@ describe('updateProductPage', () => {
     await wiki.updateProductPage('LESCO Crosscheck Plus');
     const merged = (state.inserts.knowledge_update_log || []).filter((r) => r.action === 'merge').map((r) => JSON.stringify(r));
     expect(merged.some((r) => r.includes('product/crosscheck-plus'))).toBe(true);
-    expect(merged.some((r) => r.includes('product/talstar-p'))).toBe(false);
+    expect(merged.some((r) => r.includes(kept))).toBe(false);
     expect(state.deletes.knowledge_entries).toBe(1); // only the Crosscheck-only page
   });
 
