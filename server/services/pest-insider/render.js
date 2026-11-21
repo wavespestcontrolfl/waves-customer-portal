@@ -58,6 +58,7 @@ const { heroFor, HERO_WIDTH, HERO_HEIGHT } = require('./heroes');
 const { partPictureForFact, partPictureForSpecies, PART_WIDTH, PART_HEIGHT } = require('./parts');
 const { SERVICE_EMOJI } = require('./claim-check');
 const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
+const { isPestInsiderPoll } = require('../newsletter-quiz');
 
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const POST_LINK_TEXT = 'Read the full story on the Waves blog';
@@ -73,10 +74,11 @@ const INTRO = "Here's one thing we learned about Southwest Florida homes and yar
 const SIGNOFF_LINE = 'Catch you next time.';
 const SIGNOFF_NAME = '— The Waves Team';
 
-const SECTIONS = Object.freeze({ lead: 'Today I learned', id: "What's this?", tool: "A tool we'd use" });
+const SECTIONS = Object.freeze({ lead: 'Today I learned', id: "What's this?", tool: "A tool we'd use", poll: 'Quick poll' });
 const LEAD_EMOJI = '💡';
 const ID_EMOJI = '🔍';
 const TOOL_EMOJI = '🧰';
+const POLL_EMOJI = '🗳️';
 
 // The species card's tile: the species' own emoji where its category's would
 // show another animal, else its category's, else the magnifier. "Biting"
@@ -131,12 +133,13 @@ const speciesUrl = (slug) => (/^[a-z0-9-]+$/.test(String(slug)) ? `${IDENTIFIER_
 // A section's head: its name as a small label, then the newsletter's band
 // (emoji, then the title in bold italics). The emoji sits on a white badge
 // that stays white in dark mode (dm-lightcard), so a dark emoji (🕷️ 🐜 🪳)
-// stays visible.
+// stays visible. With no label (the poll, whose band is its name and whose
+// box opens with the question) the band stands alone.
 function sectionHead(index, label, emoji, title) {
   const palette = newsletterPalette();
   const theme = newsletterSectionTheme(index);
   return [
-    `<p style="margin:0 0 6px 0;font-size:12px;line-height:1.4;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:${theme.text};">${escapeHtml(label)}</p>`,
+    ...(label ? [`<p style="margin:0 0 6px 0;font-size:12px;line-height:1.4;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:${theme.text};">${escapeHtml(label)}</p>`] : []),
     `<h2 class="dm-chip" style="font-family:${palette.font};font-size:20px;line-height:1.35;font-weight:800;color:${theme.text};background:${theme.background};border-left:4px solid ${theme.accent};border-radius:8px;padding:10px 12px;margin:0 0 14px 0;"><span class="dm-lightcard" style="display:inline-block;background:#FFFFFF;border-radius:8px;padding:2px 6px;line-height:1.25;font-style:normal;">${emoji}</span> <strong><em>${escapeHtml(title)}</em></strong></h2>`,
   ].join('\n');
 }
@@ -331,6 +334,18 @@ function toolBlock(tool) {
 
 const wrapBlock = (b) => `<div class="dm-text">\n${b.html}\n</div>`;
 
+// The issue's poll: a Waves Pest Insider poll's token (newsletter-quiz.js),
+// written here from the poll id, never taken from the caller. The sender
+// turns it into each reader's own vote buttons; the archive and the FYI copy
+// show its question and answers with no links. Any other id adds nothing.
+function pollBlock(pollQuizId) {
+  if (!isPestInsiderPoll(pollQuizId)) return null;
+  return {
+    html: [sectionHead(3, null, POLL_EMOJI, SECTIONS.poll), `{{quiz:${pollQuizId}}}`].join('\n'),
+    text: `${SECTIONS.poll.toUpperCase()}\n{{quiz-text:${pollQuizId}}}`,
+  };
+}
+
 /**
  * @param {{ subject: string, preview: string, sendDate?: string,
  *   lead: { headline: string, sentences: {text:string}[], postUrl: string, factId?: string },
@@ -339,17 +354,20 @@ const wrapBlock = (b) => `<div class="dm-text">\n${b.html}\n</div>`;
  *   lead.postUrl must be one of the reviewed POST_URLS. lead.factId names the
  *   fact whose top picture, card and sources the issue shows (only when that
  *   fact's own post is lead.postUrl) and whose service picks the band's emoji. sendDate (YYYY-MM-DD)
- *   goes in the dateline. Any other field is ignored: the shared body takes
- *   no caller text.
+ *   goes in the dateline. pollQuizId, a Waves Pest Insider poll id, adds that
+ *   poll after "What's this?" (pollBlock). Any other field is ignored: the
+ *   shared body takes no caller text.
  */
 function renderIssue(issue) {
   const lead = leadBlock(issue);
   const id = identifierBlock(issue);
+  const poll = pollBlock(issue.pollQuizId);
   const sections = [lead.text, id.text];
   const minutes = readMinutes([GREETING, INTRO, ...sections, SIGNOFF_TEXT].join(' '));
   const opening = openingBlock(issue, minutes);
-  const html = [wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), SIGNOFF_HTML].join('\n');
-  const text = [opening.text, ...sections, SIGNOFF_TEXT].join('\n\n');
+  const pollHtml = poll ? [DIVIDER_HTML, wrapBlock(poll)] : [];
+  const html = [wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), ...pollHtml, SIGNOFF_HTML].join('\n');
+  const text = [opening.text, ...sections, ...(poll ? [poll.text] : []), SIGNOFF_TEXT].join('\n\n');
   return { subject: issue.subject, preview: issue.preview, html_body: html, text_body: text };
 }
 

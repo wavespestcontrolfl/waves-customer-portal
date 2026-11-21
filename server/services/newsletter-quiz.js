@@ -26,9 +26,12 @@
  * carry an answer the server won't honor (and vice-versa).
  */
 
-const db = require('../models/db');
+// The database loads where it is used (recordQuizResponse, newsletterIssuePolls), not here: the
+// Waves Pest Insider builder loads this module for its polls and must build offline, with no
+// database module (pest-insider/index.js; pre-push round 21).
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 
 // Body substitution tokens. Hyphenated like {{greeting-name}} / {{grass-type}}
 // so a model-written _italic_ marker can't split them mid-render. {{quiz}} is
@@ -132,7 +135,6 @@ const QUIZZES = {
 // keeps the thank-you page from pitching a booking. A vote takes the same two
 // taps as every quiz (the answer, then Confirm). The autopilot adds one poll
 // to at most every 3rd issue (chooseNewsletterPoll); nothing else adds one.
-const NEWSLETTER_POLL_PREFIX = 'nl-poll-';
 const NEWSLETTER_POLLS = [
   ['nl-poll-weekend-v1', 'Poll: weekend plans', 'Where will you be this weekend?',
     [['beach', 'Beach'], ['park', 'Park'], ['home', 'Home'], ['out-to-eat', 'Out to eat']]],
@@ -155,24 +157,54 @@ const NEWSLETTER_POLLS = [
   ['nl-poll-music-v1', 'Poll: live music', "Live music: what's your speed?",
     [['rock', 'Rock'], ['country', 'Country'], ['jazz-blues', 'Jazz or blues'], ['anything-live', 'Anything live']]],
 ];
-for (const [id, label, question, answers] of NEWSLETTER_POLLS) {
-  QUIZZES[id] = {
-    label,
-    question,
-    emailCta: 'Tap one, then confirm. Just for fun.',
-    landingLine: 'Your vote is in. See you in the next Waves Newsletter.',
-    // The archive and the owner's Monday copy show the poll with no links.
-    neutralLine: 'Readers vote right in the email. Just for fun.',
-    landingCtaSuppressed: true,
-    poll: true,
-    bookLabel: 'Book a visit',
-    bookService: 'pest_control',
-    answers: answers.map(([key, text]) => ({ key, label: text, tags: [] })),
-  };
+// Waves Pest Insider polls: the list the owner approved the same day (PI1-PI6
+// on the same page), in his order, on the same rules. The Pest Insider planner
+// adds one to at most every 3rd issue (pest-insider/schedule.js, through
+// chooseNewsletterPoll); nothing else adds one.
+const PEST_INSIDER_POLLS = [
+  ['pi-poll-bugging-you-v1', 'Poll: pest bugging you', 'Which pest bugs you most this month?',
+    [['ants', 'Ants'], ['roaches', 'Roaches'], ['mosquitoes', 'Mosquitoes'], ['spiders', 'Spiders']]],
+  ['pi-poll-lizards-v1', 'Poll: lizards on the lanai', 'Lizards on the lanai: friend or foe?',
+    [['friend', 'Friend'], ['foe', 'Foe'], ['depends', 'Depends'], ['what-lizards', 'What lizards?']]],
+  ['pi-poll-house-spider-v1', 'Poll: spider in the house', 'Spider in the house. What happens next?',
+    [['cup-and-card', 'Cup and card'], ['leave-it-be', 'Leave it be'], ['shoe', 'Shoe'], ['move-out', 'Move out']]],
+  ['pi-poll-bug-surprise-v1', 'Poll: Florida bug surprise', 'Biggest Florida bug surprise?',
+    [['palmetto-bugs', 'Palmetto bugs'], ['lovebugs', 'Lovebugs'], ['fire-ants', 'Fire ants'], ['no-see-ums', 'No-see-ums']]],
+  ['pi-poll-yard-smell-v1', 'Poll: yard smell', 'Best smell in a Florida yard?',
+    [['orange-blossom', 'Orange blossom'], ['cut-grass', 'Cut grass'], ['jasmine', 'Jasmine'], ['rain-coming', 'Rain coming']]],
+  ['pi-poll-mosquito-bites-v1', 'Poll: mosquito bites', 'Who gets the mosquito bites at your house?',
+    [['me-always', 'Me, always'], ['everyone', 'Everyone'], ['not-me', 'Not me'], ['nobody', 'Nobody']]],
+];
+// Adds one newsletter's polls to QUIZZES; returns their ids in the owner's
+// order: the newsletter uses each once, then stops.
+function addPolls(polls, newsletterName) {
+  for (const [id, label, question, answers] of polls) {
+    QUIZZES[id] = {
+      label,
+      question,
+      emailCta: 'Tap one, then confirm. Just for fun.',
+      landingLine: `Your vote is in. See you in the next ${newsletterName}.`,
+      // The archive and the owner's Monday or FYI copy show the poll with no links.
+      neutralLine: 'Readers vote right in the email. Just for fun.',
+      landingCtaSuppressed: true,
+      poll: true,
+      bookLabel: 'Book a visit',
+      bookService: 'pest_control',
+      answers: answers.map(([key, text]) => ({ key, label: text, tags: [] })),
+    };
+  }
+  return Object.freeze(polls.map(([id]) => id));
 }
-/** The polls in the owner's order: the autopilot uses each once, then stops. */
-const NEWSLETTER_POLL_IDS = Object.freeze(NEWSLETTER_POLLS.map(([id]) => id));
+const NEWSLETTER_POLL_IDS = addPolls(NEWSLETTER_POLLS, 'Waves Newsletter');
+const PEST_INSIDER_POLL_IDS = addPolls(PEST_INSIDER_POLLS, 'Waves Pest Insider');
 const isNewsletterPoll = (quizId) => NEWSLETTER_POLL_IDS.includes(quizId);
+const isPestInsiderPoll = (quizId) => PEST_INSIDER_POLL_IDS.includes(quizId);
+const isPoll = (quizId) => isNewsletterPoll(quizId) || isPestInsiderPoll(quizId);
+// A newsletter type's own list: the Waves Pest Insider's for its type, the
+// Waves Newsletter's for any other (only the flagship draft shows one).
+const pollIdsFor = (newsletterType) => (newsletterType === PEST_INSIDER_TYPE ? PEST_INSIDER_POLL_IDS : NEWSLETTER_POLL_IDS);
+// Every poll id carries this; the history query's loose prefilter reads it.
+const POLL_ID_MARK = '-poll-';
 /** Sent issues between two polls: a poll shows in at most every 3rd issue, never two in a row. */
 const POLL_ISSUE_GAP = 2;
 
@@ -406,6 +438,7 @@ function neutralizeQuizTokens(content) {
  * 'no-delivery' | 'no-subscriber' | 'error'.
  */
 async function recordQuizResponse({ token, quizId, answerKey }) {
+  const db = require('../models/db');
   try {
     if (!token || !UUID_RE.test(String(token))) return { ok: false, reason: 'bad-token' };
     const answer = resolveAnswer(quizId, answerKey);
@@ -416,16 +449,16 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
       .first('id', 'subscriber_id', 'send_id');
     if (!delivery) return { ok: false, reason: 'no-delivery' };
 
-    // A Waves Newsletter poll answer counts only from an issue that showed
-    // that poll, and an issue that showed a poll takes answers only to the
-    // quizzes it showed (quizzesInIssue, the rule the poll history reads
+    // A poll answer (Waves Newsletter or Waves Pest Insider) counts only from
+    // an issue that showed that poll, and an issue that showed a poll takes
+    // answers only to the quizzes it showed (quizzesInIssue, the rule the poll history reads
     // too): an older issue's token must not record a poll its reader never
     // saw, and a hand-made link must not overwrite a poll vote (or add
     // service tags) with another quiz's answer. An issue with no poll keeps
     // the old rule. The public route answers the same either way.
     const answeredQuiz = quizId || DEFAULT_QUIZ_ID;
     const shown = quizzesInIssue(await db('newsletter_sends').where({ id: delivery.send_id }).first('html_body', 'text_body'));
-    if ((isNewsletterPoll(answeredQuiz) || shown.some(isNewsletterPoll)) && !shown.includes(answeredQuiz)) {
+    if ((isPoll(answeredQuiz) || shown.some(isPoll)) && !shown.includes(answeredQuiz)) {
       return { ok: false, reason: 'not-in-issue' };
     }
 
@@ -483,30 +516,31 @@ function quizzesInIssue(issue) {
   return parseQuizTokens(`${issue?.html_body || ''}\n${issue?.text_body || ''}`).map((token) => token.quizId);
 }
 
-// The Waves Newsletter poll an issue shows, or null.
-function pollInIssue(issue) {
-  return quizzesInIssue(issue).find(isNewsletterPoll) || null;
+// The poll from `ids` (default: the Waves Newsletter's) an issue shows, or null.
+function pollInIssue(issue, ids = NEWSLETTER_POLL_IDS) {
+  return quizzesInIssue(issue).find((quizId) => ids.includes(quizId)) || null;
 }
 
 /**
- * The poll for the next Waves Newsletter issue, or null. `recent` lists the
- * newest POLL_ISSUE_GAP issues readers got (newest first), each as the poll
- * it showed or null; `used` lists every poll an issue holds
- * (newsletterIssuePolls). No poll when one of the recent issues had one, so a
+ * The poll for a newsletter's next issue, or null. `recent` lists the newest
+ * POLL_ISSUE_GAP issues readers got (newest first), each as the poll it
+ * showed or null; `used` lists every poll an issue holds; `ids` is that
+ * newsletter's list (newsletterIssuePolls returns all three; the default is
+ * the Waves Newsletter's). No poll when one of the recent issues had one, so a
  * poll shows in at most every 3rd issue and never in two in a row. Otherwise
  * the first poll in the owner's order that no issue holds; none once the list
  * is used up.
  */
-function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
+function chooseNewsletterPoll({ recent = [], used = [], ids = NEWSLETTER_POLL_IDS } = {}) {
   if (recent.slice(0, POLL_ISSUE_GAP).some(Boolean)) return null;
   const taken = new Set(used);
-  return NEWSLETTER_POLL_IDS.find((id) => !taken.has(id)) || null;
+  return ids.find((id) => !taken.has(id)) || null;
 }
 
 /**
  * Reads what chooseNewsletterPoll needs from the issues of one newsletter
- * type: the polls of the newest POLL_ISSUE_GAP issues that readers got, and
- * every poll an issue holds. An issue reached readers when one of its delivery
+ * type: its list (pollIdsFor), the polls of the newest POLL_ISSUE_GAP issues
+ * that readers got, and every poll an issue holds. An issue reached readers when one of its delivery
  * rows reached its reader by the sender's own rule (newsletter-sender.js
  * reachedDelivery), whatever the issue's status: a send its deadline stopped,
  * or one the stale-claim recovery ended, is 'failed' although its first
@@ -536,9 +570,10 @@ function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
  * that Tuesday still ahead (newsletter-proof.js resolveFlagshipCalendarContext),
  * so last week's unsent issue cannot follow this week's.
  */
-async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
+async function newsletterIssuePolls({ newsletterType, knex = require('../models/db') } = {}) {
   // Loaded here, not at the top: newsletter-sender.js loads this module first.
   const { reachedDelivery, outstandingEligibleDeliveries } = require('./newsletter-sender');
+  const ids = pollIdsFor(newsletterType);
   const issues = () => knex('newsletter_sends as s').where('s.newsletter_type', newsletterType);
   const deliveryRows = (sub) => sub.select(knex.raw('1'))
     .from('newsletter_send_deliveries as d').whereRaw('d.send_id = s.id');
@@ -547,6 +582,16 @@ async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
   const reachedRow = (sub) => { reachedDelivery(deliveryRows(sub)); };
   const resumableRow = () => outstandingEligibleDeliveries('s.id', { database: knex, correlate: true })
     .select(knex.raw('1'));
+  // An unsent Waves Pest Insider issue holds its poll while its send row
+  // exists: a held issue (its send is a draft again), a queued one, one a
+  // worker has claimed, and a failed one, whatever its delivery rows say. A
+  // person can send or resume any of them by hand, and the sender has no send
+  // window on those paths for this newsletter, so such an issue can go out
+  // after a later one. A poll held by an issue that never goes out is skipped
+  // until that row is deleted: with six polls, a skipped one is cheaper than a
+  // repeated one. A flagship issue goes out only on its own Tuesday, so there
+  // only a resumable row holds.
+  const UNSENT = ['draft', 'scheduled', 'sending', 'failed'];
   const newest = await issues()
     .whereExists(reachedRow)
     .orderByRaw(`COALESCE(s.sent_at,
@@ -559,20 +604,27 @@ async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
   // A loose prefilter (any token form, either part, any letter case);
   // pollInIssue then reads the tokens exactly as the sender renders them.
   const holding = await issues()
-    .where((issue) => issue.whereExists(reachedRow).orWhereExists(resumableRow()))
-    .where((body) => body.where('s.html_body', 'ilike', `%{{quiz%${NEWSLETTER_POLL_PREFIX}%`)
-      .orWhere('s.text_body', 'ilike', `%{{quiz%${NEWSLETTER_POLL_PREFIX}%`))
+    .where((issue) => {
+      issue.whereExists(reachedRow).orWhereExists(resumableRow());
+      if (newsletterType === PEST_INSIDER_TYPE) issue.orWhereIn('s.status', UNSENT);
+    })
+    .where((body) => body.where('s.html_body', 'ilike', `%{{quiz%${POLL_ID_MARK}%`)
+      .orWhere('s.text_body', 'ilike', `%{{quiz%${POLL_ID_MARK}%`))
     .select('s.html_body', 's.text_body');
   return {
-    recent: newest.map(pollInIssue),
-    used: holding.map(pollInIssue).filter(Boolean),
+    ids,
+    recent: newest.map((issue) => pollInIssue(issue, ids)),
+    used: holding.map((issue) => pollInIssue(issue, ids)).filter(Boolean),
   };
 }
 
 module.exports = {
   NEWSLETTER_POLL_IDS,
+  PEST_INSIDER_POLL_IDS,
+  POLL_ID_MARK,
   POLL_ISSUE_GAP,
   isNewsletterPoll,
+  isPestInsiderPoll,
   pollInIssue,
   chooseNewsletterPoll,
   newsletterIssuePolls,

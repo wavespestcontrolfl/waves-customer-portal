@@ -32,6 +32,7 @@ const { POST_LINK_TEXT, withToolBlock, escapeHtml } = require('../services/pest-
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { loadTools, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 const { HEROES, heroFor } = require('../services/pest-insider/heroes');
+const { PEST_INSIDER_POLL_IDS, NEWSLETTER_POLL_IDS, getQuiz } = require('../services/newsletter-quiz');
 
 // Every main fact's post answers as live, unless a case says otherwise.
 const LIVE = FACTS.filter((f) => !f.reserve).map((f) => f.id);
@@ -67,7 +68,7 @@ describe('buildIssue', () => {
     // the lead links A01's own reviewed post
     expect(r.issue.html_body).toContain(`href="${postUrl('A01')}"`);
     expect(r.issue.text_body).toContain(`${POST_LINK_TEXT}: ${postUrl('A01')}`);
-    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, problems: [] });
+    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, pollId: null, problems: [] });
     // no live tool named: no tool, and no Amazon link anywhere
     expect(r.tool).toBeNull();
     for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
@@ -199,21 +200,56 @@ describe('buildIssue', () => {
 
   test('the builder loads and builds offline: no database module, under any NODE_ENV (pre-push round 21)', () => {
     // models/db.js opens Knex and throws for a NODE_ENV the knexfile lacks.
-    // The send validator's fact register used to load it at import.
+    // The send validator's fact register used to load it at import, and so
+    // did the poll module before its database read moved into its functions.
     const probe = [
       "const { buildIssue } = require('./services/pest-insider');",
       "const { POSTS } = require('./services/pest-insider/posts');",
-      "const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: Object.keys(POSTS) });",
+      `const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: Object.keys(POSTS), pollQuizId: '${PEST_INSIDER_POLL_IDS[0]}' });`,
       "const loaded = Object.keys(require.cache).filter((k) => /[\\\\/]models[\\\\/]db\\.js$|[\\\\/]node_modules[\\\\/]knex[\\\\/]/.test(k));",
-      "process.stdout.write('\\nRESULT ' + JSON.stringify({ ok: r.ok, factId: r.diagnostics.factId, loaded }) + '\\n');",
+      "process.stdout.write('\\nRESULT ' + JSON.stringify({ ok: r.ok, factId: r.diagnostics.factId, pollId: r.diagnostics.pollId, loaded }) + '\\n');",
     ].join('\n');
     const out = execFileSync(process.execPath, ['-e', probe], {
       cwd: path.join(__dirname, '..'), env: { ...process.env, NODE_ENV: 'offline-sample' }, encoding: 'utf8', timeout: 60000,
     });
     const line = out.split('\n').find((l) => l.startsWith('RESULT '));
     // the real reviewed post list here (a fresh process has no jest mock)
-    expect(JSON.parse(line.slice('RESULT '.length))).toEqual({ ok: true, factId: expect.any(String), loaded: [] });
+    expect(JSON.parse(line.slice('RESULT '.length))).toEqual({ ok: true, factId: expect.any(String), pollId: PEST_INSIDER_POLL_IDS[0], loaded: [] });
   }, 60000);
+
+  test('a Waves Pest Insider poll goes in both parts and the diagnostics; any other id adds none', () => {
+    usePlan(A01);
+    const [poll] = PEST_INSIDER_POLL_IDS;
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, pollQuizId: poll });
+    expect(r.ok).toBe(true);
+    expect(r.diagnostics.pollId).toBe(poll);
+    expect(r.issue.html_body.split(`{{quiz:${poll}}}`)).toHaveLength(2);
+    expect(r.issue.text_body.split(`{{quiz-text:${poll}}}`)).toHaveLength(2);
+    for (const other of [NEWSLETTER_POLL_IDS[0], 'lawn-headache-v1', 'pi-poll-unknown-v1', null]) {
+      const plain = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, pollQuizId: other });
+      expect(plain.diagnostics.pollId).toBeNull();
+      expect(`${plain.issue.html_body}${plain.issue.text_body}`).not.toMatch(/\{\{quiz/);
+    }
+  });
+
+  test("the send check reads a poll's words, not only its token: a poll that makes a safety claim stops the build", () => {
+    usePlan(A01);
+    const [poll] = PEST_INSIDER_POLL_IDS;
+    const quiz = getQuiz(poll);
+    const approved = quiz.question;
+    try {
+      quiz.question = 'Is it harmless to pets?';
+      const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, pollQuizId: poll });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/^send_validator_blocked: .*harmless/);
+    } finally {
+      quiz.question = approved;
+    }
+    // Every approved poll passes the check in an issue.
+    for (const id of PEST_INSIDER_POLL_IDS) {
+      expect(buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, pollQuizId: id }).ok).toBe(true);
+    }
+  });
 
   test('a planner passed by the caller is ignored (pre-push round 17)', () => {
     const plan = jest.fn(() => ({ leadFact: { ...A01, lead: ['Colonies hold 9 million ants.', 'They are everywhere.'] }, idItem: WFA }));

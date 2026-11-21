@@ -1452,6 +1452,71 @@ async function renderBrandCardUrl(cardInput, platform) {
 
 // ── Platform Posting ──
 
+// Facebook reads a link's page when it first sees the link, then fetches the
+// picture afterwards on its own clock. About 1 in 11 first shares of a blog
+// post got a small 200x200 thumbnail in place of the full picture (8 of 88,
+// 2026-08 to 2026-11-20), and a later re-read never changed a post already
+// made. So ask Facebook to read the page before the post, then give its picture
+// fetch a moment. Best-effort: a miss never blocks the post.
+//
+// The read took about 1.1 s on 2026-11-20. Read timeout + wait stay under 10 s
+// together, so a request-bound publish (Instagram alone may wait 45 s) keeps
+// its place under the proxy timeout.
+const FACEBOOK_PREVIEW_READ_TIMEOUT_MS = 6000;
+const FACEBOOK_PREVIEW_SETTLE_DEFAULT_MS = 3000;
+const FACEBOOK_PREVIEW_SETTLE_MAX_MS = 4000;
+
+// One read per link per 10 minutes. withRetry may call postToFacebook up to
+// three times for one post, and a photo post may fall back to a link post: a
+// read (and its wait) on every attempt would add up to 30 s to one publish.
+// The map holds the read's promise, so a second post of the same link that
+// arrives while the read or its wait is in flight waits for the same read; it
+// never reaches /feed first. A finished read resolves at once for a retry, and
+// a failed read counts too, so a retry never repeats a slow one.
+const FACEBOOK_PREVIEW_READ_TTL_MS = 10 * 60 * 1000;
+const facebookPreviewReads = new Map(); // link -> { at, done: Promise<void> }
+
+function facebookPreviewSettleMs() {
+  const raw = process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+  const ms = raw === undefined || raw === '' ? NaN : Number(raw);
+  if (!Number.isFinite(ms) || ms < 0) return FACEBOOK_PREVIEW_SETTLE_DEFAULT_MS;
+  return Math.min(ms, FACEBOOK_PREVIEW_SETTLE_MAX_MS);
+}
+
+// Never rejects.
+async function readFacebookLinkPreview(link, token) {
+  try {
+    const res = await fetch('https://graph.facebook.com/v25.0/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: link, scrape: true, access_token: token }),
+      signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      logger.warn(`[social] Facebook link preview refresh returned ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    // updated_time means Facebook read the page just now; its picture fetch
+    // starts after that read.
+    if (data && data.updated_time) await sleep(facebookPreviewSettleMs());
+  } catch (err) {
+    logger.warn(`[social] Facebook link preview refresh failed: ${err.name}`);
+  }
+}
+
+function refreshFacebookLinkPreview(link, token) {
+  const now = Date.now();
+  for (const [seen, read] of facebookPreviewReads) {
+    if (now - read.at >= FACEBOOK_PREVIEW_READ_TTL_MS) facebookPreviewReads.delete(seen);
+  }
+  const known = facebookPreviewReads.get(link);
+  if (known) return known.done;
+  const done = readFacebookLinkPreview(link, token);
+  facebookPreviewReads.set(link, { at: now, done });
+  return done;
+}
+
 async function postToFacebook(message, link, imageUrl) {
   const token = process.env.FACEBOOK_ACCESS_TOKEN;
   if (!token) throw new Error('FACEBOOK_ACCESS_TOKEN not configured');
@@ -1474,7 +1539,10 @@ async function postToFacebook(message, link, imageUrl) {
   }
 
   const body = { message, access_token: token };
-  if (link) body.link = link;
+  if (link) {
+    body.link = link;
+    await refreshFacebookLinkPreview(link, token);
+  }
 
   const res = await fetch(`https://graph.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/feed`, {
     method: 'POST',
@@ -2935,6 +3003,8 @@ module.exports.isGbpMediaError = isGbpMediaError;
 // besides real photos/blog heroes that GBP posts may use (no AI imagery on
 // GBP, owner rule). Consumed by autonomous-runner's GBP action.
 module.exports.renderBrandCardUrl = renderBrandCardUrl;
+// Tests only: forget which links Facebook was asked to read.
+module.exports._resetFacebookPreviewReads = () => facebookPreviewReads.clear();
 module.exports.normalizePublishChannels = normalizePublishChannels;
 module.exports.normalizeGbpLocationIds = normalizeGbpLocationIds;
 module.exports.checkAndRaiseAlert = checkAndRaiseAlert;

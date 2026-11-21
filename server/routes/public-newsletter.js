@@ -213,10 +213,12 @@ router.get('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
     const answerSafe = encodeURIComponent(answer);
 
     const heading = 'One tap to confirm.';
+    // A poll is just for fun and nothing follows a vote (no tag, no call, no
+    // visit), so its page names the answer and promises no next step.
+    const picked = label ? `You picked <strong>${escapeHtml(label)}</strong>.` : '';
+    const lead = getQuiz(quizId)?.poll ? picked : `${picked}${picked ? ' ' : ''}Tap confirm and we'll take it from here.`;
     const bodyHtml = `
-          <p>${label
-            ? `You picked <strong>${escapeHtml(label)}</strong>. Tap confirm and we'll take it from here.`
-            : `Tap confirm and we'll take it from here.`}</p>
+          ${lead ? `<p>${lead}</p>` : ''}
           <form method="POST" action="/api/public/newsletter/quiz/${tokenSafe}/${quizIdSafe}/${answerSafe}">
             <button type="submit" class="btn">Confirm${label ? ` — ${escapeHtml(label)}` : ''}</button>
           </form>
