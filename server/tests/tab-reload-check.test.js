@@ -177,6 +177,11 @@ describe('windowStart', () => {
     expect(iso('2026-11-21T20:00:00Z')).toBe('2026-11-21T04:51:00.000Z');
     // 10:00 AM EST: that run is 10 hours old, so the one before it.
     expect(iso('2026-11-21T15:00:00Z')).toBe('2026-11-20T04:51:00.000Z');
+    // Half a day to the second, 11:51:00 AM EST, and one second short of it.
+    expect(iso('2026-11-21T16:51:00Z')).toBe('2026-11-21T04:51:00.000Z');
+    expect(iso('2026-11-21T16:50:59Z')).toBe('2026-11-20T04:51:00.000Z');
+    // 11:55 AM EST: half a day ago is 11:55 PM, after that day's scheduled time.
+    expect(iso('2026-11-21T16:55:00Z')).toBe('2026-11-21T04:51:00.000Z');
   });
 });
 

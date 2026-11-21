@@ -55,14 +55,13 @@ function esc(value) {
 // Eastern time. From one run to the next is 23, 24 or 25 hours (the clocks
 // change), so a fixed 24 hours would skip the hour after the last run on the
 // night the clocks go back. It is the latest scheduled time at least half a
-// day old: a run starts a moment after its own.
+// day old (a run starts a moment after its own): the scheduled time on the
+// Eastern day of the moment half a day ago, or the one a day before it.
 function windowStart(now = new Date()) {
-  const scheduled = (daysBack) => parseETDateTime(`${etDateString(addETDays(now, -daysBack))}T${RUN_AT}`);
-  for (const daysBack of [0, 1]) {
-    const at = scheduled(daysBack);
-    if (now.getTime() - at.getTime() >= HALF_DAY_MS) return at;
-  }
-  return scheduled(2);
+  const halfDayAgo = new Date(now.getTime() - HALF_DAY_MS);
+  const scheduledOn = (day) => parseETDateTime(`${etDateString(day)}T${RUN_AT}`);
+  const sameDay = scheduledOn(halfDayAgo);
+  return sameDay.getTime() <= halfDayAgo.getTime() ? sameDay : scheduledOn(addETDays(halfDayAgo, -1));
 }
 
 // Out-of-date staff page views since the run before this one whose name
