@@ -369,6 +369,19 @@ const DAY = 86400000;
       });
     });
 
+    test('the friend credit follows the Referee Discount setting: $50 for the friend, $25 for the member', async () => {
+      await db('referral_program_settings').where({ id: 1 }).update({ referee_discount_cents: 5000 });
+      try {
+        const { member, friend, visit, ref } = await performed({ memberFields: HOME });
+        const result = await firstService(friend, visit);
+        expect(result).toMatchObject({ referralId: ref.id, referrerDollars: 25, refereeDollars: 50 });
+        expect(await amounts(friend.id)).toEqual([50]);
+        expect(await amounts(member.id)).toEqual([25]);
+      } finally {
+        await db('referral_program_settings').where({ id: 1 }).update({ referee_discount_cents: 2500 });
+      }
+    });
+
     test("the promoter's total earned follows the real credit: $25, $0 at the cap", async () => {
       const first = await performed({ memberFields: HOME });
       const staged = await db('referral_promoters').where({ id: first.ref.promoter_id }).first();

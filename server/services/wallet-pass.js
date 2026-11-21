@@ -67,6 +67,7 @@ function buildPassJson({
   portalUrl,
   cardUrl = null,
   hasLeftGoogleReview = false,
+  referralFriendCents = 0, // GATE_REFERRAL_STEP2: > 0 names the friend's credit on the back label
 }) {
   const techFirst = firstNameOf(techName);
   // No NEXT VISIT on the static pass (Codex P2 #2592): without PassKit
@@ -152,7 +153,7 @@ function buildPassJson({
         },
         {
           key: 'referral',
-          label: 'SHARE WAVES WITH A FRIEND',
+          label: referralFriendCents > 0 ? require('./referral-step2').walletReferralLabel(referralFriendCents) : 'SHARE WAVES WITH A FRIEND',
           value: referralUrl,
           attributedValue: `<a href="${referralUrl}">${referralUrl.replace(/^https?:\/\//, '')}</a>`,
         },
@@ -243,6 +244,7 @@ async function generateForToken(token) {
     portalUrl: publicPortalUrl(),
     cardUrl: `${publicPortalUrl()}/card/${card.share_token}`,
     hasLeftGoogleReview: !!customer.has_left_google_review,
+    referralFriendCents: await require('./referral-engine').step2FriendCreditCents(),
   });
 
   const files = { 'pass.json': Buffer.from(JSON.stringify(passJson)) };

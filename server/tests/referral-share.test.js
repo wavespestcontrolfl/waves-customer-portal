@@ -101,3 +101,36 @@ describe('buildReferralShareForCustomer', () => {
     expect(mockEngine.resolvePromoter).toHaveBeenCalledWith('cust-1', { conn, settings: expect.objectContaining({ program_active: true }) });
   });
 });
+
+describe('buildReferralShareForCustomer with GATE_REFERRAL_STEP2', () => {
+  const { gates } = require('../config/feature-gates');
+  afterEach(() => { gates.referralStep2 = false; });
+
+  test('gate on: a credit after the first plan service, from the setting; the subject drops "off"', async () => {
+    gates.referralStep2 = true;
+    mockEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 5000 });
+    const share = await buildReferralShareForCustomer('cust-1');
+    expect(share.smsBody).toBe("We use Waves and they'll give you a $50 credit after your first plan service with my code WAVES-TEST01. wavespestcontrol.com/r/WAVES-TEST01");
+    expect(share.emailBody).toBe("We use Waves Pest Control and they'll give you a $50 credit after your first plan service with my code WAVES-TEST01.\n\nhttps://wavespestcontrol.com/r/WAVES-TEST01");
+    expect(share.emailSubject).toBe('Waves Pest Control');
+  });
+  test('gate on: cents read exactly', async () => {
+    gates.referralStep2 = true;
+    mockEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 3250 });
+    expect((await buildReferralShareForCustomer('cust-1')).smsBody).toContain('a $32.50 credit after');
+  });
+  test('gate on, no amount: mention the code, as today', async () => {
+    gates.referralStep2 = true;
+    mockEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 0 });
+    const share = await buildReferralShareForCustomer('cust-1');
+    expect(share.smsBody).toBe('We use Waves and mention my code WAVES-TEST01 when you book. wavespestcontrol.com/r/WAVES-TEST01');
+    expect(share.emailSubject).toBe('Waves Pest Control');
+  });
+  test('gate off: today, word for word', async () => {
+    gates.referralStep2 = false;
+    const share = await buildReferralShareForCustomer('cust-1');
+    expect(share.smsBody).toBe("We use Waves and they'll take $25 off your first service with my code WAVES-TEST01. wavespestcontrol.com/r/WAVES-TEST01");
+    expect(share.emailBody).toBe("We use Waves Pest Control and they'll take $25 off your first service with my code WAVES-TEST01.\n\nhttps://wavespestcontrol.com/r/WAVES-TEST01");
+    expect(share.emailSubject).toBe('$25 off Waves Pest Control');
+  });
+});

@@ -24,6 +24,29 @@ describe('referee offer line (referral.friend_invite copy)', () => {
   });
 });
 
+describe('referee offer line with GATE_REFERRAL_STEP2', () => {
+  const { gates } = require('../config/feature-gates');
+  const TODAY_25 = 'Book your first service through their referral link and you’ll get $25 off — our way of saying welcome.';
+  const TODAY_NONE = 'Book your first service through their referral link and you’ll be in great hands from your very first visit.';
+  afterEach(() => { gates.referralStep2 = false; });
+
+  test('gate on: a credit after the first service, from the setting; whole dollars and cents', () => {
+    gates.referralStep2 = true;
+    expect(engine.buildRefereeOfferLine({ referee_discount_cents: 5000 }))
+      .toBe('Start a Waves plan and get a $50 credit on your Waves account after your first service. Our way of saying welcome.');
+    expect(engine.buildRefereeOfferLine({ referee_discount_cents: 3250 })).toContain('get a $32.50 credit');
+  });
+  test('gate on, no amount: today\'s no-amount line', () => {
+    gates.referralStep2 = true;
+    expect(engine.buildRefereeOfferLine({ referee_discount_cents: 0 })).toBe(TODAY_NONE);
+  });
+  test('gate off: today\'s line, word for word', () => {
+    gates.referralStep2 = false;
+    expect(engine.buildRefereeOfferLine({ referee_discount_cents: 2500 })).toBe(TODAY_25);
+    expect(engine.buildRefereeOfferLine({ referee_discount_cents: 0 })).toBe(TODAY_NONE);
+  });
+});
+
 describe('referral.friend_invite renders as a branded friend-facing email', () => {
   // Mirrors the seeded template (20260708000002). Pinned to service glass
   // chrome while riding the marketing_referral stream, exactly like

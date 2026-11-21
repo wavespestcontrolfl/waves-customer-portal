@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const mockState = { credits: [], immediate: [], messages: {}, promoters: {}, ledgerCalls: [], referralCalls: [] };
+const mockState = { settings: undefined, credits: [], immediate: [], messages: {}, promoters: {}, ledgerCalls: [], referralCalls: [] };
 function mockBuilder(table) {
   const calls = [];
   const builder = new Proxy({}, {
@@ -25,6 +25,7 @@ function mockBuilder(table) {
           const where = (calls.find(([m]) => m === 'where') || [null, [{}]])[1][0] || {};
           if (table === 'email_messages') return mockState.messages[where.idempotency_key];
           if (table === 'referral_promoters') return mockState.promoters[where.id];
+          if (table === 'referral_program_settings') return mockState.settings;
           return undefined;
         };
       }
@@ -66,6 +67,7 @@ beforeEach(() => {
   mockState.messages = {};
   mockState.promoters = { 'pro-1': { id: 'pro-1', first_name: 'Lea', customer_email: 'lea@example.com' } };
   mockState.ledgerCalls = [];
+  mockState.settings = undefined;
 });
 
 describe('nextRewardEmailAt: the next 9:00 AM ET at or after the credit', () => {
@@ -86,7 +88,7 @@ describe('sendDueReferralRewardEmails', () => {
     mockState.credits = [credit({ credit_dollars: '25.50' })];
     await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
     const sent = mockSendTemplate.mock.calls[0][0];
-    expect(sent.payload.reward_line).toBe('Your $25.50 referral reward has been added to your account as a credit — it applies automatically to your next invoice.');
+    expect(sent.payload.reward_line).toBe('Your $25.50 referral reward has been added to your Waves account as a credit. To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.');
   });
 
   test('a credit from yesterday afternoon sends one email at 9:00 AM: the referrer, account-credit wording, keyed by referral', async () => {
@@ -101,7 +103,7 @@ describe('sendDueReferralRewardEmails', () => {
       idempotencyKey: 'referral.reward_earned:ref-1',
       triggerEventId: 'referral.reward_earned:ref-1',
     });
-    expect(sent.payload.reward_line).toBe('Your $25 referral reward has been added to your account as a credit — it applies automatically to your next invoice.');
+    expect(sent.payload.reward_line).toBe('Your $25 referral reward has been added to your Waves account as a credit. To use it on your next invoice, turn on "Apply my credit to invoices automatically" in the Waves app.');
     expect(sent.payload.cta_label).toBe('View my account credit');
   });
 
@@ -209,5 +211,31 @@ describe('the credit itself sends nothing; the scheduler sends the email', () =>
     expect(job).toBeGreaterThan(-1);
     expect(src.slice(Math.max(0, job - 200), job)).toMatch(/cron\.schedule\('\*\/15 9-11 \* \* \*', async \(\) => \{\s*try \{\s*$/);
     expect(job).toBeGreaterThan(src.indexOf("if (!isEnabled('cronJobs')) {"));
+  });
+});
+
+describe('step2FriendCreditCents (GATE_REFERRAL_STEP2: the newsletter line and the wallet label)', () => {
+  const { gates } = require('../config/feature-gates');
+  afterEach(() => { gates.referralStep2 = false; });
+
+  test('gate on, live program active: the Referee Discount setting in cents', async () => {
+    gates.referralStep2 = true;
+    mockState.settings = { program_active: true, referee_discount_cents: 5000, base_url: 'https://wavespestcontrol.com' };
+    expect(await engine.step2FriendCreditCents()).toBe(5000);
+  });
+  test('gate off: 0, and the settings are never read', async () => {
+    mockState.settings = { program_active: true, referee_discount_cents: 5000, base_url: 'https://wavespestcontrol.com' };
+    expect(await engine.step2FriendCreditCents()).toBe(0);
+  });
+  test('gate on: a paused program, no amount, no row, or an unreadable row all give 0', async () => {
+    gates.referralStep2 = true;
+    mockState.settings = { program_active: false, referee_discount_cents: 5000 };
+    expect(await engine.step2FriendCreditCents()).toBe(0);
+    mockState.settings = { program_active: true, referee_discount_cents: 0 };
+    expect(await engine.step2FriendCreditCents()).toBe(0);
+    mockState.settings = undefined;
+    expect(await engine.step2FriendCreditCents()).toBe(0);
+    mockState.settings = { get program_active() { throw new Error('db down'); } };
+    expect(await engine.step2FriendCreditCents()).toBe(0);
   });
 });

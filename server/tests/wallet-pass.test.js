@@ -91,3 +91,13 @@ describe('wallet-pass config gate', () => {
     if (saved.wwdr) process.env.PASS_WWDR_CERT_B64 = saved.wwdr;
   });
 });
+
+describe('wallet-pass back label (GATE_REFERRAL_STEP2)', () => {
+  const label = (p) => p.generic.backFields.find((f) => f.key === 'referral').label;
+  test('a friend credit amount names it; otherwise today\'s label word for word', () => {
+    expect(label(buildPassJson({ ...BASE, referralFriendCents: 5000 }))).toBe('SHARE WAVES: FRIENDS GET A $50 CREDIT');
+    expect(label(buildPassJson({ ...BASE, referralFriendCents: 3250 }))).toBe('SHARE WAVES: FRIENDS GET A $32.50 CREDIT');
+    expect(label(buildPassJson({ ...BASE, referralFriendCents: 0 }))).toBe('SHARE WAVES WITH A FRIEND');
+    expect(label(buildPassJson(BASE))).toBe('SHARE WAVES WITH A FRIEND');
+  });
+});

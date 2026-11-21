@@ -74,6 +74,8 @@ function centsToDollars(cents) {
 // exported so the copy is unit-testable without a DB.
 function buildRefereeOfferLine(settings = {}) {
   const refereeCents = Number(settings.referee_discount_cents || 0);
+  // GATE_REFERRAL_STEP2: the friend gets an account credit after the first plan service (owner 2026-11-21).
+  if (refereeCents > 0 && isEnabled('referralStep2')) return step2.friendInviteOfferLine(refereeCents);
   return refereeCents > 0
     ? `Book your first service through their referral link and you’ll get ${centsToDollars(refereeCents)} off — our way of saying welcome.`
     : 'Book your first service through their referral link and you’ll be in great hands from your very first visit.';
@@ -633,7 +635,7 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
         // credit (postCreditMovement), not referral balance — the email must
         // point the promoter at the right ledger.
         reward_line: destination === 'account_credit'
-          ? `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your account as a credit — it applies automatically to your next invoice.`
+          ? step2.memberCreditEmailLine(rewardDollars)
           : `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your referral balance.`,
         // CTA points at the ledger the reward actually landed in: account
         // credits live on the billing tab, referral balance on the refer tab.
@@ -1585,6 +1587,19 @@ async function getLiveSettings(conn = db) {
   return row ? { ...row, base_url: normalizeReferralBaseUrl(row.base_url) } : null;
 }
 
+// GATE_REFERRAL_STEP2: the friend's credit in cents for the lines that state it outside a send (the newsletter line, the
+// wallet pass label). 0 = say nothing new: gate off, program paused, no amount, or the live row unreadable.
+async function step2FriendCreditCents() {
+  if (!isEnabled('referralStep2')) return 0;
+  try {
+    const live = await getLiveSettings();
+    if (!live?.program_active) return 0;
+    return Math.max(0, Math.trunc(Number(live.referee_discount_cents) || 0));
+  } catch {
+    return 0;
+  }
+}
+
 async function getSettings() {
   try {
     const row = await getLiveSettings();
@@ -1843,6 +1858,7 @@ module.exports = {
   milestoneLevelEarned,
   getSettings,
   getLiveSettings,
+  step2FriendCreditCents,
   updateSettings,
   getPromoterStats,
   getProgramAnalytics,
