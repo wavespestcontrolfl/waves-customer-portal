@@ -135,16 +135,41 @@ describe('save route: an App pick is the customer\'s own choice and is stored (o
   test('App over an untouched Text default is stored when the form marks it as the customer\'s change; the mark never reaches the write', () => {
     for (const existing of [{ payment_receipt_channel: 'sms', payment_receipt_channel_explicit: false }, {}, undefined]) {
       const updates = dropLegacyReceiptAppEcho(
-        { paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: true, billingEmail: 'a@example.com' }, existing);
-      expect(updates).toEqual({ paymentConfirmationChannel: 'push', billingEmail: 'a@example.com' });
+        { paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: true, billingEmail: 'a@example.com', billingReminderChannel: 'sms' }, existing);
+      expect(updates).toEqual({ paymentConfirmationChannel: 'push', billingEmail: 'a@example.com', billingReminderChannel: 'sms' });
       expect(notificationPrefsDbUpdates(updates, existing || {}))
         .toMatchObject({ payment_receipt_channel: 'push', payment_receipt_channel_explicit: true });
     }
     // A false mark is no mark, and the mark is removed whatever the channel value.
-    expect(dropLegacyReceiptAppEcho({ paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: false, billingEmail: '' }, {}))
-      .toEqual({ billingEmail: '' });
+    expect(dropLegacyReceiptAppEcho(
+      { paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: false, billingEmail: '', billingReminderChannel: 'sms' }, {}))
+      .toEqual({ billingEmail: '', billingReminderChannel: 'sms' });
     expect(dropLegacyReceiptAppEcho({ paymentConfirmationChannel: 'email', paymentConfirmationChannelEdited: true }, {}))
       .toEqual({ paymentConfirmationChannel: 'email' });
+  });
+
+  // Only the legacy form save can be that form's echo: it always carries billingEmail and
+  // billingReminderChannel. A save of the receipt channel alone is a choice (pre-push audit, f01a40995c).
+  test('a receipt App value sent outside the legacy form save is stored, with no mark needed', () => {
+    for (const existing of [{ payment_receipt_channel: 'sms', payment_receipt_channel_explicit: false }, {}, undefined]) {
+      for (const sent of [
+        { paymentConfirmationChannel: 'push' },
+        { paymentConfirmationChannel: 'push', billingEmail: 'a@example.com' },
+        { paymentConfirmationChannel: 'push', billingReminderChannel: 'sms' },
+        { paymentConfirmationChannel: 'push', pushEnabled: true },
+      ]) {
+        const updates = dropLegacyReceiptAppEcho({ ...sent }, existing);
+        expect(updates).toEqual(sent);
+        expect(notificationPrefsDbUpdates(updates, existing || {}))
+          .toMatchObject({ payment_receipt_channel: 'push', payment_receipt_channel_explicit: true });
+      }
+    }
+  });
+
+  test('the payload tells the page that this server accepts the mark, and the save schema accepts it', () => {
+    expect(notificationsRoute._private.preferencePayload({}, { includeChannels: true })).toMatchObject({ receiptChannelEditMark: true });
+    const source = fs.readFileSync(path.join(__dirname, '../routes/notifications.js'), 'utf8');
+    expect(source).toContain('paymentConfirmationChannelEdited: Joi.boolean(),');
   });
 
   test('the echo guard touches only an App value on the legacy receipt key', () => {

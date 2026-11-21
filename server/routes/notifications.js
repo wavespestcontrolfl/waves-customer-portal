@@ -259,6 +259,10 @@ function preferencePayload(prefs = {}, { includeChannels = true, appPreferences 
       // (estimate-deposits / estimate-card-holds) all read ONE preference.
       billingReminderChannel: channelValue(prefs.billing_channel),
       paymentConfirmationChannel: channelValue(prefs.payment_receipt_channel, appPreferences),
+      // This server accepts paymentConfirmationChannelEdited on a save (dropLegacyReceiptAppEcho).
+      // The page sends that mark only when it reads this, so an older server never gets a key
+      // its schema rejects.
+      receiptChannelEditMark: true,
       ...(billingChannelsAvailable ? billingChannelsPayload(prefs, { emailAvailable }) : {}),
       ...(appPreferences ? {
         appPreferencesAvailable: true,
@@ -281,15 +285,20 @@ function comparableEmail(value) {
 // loaded before 2026-11-20 showed App for an untouched Text default, so its echo is
 // 'push': the customer would get receipts in the app without having chosen it (owner
 // 2026-11-20: text unless the customer sets the app up). The current form marks a save
-// where the customer changed the receipt selector (paymentConfirmationChannelEdited).
-// So App over an untouched Text default is stored only with that mark; an unmarked one
-// is an echo and is dropped. The mark is transport only and never reaches the write.
-// The billing channels list (paymentConfirmationChannels) and every other channel key
-// send only what the customer changed.
+// where the customer changed the receipt selector (paymentConfirmationChannelEdited;
+// the payload's receiptChannelEditMark tells the page this server accepts the mark).
+// So in a legacy form save, App over an untouched Text default is stored only with that
+// mark; an unmarked one is an echo and is dropped. The mark is transport only and never
+// reaches the write.
+// Only the legacy form save is judged: it always carries billingEmail and
+// billingReminderChannel. A save of the receipt channel alone cannot be that form's echo
+// and is stored as sent. The billing channels list (paymentConfirmationChannels) and
+// every other channel key send only what the customer changed.
 function dropLegacyReceiptAppEcho(updates, existing = {}) {
   const edited = updates.paymentConfirmationChannelEdited === true;
   delete updates.paymentConfirmationChannelEdited;
-  if (!edited && updates.paymentConfirmationChannel === 'push'
+  const legacyFormSave = updates.billingEmail !== undefined && updates.billingReminderChannel !== undefined;
+  if (legacyFormSave && !edited && updates.paymentConfirmationChannel === 'push'
     && channelValue(existing?.payment_receipt_channel, true) === 'sms'
     && existing?.payment_receipt_channel_explicit !== true) {
     delete updates.paymentConfirmationChannel;
