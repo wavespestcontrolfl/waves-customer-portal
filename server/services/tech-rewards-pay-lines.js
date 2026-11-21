@@ -36,7 +36,8 @@
  *
  * READINESS. A sync NEVER blocks a check or holds a run. A technician who cannot get the gift at all is skipped with a reason
  * in the audit event and no note: hired after the gift date, or the run's week ended before Jan 1 of the gift year. A
- * technician with no hire date on file WAITS until it is entered (no money on a guess). A technician who can get it but not on
+ * technician with no hire date on file WAITS until it is entered (no money on a guess), and so does one who has a December
+ * gift line this sync did not write (a row added by hand in the database: the automatic gift is never paid beside it). A technician who can get it but not on
  * this run WAITS (waitOf): a later check of theirs in the tax year is already final, so
  * finalize would refuse a run that holds a check of theirs (laterFinalCheckExists); or an earlier week of the year holds work (a
  * weekly timesheet with minutes, recorded work by workedDates, or paid time off) and has no FINALIZED check; or the pay run's own
@@ -240,6 +241,7 @@ const WAIT_WORDS = {
   later_check_final: () => 'a later paycheck of theirs is already final, so this pay run cannot hold one for them',
   hire_date_missing: () => 'their hire date is not on file, so the pay run cannot tell whether they were hired by the gift date',
   hired_after_pay_week: () => 'they were hired after the week this pay run pays',
+  other_gift_line: () => 'a December gift line that the pay run did not write is already on file for them, so check that line first',
 };
 
 /** What waits as of this sync, kept on the draft run's row and replaced by every sync with the gate on. */
@@ -313,17 +315,31 @@ async function loadState(trx, run, lock) {
       candidates.set(sourceIdOf(kind, tech.id, key), { kind, key, technicianId: tech.id, due: true });
     }
   }
+  // An open line of this week whose technician is not a recipient now, or that the run is no longer dated for. `due` is the
+  // run's own answer (its pay date), whoever the technician is, so the audit event says which of the two took the line off.
+  const dueKeys = new Set(due.map((d) => `${d.kind}:${d.key}`));
   for (const line of openHere) {
     const match = SOURCE_ID_RE.exec(line.source_id || '');
     const own = match && match[1] === line.kind && match[2].toLowerCase() === line.technician_id.toLowerCase();
     if (own && !candidates.has(line.source_id)) {
-      candidates.set(line.source_id, { kind: line.kind, key: match[3], technicianId: line.technician_id, due: false });
+      candidates.set(line.source_id, {
+        kind: line.kind, key: match[3], technicianId: line.technician_id, due: dueKeys.has(`${line.kind}:${match[3]}`),
+      });
     }
   }
+  // A December gift line this sync did not write. No code path makes one (the add form and its route offer the four manual
+  // kinds only), so it is a row somebody put in the database by hand: that technician's automatic gift is held for review, and
+  // never paid beside it. Any year, open or paid; a voided row does not count.
+  const handMade = new Set(due.length
+    ? (await trx('payroll_pay_lines').where({ kind: GIFT }).whereNot({ status: 'voided' })
+      .where(function notSynced() { this.whereNull('source_type').orWhereNot('source_type', SOURCE_TYPE); })
+      .select('technician_id')).map((row) => row.technician_id)
+    : []);
   return {
     candidates,
     techById: new Map(techs.map((row) => [row.id, row])),
     settled,
+    handMade,
     openBySource: new Map(allOpen.map((line) => [line.source_id, line])),
   };
 }
@@ -349,7 +365,9 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
   const tech = state.techById.get(cand.technicianId);
   let priced;
   if (!cand.due) priced = { skip: 'not_due_in_this_run' };
-  else priced = tech ? await priceCandidate(trx, cand, tech, run) : { skip: 'not_active' };
+  else if (!tech) priced = { skip: 'not_active' };
+  else if (state.handMade.has(cand.technicianId)) priced = { wait: { reason: 'other_gift_line', week: null } };
+  else priced = await priceCandidate(trx, cand, tech, run);
   if (priced.skip || priced.wait) {
     if (here) await trx('payroll_pay_lines').where({ id: open.id }).del();
     return { skip: priced.skip, wait: priced.wait, removed: here ? open.id : null };

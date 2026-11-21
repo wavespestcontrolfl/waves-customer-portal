@@ -322,6 +322,15 @@ postgres('tech rewards pay lines: the December gift', () => {
       await recompute(run.id);
       expect(await linesOf(alpha)).toHaveLength(0);
       expect(await linesOf(bravo)).toHaveLength(1);
+      // the audit event says the technician is not active, not that the run is no longer dated for the gift
+      expect((await syncEvents()).flatMap((e) => e.metadata.skipped || []))
+        .toContainEqual({ technician_id: alpha, kind: 'december_gift', reason: 'not_active' });
+      // a run that is no longer dated for the gift says that instead
+      await trx('payroll_runs').where({ id: run.id }).update({ pay_date: '2026-12-17' });
+      await recompute(run.id);
+      expect(await linesOf(bravo)).toHaveLength(0);
+      expect((await syncEvents()).flatMap((e) => e.metadata.skipped || []))
+        .toContainEqual({ technician_id: bravo, kind: 'december_gift', reason: 'not_due_in_this_run' });
     });
 
     it('writes no gift, and still drafts the run, when an old week from before the gift year is paid on the gift date', async () => {
@@ -662,6 +671,36 @@ postgres('tech rewards pay lines: the December gift', () => {
   });
 
   describe('an open line sits in one pay week, and only that week\'s run pays it', () => {
+    it('holds the automatic gift for review when a December gift line the pay run did not write is on file, open or paid', async () => {
+      const alpha = await readyTech('Sample Alpha'); // an open hand-made line
+      const bravo = await readyTech('Sample Bravo'); // a paid hand-made line
+      await approvedWeek(alpha, GIFT_WEEK);
+      await approvedWeek(bravo, GIFT_WEEK);
+      const [open] = await trx('payroll_pay_lines').insert({
+        technician_id: alpha, kind: 'december_gift', amount_cents: 12345, earned_week_start: EARLY_WEEK, covers_from: EARLY_WEEK, covers_to: '2026-12-06',
+      }).returning('id');
+      const paidRun = await paidWeek(bravo, EARLY_WEEK);
+      const paidCheck = await trx('payroll_checks').where({ run_id: paidRun, technician_id: bravo }).first('id');
+      await trx('payroll_pay_lines').insert({
+        technician_id: bravo, kind: 'december_gift', amount_cents: 12345, earned_week_start: EARLY_WEEK, covers_from: EARLY_WEEK, covers_to: '2026-12-06',
+        status: 'paid', check_id: paidCheck.id,
+      });
+      const run = await draft(GIFT_WEEK);
+      // no second gift: the hand-made open line rides on Alpha's check as before, and Bravo's check has none
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(await linesOf(bravo)).toHaveLength(0);
+      expect(checkOf(run, alpha).techRewardsCents).toBe(12345);
+      expect(checkOf(run, bravo)).not.toHaveProperty('techRewardsCents');
+      const held = 'a December gift line that the pay run did not write is already on file for them, so check that line first';
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', held), waits('Sample Bravo', held)]);
+      // the hand-made open line is taken out: the next sync writes Alpha's gift, once
+      await trx('payroll_pay_lines').where({ id: open.id || open }).del();
+      const again = await recompute(run.id);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(GIFT);
+      expect(await linesOf(alpha)).toHaveLength(1);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Bravo', held)]);
+    });
+
     it('leaves every line the sync did not write to carry forward as before, also a reward kind with no source', async () => {
       const tech = await readyTech('Sample Alpha');
       delete process.env.GATE_TECH_REWARDS_PAY_LINES; // the sync writes nothing, so the check shows the hand-made row alone
