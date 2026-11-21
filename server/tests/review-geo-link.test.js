@@ -85,6 +85,7 @@ describe('GET /rv', () => {
   afterAll((done) => { server.close(done); });
   beforeEach(() => {
     resolveShortCode.mockReset();
+    logger.warn.mockClear();
     resolveShortCode.mockResolvedValue('https://unused.example.test');
     logger.error.mockClear();
   });
@@ -142,6 +143,9 @@ describe('GET /rv', () => {
     const res = await hit({ 'cf-iplatitude': '27.0870', 'cf-iplongitude': '-82.4046' });
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe(reviewUrl('venice'));
+    // The failed count is logged (a database outage must show), with no location in the line.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(logger.warn).toHaveBeenCalledWith('[review-geo-link] office count failed: db down');
   });
 
   test('a synchronously throwing counter still redirects', async () => {
@@ -155,6 +159,8 @@ describe('GET /rv', () => {
     resolveShortCode.mockResolvedValue(null);
     const res = await hit({ 'cf-iplatitude': '27.5698', 'cf-iplongitude': '-82.4265' });
     expect(res.headers.get('location')).toBe(reviewUrl('parrish'));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   test('no location value, client IP or user agent is passed to the counter or to a log of this route', async () => {

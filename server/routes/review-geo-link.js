@@ -134,7 +134,10 @@ router.get('/', (req, res) => {
         .then(() => resolveShortCode(reviewShortCodeForOffice(officeId), {
           recordClick: shouldRecord(req),
         }))
-        .catch(() => { /* counting never blocks the redirect; resolveShortCode logs its own errors */ });
+        // Counting never blocks or changes the redirect, but a failed lookup
+        // (database down) must not pass in silence: scans would go uncounted.
+        // A missing row resolves to null and is not an error.
+        .catch((err) => logger.warn(`[review-geo-link] office count failed: ${err.message}`));
     }
   } catch (err) {
     logger.error(`[review-geo-link] pick failed: ${err.message}`);
