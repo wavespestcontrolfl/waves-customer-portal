@@ -185,16 +185,18 @@ const SLOT_ID_RE = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})_(.+)$/;
 
 // A hold row's own block in minutes after midnight, for the shift check (technician-eligibility.js `hours`).
 // Its end is its start plus `minutes` (the length resolved now) when given, else its stored end, else its
-// start plus its stored length (60 minutes when none): the chain the occupancy checks read a hold by. A
-// computed end is not wrapped at midnight, so a long job late in the day still ends after it starts. A
-// time that cannot be read is null, and that check then leaves the hold to the others.
+// start plus its stored length (60 minutes when none): the chain the occupancy checks read a hold by. The
+// end is never wrapped at midnight, so a long job late in the day still ends after it starts. A start that
+// cannot be read is null, and that check then leaves the hold to the others.
 function holdBlock(row, minutes = null) {
   const { parseHHMM } = require('./scheduling/window-rules');
   const startMin = parseHHMM(row.window_start);
-  const storedEnd = Number(minutes) > 0 ? null : parseHHMM(row.window_end);
-  const length = Number(minutes) > 0 ? Number(minutes)
-    : (Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : DEFAULT_DURATION_MINUTES);
-  return { startMin, endMin: storedEnd ?? (startMin == null ? null : startMin + length) };
+  if (startMin == null) return { startMin: null, endMin: null };
+  if (Number(minutes) > 0) return { startMin, endMin: startMin + Number(minutes) };
+  const storedEnd = parseHHMM(row.window_end);
+  // A stored end before the start was wrapped at midnight when it was written (16:00 to 00:00): it is the next day's.
+  if (storedEnd != null) return { startMin, endMin: storedEnd < startMin ? storedEnd + 1440 : storedEnd };
+  return { startMin, endMin: startMin + (Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : DEFAULT_DURATION_MINUTES) };
 }
 
 function parseSlotId(slotId) {
