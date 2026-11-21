@@ -1,7 +1,7 @@
 const {
   normalizeLeadAddress, leadAddressFields, streetLineHoldsLocality, parseRawAddress, formatAddress,
   normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, premiseUnitKey,
-  dwellingUnitOnLine, dwellingUnitOfUnitLine, splitUnitFirstLine, structuralUnitPart,
+  dwellingUnitOnLine, dwellingUnitOfUnitLine, splitUnitFirstLine, structuralUnitPart, streetLineNamesStreet,
 } = require('../utils/address-normalizer');
 
 describe('address normalizer', () => {
@@ -840,5 +840,20 @@ describe('streetLineHoldsLocality', () => {
       ['123 Main St', 'Sarasota'],
       ['', ''],
     ]) expect([address_line1, streetLineHoldsLocality({ address_line1, city })]).toEqual([address_line1, false]);
+  });
+});
+
+describe('streetLineNamesStreet (codex pre-push r31 P1 on #8132)', () => {
+  test('a street names one, with or without a unit in either position; a state road counts', () => {
+    for (const line of ['1 Main St', '1 Main St Apt 4', '1 Main St Apt#4', 'Unit 4, 1 Main St', 'Apt 204 at 1 Main St',
+      '#204 900 Bayview Ter', 'Bldg 9, Apt 204, 123 Main St', '12345 FL-70', 'Florida 70', '4500 US-41', 'Lot 12 Sunny Acres']) {
+      expect([line, streetLineNamesStreet(line)]).toEqual([line, true]);
+    }
+  });
+
+  test('a blank line, a unit alone, or a number with a unit names none', () => {
+    for (const line of ['', null, 'Apt 4', '#4', 'Apt#4', 'Apt4', 'Bldg 2 Apt 4', 'Apt 4, Bldg 2', '4', '123 Apt 4', '123 Ste 4B', 'Apt 4 12', 'Lot 12']) {
+      expect([line, streetLineNamesStreet(line)]).toEqual([line, false]);
+    }
   });
 });

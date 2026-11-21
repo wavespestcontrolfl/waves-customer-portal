@@ -510,6 +510,22 @@ function splitUnitFirstLine(value) {
   return null;
 }
 
+// Whether a street line names a street (codex pre-push r31 P1 on #8132): the
+// text left after a leading unit ("Unit 4, 100 Beach Rd", "Apt 204 at 123
+// Main St") and a trailing unit ("123 Main St Apt 4") are cut off has a
+// letter and is not only units itself ("Apt 4", "Apt#4", "Bldg 2 Apt 4").
+// So a blank line, a unit, or a number with a unit ("123 Apt 4", "#4")
+// names none. A leading unit is cut only when the line starts with a
+// designator or a hash: the unit-first pattern also takes a word that starts
+// like one ("Florida 70" as "Fl" + "orida"), and that line names a road.
+function streetLineNamesStreet(value) {
+  const line = cleanString(value);
+  const leadLetters = line.toLowerCase().match(/^[a-z]+/)?.[0] || '';
+  const lead = line.startsWith('#') || UNIT_DESIGNATORS.has(leadLetters) ? splitUnitFirstLine(line) : null;
+  const street = splitStreetLineUnit(lead ? lead.rest : line).street.trim();
+  return /[a-z]/i.test(street) && !UNIT_FIRST_SEGMENT_RE.test(street);
+}
+
 // The unit a line carries in EITHER supported position — trailing/inline
 // ("123 Main St Apt 204, …") or unit-first ("Apt 204, 123 Main St, …").
 function unitAnywhereOnLine(value) {
@@ -900,7 +916,7 @@ module.exports = {
   splitStreetLineUnit,
   splitStreetLineUnitParts,
   splitUnitFirstLine,
-  unitOnlySegment,
+  streetLineNamesStreet,
   unitAnywhereOnLine,
   dwellingUnitOnLine,
   dwellingUnitOfUnitLine,
