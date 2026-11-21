@@ -14067,19 +14067,21 @@ const PENDING_REFERRAL_STATUSES = ['pending', 'contacted', 'estimated', 'sms_fai
 // GATE_REFERRAL_STEP2 words for the Refer tab (owner 2026-11-21): the friend's benefit is an account credit after the
 // first plan service. The server sends annualCap only while the program is on Step 2, with friendReward in dollars (the
 // live Referee Discount setting). Every field is null when the tab must keep today's words: Step 2 off, or the server
-// confirms no amount for that line (friend amount 0, member at the yearly limit, program paused).
+// confirms no amount for that line (friend amount 0, member at the yearly limit, program paused). Both credits post at
+// the friend's first performed recurring plan service, so every line says "first plan service" (not "paid", not any
+// one-time service).
 function referTabStep2Words({ data, rewardPerReferral, earnsCredit, money, shareLink }) {
   if (data?.annualCap == null) return { heading: null, intro: null, earnStep: null, shareText: null };
   const friendReward = Number(data.friendReward) || 0;
   const cap = Number(data.annualCap);
   const amounts = [
     friendReward > 0 && `They get a ${money(friendReward)} credit after their first plan service.`,
-    earnsCredit && `You earn a ${money(rewardPerReferral)} credit after their first service. Up to ${cap} credit${cap === 1 ? '' : 's'} a year.`,
+    earnsCredit && `You earn a ${money(rewardPerReferral)} credit after their first plan service. Up to ${cap} credit${cap === 1 ? '' : 's'} a year.`,
   ].filter(Boolean);
   return {
     heading: 'Friends & Neighbors',
     intro: amounts.length ? ['Share your link.', ...amounts].join(' ') : null,
-    earnStep: `Your ${money(rewardPerReferral)} credit is applied after their first paid service.`,
+    earnStep: `Your ${money(rewardPerReferral)} credit is applied after their first plan service.`,
     shareText: friendReward > 0
       ? `I use Waves and thought you might want their info. You get a ${money(friendReward)} credit after your first plan service with my link: ${shareLink}`
       : null,

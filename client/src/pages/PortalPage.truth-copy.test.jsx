@@ -296,8 +296,8 @@ describe('Refer tab Step 2 words', () => {
     render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
 
     expect(await screen.findByRole('heading', { name: 'Friends & Neighbors' })).toBeInTheDocument();
-    expect(screen.getByText('Share your link. They get a $50 credit after their first plan service. You earn a $25 credit after their first service. Up to 10 credits a year.')).toBeInTheDocument();
-    expect(screen.getByText('Your $25 credit is applied after their first paid service.')).toBeInTheDocument();
+    expect(screen.getByText('Share your link. They get a $50 credit after their first plan service. You earn a $25 credit after their first plan service. Up to 10 credits a year.')).toBeInTheDocument();
+    expect(screen.getByText('Your $25 credit is applied after their first plan service.')).toBeInTheDocument();
     expect(screen.queryByText(/Refer and Earn/)).not.toBeInTheDocument();
     expect(await tapText()).toBe('sms:?body=I use Waves and thought you might want their info. You get a $50 credit after your first plan service with my link: https://portal.wavespestcontrol.com/r/PAT123');
   });
@@ -306,14 +306,14 @@ describe('Refer tab Step 2 words', () => {
     api.getReferrals.mockResolvedValue(step2({ friendReward: 49.99, rewardPerReferral: 12.5 }));
     render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
 
-    expect(await screen.findByText('Share your link. They get a $49.99 credit after their first plan service. You earn a $12.50 credit after their first service. Up to 10 credits a year.')).toBeInTheDocument();
+    expect(await screen.findByText('Share your link. They get a $49.99 credit after their first plan service. You earn a $12.50 credit after their first plan service. Up to 10 credits a year.')).toBeInTheDocument();
   });
 
   it('promises the friend nothing when the friend amount is 0: no friend sentence, and today\'s share text', async () => {
     api.getReferrals.mockResolvedValue(step2({ friendReward: 0 }));
     render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
 
-    expect(await screen.findByText('Share your link. You earn a $25 credit after their first service. Up to 10 credits a year.')).toBeInTheDocument();
+    expect(await screen.findByText('Share your link. You earn a $25 credit after their first plan service. Up to 10 credits a year.')).toBeInTheDocument();
     expect(screen.queryByText(/They get/)).not.toBeInTheDocument();
     expect(await tapText()).toBe('sms:?body=I use Waves and thought you might want their info. Here is my referral link: https://portal.wavespestcontrol.com/r/PAT123');
   });
