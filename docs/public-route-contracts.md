@@ -6413,6 +6413,36 @@ to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs and staff — the
 filter `/l` uses — still redirect but log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
 is on, but the route stays live regardless of the gate so links already sent
 keep working. Destinations are never tagged or altered.)
+`/rv` (printed business-card review QR, owner 2026-11-21 "less clicks to give
+reviews is always better" — `server/routes/review-geo-link.js`; `GET /rv` is a
+302 straight to the Google review form of the nearest Waves office, never a
+page. `/go` was taken by the outside-link redirect and `/review/:token` is a
+client route, so it uses `/rv`. The office comes from Cloudflare's visitor-location
+headers (`cf-ipcountry`, `cf-iplatitude`, `cf-iplongitude`; an IP-based estimate):
+a non-US country, a missing, non-numeric or out-of-range coordinate, or a nearest
+office more than 20 miles away (a carrier IP in Tampa is ~26 miles from Parrish)
+gets the Lakewood Ranch profile (office id `bradenton`). **Not an open
+redirect**: the target is ONLY a `googleReviewUrl` from `config/locations.js`;
+nothing in the request names it, and a throw anywhere still 302s to the
+Lakewood Ranch form. `Cache-Control: private, no-store`, `noindex`,
+`Referrer-Policy: no-referrer` on every response this router sends: the 302
+and its limiter's 429 (set before the limiter). A response the app stack
+sends before the router (a CORS preflight, a body-parser 400) is the app's
+generic one: it comes from no location header and carries no review target.
+Mounts OUTSIDE the `/api/` limiter with its own 120/min per-key limiter (the
+`/l` budget); over the limit is a plain 429. **Privacy**: the route never logs,
+stores or forwards latitude, longitude, region or country. Its only record is
+which office was picked: one fire-and-forget `resolveShortCode` on the reserved
+code `review-<office id>` (`review-bradenton`, `review-parrish`,
+`review-sarasota`, `review-venice`), called with NO ip and NO user agent, so the
+code row keeps `click_count` and the last-click time only and the click row has
+a null `ip_hash` and a null `user_agent`. `short_codes.click_count` gives the
+office mix. (The app-wide access log writes its usual line for the request, as
+for every route; it carries no location header and no redirect target.) Bot
+user agents are filtered in the route and not counted; a missing row is a silent no-op. No
+`GATE_*`: it sends nothing, charges nothing and deletes nothing. Excluded from
+the iOS universal-link claim (`BROWSER_ONLY_PATH_ROOTS`) so a scan never opens
+the app.)
 `/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
 (`server/routes/og-preview.js`, link-preview images, owner 2026-09-27: the
 picture iMessage/SMS/email crawlers show under a texted or emailed customer
@@ -7310,7 +7340,7 @@ AASA also requires a team ID (`APPLE_TEAM_ID`/`APNS_TEAM_ID`), assetlinks
 also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
 `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
 API/PDF responses must never be claimed by the app. It also excludes the
-browser-only pages (`/card`, `/careers`, `/help`, `/newsletter`, the roots
+browser-only pages (`/card`, `/careers`, `/help`, `/newsletter`, `/rv`, the roots
 Android's allowlist leaves out; `/help/*` is the static how-to pages in
 `client/public/help`) and the exact marketing-redirect paths (`/quote`, bare
 `/estimate`, `/estimate/<service>`), so those open in Safari; `/estimate/<token>`
