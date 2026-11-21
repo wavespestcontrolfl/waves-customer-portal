@@ -48,11 +48,13 @@ describe('calculateInventoryCost prices a package share only in the package\'s o
     expect(price(bottle, 4, 'fl_oz')).toEqual({ unitCost: 2, costUsed: 8 });
   });
 
-  test('punctuation inside the unit is set aside: "30 fl. oz." and "8 fl-oz" read as fl oz, and "2.5 lb." keeps its decimal', () => {
+  test('punctuation around the unit is set aside: "30 fl. oz.", "8 fl-oz", "13.5-g packet"; "2.5 lb." keeps its decimal', () => {
     const dotted = { container_size: '30 fl. oz.', inventory_unit: null, unit_size_oz: 30, best_price: 60, cost_per_unit: null };
     expect(price(dotted, 1, 'lb')).toEqual(UNCOSTED);
     expect(price(dotted, 3, 'fl_oz')).toEqual({ unitCost: 2, costUsed: 6 });
     expect(price({ ...dotted, container_size: '8 fl-oz', unit_size_oz: 8 }, 1, 'lb')).toEqual(UNCOSTED);
+    expect(price({ ...PACKET, container_size: '13.5-g packet' }, 0.5, 'gal')).toEqual(UNCOSTED);
+    expect(price({ ...PACKET, container_size: '13.5-g packet' }, 0.24, 'oz')).toEqual({ unitCost: 25, costUsed: 6 });
     const bag = { container_size: '2.5 lb.', inventory_unit: null, unit_size_oz: 40, best_price: 30, cost_per_unit: null };
     expect(price(bag, 1, 'qt')).toEqual(UNCOSTED);
     expect(price(bag, 8, 'oz')).toEqual({ unitCost: 0.75, costUsed: 6 });
@@ -101,6 +103,8 @@ describe('costLineFromUsage prices a package share only in the package\'s own me
     expect(usage(jar, 0.5, 'gal').warning).toBe('Synthetic product: usage in gal cannot be priced from its weight package');
     const dotted = { container_size: '30 fl. oz', inventory_unit: null, unit_size_oz: 30, best_price: 60, cost_per_unit: null };
     expect(usage(dotted, 1, 'lb').warning).toBe('Synthetic product: usage in lb cannot be priced from its volume package');
+    expect(usage({ ...PACKET, container_size: '13.5-g packet' }, 0.5, 'gal').warning)
+      .toBe('Synthetic product: usage in gal cannot be priced from its weight package');
   });
 
   test('the same measure, or a plain oz, still prices its share', () => {

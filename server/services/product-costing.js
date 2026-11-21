@@ -175,9 +175,10 @@ function unitFamily(unit, opts = {}) {
 const numberOrNull = (value) => (value == null ? null : Number(value));
 const measuredFamily = (family) => (family === 'weight' || family === 'volume' ? family : null);
 
-// A pack label with the punctuation written inside a unit set aside: "16 fl_oz" (the importer's spelling), "30 fl. oz."
-// and "8 fl-oz" all read as fl oz. A decimal point follows a digit, so "13.5 g" keeps it.
-const packLabelText = (label) => String(label ?? '').replace(/_|(?<=[a-z])[.-]/gi, ' ');
+// A pack label with the punctuation written around its unit set aside: an underscore or a hyphen anywhere, and a dot that
+// follows a letter. "16 fl_oz" (the importer's spelling), "30 fl. oz." and "8 fl-oz" read as fl oz, and "13.5-g packet"
+// as 13.5 g. A decimal point follows a digit, so it stays.
+const packLabelText = (label) => String(label ?? '').replace(/[_-]|(?<=[a-z])\./gi, ' ');
 
 // 'weight' or 'volume': what one best_price package holds. The pack label says so ("13.5 g", "1 gal"). A label with a
 // plain "oz" or no size leaves it to the stock unit: a product stocked in g holds weight ounces. null when neither says.
