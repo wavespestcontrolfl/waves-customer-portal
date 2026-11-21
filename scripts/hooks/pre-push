@@ -35,9 +35,9 @@
 #   CLAUDE_REVIEW_MODEL=opus           — fallback auditor model (default sonnet)
 #   SPLIT_WARN_FILES=25                — advisory split threshold, files (0 disables)
 #   SPLIT_WARN_BYTES=120000            — advisory split threshold, bytes (0 disables)
-#   CODEX_REVIEW_ROUND_LOG=off         — do not log this audit run; or a file
-#                                         path to log it there (default
-#                                         <common git dir>/codex-review-rounds.jsonl)
+#   CODEX_REVIEW_ROUND_LOG=off         — do not log this run's audit rounds; or a
+#                                         directory to log them in (default: the
+#                                         clone's common git dir)
 #
 # ── Two LLM auditors ─────────────────────────────────────────────────────
 # Codex is the PRIMARY reviewer. Claude is the FALLBACK, and it runs only
@@ -377,61 +377,80 @@ if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
 fi
 
 # ── Round log ────────────────────────────────────────────────────────────
-# One line for each run that reaches the LLM audit, in the clone's COMMON git
-# dir, so every worktree of this clone appends to the same file. Why: local
-# rounds were invisible. The artifact dir below keeps only the last run, so a
-# branch that took ten audit rounds looked the same as one that took one, and
-# nobody could see a branch looping (waves-ship §4's round cap counts GitHub
-# rounds only). A weekly read of this file shows rounds per branch, P0
+# One line for each commit this hook audits (or passes un-audited), in the
+# clone's COMMON git dir, so every worktree of this clone appends to the same
+# files. Why: local rounds were invisible. The artifact dir below keeps only
+# the last run, so a branch that took ten audit rounds looked the same as one
+# that took one, and nobody could see a branch looping (waves-ship §4's round
+# cap counts GitHub rounds only). A weekly read shows rounds per branch, P0
 # blocks and un-audited pushes.
-#   CODEX_REVIEW_ROUND_LOG=<file>  write there instead
+#   <dir>/codex-review-rounds-YYYY-MM.jsonl   (UTC month)
+#   CODEX_REVIEW_ROUND_LOG=<dir>   write the month files there instead
 #   CODEX_REVIEW_ROUND_LOG=off     write nothing
-# It runs from the EXIT trap, after the verdict is decided. It never prints,
-# never changes the exit code, and a failed write is dropped.
-log_audit_round() {
-  local rc="$1" file="${CODEX_REVIEW_ROUND_LOG:-}" dir size
-  [ "$file" = "off" ] && return 0
-  command -v jq >/dev/null 2>&1 || return 0
-  if [ -z "$file" ]; then
-    dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
-    [ -n "$dir" ] && [ -d "$dir" ] || return 0
-    file="$dir/codex-review-rounds.jsonl"
-  fi
-  jq -cn \
-    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --arg ref "${ROUND_LOG_REF:-}" \
-    --arg sha "${ROUND_LOG_SHA:-}" \
-    --arg auditors "${AUDITORS_USED:-}" \
-    --arg rc "$rc" \
-    --arg seconds "${SECONDS:-0}" \
-    --arg refs "${ROUND_LOG_REFS:-0}" \
-    --arg audited "${AUDITED:-0}" \
-    --arg unaudited "${UNAUDITED_REFS:-0}" \
-    --arg p0 "${P0_TOTAL:-0}" \
-    --arg p1 "${P1_TOTAL:-0}" \
-    '{ts: $ts, ref: $ref, sha: $sha, refs: ($refs | tonumber), audited: ($audited | tonumber),
-      unaudited: ($unaudited | tonumber), p0: ($p0 | tonumber), p1: ($p1 | tonumber),
-      auditors: ($auditors | split(" ") | map(select(length > 0))),
-      exit: ($rc | tonumber), seconds: ($seconds | tonumber)}' \
-    >> "$file" 2>/dev/null || return 0
-  # Keep the file small: past ~4 MB, keep the newest 8000 runs.
-  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')"
-  if [ "${size:-0}" -gt 4194304 ] 2>/dev/null; then
-    if tail -n 8000 "$file" > "$file.$$.tmp" 2>/dev/null; then
-      mv -f "$file.$$.tmp" "$file" 2>/dev/null || rm -f "$file.$$.tmp" 2>/dev/null
-    else
-      rm -f "$file.$$.tmp" 2>/dev/null
+# Rules it keeps:
+# - Each line carries its own commit's destination ref(s) and its own P0/P1
+#   counts. A push of two branches writes two lines, so a block on one is
+#   never booked to the other. `exit` is the verdict of the whole push.
+# - A commit with nothing to audit (no diff vs the base, or not reachable)
+#   writes no line: it is not a round.
+# - A file is only ever appended to, in one write per push, and never
+#   rewritten: a second worktree's line cannot be lost to a trim. Size is
+#   bounded by deleting whole month files past the newest ROUND_LOG_KEEP.
+# - The lines are written from the EXIT trap, after the verdict is decided.
+#   It never prints, never changes the exit code, and a failed write is dropped.
+ROUND_LOG_KEEP=3
+ROUND_LOG_ROWS=""
+
+# round_log_row <sha> <local label> <audited|unaudited> <why> <p0> <p1> <auditor>
+# Queues one line for the commit just handled. Never fails, never prints.
+round_log_row() {
+  local dests="" row="" j
+  for j in "${!GUARD_SHAS[@]}"; do
+    if [ "${GUARD_SHAS[$j]}" = "$1" ] && [ -n "${GUARD_REMOTE_REFS[$j]:-}" ]; then
+      dests="${dests}${GUARD_REMOTE_REFS[$j]}
+"
     fi
-  fi
+  done
+  row="$(jq -cn --arg sha "$1" --arg label "$2" --arg outcome "$3" --arg why "$4" \
+    --arg p0 "$5" --arg p1 "$6" --arg auditor "$7" --arg dests "$dests" \
+    '($dests | split("\n") | map(select(length > 0))) as $refs
+     | {ref: ($refs[0] // $label), refs: $refs, sha: $sha, outcome: $outcome}
+       + (if $why == "" then {} else {why: $why} end)
+       + {p0: ($p0 | tonumber), p1: ($p1 | tonumber)}
+       + (if $auditor == "" then {} else {auditor: $auditor} end)' 2>/dev/null)" || return 0
+  [ -n "$row" ] || return 0
+  ROUND_LOG_ROWS="${ROUND_LOG_ROWS}${row}
+"
   return 0
 }
-ROUND_LOG_REF="${GUARD_REMOTE_REFS[0]:-}"
-ROUND_LOG_SHA="${REF_SHAS[0]:-}"
-ROUND_LOG_REFS="${#REF_SHAS[@]}"
+
+# write_round_log <hook exit code>: appends the queued lines. EXIT trap only.
+write_round_log() {
+  local rc="$1" dir="${CODEX_REVIEW_ROUND_LOG:-}" lines=""
+  [ "$dir" = "off" ] && return 0
+  [ -n "${ROUND_LOG_ROWS:-}" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  if [ -z "$dir" ]; then
+    dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+  fi
+  [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  lines="$(printf '%s' "$ROUND_LOG_ROWS" | jq -c \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg rc "$rc" --arg seconds "${SECONDS:-0}" \
+    '{ts: $ts} + . + {exit: ($rc | tonumber), seconds: ($seconds | tonumber)}' 2>/dev/null)" || return 0
+  [ -n "$lines" ] || return 0
+  printf '%s\n' "$lines" >> "$dir/codex-review-rounds-$(date -u +%Y-%m).jsonl" || return 0
+  # Month names sort by date, so the first matches are the oldest files.
+  set -- "$dir"/codex-review-rounds-[0-9][0-9][0-9][0-9]-[0-9][0-9].jsonl
+  while [ "$#" -gt "$ROUND_LOG_KEEP" ]; do
+    rm -f "$1"
+    shift
+  done
+  return 0
+}
 
 # ── Per-ref audit ────────────────────────────────────────────────────────
 TMPDIR_RUN="$(mktemp -d -t codex-review.XXXXXX)"
-trap 'ROUND_LOG_RC=$?; log_audit_round "$ROUND_LOG_RC" 2>/dev/null || true; rm -rf "$TMPDIR_RUN"' EXIT
+trap 'ROUND_LOG_RC=$?; write_round_log "$ROUND_LOG_RC" 2>/dev/null || true; rm -rf "$TMPDIR_RUN"' EXIT
 
 # Stable artifact dir: the EXIT trap above deletes $TMPDIR_RUN the moment the
 # hook exits, so on a BLOCKED push the findings JSON was gone before anyone
@@ -1263,6 +1282,7 @@ for i in "${!REF_SHAS[@]}"; do
   if [ "$MAX_DIFF_BYTES" -gt 0 ] && [ "$DIFF_BYTES" -gt "$MAX_DIFF_BYTES" ]; then
     echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): diff is $DIFF_BYTES bytes (cap $MAX_DIFF_BYTES) — skipping audit for this ref. Set CODEX_REVIEW_MAX_DIFF_BYTES=0 to disable the cap." >&2
     UNAUDITED_REFS=$((UNAUDITED_REFS + 1))
+    round_log_row "$AUDIT_SHA" "$AUDIT_LABEL" unaudited diff_too_large 0 0 ""
     continue
   fi
 
@@ -1434,6 +1454,7 @@ for i in "${!REF_SHAS[@]}"; do
     fi
     UNAUDITED_REFS=$((UNAUDITED_REFS + 1))
     persist_ref_artifacts "$i"
+    round_log_row "$AUDIT_SHA" "$AUDIT_LABEL" unaudited auditors_failed 0 0 ""
     continue
   fi
 
@@ -1448,6 +1469,7 @@ for i in "${!REF_SHAS[@]}"; do
   P1_COUNT="$(jq '[.findings[]? | select(.priority=="P1")] | length' "$OUT_FILE")"
   P0_TOTAL=$((P0_TOTAL + P0_COUNT))
   P1_TOTAL=$((P1_TOTAL + P1_COUNT))
+  round_log_row "$AUDIT_SHA" "$AUDIT_LABEL" audited "" "$P0_COUNT" "$P1_COUNT" "$AUDITOR"
 
   echo "" >&2
   echo "──────── Review · $AUDIT_LABEL ($SHORT_SHA) · auditor: $AUDITOR ────" >&2
