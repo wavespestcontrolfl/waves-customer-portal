@@ -782,9 +782,8 @@ function syncBedBugPricingConfig(bedBugConfig) {
 
 let _lastSync = 0;
 const SYNC_INTERVAL = 60_000; // 1 minute cache
-// Counted for settingsHeldForUnattendedPrice (near the end of this file).
+// Counted for withSettingsForUnattendedPrice (near the end of this file).
 let _invalidations = 0; // every invalidatePricingConfigCache()
-let _applies = 0; // every refresh that began to change the constants
 
 // Are the rows of the standard pest price complete?
 // A sync keeps what the engine had for a row or a field that is missing: the
@@ -1257,8 +1256,6 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
     }
     if (Object.keys(config).length === 0) return false;
-    // From here on this run changes the constants (settingsHeldForUnattendedPrice counts it).
-    _applies += 1;
     constantsSnapshot = snapshotPricingConstants();
     mistingProvenanceSnapshot = require('./mosquito-misting-config').snapshotMistingRefillProvenance();
 
@@ -2520,42 +2517,44 @@ function invalidatePricingConfigCache() {
 // only in the process that made it, and a refresh that ends after an edit
 // overwrites that mark. For a card a person reads, that is fine. A caller
 // that prices with nobody watching must know that the constants the engine
-// read are the committed rows, loaded for its own call. The two functions
-// below are that one answer; the caller asks nothing else of the cache.
+// read are the committed rows, loaded for its own call. This function is
+// that one answer; such a caller asks nothing else of the cache.
 //
-// loadSettingsForUnattendedPrice() runs a refresh of its own, after any that
-// is queued. It is never shared with another caller's refresh, and it reads
-// on the app's connection, never on the caller's handle: a transaction can
-// hold an edit of the settings that never commits, and what a refresh reads
-// goes into the constants every caller prices from. It answers a ticket, or
-// null when the refresh failed.
-//
-// settingsHeldForUnattendedPrice(ticket), asked after the engine priced, is
-// yes when the constants are still that refresh's and are the rows' own:
-//   - no refresh began to change the constants since (_applies), and none is
-//     running now;
-//   - no edit of the settings was signaled in this process since the moment
-//     before that refresh read the rows (_invalidations);
-//   - the rows carried every input of the standard pest price
-//     (standardPestPriceRowsAreComplete).
-// A no means "price again", never a price.
+// withSettingsForUnattendedPrice(price) is ONE operation in the queue of
+// refreshes:
+//   1. a refresh of its own. It is never shared with another caller's
+//      refresh, and it reads on the app's connection, never on the caller's
+//      handle: a transaction can hold an edit of the settings that never
+//      commits, and what a refresh reads goes into the constants every
+//      caller prices from;
+//   2. three questions: did the refresh succeed; was an edit of the settings
+//      signaled in this process since the moment before the refresh read
+//      the rows (_invalidations); did the rows carry every input of the
+//      standard pest price (standardPestPriceRowsAreComplete);
+//   3. price(), called at once and synchronously. The next refresh in the
+//      queue starts after this operation ends, so price() reads the
+//      constants of step 1 and nothing else.
+// It answers { priced: true, value } or { priced: false, reason }
+// ('not_loaded', 'edited', 'rows'): "price again", never a price. Callers
+// that overlap wait in the queue; none of them refuses another.
+// price() must not return a promise: the queue would wait for it, and with
+// it every refresh of the process. What price() throws, the caller gets.
 //
 // Not covered, by design: an edit that another process commits after the
 // refresh read the rows. The price is the one that was true at that read.
-function loadSettingsForUnattendedPrice() {
+function withSettingsForUnattendedPrice(price) {
   const run = _syncQueue.then(async () => {
     const invalidations = _invalidations;
     const loaded = await _syncConstantsFromDBUnserialized();
-    return loaded === true ? Object.freeze({ applies: _applies, invalidations }) : null;
+    if (loaded !== true) return { priced: false, reason: 'not_loaded' };
+    if (invalidations !== _invalidations) return { priced: false, reason: 'edited' };
+    if (!standardPestPriceRowsAreComplete()) return { priced: false, reason: 'rows' };
+    const value = price();
+    if (value && typeof value.then === 'function') throw new Error('withSettingsForUnattendedPrice: price() must be synchronous');
+    return { priced: true, value };
   });
   _syncQueue = run.catch(() => {});
   return run;
-}
-function settingsHeldForUnattendedPrice(ticket) {
-  return Boolean(ticket)
-    && ticket.applies === _applies
-    && ticket.invalidations === _invalidations
-    && standardPestPriceRowsAreComplete();
 }
 
 module.exports = {
@@ -2566,8 +2565,7 @@ module.exports = {
   needsSync,
   invalidatePricingConfigCache,
   standardPestPriceRowsAreComplete,
-  loadSettingsForUnattendedPrice,
-  settingsHeldForUnattendedPrice,
+  withSettingsForUnattendedPrice,
   validatePestPricingConfig,
   assertValidPestPricingConfig,
 };

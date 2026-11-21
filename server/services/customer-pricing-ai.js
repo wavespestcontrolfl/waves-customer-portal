@@ -1203,7 +1203,7 @@ async function maybeSyncPricingEngine(db) {
 // strictPriceSettings (opt-in, for a caller that prices with nobody watching:
 // the plan offer after a one-time job). It is the price of the standard pest
 // plan for an account that may start a plan, from price settings that are
-// loaded and are the rows' own. Four rules. No caller passes it yet.
+// loaded and are the rows' own. Three rules. No caller passes it yet.
 //
 // 1. The account (assertStrictPriceAccount). The bridge can say "from the
 //    rows" for the standard pest price only, and only for a customer who has
@@ -1216,32 +1216,28 @@ async function maybeSyncPricingEngine(db) {
 //    carries code PLAN_START_BLOCKED and the blocker, so a caller can tell
 //    the customer's state from its own mistake. A failed read of the shared
 //    answer throws as it is: an outage is never "this account has no plan".
-//    The shared answer reads the account's records. The property the engine
-//    prices is resolved after it, and a lookup or an estimate seed can name a
-//    type the account row does not carry. The engine prices a commercial
-//    property by its commercial rules, from settings the bridge has no answer
-//    for. So the resolved property is asked too, by the engine's own rule
-//    (assertStrictPriceProperty), with the blocker 'commercial'.
-// 2. The settings, loaded for this call (strictPriceSettingsTicket). The
-//    default answers a failed refresh with the values the engine had (the
-//    in-code defaults on a cold start), and it shares the bridge's cache:
-//    one minute old at most, loaded on the handle of whoever asked first,
-//    and stale only in the process an edit was made in. Strict asks the
-//    bridge for a refresh of its own, from committed rows
-//    (loadSettingsForUnattendedPrice), and gets a ticket. No ticket throws
-//    PRICING_CONFIG_UNAVAILABLE.
-// 3. The settings, still the ones the engine priced from
-//    (assertStrictPriceSettingsHeld), asked AFTER the engine priced. The
-//    bridge answers for that ticket (settingsHeldForUnattendedPrice): no
-//    other refresh began to change the settings, none is running, no edit
-//    was signaled in this process since before the refresh read the rows,
-//    and the rows carried every input of the standard pest price (a refresh
-//    answers true when pricing_config holds any row at all; for a row or a
-//    field that is missing the engine keeps what it had). A no throws the
-//    price away, with PRICING_CONFIG_UNAVAILABLE. The whole question of
-//    "are these the rows' prices" is the bridge's: the pricer asks nothing
-//    else of the cache.
-// 4. The hand check (in the option loop). An option whose engine result
+//    The shared answer reads the account's saved records. The property the
+//    engine prices is resolved after it, and a lookup or an estimate seed can
+//    name a type that no saved record carries. So the resolved property is
+//    asked too (assertStrictPriceProperty), with the blocker 'commercial':
+//    by the engine's own rule on its input (it prices a commercial property
+//    by its commercial rules, from settings the bridge has no answer for),
+//    and by the shared answer's rule for a property type of this account
+//    (resolvedPropertyTypeBlocker: a property manager's condo is a business
+//    there, and a home to the engine).
+// 2. The settings (strictPriceOnOwnSettings). The default answers a failed
+//    refresh with the values the engine had (the in-code defaults on a cold
+//    start), and it shares the bridge's cache: one minute old at most,
+//    loaded on the handle of whoever asked first, stale only in the process
+//    an edit was made in, and complete or not in its rows. Strict hands the
+//    bridge its engine calls (withSettingsForUnattendedPrice): the bridge
+//    loads the committed rows in a refresh of its own, asks whether they are
+//    whole and unedited, and runs the engine calls in that same operation,
+//    before any other refresh can start. A no throws
+//    PRICING_CONFIG_UNAVAILABLE, and the engine is not called. The whole
+//    question of "are these the rows' prices" is the bridge's: the pricer
+//    asks nothing of the cache.
+// 3. The hand check (in the option loop). An option whose engine result
 //    needs a hand check is not returned. The test is the one the plan-start
 //    mint refuses on (engineResultNeedsReview: a review marker on a line, a
 //    footprint the engine guessed, low confidence, field verification). The
@@ -1250,10 +1246,15 @@ async function maybeSyncPricingEngine(db) {
 function priceSettingsUnavailable(message) {
   return Object.assign(new Error(message), { code: 'PRICING_CONFIG_UNAVAILABLE' });
 }
-async function strictPriceSettingsTicket() {
-  const ticket = await require('./pricing-engine/db-bridge').loadSettingsForUnattendedPrice();
-  if (!ticket) throw priceSettingsUnavailable('live price settings could not be loaded');
-  return ticket;
+const PRICE_SETTINGS_REFUSALS = Object.freeze({
+  not_loaded: 'live price settings could not be loaded',
+  edited: 'the price settings were edited while they were loaded',
+  rows: 'the pest price settings are not complete in their rows',
+});
+async function strictPriceOnOwnSettings(price) {
+  const answer = await require('./pricing-engine/db-bridge').withSettingsForUnattendedPrice(price);
+  if (answer?.priced !== true) throw priceSettingsUnavailable(PRICE_SETTINGS_REFUSALS[answer?.reason] || PRICE_SETTINGS_REFUSALS.not_loaded);
+  return answer.value;
 }
 // strict reads the customer's current services and the account's records.
 // Without a handle or a customer id the first would read as "none": a
@@ -1261,19 +1262,18 @@ async function strictPriceSettingsTicket() {
 function assertStrictPriceCall(db, customer) {
   if (!db || !customer?.id) throw new Error('strictPriceSettings needs a database handle and a customer id');
 }
-function assertStrictPriceSettingsHeld(ticket) {
-  if (!require('./pricing-engine/db-bridge').settingsHeldForUnattendedPrice(ticket)) {
-    throw priceSettingsUnavailable('the price settings changed while the price was computed, or the pest price rows are not complete');
-  }
-}
 function planStartBlocked(blocker) {
   return Object.assign(new Error(`strictPriceSettings: the account may not start a plan (${blocker})`), { code: 'PLAN_START_BLOCKED', blocker });
 }
-// The property the engine is about to price, by the engine's own rule for a
-// commercial property (generateEstimate asks isCommercialProperty of the same
-// input and then prices by its commercial rules).
-function assertStrictPriceProperty(propertyInput) {
-  if (require('./pricing-engine/commercial-helpers').isCommercialProperty(propertyInput)) throw planStartBlocked('commercial');
+// The property the engine is about to price. First by the engine's own rule
+// for a commercial property (generateEstimate asks isCommercialProperty of
+// the same input and then prices by its commercial rules). Then by the shared
+// answer's rule for a property type of this account, which knows the client.
+async function assertStrictPriceProperty(db, customer, propertyInput) {
+  const blocker = require('./pricing-engine/commercial-helpers').isCommercialProperty(propertyInput)
+    ? 'commercial'
+    : await require('./plan-start-eligibility').resolvedPropertyTypeBlocker(db, customer.id, propertyInput.propertyType);
+  if (blocker) throw planStartBlocked(blocker);
 }
 // Throws for a strict request the pricer must not price. `ownedSet` is the
 // pricer's own read of the recurring services at the priced property.
@@ -1311,8 +1311,8 @@ async function buildCustomerPricingResponse({
   // Opt-in ONLY (a caller that prices with nobody watching): the standard
   // pest plan's price for an account that may start a plan, from price
   // settings that are loaded and are the rows' own. It throws where the
-  // default answers from what the engine had (the four rules above
-  // strictPriceSettingsTicket). No caller passes it yet.
+  // default answers from what the engine had (the three rules above
+  // strictPriceOnOwnSettings). No caller passes it yet.
   strictPriceSettings = false,
 }) {
   const text = String(prompt || '').trim();
@@ -1422,7 +1422,7 @@ async function buildCustomerPricingResponse({
     propertyLookup: lookupCanInformPricing ? lookupFn : null,
     propertySeed,
   });
-  if (strictPriceSettings) assertStrictPriceProperty(propertyContext.propertyInput);
+  if (strictPriceSettings) await assertStrictPriceProperty(db, customer, propertyContext.propertyInput);
 
   // Measured AFTER the exclusion: an owned service missing a measurement must
   // not short-circuit the request into PROPERTY_DETAILS_NEEDED — we are not
@@ -1446,95 +1446,105 @@ async function buildCustomerPricingResponse({
     };
   }
 
-  const settingsTicket = strictPriceSettings ? await strictPriceSettingsTicket() : await maybeSyncPricingEngine(db);
+  // Every engine call of this request, in one synchronous function. The default runs it after the shared
+  // refresh. Strict hands it to the bridge, which runs it inside a refresh of its own (rule 2 above
+  // strictPriceOnOwnSettings).
+  const priceOptions = () => {
+    const context = {
+      grassType: propertyContext.grassType,
+      palmCount: propertyContext.palmCount,
+    };
+    const currentServices = currentServiceObjectsFor(currentServiceKeys, context);
+    const currentEstimate = Object.keys(currentServices).length
+      ? pricingEngine.generateEstimate({ ...propertyContext.propertyInput, services: currentServices })
+      : null;
+    const actualMonthly = positiveNumber(customer.monthly_rate);
+    const modeledCurrentMonthly = positiveNumber(currentEstimate?.summary?.recurringMonthlyAfterDiscount);
+    const billingModelMismatch = actualMonthly > 0 && (!modeledCurrentMonthly || Math.abs(actualMonthly - modeledCurrentMonthly) > 1);
+    const currentMonthly = actualMonthly || modeledCurrentMonthly;
+    const quoteBaselineMonthly = modeledCurrentMonthly || 0;
 
-  const context = {
-    grassType: propertyContext.grassType,
-    palmCount: propertyContext.palmCount,
-  };
-  const currentServices = currentServiceObjectsFor(currentServiceKeys, context);
-  const currentEstimate = Object.keys(currentServices).length
-    ? pricingEngine.generateEstimate({ ...propertyContext.propertyInput, services: currentServices })
-    : null;
-  const actualMonthly = positiveNumber(customer.monthly_rate);
-  const modeledCurrentMonthly = positiveNumber(currentEstimate?.summary?.recurringMonthlyAfterDiscount);
-  const billingModelMismatch = actualMonthly > 0 && (!modeledCurrentMonthly || Math.abs(actualMonthly - modeledCurrentMonthly) > 1);
-  const currentMonthly = actualMonthly || modeledCurrentMonthly;
-  const quoteBaselineMonthly = modeledCurrentMonthly || 0;
-
-  const options = [];
-  // Each option's raw engine result, kept beside the options (never in the answer): the
-  // plan-start hint runs the mint's own review check on it (codex pre-push P1).
-  const engineResults = new Map();
-  const generic = !text;
-  // Composed BEFORE the option loop so every priced option carries the owned
-  // half of a mixed request into what staff receive (codex #3253 r2).
-  const ownedRequestNote = alreadyIncluded.length
-    ? `Customer also asked about ${alreadyIncluded.map(toKeyLabel).join(', ')}, already active on this account — not re-priced in the portal; review that change with them.`
-    : '';
-  for (const serviceKey of servicesToPrice) {
-    for (const option of variantsForService(serviceKey, text, generic)) {
-      const targetServices = {
-        ...currentServices,
-        ...optionServices(option, context),
-      };
-      const estimate = pricingEngine.generateEstimate({
-        ...propertyContext.propertyInput,
-        recurringCustomer: currentServiceKeys.length > 0,
-        services: targetServices,
-      });
-      // strict: a price the engine marked for a hand check is not a price for a caller nobody watches (rule 4).
-      if (strictPriceSettings && require('./cancellation-resolution/restart').engineResultNeedsReview(estimate)) continue;
-      const quoted = buildQuoteOption({
-        option,
-        estimate,
-        currentMonthly: quoteBaselineMonthly,
-        currentServiceKeys,
-        propertyContext,
-        showEstimatedPlanMonthly: !billingModelMismatch,
-        baselineMismatch: billingModelMismatch,
-        ownedRequestNote,
-      });
-      // Belt-and-braces on the money rule, sharing the SAME predicate as the
-      // servicesToPrice filter above (no second definition to drift): if a
-      // future path ever routes an owned service here, no price for it can
-      // still reach the customer.
-      if (ownedAndNotRepeatable(option.serviceKey, ownedSet)) continue;
-      if (includeEngineContext) {
-        // The exact inputs this option's price came from. targetOnlyServices
-        // is the option WITHOUT the modeled current services: an estimate
-        // minted from it prices just the new service, with the combined
-        // WaveGuard tier restored through priorQualifyingServices — the
-        // engine unions those into tierServiceKeys, so the target line's
-        // tier discount matches this combined run (the mint cross-checks
-        // that equality to the cent before anything persists).
-        quoted.engineContext = {
-          propertyInput: propertyContext.propertyInput,
-          targetOnlyServices: optionServices(option, context),
-          currentServiceKeys: [...currentServiceKeys],
-          // The RAW staff-writable price-bearing sources this pricing read
-          // (GitHub #3391 round: address/property_type equality alone
-          // misses these) — the mint re-reads both rows under its lock and
-          // treats any change as offer drift.
-          pricingSourceStamp: {
-            lot_sqft: customer.lot_sqft ?? null,
-            property_sqft: customer.property_sqft ?? null,
-            bed_sqft: customer.bed_sqft ?? null,
-            palm_count: customer.palm_count ?? null,
-            lawn_type: customer.lawn_type ?? null,
-            turf_lawn_sqft: turfProfile?.lawn_sqft ?? null,
-            turf_track_key: turfProfile?.track_key ?? turfProfile?.grass_type ?? null,
-          },
+    const options = [];
+    // Each option's raw engine result, kept beside the options (never in the answer): the
+    // plan-start hint runs the mint's own review check on it (codex pre-push P1).
+    const engineResults = new Map();
+    const generic = !text;
+    // Composed BEFORE the option loop so every priced option carries the owned
+    // half of a mixed request into what staff receive (codex #3253 r2).
+    const ownedRequestNote = alreadyIncluded.length
+      ? `Customer also asked about ${alreadyIncluded.map(toKeyLabel).join(', ')}, already active on this account — not re-priced in the portal; review that change with them.`
+      : '';
+    for (const serviceKey of servicesToPrice) {
+      for (const option of variantsForService(serviceKey, text, generic)) {
+        const targetServices = {
+          ...currentServices,
+          ...optionServices(option, context),
         };
-      }
-      if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) {
-        options.push(quoted);
-        engineResults.set(quoted.id, estimate);
+        const estimate = pricingEngine.generateEstimate({
+          ...propertyContext.propertyInput,
+          recurringCustomer: currentServiceKeys.length > 0,
+          services: targetServices,
+        });
+        // strict: a price the engine marked for a hand check is not a price for a caller nobody watches (rule 3).
+        if (strictPriceSettings && require('./cancellation-resolution/restart').engineResultNeedsReview(estimate)) continue;
+        const quoted = buildQuoteOption({
+          option,
+          estimate,
+          currentMonthly: quoteBaselineMonthly,
+          currentServiceKeys,
+          propertyContext,
+          showEstimatedPlanMonthly: !billingModelMismatch,
+          baselineMismatch: billingModelMismatch,
+          ownedRequestNote,
+        });
+        // Belt-and-braces on the money rule, sharing the SAME predicate as the
+        // servicesToPrice filter above (no second definition to drift): if a
+        // future path ever routes an owned service here, no price for it can
+        // still reach the customer.
+        if (ownedAndNotRepeatable(option.serviceKey, ownedSet)) continue;
+        if (includeEngineContext) {
+          // The exact inputs this option's price came from. targetOnlyServices
+          // is the option WITHOUT the modeled current services: an estimate
+          // minted from it prices just the new service, with the combined
+          // WaveGuard tier restored through priorQualifyingServices — the
+          // engine unions those into tierServiceKeys, so the target line's
+          // tier discount matches this combined run (the mint cross-checks
+          // that equality to the cent before anything persists).
+          quoted.engineContext = {
+            propertyInput: propertyContext.propertyInput,
+            targetOnlyServices: optionServices(option, context),
+            currentServiceKeys: [...currentServiceKeys],
+            // The RAW staff-writable price-bearing sources this pricing read
+            // (GitHub #3391 round: address/property_type equality alone
+            // misses these) — the mint re-reads both rows under its lock and
+            // treats any change as offer drift.
+            pricingSourceStamp: {
+              lot_sqft: customer.lot_sqft ?? null,
+              property_sqft: customer.property_sqft ?? null,
+              bed_sqft: customer.bed_sqft ?? null,
+              palm_count: customer.palm_count ?? null,
+              lawn_type: customer.lawn_type ?? null,
+              turf_lawn_sqft: turfProfile?.lawn_sqft ?? null,
+              turf_track_key: turfProfile?.track_key ?? turfProfile?.grass_type ?? null,
+            },
+          };
+        }
+        if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) {
+          options.push(quoted);
+          engineResults.set(quoted.id, estimate);
+        }
       }
     }
+    return { options, engineResults, currentMonthly };
+  };
+  let priced;
+  if (strictPriceSettings) {
+    priced = await strictPriceOnOwnSettings(priceOptions);
+  } else {
+    await maybeSyncPricingEngine(db);
+    priced = priceOptions();
   }
-  // After the last engine call (rule 3 above strictPriceSettingsTicket).
-  if (strictPriceSettings) assertStrictPriceSettingsHeld(settingsTicket);
+  const { options, engineResults, currentMonthly } = priced;
 
   // A mixed prompt ("upgrade my lawn care and add mosquito") must not lose the
   // owned half just because the new half priced (codex r1 P2).

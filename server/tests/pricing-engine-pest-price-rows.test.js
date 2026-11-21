@@ -9,7 +9,7 @@
 // The answer must depend on the rows of the last successful sync alone, never on what an earlier sync of the
 // worker loaded: every partial row below is tried on a cold worker and on a warm one, and both must refuse it.
 // The app's own connection. Only the bridge's refresh for a price nobody watches reads there
-// (loadSettingsForUnattendedPrice, the last describe); every other sync in this suite passes its handle.
+// (withSettingsForUnattendedPrice, the last describe); every other sync in this suite passes its handle.
 // A test sets what the connection answers; with none set, a read fails.
 let mockAppDb = null;
 jest.mock('../models/db', () => new Proxy(function appConnection() {}, {
@@ -801,16 +801,22 @@ describe('the answer is about the rows of the standard pest price, not about a q
   });
 });
 
-// A caller that prices with nobody watching (strictPriceSettings of customer-pricing-ai) asks the bridge two
-// things, and nothing else of the cache: load the settings for my call (a ticket), and are the settings still
-// that ticket's and the rows' own. The shared refresh cannot answer that: callers share one run, it reads on
-// the handle of whoever asked first, its result stays for a minute, and an edit is known only in its process.
+// A caller that prices with nobody watching (strictPriceSettings of customer-pricing-ai) hands the bridge its
+// engine calls and asks nothing else of the cache. The bridge runs ONE operation in its queue of refreshes: a
+// refresh of its own, three questions, then the calls, before any other refresh can start. The shared refresh
+// cannot give that: callers share one run, it reads on the handle of whoever asked first, its result stays for
+// a minute, and an edit is known only in its process.
 describe('the settings for a price nobody watches', () => {
   afterEach(() => { mockAppDb = null; });
   // What the app's connection answers from now on.
   const appRows = (worker, config) => { mockAppDb = configDb(worker, config); return mockAppDb; };
-  const load = (worker) => worker.bridge.loadSettingsForUnattendedPrice();
-  const held = (worker, ticket) => worker.bridge.settingsHeldForUnattendedPrice(ticket);
+  // price() here answers the base price the engine holds at the moment it is called.
+  const baseNow = (worker) => () => worker.constants.PEST.base;
+  const priceOn = (worker, price = baseNow(worker)) => worker.bridge.withSettingsForUnattendedPrice(price);
+  const priced = (value) => ({ priced: true, value });
+  const refused = (reason) => ({ priced: false, reason });
+  // How many refreshes began to read on this connection.
+  const refreshesOn = (db) => db.schema.hasTable.mock.calls.filter(([table]) => table === 'pricing_config').length;
   // Makes `db` stop a refresh at its first catalog read (the rows are in the engine by then) until release().
   const pauseAtCatalogRead = (db) => {
     let release;
@@ -828,83 +834,79 @@ describe('the settings for a price nobody watches', () => {
     config.pest_base.base = base;
     return config;
   };
-  // A worker with a ticket that holds.
-  const loaded = async () => {
-    const worker = freshWorker();
-    appRows(worker, fullRows(worker.constants));
-    const ticket = await load(worker);
-    expect(held(worker, ticket)).toBe(true);
-    return { worker, ticket };
-  };
 
-  describe('the load', () => {
-    test('reads the rows on the app connection into the engine, and its ticket holds', async () => {
+  describe('a price', () => {
+    test('reads the rows on the app connection into the engine, then calls price() once and answers its value', async () => {
       const worker = freshWorker();
       const base = worker.constants.PEST.base;
       const db = appRows(worker, withBase(worker.constants, base + 5));
-      const ticket = await load(worker);
-      expect(db.schema.hasTable).toHaveBeenCalledWith('pricing_config');
-      expect(worker.constants.PEST.base).toBe(base + 5);
-      expect(Object.isFrozen(ticket)).toBe(true);
-      expect(held(worker, ticket)).toBe(true);
-    });
-
-    test.each([
-      ['the app connection answers nothing', () => null],
-      ['the table holds no row', () => pricingConfigDb([])],
-      ['the validation refuses the rows', (worker) => configDb(worker, refusedRows(worker.constants))],
-    ])('a refresh that fails gives no ticket: %s', async (_label, connection) => {
-      const worker = freshWorker();
-      mockAppDb = connection(worker);
-      await expect(load(worker)).resolves.toBeNull();
-    });
-
-    test('nothing but a ticket of this worker holds', async () => {
-      const { worker, ticket } = await loaded();
-      expect(held(worker, null)).toBe(false);
-      expect(held(worker, undefined)).toBe(false);
-      expect(held(worker, {})).toBe(false);
-      expect(held(worker, { ...ticket, applies: ticket.applies + 1 })).toBe(false);
-      expect(held(worker, { ...ticket, invalidations: ticket.invalidations + 1 })).toBe(false);
-      expect(held(worker, { ...ticket })).toBe(true);
-    });
-
-    test('rows that lack an input of the pest price: the refresh succeeds, and its ticket does not hold', async () => {
-      const worker = freshWorker();
-      const partial = fullRows(worker.constants);
-      delete partial.pest_features.indoor;
-      appRows(worker, partial);
-      const ticket = await load(worker);
-      expect(ticket).not.toBeNull();
-      expect(held(worker, ticket)).toBe(false);
+      const price = jest.fn(() => ({ base: worker.constants.PEST.base }));
+      await expect(priceOn(worker, price)).resolves.toEqual(priced({ base: base + 5 }));
+      expect(refreshesOn(db)).toBe(1);
+      expect(price).toHaveBeenCalledTimes(1);
+      expect(price).toHaveBeenCalledWith();
     });
 
     // An edit that another process made: no word of it reaches this one, and the shared settings read fresh.
     test('a warm worker reads the rows again, though the shared settings read fresh', async () => {
-      const { worker, ticket: first } = await loaded();
+      const worker = freshWorker();
       const base = worker.constants.PEST.base;
+      appRows(worker, fullRows(worker.constants));
+      await expect(priceOn(worker)).resolves.toEqual(priced(base));
       expect(worker.bridge.needsSync()).toBe(false);
       appRows(worker, withBase(worker.constants, base + 5));
-      const second = await load(worker);
-      expect(worker.constants.PEST.base).toBe(base + 5);
-      expect(held(worker, second)).toBe(true);
-      expect(held(worker, first)).toBe(false);
+      await expect(priceOn(worker)).resolves.toEqual(priced(base + 5));
+    });
+
+    // Callers that overlap wait in the queue. None of them refuses another: a refresh that another caller
+    // starts cannot begin before this caller's price() returned.
+    test('callers that overlap are each priced, one after the other, each right after a refresh of its own', async () => {
+      const worker = freshWorker();
+      const base = worker.constants.PEST.base;
+      const db = appRows(worker, fullRows(worker.constants));
+      const order = [];
+      const call = (name) => priceOn(worker, () => { order.push(`${name} after refresh ${refreshesOn(db)}`); return worker.constants.PEST.base; });
+      await expect(Promise.all([call('a'), call('b'), call('c')])).resolves.toEqual([priced(base), priced(base), priced(base)]);
+      expect(order).toEqual(['a after refresh 1', 'b after refresh 2', 'c after refresh 3']);
     });
 
     // Two refreshes that ran at once would mix their rows in the engine.
-    test('runs in the one queue of refreshes: a shared refresh asked while it runs starts after it', async () => {
+    test('waits for a refresh that runs, and is priced after it from its own rows', async () => {
       const worker = freshWorker();
-      const running = pauseAtCatalogRead(appRows(worker, fullRows(worker.constants)));
-      const mine = load(worker);
+      const base = worker.constants.PEST.base;
+      const app = appRows(worker, fullRows(worker.constants));
+      const first = configDb(worker, withBase(worker.constants, base + 5));
+      const running = pauseAtCatalogRead(first);
+      const firstDone = worker.bridge.syncConstantsFromDB(first);
       await running.paused;
-      const other = configDb(worker, fullRows(worker.constants));
-      const shared = worker.bridge.syncConstantsFromDB(other);
+      const mine = priceOn(worker);
       await new Promise((resolve) => { setImmediate(resolve); });
-      expect(other.schema.hasTable).not.toHaveBeenCalled();
+      expect(refreshesOn(app)).toBe(0);
       running.release();
-      await mine;
+      await expect(firstDone).resolves.toBe(true);
+      await expect(mine).resolves.toEqual(priced(base));
+      expect(refreshesOn(app)).toBe(1);
+    });
+
+    test('the next refresh in the queue starts only after price() returned', async () => {
+      const worker = freshWorker();
+      const base = worker.constants.PEST.base;
+      const running = pauseAtCatalogRead(appRows(worker, fullRows(worker.constants)));
+      const other = configDb(worker, withBase(worker.constants, base + 5));
+      const seen = {};
+      const mine = priceOn(worker, () => {
+        seen.otherStarted = refreshesOn(other) > 0;
+        seen.refreshRunning = worker.bridge.isSyncInFlight();
+        return worker.constants.PEST.base;
+      });
+      await running.paused;
+      const shared = worker.bridge.syncConstantsFromDB(other);
+      running.release();
+      await expect(mine).resolves.toEqual(priced(base));
+      expect(seen).toEqual({ otherStarted: false, refreshRunning: false });
       await expect(shared).resolves.toBe(true);
-      expect(other.schema.hasTable).toHaveBeenCalledWith('pricing_config');
+      expect(refreshesOn(other)).toBe(1);
+      expect(worker.constants.PEST.base).toBe(base + 5);
     });
 
     // A shared refresh is running, and another caller has one waiting behind it on its own handle (say a
@@ -921,82 +923,111 @@ describe('the settings for a price nobody watches', () => {
       const waiting = worker.bridge.syncConstantsFromDB(otherHandle);
       expect(worker.bridge.syncConstantsFromDB(configDb(worker, fullRows(worker.constants)))).toBe(waiting);
 
-      const mine = load(worker);
+      const mine = priceOn(worker);
       expect(mine).not.toBe(waiting);
       running.release();
       await firstDone;
       await expect(waiting).resolves.toBe(true);
       expect(worker.constants.PEST.base).toBe(base + 5);
-      const ticket = await mine;
-      expect(app.schema.hasTable).toHaveBeenCalledWith('pricing_config');
-      expect(worker.constants.PEST.base).toBe(base);
-      expect(held(worker, ticket)).toBe(true);
-    });
-  });
-
-  describe('a ticket stops holding', () => {
-    test('when an edit of the settings is signaled in this process', async () => {
-      const { worker, ticket } = await loaded();
-      worker.bridge.invalidatePricingConfigCache();
-      expect(held(worker, ticket)).toBe(false);
+      await expect(mine).resolves.toEqual(priced(base));
+      expect(refreshesOn(app)).toBe(1);
     });
 
-    test('while another refresh runs, and for good once that refresh changed the constants', async () => {
-      const { worker, ticket } = await loaded();
-      const next = configDb(worker, fullRows(worker.constants));
-      const running = pauseAtCatalogRead(next);
-      const done = worker.bridge.syncConstantsFromDB(next);
-      await running.paused;
-      expect(held(worker, ticket)).toBe(false);
-      running.release();
-      await expect(done).resolves.toBe(true);
-      // The shared answer is yes again. These are another refresh's settings, not this ticket's.
-      expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
-      expect(held(worker, ticket)).toBe(false);
-    });
-
-    test('after a refresh that failed and put the constants back', async () => {
-      const { worker, ticket } = await loaded();
-      await expect(sync(worker, refusedRows(worker.constants))).resolves.toBe(false);
-      expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
-      expect(held(worker, ticket)).toBe(false);
-    });
-
-    // The shared cache loses this edit: the end of the refresh marks the settings fresh again.
-    test('never holds when an edit was signaled while its refresh ran, after the refresh read the rows', async () => {
+    test('an edit that was signaled before the refresh began to read is in the rows it read: priced', async () => {
       const worker = freshWorker();
-      const running = pauseAtCatalogRead(appRows(worker, fullRows(worker.constants)));
-      const mine = load(worker);
-      await running.paused;
-      worker.bridge.invalidatePricingConfigCache();
-      running.release();
-      const ticket = await mine;
-      expect(ticket).not.toBeNull();
-      expect(worker.bridge.needsSync()).toBe(false);
-      expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
-      expect(held(worker, ticket)).toBe(false);
-    });
-  });
-
-  describe('a ticket still holds', () => {
-    test('when the edit was signaled before its refresh began to read: the refresh read the edited rows', async () => {
-      const worker = freshWorker();
+      const base = worker.constants.PEST.base;
       appRows(worker, fullRows(worker.constants));
       const first = configDb(worker, fullRows(worker.constants));
       const running = pauseAtCatalogRead(first);
       const firstDone = worker.bridge.syncConstantsFromDB(first);
       await running.paused;
-      const mine = load(worker);
+      const mine = priceOn(worker);
       worker.bridge.invalidatePricingConfigCache();
       running.release();
       await firstDone;
-      expect(held(worker, await mine)).toBe(true);
+      await expect(mine).resolves.toEqual(priced(base));
+    });
+  });
+
+  describe('no price, and price() is never called', () => {
+    test.each([
+      ['the app connection answers nothing', () => null],
+      ['the table holds no row', () => pricingConfigDb([])],
+      ['the validation refuses the rows', (worker) => configDb(worker, refusedRows(worker.constants))],
+    ])('a refresh that fails: %s', async (_label, connection) => {
+      const worker = freshWorker();
+      mockAppDb = connection(worker);
+      const price = jest.fn();
+      await expect(priceOn(worker, price)).resolves.toEqual(refused('not_loaded'));
+      expect(price).not.toHaveBeenCalled();
     });
 
-    test('after a shared refresh that found no row to apply: it changed nothing', async () => {
-      const { worker, ticket } = await loaded();
-      await expect(worker.bridge.syncConstantsFromDB(pricingConfigDb([]))).resolves.toBe(false);
-      expect(held(worker, ticket)).toBe(true);
+    test('a warm worker whose refresh fails: never a price from the settings it held', async () => {
+      const worker = freshWorker();
+      appRows(worker, fullRows(worker.constants));
+      await expect(priceOn(worker)).resolves.toMatchObject({ priced: true });
+      mockAppDb = configDb(worker, refusedRows(worker.constants));
+      const price = jest.fn();
+      await expect(priceOn(worker, price)).resolves.toEqual(refused('not_loaded'));
+      expect(price).not.toHaveBeenCalled();
+      // The shared answer still speaks of the earlier refresh, whose rows were whole.
+      expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
+    });
+
+    test('rows that lack an input of the pest price: the refresh succeeds, and the price is refused', async () => {
+      const worker = freshWorker();
+      const partial = fullRows(worker.constants);
+      delete partial.pest_features.indoor;
+      appRows(worker, partial);
+      const price = jest.fn();
+      await expect(priceOn(worker, price)).resolves.toEqual(refused('rows'));
+      expect(price).not.toHaveBeenCalled();
+      expect(worker.bridge.needsSync()).toBe(false);
+    });
+
+    // The shared cache loses this edit: the end of the refresh marks the settings fresh again.
+    test('an edit that was signaled while the refresh ran, after it read the rows; the next call reads again and prices', async () => {
+      const worker = freshWorker();
+      const base = worker.constants.PEST.base;
+      const running = pauseAtCatalogRead(appRows(worker, fullRows(worker.constants)));
+      const price = jest.fn();
+      const mine = priceOn(worker, price);
+      await running.paused;
+      worker.bridge.invalidatePricingConfigCache();
+      running.release();
+      await expect(mine).resolves.toEqual(refused('edited'));
+      expect(price).not.toHaveBeenCalled();
+      expect(worker.bridge.needsSync()).toBe(false);
+      expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
+      appRows(worker, fullRows(worker.constants));
+      await expect(priceOn(worker)).resolves.toEqual(priced(base));
+    });
+  });
+
+  describe('what price() does', () => {
+    test('a value that is not truthy is still the price', async () => {
+      const worker = freshWorker();
+      appRows(worker, fullRows(worker.constants));
+      await expect(priceOn(worker, () => null)).resolves.toEqual(priced(null));
+      await expect(priceOn(worker, () => 0)).resolves.toEqual(priced(0));
+    });
+
+    test('what it throws reaches the caller, and the queue goes on', async () => {
+      const worker = freshWorker();
+      const base = worker.constants.PEST.base;
+      appRows(worker, fullRows(worker.constants));
+      await expect(priceOn(worker, () => { throw new Error('engine fault'); })).rejects.toThrow('engine fault');
+      await expect(priceOn(worker)).resolves.toEqual(priced(base));
+      await expect(sync(worker, fullRows(worker.constants))).resolves.toBe(true);
+    });
+
+    // The queue would wait for the promise, and with it every refresh of the process.
+    test('a promise for an answer is a mistake of the caller: it throws, and the queue goes on', async () => {
+      const worker = freshWorker();
+      const base = worker.constants.PEST.base;
+      appRows(worker, fullRows(worker.constants));
+      await expect(priceOn(worker, async () => base)).rejects.toThrow('price() must be synchronous');
+      await expect(priceOn(worker)).resolves.toEqual(priced(base));
     });
   });
 });

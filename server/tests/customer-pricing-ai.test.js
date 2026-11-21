@@ -2576,22 +2576,25 @@ describe('strictPriceSettings', () => {
   const pricingEngine = require('../services/pricing-engine');
   const bridge = require('../services/pricing-engine/db-bridge');
   const proof = require('../services/plan-start-eligibility');
-  // The bridge's two answers for a price nobody watches (its own suite proves what a ticket means:
-  // pricing-engine-pest-price-rows.test.js). The default path asks neither; it uses the shared refresh.
-  const TICKET = Object.freeze({ applies: 1, invalidations: 0 });
-  let loadSettings;
-  let settingsHeld;
+  // The bridge's one answer for a price nobody watches (its own suite proves what it means:
+  // pricing-engine-pest-price-rows.test.js). The spy does what the bridge does after a refresh that holds: it
+  // runs the pricer's engine calls and answers their value. The default path never asks it; it uses the shared
+  // refresh.
+  const priceOnHeldSettings = async (priceOptions) => ({ priced: true, value: priceOptions() });
+  let ownSettings;
   let needsSync;
   let sync;
   let blocker;
+  let resolvedBlocker;
   beforeEach(() => {
-    loadSettings = jest.spyOn(bridge, 'loadSettingsForUnattendedPrice').mockResolvedValue(TICKET);
-    settingsHeld = jest.spyOn(bridge, 'settingsHeldForUnattendedPrice').mockReturnValue(true);
+    ownSettings = jest.spyOn(bridge, 'withSettingsForUnattendedPrice').mockImplementation(priceOnHeldSettings);
     needsSync = jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false);
     sync = jest.spyOn(pricingEngine, 'syncConstantsFromDB').mockResolvedValue(true);
     blocker = jest.spyOn(proof, 'planStartBlocker').mockResolvedValue(null);
+    // The shared answer's rule for the type of the resolved property (its own suite: plan-start-eligibility.test.js).
+    resolvedBlocker = jest.spyOn(proof, 'resolvedPropertyTypeBlocker').mockResolvedValue(null);
   });
-  afterEach(() => { [loadSettings, settingsHeld, needsSync, sync, blocker].forEach((spy) => spy.mockRestore()); });
+  afterEach(() => { [ownSettings, needsSync, sync, blocker, resolvedBlocker].forEach((spy) => spy.mockRestore()); });
 
   const customer = propertyCustomer({ id: 'cust-strict', waveguard_tier: null, monthly_rate: null });
   // A handle the default path could refresh from (the refresh itself is the spy above).
@@ -2633,7 +2636,7 @@ describe('strictPriceSettings', () => {
       await expect(strict({ db, propertyLookup })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: reason });
       expect(blocker).toHaveBeenCalledWith(db, customer.id);
       expect(propertyLookup).not.toHaveBeenCalled();
-      expect(loadSettings).not.toHaveBeenCalled();
+      expect(ownSettings).not.toHaveBeenCalled();
     });
 
     test('a failed read of the shared answer throws as it is: an outage is never "this account has no plan"', async () => {
@@ -2663,7 +2666,7 @@ describe('strictPriceSettings', () => {
       const engine = jest.spyOn(pricingEngine, 'generateEstimate');
       try {
         await expect(strict({ propertySeed: { propertyType } })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'commercial' });
-        expect(loadSettings).not.toHaveBeenCalled();
+        expect(ownSettings).not.toHaveBeenCalled();
         expect(engine).not.toHaveBeenCalled();
       } finally {
         engine.mockRestore();
@@ -2676,7 +2679,7 @@ describe('strictPriceSettings', () => {
       try {
         await expect(strict({ propertyLookup })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'commercial' });
         expect(propertyLookup).toHaveBeenCalledTimes(1);
-        expect(loadSettings).not.toHaveBeenCalled();
+        expect(ownSettings).not.toHaveBeenCalled();
         expect(engine).not.toHaveBeenCalled();
       } finally {
         engine.mockRestore();
@@ -2686,6 +2689,53 @@ describe('strictPriceSettings', () => {
     test('a home type from the estimate seed is priced, and the default does not refuse a business property', async () => {
       expectPriced(await strict({ propertySeed: { propertyType: 'townhome_end' } }));
       await expect(price({ propertySeed: { propertyType: 'commercial' } })).resolves.toMatchObject({ ok: true });
+    });
+
+    // The engine's rule reads a condo as a home. The shared answer reads the condo of a property manager as a
+    // business, and it would have refused the same type saved on the account. So the type the lookup names is
+    // asked of the shared answer's own rule, with this account.
+    describe('the resolved property, by the shared answer', () => {
+      const condoLookup = () => jest.fn(async () => ({ enriched: { homeSqFt: 2200, stories: 1, propertyType: 'condo_ground', aiConfidence: 85 } }));
+
+      test('asks about the very type the engine prices, on the handle of the caller, after the lookup', async () => {
+        const engine = jest.spyOn(pricingEngine, 'generateEstimate');
+        const db = refreshable();
+        const propertyLookup = condoLookup();
+        try {
+          expectPriced(await strict({ db, propertyLookup }));
+          expect(resolvedBlocker).toHaveBeenCalledTimes(1);
+          expect(resolvedBlocker).toHaveBeenCalledWith(db, customer.id, 'condo_ground');
+          expect(engine.mock.calls.length).toBeGreaterThan(0);
+          expect(engine.mock.calls.every(([input]) => input.propertyType === 'condo_ground')).toBe(true);
+          expect(propertyLookup.mock.invocationCallOrder[0]).toBeLessThan(resolvedBlocker.mock.invocationCallOrder[0]);
+        } finally {
+          engine.mockRestore();
+        }
+      });
+
+      test.each(['commercial', 'not_live'])('a type it blocks (%s) is refused with that reason, before the settings are loaded and the engine prices', async (reason) => {
+        resolvedBlocker.mockResolvedValue(reason);
+        const engine = jest.spyOn(pricingEngine, 'generateEstimate');
+        try {
+          await expect(strict({ propertyLookup: condoLookup() })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: reason });
+          expect(ownSettings).not.toHaveBeenCalled();
+          expect(engine).not.toHaveBeenCalled();
+        } finally {
+          engine.mockRestore();
+        }
+      });
+
+      test('a failed read of it throws as it is, never a price', async () => {
+        resolvedBlocker.mockRejectedValue(new Error('customers read down'));
+        await expect(strict({ propertyLookup: condoLookup() })).rejects.toThrow('customers read down');
+        expect(ownSettings).not.toHaveBeenCalled();
+      });
+
+      test('the default does not ask it', async () => {
+        resolvedBlocker.mockResolvedValue('commercial');
+        expectPriced(await price({ propertyLookup: condoLookup() }));
+        expect(resolvedBlocker).not.toHaveBeenCalled();
+      });
     });
 
     test('the default asks no shared answer, and prices pest control beside a lawn plan as before', async () => {
@@ -2725,7 +2775,7 @@ describe('strictPriceSettings', () => {
       await expect(strict({ prompt, propertyLookup })).rejects.toThrow('strictPriceSettings prices pest control only');
       expect(blocker).not.toHaveBeenCalled();
       expect(propertyLookup).not.toHaveBeenCalled();
-      expect(loadSettings).not.toHaveBeenCalled();
+      expect(ownSettings).not.toHaveBeenCalled();
     });
 
     test('the same request without strict is priced', async () => {
@@ -2734,16 +2784,24 @@ describe('strictPriceSettings', () => {
     });
   });
 
-  // The default shares the bridge's cache and answers a failed refresh with what the engine had. Strict asks the
-  // bridge for a refresh of its own and gets a ticket. The pricer asks nothing else of the cache.
+  // The default shares the bridge's cache and answers a failed refresh with what the engine had. Strict hands
+  // its engine calls to the bridge, which runs them inside a refresh of its own. The pricer asks nothing else
+  // of the cache.
   describe('the settings, loaded for this call', () => {
-    test('default: a refresh that is due and fails still prices, from the values the engine had, and asks the bridge for no ticket', async () => {
+    let engine;
+    let priceForReal;
+    beforeEach(() => {
+      priceForReal = pricingEngine.generateEstimate;
+      engine = jest.spyOn(pricingEngine, 'generateEstimate');
+    });
+    afterEach(() => { engine.mockRestore(); });
+
+    test('default: a refresh that is due and fails still prices, from the values the engine had, and never asks the bridge for settings of its own', async () => {
       needsSync.mockReturnValue(true);
       sync.mockResolvedValue(false);
       expectPriced(await price());
       expect(sync).toHaveBeenCalledTimes(1);
-      expect(loadSettings).not.toHaveBeenCalled();
-      expect(settingsHeld).not.toHaveBeenCalled();
+      expect(ownSettings).not.toHaveBeenCalled();
     });
 
     test('default: settings that read fresh are not loaded again', async () => {
@@ -2751,28 +2809,66 @@ describe('strictPriceSettings', () => {
       expect(sync).not.toHaveBeenCalled();
     });
 
-    test.each([['read fresh', false], ['are due', true]])('strict: asks the bridge for a refresh of its own, once and with no handle, also when the shared settings %s', async (_label, due) => {
+    test.each([['read fresh', false], ['are due', true]])('strict: hands the bridge its engine calls, once, and asks nothing of the shared settings, also when they %s', async (_label, due) => {
       needsSync.mockReturnValue(due);
       expectPriced(await strict());
-      expect(loadSettings).toHaveBeenCalledTimes(1);
-      expect(loadSettings).toHaveBeenCalledWith();
+      expect(ownSettings).toHaveBeenCalledTimes(1);
+      expect(ownSettings.mock.calls[0]).toHaveLength(1);
+      expect(typeof ownSettings.mock.calls[0][0]).toBe('function');
+      expect(needsSync).not.toHaveBeenCalled();
       expect(sync).not.toHaveBeenCalled();
     });
 
-    test.each([[null], [undefined], [false]])('strict: no ticket (%p) throws before the engine prices, never a price', async (answer) => {
-      loadSettings.mockResolvedValue(answer);
-      const engine = jest.spyOn(pricingEngine, 'generateEstimate');
-      try {
-        await expect(strict()).rejects.toMatchObject({ ...UNAVAILABLE, message: 'live price settings could not be loaded' });
-        expect(engine).not.toHaveBeenCalled();
-        expect(settingsHeld).not.toHaveBeenCalled();
-      } finally {
-        engine.mockRestore();
-      }
+    // The bridge calls the function it was handed between its refresh and the next one in its queue. So every
+    // engine call of the request must be in that function, and it must answer at once, not with a promise.
+    test("strict: every engine call of the request runs inside the bridge's operation, and the function answers at once", async () => {
+      const order = [];
+      ownSettings.mockImplementation(async (priceOptions) => {
+        order.push('refreshed');
+        const value = priceOptions();
+        order.push('priced');
+        expect(value).toMatchObject({ options: expect.any(Array) });
+        return { priced: true, value };
+      });
+      engine.mockImplementation((...args) => { order.push('engine'); return priceForReal(...args); });
+      expectPriced(await strict());
+      expect(order[0]).toBe('refreshed');
+      expect(order[order.length - 1]).toBe('priced');
+      expect(order.slice(1, -1).length).toBeGreaterThan(0);
+      expect(order.slice(1, -1).every((step) => step === 'engine')).toBe(true);
     });
 
-    test('strict: a refresh that throws is thrown as it is', async () => {
-      loadSettings.mockRejectedValue(new Error('pool is down'));
+    test('strict: the answer is what the bridge returned; the engine does not run outside its operation', async () => {
+      ownSettings.mockResolvedValue({ priced: true, value: { options: [], engineResults: new Map(), currentMonthly: 0 } });
+      await expect(strict()).resolves.toMatchObject({ ok: true, options: [] });
+      expect(engine).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['not_loaded', 'live price settings could not be loaded'],
+      ['edited', 'the price settings were edited while they were loaded'],
+      ['rows', 'the pest price settings are not complete in their rows'],
+    ])('strict: a refusal of the bridge (%s) throws with its reason, never a price', async (reason, message) => {
+      ownSettings.mockResolvedValue({ priced: false, reason });
+      await expect(strict()).rejects.toMatchObject({ ...UNAVAILABLE, message });
+      expect(engine).not.toHaveBeenCalled();
+      // The default prices from what the engine holds, and does not ask.
+      expectPriced(await price());
+      expect(ownSettings).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['nothing', null],
+      ['an empty answer', {}],
+      ['a value with no clear yes', { priced: 'yes', value: { options: [{ id: 'x', serviceKey: 'pest_control', monthly: 1 }], engineResults: new Map(), currentMonthly: 0 } }],
+      ['a refusal with a reason it does not know', { priced: false, reason: 'other' }],
+    ])('strict: %s from the bridge is refused, never a price', async (_label, answer) => {
+      ownSettings.mockResolvedValue(answer);
+      await expect(strict()).rejects.toMatchObject(UNAVAILABLE);
+    });
+
+    test('strict: what the bridge throws is thrown as it is', async () => {
+      ownSettings.mockRejectedValue(new Error('pool is down'));
       await expect(strict()).rejects.toThrow('pool is down');
     });
   });
@@ -2829,49 +2925,14 @@ describe('strictPriceSettings', () => {
         ['has a line that requires manual review', onEveryLine({ requiresManualReview: true })],
         ['has a line graded low confidence', onEveryLine({ pricingConfidence: 'low' })],
         ['has a line priced from a footprint the engine guessed', onEveryLine({ footprintWasDefaulted: true })],
-      ])('an engine result that %s: strict returns no option, and the settings are still asked', async (_label, mark) => {
+      ])("an engine result that %s: strict returns no option, from the bridge's operation as any price", async (_label, mark) => {
         expectPriced(await strict());
-        settingsHeld.mockClear();
+        ownSettings.mockClear();
         engine.mockImplementation((...args) => mark(priceForReal(...args)));
         expect(await strict()).toMatchObject({ ok: true, options: [] });
-        expect(settingsHeld).toHaveBeenCalledTimes(1);
+        expect(ownSettings).toHaveBeenCalledTimes(1);
         expectPriced(await price());
       });
-    });
-  });
-
-  // Asked after the engine priced: are the settings still the ones of that ticket, and the rows' own.
-  describe('the settings, still the ones the engine priced from', () => {
-    let engine;
-    let priceForReal;
-    beforeEach(() => {
-      priceForReal = pricingEngine.generateEstimate;
-      engine = jest.spyOn(pricingEngine, 'generateEstimate');
-    });
-    afterEach(() => { engine.mockRestore(); });
-
-    test('strict: asks about the ticket it was given, once, after the last engine call', async () => {
-      const order = [];
-      loadSettings.mockImplementation(async () => { order.push('load'); return TICKET; });
-      engine.mockImplementation((...args) => { order.push('engine'); return priceForReal(...args); });
-      settingsHeld.mockImplementation(() => { order.push('held'); return true; });
-      expectPriced(await strict());
-      expect(settingsHeld).toHaveBeenCalledTimes(1);
-      // The very ticket of this call's own refresh, not one that looks like it.
-      expect(settingsHeld.mock.calls[0][0]).toBe(TICKET);
-      expect(order[0]).toBe('load');
-      expect(order[order.length - 1]).toBe('held');
-      expect(order.slice(1, -1).length).toBeGreaterThan(0);
-      expect(order.slice(1, -1).every((step) => step === 'engine')).toBe(true);
-    });
-
-    test('strict: settings that did not hold throw the price away; the default prices and does not ask', async () => {
-      settingsHeld.mockReturnValue(false);
-      await expect(strict()).rejects.toMatchObject(UNAVAILABLE);
-      expect(engine).toHaveBeenCalled();
-      expect(settingsHeld).toHaveBeenCalledTimes(1);
-      expectPriced(await price());
-      expect(settingsHeld).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
   return new Proxy(refuse, { get: (_target, key) => (typeof key === 'symbol' || key === 'then' || key === '__esModule' ? undefined : refuse) });
 });
 
-const { planStartBlocker, PLAN_START_BLOCKERS } = require('../services/plan-start-eligibility');
+const { planStartBlocker, resolvedPropertyTypeBlocker, PLAN_START_BLOCKERS } = require('../services/plan-start-eligibility');
 
 const FUTURE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 const PAST = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString().slice(0, 10);
@@ -2361,6 +2361,88 @@ describe('planStartBlocker', () => {
       } finally {
         if (saved !== undefined) process.env.GATE_PLAN_RATE_LEDGER = saved;
       }
+    });
+  });
+});
+
+// A pricer resolves the property after the proof cleared the account. A lookup or an estimate seed can name a
+// type that no saved record carries, so the type is asked here, by the rule for a type saved on the account.
+describe('resolvedPropertyTypeBlocker', () => {
+  const resolved = (customer, propertyType) => resolvedPropertyTypeBlocker(world({ customer }), 'cust-1', propertyType);
+  const MANAGER = { contact_role: 'property_manager', property_type: null };
+  const OWNER = { contact_role: 'owner', property_type: null };
+
+  test('needs a database handle and a customer id', async () => {
+    await expect(resolvedPropertyTypeBlocker(null, 'cust-1', 'condo')).rejects.toThrow('resolvedPropertyTypeBlocker needs');
+    await expect(resolvedPropertyTypeBlocker(world(), null, 'condo')).rejects.toThrow('resolvedPropertyTypeBlocker needs');
+  });
+
+  test('an account that is gone is not live, and a failed read throws', async () => {
+    expect(await resolvedPropertyTypeBlocker(world({ customer: null }), 'cust-1', 'condo')).toBe('not_live');
+    const down = world({ tables: { customers: () => { throw new Error('customers read down'); } } });
+    await expect(resolvedPropertyTypeBlocker(down, 'cust-1', 'condo')).rejects.toThrow('customers read down');
+  });
+
+  // The engine's rule reads each of these condo types as a home. The proof, with the account's manager role, does not.
+  test.each(['condo', 'condo_ground', 'condo_upper'])("a property manager's %s is a business; the owner's is a home", async (propertyType) => {
+    const { isCommercialProperty } = require('../services/pricing-engine/commercial-helpers');
+    expect(isCommercialProperty({ propertyType })).toBe(false);
+    expect(await resolved(MANAGER, propertyType)).toBe('commercial');
+    expect(await resolved(OWNER, propertyType)).toBeNull();
+  });
+
+  test.each(['apartment', 'multi_family', 'commercial', 'office', 'warehouse', 'hoa'])('a %s is a business for any client', async (propertyType) => {
+    expect(await resolved(OWNER, propertyType)).toBe('commercial');
+    expect(await resolved(MANAGER, propertyType)).toBe('commercial');
+  });
+
+  test.each(['single_family', 'townhome_end', 'townhome_interior', 'duplex', '', null, undefined])('a %j is a home, also for a property manager', async (propertyType) => {
+    expect(await resolved(MANAGER, propertyType)).toBeNull();
+    expect(await resolved(OWNER, propertyType)).toBeNull();
+  });
+
+  // One rule for a type, saved or resolved: the proof answers the same for the type on the account's own row.
+  test.each([
+    ['condo', 'property_manager'], ['condo', 'owner'], ['condo_ground', 'property_manager'], ['apartment', 'owner'],
+    ['single_family', 'property_manager'], ['townhome_end', 'tenant'],
+  ])('a %s with the role %s reads the same resolved as saved on the account', async (propertyType, contact_role) => {
+    const saved = await blocker(world({ customer: { contact_role, property_type: propertyType } }));
+    expect(await resolved({ contact_role, property_type: null }, propertyType)).toBe(saved);
+  });
+
+  test('reads the account by its id', async () => {
+    const reads = [];
+    const db = world({ tables: { customers: (calls) => { reads.push(calls); return [CUSTOMER(MANAGER)]; } } });
+    expect(await resolvedPropertyTypeBlocker(db, 'cust-1', 'condo')).toBe('commercial');
+    expect(reads).toHaveLength(1);
+    expect(whereHas(reads[0], (filter) => filter.id === 'cust-1')).toBe(true);
+  });
+
+  // The client is a manager also by a saved property of the account: one it manages for a client. The proof reads
+  // a saved condo that way (hasCommercialProperty), so a condo the lookup names is read that way too.
+  describe('an account with a saved property it manages for a client', () => {
+    // Answers the managed row only to a read that asks for this account's managed properties.
+    const managedOnly = (calls) => (whereHas(calls, (filter) => filter.customer_id === 'cust-1' && filter.relationship === 'managed_for_client')
+      ? [PROPERTY({ property_type: null, relationship: 'managed_for_client' })]
+      : []);
+    const withManaged = (propertyType) => resolvedPropertyTypeBlocker(world({ customer: OWNER, tables: { customer_properties: managedOnly } }), 'cust-1', propertyType);
+
+    test.each(['condo', 'condo_ground', 'condo_upper'])('a %s the lookup names is a business, though the contact role is not a manager', async (propertyType) => {
+      expect(await withManaged(propertyType)).toBe('commercial');
+    });
+
+    test('a house stays a home', async () => {
+      expect(await withManaged('single_family')).toBeNull();
+    });
+
+    test('a saved property with another relationship makes no manager', async () => {
+      const owned = (calls) => (whereHas(calls, (filter) => filter.relationship === 'managed_for_client') ? [] : [PROPERTY({ relationship: 'owner' })]);
+      expect(await resolvedPropertyTypeBlocker(world({ customer: OWNER, tables: { customer_properties: owned } }), 'cust-1', 'condo')).toBeNull();
+    });
+
+    test('a failed read of the saved properties throws', async () => {
+      const down = world({ customer: OWNER, tables: { customer_properties: () => { throw new Error('properties read down'); } } });
+      await expect(resolvedPropertyTypeBlocker(down, 'cust-1', 'condo')).rejects.toThrow('properties read down');
     });
   });
 });

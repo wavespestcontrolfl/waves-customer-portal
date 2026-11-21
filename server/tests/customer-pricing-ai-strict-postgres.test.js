@@ -3,13 +3,13 @@
 // runs the REAL pricer, the REAL bridge on the pricing_config rows of the migrated schema, and the REAL
 // planStartBlocker on real account rows. It proves what only the database can: a one-time customer is priced
 // from the seeded rows, a row that another server process changed is read again, a row that loses a value
-// refuses the price while the default still answers, and an account that is not live, is a business or holds
-// a plan is refused by the shared answer.
+// refuses the price while the default still answers, callers that overlap are all priced, and an account that
+// is not live, is a business or holds a plan is refused by the shared answer.
 // No network, no spend. All names and addresses are synthetic.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
-// The app's own connection. A strict price loads the price settings there, in a refresh of its own (committed
+// The app's own connection. A strict price loads the price settings there, in the bridge's own refresh (committed
 // rows in production, never the caller's transaction). In this suite that connection answers from the test's
 // transaction, and only for the tables a refresh reads, so a test can change a row and roll it back. Every
 // other read of a strict price must run on the handle the caller gives: any other use of the connection throws.
@@ -150,6 +150,20 @@ postgres('strictPriceSettings of the customer pricer (live Postgres)', () => {
     after.options.forEach((option, index) => expect(option.monthly).toBeGreaterThan(before.options[index].monthly));
   });
 
+  // Each strict call is one operation in the bridge's queue: its own refresh, then its engine calls. So calls that
+  // overlap wait for one another, and none of them makes another fail.
+  test('strict prices asked at the same moment, on settings that do not change, are all priced and all the same', async () => {
+    const worker = freshWorker();
+    const customer = await seedCustomer();
+    const results = await Promise.all([strict(worker, customer), strict(worker, customer), strict(worker, customer), strict(worker, customer)]);
+    results.forEach(expectPriced);
+    const monthly = (result) => result.options.map((option) => option.monthly);
+    results.forEach((result) => expect(monthly(result)).toEqual(monthly(results[0])));
+    // And a default price asked beside strict ones is priced as before.
+    const mixed = await Promise.all([strict(worker, customer), ask(worker, customer), strict(worker, customer)]);
+    mixed.forEach(expectPriced);
+  });
+
   test('after the base row is removed the engine still holds the earlier base price: the default prices from it, strict throws, and the row put back prices again', async () => {
     const worker = freshWorker();
     const customer = await seedCustomer();
@@ -206,6 +220,49 @@ postgres('strictPriceSettings of the customer pricer (live Postgres)', () => {
       expect(propertyLookup).toHaveBeenCalledTimes(1);
       // No refresh ran on this worker.
       expect(worker.bridge.needsSync()).toBe(true);
+    });
+
+    // The engine's rule reads a condo as a home. The shared answer reads the condo of a property manager as a
+    // business: the same type saved on the account row refuses it (the first test). Here no saved record
+    // carries the type; only the lookup names it.
+    describe('a condo that only the lookup names', () => {
+      const condoLookup = () => jest.fn(async () => ({ enriched: { ...SAVED_LOOKUP.enriched, propertyType: 'condo_ground', aiConfidence: 85 }, propertyRecord: {} }));
+      const refusedAsBusiness = async (worker, customer) => {
+        const propertyLookup = condoLookup();
+        await expect(ask(worker, customer, { strictPriceSettings: true, propertyLookup })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'commercial' });
+        expect(propertyLookup).toHaveBeenCalledTimes(1);
+        // No refresh ran on this worker.
+        expect(worker.bridge.needsSync()).toBe(true);
+      };
+
+      test('the same condo saved on the account of a property manager is refused before the lookup', async () => {
+        const worker = freshWorker();
+        const customer = await seedCustomer({ contact_role: 'property_manager', property_type: 'condo_ground' });
+        const propertyLookup = condoLookup();
+        await expect(ask(worker, customer, { strictPriceSettings: true, propertyLookup })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'commercial' });
+        expect(propertyLookup).not.toHaveBeenCalled();
+      });
+
+      test('on the account of a property manager: strict refuses it as a business, and the default prices it as a home', async () => {
+        const worker = freshWorker();
+        const customer = await seedCustomer({ contact_role: 'property_manager' });
+        await refusedAsBusiness(worker, customer);
+        expectPriced(await ask(worker, customer, { propertyLookup: condoLookup() }));
+      });
+
+      test('on an account with a saved property it manages for a client: strict refuses it as a business', async () => {
+        const worker = freshWorker();
+        const customer = await seedCustomer();
+        await trx('customer_properties').insert({ customer_id: customer.id, relationship: 'managed_for_client' });
+        await refusedAsBusiness(worker, customer);
+      });
+
+      test('on the account of its owner, with a home of their own saved: strict prices it', async () => {
+        const worker = freshWorker();
+        const customer = await seedCustomer({ contact_role: 'owner' });
+        await trx('customer_properties').insert({ customer_id: customer.id, relationship: 'own_home' });
+        expectPriced(await ask(worker, customer, { strictPriceSettings: true, propertyLookup: condoLookup() }));
+      });
     });
 
     test('the account is priced once the visit that blocked it is gone', async () => {
