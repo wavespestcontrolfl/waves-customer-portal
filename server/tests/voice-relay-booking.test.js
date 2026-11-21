@@ -562,18 +562,35 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     test.each([
       ['starts before the shift', '09:30', '18:00', 'is on shift 09:30 to 18:00'],
       ['ends after the shift end', '08:00', '09:59', 'is on shift 08:00 to 09:59'],
-    ])('a visit that %s is not booked: nothing is written and no customer message is sent', async (_case, start, end, reason) => {
+    ])('a visit that %s is not booked: nothing is written, and the agent is sent for fresh times', async (_case, start, end, reason) => {
       process.env.GATE_TECH_SHIFT_HOURS = 'true';
       techOnShift(start, end);
       const ctx = slotCtx();
       const out = await executeTool('request_booking', GOOD_INPUT, ctx);
-      expect(out).toMatch(/could not be placed — NOTHING was booked/);
-      expect(ctx.toolFailed).toBe(true);
+      // The answer for a time that is gone, not the office-callback failure.
+      expect(out).toMatch(/NOTHING was booked\. Call find_slots again for fresh times/);
+      expect(ctx.toolFailed).not.toBe(true);
       expect(ctx.bookingRequested()).toBe(false);
       expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
       expect(trxBuilders.triage_items.insert).not.toHaveBeenCalled();
-      // The refusal is the shift rule's own, not a broken read.
-      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining(`${reason} on ${BOOK_DATE}, not for a job from 09:00 to 10:00,`));
+      // The refusal is the shift rule's own, logged as a refusal and not as an error.
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(`${reason} on ${BOOK_DATE}, not for a job from 09:00 to 10:00,`));
+      expect(logger.error).not.toHaveBeenCalled();
+      assertNoComms();
+    });
+
+    test.each([
+      ['a technician who is no longer active', (hours) => { hours.first = jest.fn(async () => ({ id: 't-1', name: 'Tech One', employment_status: 'terminated', field_dispatchable: true })); }],
+      ['a failed read of the hours', (hours) => { hours.then = (resolve, reject) => Promise.reject(new Error('hours read failed')).then(resolve, reject); }],
+    ])('%s stays a failure: nothing is booked and the office calls back', async (_case, arrange) => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      arrange(techOnShift('08:00', '18:00'));
+      const ctx = slotCtx();
+      const out = await executeTool('request_booking', GOOD_INPUT, ctx);
+      expect(out).toMatch(/could not be placed — NOTHING was booked/);
+      expect(ctx.toolFailed).toBe(true);
+      expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalled();
       assertNoComms();
     });
 

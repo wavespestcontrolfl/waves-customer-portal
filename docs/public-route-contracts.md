@@ -1022,7 +1022,10 @@ link, inspection booking and a signed proposal's first visit. A visit the
 technician's shift does not hold gets the route's existing recoverable answer
 (409 `SLOT_UNAVAILABLE`, or `SLOT_TAKEN` from the `/book` commit), so an offer
 signed before the gate was set, or before the office changed the hours, is
-refused and the customer picks another time. Not yet checked at a commit:
+refused and the customer picks another time. A self-booked plan's first visit
+is lengthened to the program's length only when the longer block fits the
+shift too; otherwise it keeps its signed end, as when the next time is taken.
+Not yet checked at a commit:
 public reschedule moves, and the day as the route would run it (capacity
 mode). Gate off: byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
