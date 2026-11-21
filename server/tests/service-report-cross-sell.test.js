@@ -611,18 +611,30 @@ describe('buildReportCrossSell', () => {
         'quote required': { quoteRequired: true },
         'manual-review reasons': { manualReviewReasons: ['very_large_lot'] },
         'low pricing confidence': { pricingConfidence: 'LOW' },
+        // A guessed footprint, in each form the pricers write it.
+        'defaulted footprint': { footprintWasDefaulted: true },
+        'fallback footprint source': { footprintSource: 'homeSqFt_fallback' },
+        'fallback fpSource': { fpSource: 'Fallback' },
       };
       for (const [name, fields] of Object.entries(markers)) {
         expect([name, flagged(line(fields))]).toEqual([name, true]);
       }
       expect(flagged({ engineResult: { lineItems: [{ service: 'tree_shrub', treeCountSource: 'default_zero' }] } })).toBe(true);
+      // The mint holds a fresh result to the same row test: one function, so
+      // a marker added for one is a marker for the other.
+      const { lineNeedsReviewBeforeExactPrice } = require('../services/estimator-engine/draft-builder');
+      const { engineResultNeedsReview } = require('../services/cancellation-resolution/restart');
+      for (const [name, fields] of Object.entries(markers)) {
+        expect([name, lineNeedsReviewBeforeExactPrice(fields), engineResultNeedsReview({ lineItems: [fields] })]).toEqual([name, true, true]);
+      }
+      expect(lineNeedsReviewBeforeExactPrice({ service: 'lawn_care', turfBasis: 'measuredTurfSf', footprintSource: 'footprint', pricingConfidence: 'high' })).toBe(false);
     });
 
     test('a clean estimate stays clean', () => {
       const clean = {
         'no result at all': {},
         'measured turf on the line and the meta': {
-          engineResult: { lineItems: [{ service: 'lawn_care', turfBasis: 'measuredTurfSf', turfConfidence: 'HIGH', manualReviewReasons: [] }] },
+          engineResult: { lineItems: [{ service: 'lawn_care', turfBasis: 'measuredTurfSf', turfConfidence: 'HIGH', manualReviewReasons: [], footprintWasDefaulted: false, footprintSource: 'footprint' }] },
           result: { fieldVerify: [], results: { lawnMeta: { turfBasis: 'estimatedTurfSf', turfConfidence: 'MEDIUM', customQuoteFlag: false } } },
         },
         'clean rows in every place': {
@@ -650,8 +662,11 @@ describe('buildReportCrossSell', () => {
       }
       // A stored input is not read, whatever it holds.
       expect(flagged({ engineRequest: { profile: { requiresManualReview: true } } })).toBe(false);
-      // Only at the top: the same key inside a result is read like any other.
-      expect(flagged({ result: { engineRequest: { profile } } })).toBe(true);
+      // At any depth: the estimator attaches the request to the result it
+      // saves, so the same flags can sit at result.engineRequest.
+      expect(flagged({ engineRequest: { profile }, result: { engineRequest: { profile, options: {} }, lineItems: [{ service: 'pest_control', inputs: { fieldVerifyFlags: profile.fieldVerifyFlags } }] } })).toBe(false);
+      // A marker beside the request is still read.
+      expect(flagged({ result: { engineRequest: { profile }, lineItems: [{ service: 'pest_control', requiresManualReview: true }] } })).toBe(true);
     });
 
     test('the property summary turf grade counts only when the seed replays a lawn size', async () => {
@@ -715,7 +730,11 @@ describe('buildReportCrossSell', () => {
         SERVICE(),
         dbFor(args({
           engineRequest: { profile: { fieldVerifyFlags: [{ field: 'estimatedTurfSf', priority: 'MEDIUM', reason: 'x' }] } },
-          result: { property: { turfConfidence: 'LOW', turfBasis: 'lotFallback' }, recurring: { services: [{ service: 'pest_control' }] } },
+          result: {
+            engineRequest: { profile: { fieldVerifyFlags: [{ field: 'estimatedTurfSf', priority: 'MEDIUM', reason: 'x' }] } },
+            property: { turfConfidence: 'LOW', turfBasis: 'lotFallback' },
+            recurring: { services: [{ service: 'pest_control' }] },
+          },
         })),
         { propertyLookup: missLookup },
       );

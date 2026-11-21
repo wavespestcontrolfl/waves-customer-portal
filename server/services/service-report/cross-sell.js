@@ -324,12 +324,13 @@ function positiveOrNull(value) {
 // unqualified exact per-application figure, since the new price is graded
 // on its own inputs and knows nothing about the original's caveat.
 //
-// WHAT counts as a marker: a non-empty fieldVerify list, or the row test that
-// proposal generation and the plan mint gate on (lineRequiresReview,
-// lineHasHeuristicTurf, a LOW pricing confidence). A hand-kept subset read a
-// LOW turf confidence only, so a heuristic turf BASIS at MEDIUM
-// (plausibleMaxTurfCap), a measurement request or a list of manual-review
-// reasons read as clean (#8132 pre-push r31).
+// WHAT counts as a marker: a non-empty fieldVerify list, or the row test the
+// plan mint holds its own fresh result to (draft-builder's
+// lineNeedsReviewBeforeExactPrice: lineRequiresReview, a heuristic turf
+// grade, a LOW pricing confidence, a guessed footprint). A hand-kept subset
+// read a LOW turf confidence only, so a heuristic turf BASIS at MEDIUM
+// (plausibleMaxTurfCap), a measurement request, a list of manual-review
+// reasons or a guessed footprint read as clean (#8132 pre-push r31).
 //
 // WHERE it looks: every object of the stored blob. The blob has kept its
 // rows in many places (raw lineItems, the mapped recurring.services and
@@ -338,9 +339,10 @@ function positiveOrNull(value) {
 // accepted estimates held a review-marked row the old list did not read. A
 // missed marker reads as "clean", so an unknown key is read, never skipped.
 // Two parts of the blob are not markers of the price:
-//   - what was fed INTO the pricer (SEED_INPUT_KEYS). The lookup profile kept
-//     there lists verify flags for most properties. The check never read it,
-//     and reading it would end nearly every seeded price;
+//   - what was fed INTO the pricer (SEED_INPUT_KEYS), at any depth: the
+//     estimator also attaches the request to the result it saves. The lookup
+//     profile kept there lists verify flags for most properties. The check
+//     never read it, and reading it would end nearly every seeded price;
 //   - the turf grade on a result's `property` summary: the engine's own
 //     lawn-size guess, which every result carries, a pest-only quote
 //     included. It counts unless the caller replays no lawn size
@@ -352,26 +354,24 @@ const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engin
 
 function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } = {}) {
   if (!estData || typeof estData !== 'object') return false;
-  const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
+  const { lineNeedsReviewBeforeExactPrice } = require('../estimator-engine/draft-builder');
   const markedForReview = (c, isPropertySummary) => (Array.isArray(c.fieldVerify) && c.fieldVerify.length > 0)
     || (Array.isArray(c.fieldVerifyFlags) && c.fieldVerifyFlags.length > 0)
-    || lineRequiresReview(c)
-    || String(c.pricingConfidence || '').toLowerCase() === 'low'
-    || ((!isPropertySummary || replaysLawnSize) && lineHasHeuristicTurf(c));
+    || lineNeedsReviewBeforeExactPrice(c, { turfGrade: !isPropertySummary || replaysLawnSize });
   // The stored JSON is a finite tree, so the walk needs no depth limit; a
   // limit would be a place where a marker reads as clean.
-  const pending = [{ node: estData, key: null, top: true }];
+  const pending = [{ node: estData, key: null }];
   while (pending.length) {
-    const { node, key, top } = pending.pop();
+    const { node, key } = pending.pop();
     if (!node || typeof node !== 'object') continue;
     if (Array.isArray(node)) {
-      for (const item of node) pending.push({ node: item, key, top: false });
+      for (const item of node) pending.push({ node: item, key });
       continue;
     }
     if (markedForReview(node, key === 'property')) return true;
     for (const [childKey, child] of Object.entries(node)) {
-      if (top && SEED_INPUT_KEYS.has(childKey)) continue;
-      pending.push({ node: child, key: childKey, top: false });
+      if (SEED_INPUT_KEYS.has(childKey)) continue;
+      pending.push({ node: child, key: childKey });
     }
   }
   return false;
