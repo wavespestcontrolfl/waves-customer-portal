@@ -213,6 +213,16 @@ describe('the page-load note', () => {
     expect(marker()).toEqual({ build: 'bbb222bbb222', tries: 1 });
   });
 
+  // A rollout can move on between the answer and the reload: the tab on A
+  // hears B and its reload lands on C. The tab updated.
+  test('a reload that landed on a later build than the one it was made for reads first-page', async () => {
+    liveBuild('bbb222bbb222', Date.now());
+    await expect(reloadForNewBuild({ reload: vi.fn() })).resolves.toBeNull();
+    loadAgain('ccc333ccc333');
+    expect(pageLoadNote()).toBe('first-page');
+    expect(marker()).toEqual({ build: 'bbb222bbb222', tries: 1 });
+  });
+
   test('storage that cannot be read reads first-page', () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
     expect(pageLoadNote()).toBe('first-page');
@@ -228,7 +238,7 @@ describe('reloadForNewBuild', () => {
     // the gate's own effect, as before the stale-chunk reload shared the wait.
     expect(reload).toHaveBeenCalledTimes(1);
     await expect(first).resolves.toBeNull();
-    expect(JSON.parse(sessionStorage.getItem('portal-reloaded-for'))).toEqual({ build: 'bbb222bbb222', tries: 1, pending: true });
+    expect(JSON.parse(sessionStorage.getItem('portal-reloaded-for'))).toEqual({ build: 'bbb222bbb222', tries: 1, from: 'aaa111aaa111' });
     await expect(reloadForNewBuild({ reload })).resolves.toBeNull();
     await expect(reloadForNewBuild({ reload })).resolves.toBeNull();
     expect(reload).toHaveBeenCalledTimes(3);

@@ -96,18 +96,20 @@ export function reloadBlockerAtMove(pathname, now = Date.now(), from = null) {
 }
 
 // The note for the page this tab loaded: 'first-page', or 'reload-missed'
-// when this page load is the reload this module made for a newer build
-// (reloadForNewBuild marks it `pending`) and the page still runs another
-// build: the service worker answered with its saved copy. The first read
-// takes the mark, so a later load of the tab reads 'first-page' again.
+// when this page load is the reload this module made for a newer build and
+// the page came back on the build it left (reloadForNewBuild marks that build
+// as `from`): the service worker answered with its saved copy. A reload that
+// lands on any other build updated the tab, also when a later build went live
+// meanwhile. The first read takes the mark, so a later load of the tab reads
+// 'first-page' again.
 let loadNote;
 export function pageLoadNote() {
   if (loadNote !== undefined) return loadNote;
   loadNote = 'first-page';
   try {
     const marker = JSON.parse(sessionStorage.getItem(RELOADED_FOR));
-    if (marker?.pending) {
-      if (marker.build !== loadedBuild()) loadNote = 'reload-missed';
+    if (marker?.from) {
+      if (marker.from === loadedBuild()) loadNote = 'reload-missed';
       sessionStorage.setItem(RELOADED_FOR, JSON.stringify({ build: marker.build, tries: marker.tries }));
     }
   } catch { /* storage cannot be read: the tab made no reload */ }
@@ -232,7 +234,7 @@ export async function reloadForNewBuild({
   if (tries >= RELOAD_TRIES) return 'reloaded';
   // The wait for writes can outlast the signal: ask again.
   if (!hasSignal(now())) return 'no-signal';
-  try { sessionStorage.setItem(RELOADED_FOR, JSON.stringify({ build, tries: tries + 1, pending: true })); } catch { return 'storage'; }
+  try { sessionStorage.setItem(RELOADED_FOR, JSON.stringify({ build, tries: tries + 1, from: loadedBuild() })); } catch { return 'storage'; }
   reload();
   return null;
 }

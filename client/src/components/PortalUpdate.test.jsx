@@ -319,7 +319,7 @@ describe('PortalUpdateGate', () => {
   });
 
   test('the page that a reload opened on the old build notes reload-missed, not first-page', () => {
-    sessionStorage.setItem('portal-reloaded-for', JSON.stringify({ build: 'bbb222bbb222', tries: 1, pending: true }));
+    sessionStorage.setItem('portal-reloaded-for', JSON.stringify({ build: 'bbb222bbb222', tries: 1, from: 'aaa111aaa111' }));
     renderAt('/admin/dashboard');
     expect(moveBlockerFor('/admin/dashboard')).toBe('reload-missed');
   });
