@@ -649,7 +649,7 @@ describe('mintPlanStartEstimate', () => {
     test('a first line that names no street is priced by hand: its home key would be the unit alone (codex pre-push r31 P1)', async () => {
       // The real stored address, so the read-back check alone cannot refuse these.
       const realAddress = { pricingAi: { ...deps().pricingAi, addressForCustomer: require('../services/customer-pricing-ai').addressForCustomer } };
-      for (const [line1, line2] of [['', 'Apt 4'], ['Apt 4', null], ['#4', null], ['Apt#4', null], ['123 Apt 4', null], ['4', null]]) {
+      for (const [line1, line2] of [['', 'Apt 4'], ['Apt 4', null], ['#4', null], ['Apt#4', null], ['4B', null], ['123 Apt 4', null], ['123 Apt#4', null], ['4', null]]) {
         tables.customers = [{ ...LEAD, address_line1: line1, address_line2: line2 }];
         await refused('pricing_unavailable', {}, realAddress);
       }

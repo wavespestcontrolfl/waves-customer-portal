@@ -2261,7 +2261,7 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     premises.mockRejectedValueOnce(new Error('pg down'));
     expect('planStart' in await ask(plain())).toBe(false);
     premises.mockClear();
-    for (const street of [{ address_line1: null }, { city: null, zip: null }, { address_line1: '', address_line2: 'Apt 4' }, { address_line1: 'Apt 4' }, { address_line1: '123 Apt 4' }]) {
+    for (const street of [{ address_line1: null }, { city: null, zip: null }, { address_line1: '', address_line2: 'Apt 4' }, { address_line1: 'Apt 4' }, { address_line1: '4B' }, { address_line1: '123 Apt#4' }]) {
       const result = await ask(plain(street));
       // Still priced: only the street check turns booking off.
       expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);

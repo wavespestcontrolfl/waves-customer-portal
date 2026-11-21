@@ -722,9 +722,9 @@ async function accountHasOtherProfile(dbh, customer) {
 // property row. Plan restart keeps the portal offer's default, as on main.
 // Both modes refuse a first line that names no street (codex pre-push r31
 // P1; streetLineNamesStreet, the address normalizer's own unit grammar):
-// blank with the unit on line 2, only a unit ("Apt 4", "#4", "Apt#4"), or a
-// number with no street ("4", "123 Apt 4"). Its key would be a unit or a
-// number alone ("4|city|zip"), which names no house.
+// blank with the unit on line 2, only a unit ("Apt 4", "#4", "Apt#4", "4B"),
+// or a number with no street ("4", "123 Apt#4"). Its key would be a unit or
+// a number alone ("4|city|zip"), which names no house.
 async function singlePremisesStreet(dbh, customer, { proof, strict = false } = {}) {
   const linkage = require('../estimate-property-linkage');
   if (!require('../../utils/address-normalizer').streetLineNamesStreet(customer.address_line1)) return null;

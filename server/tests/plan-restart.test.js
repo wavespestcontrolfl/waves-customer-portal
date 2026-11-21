@@ -1160,7 +1160,7 @@ describe('mintRestartEstimate', () => {
   });
 
   test('a first line that names no street gets no online restart price: its home key would be the unit alone (codex pre-push r31 P1)', async () => {
-    for (const [line1, line2] of [['', 'Apt 4'], ['Apt 4', null], ['#4', null], ['Apt#4', null], ['123 Apt 4', null], ['Bldg 2, Apt 4', null], ['4', null]]) {
+    for (const [line1, line2] of [['', 'Apt 4'], ['Apt 4', null], ['#4', null], ['Apt#4', null], ['4B', null], ['123 Apt 4', null], ['123 Apt#4', null], ['Bldg 2, Apt 4', null], ['4', null]]) {
       tables.customers[0] = { ...tables.customers[0], address_line1: line1, address_line2: line2 };
       await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'pricing_unavailable' });
     }

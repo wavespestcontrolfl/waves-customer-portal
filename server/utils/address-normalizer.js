@@ -510,20 +510,29 @@ function splitUnitFirstLine(value) {
   return null;
 }
 
-// Whether a street line names a street (codex pre-push r31 P1 on #8132): the
-// text left after a leading unit ("Unit 4, 100 Beach Rd", "Apt 204 at 123
-// Main St") and a trailing unit ("123 Main St Apt 4") are cut off has a
-// letter and is not only units itself ("Apt 4", "Apt#4", "Bldg 2 Apt 4").
-// So a blank line, a unit, or a number with a unit ("123 Apt 4", "#4")
-// names none. A leading unit is cut only when the line starts with a
-// designator or a hash: the unit-first pattern also takes a word that starts
-// like one ("Florida 70" as "Fl" + "orida"), and that line names a road.
+// Whether a street line names a street (codex pre-push r31 P1 on #8132, and
+// the follow-up's own pre-push rounds). After a leading unit is cut ("Unit
+// 4, 100 Beach Rd", "Apt 204 at 123 Main St"), the street text must keep a
+// word of two or more letters that is not part of a unit. A unit here is a
+// designator with the token after it ("Apt 4", "Lot 12"), a hash token
+// ("#4"), or a designator written as one token with its value ("Apt#4",
+// "Apt4", "Apt-4"). So a blank line, a unit alone, a lone unit value ("4B")
+// or a number with a unit ("123 Apt#4") names none. FL with a hyphen is the
+// state road ("12345 FL-70"), never a floor. A leading unit is cut only when
+// the line starts with a designator or a hash: the unit-first pattern also
+// takes a word that starts like one ("Florida 70" as "Fl" + "orida").
+const DESIGNATOR_ALTERNATION = [...UNIT_DESIGNATORS].join('|');
+const ONE_TOKEN_UNIT_RE = new RegExp(`^(?:(?:${DESIGNATOR_ALTERNATION})(?:#|(?=\\d))|(?!fl-)(?:${DESIGNATOR_ALTERNATION})-)[a-z0-9-]+$`);
 function streetLineNamesStreet(value) {
   const line = cleanString(value);
   const leadLetters = line.toLowerCase().match(/^[a-z]+/)?.[0] || '';
   const lead = line.startsWith('#') || UNIT_DESIGNATORS.has(leadLetters) ? splitUnitFirstLine(line) : null;
-  const street = splitStreetLineUnit(lead ? lead.rest : line).street.trim();
-  return /[a-z]/i.test(street) && !UNIT_FIRST_SEGMENT_RE.test(street);
+  const words = splitStreetLineUnit(lead ? lead.rest : line).street.toLowerCase().replace(/[.,]/g, '').split(' ').filter(Boolean);
+  for (let i = 0; i < words.length; i += 1) {
+    if (words[i] === '#' || UNIT_DESIGNATORS.has(words[i].replace(/#$/, ''))) i += 1;
+    else if (!words[i].startsWith('#') && !ONE_TOKEN_UNIT_RE.test(words[i]) && (words[i].match(/[a-z]/g) || []).length >= 2) return true;
+  }
+  return false;
 }
 
 // The unit a line carries in EITHER supported position — trailing/inline
