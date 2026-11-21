@@ -45,8 +45,21 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     const [inserted] = await db('newsletter_subscribers').insert({ ...row, status: 'active', customer_id: customerId }).returning('id');
     return typeof inserted === 'object' ? inserted.id : inserted;
   }
-  const record = (customerId, date, serviceType = 'Quarterly Pest Control', status = 'completed') => db('service_records')
-    .insert({ id: randomUUID(), customer_id: customerId, service_date: date, service_type: serviceType, status });
+  // One catalog service of a category, made in this test's transaction; returns its key.
+  async function catalogService(category, over = {}) {
+    const key = `fixture_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
+    await db('services').insert({ service_key: key, name: `Fixture service ${key}`, category, ...over });
+    return key;
+  }
+  // A finished record with the catalog key its completion froze (category null: a record with
+  // no key and a name the catalog does not have).
+  async function record(customerId, date, category = 'pest_control', status = 'completed') {
+    const key = category ? await catalogService(category) : null;
+    await db('service_records').insert({
+      id: randomUUID(), customer_id: customerId, service_date: date, service_type: 'Fixture visit, no catalog name', status,
+      service_data: JSON.stringify(key ? { completedServiceKey: key } : {}),
+    });
+  }
   const property = (customerId, over = {}) => db('customer_properties')
     .insert({ customer_id: customerId, occupancy_type: 'owner_occupied', active: true, ...over });
   // A customer with a recent visit and a reader: the base case every exclusion test varies.
@@ -86,9 +99,9 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
 
   test('the last visit is the latest completed record up to today; member since is the since date; the line is the day\'s one line', async () => {
     const c = await customer({ member_since: '2024-03-05' });
-    await record(c, '2025-08-20', 'Lawn Care Visit');
-    await record(c, '2026-02-10', 'Mosquito Control');
-    await record(c, '2026-11-05', 'Quarterly Pest Control');
+    await record(c, '2025-08-20', 'lawn_care');
+    await record(c, '2026-02-10', 'mosquito');
+    await record(c, '2026-11-05', 'pest_control');
     const s = await reader(c);
     const facts = await loadHomeFacts(db, [s], NOW);
     expect(facts.get(s)).toEqual({ customerId: c, address: `${c}@example.invalid`, lastVisit: { date: '2026-11-05', line: 'pest' }, sinceDate: '2024-03-05' });
@@ -99,7 +112,7 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     const s = await reader(c);
     await record(c, '2026-06-01');
     await db('service_records').insert({ id: randomUUID(), customer_id: c, service_date: '2026-09-09', service_type: 'Quarterly Pest Control', status: null });
-    for (const status of ['scheduled', 'in_progress', 'cancelled']) await record(c, '2026-11-18', 'Quarterly Pest Control', status);
+    for (const status of ['scheduled', 'in_progress', 'cancelled']) await record(c, '2026-11-18', 'pest_control', status);
     await record(c, '2026-11-22');
     await record(c, '2026-12-15');
     expect((await loadHomeFacts(db, [s], NOW)).get(s).lastVisit.date).toBe('2026-09-09');
@@ -126,14 +139,14 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     expect((await loadHomeFacts(db, [s], NOW)).get(s).sinceDate).toBe('2023-01-31');
   });
 
-  test('two service names on the last day: from two lines gives no label, from one line gives that line', async () => {
+  test('two services on the last day: from two lines gives no label, from one line gives that line', async () => {
     const two = await customer();
-    await record(two, '2026-11-05', 'Quarterly Pest Control');
-    await record(two, '2026-11-05', 'Lawn Care Visit');
-    await record(two, '2026-10-01', 'Mosquito Control');
+    await record(two, '2026-11-05', 'pest_control');
+    await record(two, '2026-11-05', 'lawn_care');
+    await record(two, '2026-10-01', 'mosquito');
     const one = await customer();
-    await record(one, '2026-11-05', 'Lawn Care Visit');
-    await record(one, '2026-11-05', 'Lawn Care Visit #2');
+    await record(one, '2026-11-05', 'lawn_care');
+    await record(one, '2026-11-05', 'lawn_care');
     const [sTwo, sOne] = [await reader(two), await reader(one)];
     const facts = await loadHomeFacts(db, [sTwo, sOne], NOW);
     expect(facts.get(sTwo).lastVisit.line).toBeNull();
@@ -355,6 +368,34 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     expect([...facts.keys()]).toEqual([same]);
   });
 
+  test('the label comes from the service catalog: the frozen key, or a name that is one catalog name; never words in a name', async () => {
+    const lineFor = async (insertRecord) => {
+      const c = await customer();
+      await insertRecord(c);
+      const s = await reader(c);
+      return (await loadHomeFacts(db, [s], NOW)).get(s).lastVisit.line;
+    };
+    const plain = (c, over) => db('service_records').insert({ id: randomUUID(), customer_id: c, service_date: '2026-11-05', status: 'completed', ...over });
+    const tag = randomUUID().slice(0, 8);
+    // The catalog's placeholder appointment holds the company name; an aeration holds "rat".
+    const placeholder = await catalogService('specialty', { name: `Waves Pest Control Appointment Service ${tag}` });
+    const aeration = await catalogService('lawn_care', { name: `Core Aeration Service ${tag}` });
+    await catalogService('termite', { name: `Twin name ${tag}` });
+    await catalogService('rodent', { name: `Twin name ${tag}` });
+    // The frozen key decides, whatever the name says.
+    expect(await lineFor((c) => plain(c, { service_type: 'Rodent Trapping', service_data: JSON.stringify({ completedServiceKey: placeholder }) }))).toBeNull();
+    expect(await lineFor((c) => plain(c, { service_type: 'Quarterly Pest Control', service_data: JSON.stringify({ completedServiceKey: aeration }) }))).toBe('lawn');
+    // A key the catalog does not have gives no label; the name is not tried.
+    expect(await lineFor((c) => plain(c, { service_type: `Core Aeration Service ${tag}`, service_data: JSON.stringify({ completedServiceKey: `gone_${tag}` }) }))).toBeNull();
+    // No key: the name must be one catalog name, in any case.
+    expect(await lineFor((c) => plain(c, { service_type: ` core aeration service ${tag} ` }))).toBe('lawn');
+    expect(await lineFor((c) => plain(c, { service_type: `Waves Pest Control Appointment Service ${tag}` }))).toBeNull();
+    expect(await lineFor((c) => plain(c, { service_type: 'Core Aeration' }))).toBeNull();
+    expect(await lineFor((c) => plain(c, { service_type: 'Quarterly Pest Control', service_data: JSON.stringify({ completedServiceKey: '  ' }) }))).toBeNull();
+    // A name two catalog services of two categories share is not one line.
+    expect(await lineFor((c) => plain(c, { service_type: `Twin name ${tag}` }))).toBeNull();
+  });
+
   test('a customer staff marked multi-home, or one with no street on file, has no entry', async () => {
     // has_multi_home: a second premises that never got a customer_properties row.
     const { s: flagged } = await eligible({ has_multi_home: true });
@@ -419,9 +460,9 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
   test('two readers do not mix: each has its own customer, dates and line', async () => {
     const a = await customer({ member_since: '2023-02-01' });
     const b = await customer({ member_since: '2025-09-15' });
-    await record(a, '2026-10-01', 'Lawn Care Visit');
-    await record(b, '2026-05-01', 'Termite Inspection');
-    await record(b, '2026-11-01', 'Spring special');
+    await record(a, '2026-10-01', 'lawn_care');
+    await record(b, '2026-05-01', 'termite');
+    await record(b, '2026-11-01', null);
     const [sA, sB] = [await reader(a), await reader(b)];
     const facts = await loadHomeFacts(db, [sA, sB], NOW);
     expect(facts.get(sA)).toEqual({ customerId: a, address: `${a}@example.invalid`, lastVisit: { date: '2026-10-01', line: 'lawn' }, sinceDate: '2023-02-01' });

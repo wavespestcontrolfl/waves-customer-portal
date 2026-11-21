@@ -230,13 +230,10 @@ const OPTOUT_SAME_MAILBOX_SQL = (() => {
 // the address itself, LOWER(TRIM)'d, for every other domain. Two rows
 // sharing a mailbox always compute the SAME key regardless of which alias
 // spelling either one uses — collapsing the exact-match-OR-Google-alias-
-// match rule into one equality Postgres can hash-join.
-const MAILBOX_KEY_SQL = (fieldExpr) => {
-  const trimmed = `TRIM(${fieldExpr})`;
-  return `(CASE WHEN ${GOOGLE_MAILBOX_SQL.isGoogle(trimmed)} AND ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} <> ''
-    THEN ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} || '@gmail.com'
-    ELSE LOWER(${trimmed}) END)`;
-};
+// match rule into one equality Postgres can hash-join. The builder lives with
+// the mailbox identity it is made of (customer-comms-lock.js GOOGLE_MAILBOX_SQL.key),
+// so the Waves Pest Insider "Your home" mailbox rule reads the same key.
+const MAILBOX_KEY_SQL = (fieldExpr) => GOOGLE_MAILBOX_SQL.key(fieldExpr);
 // The ONE sendable row per mailbox among ACTIVE rows: DISTINCT ON collapses
 // each mailbox_key to its single earliest (created_at, id) row — the SAME
 // deterministic tie-break every other canonical pick in this codebase uses

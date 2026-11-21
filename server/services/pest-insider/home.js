@@ -12,7 +12,7 @@
  * reaches the shared body, the archive or a copy a reader did not get.
  *
  * This file is a leaf: it loads no database layer (loadHomeFacts is handed its
- * connection) and requires the classifier modules only when it runs, so the strip
+ * connection) and requires the address and property helpers only when it runs, so the strip
  * helpers can be required from newsletter-draft.js and newsletter-proof.js
  * without a load-order risk.
  */
@@ -44,25 +44,23 @@ const hasHomeToken = (content) => {
 // (Neither token is a prefix of the other: `{{pi-home}}` needs its closing braces.)
 const neutralizeHomeTokens = (content) => String(content || '').split(HOME_TEXT_TOKEN).join('').split(HOME_TOKEN).join('');
 
-// The service line of a visit day, from the platform's one classifier (the estimator's
-// serviceKeysFromText through newsletter-audience-profiles' linesFromScheduledServices,
-// which also folds palm and commercial keys into the six sellable lines). `types` is every
-// service name recorded on that day. Exactly one line across the whole set is that line;
-// none, or more than one, has none: the block prints no label then. The classifier reads
-// a service name only to pick a line; the name itself is never kept or shown.
-// The classifier's rodent rule is the bare text "rat", which also sits inside "Core Aeration"
-// and "Integrated Pest Management". A reader sees this label, so the rodent answer stands only
-// for a name with a rodent word of its own.
-const RODENT_WORD = /\b(?:rodents?|rats?|mouse|mice)\b/i;
-function serviceLineOf(types) {
-  const { linesFromScheduledServices } = require('../newsletter-audience-profiles');
+// The service line of a visit day, from the service catalog (the `services` table). A
+// finished record freezes its catalog key at completion (service_data.completedServiceKey),
+// and the catalog gives that key one category. A record with no key (a visit before the
+// keys) counts only when its name is one catalog name, letter for letter. A service name
+// is never read for words: "Core Aeration" holds "rat", and the placeholder appointment
+// holds the company's own "Pest Control". `categories` is every category of that day.
+// Exactly one line across the day is that line; none, or more than one, has none: the
+// block prints no label then. Specialty and inspection work has no line of its own.
+const CATEGORY_LINE = new Map([
+  ['pest_control', 'pest'], ['lawn_care', 'lawn'], ['mosquito', 'mosquito'],
+  ['termite', 'termite'], ['rodent', 'rodent'], ['tree_shrub', 'tree_shrub'],
+]);
+function serviceLineOf(categories) {
   const lines = new Set();
-  for (const name of Array.isArray(types) ? types : [types]) {
-    // The helper skips terminal statuses (a finished visit is not live coverage),
-    // so the row is handed over as a live recurring one: only its text is read.
-    for (const line of linesFromScheduledServices([{ service_type: name, status: 'confirmed', is_recurring: true }]).lines) {
-      if (line !== 'rodent' || RODENT_WORD.test(String(name ?? ''))) lines.add(line);
-    }
+  for (const category of Array.isArray(categories) ? categories : [categories]) {
+    const line = CATEGORY_LINE.get(String(category ?? '').trim().toLowerCase());
+    if (line) lines.add(line);
   }
   return lines.size === 1 ? [...lines][0] : null;
 }
@@ -162,7 +160,7 @@ function homeFromRow(row, today) {
     customerId: row.customer_id,
     // The address these facts were read for: the sender mails a block only to this address.
     address: String(row.reader_address ?? '').trim().toLowerCase(),
-    lastVisit: { date: lastDate, line: serviceLineOf(row.last_types) },
+    lastVisit: { date: lastDate, line: serviceLineOf(row.last_categories) },
     // "Member since": the Waves app's own date (customers.member_since), not the first
     // record, which begins in August 2025 for customers who joined before.
     sinceDate: dateOnlyString(row.member_since),
@@ -182,17 +180,14 @@ function homeFromRow(row, today) {
 // One property ever, not one active: the last visit is read over the customer's whole
 // history, so a visit to a retired second property must not stand as this home's.
 // family_occupied stays out on purpose: that home's payer can be another person.
-// One key for one mailbox, whatever its Gmail spelling: the sender's MAILBOX_KEY_SQL rule,
-// built from the same customer-comms-lock.js GOOGLE_MAILBOX_SQL parts.
-function mailboxKeySql(expr) {
-  const { GOOGLE_MAILBOX_SQL } = require('../../utils/customer-comms-lock');
-  const trimmed = `TRIM(${expr})`;
-  return `(CASE WHEN ${GOOGLE_MAILBOX_SQL.isGoogle(trimmed)} AND ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} <> ''
-    THEN ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} || '@gmail.com' ELSE LOWER(${trimmed}) END)`;
-}
-// The customers columns that can hold an address of the customer's (customer-comms-lock.js
-// CUSTOMER_EMAIL_COLUMNS; its fifth, billing_email, is on notification_prefs).
-const OTHER_CUSTOMER_MAILBOX_COLUMNS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
+// One key for one mailbox, whatever its Gmail spelling: the newsletter sender's own key
+// (customer-comms-lock.js GOOGLE_MAILBOX_SQL.key, its MAILBOX_KEY_SQL).
+const mailboxKeySql = (expr) => require('../../utils/customer-comms-lock').GOOGLE_MAILBOX_SQL.key(expr);
+// The customers columns that can hold an address of the customer's: the ownership list
+// (CUSTOMER_EMAIL_COLUMNS) without billing_email, which is on notification_prefs
+// (newsletter-confirm.js customerEmailFields reads it the same way).
+const otherCustomerMailboxColumns = () => require('../../utils/customer-comms-lock').CUSTOMER_EMAIL_COLUMNS
+  .filter((column) => column !== 'billing_email');
 
 // Every live customer's mailboxes, computed once per read (a correlated scan would key every
 // customer again for each reader; newsletter-sender.js withMailboxCustomers has the same shape).
@@ -200,7 +195,7 @@ const FACTS_SQL = (idList) => `
 WITH mailbox_owners AS MATERIALIZED (
   SELECT ${mailboxKeySql('a.address')} AS mailbox_key, o.id AS customer_id
   FROM customers o
-  CROSS JOIN LATERAL (VALUES ${OTHER_CUSTOMER_MAILBOX_COLUMNS.map((column) => `(o.${column})`).join(', ')}) AS a(address)
+  CROSS JOIN LATERAL (VALUES ${otherCustomerMailboxColumns().map((column) => `(o.${column})`).join(', ')}) AS a(address)
   WHERE o.deleted_at IS NULL AND TRIM(COALESCE(a.address, '')) <> ''
   UNION ALL
   SELECT ${mailboxKeySql('np.billing_email')} AS mailbox_key, o.id AS customer_id
@@ -208,7 +203,7 @@ WITH mailbox_owners AS MATERIALIZED (
   WHERE o.deleted_at IS NULL AND TRIM(COALESCE(np.billing_email, '')) <> ''
 )
 SELECT ns.id AS subscriber_id, c.id AS customer_id, c.member_since, c.property_type, c.waveguard_tier,
-       LOWER(TRIM(ns.email)) AS reader_address, v.last_date, t.last_types, t.last_stamps, t.last_frozen,
+       LOWER(TRIM(ns.email)) AS reader_address, v.last_date, t.last_categories, t.last_stamps, t.last_frozen,
        c.address_line1 AS home_line1, c.address_line2 AS home_line2, c.city AS home_city, c.zip AS home_zip,
        (SELECT p.id FROM customer_properties p WHERE p.customer_id = c.id LIMIT 1) AS home_property_id,
        (SELECT json_build_object('address_line1', p.address_line1, 'address_line2', p.address_line2, 'city', p.city, 'zip', p.zip,
@@ -222,7 +217,7 @@ JOIN LATERAL (
   WHERE r.customer_id = c.id AND COALESCE(r.status, 'completed') = 'completed' AND r.service_date <= CAST(? AS date)
 ) v ON v.last_date IS NOT NULL
 JOIN LATERAL (
-  SELECT array_agg(DISTINCT r.service_type) AS last_types,
+  SELECT array_agg(DISTINCT sv.category) FILTER (WHERE sv.category IS NOT NULL) AS last_categories,
          COALESCE(json_agg(json_build_object(
            'property_id', ss.property_id, 'address_line1', ss.service_address_line1, 'address_line2', ss.service_address_line2,
            'city', ss.service_address_city, 'zip', ss.service_address_zip,
@@ -234,6 +229,12 @@ JOIN LATERAL (
   FROM service_records r
   LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id
   LEFT JOIN estimates e ON e.id = ss.source_estimate_id
+  LEFT JOIN LATERAL (
+    SELECT CASE WHEN COUNT(DISTINCT s.category) = 1 THEN MIN(s.category) END AS category
+    FROM services s
+    WHERE s.service_key = NULLIF(TRIM(r.service_data->>'completedServiceKey'), '')
+       OR (NULLIF(TRIM(r.service_data->>'completedServiceKey'), '') IS NULL AND LOWER(TRIM(s.name)) = LOWER(TRIM(r.service_type)))
+  ) sv ON true
   WHERE r.customer_id = c.id AND COALESCE(r.status, 'completed') = 'completed' AND r.service_date = v.last_date
 ) t ON true
 WHERE ns.id IN (${idList})

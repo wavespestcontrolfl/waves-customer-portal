@@ -16,53 +16,46 @@ function fakeConn(batches) {
 
 describe('serviceLineOf', () => {
   test.each([
-    [['Quarterly Pest Control Service'], 'pest'],
-    [['Lawn Care Visit'], 'lawn'],
-    [['Mosquito Control'], 'mosquito'],
-    [['Termite Inspection'], 'termite'],
-    [['Rodent Exclusion'], 'rodent'],
-    [['Tree & Shrub Care'], 'tree_shrub'],
-    [['Palm Injection'], 'tree_shrub'],
-    [['Commercial Pest Control'], 'pest'],
-    [['Quarterly Pest Control', 'Pest Control Follow-up'], 'pest'],
-    // The classifier reads "rat" inside other words as rodent; the label needs a rodent word of its own.
-    [['Lawn Aeration'], 'lawn'],
-    [['Integrated Pest Management'], 'pest'],
-    [['Rat Trapping'], 'rodent'],
-    [['Rodent Control Service'], 'rodent'],
-    [['Mice Exclusion'], 'rodent'],
-  ])('%j -> %s', (types, line) => expect(serviceLineOf(types)).toBe(line));
-
-  test('"Core Aeration" is not a rodent service: no label', () => {
-    expect(serviceLineOf(['Core Aeration'])).toBeNull();
-    expect(serviceLineOf(['Preparation Visit'])).toBeNull();
-  });
+    [['pest_control'], 'pest'],
+    [['lawn_care'], 'lawn'],
+    [['mosquito'], 'mosquito'],
+    [['termite'], 'termite'],
+    [['rodent'], 'rodent'],
+    [['tree_shrub'], 'tree_shrub'],
+    [[' Pest_Control '], 'pest'],
+    // specialty and inspection work has no line: it never hides or changes the day's one line
+    [['pest_control', 'specialty'], 'pest'],
+    [['inspection', 'lawn_care', 'lawn_care'], 'lawn'],
+  ])('%j -> %s', (categories, line) => expect(serviceLineOf(categories)).toBe(line));
 
   test.each([
-    [null], [undefined], [[]], [['']], [['Spring special']], [['Lawn and Pest Combo']],
-    // two names on the last day from two lines: no label
-    [['Quarterly Pest Control', 'Lawn Care Visit']],
-    [['Lawn Care Visit', 'Spring special', 'Mosquito Control']],
-  ])('no line, or more than one across the whole day, gives null (%j)', (types) => {
-    expect(serviceLineOf(types)).toBeNull();
+    [null], [undefined], [[]], [['']], [[null]], [['specialty']], [['inspection']], [['other']],
+    // a category is a catalog value, never a service name read for words
+    [['Core Aeration']], [['Waves Pest Control Appointment Service']], [['Termite Warranty Renewal Service']],
+    [['constructor']], [['__proto__']],
+    // two lines on the last day: no label
+    [['pest_control', 'lawn_care']],
+    [['lawn_care', 'specialty', 'mosquito']],
+  ])('no line, or more than one across the whole day, gives null (%j)', (categories) => {
+    expect(serviceLineOf(categories)).toBeNull();
   });
 });
 
 describe('loadHomeFacts', () => {
   const row = (over = {}) => ({
     subscriber_id: 11, customer_id: 'c1', reader_address: 'reader@example.invalid', member_since: new Date('2024-03-05T00:00:00Z'), property_type: 'single_family', waveguard_tier: 'Silver',
-    last_date: new Date('2026-11-10T00:00:00Z'), last_types: ['Quarterly Pest Control'], ...over,
+    last_date: new Date('2026-11-10T00:00:00Z'), last_categories: ['pest_control'], ...over,
   });
 
   test('maps each row by subscriber id: dates as YYYY-MM-DD, member since as the since date, a line key, never a service name', async () => {
     const { conn } = fakeConn([[
       row(),
-      row({ subscriber_id: 12, customer_id: 'c2', last_date: '2026-10-01', member_since: null, last_types: ['Gate code 4821 Mary'] }),
+      row({ subscriber_id: 12, customer_id: 'c2', last_date: '2026-10-01', member_since: null, last_categories: null }),
     ]]);
     const facts = await loadHomeFacts(conn, [11, 12], NOW);
     expect(facts.get(11)).toEqual({ customerId: 'c1', address: 'reader@example.invalid', lastVisit: { date: '2026-11-10', line: 'pest' }, sinceDate: '2024-03-05' });
     expect(facts.get(12)).toEqual({ customerId: 'c2', address: 'reader@example.invalid', lastVisit: { date: '2026-10-01', line: null }, sinceDate: null });
-    expect(JSON.stringify([...facts])).not.toMatch(/4821|Mary|Quarterly/);
+    expect(JSON.stringify([...facts])).not.toMatch(/pest_control|Quarterly/);
     expect(JSON.stringify([...facts])).not.toMatch(/visit_?count|count/i);
   });
 
@@ -217,8 +210,8 @@ describe('loadHomeFacts', () => {
     expect([...facts.keys()]).toEqual([1, 2, 5, 6]);
   });
 
-  test('the last day\'s service names are classified together: two lines on one day give no label', async () => {
-    const { conn } = fakeConn([[row({ last_types: ['Quarterly Pest Control', 'Lawn Care Visit'] }), row({ subscriber_id: 12, last_types: ['Lawn Care Visit', 'Lawn Care Visit #2'] })]]);
+  test('the last day\'s catalog categories are read together: two lines on one day give no label', async () => {
+    const { conn } = fakeConn([[row({ last_categories: ['pest_control', 'lawn_care'] }), row({ subscriber_id: 12, last_categories: ['lawn_care'] })]]);
     const facts = await loadHomeFacts(conn, [11, 12], NOW);
     expect(facts.get(11).lastVisit.line).toBeNull();
     expect(facts.get(12).lastVisit.line).toBe('lawn');
@@ -270,7 +263,11 @@ describe('loadHomeFacts', () => {
     expect(calls[0].sql).toMatch(/NOT EXISTS \(SELECT 1 FROM mailbox_owners w WHERE w\.mailbox_key = [^]*? AND w\.customer_id <> c\.id\)/);
     expect(calls[0].sql).toContain("r.service_data->'reportIdentitySnapshot'->'address'");
     // The outer SELECT returns what the lateral computed (a rule on a column the query does not return never runs).
-    expect(calls[0].sql).toContain('t.last_types, t.last_stamps, t.last_frozen,');
+    expect(calls[0].sql).toContain('t.last_categories, t.last_stamps, t.last_frozen,');
+    // The label comes from the catalog: the record's frozen key, or a name that is one catalog name. No service name leaves the query.
+    expect(calls[0].sql).toContain("WHERE s.service_key = NULLIF(TRIM(r.service_data->>'completedServiceKey'), '')");
+    expect(calls[0].sql).toContain('LOWER(TRIM(s.name)) = LOWER(TRIM(r.service_type))');
+    expect(calls[0].sql).not.toMatch(/array_agg\([^)]*service_type/);
     expect(calls[0].sql).toContain(') AS home_property\n');
     expect(calls[0].sql).toContain("e.source = 'quote_wizard' AND e.status = 'draft' AND e.archived_at IS NULL");
     expect(calls[0].sql).toContain("TRIM(COALESCE(c.address_line1, '')) <> ''");
