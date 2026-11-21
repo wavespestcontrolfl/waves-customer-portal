@@ -42,6 +42,12 @@ describe('calculateInventoryCost prices a package share only in the package\'s o
     expect(price({ ...JUG, container_size: '1 jug', inventory_unit: 'gal' }, 4, 'fl_oz')).toEqual({ unitCost: 0.5, costUsed: 2 });
   });
 
+  test('the importer\'s "16 fl_oz" spelling reads as 16 fl oz, with no stock unit to fall back on', () => {
+    const bottle = { container_size: '16 fl_oz', inventory_unit: null, unit_size_oz: 16, best_price: 32, cost_per_unit: null };
+    expect(price(bottle, 1, 'lb')).toEqual(UNCOSTED);
+    expect(price(bottle, 4, 'fl_oz')).toEqual({ unitCost: 2, costUsed: 8 });
+  });
+
   test('a label that names a measure outranks the stock unit', () => {
     expect(price({ ...JUG, inventory_unit: 'g' }, 4, 'fl_oz')).toEqual({ unitCost: 0.5, costUsed: 2 });
     expect(price({ ...JUG, inventory_unit: 'g' }, 30, 'g')).toEqual(UNCOSTED);
@@ -65,5 +71,35 @@ describe('calculateInventoryCost prices a package share only in the package\'s o
     // 1.78 fl oz is the latest live usage movement, which booked 7.0277.
     expect(price({ ...row, container_size: onslaughtLabel.NEW_LABEL }, 1.78, 'fl_oz')).toEqual({ unitCost: 3.9481, costUsed: 7.0277 });
     expect(price({ ...row, container_size: onslaughtLabel.OLD_LABEL }, 1.78, 'fl_oz')).toEqual(UNCOSTED);
+  });
+});
+
+// The protocol and estimate costs (pricing setup preview, estimate pricing audit, inventory COGS, knowledge base) price
+// a usage row's package share with costLineFromUsage. It applies the same check, so the same half gallon is no line there.
+describe('costLineFromUsage prices a package share only in the package\'s own measure', () => {
+  const { costLineFromUsage } = require('../services/product-costing');
+  const usage = (product, usageAmount, usageUnit) => costLineFromUsage({
+    product_name: 'Synthetic product', usage_amount: usageAmount, usage_unit: usageUnit, ...product,
+  });
+
+  test('a measure clash is an unknown cost with its reason, never a package share', () => {
+    expect(usage(PACKET, 0.5, 'gal')).toEqual({
+      cost: 0, usageAmount: 0.5, warning: 'Synthetic product: usage in gal cannot be priced from its weight package',
+    });
+    expect(usage(JUG, 2, 'lb').warning).toBe('Synthetic product: usage in lb cannot be priced from its volume package');
+    const jar = { container_size: '1.33 oz', inventory_unit: 'g', unit_size_oz: 1.33, best_price: 70, cost_per_unit: null };
+    expect(usage(jar, 0.5, 'gal').warning).toBe('Synthetic product: usage in gal cannot be priced from its weight package');
+  });
+
+  test('the same measure, or a plain oz, still prices its share', () => {
+    expect(usage(PACKET, 0.9, 'g')).toMatchObject({ source: 'best_price_unit_size', usageAmount: 0.9 });
+    expect(usage(PACKET, 0.9, 'g').cost).toBeCloseTo(0.7937, 4);
+    expect(usage(PACKET, 0.24, 'oz')).toEqual({ cost: 6, source: 'best_price_unit_size', usageAmount: 0.24 });
+    expect(usage(JUG, 0.5, 'gal')).toEqual({ cost: 32, source: 'best_price_unit_size', usageAmount: 0.5 });
+  });
+
+  test('a unit-cost mismatch keeps its own warning when the package cannot price the usage either', () => {
+    const product = { ...PACKET, cost_per_unit: 5, cost_unit: 'each' };
+    expect(usage(product, 0.5, 'gal').warning).toBe('Synthetic product: usage in gal cannot be priced per each');
   });
 });

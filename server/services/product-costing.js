@@ -171,6 +171,28 @@ function unitFamily(unit, opts = {}) {
   return null;
 }
 
+// A catalog number column as a number; NULL stays null, so Number.isFinite rejects it (Number(null) would be 0).
+const numberOrNull = (value) => (value == null ? null : Number(value));
+const measuredFamily = (family) => (family === 'weight' || family === 'volume' ? family : null);
+
+// 'weight' or 'volume': what one best_price package holds. The pack label says so ("13.5 g", "1 gal"; "16 fl_oz" reads as
+// "16 fl oz"). A label with a plain "oz" or no size leaves it to the stock unit: a product stocked in g holds weight
+// ounces. null when neither says.
+function packageMeasure(row) {
+  const pack = parsePackSize(String(row?.container_size ?? '').replace(/_/g, ' '));
+  return measuredFamily(pack && unitFamily(pack.unit)) || measuredFamily(unitFamily(normalizeUnit(row?.inventory_unit)));
+}
+
+// The package's measure when an amount in `unit` is the other one, weight against volume: unit_size_oz is a bare ounce
+// count, so that amount cannot be priced as a share of one best_price package. null when they agree, or when either side
+// says neither (a plain "oz", a count or unknown unit, a package nothing measures). Shared by the two package-price
+// fallbacks: costLineFromUsage here and calculateInventoryCost (inventory-cost.js).
+function packageMeasureClash(row, unit) {
+  const used = measuredFamily(unitFamily(normalizeUnit(unit)));
+  const pack = packageMeasure(row);
+  return used && pack && used !== pack ? pack : null;
+}
+
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
 // Expand an authoritative $/oz-equivalent price across its family's display
@@ -271,7 +293,7 @@ function costLineFromUsage(row, areaSqFt = 0) {
   }
 
   const usageUnit = row.usage_unit;
-  const costPerUnit = row.cost_per_unit != null ? Number(row.cost_per_unit) : null;
+  const costPerUnit = numberOrNull(row.cost_per_unit);
   let unitMismatch = null;
   if (Number.isFinite(costPerUnit) && costPerUnit >= 0) {
     const costUnit = row.cost_unit || usageUnit;
@@ -288,11 +310,12 @@ function costLineFromUsage(row, areaSqFt = 0) {
     unitMismatch = `${row.product_name}: usage in ${usageUnit || 'no unit'} cannot be priced per ${costUnit || 'no unit'}`;
   }
 
-  const bestPrice = row.best_price != null ? Number(row.best_price) : null;
-  const unitSizeOz = row.unit_size_oz != null ? Number(row.unit_size_oz) : null;
+  const bestPrice = numberOrNull(row.best_price);
+  const unitSizeOz = numberOrNull(row.unit_size_oz);
   const usageOz = convertToOz(usageAmount, usageUnit);
+  const clash = packageMeasureClash(row, usageUnit);
   if (
-    Number.isFinite(bestPrice) && bestPrice >= 0
+    !clash && Number.isFinite(bestPrice) && bestPrice >= 0
     && Number.isFinite(unitSizeOz) && unitSizeOz > 0
     && usageOz != null
   ) {
@@ -306,7 +329,9 @@ function costLineFromUsage(row, areaSqFt = 0) {
   return {
     cost: 0,
     usageAmount,
-    warning: unitMismatch || `No normalized cost data for ${row.product_name}`,
+    warning: unitMismatch || (clash
+      ? `${row.product_name}: usage in ${usageUnit} cannot be priced from its ${clash} package`
+      : `No normalized cost data for ${row.product_name}`),
   };
 }
 
@@ -354,9 +379,10 @@ module.exports = {
   costLineFromUsage,
   normalizeQuantityToOz,
   normalizeUnit,
+  numberOrNull,
+  packageMeasureClash,
   parsePackCount,
   parsePackSize,
-  unitFamily,
   unitPriceBreakdown,
   usageAmountForArea,
 };
