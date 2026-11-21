@@ -1013,6 +1013,20 @@
           ],
           "description": "1.29.0, additive/optional (never `required`): the billing plan the CALLER chose for a RECURRING plan, judged over the WHOLE call in the caller's own words: \"annual_prepay\" when the caller chose to pay for the year up front (\"we'll prepay for the year\", \"let's do the annual\", \"I'll pay it all at once\"); \"per_application\" when the caller chose to be billed each application or visit (\"just bill each application\", \"I'll pay as we go\"). Staff explaining, offering or recommending the options is NOT a choice, and neither is a caller question about them (\"what does prepay cost?\"). An \"okay\", or going ahead with booking, right after the caller asked what a plan costs is not a choice either: the caller must name or plainly pick the plan. A caller who chose and later changed their mind takes the FINAL choice. null when no choice was made, it is unclear, or no recurring plan was discussed. When non-null, pin the caller's own choice sentence to /service_request/billing_choice with speaker \"caller\". The pipeline only verifies that quote; it never reads this field as consent to be charged."
         },
+        "estimate_response": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "accepted",
+            "accepted_with_condition",
+            "undecided",
+            "declined",
+            null
+          ],
+          "description": "1.31.0, additive/optional (never `required`): the CALLER's answer to an estimate or quote that Waves ALREADY SENT before this call, judged over the WHOLE call in the caller's own words. Only when the caller or staff refers to that earlier estimate (\"the estimate you sent\", \"the quote I got\", \"I looked at the link\"); a price first quoted on this call is price.caller_response's job, and a call with no earlier estimate is null. \"accepted\" when the caller plainly says they go ahead with the service or plan on that estimate (\"let's do it\", \"go ahead and sign me up\", \"yes, book it\") and no condition of theirs is still open at hangup; \"accepted_with_condition\" when the caller says yes but ties it to something not settled at hangup (a day still to be found, a spouse or landlord to ask, a change to the price or the scope, a question still to be answered); \"undecided\" when the estimate was discussed and the caller gave no yes and no no (\"I'll think about it\", \"let me look at it again\"); \"declined\" when the caller says no, not now, or that they chose another company. Staff offering, recommending or pressing is NOT an answer, and a bare \"okay\" or \"uh-huh\" after staff reads a price or explains the plan is not \"accepted\". Booking a visit is not by itself \"accepted\" (it can be an inspection or a free consultation): the caller must say they go ahead with the quoted service or plan. A caller who changed their mind takes the FINAL answer at hangup. null when no estimate that Waves already sent was discussed, or the answer is unclear. When non-null, pin the caller's own answer sentence to /service_request/estimate_response with speaker \"caller\". The pipeline only verifies that quote; it never reads this field as consent to be charged and never as an instruction to change an account."
+        },
         "quote_requested": {
           "type": [
             "boolean",
@@ -1581,7 +1595,7 @@
     },
     "evidence": {
       "type": "array",
-      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: scheduling.callback_window_start / _end when set (the stated callback time, and the AGENT-spoken acceptance of the callback), address, urgency, on_site_authorization, hoa_common_area_service, property.whole_building_occupancy=true (CALLER-spoken quote), sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote), scheduling.caller_accepted_slot=true (CALLER-spoken quote), scheduling.moved_appointment_date (the utterance naming it), scheduling.relative_date_used=true and scheduling.moved_appointment_relative_date_used=true (the whole clause holding the relative expression), service_request.billing_choice when non-null (CALLER-spoken quote).",
+      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: scheduling.callback_window_start / _end when set (the stated callback time, and the AGENT-spoken acceptance of the callback), address, urgency, on_site_authorization, hoa_common_area_service, property.whole_building_occupancy=true (CALLER-spoken quote), sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote), scheduling.caller_accepted_slot=true (CALLER-spoken quote), scheduling.moved_appointment_date (the utterance naming it), scheduling.relative_date_used=true and scheduling.moved_appointment_relative_date_used=true (the whole clause holding the relative expression), service_request.billing_choice when non-null (CALLER-spoken quote), service_request.estimate_response when non-null (CALLER-spoken quote).",
       "items": {
         "type": "object",
         "additionalProperties": false,
