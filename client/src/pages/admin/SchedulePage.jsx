@@ -1293,6 +1293,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
   "membership_dues_coverage_unverified", // the month's dues could not be checked / the dues mint was refused retryably (month busy, rate or lane moved); the resume re-reads coverage and mints
   "proposal_terms_unread",               // an invoice-mode commercial proposal's Net terms could not be read; the resume re-reads them and mints
+  "held_payment_lookup_failed",          // GATE_REPORT_AFTER_PAY: the payment holding the visit could not be read; the resume re-reads it before any invoice is linked
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is

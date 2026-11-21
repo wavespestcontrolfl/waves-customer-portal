@@ -11,7 +11,7 @@
 // invoice is explicitly linked to — never inferred) and asks for the closeout.
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, reportAfterPayLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 
 // A visit the technician has NOT started (job-status.js live vocabulary,
@@ -24,7 +24,8 @@ const OPEN_VISIT_STATUSES = ['pending', 'confirmed'];
 // so refusing on_site left the closeout with nothing to close: from the gate
 // flip (2026-09-24) to 2026-10-04 it closed no visit at all. An arrived visit
 // closes like an unstarted one once its day has passed; on its own day only
-// money received closes it (see issuedCloseoutVisitRefusal). en_route is NOT
+// money received closes it, and with GATE_REPORT_AFTER_PAY on only a payment
+// that does not hold it for its report (see issuedCloseoutVisitRefusal). en_route is NOT
 // here: nobody has reached the property, so the visit stays with its
 // technician. The r9 P1 concern (#4127: a quiet closeout would complete a
 // visit whose job timer is still running) is answered by its real condition
@@ -90,7 +91,14 @@ function newestStamp(...values) {
 //  - ARRIVED (on_site): the technician was there. A past day closes on a
 //    send or a payment; today closes only on money received (a send proves
 //    nothing about today — the office picker sends pre-completion invoices
-//    before the tech arrives, Codex P1 r7 #4131).
+//    before the tech arrives, Codex P1 r7 #4131). With GATE_REPORT_AFTER_PAY
+//    on (owner 2026-11-19, *report after pay*), today does not close a visit
+//    a payment holds for its report (`heldForReport`: the visit's live hold
+//    names this invoice, or this payment would record it; see
+//    reportAfterPayHold): the visit stays with its technician, whose
+//    completion reuses the paid invoice, and the daily retry sweep closes it
+//    on that payment once its day has passed. Left out, `heldForReport` is
+//    false: the visit closes as with the gate off.
 //  - UNSTARTED (pending / confirmed / NULL): nobody is known to have gone, so
 //    the INVOICE must carry the proof: it was settled / delivered on a LATER
 //    ET day than the visit (`issuedDay`, from the invoice's own stamps).
@@ -108,12 +116,12 @@ function newestStamp(...values) {
 //    module has never heard of fails CLOSED on a same-day visit.
 //  - Future or unparseable dates, en_route and every terminal status never
 //    close.
-function issuedCloseoutVisitRefusal(status, scheduledDate, { today = etDateString(), trigger = null, issuedDay = null } = {}) {
+function issuedCloseoutVisitRefusal(status, scheduledDate, { today = etDateString(), trigger = null, issuedDay = null, heldForReport = false } = {}) {
   const arrived = isArrivedVisitStatus(status);
   if (!arrived && !isLiveVisitStatus(status)) return `visit_${status}`;
   const day = dateOnly(scheduledDate);
   if (!day || day > today) return 'visit_in_future';
-  if (day === today) return arrived && trigger === 'paid' ? null : 'visit_scheduled_today';
+  if (day === today) return arrived && trigger === 'paid' && heldForReport !== true ? null : 'visit_scheduled_today';
   if (arrived) return null;
   // Never later than the call: a stamp from the future proves nothing yet.
   const proofDay = issuedDay && issuedDay < today ? issuedDay : today;
@@ -184,32 +192,218 @@ async function probeVisitRefusal(conn, svc) {
   return (profile?.requiresProject || profile?.projectBacked) ? 'project_backed' : null;
 }
 
+// GATE_REPORT_AFTER_PAY (owner 2026-11-19, *report after pay*): a payment on
+// an arrived visit's own day, while the paid invoice is the visit's only bill,
+// HOLDS the visit open for its technician's report instead of closing it.
+// The hold is DECIDED ONCE, by a closeout of that payment (its pay rail's, or
+// a retry sweep's), where the closeout would otherwise close the visit, and
+// RECORDED as an audit_log row on the visit (no migration; the closeout pins
+// its record_payment target the same way). Two limits keep the cards that
+// approve a closeout as they are with the gate off (pre-push audit rounds
+// 8-11): a payment the Intelligence Bar's record_payment card approved never
+// holds (reportAfterPayWouldHold), and a receipt resend, which retries a
+// close, never records a hold (closeOutVisitForIssuedInvoice `recordHold`).
+// Every reader reads the hold's row: the resolver and the completion's locked
+// recheck, the completion's invoice choice, both retry sweeps and the
+// Dispatch row. None re-derives the decision from stamps, because each stamp
+// can change after the payment (pre-push audit rounds 2-7: an arrival
+// backdated by the completion, a webhook's processing time, a bill added or
+// voided since). A hold is LIVE while the invoice it names is still settled
+// with the same payment (paid_at, to the millisecond) and still linked to the
+// visit; the earliest live hold wins. A payment undone, refunded or moved
+// leaves no live hold, and every reader then acts as with the gate off. Gate
+// off: every reader reads nothing and acts as before the gate, so turning it
+// off stops new holds and releases the recorded ones (the next sweep closes a
+// held visit on its payment, as the payment would have).
+const REPORT_AFTER_PAY_HOLD_ACTION = 'visit.report_after_pay_held';
+
+// An invoice's paid_at in whole milliseconds, as text: the hold records it,
+// and the live-hold test compares it, in SQL on both sides.
+const paidAtMsSql = (column) => `(FLOOR(EXTRACT(EPOCH FROM ${column}) * 1000)::bigint)::text`;
+
+// The payment a closeout is running for, as its invoice row names it: paid_at
+// in whole milliseconds, or null. A closeout carries it from the row it loaded
+// to the hold's write and to the completion's locked recheck; both compare it
+// with the row they read, through this same function (paymentReversed).
+const paidAtMsOf = (invoice) => (invoice?.paid_at ? new Date(invoice.paid_at).getTime() : null);
+
+// The live holds (hold row `h`, the invoice `hi` it names). The invoice is
+// joined through the visit's own invoices (scheduled_service_id, indexed), so
+// a lookup reads only that visit's rows.
+function liveHoldsQuery(conn) {
+  return conn('audit_log as h')
+    .join('invoices as hi', 'hi.scheduled_service_id', 'h.resource_id')
+    .where({ 'h.action': REPORT_AFTER_PAY_HOLD_ACTION, 'h.resource_type': 'scheduled_services' })
+    .whereRaw("hi.id::text = h.metadata->>'invoiceId'")
+    .whereIn('hi.status', SETTLED_INVOICE_STATUSES)
+    .whereRaw(`${paidAtMsSql('hi.paid_at')} = h.metadata->>'paidAtMs'`);
+}
+
+// liveHoldsQuery as one SQL condition on the sweeps' visit `s`.
+function liveHoldOnVisitSql() {
+  return `EXISTS (SELECT 1 FROM audit_log h JOIN invoices hi ON hi.scheduled_service_id = h.resource_id
+    WHERE h.action = '${REPORT_AFTER_PAY_HOLD_ACTION}' AND h.resource_type = 'scheduled_services' AND h.resource_id = s.id
+      AND hi.id::text = h.metadata->>'invoiceId' AND hi.status IN (${SETTLED_INVOICE_STATUSES.map((status) => `'${status}'`).join(', ')})
+      AND ${paidAtMsSql('hi.paid_at')} = h.metadata->>'paidAtMs')`;
+}
+
+// The visit's live hold: the invoice row it names, plus the payment it was
+// decided on (`hold_paid_at_ms`), or null. Gate off: null, read nothing.
+// Throws on a failed read; each caller says what that means for it.
+async function reportAfterPayHold(conn, visitId) {
+  if (!visitId || !reportAfterPayLive()) return null;
+  const row = await liveHoldsQuery(conn).where('h.resource_id', visitId)
+    .orderBy('h.created_at', 'asc').orderBy('h.id', 'asc')
+    .first('hi.*', conn.raw("h.metadata->>'paidAtMs' as hold_paid_at_ms"));
+  return row || null;
+}
+
+// A visit held on another invoice's payment is that payment's: no other
+// invoice's closeout closes or holds it. The resolver, the hold's write and
+// the completion's locked recheck all ask this one question.
+const heldOnOtherInvoice = (held, invoiceId) => Boolean(held) && String(held.id) !== String(invoiceId);
+
+// Would the payment on `invoice` hold `visit` now? The hold's own conditions,
+// read-only: the gate is on, the technician has arrived (on_site), it is the
+// visit's own ET day, no record_payment card approved the payment, and the
+// invoice is the visit's only bill (completionInvoicesOnVisits: every live
+// row, plus a refunded one). A visit with another bill on it closes on the
+// payment, as with the gate off, and the closeout pins the paid invoice by id.
+// A payment the Intelligence Bar's record_payment card approved carries that
+// card's pin (approvedPaidCloseoutTargetFor: the visit the card said the
+// payment completes, or 'none'), written in the payment's own transaction. It
+// holds nothing, so what the card said stands on every path, as with the gate
+// off (pre-push audit rounds 8-11: a card that deferred its close met the
+// hold in a new way each round). The resolver asks this, and the payment's
+// closeout asks it again under the visit's mint lock when it records the hold.
+async function reportAfterPayWouldHold(conn, { visit, invoice, today }) {
+  if (!reportAfterPayLive() || !isArrivedVisitStatus(visit?.status) || dateOnly(visit?.scheduled_date) !== today) return false;
+  if (await approvedPaidCloseoutTargetFor(conn, invoice.id)) return false;
+  const { completionInvoicesOnVisits } = require('./completion-invoice-candidate');
+  const ids = (await completionInvoicesOnVisits(conn, [visit.id])).map((row) => String(row.id));
+  return ids.length > 0 && ids.every((id) => id === String(invoice.id));
+}
+
+// The hold's write: the payment's closeout records it under the visit's mint
+// lock, which every invoice writer of the visit and the issued closeout's
+// completion take. It reads the visit's hold, the visit and the invoice again
+// and records the row only if this payment holds the visit now. `paidAtMs` is
+// the payment the closeout loaded (paidAtMsOf). Returns true when the visit is
+// held on this payment (recorded now, or before). Returns a refusal code when
+// the visit stays open for another reason: 'visit_paid_on_other_invoice' (held
+// on another invoice's payment) or 'visit_payment_reversed' (the payment is
+// gone: undone or charged back after the closeout read it, round 8, or undone
+// and made again, round 11: the invoice then carries another payment, and
+// that payment's own closeout decides for it). Returns null when this payment
+// no longer holds the visit (a bill added, the visit moved or closed, the gate
+// off): the closeout then judges the visit as with the gate off, and its
+// completion re-reads the hold and the payment under its own locks. A failed
+// read or write throws.
+async function recordReportAfterPayHold(conn, { visitId, invoiceId, today, paidAtMs = null }) {
+  if (!reportAfterPayLive()) return null;
+  return conn.transaction(async (trx) => {
+    await require('./scheduled-invoice-mint').acquireScheduledInvoiceMintLock(trx, visitId);
+    const held = await reportAfterPayHold(trx, visitId);
+    if (heldOnOtherInvoice(held, invoiceId)) return 'visit_paid_on_other_invoice';
+    if (held) return true;
+    const visit = await trx('scheduled_services').where({ id: visitId }).first('id', 'status', 'scheduled_date');
+    const invoice = await trx('invoices').where({ id: invoiceId })
+      .first('id', 'status', 'scheduled_service_id', 'paid_at', trx.raw(`${paidAtMsSql('paid_at')} as paid_at_ms`));
+    if (!visit || !invoice || String(invoice.scheduled_service_id) !== String(visitId)) return null;
+    if (!invoice.paid_at_ms || paymentReversed(invoice, { trigger: 'paid', paidAtMs })) return 'visit_payment_reversed';
+    if (!(await reportAfterPayWouldHold(trx, { visit, invoice, today }))) return null;
+    await require('./audit-log').recordAuditEvent({
+      actor_type: 'system',
+      action: REPORT_AFTER_PAY_HOLD_ACTION,
+      resource_type: 'scheduled_services',
+      resource_id: visitId,
+      metadata: { invoiceId: String(invoiceId), paidAtMs: invoice.paid_at_ms, day: today },
+      critical: true,
+      trx,
+    });
+    return true;
+  });
+}
+
+// GATE_REPORT_AFTER_PAY (pre-push audit rounds 8, 9 and 11): a close on a
+// payment, and a hold on one, need THAT payment still standing on the invoice
+// row read under the lock: on the visit's own day, and after it, where the
+// next day's sweep closes a held visit on its payment (round 9). A payment
+// undone or charged back after the closeout's unlocked reads leaves the visit
+// open, and so does one undone and made again: `paidAtMs` is the payment the
+// closeout loaded (paidAtMsOf), and a row that carries another payment is that
+// payment's to decide, by its own closeout or by the card that approved it
+// (round 11). The completion refuses `issued_visit_payment_reversed`, which
+// the retry sweep asks again, with the trigger and the pin the invoice's state
+// then proves. Every paid rail runs the closeout only once the invoice is
+// settled (a part payment runs none), so an unsettled row here is a payment
+// that is gone. Gate off: false, so the close is as before the gate.
+function paymentReversed(invoice, { trigger, paidAtMs = null } = {}) {
+  if (trigger !== 'paid' || !reportAfterPayLive()) return false;
+  if (!SETTLED_INVOICE_STATUSES.includes(String(invoice?.status))) return true;
+  return paidAtMs != null && paidAtMsOf(invoice) !== paidAtMs;
+}
+
+// The completion's read of the hold: the held invoice, linked to the service
+// record by the same statement that re-checks it under the invoice's row lock
+// (still settled with the same payment, still linked to the visit). A payment
+// undone between the read and the link leaves the visit unheld, and the
+// completion then chooses its invoice as with the gate off (pre-push audit
+// round 7). Returns the linked row, or null. Gate off: null. Throws on a
+// failed read or write: the completion fails closed.
+async function linkReportAfterPayHold(conn, { visitId, serviceRecordId, technicianId = null }) {
+  const held = await reportAfterPayHold(conn, visitId);
+  if (!held) return null;
+  const [linked] = await conn('invoices')
+    .where({ id: held.id, scheduled_service_id: visitId })
+    .whereIn('status', SETTLED_INVOICE_STATUSES)
+    .whereRaw(`${paidAtMsSql('paid_at')} = ?`, [String(held.hold_paid_at_ms)])
+    .update({ service_record_id: serviceRecordId, technician_id: technicianId || held.technician_id || null, updated_at: new Date() })
+    .returning('*');
+  return linked || null;
+}
+
+// The visits among `visitIds` that a live hold keeps open, as a Set of ids;
+// empty with the gate off. The Dispatch row's "Paid, report not sent" badge
+// reads it, never the row's newest bill: a bill added after the payment is the
+// office's and must not hide the report still owed.
+async function reportAfterPayHeldVisitIds(conn, visitIds) {
+  const ids = [...new Set((visitIds || []).filter(Boolean).map(String))];
+  if (!ids.length || !reportAfterPayLive()) return new Set();
+  const rows = await liveHoldsQuery(conn).whereIn('h.resource_id', ids).distinct('h.resource_id as id');
+  return new Set(rows.map((row) => String(row.id)));
+}
+
 // The visit this invoice bills, or null with the reason it was left alone.
 // Every "no" keeps the visit open: a future date, a visit already closed, a
 // grouped stop (the whole visit closes together), or a visit whose billing a
 // saved grouped closeout owns. Once the linked visit row is in hand, every
 // refusal carries it as `visit` so the caller can audit the refusal — and
 // resume its OWN partially committed closeout on a completed one (see
-// resumableIssuedCloseoutAttempt), never anyone else's.
-async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null } = {}) {
+// resumableIssuedCloseoutAttempt), never anyone else's. Read-only: it never
+// records a hold (GATE_REPORT_AFTER_PAY), so the probes and the closeout
+// share one judgment.
+// GATE_REPORT_AFTER_PAY: a visit held on another invoice's payment closes on
+// that payment only (`visit_paid_on_other_invoice`). One held on this payment
+// stays open for the rest of its day (issuedCloseoutVisitRefusal's
+// `heldForReport`), and so does one this payment would hold
+// (reportAfterPayWouldHold) when the caller records no hold: the read-only
+// probes, and a receipt resend's closeout. deferSameDay (a closeout that may
+// record the hold: every pay rail's, and the retry sweeps'): the visit this
+// payment would hold is judged as the sweep will judge it after its day:
+// neither the same-day rule nor a running job timer (it ends before then, and
+// the sweep checks it again) keeps it open, and every other refusal still
+// does. The answer carries `deferred: true`: the closeout records the hold
+// there (holdForReport). noHold (the record_payment card's probe, asked
+// before its payment exists): that payment will carry the card's pin and hold
+// nothing, so the visit is judged as with the gate off. A hold already
+// recorded still counts.
+async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null, deferSameDay, noHold } = {}) {
   if (!invoice) return { svc: null, reason: 'no_invoice' };
   const linked = await linkedVisitForInvoice(conn, invoice);
   if (!linked.svc) return { svc: null, reason: linked.reason, ...(linked.visit ? { visit: linked.visit } : {}) };
   const { svc } = linked;
   const leaveOpen = (reason) => ({ svc: null, reason, visit: svc });
-  // Status, day and the invoice's own proof decide together
-  // (issuedCloseoutVisitRefusal): a NULL status is a live visit (Codex P2 r8
-  // #4131), an arrived visit closes on a past day or on money received
-  // today, and a visit nobody arrived at closes only on an invoice settled
-  // or delivered after its day.
-  let issuedDay;
-  try {
-    issuedDay = await issuedDayForInvoice(conn, invoice, trigger);
-  } catch (err) {
-    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
-  }
-  const refusedByState = issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger, issuedDay });
-  if (refusedByState) return leaveOpen(refusedByState);
   // Every read from here on is against a visit already in hand: a failed
   // one is an outage of THIS visit's closeout, rethrown carrying the visit
   // (`linkedVisit`) so the caller audits it as a failure (code 'error') —
@@ -217,13 +411,28 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // nothing to be audited against and no sweep could ever retry it
   // (pre-push audit P1; probeVisitRefusal already did this for its two reads).
   try {
-    if (await visitJobTimerRunning(conn, svc.id)) return leaveOpen('visit_timer_running');
+    // Status, day and the invoice's own proof decide together
+    // (issuedCloseoutVisitRefusal): a NULL status is a live visit (Codex P2 r8
+    // #4131), an arrived visit closes on a past day or on money received
+    // today, and a visit nobody arrived at closes only on an invoice settled
+    // or delivered after its day.
+    const issuedDay = await issuedDayForInvoice(conn, invoice, trigger);
+    const held = await reportAfterPayHold(conn, svc.id);
+    if (heldOnOtherInvoice(held, invoice.id)) return leaveOpen('visit_paid_on_other_invoice');
+    const holdable = !noHold && trigger === 'paid' && await reportAfterPayWouldHold(conn, { visit: svc, invoice, today });
+    // A visit this payment would hold: the closeout that records the hold
+    // (deferSameDay) passes the same-day rule and skips the job timer; every
+    // other caller reads the visit as held for its day.
+    const deferred = deferSameDay && holdable;
+    const refusedByState = issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger, issuedDay, heldForReport: holdable ? !deferSameDay : Boolean(held) });
+    if (refusedByState) return leaveOpen(refusedByState);
+    if (!deferred && await visitJobTimerRunning(conn, svc.id)) return leaveOpen('visit_timer_running');
     if (svc.visit_id) {
       const { openMembers } = require('./visit-groups');
       if ((await openMembers(conn, svc.visit_id)).length >= 2) return leaveOpen('grouped_visit');
     }
     const refusal = await probeVisitRefusal(conn, svc);
-    return refusal ? leaveOpen(refusal) : { svc, reason: null, visit: svc };
+    return refusal ? leaveOpen(refusal) : { svc, reason: null, visit: svc, deferred };
   } catch (err) {
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
   }
@@ -324,18 +533,25 @@ const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempt
 // closeout was still running audited `visit_completed`, and if that worker
 // then died the parked attempt is the truth, not the audit row. System
 // actor: nobody is behind a retry.
-// The rule's status + day admission, as SQL, for both sweeps: an unstarted
-// visit on a past day; an arrived one on a past day, or today when the
-// invoice / statement is SETTLED (`settledSql`, a boolean SQL expression —
-// a send never closes a same-day visit) — or a visit already completed with
-// THIS closeout's own attempt still parked.
+// The rule's status + day admission, as SQL, for both sweeps (candidate
+// invoice `i`, visit `s`): an unstarted visit on a past day; an arrived one on
+// a past day, or today when the invoice / statement is SETTLED (`settledSql`,
+// a boolean SQL expression — a send never closes a same-day visit) and, with
+// GATE_REPORT_AFTER_PAY on, no live hold keeps the visit for its report
+// (liveHoldOnVisitSql; a visit with no hold yet is admitted, and its closeout
+// decides) — or a visit already completed with THIS closeout's own attempt
+// still parked.
 function retryableVisitFilter(q, today, settledSql) {
+  const reportAfterPay = reportAfterPayLive();
   return q
     .where((open) => open
       .where((unstarted) => unstarted.where((live) => live.whereIn('s.status', OPEN_VISIT_STATUSES).orWhereNull('s.status')).where('s.scheduled_date', '<', today))
       .orWhere((arrived) => arrived.whereIn('s.status', ARRIVED_VISIT_STATUSES)
         .where((day) => day.where('s.scheduled_date', '<', today)
-          .orWhere((sameDay) => sameDay.where('s.scheduled_date', '=', today).whereRaw(settledSql)))))
+          .orWhere((sameDay) => {
+            sameDay.where('s.scheduled_date', '=', today).whereRaw(settledSql);
+            if (reportAfterPay) sameDay.whereRaw(`NOT ${liveHoldOnVisitSql()}`);
+          }))))
     .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL));
 }
 
@@ -348,8 +564,8 @@ function retryableVisitFilter(q, today, settledSql) {
 // anything the rule does not admit:
 //  - every `visit_*` reason of issuedCloseoutVisitRefusal and the resolver
 //    (visit_in_future, visit_en_route, visit_scheduled_today, visit_prepaid,
-//    visit_timer_running, and the historical visit_on_site that every
-//    arrived visit got before 2026-10-04);
+//    visit_timer_running, visit_paid_on_other_invoice, and the historical
+//    visit_on_site that every arrived visit got before 2026-10-04);
 //  - a race under the completion's row lock (`issued_visit_*`);
 //  - a failure: `error`, or any 5xx the completion RETURNED rather than
 //    threw (a failed profile / prepay read answers 503 with its own code).
@@ -785,11 +1001,15 @@ async function refuseVoidedInvoice(run) {
 // recorded like a refused completion (GitHub r1 P2); an invoice with no visit
 // link has nothing to audit against — the send / payment itself is logged.
 // Sets run.svc / run.resuming and returns null to continue, else the refusal.
+// GATE_REPORT_AFTER_PAY: a visit the payment would hold resolves as `deferred`
+// for the hold phase below, unless this closeout records no hold (a receipt
+// resend, `recordHold` false): that visit is then left open for its day.
 async function resolveCloseoutTarget(run) {
-  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today, trigger: run.trigger });
+  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today, trigger: run.trigger, deferSameDay: run.recordHold });
   run.linkedVisitId = resolved.visit?.id || null;
   if (resolved.svc) {
     run.svc = resolved.svc;
+    run.deferred = resolved.deferred === true;
     return null;
   }
   if (resolved.reason === 'visit_completed'
@@ -836,6 +1056,31 @@ async function refuseUnapprovedTarget(run) {
   return { closed: false, reason: 'approved_target_mismatch', visitId: run.svc.id, approvedTarget: run.approvedTarget, audited };
 }
 
+// Phase 2c — GATE_REPORT_AFTER_PAY: a visit this payment holds (the
+// resolver's `deferred`; never a payment a record_payment card approved, and
+// never on a receipt resend). Where the gate off would close it, the closeout
+// records the hold instead (recordReportAfterPayHold) and leaves the visit
+// open, audited `visit_scheduled_today`; the retry sweep closes it on this
+// payment once its day has passed. It runs after the approved-target refusal,
+// so a visit a card did not name is never held. The locked re-read can leave
+// the visit open for another reason, with its own code: held on another
+// invoice's payment, or this payment undone, charged back or replaced by
+// another since the closeout loaded its invoice (pre-push audit rounds 8 and
+// 11: that visit stays open, never closed or held on a payment that is gone).
+// If it finds the payment no longer holds the visit (a bill added, the visit
+// moved or closed, the gate off), the visit closes as with the gate off: the
+// completion re-checks the day, the job timer, the hold and the payment under
+// its own locks.
+async function holdForReport(run) {
+  if (!run.deferred) return null;
+  const held = await recordReportAfterPayHold(run.conn, { visitId: run.svc.id, invoiceId: run.invoice.id, today: run.today, paidAtMs: run.paidAtMs });
+  if (!held) return null;
+  const code = held === true ? 'visit_scheduled_today' : held;
+  logger.info(`[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${held === true ? 'held for its report' : 'left open'} (${code})`);
+  const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code });
+  return { closed: false, reason: code, visitId: run.svc.id, audited };
+}
+
 // Phase 3 — the canonical completion in its quiet backfill posture: no
 // completion SMS, no report, no review ask, no charge; the linked invoice is
 // reused, none minted.
@@ -863,7 +1108,13 @@ async function runQuietCloseout(run) {
     },
     actor: { techRole: 'admin', technicianId: run.actorTechnicianId || null, technician: null },
     idempotencyKey: run.idempotencyKey,
-    issuedInvoiceCloseout: { invoiceId: run.invoice.id, trigger: run.trigger, ...(run.approvedVisit && !run.resuming ? { expectedVisit: run.approvedVisit } : {}) },
+    issuedInvoiceCloseout: {
+      invoiceId: run.invoice.id,
+      trigger: run.trigger,
+      ...(run.approvedVisit && !run.resuming ? { expectedVisit: run.approvedVisit } : {}),
+      // GATE_REPORT_AFTER_PAY: the payment this closeout loaded; the completion refuses a locked invoice row that carries another one.
+      ...(run.paidAtMs != null ? { paidAtMs: run.paidAtMs } : {}),
+    },
   });
   const outcome = completionOutcome(result);
   const line = `[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${outcome.closed ? `completed${run.resuming ? ' (resumed)' : ''}` : `NOT completed (${outcome.status} ${outcome.code || outcome.error || ''})`}`;
@@ -886,9 +1137,16 @@ const issuedCloseoutIdempotencyKey = (invoiceId) => `invoice-issued:${invoiceId}
 // any refusal. The same resolver and resume probe the closeout runs, writing
 // no audit row, for the Intelligence Bar card to disclose the effect before it
 // happens. A probe that cannot read throws; the caller treats that as unknown.
-async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, today = etDateString() } = {}) {
+// GATE_REPORT_AFTER_PAY: a probe records no hold, so a visit a payment holds,
+// or would hold, reads as no close today, which is what a receipt resend's own
+// closeout does (`recordHold` false): its card shows what its run does.
+// noHold (the record_payment card only, asked before its payment exists): the
+// payment that card records carries the card's pin and holds nothing
+// (reportAfterPayWouldHold), so the probe names the visit it closes now, as
+// with the gate off.
+async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, today = etDateString(), noHold = false } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return null;
-  const resolved = await resolveVisitForIssuedInvoice(conn, invoice, { today, trigger });
+  const resolved = await resolveVisitForIssuedInvoice(conn, invoice, { today, trigger, noHold });
   let visit = resolved.svc;
   let resuming = false;
   if (!visit && resolved.reason === 'visit_completed'
@@ -902,6 +1160,8 @@ async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, toda
 async function loadCloseoutInvoice(run) {
   run.invoice = await run.conn('invoices').where({ id: run.invoiceId }).first();
   if (!run.invoice) return false;
+  // GATE_REPORT_AFTER_PAY: the payment this closeout runs for (holdForReport, runQuietCloseout). Null with the gate off.
+  run.paidAtMs = run.trigger === 'paid' && reportAfterPayLive() ? paidAtMsOf(run.invoice) : null;
   run.label = `invoice ${run.invoice.invoice_number || run.invoice.id} ${run.trigger}`;
   run.idempotencyKey = issuedCloseoutIdempotencyKey(run.invoice.id);
   return true;
@@ -933,16 +1193,22 @@ async function auditCloseoutFailure(run, err) {
 // thrown back into the send. `trigger` is 'sent' | 'paid'. `actorRole` is
 // the AUTHENTICATED staff role behind actorTechnicianId (req.techRole —
 // 'admin' | 'technician'), used ONLY for the audit identity — see
-// auditCloseoutOutcome and runQuietCloseout. Three bounded phases share one
+// auditCloseoutOutcome and runQuietCloseout. Bounded phases share one
 // `run` context (GitHub r11 P2 #4127): void refusal → target resolution →
-// the quiet canonical completion.
-async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), approvedTarget = null, approvedVisit = null } = {}) {
+// the approved-target refusal → (GATE_REPORT_AFTER_PAY) the hold → the quiet
+// canonical completion. `recordHold` (GATE_REPORT_AFTER_PAY): false from a
+// receipt resend, which retries a payment's close and is not that payment's
+// closeout. It records no hold, so a visit the payment would hold stays open
+// for its day with none recorded, and the resend card's preview, which reads
+// the same resolver through issuedCloseoutTarget, shows what the run does
+// (pre-push audit round 11).
+async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), approvedTarget = null, approvedVisit = null, recordHold = true } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
-  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, approvedTarget: approvedTarget || null, approvedVisit: approvedVisit || null, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
+  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, approvedTarget: approvedTarget || null, approvedVisit: approvedVisit || null, recordHold: recordHold !== false, invoice: null, paidAtMs: null, linkedVisitId: null, svc: null, resuming: false, deferred: false, label: null, idempotencyKey: null };
   try {
     if (!(await loadCloseoutInvoice(run))) return { closed: false, reason: 'no_invoice' };
-    const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run)) || (await refuseUnapprovedTarget(run));
+    const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run)) || (await refuseUnapprovedTarget(run)) || (await holdForReport(run));
     return refused || await runQuietCloseout(run);
   } catch (err) {
     return auditCloseoutFailure(run, err);
@@ -961,6 +1227,13 @@ module.exports = {
   isLiveVisitStatus,
   isArrivedVisitStatus,
   issuedCloseoutVisitRefusal,
+  reportAfterPayHold,
+  heldOnOtherInvoice,
+  recordReportAfterPayHold,
+  paymentReversed,
+  linkReportAfterPayHold,
+  reportAfterPayHeldVisitIds,
+  REPORT_AFTER_PAY_HOLD_ACTION,
   approvedVisitChanged,
   invoiceIssuedDay,
   issuedDayForInvoice,
