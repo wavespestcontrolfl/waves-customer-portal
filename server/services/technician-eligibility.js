@@ -457,6 +457,21 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
   };
 }
 
+/**
+ * One technician's day under the shift rule (GATE_TECH_SHIFT_HOURS; owner
+ * 2026-11-19, page item D4: "offers and confirmations allow only jobs that
+ * end by that tech's shift end"): a job starts at or after the shift start
+ * and ends by the shift end. `shift` is shiftOf's answer for the technician
+ * and date; `openMin` and `closeMin` are the caller's own day, in minutes
+ * after midnight Eastern. The shift only narrows that day, and no shift
+ * (null: the gate off, or no set hours) returns it as it is. A job from
+ * `start` to `end` fits when start >= openMin and end <= closeMin. Pure.
+ */
+function shiftBounds(shift, openMin, closeMin) {
+  if (!shift) return { openMin, closeMin };
+  return { openMin: Math.max(openMin, shift.startMin), closeMin: Math.min(closeMin, shift.endMin) };
+}
+
 module.exports = {
   EMPLOYMENT_STATUSES,
   NOT_ASSIGNABLE,
@@ -468,6 +483,7 @@ module.exports = {
   absentTechDays,
   offDayTechDays,
   loadTechShifts,
+  shiftBounds,
   shiftMinutes,
   storedShift,
   normalizeWorkDays,
