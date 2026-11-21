@@ -75,39 +75,57 @@ describe('source key', () => {
 
 describe('the gates', () => {
   const OLD = { pay: process.env.GATE_PAYROLL_PAY_LINES, rewards: process.env.GATE_TECH_REWARDS_PAY_LINES };
+  beforeEach(() => recordAuditEvent.mockClear());
   afterEach(() => {
     for (const [name, value] of [['GATE_PAYROLL_PAY_LINES', OLD.pay], ['GATE_TECH_REWARDS_PAY_LINES', OLD.rewards]]) {
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
     }
   });
   const run = { id: 'run-1', week_start: '2026-12-07', pay_date: '2026-12-18' };
-  const trap = new Proxy(() => { throw new Error('the database was touched'); }, { get() { throw new Error('the database was touched'); } });
-
-  test('pay lines off: nothing is read or written, whatever the rewards gate says', async () => {
-    delete process.env.GATE_PAYROLL_PAY_LINES;
-    process.env.GATE_TECH_REWARDS_PAY_LINES = 'true';
-    await expect(syncTechRewardLines(run, trap)).resolves.toEqual({ added: 0, updated: 0, removed: 0, skipped: [], waits: [] });
-  });
-
-  test('rewards gate off: only the open Tech Rewards lines come off (paid lines are never selected)', async () => {
-    process.env.GATE_PAYROLL_PAY_LINES = 'true';
-    delete process.env.GATE_TECH_REWARDS_PAY_LINES;
+  // A knex stand-in that records each call as [method, table, argument].
+  const recorder = () => {
     const calls = [];
     const trx = jest.fn((table) => {
       const chain = {
         where: jest.fn((where) => { calls.push(['where', table, where]); return chain; }),
-        select: jest.fn(async () => [{ id: 'line-1' }]),
-        whereIn: jest.fn((column, ids) => { calls.push(['whereIn', column, ids]); return chain; }),
+        whereNotNull: jest.fn((column) => { calls.push(['whereNotNull', table, column]); return chain; }),
+        whereIn: jest.fn((column, ids) => { calls.push(['whereIn', table, ids]); return chain; }),
+        select: jest.fn(async () => { calls.push(['select', table]); return [{ id: 'line-1' }]; }),
+        update: jest.fn(async (patch) => { calls.push(['update', table, patch]); return 0; }),
         del: jest.fn(async () => { calls.push(['del', table]); return 1; }),
         forUpdate: jest.fn(() => chain),
       };
       return chain;
     });
     trx.fn = { now: jest.fn() };
+    return { trx, calls };
+  };
+  // the one statement a sync runs on the run row with a gate off: the stored waits of this draft are cleared
+  const CLEAR_WAITS = [
+    ['where', 'payroll_runs', { id: 'run-1', status: 'draft' }],
+    ['whereNotNull', 'payroll_runs', 'tech_rewards_waits'],
+    ['update', 'payroll_runs', { tech_rewards_waits: null }],
+  ];
+
+  test('pay lines off: no pay line is read or written, whatever the rewards gate says; the stored waits are cleared', async () => {
+    delete process.env.GATE_PAYROLL_PAY_LINES;
+    process.env.GATE_TECH_REWARDS_PAY_LINES = 'true';
+    const { trx, calls } = recorder();
+    await expect(syncTechRewardLines(run, trx)).resolves.toEqual({ added: 0, updated: 0, removed: 0, skipped: [], waits: [] });
+    expect(calls).toEqual(CLEAR_WAITS);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('rewards gate off: the stored waits are cleared and only the open Tech Rewards lines come off (paid lines are never selected)', async () => {
+    process.env.GATE_PAYROLL_PAY_LINES = 'true';
+    delete process.env.GATE_TECH_REWARDS_PAY_LINES;
+    const { trx, calls } = recorder();
     const result = await syncTechRewardLines(run, trx, { lock: false });
     expect(result.removed).toBe(1);
+    expect(calls.slice(0, 3)).toEqual(CLEAR_WAITS);
     expect(calls).toContainEqual(['where', 'payroll_pay_lines', { source_type: 'tech_rewards', status: 'open' }]);
     expect(calls).toContainEqual(['del', 'payroll_pay_lines']);
+    expect(calls.filter(([method, table]) => method === 'update' && table !== 'payroll_runs')).toEqual([]);
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       action: 'payroll.tech_rewards_lines_synced', metadata: expect.objectContaining({ gate: 'off', removed_line_ids: ['line-1'] }),
     }));

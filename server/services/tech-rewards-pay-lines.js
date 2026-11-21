@@ -23,30 +23,28 @@
  * premium to the weeks it covers. It is included in the regular rate on purpose, the conservative reading: whether the
  * 29 CFR 778.212 gift exclusion applies is a question for the employment lawyer / CPA, not decided here.
  *
- * OWNERSHIP. An OPEN Tech Rewards line always belongs to a DRAFT run: its earned week is that run's week, and only that run pays
- * it (payroll-pay-lines.js openLinesFor). Three things keep that true:
+ * WHICH DRAFT. An OPEN Tech Rewards line sits in ONE pay week, and only that week's run pays it (payroll-pay-lines.js
+ * openLinesFor). There is no order between two draft runs: a sync that is dated for the line and ready for the technician takes
+ * it, from whatever week it was in. Finalize syncs first, so the first ready run to be finalized pays the gift. The other draft
+ * still shows it, and its own finalize sends the changed numbers back for review (the pay run's token check, as for any pay
+ * line two drafts share). A run that is not ready leaves the line where it is. Two calls keep a line from being left behind:
  *   - voiding a run deletes its lines, open or reopened from paid (payroll-runs.js voidRun, dropRewardLinesOfWeek);
- *   - finalizing a run deletes any of its lines it did not pay (finalizeRun, the same call);
- *   - a sync claims a line open in another week, unless that week has a draft run that pays first (the earlier pay date; the
- *     earlier week on the same date) and can still pay it (ownerKeeps asks that run's own readiness);
- *   - a run that is finalized BEFORE an earlier-dated draft takes that draft's lines for the technicians it pays
- *     (claimBeforeFinal): its checks close the earlier draft to those technicians for the tax year, so the line could never
- *     be paid there. The finalize then asks for a review of the changed numbers (the pay run's own token check).
- * So the gift is on the first check that can carry it and no line is stranded.
+ *   - finalizing a run deletes any of its lines it did not pay (finalizeRun, the same call).
  * A recompute works an OPEN line out again; a PAID line is never read or changed. Gate off: every open Tech Rewards line comes
- * off at the next sync (the kill switch) and paid lines stay. Pay lines off: nothing is read or written.
+ * off at the next sync (the kill switch) and paid lines stay. Pay lines off: no pay line is read or written. With either gate
+ * off the run keeps no stored wait (clearWaits).
  *
  * READINESS. A sync NEVER blocks a check or holds a run. A technician who cannot get the gift at all is skipped with a reason
  * in the audit event and no note: hired after the gift date, or the run's week ended before Jan 1 of the gift year. A
  * technician who can get it but not on this run WAITS (waitOf): a later check of theirs in the tax year is already final, so
  * finalize would refuse a run that holds a check of theirs (laterFinalCheckExists); or an earlier week of the year holds work (a
  * weekly timesheet with minutes, recorded work by workedDates, or paid time off) and has no FINALIZED check; or the pay run's own
- * line guards would hold a check for the span (lineGuardWeek: a worked week with no approved timesheet, an automatic clock-out
- * nobody reviewed); or no check can be worked out for them on this run at all (lineOnlyCheckProblem: no pay rate, a rate under
- * the minimum wage). The technician rows are read FOR SHARE under the pay run's lock, so a change to a technician's status,
+ * line guards would hold a check for the span or for the run's own week (lineGuardWeek: a worked week with no approved
+ * timesheet, an automatic clock-out nobody reviewed); or no check can be worked out for them on this run at all
+ * (lineOnlyCheckProblem: no pay rate, a rate under the minimum wage). The technician rows are read FOR SHARE under the pay run's lock, so a change to a technician's status,
  * field work or hire date waits for the pay run's transaction and a finalize never pays a gift that change took away.
  * No line is written, the run row keeps what waits (payroll_runs.tech_rewards_waits, replaced by every sync), the run view lists
- * it (techRewardsNotes, waitNotes), and the next run claims it.
+ * it (techRewardsNotes, waitNotes) until the gift is paid, and the next run that is ready writes it.
  *
  * Every skip, wait and change is recorded in one audit event per sync (payroll.tech_rewards_lines_synced): technician ids, kinds,
  * reason codes, weeks and line ids, never an amount. Money is integer cents.
@@ -176,10 +174,10 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
  *   week_needs_review   the pay run's own line guards would hold a check for an earlier week of its span
  *   no_paycheck         no check can be worked out for the technician on this run (week is null)
  * The unpaid test asks only the weeks before the run's own: the span ends in the run's own week by design (spanOf), and that
- * week is the one this run pays. The line guards are asked for the WHOLE span, the run's own week too, exactly as the run asks
- * them of the line (evaluate): a technician who has no check on this run otherwise (an approved timesheet with no minutes) and
- * an automatic clock-out nobody reviewed in that week would get a check the run must hold. A line that passes never makes the
- * run wait, hold a check or block.
+ * week is the one this run pays. The line guards are asked for the WHOLE span, exactly as the run asks them of the line
+ * (evaluate), and for the run's OWN week also when it lies after the span (a January run that carries last year's gift, whose
+ * span ends Dec 31): a gift goes on a run only when the technician's own week there has no work waiting for approval and no
+ * automatic clock-out nobody reviewed. A line that passes never makes the run wait, hold a check or block.
  */
 async function waitOf(trx, run, technicianId, span) {
   if (await payrollRuns().laterFinalCheckExists(trx, run, [technicianId])) return { reason: 'later_check_final', week: null };
@@ -189,10 +187,13 @@ async function waitOf(trx, run, technicianId, span) {
     const unpaid = await oldestUnpaidWeek(trx, technicianId, earlier);
     if (unpaid) return { reason: 'week_not_paid', week: unpaid };
   }
-  const guarded = await payrollRuns().lineGuardWeek(trx, technicianId, {
-    amountCents: DECEMBER_GIFT_CENTS, earnedWeekStart: run.week_start, coversFrom: span.coversFrom, coversTo: span.coversTo,
-  });
-  if (guarded) return { reason: 'week_needs_review', week: guarded };
+  const ownWeek = { coversFrom: run.week_start, coversTo: addStaffWorkDays(run.week_start, 6) };
+  for (const asked of span.coversTo < run.week_start ? [span, ownWeek] : [span]) {
+    const guarded = await payrollRuns().lineGuardWeek(trx, technicianId, {
+      amountCents: DECEMBER_GIFT_CENTS, earnedWeekStart: run.week_start, coversFrom: asked.coversFrom, coversTo: asked.coversTo,
+    });
+    if (guarded) return { reason: 'week_needs_review', week: guarded };
+  }
   const problem = await payrollRuns().lineOnlyCheckProblem(trx, run, technicianId, { kind: GIFT, amountCents: DECEMBER_GIFT_CENTS });
   return problem ? { reason: 'no_paycheck', week: null } : null;
 }
@@ -230,15 +231,13 @@ async function saveWaits(trx, run, waits) {
     .update({ tech_rewards_waits: waits.length ? JSON.stringify(waits.map(waitRow)) : null });
 }
 
-/** Adds waits to the ones the run's sync saved (claimBeforeFinal), one row per line. */
-async function addWaits(trx, run, waits) {
-  const row = await trx('payroll_runs').where({ id: run.id, status: 'draft' }).first('tech_rewards_waits');
-  if (!row) return;
-  const added = waits.map(waitRow);
-  const kept = (Array.isArray(row.tech_rewards_waits) ? row.tech_rewards_waits : [])
-    .filter((old) => !added.some((w) => w.source_id === old.source_id));
-  await trx('payroll_runs').where({ id: run.id, status: 'draft' }).update({ tech_rewards_waits: JSON.stringify([...kept, ...added]) });
-}
+/**
+ * With either gate off the run keeps no stored wait: a wait saved while the gates were on would outlive its cause (a pay rate
+ * corrected since) and show again, on a finalized run too, when the gates come back on. One UPDATE, and none when the run
+ * holds no wait.
+ */
+const clearWaits = (trx, run) => trx('payroll_runs').where({ id: run.id, status: 'draft' }).whereNotNull('tech_rewards_waits')
+  .update({ tech_rewards_waits: null });
 
 async function audit(trx, actorId, run, metadata) {
   await recordAuditEvent({
@@ -269,20 +268,12 @@ async function dropRewardLinesOfWeek(trx, weekStart) {
 }
 
 // Everything this run could write or change: the lines due by its pay date for every technician, plus the open Tech Rewards
-// lines already written for this week (a recompute). An open line of another week is read only to see who owns the key.
+// lines already written for this week (a recompute). An open line of another week is read so a ready run can take it.
 async function loadState(trx, run, lock) {
   const openQuery = trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' }).select(lineColumns(trx));
   if (lock) openQuery.forUpdate();
   const allOpen = await openQuery;
   const openHere = allOpen.filter((line) => line.earned_week_start === run.week_start);
-  const otherWeeks = [...new Set(allOpen.map((line) => line.earned_week_start).filter((week) => week !== run.week_start))];
-  // the DRAFT run of each of those weeks, as loadRun reads it: week -> { id, week_start, pay_date } (one live run a week:
-  // payroll_runs_one_live_week)
-  const draftRuns = new Map(otherWeeks.length
-    ? (await trx('payroll_runs').whereIn('week_start', otherWeeks).where({ status: 'draft' })
-      .select('id', trx.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"), trx.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date")))
-      .map((row) => [row.week_start, row])
-    : []);
   // paid (or voided) lines are evidence: their keys are never read or written again
   const settled = new Set((await trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
     .select('source_id')).map((row) => row.source_id));
@@ -312,27 +303,7 @@ async function loadState(trx, run, lock) {
     techById: new Map(techs.map((row) => [row.id, row])),
     settled,
     openBySource: new Map(allOpen.map((line) => [line.source_id, line])),
-    draftRuns,
   };
-}
-
-// True when the draft run `owner` puts its checks out before `run` does: the earlier pay date, or the earlier week on the same
-// date.
-const paysFirst = (owner, run) => owner.pay_date < run.pay_date
-  || (owner.pay_date === run.pay_date && owner.week_start < run.week_start);
-
-/**
- * True when a line open in another pay week stays there: that week has a DRAFT run that pays before `run` does and can still
- * pay the line (it is dated for it, and ready by the test it applies to itself: priceCandidate). A week with no draft run
- * (finalized, voided, never drafted) never keeps a line, and neither does a draft that could no longer pay it: a pay rate
- * corrected since, a later check that went final. So a line is never held back for a run that will not pay it.
- */
-async function ownerKeeps(trx, run, open, cand, tech, state) {
-  const owner = state.draftRuns.get(open.earned_week_start);
-  if (!owner || !paysFirst(owner, run)) return false;
-  if (!tech) return true; // the technician left: nobody claims it, and the owner's next sync takes it off
-  if (!dueInRun(owner.pay_date).some((due) => due.kind === cand.kind && due.key === cand.key)) return false;
-  return Boolean((await priceCandidate(trx, cand, tech, owner)).amountCents);
 }
 
 const changed = (open, span, amountCents) => Number(open.amount_cents) !== amountCents
@@ -345,16 +316,15 @@ const moveLine = (trx, id, span, amountCents) => trx('payroll_pay_lines').where(
 });
 
 /**
- * Writes one candidate's line: insert, work out again, claim or remove. Returns { added, updated, removed, skip, wait } (ids /
- * reason / { reason, week }). A line open in another pay week stays that week's while that week's DRAFT run pays first and
- * can still pay it (ownerKeeps); otherwise this run, when dated for it and ready, claims it. An open line of this week that the
- * run is no longer dated for, or no longer ready to pay, comes off.
+ * Writes one candidate's line: insert, work out again, take or remove. Returns { added, updated, removed, skip, wait } (ids /
+ * reason / { reason, week }). A run that is dated for the line and ready takes a line that is open in another pay week (the
+ * line moves here); a run that is not leaves it where it is. An open line of this week that the run is no longer dated for, or
+ * no longer ready to pay, comes off.
  */
 async function applyCandidate(trx, run, sourceId, cand, state) {
   const open = state.openBySource.get(sourceId);
   const here = Boolean(open) && open.earned_week_start === run.week_start;
   const tech = state.techById.get(cand.technicianId);
-  if (open && !here && (!cand.due || await ownerKeeps(trx, run, open, cand, tech, state))) return {};
   let priced;
   if (!cand.due) priced = { skip: 'not_due_in_this_run' };
   else priced = tech ? await priceCandidate(trx, cand, tech, run) : { skip: 'not_active' };
@@ -384,13 +354,18 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
 /**
  * Makes the open Tech Rewards pay lines match the plan, for the pay run `run` ({ id, week_start, pay_date } as
  * payroll-runs.js loadRun reads it). Take it inside the pay run's transaction, after the payroll lock and before the run is
- * worked out. Pay lines off: nothing. Gate off: only removes open Tech Rewards lines. Never blocks a check.
+ * worked out. Pay lines off: no pay line is read or written. Gate off: only removes open Tech Rewards lines. With either off the
+ * run's stored waits are cleared. Never blocks a check.
  * Returns { added, updated, removed, skipped: [{ technicianId, kind, reason }], waits: [{ technicianId, kind, sourceId, reason, week }] }.
  */
 async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {}) {
   const result = { added: 0, updated: 0, removed: 0, skipped: [], waits: [] };
-  if (!payLinesOn()) return result;
+  if (!payLinesOn()) {
+    await clearWaits(trx, run);
+    return result;
+  }
   if (!techRewardsOn()) {
+    await clearWaits(trx, run);
     const dropped = await dropOpenLines(trx, lock);
     if (dropped.length) await audit(trx, actorId, run, { gate: 'off', removed_count: dropped.length, removed_line_ids: dropped });
     return { ...result, removed: dropped.length };
@@ -417,72 +392,12 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {
 }
 
 /**
- * Finalize only (payroll-runs.js finalizeRun, after the run is worked out and before its checks are stored). A check that goes
- * final closes every earlier-dated run of the same tax year to its technician (payroll-runs.js laterFinalCheckExists), so a
- * Tech Rewards line that an earlier-dated DRAFT still holds for one of `technicianIds` (the technicians this run pays) could
- * never be paid there once this run is final. Each such line that this run is dated for and ready to pay moves here. Returns
- * the ids moved: the caller works the run out again, and its token check sends the changed numbers back for review, so nothing
- * is paid that the office did not see. A line this run is dated for but must wait on (the earlier draft's own week holds the
- * technician's unpaid wages, say) cannot move: it is released, and the wait goes on this run's row, so the pay run that closed
- * the earlier draft says which week needs a check and by when. An owner dated in another tax year, or one that pays later,
- * keeps its line.
- */
-async function claimBeforeFinal(run, trx, technicianIds, { actorId = null } = {}) {
-  if (!payLinesOn() || !techRewardsOn() || !technicianIds.length) return [];
-  const moved = [];
-  const released = [];
-  const waits = [];
-  for (const { line, cand, tech } of await linesClosedBy(trx, run, technicianIds)) {
-    const priced = await priceCandidate(trx, cand, tech, run);
-    if (priced.amountCents) {
-      await moveLine(trx, line.id, spanOf(cand.key, run.week_start), priced.amountCents);
-      moved.push(line.id);
-    } else if (priced.wait) {
-      await trx('payroll_pay_lines').where({ id: line.id, status: 'open' }).del();
-      released.push(line.id);
-      waits.push({ technicianId: line.technician_id, kind: line.kind, sourceId: line.source_id, ...priced.wait });
-    }
-  }
-  if (waits.length) await addWaits(trx, run, waits);
-  if (moved.length || released.length) {
-    await audit(trx, actorId, run, {
-      ...(moved.length ? { claimed_before_final_line_ids: moved } : {}),
-      ...(released.length ? { released_before_final_line_ids: released, waits: waits.map(waitRow) } : {}),
-    });
-  }
-  return moved;
-}
-
-// The open lines that `run`, once final, closes to their owner: held for one of `technicianIds` by a DRAFT run of the same tax
-// year that pays before `run` does, for a technician who still gets a line, and of a kind and key `run` is dated for. Locked.
-// [{ line, cand, tech }], by source key.
-async function linesClosedBy(trx, run, technicianIds) {
-  const lines = await trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' })
-    .whereIn('technician_id', technicianIds).whereNot({ earned_week_start: run.week_start })
-    .orderBy('source_id').forUpdate().select(lineColumns(trx));
-  if (!lines.length) return [];
-  const owners = new Map((await trx('payroll_runs').whereIn('week_start', lines.map((line) => line.earned_week_start)).where({ status: 'draft' })
-    .select(trx.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"), trx.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date")))
-    .map((row) => [row.week_start, row]));
-  const techs = new Map((await recipients(trx)
-    .whereIn('technicians.id', lines.map((line) => line.technician_id)).forShare()
-    .select('technicians.id', trx.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date"))).map((row) => [row.id, row]));
-  const due = dueInRun(run.pay_date);
-  const closedTo = (owner) => Boolean(owner) && paysFirst(owner, run) && yearOf(owner.pay_date) === yearOf(run.pay_date);
-  return lines
-    .map((line) => ({ line, match: SOURCE_ID_RE.exec(line.source_id || ''), tech: techs.get(line.technician_id) }))
-    .filter(({ line, match, tech }) => match && tech && closedTo(owners.get(line.earned_week_start))
-      && due.some((d) => d.kind === line.kind && d.key === match[3]))
-    .map(({ line, match, tech }) => ({ line, tech, cand: { kind: line.kind, key: match[3], technicianId: line.technician_id } }));
-}
-
-/**
- * Plain notes for a run's summary: what waited at the run's latest sync and that no run has written since, with the last pay
- * date that can carry it, e.g. "December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a pay run
- * dated Feb 16, 2027 or earlier can add it". The limit is a PAY date (dueInRun), not today's date: a run dated inside it can
- * still be worked out and finalized later, so the note states the limit and never says what today allows. Read from the run row
- * (saveWaits). None with either gate off, and none for a gift that has its line now (a later run claimed it), so an old run never
- * says "waits" about a paid gift.
+ * Plain notes for a run's summary: what waited at the run's latest sync and is not paid since, with the last pay date that can
+ * carry it, e.g. "December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a pay run dated
+ * Feb 16, 2027 or earlier can add it". The limit is a PAY date (dueInRun), not today's date: a run dated inside it can still be
+ * worked out and finalized later, so the note states the limit and never says what today allows. Read from the run row
+ * (saveWaits). None with either gate off, and none for a gift that is paid, so an old run never says "waits" about a paid gift.
+ * A gift whose line is open on another draft still shows here: it is not paid, and on this run it waited.
  */
 async function waitNotes(conn, runId) {
   if (!payLinesOn() || !techRewardsOn()) return [];
@@ -490,10 +405,10 @@ async function waitNotes(conn, runId) {
   const waits = (row && Array.isArray(row.tech_rewards_waits) ? row.tech_rewards_waits : [])
     .filter((w) => KIND_WORDS[w.kind] && WAIT_WORDS[w.reason] && SOURCE_ID_RE.test(w.source_id || ''));
   if (!waits.length) return [];
-  const written = new Set((await conn('payroll_pay_lines').where({ source_type: SOURCE_TYPE })
+  const paid = new Set((await conn('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
     .whereIn('source_id', waits.map((w) => w.source_id)).select('source_id')).map((line) => line.source_id));
   const names = new Map((await conn('technicians').whereIn('id', waits.map((w) => w.technician_id)).select('id', 'name')).map((t) => [t.id, t.name]));
-  return waits.filter((w) => !written.has(w.source_id) && names.has(w.technician_id))
+  return waits.filter((w) => !paid.has(w.source_id) && names.has(w.technician_id))
     .map((w) => {
       const last = lastPayDate(Number(SOURCE_ID_RE.exec(w.source_id)[3]));
       return `${KIND_WORDS[w.kind]} for ${names.get(w.technician_id)} waits: ${WAIT_WORDS[w.reason](w)}. Only a pay run dated ${dayLabel(last)} or earlier can add it`;
@@ -510,7 +425,6 @@ module.exports = {
   spanOf,
   sourceIdOf,
   syncTechRewardLines,
-  claimBeforeFinal,
   dropRewardLinesOfWeek,
   waitNotes,
 };
