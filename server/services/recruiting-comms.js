@@ -44,6 +44,8 @@ const STAGE_KEYS = {
   interview_confirmation: 'job_interview_confirmation',
   // Job offer link (GATE_JOB_OFFERS): owner-pressed Send, see services/job-offers.js.
   offer_sent: 'job_offer_sent',
+  // The one reminder of an open offer (GATE_JOB_OFFER_REMINDER): sent by the reminder pass, never by a press.
+  offer_reminder: 'job_offer_reminder',
   // owner_reply: no template — the body is the owner's own words
   // (dashboard inbox reply / composer); message_type job_owner_reply.
   owner_reply: null,
@@ -55,8 +57,41 @@ const STAGE_PURPOSE = {
   interview_invite: 'interview_invite',
   interview_confirmation: 'interview_confirmation',
   offer_sent: 'offer_sent',
+  offer_reminder: 'offer_reminder',
   owner_reply: 'applicant_reply',
 };
+
+// The two stages whose text is a job offer link: the same link rules (the link must be in the text that goes out, and
+// the stored text hides it).
+const OFFER_STAGES = new Set(['offer_sent', 'offer_reminder']);
+const isOfferStage = (stage) => OFFER_STAGES.has(stage);
+// A stage whose text is tried once, when its sender runs: a text the rail holds (the send window, a lookup to try
+// again) is not queued for a later replay. The reminder pass takes an offer once and sends in its own hours; a replay
+// would go out later, with no pass to check the applicant's yes to texts again or to record that it went.
+const TRIED_ONCE_STAGES = new Set(['offer_reminder']);
+// Nothing tries such a text again and no person presses Send again, so a text that did not go is read fail-loud. It
+// is 'blocked' only when the refusal is about the applicant: the rail refused it (opted out, suppressed, not a mobile
+// line, no consent on record), or Twilio refused the number itself (unsubscribed at the carrier, not mobile, not a
+// valid or routable number: the provider's own list). It is 'stale' when the caller's own check stopped it. Every
+// other reason is on our side (a store or a template that could not be read, a disabled or broken template, a hold
+// that nothing replays): 'failed', so the caller's job shows it. Other stages keep the outcome they had.
+const APPLICANT_REFUSAL_CODE = /^(SUPPRESSED_[A-Z_]+|[A-Z_]*OPTED_OUT|NON_MOBILE_SMS_RECIPIENT|NO_CONSENT_RECORD|CONTACT_DECLINED)$/;
+function triedOnceTextOutcome(stage, outcome, { code, providerErrorCode } = {}) {
+  if (!TRIED_ONCE_STAGES.has(stage) || ['sent', 'uncertain', 'stale'].includes(outcome)) return outcome;
+  if (code === 'RECRUITING_STALE') return 'stale';
+  const { RECIPIENT_TERMINAL_TWILIO_CODES } = require('./messaging/providers/twilio-sms');
+  const numberRefused = providerErrorCode != null && (RECIPIENT_TERMINAL_TWILIO_CODES || []).includes(String(providerErrorCode));
+  const railRefused = outcome === 'blocked' && APPLICANT_REFUSAL_CODE.test(String(code || ''));
+  return numberRefused || railRefused ? 'blocked' : 'failed';
+}
+
+// The gate a stage answers to. The offer text answers to GATE_JOB_OFFERS alone (the flow's own gate); the reminder
+// needs its own gate as well; every other stage answers to recruitingComms.
+function stageEnabled(stage) {
+  if (stage === 'offer_sent') return isEnabled('jobOffers');
+  if (stage === 'offer_reminder') return isEnabled('jobOffers') && isEnabled('jobOfferReminder');
+  return isEnabled('recruitingComms');
+}
 
 const INTERVIEW_LINK_PLACEHOLDER = '[interview link]';
 
@@ -181,7 +216,7 @@ function buildVars(app, stage) {
   if (stage === 'interview_invite') {
     return { first_name: first, interview_url: interviewUrlFor(app.interview_token) || '' };
   }
-  if (stage === 'offer_sent') {
+  if (isOfferStage(stage)) {
     // The offer's own values (link, expiry day, title, sender) come from the caller (opts.vars).
     return { first_name: first };
   }
@@ -243,12 +278,18 @@ function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel, signoff })
   return parts.join('\n');
 }
 
-// The job-offer email (owner-approved words, spec 2026-11-19). English only. No reply-time promise: the expiry day is
-// the only date. The sign-off is the sender's own name, taken from the technicians row that pressed Send.
-function buildOfferEmail(first, vars) {
-  const subject = 'Your job offer from Waves';
+// The job-offer email (GATE_JOB_OFFERS) and its one reminder (GATE_JOB_OFFER_REMINDER). Owner-approved words, spec
+// 2026-11-19: the two differ in the subject and the first paragraph only ("same shape"). English only. No reply-time
+// promise: the expiry day is the only date. The sign-off is the sender's own name: the technicians row that pressed
+// Send (the reminder takes it from the offer that was sent).
+const OFFER_EMAIL_OPENERS = {
+  offer_sent: { subject: 'Your job offer from Waves', opener: (first, vars) => `Hi ${first}, I'd like you to join Waves as a ${vars.job_title}.` },
+  offer_reminder: { subject: 'Your job offer is still open', opener: (first, vars) => `Hi ${first}, your job offer from Waves is still open until ${vars.expires_on}.` },
+};
+function buildOfferEmail(stage, first, vars) {
+  const { subject, opener } = OFFER_EMAIL_OPENERS[stage];
   const paragraphs = [
-    `Hi ${first}, I'd like you to join Waves as a ${vars.job_title}.`,
+    opener(first, vars),
     'Your offer has your start date and pay. Please read it and the Technician Terms, then sign on your phone or computer.',
     `It stays open until ${vars.expires_on}. Please don't give notice at your current job until you have signed it.`,
   ];
@@ -299,7 +340,7 @@ function buildEmailContent(app, stage, vars) {
     };
   }
 
-  if (stage === 'offer_sent') return buildOfferEmail(first, vars);
+  if (isOfferStage(stage)) return buildOfferEmail(stage, first, vars);
 
   if (stage === 'interview_confirmation') {
     const subject = isEs
@@ -510,7 +551,9 @@ async function dispatchEmailToProvider({ app, stage, to, subject, html, text, te
     // or ambiguous) may have gone out before the response — the ledger
     // status column has no CHECK constraint, so 'uncertain' is a real value,
     // not a euphemism for 'failed' (Codex P2).
-    const definite = sendgrid.isDefiniteRejection(err);
+    // No key means no request was made (sendOne refuses before it calls SendGrid): definite too, as the template
+    // sender reads it (email-template-library).
+    const definite = (err && err.code === 'SENDGRID_NOT_CONFIGURED') || sendgrid.isDefiniteRejection(err);
     const status = definite ? 'failed' : 'uncertain';
     logger.warn(`[recruiting-comms] SendGrid send failed (application ${app.id}, stage ${stage}, status ${(err && err.status) || 'unknown'}, outcome ${status})`);
     return {
@@ -1024,7 +1067,7 @@ async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, 
     sendRes = classifySmsThrow(err);
   }
 
-  let outcome = classifySmsOutcome(sendRes);
+  let outcome = triedOnceTextOutcome(stage, classifySmsOutcome(sendRes), sendRes);
   if (outcome === 'sent') await retireQueuedInterviewInvites(app, stage);
 
   let deferredLedgerDone = false;
@@ -1032,7 +1075,7 @@ async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, 
   // window). A provider timeout / 5xx after the boundary is 'uncertain' even
   // when the pipeline marks it retryable: the applicant may already hold it,
   // so it keeps its handoff evidence and is never replayed (Codex r15 P1).
-  if (outcome !== 'sent' && sendRes.deliveryOutcome === 'not_sent' && sendRes.retryable && sendRes.nextAllowedAt) {
+  if (!TRIED_ONCE_STAGES.has(stage) && outcome !== 'sent' && sendRes.deliveryOutcome === 'not_sent' && sendRes.retryable && sendRes.nextAllowedAt) {
     const queued = await queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes, opts });
     // 'deferred' = queued (ledger settled in the same transaction);
     // 'superseded' = an overlapping queued invite already owns the send
@@ -1073,16 +1116,19 @@ async function runSmsLeg(ctx) {
     const rendered = await renderStageSmsBody(app, stage, vars);
     body = rendered.body;
   }
+  // No body: the template is off, or it could not be read (the renderer answers empty for both).
   if (!body) {
-    entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'template_disabled', body: '', by }));
-    return 'skipped';
+    const outcome = triedOnceTextOutcome(stage, 'skipped', { code: 'template_disabled' });
+    entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome, code: 'template_disabled', body: '', by }));
+    return outcome;
   }
   // An edited or variant offer text that dropped {offer_link} would report "sent" while the applicant has nothing to open.
   // The template renderer strips https:// from every link (sms-link-policy), so the rendered body carries the bare form.
   const offerLinkForms = vars.offer_link ? [vars.offer_link, stripSmsUrlScheme(vars.offer_link)] : [];
-  if (stage === 'offer_sent' && !offerLinkForms.some((link) => body.includes(link))) {
-    entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'offer_link_missing', body: '', by }));
-    return 'skipped';
+  if (isOfferStage(stage) && !offerLinkForms.some((link) => body.includes(link))) {
+    const outcome = triedOnceTextOutcome(stage, 'skipped', { code: 'offer_link_missing' });
+    entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome, code: 'offer_link_missing', body: '', by }));
+    return outcome;
   }
 
   // Written as 'pending' (NOT delivery evidence) before the pipeline; moved
@@ -1154,14 +1200,16 @@ async function runEmailLeg(ctx) {
 /**
  * @param {object} app - job_applications row (fresh: must already carry
  *   any interview_token/mode/at the stage needs).
- * @param {'application_received'|'interview_invite'|'interview_confirmation'|'offer_sent'} stage
+ * @param {'application_received'|'interview_invite'|'interview_confirmation'|'offer_sent'|'offer_reminder'} stage
  * @param {object} opts
  * @param {boolean} opts.sms - attempt the SMS leg
  * @param {boolean} opts.email - attempt the email leg
  * @param {string} [opts.by] - technicianId | 'system' | 'applicant'
- * @param {object} [opts.vars] - extra template values (offer_sent: offer_link, expires_on, job_title, sender_name)
+ * @param {object} [opts.vars] - extra template values (the offer stages: offer_link, expires_on, job_title, sender_name)
  * @param {string} [opts.offerId] - offer_sent: the job_offers row a held text pins (replay recheck)
  * @param {string} [opts.offerToken] - offer_sent: that offer's token
+ * @param {(conn?: object, channel?: 'sms'|'email') => Promise<boolean>} [opts.stillEligible] - read again before each
+ *   provider (the locked transaction is `conn` at the handoff); false stops that channel as 'stale'
  * @param {string} [opts.smsBody] - admin-edited override (already
  *   link-guard-validated and placeholder-substituted by the caller)
  * @param {string} [opts.emailSubject] - admin-edited override
@@ -1177,8 +1225,7 @@ async function sendStageComms(app, stage, opts = {}) {
 
   if (!wantSms && !wantEmail) return result;
 
-  // The job-offer stage is governed by GATE_JOB_OFFERS alone (the flow's own gate); every other stage by recruitingComms.
-  if (!isEnabled(stage === 'offer_sent' ? 'jobOffers' : 'recruitingComms')) {
+  if (!stageEnabled(stage)) {
     if (wantSms) result.sms = 'disabled';
     if (wantEmail) result.email = 'disabled';
     return result;
@@ -1194,15 +1241,17 @@ async function sendStageComms(app, stage, opts = {}) {
   // `conn` — the locked transaction at the provider boundary, so the
   // eligibility read never needs a second pool connection while the first
   // is held (DB_POOL_MAX=2 is a supported production config).
-  const legEligible = async (conn) => {
+  // The caller's check gets the channel ('sms' | 'email') as its second argument: a rule of one channel (the reminder
+  // text needs the applicant's yes to texts) never stops the other.
+  const legEligibleFor = (channel) => async (conn) => {
     if (typeof opts.stillEligible !== 'function') return true;
-    try { return (await opts.stillEligible(conn)) !== false; } catch { return false; }
+    try { return (await opts.stillEligible(conn, channel)) !== false; } catch { return false; }
   };
 
-  const ctx = { app, stage, opts, by, contact, vars, entries, legEligible };
+  const ctx = { app, stage, opts, by, contact, vars, entries };
 
-  if (wantSms) result.sms = await runSmsLeg(ctx);
-  if (wantEmail) result.email = await runEmailLeg(ctx);
+  if (wantSms) result.sms = await runSmsLeg({ ...ctx, legEligible: legEligibleFor('sms') });
+  if (wantEmail) result.email = await runEmailLeg({ ...ctx, legEligible: legEligibleFor('email') });
 
   // Always persist whatever completed — a history write failure is logged,
   // never allowed to mask an outcome the caller already has.
@@ -1326,6 +1375,7 @@ module.exports = {
   appendCommsHistory,
   historyEntry,
   sendStageComms,
+  stageEnabled,
   maskOfferLink,
   // exposed for tests
   _internals: { renderStageSmsBody, sendRawEmail },
