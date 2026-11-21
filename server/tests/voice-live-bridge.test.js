@@ -1079,6 +1079,18 @@ describe("the reply delay is read from the caller's own audio", () => {
     expect((await end(t)).turns).toEqual([1102]); // 1101.5, rounded
   });
 
+  test("the server's clock steps back between the caller's last speech and the reply: the delay is 0, never negative", async () => {
+    const t = setup();
+    await t.ready();
+    for (let i = 0; i < 10; i++) {
+      t.advance(20);
+      t.twilioMedia(b64(160)); // the caller speaks
+    }
+    t.advance(-500); // the clock is set back
+    delta(t, b64(800)); // the first reply of the call, 500 ms "before" the caller's last frame by that clock
+    expect((await end(t)).first_reply_ambiguous_ms).toBe(0);
+  });
+
   test("the caller starts again 60 ms before a reply's first voice and speaks on: that reply has no delay, though the sound is known as speech only after the voice began", async () => {
     const reply = async (again) => {
       const t = setup({ speech: [[2000, 3000], [again, again + 200]] });

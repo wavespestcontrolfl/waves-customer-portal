@@ -569,7 +569,9 @@ class LiveBridge {
     this.replyDelayIn = null;
     this.callerSpokeSinceReply = false;
     if (!spoke) return; // no caller speech since the reply before this one began
-    const delay = Math.round(voiceAt - this.callerSpokeAt);
+    // Both times are the bridge's wall clock (deps.now), as every time in this
+    // file. Never negative when that clock steps back, as before this change.
+    const delay = Math.max(0, Math.round(voiceAt - this.callerSpokeAt));
     if (ambiguous) this.replyDelayIn = this.ambiguousReplies;
     else this.replyDelayIn = first ? 'first' : this.latencies;
     if (this.replyDelayIn === 'first') this.firstReplyAmbiguousMs = delay;
