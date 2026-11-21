@@ -91,11 +91,14 @@ function emailShowed(row, summary) {
 
 async function emailedServiceName(estimate, todayLabel) {
   try {
-    if (!replaceableLabel(todayLabel)) return null;
-    const address = String(estimate?.customer_email || '').trim().toLowerCase();
-    if (!estimate?.id || !address) return null;
+    if (!replaceableLabel(todayLabel) || !estimate?.id) return null;
+    // The engine read its row before it claimed the job. The address and the service are judged on a fresh
+    // row, so a change since that read (a corrected address, a revised service) drops the name.
+    const fresh = await db('estimates').where({ id: estimate.id }).first();
+    const address = String(fresh?.customer_email || '').trim().toLowerCase();
+    if (!fresh || !address) return null;
     const rows = await db('email_messages')
-      .where({ estimate_id: estimate.id })
+      .where({ estimate_id: fresh.id })
       .whereIn('template_key', DELIVERY_TEMPLATE_KEYS())
       .whereIn('status', QUERY_STATUSES)
       .whereRaw('LOWER(TRIM(recipient_email_snapshot)) = ?', [address])
@@ -113,7 +116,7 @@ async function emailedServiceName(estimate, todayLabel) {
     // Second proof: the same function the delivery email used must still give
     // the same words. A different or empty result means the estimate changed.
     const { inferEstimateServiceInterest } = require('./estimate-service-lines');
-    const current = inferEstimateServiceInterest({ ...estimate, estimateData: estimate.estimate_data });
+    const current = inferEstimateServiceInterest({ ...fresh, estimateData: fresh.estimate_data });
     return current === stored ? name : null;
   } catch (err) {
     // A knex message can carry addresses: log only the code or name.

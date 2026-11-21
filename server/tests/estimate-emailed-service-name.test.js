@@ -55,14 +55,19 @@ describe('emailedServiceName', () => {
   let failure;
 
   // A lawn + pest estimate whose current inference is "Lawn Care + Pest Control".
+  // The reader re-reads the estimate by id. The fresh row is the fixture last built here, unless a test
+  // sets `freshRow` (a row that changed after the engine read it; `null` = the row is gone).
+  let lastEstimate;
+  let freshRow;
   function estimate(extra = {}) {
-    return {
+    lastEstimate = {
       id: 'est-1',
       customer_email: ' Jordan@Example.com ',
       service_interest: 'Lawn Care + Pest Control',
       estimate_data: null,
       ...extra,
     };
+    return lastEstimate;
   }
   // The stored email shows whatever summary its payload holds, unless a test overrides the text.
   const row = (extra = {}) => {
@@ -88,7 +93,9 @@ describe('emailedServiceName', () => {
     builder.then = (resolve, reject) => (failure
       ? Promise.reject(failure).then(resolve, reject)
       : Promise.resolve(rows).then(resolve, reject));
-    db.mockImplementation(() => builder);
+    freshRow = undefined;
+    const estimates = { where: jest.fn(() => estimates), first: jest.fn(async () => (freshRow === undefined ? lastEstimate : freshRow)) };
+    db.mockImplementation((table) => (table === 'estimates' ? estimates : builder));
   });
 
   test('the fixture matches the inference the proof uses', () => {
@@ -145,10 +152,35 @@ describe('emailedServiceName', () => {
     await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
   });
 
-  test('no address on the estimate: no name and no read', async () => {
+  test('no address on the estimate: no name and no email-log read', async () => {
     await expect(emailedServiceName(estimate({ customer_email: '  ' }), BUNDLE)).resolves.toBeNull();
     await expect(emailedServiceName(estimate({ customer_email: null }), BUNDLE)).resolves.toBeNull();
-    expect(db).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalledWith('email_messages');
+  });
+
+  describe('the address and the service are judged on a fresh estimate row', () => {
+    test('the service changed after the engine read the row: no name', async () => {
+      rows = [row()];
+      const stale = estimate();
+      freshRow = { ...stale, service_interest: 'Lawn Care + Pest Control + Mosquito' };
+      await expect(emailedServiceName(stale, BUNDLE)).resolves.toBeNull();
+    });
+
+    test('the address changed after the engine read the row: the email log is asked for the new address', async () => {
+      rows = [];
+      const stale = estimate();
+      freshRow = { ...stale, customer_email: 'New@Example.com' };
+      await expect(emailedServiceName(stale, BUNDLE)).resolves.toBeNull();
+      expect(builder.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(recipient_email_snapshot)) = ?', ['new@example.com']);
+    });
+
+    test('the row is gone: no name and no email-log read', async () => {
+      rows = [row()];
+      const stale = estimate();
+      freshRow = null;
+      await expect(emailedServiceName(stale, BUNDLE)).resolves.toBeNull();
+      expect(db).not.toHaveBeenCalledWith('email_messages');
+    });
   });
 
   test('a JSON string payload and an object payload read the same', async () => {
