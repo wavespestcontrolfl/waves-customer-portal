@@ -3,7 +3,8 @@
  * - newsletterIssuePolls reads one newsletter type's poll history: the polls
  *   of the newest two issues readers got (by the sender's own reach rule),
  *   and every poll such an issue, or an unsent one a Resume could still mail,
- *   holds. Each body part is read by its own token form, in any letter case.
+ *   holds. Tokens are read as the sender renders them: either form, either
+ *   part, any letter case.
  *   A 'failed' send that reached readers before it stopped counts, and so
  *   does one whose only proof is a reader's spam report; a draft, a send that
  *   reached no reader (a 'sent' one whose recipients all dropped out, or
@@ -178,16 +179,20 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     expect(chooseNewsletterPoll(history)).toBeNull();
   });
 
-  test('an unsent issue a Resume could still mail holds its poll; one with nothing left to mail does not', async () => {
+  test('an unsent issue a Resume could still mail holds its poll; one with no eligible reader left does not', async () => {
     const TYPE = newType();
+    const [reader] = await db('newsletter_subscribers')
+      .insert({ email: `poll-test-${randomUUID().slice(0, 8)}@example.invalid`, status: 'active', source: 'public_form' })
+      .returning(['id']);
     await insertIssues(TYPE, [
       { poll: null, sentAt: daysAgo(21) },
       { poll: null, sentAt: daysAgo(14) },
-      // Failed before SendGrid took any message; its rows are still retryable,
-      // and a Resume may mail them after the next issue.
-      { poll: P1, status: 'failed', createdAt: daysAgo(8), deliveries: [{ status: 'queued' }, { status: 'failed' }] },
-      // Failed with no row a Resume would mail: it can never go out.
-      { poll: P3, status: 'failed', createdAt: daysAgo(9), deliveries: [{ status: 'skipped' }] },
+      // Failed before SendGrid took any message; an active reader's row is
+      // still retryable, and a Resume may mail it after the next issue.
+      { poll: P1, status: 'failed', createdAt: daysAgo(8), deliveries: [{ status: 'queued', subscriberId: reader.id }] },
+      // Failed too, but its retryable row has no active subscriber: a Resume
+      // would mail no one (the sender's outstandingEligibleDeliveries).
+      { poll: P3, status: 'failed', createdAt: daysAgo(9), deliveries: [{ status: 'queued' }, { status: 'skipped' }] },
     ]);
     const history = await newsletterIssuePolls({ newsletterType: TYPE });
     expect(history.recent).toEqual([null, null]);
@@ -195,12 +200,15 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     expect(chooseNewsletterPoll(history)).toBe(P2);
   });
 
-  test('a poll token in the other part\'s form is not a poll the issue showed', async () => {
+  test('a poll token of either form in either part counts, as the sender renders it', async () => {
     const TYPE = newType();
     const [[row]] = await insertIssues(TYPE, [{ poll: P1, wrongPart: true, sentAt: daysAgo(7) }]);
-    expect(await newsletterIssuePolls({ newsletterType: TYPE })).toEqual({ recent: [null], used: [] });
+    expect(await newsletterIssuePolls({ newsletterType: TYPE })).toEqual({ recent: [P1], used: [P1] });
+    // The reader got working vote links, so the vote counts.
     await expect(recordQuizResponse({ token: row.engagement_token, quizId: P1, answerKey: 'beach' }))
-      .resolves.toEqual({ ok: false, reason: 'not-in-issue' });
+      .resolves.toEqual({ ok: false, reason: 'no-subscriber' });
+    expect(await db('newsletter_send_deliveries').where({ id: row.id }).first('quiz_id', 'quiz_answer'))
+      .toEqual({ quiz_id: P1, quiz_answer: 'beach' });
   });
 
   test('the sender\'s reach rule decides: a hard-bounced issue does not count; a reader\'s spam report does', async () => {

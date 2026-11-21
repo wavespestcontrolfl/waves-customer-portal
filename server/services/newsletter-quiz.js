@@ -474,15 +474,13 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
 }
 
 /**
- * The quizzes an issue shows, each part read by its own token form, as the
- * public route contract reads them: {{quiz:<id>}} in html_body and
- * {{quiz-text:<id>}} in text_body, in any letter case (parseQuizTokens).
+ * The quizzes an issue shows: every quiz token, of either form, in either
+ * part, in any letter case. These are the tokens the sender renders as vote
+ * links: newsletter-sender.js builds one substitution map from both parts
+ * joined (buildQuizSubstitutions), and SendGrid applies it to both parts.
  */
 function quizzesInIssue(issue) {
-  return [
-    ...parseQuizTokens(issue?.html_body).filter((token) => !token.isText),
-    ...parseQuizTokens(issue?.text_body).filter((token) => token.isText),
-  ].map((token) => token.quizId);
+  return parseQuizTokens(`${issue?.html_body || ''}\n${issue?.text_body || ''}`).map((token) => token.quizId);
 }
 
 // The Waves Newsletter poll an issue shows, or null.
@@ -518,7 +516,7 @@ function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
  * batch leaves it at 0).
  * Sent bodies keep their quiz tokens (the per-reader buttons are SendGrid
  * substitutions), so the tokens in html_body and text_body are the record,
- * read part by part (pollInIssue).
+ * read as the sender renders them (pollInIssue).
  * An issue's time is its sent_at, else the earliest time any of its delivery
  * rows records (a worker that failed after a batch leaves sent_at empty, a
  * lost SendGrid answer leaves a row's sent_at empty while the webhook still
@@ -526,9 +524,12 @@ function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
  * else its draft time.
  *
  * An issue no reader got yet still holds its poll while a Resume could mail
- * it (a retryable delivery row): sendCampaign skips the Tuesday window for a
- * resume of existing rows, so that issue can go out after a later one. Its
- * poll is never chosen again, and is skipped if the issue is never resumed.
+ * one of its rows (newsletter-sender.js outstandingEligibleDeliveries: a
+ * retryable row of a still-eligible reader): sendCampaign skips the Tuesday
+ * window for a resume of existing rows, so that issue can go out after a
+ * later one. Its poll is never chosen again, and is skipped if the issue is
+ * never resumed. It is held, not every poll: a failed issue nobody resumes
+ * would otherwise stop the polls for good.
  * Any other unsent issue holds nothing: a fresh send of a flagship issue goes
  * out only on its own Tuesday at 6:00 AM ET (newsletter-sender.js
  * isCurrentFlagshipTarget + isFlagshipDeliveryWindow), and its approval needs
@@ -537,14 +538,15 @@ function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
  */
 async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
   // Loaded here, not at the top: newsletter-sender.js loads this module first.
-  const { reachedDelivery, applyRetryableDeliveryFilter } = require('./newsletter-sender');
+  const { reachedDelivery, outstandingEligibleDeliveries } = require('./newsletter-sender');
   const issues = () => knex('newsletter_sends as s').where('s.newsletter_type', newsletterType);
   const deliveryRows = (sub) => sub.select(knex.raw('1'))
     .from('newsletter_send_deliveries as d').whereRaw('d.send_id = s.id');
   // reachedDelivery's unqualified columns are d's: SQL resolves a name in the
   // innermost FROM first, before the outer newsletter_sends row.
   const reachedRow = (sub) => { reachedDelivery(deliveryRows(sub)); };
-  const resumableRow = (sub) => { applyRetryableDeliveryFilter(deliveryRows(sub), 'd'); };
+  const resumableRow = () => outstandingEligibleDeliveries('s.id', { database: knex, correlate: true })
+    .select(knex.raw('1'));
   const newest = await issues()
     .whereExists(reachedRow)
     .orderByRaw(`COALESCE(s.sent_at,
@@ -554,11 +556,12 @@ async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
       s.scheduled_for, s.created_at) DESC`)
     .limit(POLL_ISSUE_GAP)
     .select('s.html_body', 's.text_body');
-  // ILIKE: the sender reads quiz tokens in any letter case (parseQuizTokens).
+  // A loose prefilter (any token form, either part, any letter case);
+  // pollInIssue then reads the tokens exactly as the sender renders them.
   const holding = await issues()
-    .where((issue) => issue.whereExists(reachedRow).orWhereExists(resumableRow))
-    .where((body) => body.where('s.html_body', 'ilike', `%{{quiz:${NEWSLETTER_POLL_PREFIX}%`)
-      .orWhere('s.text_body', 'ilike', `%{{quiz-text:${NEWSLETTER_POLL_PREFIX}%`))
+    .where((issue) => issue.whereExists(reachedRow).orWhereExists(resumableRow()))
+    .where((body) => body.where('s.html_body', 'ilike', `%{{quiz%${NEWSLETTER_POLL_PREFIX}%`)
+      .orWhere('s.text_body', 'ilike', `%{{quiz%${NEWSLETTER_POLL_PREFIX}%`))
     .select('s.html_body', 's.text_body');
   return {
     recent: newest.map(pollInIssue),

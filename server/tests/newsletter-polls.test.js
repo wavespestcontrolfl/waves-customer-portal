@@ -104,11 +104,11 @@ describe('Waves Newsletter polls', () => {
     expect(chooseNewsletterPoll(history)).toBe(want);
   });
 
-  test('pollInIssue reads each part by its own token form and ignores the other quizzes', () => {
+  test('pollInIssue reads a poll token of either form in either part, as the sender renders it, and ignores the other quizzes', () => {
     expect(pollInIssue({ html_body: `<p>Hi</p>{{quiz:${P2}}}<p>Bye</p>`, text_body: 'Hi' })).toBe(P2);
     expect(pollInIssue({ html_body: '<p>Hi</p>', text_body: `Hi\n{{QUIZ-TEXT:${P2}}}` })).toBe(P2);
-    // A token in the other part's form is not a poll the issue showed.
-    expect(pollInIssue({ html_body: `{{quiz-text:${P2}}}`, text_body: `{{quiz:${P2}}}` })).toBeNull();
+    // The sender builds one substitution map from both parts, so this renders too.
+    expect(pollInIssue({ html_body: `{{quiz-text:${P2}}}`, text_body: 'Hi' })).toBe(P2);
     expect(pollInIssue({ html_body: '{{quiz}} {{quiz:lawn-headache-v1}} {{quiz:stay-subscribed-v1}}', text_body: '' })).toBeNull();
     expect(pollInIssue(null)).toBeNull();
   });
