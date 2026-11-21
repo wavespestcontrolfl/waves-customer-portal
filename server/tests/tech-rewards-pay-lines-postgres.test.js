@@ -1663,15 +1663,33 @@ postgres('tech rewards pay lines: the December gift', () => {
       await voidRun(lateRun);
     });
 
-    it('keeps the record of a paid bonus: the migration is not rolled back while a paid line holds its counted checks', async () => {
+    it('keeps the record of a stay bonus: the migration is not rolled back while a line, open or paid, holds its counted checks', async () => {
       const migration = require('../models/migrations/20261121180000_pay_line_counted_checks');
+      const refused = 'This migration is not rolled back while one does';
       const alpha = await stayTech('Sample Alpha');
       await paidWeeks(alpha);
       const run = await draft(EARLY_WEEK);
-      // an open line is no evidence yet, and a paid one is
+      // an OPEN line: the release before the column would carry it forward as a hand-made line and pay its old amount
+      expect(await lineOf(alpha)).toMatchObject({ status: 'open' });
+      const statements = [];
+      const listen = (query) => statements.push(String(query.sql));
+      database.on('query', listen);
+      try {
+        await expect(migration.down(trx)).rejects.toThrow(refused);
+      } finally {
+        database.removeListener('query', listen);
+      }
+      // the payroll lock is taken before the lines are read, so no pay run write slips in between the read and the drop
+      const lockAt = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock('));
+      const readAt = statements.findIndex((sql) => sql.includes('from "payroll_pay_lines"'));
+      expect(lockAt).toBeGreaterThanOrEqual(0);
+      expect(readAt).toBeGreaterThan(lockAt);
+      expect(statements.some((sql) => /drop column/i.test(sql))).toBe(false);
+      // a PAID line: its list is the evidence the void guard reads
       await finalize(run.id);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid' });
       expect((await lineOf(alpha)).counted_check_ids).toHaveLength(3);
-      await expect(migration.down(trx)).rejects.toThrow('holds the paychecks a paid bonus was worked out from');
+      await expect(migration.down(trx)).rejects.toThrow(refused);
       expect(await trx.schema.hasColumn('payroll_pay_lines', 'counted_check_ids')).toBe(true);
     });
   });
