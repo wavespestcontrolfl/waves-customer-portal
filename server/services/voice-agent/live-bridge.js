@@ -437,7 +437,7 @@ class LiveBridge {
       this.tailDropSince = null;
     }
     this.queueEndsAt = Math.max(t, this.queueEndsAt) + audio.length / MULAW_BYTES_PER_MS;
-    this.playbackEndsAt = this.queueEndsAt;
+    this.playbackEndsAt = this.queueEndsAt - this.silentRunMs; // at the chunk's last voiced sample
     this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload: msg.delta } });
   }
 
@@ -525,6 +525,11 @@ class LiveBridge {
   // playing. A late transcript of words the caller finished BEFORE the reply
   // began is not one: flushing then would cut the answer to their question.
   // No timing, no flush.
+  // The flush covers only voice already queued at Twilio, which GPT-Live can
+  // no longer take back. GPT-Live is full duplex: it hears the caller while it
+  // speaks and yields by itself. On its real-time stream under
+  // BARGE_IN_MARGIN_MS of voice is queued, so caller speech over evenly paced
+  // voice flushes nothing and drops nothing.
   isBargeIn(t, speechEnd) {
     if (t >= this.playbackEndsAt - BARGE_IN_MARGIN_MS) return false; // nothing (much) left to cut
     if (speechEnd === null || this.replyStartWall === null) return false;

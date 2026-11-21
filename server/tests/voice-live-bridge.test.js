@@ -722,6 +722,36 @@ describe('reply start on the continuous GPT-Live stream', () => {
     expect(summaryOf(t).interruptions).toBe(1);
   });
 
+  test('voice then silence in one chunk: playback ends at the last voiced sample, so speech over the silent end is no barge-in', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    // One chunk: 1000 ms of voice, then 1000 ms of silence. The voice plays until +1000.
+    delta(t, Buffer.concat([Buffer.alloc(8000, 0x00), Buffer.alloc(8000, 0xff)]).toString('base64'));
+    t.advance(1100);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hello', start_ms: 1050, end_ms: 1100 });
+    expect(t.twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).interruptions).toBe(0);
+  });
+
+  test('caller speech over evenly paced live voice flushes nothing and drops nothing: GPT-Live yields by itself', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    delta(t, b64(160)); // greeting
+    t.advance(1000);
+    run(t, 10, b64(800)); // a reply at the live pacing, +1000..+2000: 100 ms queued at the most
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1500, end_ms: 1900 }); // at +2000, over the reply
+    run(t, 3, b64(800)); // the model is still speaking
+    expect(t.twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+    expect(mediaPayloads(t).filter((p) => p === b64(800))).toHaveLength(13);
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).interruptions).toBe(0);
+  });
+
   test('a barge-in flush empties the whole queue: the next reply plays from its own arrival', async () => {
     const t = setup();
     await t.ready();
