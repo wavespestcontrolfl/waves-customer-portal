@@ -2,7 +2,8 @@
  * The job offer 7-day close in the scheduler (server/services/scheduler.js, '0 9,24,39,54 * * * *'): with
  * GATE_JOB_OFFERS off the tick does nothing at all; on, it runs closeExpiredOffers under runExclusive, so a Railway
  * deploy overlap cannot run two passes that each ring the bell. An offer that did not close fails the job (job_health
- * records it) and never throws out of the tick.
+ * records it) and never throws out of the tick. The same tick then runs the staff record pass (makeDueStaffRecords) as
+ * its own job, whatever the close did.
  *
  * Mock baseline copied from scheduler-bi-briefing-cron.test.js.
  */
@@ -32,12 +33,12 @@ jest.mock('../services/intelligence-bar/threads', () => ({ purgeExpiredThreads: 
 jest.mock('../services/intelligence-bar/tasks', () => ({ purgeExpiredTasks: jest.fn().mockResolvedValue(1) }));
 jest.mock('../services/recurring-series-topup', () => ({ runRecurringSeriesTopUpSweep: jest.fn() }));
 
-jest.mock('../services/job-offers', () => ({ closeExpiredOffers: jest.fn() }));
+jest.mock('../services/job-offers', () => ({ closeExpiredOffers: jest.fn(), makeDueStaffRecords: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
 const { isEnabled } = require('../config/feature-gates');
-const { closeExpiredOffers } = require('../services/job-offers');
+const { closeExpiredOffers, makeDueStaffRecords } = require('../services/job-offers');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -53,12 +54,15 @@ function closeTick({ gateOn = true } = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   closeExpiredOffers.mockResolvedValue({ closed: 0, failed: 0 });
+  makeDueStaffRecords.mockResolvedValue({ made: 0, refused: 0, failed: 0 });
 });
 
 test('with the gate off the tick takes no lock and reads nothing', async () => {
   await closeTick({ gateOn: false });
   expect(runExclusive).not.toHaveBeenCalledWith('job-offer-close', expect.any(Function));
+  expect(runExclusive).not.toHaveBeenCalledWith('job-offer-staff-records', expect.any(Function));
   expect(closeExpiredOffers).not.toHaveBeenCalled();
+  expect(makeDueStaffRecords).not.toHaveBeenCalled();
 });
 
 test('with the gate on the tick runs the close inside runExclusive', async () => {
@@ -85,4 +89,30 @@ test('an offer that did not close fails the job inside the lock, and the tick do
   await expect(closeTick()).resolves.toBeUndefined();
   expect(thrownInLock).toEqual(new Error('2 offer(s) did not close'));
   expect(logger.error).toHaveBeenCalledWith('[job-offers] close sweep failed: 2 offer(s) did not close');
+});
+
+test('with the gate on the tick runs the staff record pass as its own job', async () => {
+  makeDueStaffRecords.mockResolvedValue({ made: 1, refused: 1, failed: 0 });
+  await closeTick();
+  expect(runExclusive).toHaveBeenCalledWith('job-offer-staff-records', expect.any(Function));
+  expect(makeDueStaffRecords).toHaveBeenCalledTimes(1);
+  expect(logger.info).toHaveBeenCalledWith('[job-offers] staff record pass: made=1 refused=1');
+  expect(logger.error).not.toHaveBeenCalled();
+});
+
+test('a close that failed does not stop the staff record pass', async () => {
+  closeExpiredOffers.mockRejectedValue(new Error('db down'));
+  await expect(closeTick()).resolves.toBeUndefined();
+  expect(makeDueStaffRecords).toHaveBeenCalledTimes(1);
+});
+
+test('a staff record that was not made fails its job inside the lock, and the tick does not throw', async () => {
+  makeDueStaffRecords.mockResolvedValue({ made: 0, refused: 0, failed: 1 });
+  const thrownInLock = {};
+  runExclusive.mockImplementation(async (key, task) => {
+    try { return await task(); } catch (err) { thrownInLock[key] = err; throw err; }
+  });
+  await expect(closeTick()).resolves.toBeUndefined();
+  expect(thrownInLock).toEqual({ 'job-offer-staff-records': new Error('1 staff record(s) not made') });
+  expect(logger.error).toHaveBeenCalledWith('[job-offers] staff record pass failed: 1 staff record(s) not made');
 });

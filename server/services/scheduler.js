@@ -2771,6 +2771,18 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`[job-offers] close sweep failed: ${err.message}`);
     }
+    // The staff record of a signed offer (job-offers.js makeDueStaffRecords): a signature makes it at once, and this
+    // pass makes one that is still missing (its own try failed, or a restart came between the two commits). Its own
+    // job, so a failed close does not stop it. It writes a prospective staff row and sends no one anything.
+    try {
+      await runExclusive('job-offer-staff-records', async () => {
+        const { made, refused, failed } = await require('./job-offers').makeDueStaffRecords();
+        if (made + refused > 0) logger.info(`[job-offers] staff record pass: made=${made} refused=${refused}`);
+        if (failed > 0) throw new Error(`${failed} staff record(s) not made`);
+      });
+    } catch (err) {
+      logger.error(`[job-offers] staff record pass failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // Job offers, the 2-day reminder (job-offers.js sendDueReminders; GATE_JOB_OFFER_REMINDER, and GATE_JOB_OFFERS): every
