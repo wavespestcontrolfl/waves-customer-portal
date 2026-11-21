@@ -20,15 +20,15 @@ describe('serviceNameFromSummary', () => {
     ['Lawn Care', 'lawn care'],
     ['Lawn Care + Pest Control', 'lawn care and pest control'],
     ['Pest Control + Lawn Care', 'lawn care and pest control'],
-    ['  Pest Control ', 'pest control'],
-    ['Pest Control + Pest Control', 'pest control'],
-    ['Lawn Care + Pest Control + Lawn Care', 'lawn care and pest control'],
   ])('%j gives %j', (summary, expected) => {
     expect(serviceNameFromSummary(summary)).toBe(expected);
   });
 
   test.each([
     ['a third label', 'Lawn Care + Pest Control + Mosquito'],
+    ['spaces around a label (exact strings only)', '  Pest Control '],
+    ['a repeated label', 'Pest Control + Pest Control'],
+    ['a repeated label after the pair', 'Lawn Care + Pest Control + Lawn Care'],
     ['an unlisted label', 'Termite'],
     ['an unlisted label next to a listed one', 'Pest Control + Termite'],
     ['near-miss casing', 'pest control'],
@@ -43,6 +43,11 @@ describe('serviceNameFromSummary', () => {
     expect(serviceNameFromSummary(value)).toBeNull();
   });
 });
+
+// Today's two generic labels, read from the packs (never retyped).
+const { PACKS } = require('../services/estimate-followup-copy')._private;
+const BUNDLE = PACKS.bundle.label;
+const ONE_TIME = PACKS.one_time.label;
 
 describe('emailedServiceName', () => {
   let builder;
@@ -85,7 +90,7 @@ describe('emailedServiceName', () => {
 
   test('asks for this estimate, the three delivery keys, the current address, newest first, with no limit', async () => {
     rows = [row()];
-    await expect(emailedServiceName(estimate())).resolves.toBe('lawn care and pest control');
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
     expect(db).toHaveBeenCalledWith('email_messages');
     expect(builder.where).toHaveBeenCalledWith({ estimate_id: 'est-1' });
     const keysCall = builder.whereIn.mock.calls.find(([col]) => col === 'template_key');
@@ -103,7 +108,7 @@ describe('emailedServiceName', () => {
       row({ payload_snapshot: { service_summary: 'Lawn Care + Pest Control' } }),
       row({ payload_snapshot: { service_summary: 'Pest Control' } }),
     ];
-    await expect(emailedServiceName(estimate())).resolves.toBe('lawn care and pest control');
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
   });
 
   test('a failed or queued newest row is skipped for the next accepted one', async () => {
@@ -112,12 +117,12 @@ describe('emailedServiceName', () => {
       row({ status: 'queued', payload_snapshot: { service_summary: 'Lawn Care' } }),
       row({ status: 'delivered' }),
     ];
-    await expect(emailedServiceName(estimate())).resolves.toBe('lawn care and pest control');
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
   });
 
   test('only failed or queued rows: no name', async () => {
     rows = [row({ status: 'failed' }), row({ status: 'queued' }), row({ status: 'bounced' })];
-    await expect(emailedServiceName(estimate())).resolves.toBeNull();
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
   });
 
   test('the newest accepted row decides even when an older one would have named a service', async () => {
@@ -125,25 +130,25 @@ describe('emailedServiceName', () => {
       row({ payload_snapshot: { service_summary: 'Termite' } }),
       row(),
     ];
-    await expect(emailedServiceName(estimate())).resolves.toBeNull();
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
   });
 
   test('no rows (another address, another estimate): no name', async () => {
     rows = [];
-    await expect(emailedServiceName(estimate())).resolves.toBeNull();
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
   });
 
   test('no address on the estimate: no name and no read', async () => {
-    await expect(emailedServiceName(estimate({ customer_email: '  ' }))).resolves.toBeNull();
-    await expect(emailedServiceName(estimate({ customer_email: null }))).resolves.toBeNull();
+    await expect(emailedServiceName(estimate({ customer_email: '  ' }), BUNDLE)).resolves.toBeNull();
+    await expect(emailedServiceName(estimate({ customer_email: null }), BUNDLE)).resolves.toBeNull();
     expect(db).not.toHaveBeenCalled();
   });
 
   test('a JSON string payload and an object payload read the same', async () => {
     rows = [row({ payload_snapshot: JSON.stringify({ service_summary: 'Lawn Care + Pest Control' }) })];
-    await expect(emailedServiceName(estimate())).resolves.toBe('lawn care and pest control');
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
     rows = [row({ payload_snapshot: { service_summary: 'Lawn Care + Pest Control' } })];
-    await expect(emailedServiceName(estimate())).resolves.toBe('lawn care and pest control');
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
   });
 
   test.each([
@@ -153,30 +158,56 @@ describe('emailedServiceName', () => {
     ['a payload with no summary', { first_name: 'Jordan' }],
   ])('a payload that is %s gives no name', async (_label, payload_snapshot) => {
     rows = [row({ payload_snapshot })];
-    await expect(emailedServiceName(estimate())).resolves.toBeNull();
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
   });
 
   test('a stored summary outside the closed labels gives no name', async () => {
     rows = [row({ payload_snapshot: { service_summary: 'Quarterly Pest Control' } })];
-    await expect(emailedServiceName(estimate({ service_interest: 'Quarterly Pest Control' }))).resolves.toBeNull();
+    await expect(emailedServiceName(estimate({ service_interest: 'Quarterly Pest Control' }), BUNDLE)).resolves.toBeNull();
   });
 
   test('a stored summary that differs from the current inference gives no name', async () => {
     rows = [row({ payload_snapshot: { service_summary: 'Pest Control' } })];
-    await expect(emailedServiceName(estimate())).resolves.toBeNull();
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
   });
 
   test('an estimate that now infers nothing gives no name', async () => {
     rows = [row()];
-    await expect(emailedServiceName(estimate({ service_interest: null }))).resolves.toBeNull();
+    await expect(emailedServiceName(estimate({ service_interest: null }), BUNDLE)).resolves.toBeNull();
   });
 
   test('a failed read gives no name and logs only the error code', async () => {
     failure = Object.assign(new Error('select failed for jordan@example.com'), { code: '57014' });
-    await expect(emailedServiceName(estimate())).resolves.toBeNull();
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
     expect(logger.warn).toHaveBeenCalledTimes(1);
     const logged = logger.warn.mock.calls[0].join(' ');
     expect(logged).toContain('57014');
     expect(logged).not.toContain('example.com');
+  });
+
+  describe('only the two generic labels are replaced', () => {
+    const pestOnly = { service_interest: 'Pest Control' };
+    const pestRow = () => row({ payload_snapshot: { service_summary: 'Pest Control' } });
+
+    test.each([['pest control'], ['lawn care'], ['termite protection'], [undefined], [null], ['']])(
+      'today\'s label %j is never replaced, and nothing is read', async (label) => {
+        rows = [row()];
+        await expect(emailedServiceName(estimate(), label)).resolves.toBeNull();
+        expect(db).not.toHaveBeenCalled();
+      });
+
+    test('the bundle label takes the two-service name only', async () => {
+      rows = [row()];
+      await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
+      rows = [pestRow()];
+      await expect(emailedServiceName(estimate(pestOnly), BUNDLE)).resolves.toBeNull();
+    });
+
+    test('the one-time label takes a single-service name only', async () => {
+      rows = [pestRow()];
+      await expect(emailedServiceName(estimate(pestOnly), ONE_TIME)).resolves.toBe('pest control');
+      rows = [row()];
+      await expect(emailedServiceName(estimate(), ONE_TIME)).resolves.toBeNull();
+    });
   });
 });

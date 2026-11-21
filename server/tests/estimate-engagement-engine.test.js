@@ -470,7 +470,8 @@ describe('processDueJobs', () => {
       estimateFollowupServiceNameLive.mockReturnValue(true);
       emailedServiceName.mockResolvedValue('lawn care and pest control');
       const after = await sendOnce();
-      expect(emailedServiceName).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }));
+      // The engine hands the reader today's label; the reader decides whether that label may be replaced.
+      expect(emailedServiceName).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }), 'pest control');
       expect(after.service_label).toBe('lawn care and pest control');
       expect({ ...after, service_label: before.service_label }).toEqual(before);
     });

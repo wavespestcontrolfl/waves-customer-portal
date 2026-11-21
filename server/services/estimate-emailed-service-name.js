@@ -13,9 +13,11 @@
  *     "Lawn Care + Pest Control"
  *     or "Pest Control + Lawn Care" -> "lawn care and pest control"
  *     anything else                -> null
- *   emailedServiceName(estimate)     async: the newest accepted delivery email
- *     for this estimate and its current address, and only while the estimate
- *     still infers the same summary. A name or null.
+ *   emailedServiceName(estimate, todayLabel)  async: only for today's two generic
+ *     labels ("home protection" takes the two-service name, "service quote" a
+ *     single-service name); the newest accepted delivery email for this estimate
+ *     and its current address, and only while the estimate still infers the same
+ *     summary. A name or null.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -38,20 +40,36 @@ function packLabels() {
   return { pest: PACKS.pest.label, lawn: PACKS.lawn.label };
 }
 
+// Exact strings only: the two single labels and the two orders of the pair. No trimming and no
+// de-duplicating, so "Lawn Care + Pest Control + Lawn Care" is not a known summary.
 function serviceNameFromSummary(summary) {
   if (typeof summary !== 'string') return null;
-  const parts = [];
-  for (const raw of summary.split(SUMMARY_SEPARATOR)) {
-    const part = raw.trim();
-    if (!parts.includes(part)) parts.push(part);
-  }
   const names = pestLawnLabels();
-  if (!parts.length || !parts.every((p) => p === names.pest || p === names.lawn)) return null;
   const labels = packLabels();
-  const hasPest = parts.includes(names.pest);
-  const hasLawn = parts.includes(names.lawn);
-  if (hasPest && hasLawn) return `${labels.lawn} and ${labels.pest}`;
-  return hasPest ? labels.pest : labels.lawn;
+  if (summary === names.pest) return labels.pest;
+  if (summary === names.lawn) return labels.lawn;
+  const pair = [`${names.lawn}${SUMMARY_SEPARATOR}${names.pest}`, `${names.pest}${SUMMARY_SEPARATOR}${names.lawn}`];
+  return pair.includes(summary) ? bothLabel() : null;
+}
+
+const bothLabel = () => {
+  const labels = packLabels();
+  return `${labels.lawn} and ${labels.pest}`;
+};
+
+// Only the two generic labels are replaced. The bundle pack's label ("home protection") takes the
+// two-service name; the one-time pack's label ("service quote") takes a single-service name. Every
+// other label already names the service its pack's copy is about, so it is never replaced.
+function nameForTodayLabel(todayLabel, name) {
+  const { PACKS } = require('./estimate-followup-copy')._private;
+  if (todayLabel === PACKS.bundle.label) return name === bothLabel() ? name : null;
+  if (todayLabel === PACKS.one_time.label) return name && name !== bothLabel() ? name : null;
+  return null;
+}
+
+function replaceableLabel(todayLabel) {
+  const { PACKS } = require('./estimate-followup-copy')._private;
+  return todayLabel === PACKS.bundle.label || todayLabel === PACKS.one_time.label;
 }
 
 function summaryFromSnapshot(snapshot) {
@@ -63,8 +81,9 @@ function summaryFromSnapshot(snapshot) {
   return payload.service_summary;
 }
 
-async function emailedServiceName(estimate) {
+async function emailedServiceName(estimate, todayLabel) {
   try {
+    if (!replaceableLabel(todayLabel)) return null;
     const address = String(estimate?.customer_email || '').trim().toLowerCase();
     if (!estimate?.id || !address) return null;
     const rows = await db('email_messages')
@@ -78,7 +97,7 @@ async function emailedServiceName(estimate) {
     const newest = (rows || []).find(acceptedForSending);
     if (!newest) return null;
     const stored = summaryFromSnapshot(newest.payload_snapshot);
-    const name = serviceNameFromSummary(stored);
+    const name = nameForTodayLabel(todayLabel, serviceNameFromSummary(stored));
     if (!name) return null;
     // Second proof: the same function the delivery email used must still give
     // the same words. A different or empty result means the estimate changed.
