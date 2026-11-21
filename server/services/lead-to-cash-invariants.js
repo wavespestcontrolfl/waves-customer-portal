@@ -503,9 +503,10 @@ async function saveRunStateRow(row) {
 }
 
 // The first step of every in-app run: read the last result, then mark this
-// run's start in the row. Returns the trusted result, or null. A start that
-// cannot be marked = null too: this run then trusts nothing and posts, since
-// nothing would tell the next run that its own result went unsaved.
+// run's start in the row. Returns { marked, state }: `state` is the trusted
+// result, or null. A start that cannot be marked = null too, and the run then
+// trusts nothing, posts, and closes nothing (closeStandingAlert): nothing
+// would tell the next run that this run's own result went unsaved.
 async function startRun(now) {
   let raw = null;
   try {
@@ -516,7 +517,21 @@ async function startRun(now) {
   }
   const last = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const marked = await saveRunStateRow({ ...last, attempt: now.toISOString() });
-  return marked ? trustedState(last, now) : null;
+  return { marked, state: marked ? trustedState(last, now) : null };
+}
+
+// Every standing check ran and passed, so the open standing alert is fixed.
+// retireIfClean names the standing key only, so it can never close a record,
+// and it never throws. It runs only when this run's start is marked: without
+// the mark, a later run could trust an older result that still names the
+// check, and keep it quiet with its alert closed. Not closed on this run =
+// closed by the next clean run.
+async function closeStandingAlert(marked) {
+  if (!marked) {
+    logger.warn('[l2c-invariants] the run start could not be marked — the standing alert stays open until the next clean run');
+    return;
+  }
+  await retireIfClean(STANDING_KEY);
 }
 
 // The last step: this run's result, tried twice. Returns true when it is
@@ -608,15 +623,13 @@ async function deliver(options) {
 // The standing list. Returns { posted, error, items, alertedAt, alertId }: the
 // last three are what the run state keeps. It never throws, so a failure
 // here cannot stop the records of the same run.
-async function postStandingList(standing, state, { now, mailer, to }) {
+async function postStandingList(standing, state, { now, mailer, to, marked }) {
   const items = failingItems(standing);
   if (!items.length) {
-    // Every standing check ran and passed, so the open standing alert is
-    // fixed. A moving-window failure in this run does not matter here (it is
-    // a record), and retireIfClean names the standing key only, so it can
-    // never close a record. It never throws. If the state write after this
-    // fails, the start mark of startRun makes the next run post.
-    await retireIfClean(STANDING_KEY);
+    // A moving-window failure in this run does not matter here: it is a
+    // record. If the state write after this close fails, the start mark of
+    // startRun makes the next run post.
+    await closeStandingAlert(marked);
     return { posted: false, items: [], alertedAt: null, alertId: null };
   }
   const kept = { alertedAt: state?.alertedAt || null, alertId: state?.alertId || null };
@@ -646,7 +659,7 @@ async function postStandingList(standing, state, { now, mailer, to }) {
       html: report.html,
       text: report.text,
       link: '/admin/invoices',
-      fallOff: true, // retired by retireIfClean above, or replaced by the next standing alert
+      fallOff: true, // retired by closeStandingAlert, or replaced by the next standing alert
       supersedePrior: true,
       sendEmail: emailSender(mailer, to, report),
     });
@@ -705,8 +718,8 @@ async function postRecords(moving, notRun, state, { now, mailer, to }) {
 
 // In the app: both alerts, each tried by itself, then one write of the run state.
 async function postInApp(results, context) {
-  const state = await startRun(context.now);
-  const standing = await postStandingList(results.filter((r) => !isRecordResult(r)), state, context);
+  const { marked, state } = await startRun(context.now);
+  const standing = await postStandingList(results.filter((r) => !isRecordResult(r)), state, { ...context, marked });
   const records = await postRecords(results.filter(isRecordResult), results.filter((r) => r.moving && !isRecordResult(r)), state, context);
   const saved = await writeRunState(context.now, { items: standing.items, alertedAt: standing.alertedAt, alertId: standing.alertId, seen: records.seen });
   return { posted: standing.posted || records.posted, errors: [standing.error, records.error].filter(Boolean), saved };
@@ -733,8 +746,8 @@ async function sendWholeReport(report, { mailer, to }) {
 // Returns the run's outcome: clean, or state_failed when the clean result
 // could not be saved.
 async function recordCleanRun(now) {
-  await startRun(now);
-  await retireIfClean(STANDING_KEY);
+  const { marked } = await startRun(now);
+  await closeStandingAlert(marked);
   const saved = await writeRunState(now, { items: [], alertedAt: null, alertId: null, seen: {} });
   return saved ? { skipped: 'clean' } : { error: 'state_failed' };
 }

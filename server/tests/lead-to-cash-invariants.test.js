@@ -516,11 +516,22 @@ describe('two alerts, not one a day (in the app)', () => {
       expect(await sweep([welcome(['c1'])])).toMatchObject({ skipped: 'no_new_item' });
     });
 
-    test('a start that cannot be marked: the run trusts nothing and posts', async () => {
+    test('a start that cannot be marked: the run trusts nothing, posts, and closes nothing', async () => {
       lastRun(['b'], DAY);
       mockTables.system_settings.merge = jest.fn().mockRejectedValueOnce(new Error('deadlock detected')).mockResolvedValue(1);
       expect(await sweep([fails('b')])).toMatchObject({ sent: true });
       expect(savedState()).toMatchObject({ items: ['b'], alertedAt: NOW.toISOString() });
+      // A clean run that cannot write the row at all leaves the standing alert open: with it closed, a later run
+      // could trust the older result that still names `b`. The run reads as failed.
+      lastRun(['b'], DAY);
+      mockTables.system_settings.merge = jest.fn().mockRejectedValue(new Error('deadlock detected'));
+      expect(await sweep([ok('a'), ok('b')])).toEqual({ error: 'state_failed', results: { a: 0, b: 0 } });
+      expect(resolve).not.toHaveBeenCalled();
+      // The same with a moving-window failure beside the clean standing checks.
+      lastRun(['b'], DAY);
+      mockTables.system_settings.merge = jest.fn().mockRejectedValue(new Error('deadlock detected'));
+      expect(await sweep([ok('b'), welcome(['c1'])])).toEqual({ error: 'state_failed', results: { b: 0, new_plan_without_welcome: 1 } });
+      expect(resolve).not.toHaveBeenCalled();
     });
 
     test('a result that cannot be saved is tried twice, then the run reads as failed', async () => {
