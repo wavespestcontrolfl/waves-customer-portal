@@ -44,6 +44,12 @@ describe('serviceNameFromSummary', () => {
   });
 });
 
+// Priced recurring lines, in the shape the estimator stores them.
+const line = (service, mo) => ({ service, mo });
+const LAWN_AND_PEST_LINES = { result: { recurring: { services: [line('lawn_care', 50), line('pest_control', 40)] } } };
+const PEST_LINES = { result: { recurring: { services: [line('pest_control', 40)] } } };
+const PEST_AND_MOSQUITO_LINES = { result: { recurring: { services: [line('pest_control', 40), line('mosquito', 30)] } } };
+
 // Today's two generic labels, read from the packs (never retyped).
 const { PACKS } = require('../services/estimate-followup-copy')._private;
 const BUNDLE = PACKS.bundle.label;
@@ -64,7 +70,7 @@ describe('emailedServiceName', () => {
       id: 'est-1',
       customer_email: ' Jordan@Example.com ',
       service_interest: 'Lawn Care + Pest Control',
-      estimate_data: null,
+      estimate_data: LAWN_AND_PEST_LINES,
       ...extra,
     };
     return lastEstimate;
@@ -99,7 +105,11 @@ describe('emailedServiceName', () => {
   });
 
   test('the fixture matches the inference the proof uses', () => {
-    expect(inferEstimateServiceInterest({ ...estimate(), estimateData: null })).toBe('Lawn Care + Pest Control');
+    const est = estimate();
+    expect(inferEstimateServiceInterest({ ...est, estimateData: est.estimate_data })).toBe('Lawn Care + Pest Control');
+    // The lines alone give the same words (the reader's third check).
+    expect(inferEstimateServiceInterest({ estimateData: LAWN_AND_PEST_LINES })).toBe('Lawn Care + Pest Control');
+    expect(inferEstimateServiceInterest({ estimateData: PEST_LINES })).toBe('Pest Control');
   });
 
   test('asks for this estimate, the three delivery keys, the current address, newest first, with no limit', async () => {
@@ -174,6 +184,16 @@ describe('emailedServiceName', () => {
       expect(db).not.toHaveBeenCalledWith('email_messages');
     });
 
+    test('a revision changed only the lines (the stored interest still says lawn and pest): no name', async () => {
+      rows = [row()];
+      await expect(emailedServiceName(estimate({ estimate_data: PEST_AND_MOSQUITO_LINES }), BUNDLE)).resolves.toBeNull();
+    });
+
+    test('a stored interest with no lines behind it: no name', async () => {
+      rows = [row()];
+      await expect(emailedServiceName(estimate({ estimate_data: null }), BUNDLE)).resolves.toBeNull();
+    });
+
     test('the row is gone: no name and no email-log read', async () => {
       rows = [row()];
       const stale = estimate();
@@ -212,7 +232,7 @@ describe('emailedServiceName', () => {
 
   test('an estimate that now infers nothing gives no name', async () => {
     rows = [row()];
-    await expect(emailedServiceName(estimate({ service_interest: null }), BUNDLE)).resolves.toBeNull();
+    await expect(emailedServiceName(estimate({ service_interest: null, estimate_data: null }), BUNDLE)).resolves.toBeNull();
   });
 
   test('a failed read gives no name and logs only the error code', async () => {
@@ -226,7 +246,7 @@ describe('emailedServiceName', () => {
 
   describe('the stored email must show the summary on its Service line', () => {
     const WRAPPER = 'Waves Pest Control & Lawn Care\nWaves Pest Control, LLC';
-    const pestOnly = { service_interest: 'Pest Control' };
+    const pestOnly = { service_interest: 'Pest Control', estimate_data: PEST_LINES };
     const pestPayload = { service_summary: 'Pest Control' };
 
     test('the exact Service line counts, with spaces around it', async () => {
@@ -251,7 +271,7 @@ describe('emailedServiceName', () => {
   });
 
   describe('only the two generic labels are replaced', () => {
-    const pestOnly = { service_interest: 'Pest Control' };
+    const pestOnly = { service_interest: 'Pest Control', estimate_data: PEST_LINES };
     const pestRow = () => row({ payload_snapshot: { service_summary: 'Pest Control' } });
 
     test.each([['pest control'], ['lawn care'], ['termite protection'], [undefined], [null], ['']])(

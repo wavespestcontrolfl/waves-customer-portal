@@ -119,7 +119,13 @@ async function emailedServiceName(estimate, todayLabel) {
     // the same words. A different or empty result means the estimate changed.
     const { inferEstimateServiceInterest } = require('./estimate-service-lines');
     const current = inferEstimateServiceInterest({ ...fresh, estimateData: fresh.estimate_data });
-    return current === stored ? name : null;
+    if (current !== stored) return null;
+    // A stored service_interest wins in that function before it looks at the lines. Ask it again with the
+    // stored interest blank: the estimate's own lines must give the same words, or the name is not used.
+    const fromLines = inferEstimateServiceInterest({
+      ...fresh, service_interest: null, serviceInterest: null, estimateData: fresh.estimate_data,
+    });
+    return fromLines === stored ? name : null;
   } catch (err) {
     // A knex message can carry addresses: log only the code or name.
     logger.warn(`[estimate-emailed-service-name] read failed: ${err?.code || err?.name || 'error'}`);
