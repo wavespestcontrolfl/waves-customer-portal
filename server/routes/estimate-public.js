@@ -165,6 +165,7 @@ const {
 } = require('../services/estimate-lawn-limits');
 const { beforeYouBookBlock } = require('../services/estimate-before-you-book');
 const { mistingLayoutDocBlock } = require('../services/misting-layouts');
+const { roofPointsDocBlock } = require('../services/estimate-roof-points');
 const { isMistingSystemIdentity, isMistingSelection, mistingCustomerFacts } = require('../utils/mosquito-misting-system');
 
 function lawnCalendarBlock(services) {
@@ -31991,6 +31992,11 @@ async function composeEstimateDataPayload(estimate, {
       // off, with no saved layout, for an estimate with no misting system, and for a layout drawn for another
       // address, so those responses stay byte-identical.
       ...(await mistingLayoutDocBlock(estimate)),
+      // "Roof points" (owner ruling 2026-11-20, choice 4A): the roof points the technician confirmed, frozen when the
+      // estimate was sent, shown on the county roof photo in the Waves AI card. The key is absent with no frozen copy,
+      // when staff hid the points, and when the estimate has moved to another address, so those responses stay
+      // byte-identical. The page prints it; the emailed document does not (EstimateProposalDocument ignores the key).
+      ...(await roofPointsDocBlock(estimate)),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.

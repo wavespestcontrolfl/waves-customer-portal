@@ -32,6 +32,7 @@ const { clearRouteCacheForRequest } = require('../utils/route-cache');
 const { nanpNationalDigits, isValidNanpNumber, nanpPhoneProblem } = require('../utils/phone');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
+const { freezeRoofPointsForEstimate } = require('../services/estimate-roof-points');
 const { soldByLive, setEstimateSoldBy, listSellerCandidates, loadSoldByForList, soldByRowFields } = require('../services/estimate-sold-by');
 const {
   buildEstimatePricingAudit,
@@ -3531,6 +3532,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   const lastDeliveredAt = stampChannels.length
     ? now().toISOString()
     : (priorDeliveryState?.lastDeliveredAt || null);
+  // Roof points (owner ruling 2026-11-20, choice 4A): the customer page shows only the points the technician confirmed, as
+  // they stood at the last send that reached the customer. Every delivered send passes here (immediate, scheduled, lead
+  // auto-send, tech send and re-sends all end in sendEstimateNow), but only a REAL provider handoff takes the copy, the
+  // same test that moves the price snapshot: a suppressed or deduplicated send must not change a link the customer
+  // already holds. The copy carries this handoff's time (the lastDeliveredAt stamped below), and the page shows a copy
+  // only while the estimate has no later handoff: if this write fails, the older copy is not shown. Each group sibling
+  // takes its copy below, once this send has published it. A re-send replaces the copy; no confirmed points now deletes
+  // it. Never throws, so it cannot fail the send.
+  if (stampChannels.length > 0) await freezeRoofPointsForEstimate(estimate, { deliveredAt: lastDeliveredAt });
   // Use one handoff-anchored ordinary expiry for the navigation promise and
   // every ordinary sibling publication/reconciliation below. Recomputing
   // seven days later in the publication loop could leave the sibling's offer
@@ -3831,6 +3841,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             }
           }
           published = true;
+          // The sibling's link went out with this real handoff: take its roof points copy now, under the same handoff
+          // time its delivery state gets below (never throws).
+          if (stampChannels.length > 0) await freezeRoofPointsForEstimate(sibling, { deliveredAt: lastDeliveredAt });
           // A sibling is a delivered row of its own after the confirmed
           // handoff — same telemetry as the anchor (a fallback sibling
           // behind a SERVER anchor was invisible before; GH codex P2 on

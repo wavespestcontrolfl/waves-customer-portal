@@ -1035,4 +1035,24 @@ async function planStartBlocker(database, customerId) {
   return (await customerHoldsPlan(database, customer)) ? 'has_plan' : null;
 }
 
-module.exports = { planStartBlocker, PLAN_START_BLOCKERS };
+// The type of the property a pricer resolved for an account, after the proof
+// above cleared it. A lookup or an estimate seed can name a type that no
+// saved record of the account carries, and the proof reads saved records
+// only. The type is judged as a type saved for the account is: by the same
+// rule (isCommercialPropertyType), with a manager where the account has one:
+// its contact role, or a saved property it manages for a client (any one:
+// this answer gets no property to answer for, as the proof above). So a
+// property manager's condo is a business here too, though the engine's rule
+// reads a condo as a home.
+// Answers 'commercial', null, or 'not_live' when the account is gone. Throws
+// on a failed read.
+async function resolvedPropertyTypeBlocker(database, customerId, propertyType) {
+  if (!database || !customerId) throw new Error('resolvedPropertyTypeBlocker needs a database handle and a customer id');
+  const customer = await database('customers').where({ id: customerId }).first('contact_role');
+  if (!customer) return 'not_live';
+  const managed = isManagerWord(customer.contact_role)
+    || Boolean(await database('customer_properties').where({ customer_id: customerId, relationship: MANAGED_PROPERTY }).first('id'));
+  return isCommercialPropertyType(propertyType, managed) ? 'commercial' : null;
+}
+
+module.exports = { planStartBlocker, resolvedPropertyTypeBlocker, PLAN_START_BLOCKERS };
