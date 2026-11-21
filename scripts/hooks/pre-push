@@ -1328,14 +1328,21 @@ for i in "${!REF_SHAS[@]}"; do
 
   DIFF="$(git diff --no-color "$BASE...$AUDIT_SHA" 2>/dev/null)"
   DIFF_RC=$?
+  # The exit status first, the text second. A diff git could not finish is
+  # not "no changes" (git printed nothing: no shared history with $BASE),
+  # and what it printed before it failed is not the change (a later file's
+  # text filter failed): an audit of part of a diff would read as an audit
+  # of all of it. Such a commit is NOT audited, and the push says so.
+  if [ "$DIFF_RC" -ne 0 ]; then
+    echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): git could not compare it with $BASE (git diff exit $DIFF_RC) — NOT audited." >&2
+    UNAUDITED_REFS=$((UNAUDITED_REFS + 1))
+    round_log_mark "$i" unaudited diff_failed 0 0 ""
+    continue
+  fi
   if [ -z "$DIFF" ]; then
     # The round log keeps what THIS comparison found: another worktree can
-    # move $BASE before the EXIT trap runs. A failed diff is not "no changes".
-    if [ "$DIFF_RC" -eq 0 ]; then
-      round_log_mark "$i" none "" 0 0 ""
-    else
-      round_log_mark "$i" unaudited diff_failed 0 0 ""
-    fi
+    # move $BASE before the EXIT trap runs.
+    round_log_mark "$i" none "" 0 0 ""
     echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): no changes vs $BASE — skipping." >&2
     continue
   fi
