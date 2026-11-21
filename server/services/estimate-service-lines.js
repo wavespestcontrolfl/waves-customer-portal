@@ -459,19 +459,17 @@ function inferEstimateServiceLines(estimate = {}) {
   ];
 }
 
-// The lane keys the estimate names through CLOSED sources only: its commercial lines, else its recurring rows' keys,
-// else the estimator's ticked boxes. Never the free-text match (serviceKeysFromText over service_interest, notes and
-// description: its patterns are unanchored, so "want" reads as `ant`) and never the stored service_interest, which can
-// hold an AI label or the lead's own words. Customer copy that NAMES the service reads this, not inferEstimateServiceLines.
-function closedServiceKeys(estimate = {}) {
+// The keys of the estimator's ticked boxes (inputs.svc*), nothing else: never free text, never the stored service_interest.
+function tickedBoxServiceKeys(estimate = {}) {
   const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
-  const known = (lines) => unique(lines.map((line) => line.key).filter((key) => key && key !== 'unknown'));
-  const recurringKeys = known(recurringServicesFromData(data));
-  const priced = commercialPricedLinesFromData(data).filter((line) => !recurringKeys.includes(line.key));
-  const commercialKeys = known([...priced, ...commercialManualLinesFromData(data)]);
-  if (commercialKeys.length) return unique([...commercialKeys, ...recurringKeys]);
-  if (recurringKeys.length) return recurringKeys;
   return selectedServiceKeysFromInputs(data?.inputs || data?.engineInputs || {});
+}
+
+// Does an enabled, itemized authored proposal define the offer? Its retained engine rows can be stale, so copy that names a
+// service does not read them (the persisted detector estimateDataCarriesAreaAddOns applies the same "enabled" test).
+function estimateHasAuthoredProposal(estimate = {}) {
+  const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
+  return !!(data && data.proposal && data.proposal.enabled === true);
 }
 
 // The keys of the estimate's STORED recurring rows only; [] when it has none. Ticked boxes never count here: they fold
@@ -503,8 +501,9 @@ function inferEstimateServiceInterest(estimate = {}) {
 
 module.exports = {
   SERVICE_LINE_LABELS,
-  closedServiceKeys,
+  estimateHasAuthoredProposal,
   recurringRowServiceKeys,
+  tickedBoxServiceKeys,
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
   oneTimeLineKeys,

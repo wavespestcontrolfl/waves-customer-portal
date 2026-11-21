@@ -30,7 +30,7 @@
  */
 
 const {
-  inferEstimateServiceLines, closedServiceKeys, recurringRowServiceKeys, oneTimeLineKeys,
+  inferEstimateServiceLines, recurringRowServiceKeys, oneTimeLineKeys, tickedBoxServiceKeys, estimateHasAuthoredProposal,
 } = require('./estimate-service-lines');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
@@ -337,36 +337,7 @@ function copyCategoryForEstimate(estimate, keys = laneKeysFor(estimate)) {
   return PACKS[keys[0]] ? keys[0] : 'unknown';
 }
 
-// The order two recurring services are named in ("lawn care and pest control").
-const SERVICE_NAME_ORDER = ['lawn', 'pest', 'mosquito', 'tree_shrub', 'palm_injection', 'rodent', 'termite'];
 const NAMEABLE_ONE_TIME = new Set(['pest', 'lawn', 'mosquito']);
-
-/**
- * The service the estimate quotes, in the words the packs use, built from
- * CLOSED sources only (closedServiceKeys: commercial lines, the recurring rows,
- * the estimator's ticked boxes). Never the free-text match and never the stored
- * service_interest string. No closed key: the label the estimate gets today.
- */
-function quotedServiceName(estimate) {
-  const todayLabel = () => PACKS[copyCategoryForEstimate(estimate)].label;
-  let keys;
-  try {
-    keys = closedServiceKeys(estimate || {});
-  } catch (e) {
-    logger.warn(`[estimate-followup-copy] closed service keys failed: ${e.message}`);
-    return todayLabel();
-  }
-  if (!keys.length) return todayLabel();
-  if (keys.some((k) => k.startsWith('commercial_'))) return PACKS.commercial.label;
-  if (estimateIsOneTimeOnly(estimate)) {
-    return keys.length === 1 && NAMEABLE_ONE_TIME.has(keys[0]) ? `one-time ${PACKS[keys[0]].label}` : todayLabel();
-  }
-  const named = SERVICE_NAME_ORDER.filter((k) => keys.includes(k));
-  if (named.length !== keys.length) return todayLabel();
-  if (named.length === 1) return PACKS[named[0]].label;
-  if (named.length === 2) return `${PACKS[named[0]].label} and ${PACKS[named[1]].label}`;
-  return PACKS.bundle.label;
-}
 
 // A sold one-time service line of any kind: a one-time item, spec item or area add-on the estimate carries, or one-time
 // dollars. A recurring estimate's inferred lanes never show these, so the lawn + pest pack checks them here.
@@ -375,29 +346,62 @@ function carriesOneTimeService(estimate) {
     || (Number(estimate?.onetime_total ?? estimate?.onetimeTotal ?? estimate?.oneTimeTotal) || 0) > 0;
 }
 
+const exactly = (keys, ...want) => !!keys && keys.length === want.length && want.every((k) => keys.includes(k));
+
 // The lawn + pest pack applies only to a PURE recurring lawn + pest estimate: the stored recurring rows name exactly lawn +
-// pest, both are recurring-terms lanes, and the estimate carries no one-time service line and no termite key from any closed
-// source. Ticked boxes alone never qualify (they fold one-time and recurring services into one family), and the legacy
+// pest, both are recurring-terms lanes, no authored proposal defines the offer, and the estimate carries no one-time service
+// line. Ticked boxes alone never qualify (they fold one-time and recurring services into one family), and the legacy
 // (text-inclusive) lane keys must agree, so a lane found only in free text keeps the neutral bundle terms.
 function usesLawnPestPack(estimate, legacyKeys) {
   const terms = (key) => PACKS[key].benefit === RECURRING_TERMS_BENEFIT;
-  const sameTwo = (keys) => keys.length === 2 && keys.includes('lawn') && keys.includes('pest');
   try {
-    return sameTwo(recurringRowServiceKeys(estimate || {})) && sameTwo(legacyKeys || [])
-      && terms('lawn') && terms('pest') && !estimateIsOneTimeOnly(estimate)
-      && !carriesOneTimeService(estimate)
-      && !closedServiceKeys(estimate || {}).some((k) => TERMITE_LANES.has(k));
+    return exactly(recurringRowServiceKeys(estimate || {}), 'lawn', 'pest') && exactly(legacyKeys, 'lawn', 'pest')
+      && terms('lawn') && terms('pest') && !estimateHasAuthoredProposal(estimate || {})
+      && !estimateIsOneTimeOnly(estimate) && !carriesOneTimeService(estimate);
   } catch { return false; }
 }
 
-// Gate on: a termite job sold as a one-time line (trenching, pre-slab, Bora-Care) counts as termite for the no-guarantee
-// override, though the recurring rows hide it from the legacy lane keys.
-function hasTermiteLane(estimate, legacyKeys, nameService) {
-  const keys = [...(legacyKeys || [])];
-  if (nameService) {
-    try { keys.push(...oneTimeLineKeys(estimate || {})); } catch { /* the legacy keys stand */ }
+// Case b: one recurring lane, pest or lawn, proven by the stored recurring rows, agreed by the legacy lane keys, with no
+// one-time line on the estimate. Case c: a one-time-only estimate whose ticked boxes name exactly one of pest, lawn or
+// mosquito, agreed by the legacy lane keys. Returns that lane's key, or null.
+function singleQuotedLane(estimate, legacyKeys) {
+  const recurringKeys = recurringRowServiceKeys(estimate);
+  if (recurringKeys.length === 1 && ['pest', 'lawn'].includes(recurringKeys[0])
+    && exactly(legacyKeys, recurringKeys[0]) && oneTimeLineKeys(estimate).length === 0) {
+    return { key: recurringKeys[0], oneTime: false };
   }
-  return keys.some((k) => TERMITE_LANES.has(k));
+  if (!estimateIsOneTimeOnly(estimate)) return null;
+  const boxes = tickedBoxServiceKeys(estimate);
+  return boxes.length === 1 && NAMEABLE_ONE_TIME.has(boxes[0]) && exactly(legacyKeys, boxes[0]) ? { key: boxes[0], oneTime: true } : null;
+}
+
+/**
+ * The service the estimate quotes, named ONLY on narrow proof; otherwise null (callers say "Waves", or keep today's label).
+ *   a. a pure recurring lawn + pest estimate: "lawn care and pest control";
+ *   b. one recurring pest or lawn lane (see singleQuotedLane): that pack's label;
+ *   c. a one-time-only estimate with exactly one ticked pest, lawn or mosquito box: "one-time " + that pack's label.
+ * An authored proposal defines its own offer and is never named; never reads free text or the stored service_interest.
+ */
+function quotedServiceName(estimate) {
+  try {
+    if (!estimate || estimateHasAuthoredProposal(estimate)) return null;
+    const legacyKeys = laneKeysFor(estimate);
+    if (usesLawnPestPack(estimate, legacyKeys)) return LAWN_PEST_PACK.label;
+    const lane = singleQuotedLane(estimate, legacyKeys);
+    if (!lane) return null;
+    return lane.oneTime ? `one-time ${PACKS[lane.key].label}` : PACKS[lane.key].label;
+  } catch (e) {
+    logger.warn(`[estimate-followup-copy] service naming failed: ${e && (e.code || e.name)}`);
+    return null;
+  }
+}
+
+// The two answers every estimate_sent email gives, whatever the service: when a customer can start, and that the quoted price holds.
+const ESTIMATE_SENT_FAQ = Object.freeze({ start: FAQ_START, price: FAQ_PRICE });
+
+// Gate on: the one-time service lines the estimate carries, as lane keys ([] when none or unreadable).
+function oneTimeKeysOf(estimate) {
+  try { return oneTimeLineKeys(estimate || {}); } catch { return []; }
 }
 
 function packForEstimate(estimate) {
@@ -435,23 +439,20 @@ function emailVarsFor(pack, serviceLabel, hasTermite) {
 function followupEmailVars(estimate) {
   const keys = laneKeysFor(estimate);
   const nameService = featureGates.estimateEmailsNameServiceLive?.() === true;
-  const pack = nameService && usesLawnPestPack(estimate, keys)
+  let pack = nameService && usesLawnPestPack(estimate, keys)
     ? LAWN_PEST_PACK
     : PACKS[copyCategoryForEstimate(estimate, keys)];
+  // Gate on: a one-time line the legacy lane keys do not show (a recurring plan plus one-time trenching) makes a mixed
+  // estimate. A pack that promises recurring terms must not speak for it: the whole email takes the bundle pack's neutral
+  // words (blank terms and between-visits rows).
+  const oneTime = nameService ? oneTimeKeysOf(estimate) : [];
+  if (pack.benefit === RECURRING_TERMS_BENEFIT && oneTime.some((k) => !(keys || []).includes(k))) pack = PACKS.bundle;
   // A termite lane drops the guarantee under ANY pack: one-time trenching /
   // pre-slab / Bora-Care quotes fold to `one_time`, termite + pest to
   // `bundle`, bait monitoring to `commercial`, and all three carry
-  // "satisfaction guaranteed".
-  const hasTermite = hasTermiteLane(estimate, keys, nameService);
-  return emailVarsFor(pack, nameService ? quotedServiceName(estimate) : pack.label, hasTermite);
-}
-
-/**
- * The vars of the property-generic `unknown` pack, read from no estimate at all (no notes, description or
- * service_interest). The 2-hour estimate_sent email uses them when the estimate names no service through a closed source.
- */
-function neutralFollowupEmailVars() {
-  return emailVarsFor(PACKS.unknown, PACKS.unknown.label, false);
+  // "satisfaction guaranteed". Gate on, a one-time termite line counts too.
+  const hasTermite = [...(keys || []), ...oneTime].some((k) => TERMITE_LANES.has(k));
+  return emailVarsFor(pack, (nameService && quotedServiceName(estimate)) || pack.label, hasTermite);
 }
 
 /**
@@ -469,7 +470,7 @@ module.exports = {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
-  neutralFollowupEmailVars,
   quotedServiceName,
+  ESTIMATE_SENT_FAQ,
   _private: { PACKS, LAWN_PEST_PACK, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, NO_GUARANTEE_BENEFIT, REPORT_TOUR_VIDEOS_LIVE },
 };

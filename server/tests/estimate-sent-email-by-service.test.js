@@ -68,7 +68,22 @@ afterEach(() => {
 describe('buildEstimateSentEmail', () => {
   const link = 'https://waves.test/l/abc123?x=1&y=2';
 
-  test('an opened estimate: thanks line, service named, button, the five question rows, kept greeting and closing', () => {
+  const TWO_ROWS = ['When can I start?', 'Is the price locked in?'];
+  const oneTimeJob = { id: 'one', status: 'sent', monthly_total: 0, annual_total: 0, onetime_total: 150, estimate_data: { inputs: { svcOnetimePest: true } } };
+  const authoredProposal = {
+    id: 'prop', status: 'sent', monthly_total: 300, annual_total: 3600, onetime_total: 0,
+    estimate_data: {
+      proposal: { enabled: true },
+      manualQuoteLines: [{ service: 'commercial_pest', quoteRequired: true }],
+      result: { recurring: { services: [{ service: 'Pest Control', mo: 30 }] } },
+    },
+  };
+  const wizardEstimate = {
+    id: 'wiz', status: 'sent', monthly_total: 60, annual_total: 720, onetime_total: 0,
+    estimate_data: { engineResult: { lineItems: [{ service: 'lawn_care', monthly: 60 }] }, inputs: {} },
+  };
+
+  test('an opened estimate: thanks line, service named, button, the two question rows, kept greeting and closing', () => {
     const { html_body: html, text_body: text, service } = buildEstimateSentEmail({
       estimate: { ...recurring('Pest Control', 'Lawn Care'), viewed_at: new Date() }, estimateUrl: link,
     });
@@ -79,14 +94,24 @@ describe('buildEstimateSentEmail', () => {
     expect(html).toContain('View my estimate');
     expect(html).toContain('href="https://waves.test/l/abc123?x=1&amp;y=2"');
     expect(html).toContain('<h2>A few things folks usually ask</h2>');
-    ['What is included?', 'When can I start?', 'Am I locked in?', 'What if I see activity between visits?', 'Is the price locked in?']
-      .forEach((q) => expect(html).toContain(`<strong>${q}</strong>`));
-    expect(html.indexOf('What is included?')).toBeLessThan(html.indexOf('When can I start?'));
-    expect(html).toContain('Pest control: exterior and interior protection on a recurring schedule');
     expect(html).toContain('<p>— The Waves Pest Control team</p>');
     expect(text).toContain('Thanks for taking a look at your lawn care and pest control estimate.');
     expect(text).toContain(`View my estimate: ${link}`);
     expect(text).not.toMatch(/landed/i);
+  });
+
+  test.each([
+    ['a plan', recurring('Pest Control', 'Lawn Care')],
+    ['a one-time job', oneTimeJob],
+    ['a termite estimate', recurring('Termite Bait Monitoring')],
+    ['a plan plus one-time trenching', { ...recurring('Pest Control'), estimate_data: { result: { recurring: { services: [{ service: 'Pest Control', mo: 30 }] }, oneTime: { items: [{ service: 'termite_trenching', name: 'Termite trenching', price: 800 }] } } }, onetime_total: 800 }],
+  ])('%s: exactly the same two question rows, no service-specific promise', (_name, estimate) => {
+    const { html_body: html, text_body: text } = buildEstimateSentEmail({ estimate, estimateUrl: link });
+    expect([...html.matchAll(/<li><strong>([^<]+)<\/strong>/g)].map((m) => m[1])).toEqual(TWO_ROWS);
+    expect(html).toContain('Whenever works for you. Most new customers pick a start date within 1–2 weeks.');
+    expect(html).toContain('your price holds until the expiration date on your estimate');
+    expect(html).not.toMatch(/What is included|Am I locked in|between visits|callback|guarantee|money-back|re-service|commitment|cancel/i);
+    expect(text).not.toMatch(/callback|guarantee|money-back|re-service|commitment|cancel/i);
   });
 
   test.each([
@@ -113,42 +138,25 @@ describe('buildEstimateSentEmail', () => {
     expect(html).toContain('A few things folks usually ask');
   });
 
-  test('an estimate that names no service through a closed source is neutral: your Waves estimate, generic answers', () => {
-    const est = {
-      id: 'n', status: 'sent', monthly_total: 40, notes: 'want a quote', description: 'pest and lawn', service_interest: 'Pest Control',
-      estimate_data: { inputs: {} },
-    };
+  test.each([
+    ['free text only (a note, a description, a stored service_interest)', { id: 'n', status: 'sent', monthly_total: 40, notes: 'want a quote', description: 'pest and lawn', service_interest: 'Pest Control', estimate_data: { inputs: {} } }],
+    ['a quote-wizard estimate (engineResult.lineItems, no recurring rows, no boxes)', wizardEstimate],
+    ['an authored commercial proposal that retains a residential pest row', authoredProposal],
+    ['a termite estimate', recurring('Termite Bait Monitoring')],
+  ])('%s: "your Waves estimate"', (_name, est) => {
     const { html_body: html, text_body: text, service } = buildEstimateSentEmail({ estimate: est, estimateUrl: link });
     expect(service).toBe('Waves');
     expect(html).toContain('<p>Your Waves estimate is ready whenever you are.</p>');
     expect(text).toContain('Your Waves estimate is ready whenever you are.');
-    expect(html).toContain('A plan priced from your actual property');
-    expect(html).not.toMatch(/pest control estimate|lawn care|callbacks|free re-service|Am I locked in|between visits/i);
+    expect(html).not.toMatch(/pest control estimate|lawn care/i);
     const opened = buildEstimateSentEmail({ estimate: { ...est, viewed_at: new Date() }, estimateUrl: null });
     expect(opened.html_body).toContain('Thanks for taking a look at your Waves estimate.');
   });
 
-  test('a one-time job drops the contract and between-visits rows', () => {
-    const est = {
-      id: 'one', status: 'sent', monthly_total: 0, annual_total: 0, onetime_total: 150,
-      estimate_data: { inputs: { svcOnetimePest: true } },
-    };
-    const { html_body: html, service } = buildEstimateSentEmail({ estimate: est, estimateUrl: link });
+  test('a one-time-only pest job is named one-time', () => {
+    const { html_body: html, service } = buildEstimateSentEmail({ estimate: oneTimeJob, estimateUrl: link });
     expect(service).toBe('one-time pest control');
     expect(html).toContain('Your one-time pest control estimate is ready');
-    expect(html).toContain('<strong>What is included?</strong>');
-    expect(html).toContain('<strong>When can I start?</strong>');
-    expect(html).toContain('<strong>Is the price locked in?</strong>');
-    expect(html).not.toContain('Am I locked in?');
-    expect(html).not.toContain('between visits');
-  });
-
-  test('a termite estimate carries no guarantee line and no contract row', () => {
-    const { html_body: html, text_body: text } = buildEstimateSentEmail({ estimate: recurring('Termite Bait Monitoring'), estimateUrl: link });
-    expect(html).toContain('Your termite protection estimate is ready');
-    expect(html).not.toMatch(/guarantee|callbacks|money-back/i);
-    expect(text).not.toMatch(/guarantee|callbacks|money-back/i);
-    expect(html).not.toContain('Am I locked in?');
   });
 
   describe('the Waves app block', () => {
@@ -179,12 +187,11 @@ describe('buildEstimateSentEmail', () => {
     });
   });
 
-  test('every merged value is escaped in the HTML body', () => {
+  test('the link is escaped in the HTML body', () => {
     const { html_body: html } = buildEstimateSentEmail({
-      estimate: { ...recurring('Tree & Shrub Care'), viewed_at: new Date() },
+      estimate: { ...recurring('Pest Control'), viewed_at: new Date() },
       estimateUrl: 'https://waves.test/l/a"><script>alert(1)</script>',
     });
-    expect(html).toContain('tree &amp; shrub care estimate');
     expect(html).not.toContain('<script>');
     expect(html).toContain('&quot;&gt;&lt;script&gt;');
   });
@@ -353,13 +360,16 @@ describe('estimate_sent at delivery', () => {
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('941-555-0100');
   });
 
-  test('gate on: a step that goes to another address than the estimate\'s (the account holder) gets no button and no log read', async () => {
-    queues({ estimateRows: [undefined, recurring('Pest Control'), recurring('Pest Control')], enrollment: { email: 'holder@example.com' } });
+  test('gate on: a step that goes to another address than the estimate\'s gets today\'s body unchanged, nothing about the estimate', async () => {
+    queues({ estimateRows: [undefined, { ...recurring('Pest Control'), viewed_at: new Date() }], enrollment: { email: 'holder@example.com' } });
     sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-b3' });
 
     await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
-    expect(sendgrid.sendOne.mock.calls[0][0].to).toBe('holder@example.com');
-    expect(sendgrid.sendOne.mock.calls[0][0].html).not.toContain('View my estimate');
+    const sent = sendgrid.sendOne.mock.calls[0][0];
+    expect(sent.to).toBe('holder@example.com');
+    expect(sent.html).toContain('Old body: just making sure it landed.');
+    expect(sent.text).toContain('Old text: making sure it landed.');
+    expect(sent.html).not.toMatch(/pest control estimate|Thanks for taking a look|View my estimate|Waves app keeps/);
     expect(db).not.toHaveBeenCalledWith('email_messages');
     expect(followUp._private.mintStageLinks).not.toHaveBeenCalled();
   });

@@ -6,14 +6,14 @@
  * so renderAutomationStepContent wraps it unchanged (it merges {{first_name}} and the chrome).
  *
  * Kept from the live step body (20260926120200 audit): the greeting, the "A few things folks usually ask" heading,
- * the closing and the sign-off. Changed: the first paragraph (it names the quoted service and no longer says the
- * email is "just making sure it landed"), a View my estimate button, and a question row only when its answer is not
- * blank, then the Waves app block (paragraph, linked tour poster, caption) before the closing. Every answer comes from followupEmailVars, so a one-time job gets no contract or between-visits row and a
- * termite estimate gets no guarantee line.
+ * the closing and the sign-off. Changed: the first paragraph (it names the quoted service, or says "Waves" when no
+ * service is proven, and no longer says the email is "just making sure it landed"), a View my estimate button, two
+ * question rows (start date, price holds) that are the same for every estimate, and the Waves app block before the
+ * closing. The email makes no service-specific promise: no contract, callback or guarantee wording. The caller
+ * (automation-runner.js) builds it only for the address the estimate was sent to.
  */
 
-const { followupEmailVars, neutralFollowupEmailVars, quotedServiceName } = require('./estimate-followup-copy');
-const { closedServiceKeys } = require('./estimate-service-lines');
+const { quotedServiceName, ESTIMATE_SENT_FAQ } = require('./estimate-followup-copy');
 const { ctaButton } = require('./email-template');
 
 const BUTTON_LABEL = 'View my estimate';
@@ -39,13 +39,10 @@ function appBlockHtml() {
   ].join('\n');
 }
 
-// Question rows in the order the email shows them: [label, followupEmailVars key].
+// Two question rows, the same for every estimate: the email promises nothing that depends on which service was quoted.
 const QUESTION_ROWS = [
-  ['What is included?', 'category_included'],
-  ['When can I start?', 'faq_start'],
-  ['Am I locked in?', 'faq_terms'],
-  ['What if I see activity between visits?', 'faq_between_visits'],
-  ['Is the price locked in?', 'faq_price'],
+  ['When can I start?', ESTIMATE_SENT_FAQ.start],
+  ['Is the price locked in?', ESTIMATE_SENT_FAQ.price],
 ];
 
 function escapeHtml(value) {
@@ -69,31 +66,15 @@ function firstParagraph(estimate, service) {
     : `Your ${service} estimate is ready whenever you are.`;
 }
 
-function questionRows(vars) {
-  return QUESTION_ROWS
-    .map(([label, key]) => [label, String(vars[key] || '').trim()])
-    .filter(([, answer]) => answer);
-}
-
-// An estimate that names no service through a closed source gets a neutral email: "your Waves estimate" and the
-// property-generic pack's answers. Nothing here reads notes, description or service_interest (the free-text match).
-function hasClosedService(estimate) {
-  try { return closedServiceKeys(estimate || {}).length > 0; } catch { return false; }
-}
-function serviceAndVars(estimate) {
-  if (!hasClosedService(estimate)) return { service: NEUTRAL_SERVICE, vars: neutralFollowupEmailVars() };
-  return { service: quotedServiceName(estimate), vars: followupEmailVars(estimate) };
-}
-
 /**
  * @param {{ estimate: object, estimateUrl?: string|null }} args  `estimateUrl` is the minted email link, or
  *   null/empty when the guard refused or the mint failed: the email then goes without the button.
  * @returns {{ html_body: string, text_body: string, service: string }}
  */
 function buildEstimateSentEmail({ estimate, estimateUrl = null }) {
-  const { service, vars } = serviceAndVars(estimate);
+  const service = quotedServiceName(estimate) || NEUTRAL_SERVICE;
   const paragraph = firstParagraph(estimate, service);
-  const rows = questionRows(vars);
+  const rows = QUESTION_ROWS;
   const url = String(estimateUrl || '').trim();
 
   const htmlParts = [

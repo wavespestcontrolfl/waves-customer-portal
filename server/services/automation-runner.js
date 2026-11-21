@@ -329,6 +329,9 @@ async function withEstimateSentBody({ html, text }, { template, step, enrollment
   const estimate = stopEvaluatedEstimates.get(enrollment);
   if (!estimate) return { html, text };
   stopEvaluatedEstimates.delete(enrollment);
+  // The address first: a step that goes anywhere but the estimate's own current address (a corrected address, the account
+  // holder) gets today's content, with nothing about this estimate: no opened state, no service word, no button.
+  if (lowerTrim(recipient) !== lowerTrim(estimate.customer_email) || !lowerTrim(recipient)) return { html, text };
   const { buildEstimateSentEmail } = require('./estimate-sent-email-by-service');
   const body = buildEstimateSentEmail({ estimate, estimateUrl: await estimateSentLink(estimate, recipient) });
   return renderAutomationStepContent({ template, htmlBody: body.html_body, textBody: body.text_body, customer: personal, asmGroupId });

@@ -1,7 +1,8 @@
 /**
- * GATE_ESTIMATE_EMAILS_NAME_SERVICE, engine copy (owner 2026-11-21): quotedServiceName names the quoted service from
- * CLOSED sources only, and followupEmailVars uses it (plus a lawn + pest pack) only while the gate is on.
- * Synthetic estimates only.
+ * GATE_ESTIMATE_EMAILS_NAME_SERVICE, engine copy (owner 2026-11-21): quotedServiceName names a service only on narrow
+ * proof (a pure recurring lawn + pest plan, one recurring pest or lawn lane, a one-time-only estimate with one ticked box)
+ * and is null otherwise; followupEmailVars uses it (plus a lawn + pest pack and a mixed-estimate rule) only while the gate
+ * is on. Synthetic estimates only.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -13,12 +14,13 @@ jest.mock('../routes/estimate-public', () => ({
 
 const {
   quotedServiceName,
-  neutralFollowupEmailVars,
   followupEmailVars,
   RECURRING_TERMS_LANES,
   _private: { PACKS, LAWN_PEST_PACK, RECURRING_TERMS_BENEFIT, NO_GUARANTEE_BENEFIT },
 } = require('../services/estimate-followup-copy');
-const { closedServiceKeys, recurringRowServiceKeys } = require('../services/estimate-service-lines');
+const {
+  recurringRowServiceKeys, oneTimeLineKeys, tickedBoxServiceKeys, estimateHasAuthoredProposal,
+} = require('../services/estimate-service-lines');
 
 function recurring(...services) {
   return {
@@ -30,6 +32,13 @@ function boxes(inputs, totals = {}) {
   return { id: 'e-box', monthly_total: 0, annual_total: 0, onetime_total: 0, estimate_data: { inputs }, ...totals };
 }
 const ONE_TIME = { monthly_total: 0, annual_total: 0, onetime_total: 150 };
+const TRENCHING = { service: 'termite_trenching', name: 'Termite trenching', price: 800 };
+function withOneTime(est, ...items) {
+  est.estimate_data.result.oneTime = { items };
+  est.onetime_total = items.reduce((sum, item) => sum + item.price, 0);
+  return est;
+}
+const RECURRING_PROMISES = /callback|cancel|re-service|commitment|contract|money-back/i;
 
 let saved;
 beforeEach(() => { saved = process.env.GATE_ESTIMATE_EMAILS_NAME_SERVICE; });
@@ -39,100 +48,89 @@ afterEach(() => {
 });
 const gateOn = () => { process.env.GATE_ESTIMATE_EMAILS_NAME_SERVICE = 'true'; };
 const gateOff = () => { delete process.env.GATE_ESTIMATE_EMAILS_NAME_SERVICE; };
+const followupCategory = (est) => require('../services/estimate-followup-copy').copyCategoryForEstimate(est);
 
-describe('closedServiceKeys', () => {
-  test('recurring rows win over ticked boxes', () => {
-    const est = recurring('Pest Control');
-    est.estimate_data.inputs = { svcLawn: true };
-    expect(closedServiceKeys(est)).toEqual(['pest']);
-  });
+// An authored commercial proposal that still retains a residential pest row.
+const COMMERCIAL_PROPOSAL = {
+  id: 'prop', monthly_total: 300, annual_total: 3600, onetime_total: 0,
+  estimate_data: {
+    proposal: { enabled: true },
+    manualQuoteLines: [{ service: 'commercial_pest', quoteRequired: true }],
+    result: { recurring: { services: [{ service: 'Pest Control', mo: 30 }] } },
+  },
+};
+// The public quote wizard keeps residential service ids in engineResult.lineItems, with no recurring rows and no svc boxes.
+const WIZARD = {
+  id: 'wiz', monthly_total: 60, annual_total: 720, onetime_total: 0,
+  estimate_data: { engineResult: { lineItems: [{ service: 'lawn_care', monthly: 60 }] }, inputs: {} },
+};
 
-  test('ticked boxes name the lanes of an estimate with no recurring rows', () => {
-    expect(closedServiceKeys(boxes({ svcLawn: true, svcPest: true }))).toEqual(['pest', 'lawn']);
-  });
-
-  test('free text and a stored service_interest name nothing', () => {
-    const est = {
-      id: 'e-text', service_interest: 'Pest Control and Lawn Care', notes: 'We want ants gone', description: 'rodent',
-      estimate_data: { inputs: { leadServiceInterest: 'mosquito' } },
-    };
-    expect(closedServiceKeys(est)).toEqual([]);
-  });
-
-  test('a commercial manual line names a commercial lane', () => {
-    const est = { id: 'e-com', estimate_data: { manualQuoteLines: [{ service: 'commercial_pest', quoteRequired: true }] } };
-    expect(closedServiceKeys(est)).toEqual(['commercial_pest']);
-  });
-});
-
-describe('recurringRowServiceKeys', () => {
-  test('names only the stored recurring rows', () => {
+describe('the closed readers', () => {
+  test('recurringRowServiceKeys names only the stored recurring rows', () => {
     expect(recurringRowServiceKeys(recurring('Pest Control', 'Lawn Care'))).toEqual(['pest', 'lawn']);
     expect(recurringRowServiceKeys(boxes({ svcPest: true, svcLawn: true }))).toEqual([]);
     expect(recurringRowServiceKeys({ id: 'x' })).toEqual([]);
   });
-});
 
-describe('neutralFollowupEmailVars', () => {
-  test('is the property-generic pack with no recurring promises', () => {
-    const vars = neutralFollowupEmailVars();
-    expect(vars.service_label).toBe(PACKS.unknown.label);
-    expect(vars.category_included).toBe(PACKS.unknown.included);
-    expect(vars.faq_terms).toBe('');
-    expect(vars.category_benefit).toBe(NO_GUARANTEE_BENEFIT);
+  test('tickedBoxServiceKeys reads the boxes and never free text or service_interest', () => {
+    expect(tickedBoxServiceKeys(boxes({ svcOnetimePest: true }))).toEqual(['pest']);
+    expect(tickedBoxServiceKeys({ id: 'x', service_interest: 'Pest Control', notes: 'We want ants gone', estimate_data: {} })).toEqual([]);
+  });
+
+  test('oneTimeLineKeys reads the one-time lines a recurring estimate carries', () => {
+    expect(oneTimeLineKeys(withOneTime(recurring('Pest Control'), TRENCHING))).toEqual(['termite']);
+    expect(oneTimeLineKeys(recurring('Pest Control'))).toEqual([]);
+  });
+
+  test('estimateHasAuthoredProposal needs an enabled proposal', () => {
+    expect(estimateHasAuthoredProposal(COMMERCIAL_PROPOSAL)).toBe(true);
+    expect(estimateHasAuthoredProposal({ estimate_data: { proposal: { enabled: false } } })).toBe(false);
+    expect(estimateHasAuthoredProposal(recurring('Pest Control'))).toBe(false);
   });
 });
 
 describe('quotedServiceName', () => {
   test.each([
-    ['one recurring service', recurring('Pest Control'), 'pest control'],
-    ['a lawn estimate', recurring('Lawn Care'), 'lawn care'],
-    ['two recurring services, lawn first', recurring('Pest Control', 'Lawn Care'), 'lawn care and pest control'],
-    ['pest and mosquito', recurring('Mosquito', 'Pest Control'), 'pest control and mosquito protection'],
-    ['three recurring services', recurring('Pest Control', 'Lawn Care', 'Mosquito'), PACKS.bundle.label],
-    ['a commercial line', { id: 'c', estimate_data: { manualQuoteLines: [{ service: 'commercial_pest', quoteRequired: true }] } }, PACKS.commercial.label],
-  ])('%s', (_name, est, expected) => {
+    ['one recurring pest lane', recurring('Pest Control'), 'pest control'],
+    ['one recurring lawn lane', recurring('Lawn Care'), 'lawn care'],
+    ['a pure recurring lawn + pest plan', recurring('Pest Control', 'Lawn Care'), 'lawn care and pest control'],
+    ['a stored service_interest that names other services', { ...recurring('Lawn Care'), service_interest: 'Mosquito, Pest Control and Termite' }, 'lawn care'],
+    ['a one-time-only pest box', boxes({ svcOnetimePest: true }, ONE_TIME), 'one-time pest control'],
+    ['a one-time-only lawn box', boxes({ svcOnetimeLawn: true }, ONE_TIME), 'one-time lawn care'],
+    ['a one-time-only mosquito box', boxes({ svcOnetimeMosquito: true }, ONE_TIME), 'one-time mosquito protection'],
+  ])('%s is named', (_name, est, expected) => {
     expect(quotedServiceName(est)).toBe(expected);
   });
 
-  test('a one-time-only estimate with one pest, lawn or mosquito box is named one-time', () => {
-    expect(quotedServiceName(boxes({ svcOnetimePest: true }, ONE_TIME))).toBe('one-time pest control');
-    expect(quotedServiceName(boxes({ svcOnetimeLawn: true }, ONE_TIME))).toBe('one-time lawn care');
-    expect(quotedServiceName(boxes({ svcOnetimeMosquito: true }, ONE_TIME))).toBe('one-time mosquito protection');
-  });
-
-  test('any other one-time estimate keeps today\'s label', () => {
-    expect(quotedServiceName(boxes({ svcTrenching: true }, ONE_TIME))).toBe(PACKS.one_time.label);
-    expect(quotedServiceName(boxes({ svcOnetimePest: true, svcOnetimeLawn: true }, ONE_TIME))).toBe(PACKS.one_time.label);
-  });
-
-  test('an estimate with no closed key keeps today\'s label, whatever the free text says', () => {
-    const est = {
-      id: 'e-text', monthly_total: 40, service_interest: 'Lawn Care', notes: 'We want a quote',
-      estimate_data: { inputs: {} },
-    };
-    expect(quotedServiceName(est)).toBe(PACKS[followupCategory(est)].label);
-    // "want" reads as ant in the free-text match: that text must not name pest control
-    expect(quotedServiceName(est)).not.toBe('pest control');
-  });
-
-  test('a stored service_interest is ignored when a closed source names another service', () => {
-    const est = { ...recurring('Lawn Care'), service_interest: 'Mosquito, Pest Control and Termite' };
-    expect(quotedServiceName(est)).toBe('lawn care');
+  test.each([
+    ['pest and mosquito', recurring('Mosquito', 'Pest Control')],
+    ['three recurring services', recurring('Pest Control', 'Lawn Care', 'Mosquito')],
+    ['a recurring mosquito lane', recurring('Mosquito')],
+    ['a recurring termite lane', recurring('Termite Bait Monitoring')],
+    ['a commercial manual line', { id: 'c', estimate_data: { manualQuoteLines: [{ service: 'commercial_pest', quoteRequired: true }] } }],
+    ['a recurring pest plan plus a one-time trenching job', withOneTime(recurring('Pest Control'), TRENCHING)],
+    ['a lawn + pest plan plus a one-time line', withOneTime(recurring('Pest Control', 'Lawn Care'), TRENCHING)],
+    ['one-time trenching', boxes({ svcTrenching: true }, ONE_TIME)],
+    ['two one-time boxes', boxes({ svcOnetimePest: true, svcOnetimeLawn: true }, ONE_TIME)],
+    ['ticked boxes on a recurring estimate with no stored rows', boxes({ svcPest: true }, { monthly_total: 40 })],
+    ['a quote-wizard estimate', WIZARD],
+    ['an authored commercial proposal that retains a residential pest row', COMMERCIAL_PROPOSAL],
+    ['an authored proposal over a recurring pest row', { ...recurring('Pest Control'), estimate_data: { proposal: { enabled: true }, result: { recurring: { services: [{ service: 'Pest Control', mo: 30 }] } } } }],
+    ['free text and a stored service_interest only', { id: 't', monthly_total: 40, service_interest: 'Pest Control', notes: 'We want a quote', estimate_data: { inputs: {} } }],
+  ])('%s is not named', (_name, est) => {
+    expect(quotedServiceName(est)).toBeNull();
   });
 });
-
-function followupCategory(est) {
-  return require('../services/estimate-followup-copy').copyCategoryForEstimate(est);
-}
 
 describe('followupEmailVars', () => {
   const samples = [
     recurring('Pest Control'),
     recurring('Pest Control', 'Lawn Care'),
+    withOneTime(recurring('Pest Control'), TRENCHING),
     boxes({ svcOnetimePest: true }, ONE_TIME),
     { id: 'blank', estimate_data: {} },
-    { id: 'c', estimate_data: { manualQuoteLines: [{ service: 'commercial_pest', quoteRequired: true }] } },
+    COMMERCIAL_PROPOSAL,
+    WIZARD,
   ];
 
   test.each(samples.map((s) => [s.id, s]))('gate off: %s returns what the pack gives today', (_id, est) => {
@@ -143,6 +141,7 @@ describe('followupEmailVars', () => {
     expect(vars.category_headline).toBe(pack.headline);
     expect(vars.category_included).toBe(pack.included);
     expect(vars.faq_terms).toBe(pack.faq.terms);
+    expect(vars.faq_between_visits).toBe(pack.faq.betweenVisits);
     expect(vars.category_benefit).toBe(pack.benefit);
   });
 
@@ -153,7 +152,7 @@ describe('followupEmailVars', () => {
     expect(vars.category_headline).toBe(PACKS.bundle.headline);
   });
 
-  test('gate on: a recurring lawn + pest estimate gets the owner words', () => {
+  test('gate on: a pure recurring lawn + pest plan gets the owner words', () => {
     gateOn();
     const vars = followupEmailVars(recurring('Pest Control', 'Lawn Care'));
     expect(vars).toMatchObject({
@@ -180,88 +179,61 @@ describe('followupEmailVars', () => {
     expect(LAWN_PEST_PACK.benefit).toBe(RECURRING_TERMS_BENEFIT);
   });
 
-  test('gate on: lawn + pest + mosquito is the bundle pack with the bundle name', () => {
+  test('gate on: a recurring pest plan names itself and keeps the pest pack', () => {
     gateOn();
-    const vars = followupEmailVars(recurring('Pest Control', 'Lawn Care', 'Mosquito'));
-    expect(vars.service_label).toBe(PACKS.bundle.label);
-    expect(vars.category_headline).toBe(PACKS.bundle.headline);
+    const vars = followupEmailVars(recurring('Pest Control'));
+    expect(vars.service_label).toBe('pest control');
+    expect(vars.category_headline).toBe(PACKS.pest.headline);
   });
 
-  test('gate on: a one-time lawn + pest job does not get the lawn + pest pack', () => {
+  test('gate on: a recurring pest plan plus one-time trenching is bundle-neutral with no recurring wording anywhere', () => {
     gateOn();
-    const vars = followupEmailVars(boxes({ svcOnetimePest: true, svcOnetimeLawn: true }, ONE_TIME));
-    expect(vars.category_headline).toBe(PACKS.one_time.headline);
-    expect(vars.faq_terms).toBe('');
-    expect(vars.faq_between_visits).toBe('');
-  });
-
-  test('gate on: lawn + pest ticked boxes with a termite word in free text name both but keep the neutral bundle terms', () => {
-    gateOn();
-    const est = boxes({ svcPest: true, svcLawn: true }, { monthly_total: 90, notes: 'termite damage seen' });
-    const vars = followupEmailVars(est);
-    expect(vars.service_label).toBe('lawn care and pest control');
+    const vars = followupEmailVars(withOneTime(recurring('Pest Control'), TRENCHING));
     expect(vars.category_headline).toBe(PACKS.bundle.headline);
     expect(vars.category_benefit).toBe(NO_GUARANTEE_BENEFIT);
+    expect(vars.faq_terms).toBe('');
+    expect(vars.faq_between_visits).toBe('');
+    Object.values(vars).forEach((value) => expect(String(value)).not.toMatch(RECURRING_PROMISES));
+    gateOff();
+    // gate off is today's output: the pest pack, with its recurring wording
+    expect(followupEmailVars(withOneTime(recurring('Pest Control'), TRENCHING)).category_headline).toBe(PACKS.pest.headline);
+  });
+
+  test('gate on: a recurring lawn + pest plan plus one-time trenching is not the combined pack and has no guarantee line', () => {
+    gateOn();
+    const vars = followupEmailVars(withOneTime(recurring('Pest Control', 'Lawn Care'), TRENCHING));
+    expect(vars.category_headline).toBe(PACKS.bundle.headline);
+    expect(vars.category_benefit).toBe(NO_GUARANTEE_BENEFIT);
+    Object.values(vars).forEach((value) => expect(String(value)).not.toMatch(RECURRING_PROMISES));
+  });
+
+  test('gate on: a recurring lawn + pest plan plus a one-time pest line is bundle-neutral too', () => {
+    gateOn();
+    const vars = followupEmailVars(withOneTime(recurring('Pest Control', 'Lawn Care'), { service: 'one_time_pest', name: 'One-time pest treatment', price: 150 }));
+    expect(vars.category_headline).toBe(PACKS.bundle.headline);
     expect(vars.faq_terms).toBe('');
   });
 
   test('gate on: a recurring pest + one-time lawn with no stored recurring rows gets bundle terms, no plan promises', () => {
     gateOn();
-    // the ticked boxes fold the one-time lawn and the recurring pest into the same two lanes
-    const est = boxes({ svcPest: true, svcOnetimeLawn: true }, { monthly_total: 40, onetime_total: 120 });
-    const vars = followupEmailVars(est);
+    const vars = followupEmailVars(boxes({ svcPest: true, svcOnetimeLawn: true }, { monthly_total: 40, onetime_total: 120 }));
     expect(vars.category_headline).toBe(PACKS.bundle.headline);
-    expect(vars.category_benefit).toBe(PACKS.bundle.benefit);
     expect(vars.faq_terms).toBe('');
-    expect(vars.faq_between_visits).toBe('');
     expect(vars.category_included).not.toContain('free callbacks');
   });
 
-  test('gate on: a recurring lawn + pest plan plus a one-time trenching job gets neutral terms and no guarantee line', () => {
+  test('gate on: an authored commercial proposal keeps today\'s label and pack', () => {
     gateOn();
-    const est = recurring('Pest Control', 'Lawn Care');
-    est.estimate_data.result.oneTime = { items: [{ service: 'termite_trenching', name: 'Termite trenching', price: 800 }] };
-    est.onetime_total = 800;
-    const vars = followupEmailVars(est);
-    expect(vars.service_label).toBe('lawn care and pest control');
-    expect(vars.category_headline).toBe(PACKS.bundle.headline);
-    expect(vars.category_benefit).toBe(NO_GUARANTEE_BENEFIT);
-    expect(vars.faq_terms).toBe('');
-    expect(vars.faq_between_visits).toBe('');
-    expect(vars.category_included).not.toMatch(/callback|guarantee/i);
-    gateOff();
-    // gate off is today's output: the bundle pack, whose benefit keeps its own wording
-    expect(followupEmailVars(est).category_benefit).toBe(PACKS.bundle.benefit);
+    const vars = followupEmailVars(COMMERCIAL_PROPOSAL);
+    expect(vars.service_label).toBe(PACKS.commercial.label);
+    expect(vars.category_headline).toBe(PACKS.commercial.headline);
   });
 
-  test('gate on: a recurring lawn + pest plan with any other one-time service line is not the combined pack', () => {
-    gateOn();
-    const est = recurring('Pest Control', 'Lawn Care');
-    est.estimate_data.result.oneTime = { items: [{ service: 'one_time_pest', name: 'One-time pest treatment', price: 150 }] };
-    const vars = followupEmailVars(est);
-    expect(vars.category_headline).toBe(PACKS.bundle.headline);
-    expect(vars.faq_terms).toBe('');
-  });
-
-  test('gate on: a pure recurring lawn + pest plan is the combined pack', () => {
-    gateOn();
-    const vars = followupEmailVars(recurring('Pest Control', 'Lawn Care'));
-    expect(vars.category_headline).toBe(LAWN_PEST_PACK.headline);
-    expect(vars.category_benefit).toBe(RECURRING_TERMS_BENEFIT);
-  });
-
-  test('gate on: a termite estimate keeps no guarantee and gets no contract claim', () => {
+  test('gate on: a termite estimate keeps no guarantee and no contract claim', () => {
     gateOn();
     const vars = followupEmailVars(recurring('Termite Bait Monitoring'));
     expect(vars.service_label).toBe('termite protection');
     expect(vars.category_benefit).toBe(NO_GUARANTEE_BENEFIT);
     expect(vars.faq_terms).toBe('');
-  });
-
-  test('gate on: a single service keeps its own pack words and names itself', () => {
-    gateOn();
-    const vars = followupEmailVars(recurring('Pest Control'));
-    expect(vars.service_label).toBe('pest control');
-    expect(vars.category_headline).toBe(PACKS.pest.headline);
   });
 });
