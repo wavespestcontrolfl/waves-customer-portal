@@ -43,7 +43,6 @@ const VOICED_SAMPLE_MIN = 300; // a decoded sample at or above this magnitude (1
 const CALLER_VOICED_RMS_MIN = 300; // a caller frame at or above this RMS (16-bit scale) holds voice
 const CALLER_SPEECH_MIN_MS = 100; // caller frames that hold voice this long in a row are speech; a shorter sound (a click, a knock) is not
 const CALLER_GAP_MIN_MS = 20; // caller audio missing this long before a frame, by Twilio's media timestamps (one 20 ms frame of its), ends a run of voice
-const CALLER_STOPPED_MIN_MS = 200; // a reply whose first voice comes sooner than this after the caller's last speech did not wait for the caller to stop
 const TAIL_DROP_MAX_MS = 1500; // after a barge-in, drop the cut-off reply's tail at most this long
 // Caller audio that arrives before session.started (admission and the OpenAI
 // start) is held in memory, never stored: the latest 3 s at most (Twilio sends
@@ -566,10 +565,6 @@ class LiveBridge {
     this.replyDelayIn = null;
     if (spoke === null || (prev !== null && spoke <= prev)) return; // no caller speech since the reply before this one began
     const delay = Math.round(voiceAt - spoke);
-    // Under CALLER_STOPPED_MIN_MS the reply did not wait for the caller to
-    // stop: the model spoke over the caller, or the line is noisy and the
-    // bridge cannot hear the caller stop. The number would not be a reply delay.
-    if (delay < CALLER_STOPPED_MIN_MS) return;
     if (ambiguous) this.replyDelayIn = this.ambiguousReplies;
     else this.replyDelayIn = prev === null ? 'first' : this.latencies;
     if (this.replyDelayIn === 'first') this.firstReplyAmbiguousMs = delay;
@@ -578,7 +573,11 @@ class LiveBridge {
 
   // Takes back the current reply's delay. Caller speech that began before the
   // reply's first voiced sample goes on after the reply's chunk arrived
-  // (noteCallerFrame): the reply did not wait for the caller, as above.
+  // (noteCallerFrame): the model spoke over the caller, or the line is noisy
+  // and the bridge cannot hear the caller stop. Either way the number would
+  // not be a reply delay. The caller's audio after the reply began decides,
+  // not how short the delay is: a fast reply after the caller truly stopped
+  // is followed by silence and keeps its delay.
   dropReplyDelay() {
     if (this.replyDelayIn === 'first') this.firstReplyAmbiguousMs = null;
     else if (this.replyDelayIn) this.replyDelayIn.pop();
