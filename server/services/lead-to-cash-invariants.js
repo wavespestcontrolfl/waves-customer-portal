@@ -39,9 +39,10 @@
  *      that the last run did not have, so a 14-day window does not post 14
  *      copies and a finding that cleared and came back posts again.
  * The run state (one system_settings row) holds what the last run found. A
- * state that is missing or cannot be read never hides a finding: it posts.
- * The state moves forward only for an alert the feed holds, so a failed
- * write is tried again on the next run.
+ * state that is missing, cannot be read, or was not written by the last
+ * daily run never hides a finding: it posts. The state moves forward only
+ * for an alert the feed holds, so a failed write is tried again on the next
+ * run.
  * Rows written before this split are full reports under RECORD_KEY. They get
  * the record treatment: the sweep never touches them.
  * The email path (the in-app feed off) is unchanged: one email a run.
@@ -76,9 +77,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // cron fires at 06:55 with a few seconds of jitter, so the limit is 6.5 days:
 // an exact 7 days could miss the 7th run by a second and wait for the 8th.
 const REPEAT_AFTER_MS = 6.5 * DAY_MS;
-// The most findings of one moving-window check the run state keeps (as short
-// hashes). Past this number only the count can show a new finding.
-const ITEM_KEYS_CAP = 300;
+// The run state counts only when the LAST daily run wrote it. An older one (a
+// failed state write, a missed run, days on the email path) no longer says
+// what the feed shows, so the run reads it as "no state" and posts. The runs
+// are 24 hours apart (23 or 25 on a clock change).
+const STATE_FRESH_MS = 36 * 60 * 60 * 1000;
 const SAMPLE_IDS = 25;
 const CLOSEOUT_VISIT_CAP = 150;
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
@@ -360,7 +363,9 @@ async function runDetectors({ now = new Date(), detectors = DETECTORS } = {}) {
         // EVERY finding's key, not the display sample below: a record is new
         // when a key is new, and the 26th finding must count like the first.
         // `listCapped` = the check itself returned a part of its list.
-        itemKeys: Array.isArray(out.itemKeys) ? out.itemKeys.map(String) : ids, listCapped: out.truncated === true,
+        // `ids` is the whole list too, so a record can show a new finding
+        // that is not in the first SAMPLE_IDS.
+        ids, itemKeys: Array.isArray(out.itemKeys) ? out.itemKeys.map(String) : ids, listCapped: out.truncated === true,
         // A detector that already capped its sample in SQL reports the cap
         // itself (out.truncated) — the length test alone cannot see it.
         count: Number(out.count) || 0, sample: ids.slice(0, SAMPLE_IDS), truncated: ids.length > SAMPLE_IDS || out.truncated === true,
@@ -374,7 +379,7 @@ async function runDetectors({ now = new Date(), detectors = DETECTORS } = {}) {
       logger.error(`[l2c-invariants] ${d.key} unavailable: ${scrubSentryText(err?.message || err)}`);
       results.push({
         key: d.key, label: d.label, href: d.href, moving: d.moving === true, freshEachRun: d.freshEachRun === true, ok: false, unavailable: true,
-        itemKeys: [], listCapped: false,
+        ids: [], itemKeys: [], listCapped: false,
         count: 0, sample: [], truncated: false, detail: null,
         error: safeErrorToken(err?.code) || safeErrorToken(err?.name) || 'error', ms: Date.now() - started,
       });
@@ -444,18 +449,23 @@ function failingItems(results) {
 //   items     the standing checks that failed (failingItems)
 //   alertedAt the time of the last standing alert the feed holds, or null
 //   seen      for each failing moving-window check, its findings (itemHashes)
-// null when there is none or it cannot be read. The callers then post: a
-// state fault never hides a finding.
-async function readRunState() {
+// null when there is none, it cannot be read, or the last daily run did not
+// write it (STATE_FRESH_MS). The callers then post: a state fault never hides
+// a finding.
+async function readRunState(now) {
   try {
     const row = await db('system_settings').where({ key: RUN_STATE_KEY }).first('value');
     const state = row?.value ? JSON.parse(row.value) : null;
     if (!state || !Array.isArray(state.items)) return null;
-    const alertedAt = Number.isFinite(Date.parse(state.alertedAt)) ? state.alertedAt : null;
+    const age = now.getTime() - Date.parse(state.runAt);
+    if (!(age < STATE_FRESH_MS)) {
+      logger.info(`[l2c-invariants] run state is not from the last daily run (written ${state.runAt || 'at an unknown time'}) — treating every item as new`);
+      return null;
+    }
     const seen = state.seen && typeof state.seen === 'object' && !Array.isArray(state.seen) ? state.seen : {};
     return {
       items: state.items.map(String),
-      alertedAt,
+      alertedAt: Number.isFinite(Date.parse(state.alertedAt)) ? state.alertedAt : null,
       seen: Object.fromEntries(Object.entries(seen).filter(([, hashes]) => Array.isArray(hashes)).map(([key, hashes]) => [key, hashes.map(String)])),
     };
   } catch (err) {
@@ -464,15 +474,18 @@ async function readRunState() {
   }
 }
 
-async function writeRunState({ items, alertedAt, seen }) {
+// Returns true when the state is saved. It never throws.
+async function writeRunState(now, { items, alertedAt, seen }) {
   try {
-    const value = JSON.stringify({ items, alertedAt: alertedAt || null, seen: seen || {} });
+    const value = JSON.stringify({ runAt: now.toISOString(), items, alertedAt: alertedAt || null, seen: seen || {} });
     await db('system_settings')
       .insert({ key: RUN_STATE_KEY, value, category: 'ops_digest', description: 'Lead-to-cash sweep: what the last run found (failing standing checks, time of the last standing alert, moving-window findings as hashes)' })
       .onConflict('key')
       .merge({ value, updated_at: new Date() });
+    return true;
   } catch (err) {
     logger.warn(`[l2c-invariants] run-state write failed (${err.message}) — the next run may post again`);
+    return false;
   }
 }
 
@@ -487,25 +500,40 @@ function nothingNew(state, items, now) {
 
 const shortHash = (text) => crypto.createHash('sha1').update(String(text)).digest('hex').slice(0, 16);
 
-// The findings of one failing moving-window check, as short hashes: what the
-// run state keeps to tell a new finding from one already posted (it holds no
-// record id). A check that reads a different window on each run (yesterday's
+// One finding of a moving-window check, as a short hash: what the run state
+// keeps to tell a new finding from one already posted (it holds no record
+// id). A check that reads a different window on each run (yesterday's
 // closeouts) adds the date, so the same visit id, or "could not run", on two
-// days is two findings. A list that does not name every finding (the check
-// returned a part, the cap cut it, or it gave no ids) cannot show a new one,
-// so its count joins the list and any change of the count is a new finding.
+// days is two findings.
+function itemHash(r, itemKey, now) {
+  return shortHash(`${r.freshEachRun ? etDateString(now) : ''}|${r.key}|${itemKey}`);
+}
+
+// EVERY finding of one failing moving-window check (no cap: a finding left
+// out could be replaced unseen). A list that does not name every finding (the
+// check returned a part of it, or no ids) cannot show a new one, so its count
+// joins the list and any change of the count is a new finding.
 function itemHashes(r, now) {
-  const scope = `${r.freshEachRun ? etDateString(now) : ''}|${r.key}|`;
-  if (r.unavailable) return [shortHash(`${scope}unavailable`)];
-  const all = [...new Set(r.itemKeys)].sort();
-  const keys = all.slice(0, ITEM_KEYS_CAP);
-  if (r.listCapped || all.length > keys.length || !keys.length) keys.push(`count:${r.count}`);
-  return keys.map((key) => shortHash(scope + key)).sort();
+  if (r.unavailable) return [itemHash(r, 'unavailable', now)];
+  const keys = [...new Set(r.itemKeys)];
+  if (r.listCapped || !keys.length) keys.push(`count:${r.count}`);
+  return keys.map((key) => itemHash(r, key, now)).sort();
 }
 
 function hasNewItem(hashes, seen) {
   const known = new Set(Array.isArray(seen) ? seen : []);
   return hashes.some((hash) => !known.has(hash));
+}
+
+// A failing check as a record shows it: the findings the last run did not
+// have come first, so the SAMPLE_IDS shown always hold what made the record.
+function newFindingsFirst(r, seen, now) {
+  if (r.ok || r.unavailable || r.ids.length !== r.itemKeys.length) return r;
+  const known = new Set(Array.isArray(seen) ? seen : []);
+  const fresh = [];
+  const old = [];
+  r.ids.forEach((id, i) => (known.has(itemHash(r, r.itemKeys[i], now)) ? old : fresh).push(id));
+  return { ...r, sample: [...fresh, ...old].slice(0, SAMPLE_IDS) };
 }
 
 const emailSender = (mailer, to, report) => () => mailer.sendOne({
@@ -523,20 +551,16 @@ async function deliver(options) {
   return out?.channel === 'in_app' ? 'in_app' : 'email';
 }
 
-// The standing list. Returns { posted, error, items, alertedAt }: the last two
-// are what the run state keeps. It never throws, so a failure here cannot
+// The standing list. Returns { posted, clean, error, items, alertedAt }: the
+// last two are what the run state keeps. It never throws, so a failure here cannot
 // stop the records of the same run.
 async function postStandingList(standing, state, { now, mailer, to }) {
   const items = failingItems(standing);
   const alertedAt = state?.alertedAt || null;
-  if (!items.length) {
-    // Every standing check ran and passed, so the open standing alert is
-    // fixed. A moving-window failure in this run does not matter here (it is
-    // a record), and retireIfClean names the standing key only, so it can
-    // never close a record. It never throws.
-    await retireIfClean(STANDING_KEY);
-    return { posted: false, items: [], alertedAt: null }; // an empty list: the next failing check is new
-  }
+  // An empty list: the caller closes the open alert (closeStandingAlert), and
+  // the next failing check is new. A moving-window failure in this run does
+  // not matter here: it is a record.
+  if (!items.length) return { posted: false, clean: true, items: [], alertedAt: null };
   if (nothingNew(state, items, now)) {
     logger.info(`[l2c-invariants] standing list: no new item since the last alert (${state.alertedAt}) — not posted again`);
     return { posted: false, items, alertedAt };
@@ -557,7 +581,7 @@ async function postStandingList(standing, state, { now, mailer, to }) {
       html: report.html,
       text: report.text,
       link: '/admin/invoices',
-      fallOff: true, // retired by retireIfClean above, or replaced by the next standing alert
+      fallOff: true, // retired by closeStandingAlert, or replaced by the next standing alert
       supersedePrior: true,
       sendEmail: emailSender(mailer, to, report),
     });
@@ -581,7 +605,10 @@ async function postRecords(moving, state, { now, mailer, to }) {
   // What the state keeps when the feed did not get the record: the findings
   // posted before that still stand. A new finding stays new for the next run.
   const unposted = Object.fromEntries(failing.map((r) => [r.key, current[r.key].filter((hash) => (before[r.key] || []).includes(hash))]));
-  const report = composeReport(moving, { now });
+  const report = composeReport(moving.map((r) => newFindingsFirst(r, before[r.key], now)), {
+    now,
+    note: 'Record: in each list, the findings that the last run did not have come first.',
+  });
   try {
     const channel = await deliver({
       key: RECORD_KEY,
@@ -601,12 +628,27 @@ async function postRecords(moving, state, { now, mailer, to }) {
   }
 }
 
+// Every standing check ran and passed, so the open standing alert is fixed.
+// It closes only after the run state says the list is empty: with a state
+// that still names a check, a close here would let that check come back
+// unseen on the next run. Not closed today = closed by the next clean run.
+// retireIfClean names the standing key only, so it can never close a record,
+// and it never throws.
+async function closeStandingAlert(stateSaved) {
+  if (!stateSaved) {
+    logger.warn('[l2c-invariants] the run state was not saved — the standing alert stays open until the next clean run');
+    return;
+  }
+  await retireIfClean(STANDING_KEY);
+}
+
 // In the app: both alerts, each tried by itself, then one write of the run state.
 async function postInApp(results, context) {
-  const state = await readRunState();
+  const state = await readRunState(context.now);
   const standing = await postStandingList(results.filter((r) => !r.moving), state, context);
   const records = await postRecords(results.filter((r) => r.moving), state, context);
-  await writeRunState({ items: standing.items, alertedAt: standing.alertedAt, seen: records.seen });
+  const saved = await writeRunState(context.now, { items: standing.items, alertedAt: standing.alertedAt, seen: records.seen });
+  if (standing.clean) await closeStandingAlert(saved);
   return { posted: standing.posted || records.posted, errors: [standing.error, records.error].filter(Boolean) };
 }
 
@@ -628,9 +670,8 @@ async function sendWholeReport(report, { mailer, to }) {
 // finding stands. Records are never retired: closeout_failed_facts checks
 // yesterday only, and a clean later window does not prove older failures
 // (including license facts) were fixed.
-async function recordCleanRun() {
-  await retireIfClean(STANDING_KEY);
-  await writeRunState({ items: [], alertedAt: null, seen: {} });
+async function recordCleanRun(now) {
+  await closeStandingAlert(await writeRunState(now, { items: [], alertedAt: null, seen: {} }));
 }
 
 /**
@@ -645,7 +686,7 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   const exceptions = results.filter((r) => !r.ok);
   if (!exceptions.length) {
     logger.info(`[l2c-invariants] clean: ${JSON.stringify(summary)}`);
-    if (inAppEnabled()) await recordCleanRun();
+    if (inAppEnabled()) await recordCleanRun(now);
     return { skipped: 'clean', results: summary };
   }
   const report = composeReport(results, { now });
@@ -673,6 +714,6 @@ module.exports = {
   DETECTORS,
   _private: {
     runDetectors, composeReport, sentRecently, stampSendMarker, failingItems, nothingNew, itemHashes, hasNewItem, readRunState, writeRunState,
-    SEND_MARKER_KEY, RECORD_KEY, STANDING_KEY, RUN_STATE_KEY, REPEAT_AFTER_MS, ITEM_KEYS_CAP, SAMPLE_IDS, CLOSEOUT_VISIT_CAP,
+    SEND_MARKER_KEY, RECORD_KEY, STANDING_KEY, RUN_STATE_KEY, REPEAT_AFTER_MS, STATE_FRESH_MS, SAMPLE_IDS, CLOSEOUT_VISIT_CAP,
   },
 };
