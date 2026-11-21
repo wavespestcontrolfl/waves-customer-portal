@@ -1536,6 +1536,57 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   // capacity proof, when every clash is a previous-side buffer against an
   // assigned committed stop — and verifyArrivalCapacity then enforces the
   // offer's own grace. The offer-side twin is book-arrival-grace-parity.test.js.
+  // GATE_TECH_SHIFT_HOURS at the commit: the visit's own block against the technician's shift
+  // (assertAssignableTechnician `hours`, on the booking transaction). The availability builder offers
+  // only hours inside the shift; the office may change the hours between the offer and the confirm.
+  // The offered visit is 09:00 to 10:00.
+  describe('technician shift hours at the commit', () => {
+    afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+    // The booking transaction, with the technician's set hours and no clock-in today.
+    function setShift(shift_start, shift_end) {
+      const reads = (rows) => {
+        const b = { then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject) };
+        for (const m of ['where', 'whereNot', 'whereNotNull', 'whereIn', 'whereRaw', 'groupBy', 'select', 'min', 'forShare']) b[m] = jest.fn(() => b);
+        return b;
+      };
+      const hours = reads([{ id: TECH_ID, shift_start, shift_end }]);
+      hours.first = jest.fn(async () => ({ id: TECH_ID, name: 'Tech One', employment_status: 'active', field_dispatchable: true }));
+      const clockIns = reads([]);
+      db.transaction = jest.fn(async (fn) => fn(Object.assign(
+        (table) => (table === 'technicians' ? hours : table === 'time_entries' ? clockIns : trxTable(table)),
+        { raw: jest.fn().mockResolvedValue(undefined), fn: { now: () => new Date() }, schema: { hasColumn: jest.fn().mockResolvedValue(true) } },
+      )));
+      return { hours, clockIns };
+    }
+    const confirm = () => createSelfBooking(confirmPayload(mintSlotOfferField(offerPayload())));
+
+    test('a visit inside the shift reaches the insert, at the shift start and the shift end', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const { hours } = setShift('09:00', '10:00');
+      await expect(confirm()).rejects.toThrow(SENTINEL);
+      expect(capturedScheduledInsert).toMatchObject({ technician_id: TECH_ID, window_start: '09:00', window_end: '10:00' });
+      expect(hours.whereIn).toHaveBeenCalledWith('id', [TECH_ID]);
+    });
+
+    test.each([
+      ['starts before the shift', '09:01', '18:00'],
+      ['ends after the shift end', '08:00', '09:59'],
+    ])('a visit that %s is refused as SLOT_TAKEN and nothing is written', async (_case, start, end) => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      setShift(start, end);
+      await expect(confirm()).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN', error: expect.stringMatching(/no longer available/i) });
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('gate off: the same visit reaches the insert and the hours are not read', async () => {
+      const { hours, clockIns } = setShift('09:01', '18:00');
+      await expect(confirm()).rejects.toThrow(SENTINEL);
+      expect(capturedScheduledInsert).toBeDefined();
+      expect(hours.whereNotNull).not.toHaveBeenCalled();
+      expect(clockIns.where).not.toHaveBeenCalled();
+    });
+  });
+
   describe('GATE_BOOK_ARRIVAL_GRACE commit gate', () => {
     const {
       BOOK_ARRIVAL_GRACE_OFFER_POLICY,

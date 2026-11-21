@@ -686,6 +686,46 @@ describe('customer pricing AI helpers', () => {
     expect(review(await run({ stories: 2 }))).toBe(false);
   });
 
+  // The lookup answers `stories: 1, storiesSource: 'default'` when nobody knew the count (it fell back to 1), and
+  // it raises no verify flag for that. Such a count is a gap, not a read: adopted, it was graded 'lookup', and the
+  // story-sensitive prices (pest per-story minutes, termite bait perimeter) carried no stories_estimated marker.
+  describe('a story count the lookup itself defaulted', () => {
+    const run = (enrichedStories, extra = {}) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2400, lotSqFt: 8000, ...enrichedStories }, propertyRecord: {} }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-story-default', property_sqft: null, lot_sqft: null }),
+      propertySeed: null,
+      includeEngineContext: true,
+      ...extra,
+    });
+    const pest = (result) => result.options.find((option) => option.id === 'pest-quarterly');
+    const graded = (result) => {
+      const { stories, storiesSource } = pest(result).engineContext.propertyInput;
+      return { stories, storiesSource, review: pest(result).manualReview };
+    };
+
+    test('is not adopted: the price is marked for review, as for a home with no story count', async () => {
+      expect(graded(await run({ stories: 1, storiesSource: 'default' }))).toEqual({ stories: 1, storiesSource: 'default', review: true });
+      expect(graded(await run({}))).toEqual({ stories: 1, storiesSource: 'default', review: true });
+    });
+
+    test.each([
+      ['no source on the lookup', { stories: 1 }],
+      ['a public record', { stories: 1, storiesSource: 'ai' }],
+      ['a permit', { stories: 2, storiesSource: 'permit' }],
+      ['a staff correction', { stories: 2, storiesSource: 'verified' }],
+    ])('a count with %s is adopted as before', async (_label, enrichedStories) => {
+      expect(graded(await run(enrichedStories))).toEqual({ stories: enrichedStories.stories, storiesSource: 'lookup', review: false });
+    });
+
+    test("is a gap the accepted estimate's count may fill, with that estimate's own grade", async () => {
+      const lookup = { stories: 1, storiesSource: 'default' };
+      expect(graded(await run(lookup, { propertySeed: { stories: 2, storiesSource: 'lookup' } }))).toEqual({ stories: 2, storiesSource: 'lookup', review: false });
+      expect(graded(await run(lookup, { propertySeed: { stories: 2 } }))).toEqual({ stories: 2, storiesSource: 'estimated', review: true });
+    });
+  });
+
   test('with no building footprint at all (lookup failed or carried none), a lot-inferred T&S line parks (Codex #6398 r24 P1)', async () => {
     // missingPropertyFor lets T&S price from the lot alone; a zero footprint
     // would infer beds from nearly the whole lot and publish unreviewed.
