@@ -23,6 +23,9 @@
  * body, which the archive serves, never carries an Amazon link. The send
  * path records one `recent.toolIds` entry per issue: the tool's product id,
  * or null for an issue without one.
+ * `pollQuizId` is the issue's poll, which the planner picks
+ * (newsletter-quiz.js chooseNewsletterPoll); the renderer shows only a Waves
+ * Pest Insider poll, and the send check reads its words.
  * Returns { ok, reason, issue, tool, diagnostics } where `issue` is
  * { subject, preview, html_body, text_body } and `tool` is the live tool or
  * null, when ok.
@@ -35,6 +38,7 @@ const { renderIssue } = require('./render');
 const { sendDateET } = require('./facts');
 const { postUrl } = require('./posts');
 const { validateNewsletterDraft } = require('../newsletter-validator');
+const { neutralizeQuizTokens, pollInIssue, PEST_INSIDER_POLL_IDS } = require('../newsletter-quiz');
 
 // The Pest Insider's newsletter type key: the send path, the proof kill
 // switch and the validator's claim rules all key on it.
@@ -47,13 +51,14 @@ const copyFailReason = (copy) => `copy_check_failed: ${copy.problems.map((p) => 
 
 // The send validator itself, on the issue as rendered. It reads the whole
 // email, where a pronoun opening one block reads the sentence before it, so
-// an issue this returns errors for would be refused at send anyway.
+// an issue this returns errors for would be refused at send anyway. A poll
+// is read as its words (the archive's render), not as its token.
 function sendGateErrors(issue) {
   const { errors } = validateNewsletterDraft({
     subject: issue.subject,
     preview_text: issue.preview,
-    html_body: issue.html_body,
-    text_body: issue.text_body,
+    html_body: neutralizeQuizTokens(issue.html_body),
+    text_body: neutralizeQuizTokens(issue.text_body),
     newsletter_type: NEWSLETTER_TYPE,
   });
   return errors;
@@ -61,12 +66,12 @@ function sendGateErrors(issue) {
 
 /**
  * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[], toolIds?: (string|null)[] },
- *   recheckedFactIds?: string[], livePostFactIds?: string[], liveToolUrls?: string[] }} input
+ *   recheckedFactIds?: string[], livePostFactIds?: string[], liveToolUrls?: string[], pollQuizId?: string|null }} input
  *   The issue is one email for every subscriber and takes no caller text (render.js says why).
  */
-function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFactIds = [], liveToolUrls = [] }) {
+function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFactIds = [], liveToolUrls = [], pollQuizId = null }) {
   const dateET = sendDateET(sendDate);
-  const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, toolId: null, problems: [] };
+  const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, toolId: null, pollId: null, problems: [] };
 
   const { leadFact, idItem, tool, reason } = planIssue({
     sendDate: dateET,
@@ -105,7 +110,10 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
     preview: copy.preview,
     lead: { headline: copy.headline, sentences: copy.lead.map((text) => ({ text })), postUrl: post, factId: leadFact.id },
     idItem: { text: copy.idText, species: idItem },
+    pollQuizId,
   });
+  // The poll the body carries, read as the sender and the poll history read it.
+  diagnostics.pollId = pollInIssue(issue, PEST_INSIDER_POLL_IDS);
 
   const errors = sendGateErrors(issue);
   if (errors.length) {

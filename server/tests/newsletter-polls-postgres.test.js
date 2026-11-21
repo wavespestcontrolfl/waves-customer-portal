@@ -13,6 +13,8 @@
  * - recordQuizResponse records a poll vote only from an issue that showed
  *   that poll; an issue that showed a poll takes no other quiz's answer; an
  *   issue with no poll keeps the old rule.
+ * - The Waves Pest Insider (its real type key) reads its own list from its
+ *   own issues, and its votes follow the same rule.
  * Real Postgres, because these are an ILIKE over the stored bodies, EXISTS
  * and subqueries over the delivery rows, and the vote's row update.
  * Runs in CI's DB-gated step or this worktree's private QA database; every
@@ -36,12 +38,15 @@ const { randomUUID } = require('crypto');
 postgres('Waves Newsletter polls (real Postgres)', () => {
   const db = require('../models/db');
   const {
-    newsletterIssuePolls, chooseNewsletterPoll, recordQuizResponse, NEWSLETTER_POLL_IDS,
+    newsletterIssuePolls, chooseNewsletterPoll, recordQuizResponse, NEWSLETTER_POLL_IDS, PEST_INSIDER_POLL_IDS,
   } = require('../services/newsletter-quiz');
+  const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
   const [P1, P2, P3, P4] = NEWSLETTER_POLL_IDS;
+  const [PI1, PI2] = PEST_INSIDER_POLL_IDS;
   let database;
   const HOUR = 60 * 60 * 1000;
   const daysAgo = (days) => new Date(Date.now() - days * 24 * HOUR);
+  const daysAhead = (days) => new Date(Date.now() + days * 24 * HOUR);
   const newType = () => `poll-test-${randomUUID()}`;
 
   // Inserts issues and their delivery rows; returns each issue's delivery rows
@@ -203,7 +208,7 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
   test('a poll token of either form in either part counts, as the sender renders it', async () => {
     const TYPE = newType();
     const [[row]] = await insertIssues(TYPE, [{ poll: P1, wrongPart: true, sentAt: daysAgo(7) }]);
-    expect(await newsletterIssuePolls({ newsletterType: TYPE })).toEqual({ recent: [P1], used: [P1] });
+    expect(await newsletterIssuePolls({ newsletterType: TYPE })).toEqual({ ids: NEWSLETTER_POLL_IDS, recent: [P1], used: [P1] });
     // The reader got working vote links, so the vote counts.
     await expect(recordQuizResponse({ token: row.engagement_token, quizId: P1, answerKey: 'beach' }))
       .resolves.toEqual({ ok: false, reason: 'no-subscriber' });
@@ -262,5 +267,55 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
       .resolves.toEqual({ ok: true, reason: 'tagged' });
     expect(await answerOf(withoutPoll)).toEqual(expect.objectContaining({ quiz_id: 'pest-pressure-v1', quiz_answer: 'roaches' }));
     expect(await tagsOf()).toEqual(expect.arrayContaining(['pest-interested', 'pest:roaches']));
+  });
+
+  test('the Waves Pest Insider reads its own list from its own issues, and a vote counts only from the issue that carried its poll', async () => {
+    const OTHER = newType();
+    const [sub] = await db('newsletter_subscribers')
+      .insert({ email: `poll-test-${randomUUID().slice(0, 8)}@example.invalid`, status: 'active', source: 'public_form' })
+      .returning(['id']);
+    // The real type key picks the Pest Insider's list. The issues are dated
+    // ahead of today, so they are this newsletter's newest in any database.
+    const toReader = (sentAt) => [{ status: 'sent', sentAt, subscriberId: sub.id }];
+    const [[withPoll], [otherPoll]] = await insertIssues(PEST_INSIDER_TYPE, [
+      { poll: PI1, sentAt: daysAhead(3650), deliveries: toReader(daysAhead(3650)) },
+      // A Waves Newsletter poll's token in a Pest Insider issue is not a Pest Insider poll.
+      { poll: P1, sentAt: daysAhead(3664), deliveries: toReader(daysAhead(3664)) },
+      // Another newsletter's issue that carried PI2 does not use PI2 up here.
+      { poll: PI2, type: OTHER, sentAt: daysAhead(3670) },
+    ]);
+
+    const history = await newsletterIssuePolls({ newsletterType: PEST_INSIDER_TYPE });
+    expect(history.ids).toEqual(PEST_INSIDER_POLL_IDS);
+    expect(history.recent).toEqual([null, PI1]);
+    // The stored-body prefilter finds a pi-poll token (it matched only nl-poll before).
+    expect(history.used).toContain(PI1);
+    expect(history.used).not.toContain(PI2);
+    expect(history.used).not.toContain(P1);
+    expect(chooseNewsletterPoll(history)).toBeNull();
+    // And the other way: a Pest Insider poll is not another newsletter's poll.
+    expect(await newsletterIssuePolls({ newsletterType: OTHER })).toEqual({ ids: NEWSLETTER_POLL_IDS, recent: [null], used: [] });
+
+    // A second issue without a Pest Insider poll opens the gap: the next poll is PI2.
+    await insertIssues(PEST_INSIDER_TYPE, [{ poll: null, sentAt: daysAhead(3678) }]);
+    const later = await newsletterIssuePolls({ newsletterType: PEST_INSIDER_TYPE });
+    expect(later.recent).toEqual([null, null]);
+    expect(chooseNewsletterPoll(later)).toBe(PI2);
+
+    const answerOf = async (row) => db('newsletter_send_deliveries').where({ id: row.id }).first('quiz_id', 'quiz_answer');
+    const tagsOf = async () => (await db('newsletter_subscribers').where({ id: sub.id }).first('tags')).tags;
+    const tagsBefore = await tagsOf();
+    // The issue that never showed PI1 records no PI1 vote.
+    await expect(recordQuizResponse({ token: otherPoll.engagement_token, quizId: PI1, answerKey: 'ants' }))
+      .resolves.toEqual({ ok: false, reason: 'not-in-issue' });
+    expect(await answerOf(otherPoll)).toEqual({ quiz_id: null, quiz_answer: null });
+    await expect(recordQuizResponse({ token: withPoll.engagement_token, quizId: PI1, answerKey: 'ants' }))
+      .resolves.toEqual({ ok: true, reason: 'tagged' });
+    expect(await answerOf(withPoll)).toEqual({ quiz_id: PI1, quiz_answer: 'ants' });
+    // A hand-made link with a service quiz's answer neither replaces the vote nor adds a tag.
+    await expect(recordQuizResponse({ token: withPoll.engagement_token, quizId: 'pest-pressure-v1', answerKey: 'roaches' }))
+      .resolves.toEqual({ ok: false, reason: 'not-in-issue' });
+    expect(await answerOf(withPoll)).toEqual({ quiz_id: PI1, quiz_answer: 'ants' });
+    expect(await tagsOf()).toEqual(tagsBefore);
   });
 });
