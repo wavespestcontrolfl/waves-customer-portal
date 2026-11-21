@@ -646,11 +646,11 @@ describe('mintPlanStartEstimate', () => {
       await expect(mint({}, realAddress)).resolves.toMatchObject({ reused: false });
     });
 
-    test('a first line that names no street is priced by hand: its home key would name no house (codex pre-push r31 P1)', async () => {
+    test('a first line with no house number is priced by hand: its home key would name no house (codex pre-push r31 P1)', async () => {
       // The real stored address, so the read-back check alone cannot refuse these.
       const realAddress = { pricingAi: { ...deps().pricingAi, addressForCustomer: require('../services/customer-pricing-ai').addressForCustomer } };
-      for (const [line1, line2] of [['', 'Apt 4'], ['Apt 4', null], ['#4', null], ['Apt#4', null], ['4B', null], ['PH1', null], ['123 Apt 4', null], ['123 Apt#4', null], ['4', null], ['Parrish', null],
-        ['123 Parrish', null], ['Main St', null], ['123 FL 34219', null]]) {
+      for (const [line1, line2] of [['', 'Apt 4'], ['Apt 4', null], ['#4', null], ['Apt#4', null], ['Apt # AB', null], ['4B', null], ['PH1', null], ['4', null], ['Parrish', null],
+        ['Main St', null], ['59th Ave E', null], ['5th Floor', null], ['PO Box 123', null]]) {
         tables.customers = [{ ...LEAD, address_line1: line1, address_line2: line2 }];
         await refused('pricing_unavailable', {}, realAddress);
       }
