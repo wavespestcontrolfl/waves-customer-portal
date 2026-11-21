@@ -190,6 +190,26 @@ describe('two services of one customer at one stop end together', () => {
   });
 });
 
+describe('a day that cannot run without the visit is still compared', () => {
+  // The search's own road times (context.travel). The direct road from the office to the far stop
+  // takes 590 minutes and every other leg takes 20. Alone, the far stop is reached at 17:50.
+  // Through the visit it is reached at 10:20.
+  const travel = { lookup: ({ from, to }) => ({ minutes: Number(from.lat) === 27.4 && Number(to.lat) === 27.6 ? 590 : 20, source: 'google_traffic', reason: null }) };
+  const route = (far) => ({ ...movedTo([far], moved('09:00', 27.50)), travel });
+
+  test.each([
+    ['is late for its 15:00 promise', stop('far', '15:00', 27.60, { route_order: 1 }), '16:00', 15 * 60 + 30],
+    ['ends at 20:20, past the day\'s end', stop('far', '16:00', 27.60, { minutes: 150, route_order: 1 }), '18:30', 17 * 60],
+  ])('without the visit the far stop %s: its earlier end with the visit is not an overrun', (_words, far, end, shiftEndMin) => {
+    const open = evaluateArrivalPlacement(route(far), at('09:00'));
+    expect(order(open)).toEqual(['target', 'far']);
+    expect(rowOf(open, 'far').departure).toBe(end);
+    expect(evaluateArrivalPlacement(route(far), { ...at('09:00'), shiftEndMin })).toEqual(open);
+    // The visit itself is still held to the shift end: it ends at 10:00.
+    expect(evaluateArrivalPlacement(route(far), { ...at('09:00'), shiftEndMin: 10 * 60 - 1 })).toMatchObject(REFUSED);
+  });
+});
+
 describe('next to the engine\'s other limits', () => {
   // Stop a is next to the office and the visit is far north: the order that ends at the visit gets home later.
   const route = () => movedTo([stop('a', '09:00', 27.44, { route_order: 1 })], moved('09:00', 27.60));
