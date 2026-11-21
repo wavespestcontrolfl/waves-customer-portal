@@ -33,6 +33,8 @@ const {
 const {
   MAX_STAFF_EMAIL_LENGTH,
   canonicalStaffEmail,
+  findStaffByCanonicalEmail: findTechnicianByCanonicalEmail,
+  lockStaffIdentityWrites: lockTechnicianMutations,
 } = require('../utils/staff-identity');
 const { assertMayChangeFullAccessEmail, ibFullAccess, isFullAccessEmail } = require('../services/intelligence-bar/ib-access');
 const googleSignin = require('../services/staff-google-signin');
@@ -950,21 +952,6 @@ function normalizeTechnicianEmail(value) {
     return { error: `Email must be a valid address of ${MAX_STAFF_EMAIL_LENGTH} characters or fewer` };
   }
   return { value: email };
-}
-
-async function findTechnicianByCanonicalEmail(connection, email, excludeId) {
-  if (!email) return null;
-  let query = connection('technicians')
-    .whereNotNull('email')
-    .whereRaw('LOWER(BTRIM(email)) = ?', [email]);
-  if (excludeId) query = query.whereNot('id', excludeId);
-  return query.first('id');
-}
-
-// The staff table is small and identity mutations are rare. Serialize them to
-// make canonical-email uniqueness and last-admin checks race-safe.
-async function lockTechnicianMutations(trx) {
-  await trx.raw('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE');
 }
 
 function disconnectRevokedStaffSessions(technicianId, reason) {
