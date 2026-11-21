@@ -370,7 +370,10 @@ describe('admin usage: POST /track tab build', () => {
     // 'not-staff' (the beacon logs staff pages only).
     const notSent = new Set(['portal-reloaded-for', 'undefined', 'pointerdown', 'click', 'keydown', 'input', 'change', 'moved', 'not-staff']);
     const names = new Set([...read('lib/portalReload.js').matchAll(/'([a-z][a-z0-9-]*)'/g)].map((m) => m[1]).filter((name) => !notSent.has(name)));
-    for (const m of read('components/PortalUpdate.jsx').matchAll(/noteMoveOutcome\([^,]+, '([a-z-]+)'\)/g)) names.add(m[1]);
+    // The gate keeps its note in its state (`blocker: 'first-page'`).
+    const gateNotes = [...read('components/PortalUpdate.jsx').matchAll(/\bblocker: '([a-z-]+)'/g)].map((m) => m[1]);
+    expect(gateNotes).toContain('first-page');
+    gateNotes.forEach((name) => names.add(name));
     const sources = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) return sources(file);

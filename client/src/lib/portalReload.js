@@ -98,7 +98,8 @@ export function reloadBlockerAtMove(pathname, now = Date.now(), from = null) {
 // What the latest page move did, for the usage beacon (lib/adminUsage.js):
 // the blocker that kept the page in view in this build, null when its move
 // was due a reload, or 'first-page' for the page the tab loaded.
-// PortalUpdateGate notes it at each move and when a held reload gives up.
+// PortalUpdateGate notes it once each move is in view, and when a held
+// reload gives up.
 let moveOutcome = { pathname: null, blocker: null };
 export function noteMoveOutcome(pathname, blocker) {
   moveOutcome = { pathname, blocker };

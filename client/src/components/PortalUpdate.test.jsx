@@ -4,7 +4,7 @@
 // in an out-of-date tab loads the live code, the first page never reloads, a
 // tab inside a page is not a move, held work stops it, and the Reload bar
 // shows on staff pages only.
-import { useEffect, useLayoutEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useLayoutEffect, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
@@ -315,6 +315,71 @@ describe('PortalUpdateGate', () => {
     } finally {
       setItem.mockRestore();
     }
+  });
+
+  // Like AdminLayoutV2: the page sends its view from its own effect, in the
+  // commit that puts the page in view.
+  test('the note is ready when the page\'s own effect sends its beacon', () => {
+    const sent = [];
+    function Reporter() {
+      const { pathname } = useLocation();
+      useEffect(() => { sent.push([pathname, moveBlockerFor(pathname)]); }, [pathname]);
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/admin/dashboard']}>
+        <PortalUpdateGate fallback={<p>Loading the new version...</p>}>
+          <Reporter />
+          <Routes>
+            <Route path="/admin/dashboard" element={<Page name="Dashboard" />} />
+            <Route path="/admin/pipeline" element={<Page name="Pipeline" />} />
+          </Routes>
+        </PortalUpdateGate>
+      </MemoryRouter>,
+    );
+    goLive('bbb222bbb222');
+    holding = true;
+    fireEvent.click(screen.getByText('Open Pipeline'));
+    expect(sent).toEqual([['/admin/dashboard', 'first-page'], ['/admin/pipeline', 'test-hold']]);
+  });
+
+  // The router moves in a transition (App.jsx). While the next page's code
+  // loads, the old page stays in view and still sends beacons. Back then
+  // drops that move, and no later move puts the old page's note back.
+  test('a move notes only once it is in view: Back while the next page\'s code loads keeps the note of the page in view', async () => {
+    let navigate;
+    function Navigator() {
+      navigate = useNavigate();
+      return null;
+    }
+    let loadBlog;
+    const Blog = lazy(() => new Promise((resolve) => { loadBlog = resolve; }));
+    render(
+      <MemoryRouter initialEntries={['/admin/dashboard']} future={{ v7_startTransition: true }}>
+        <PortalUpdateGate fallback={<p>Loading the new version...</p>}>
+          <Navigator />
+          <Suspense fallback={<p>Loading the page</p>}>
+            <Routes>
+              <Route path="/admin/dashboard" element={<Page name="Dashboard" />} />
+              <Route path="/admin/blog" element={<Blog />} />
+            </Routes>
+          </Suspense>
+        </PortalUpdateGate>
+      </MemoryRouter>,
+    );
+    goLive('bbb222bbb222');
+    holding = true;
+    act(() => { navigate('/admin/blog'); });
+    expect(screen.getByText('Dashboard')).toBeTruthy();
+    expect(moveBlockerFor('/admin/dashboard')).toBe('first-page');
+    act(() => { navigate(-1); });
+    expect(moveBlockerFor('/admin/dashboard')).toBe('first-page');
+    // The same move again, and this time its page loads.
+    act(() => { navigate('/admin/blog'); });
+    expect(moveBlockerFor('/admin/blog')).toBeNull();
+    await act(async () => { loadBlog({ default: () => <h1>Blog</h1> }); });
+    expect(await screen.findByText('Blog')).toBeTruthy();
+    expect(moveBlockerFor('/admin/blog')).toBe('test-hold');
   });
 
   test('held work keeps the tab: the move opens the page and the bar stays', async () => {

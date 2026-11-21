@@ -18,8 +18,8 @@ import { notePageInView, notePageMove, onPageUse, usedOnPageInView } from '../li
 // (reloadHolds.js). A held move opens the next page in the old code. If the
 // deploy removed that page's code, the stale-chunk reload obeys the same
 // holds (staleChunkReload.js): the page waits for open work, then reloads
-// once or shows its retry screen. Each move notes why its page did not
-// reload, for the usage beacon (noteMoveOutcome, lib/portalReload.js).
+// once or shows its retry screen. Each move in view notes why its page did
+// not reload, for the usage beacon (noteMoveOutcome, lib/portalReload.js).
 export function PortalUpdateGate({ fallback, children }) {
   const { pathname } = useLocation();
   const navigationType = useNavigationType();
@@ -38,10 +38,9 @@ export function PortalUpdateGate({ fallback, children }) {
   // leaves a field page, each replace after it keeps that page, until the
   // next push or Back: /admin -> Today -> the sign-in page -> the next page
   // leaves Today, as Today -> the sign-in page does.
-  const [gate, setGate] = useState(() => {
-    noteMoveOutcome(pathname, 'first-page');
-    return { pathname, origin: pathname, from: null, reloading: false };
-  });
+  // `blocker`: why this page did not reload (lib/portalReload.js), null while
+  // its move is due a reload.
+  const [gate, setGate] = useState({ pathname, origin: pathname, from: null, reloading: false, blocker: 'first-page' });
   if (gate.pathname !== pathname) {
     const replace = navigationType === 'REPLACE';
     const origin = replace ? gate.origin : gate.pathname;
@@ -51,19 +50,22 @@ export function PortalUpdateGate({ fallback, children }) {
     // in view.
     notePageMove(from, pathname, origin);
     const blocker = reloadBlockerAtMove(pathname, Date.now(), from);
-    noteMoveOutcome(pathname, blocker);
-    setGate({ pathname, origin, from, reloading: blocker === null });
+    setGate({ pathname, origin, from, reloading: blocker === null, blocker });
   }
   // A layout effect, so that no tap comes between the move and this note.
   useLayoutEffect(() => { notePageInView(gate.from, gate.pathname); }, [gate.from, gate.pathname]);
+  // The usage beacon's note, once the move is in view. The router moves in a
+  // transition: while the next page's code loads, the old page stays in view
+  // and still sends beacons, and Back then drops that render. So a render
+  // never notes. A layout effect runs before the page's own effects send its
+  // beacon (AdminLayoutV2).
+  useLayoutEffect(() => { noteMoveOutcome(gate.pathname, gate.blocker); }, [gate]);
 
   useEffect(() => {
     if (!gate.reloading) return undefined;
     let current = true;
     reloadForNewBuild({ current: () => current }).then((blocker) => {
-      if (!current || !blocker) return;
-      noteMoveOutcome(gate.pathname, blocker);
-      setGate((state) => (state === gate ? { ...state, reloading: false } : state));
+      if (current && blocker) setGate((state) => (state === gate ? { ...state, reloading: false, blocker } : state));
     });
     return () => { current = false; };
   }, [gate]);
