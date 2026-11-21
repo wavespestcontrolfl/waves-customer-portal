@@ -6,7 +6,6 @@
 const {
   decidePushRoute,
   PUSH_ROUTING_POLICY,
-  APP_FIRST_ANY_DEVICE_POLICY,
   _test,
 } = require('../services/messaging/push-channel-routing');
 
@@ -59,9 +58,10 @@ describe('decidePushRoute', () => {
     expect(decidePushRoute({ ...base, messageType: 'appointment_cancelled' })).toBe('sms_only');
   });
 
-  it('routes low-stakes informational templates push-first', () => {
-    expect(decidePushRoute({ ...base, messageType: 'tech_en_route' })).toBe('push_first');
-    expect(decidePushRoute({ ...base, messageType: 'receipt' })).toBe('push_first');
+  it('on-the-way notices and receipts go by text (they were push-first before 2026-11-20)', () => {
+    for (const t of ['tech_en_route', 'receipt', 'deposit_receipt']) {
+      expect(decidePushRoute({ ...base, messageType: t })).toBe('sms_only');
+    }
   });
 
   it('defaults every unlisted template to sms_only', () => {
@@ -71,13 +71,17 @@ describe('decidePushRoute', () => {
   });
 });
 
-describe('decidePushRoute app first on any device (owner 2026-11-04)', () => {
-  const MOVED = [
+// Owner 2026-11-20: "lets revert to text, if they want to setup app notifications,
+// let them do it on their own". The 2026-11-04 app-first rule is withdrawn.
+describe('decidePushRoute: a routed notice never replaces its text (owner 2026-11-20)', () => {
+  // The types the 2026-11-04 rule sent to the app instead of a text.
+  const WAS_APP_FIRST = [
     'appointment_reminder', 'reminder_72h', 'tech_arrived', 'service_complete', 'service_complete_paid_receipt',
     'service_complete_prepaid', 'service_complete_annual_prepay', 'service_complete_annual_prepay_after_first_visit',
     'service_report_v1', 'lawn_watering_instruction',
   ];
-  const ALREADY_PUSH_FIRST = ['tech_en_route', 'receipt', 'deposit_receipt'];
+  const WAS_PUSH_FIRST = ['tech_en_route', 'receipt', 'deposit_receipt'];
+  const REMINDERS = ['appointment_reminder', 'reminder_72h'];
   const BILLING = [
     'billing_reminder', 'payment_failure', 'payment_failed', 'late_payment', 'payment_expiry', 'autopay',
     'autopay_pre_charge', 'autopay_charge_failed', 'autopay_retry_failed', 'autopay_retry_final_failed',
@@ -88,10 +92,30 @@ describe('decidePushRoute app first on any device (owner 2026-11-04)', () => {
     'manual', 'ai_assistant', 'appointment_confirmation', 'appointment_cancelled', 'internal_alert',
   ];
 
-  it('every moved and every existing push-first type is push_first', () => {
-    for (const t of [...MOVED, ...ALREADY_PUSH_FIRST]) {
-      expect(decidePushRoute({ ...base, messageType: t })).toBe('push_first');
+  it('no policy entry is push_first: only a customer\'s own App choice replaces a text', () => {
+    expect(Object.values(PUSH_ROUTING_POLICY)).not.toContain('push_first');
+    expect([...new Set(Object.values(PUSH_ROUTING_POLICY))]).toEqual(['push_and_sms']);
+  });
+
+  it('only billing and payment notices keep the app alert after the text', () => {
+    expect(Object.keys(PUSH_ROUTING_POLICY).sort()).toEqual([...BILLING].sort());
+  });
+
+  it('no message type routes push_first, with or without the technician\'s customer-channel mark', () => {
+    const types = [...WAS_APP_FIRST, ...WAS_PUSH_FIRST, ...BILLING, ...STAYS_TEXT, ...Object.keys(_test.PREF_CHANNEL_COLUMN), 'made_up_type', undefined];
+    for (const t of types) {
+      expect(decidePushRoute({ ...base, messageType: t })).not.toBe('push_first');
+      expect(decidePushRoute({ ...base, messageType: t, operatorInitiated: true, useCustomerChannel: true })).not.toBe('push_first');
     }
+  });
+
+  it('every withdrawn type sends the text alone, the two reminders included', () => {
+    // A reminder text carries the visit's links. A companion alert would repeat that text on
+    // every phone and browser of the account, so a reminder has no companion (pre-push audit, 2026-11-20).
+    for (const t of [...WAS_APP_FIRST, ...WAS_PUSH_FIRST]) {
+      expect(decidePushRoute({ ...base, messageType: t })).toBe('sms_only');
+    }
+    for (const t of REMINDERS) expect(PUSH_ROUTING_POLICY[t]).toBeUndefined();
   });
 
   it('billing, payment-failure, autopay and ACH types stay push_and_sms', () => {
@@ -105,7 +129,7 @@ describe('decidePushRoute app first on any device (owner 2026-11-04)', () => {
   });
 
   it('staff, human, media, bundled-review and missing-customer sends still go as text', () => {
-    for (const t of MOVED) {
+    for (const t of [...REMINDERS, ...BILLING]) {
       const input = { ...base, messageType: t };
       expect(decidePushRoute({ ...input, hasMedia: true })).toBe('sms_only');
       expect(decidePushRoute({ ...input, humanAuthored: true })).toBe('sms_only');
@@ -117,18 +141,11 @@ describe('decidePushRoute app first on any device (owner 2026-11-04)', () => {
     }
   });
 
-  it('every moved type maps to a preference column (a saved Email / Both choice still vetoes) and has a real presentation', () => {
-    for (const type of Object.keys(APP_FIRST_ANY_DEVICE_POLICY)) {
+  it('every withdrawn type keeps its preference column and presentation, for the customer\'s own App choice', () => {
+    for (const type of [...WAS_APP_FIRST, ...WAS_PUSH_FIRST]) {
       expect(typeof _test.PREF_CHANNEL_COLUMN[type]).toBe('string');
       expect(_test.pushPresentation(type).link.startsWith('/')).toBe(true);
       expect(_test.pushPresentation(type).title).not.toBe('Waves Pest Control');
-    }
-    expect(Object.keys(APP_FIRST_ANY_DEVICE_POLICY).sort()).toEqual([...MOVED].sort());
-  });
-
-  it('never moves a type that carries a bill or a payment failure', () => {
-    for (const t of [...BILLING, 'service_complete_with_invoice', 'service_report_v1_with_invoice']) {
-      expect(APP_FIRST_ANY_DEVICE_POLICY[t]).toBeUndefined();
     }
   });
 });
