@@ -82,11 +82,16 @@ const SERVICE_PHOTO_TTL_SECONDS = PhotoService.CUSTOMER_DWELL_TTL_SECONDS;
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 
+// The two card taps (GATE_DOC_CROSS_SELL) skip this limiter while the gate
+// is dark (AGENTS.md: a dark route skips its limiter so a probe never sees
+// a revealing 429) — their route guard answers the generic 404.
+const CARD_TAP_PATH_RE = /^\/[^/]+\/(cross-sell|referral-link)\/?$/;
 router.use(rateLimit({
   windowMs: 60 * 1000,
   max: 120,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.method === 'POST' && CARD_TAP_PATH_RE.test(req.path || '') && !isEnabled('docCrossSell'),
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 
@@ -1005,7 +1010,11 @@ async function loadTrackCardContext(token) {
   const record = await db('service_records')
     .where({ scheduled_service_id: row.id })
     .orderBy('created_at', 'desc')
-    .first('id', 'structured_notes');
+    .first('id', 'structured_notes', 'is_callback');
+  // A complaint-driven visit gets neither card (owner 2026-08-30, the
+  // report's rule): no upsell and no referral ask after a callback.
+  const { reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
+  if (reserviceReportCopyGateOn() && record?.is_callback === true) return null;
   let notes = {};
   try {
     notes = typeof record?.structured_notes === 'string'

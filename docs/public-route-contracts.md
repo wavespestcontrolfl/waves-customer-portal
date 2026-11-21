@@ -3415,8 +3415,11 @@ one shared `service_requests` row with source `invoice_receipt` / `tracker`,
 `estimateUrl` with `GATE_REPORT_CLICK_TO_ESTIMATE`) and its referral composer
 (enrolls on the tap only). 404 when off or ineligible; a dark gate or a
 malformed token (receipt: the pay route's `^[A-Za-z0-9_-]{20,64}$`; tracker:
-64-hex) is the generic 404 AHEAD of the limiter and any DB read, so the dark
-routes never answer 429; 5 a minute per token;
+64-hex) is the generic 404 AHEAD of the limiter and any DB read, and the
+tracker's router-wide 120/min limiter skips the two taps while the gate is
+dark, so the dark routes never answer 429; 5 a minute per token; a
+complaint-driven (callback) visit carries neither card and its taps 404 while
+`GATE_RESERVICE_REPORT_COPY` is on (the report's rule);
 a receipt tap never records a receipt view. The receipt page shows the
 per-application price; the report card stays price-free (owner 2026-10-05).
 

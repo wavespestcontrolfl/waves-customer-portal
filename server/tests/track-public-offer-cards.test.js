@@ -127,3 +127,43 @@ test.each([
   expect(res.statusCode).toBe(404);
   expect(mockDb).not.toHaveBeenCalled();
 });
+
+test('a callback visit gets neither card (the report\'s rule, with the re-service copy gate on)', async () => {
+  const prior = process.env.GATE_RESERVICE_REPORT_COPY;
+  process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+  try {
+    install({ record: { ...RECORD, is_callback: true } });
+    expect((await drive('/:token/cross-sell', { metadata: {} })).statusCode).toBe(404);
+    expect((await drive('/:token/referral-link')).statusCode).toBe(404);
+    expect(tap.handleCrossSellTap).not.toHaveBeenCalled();
+    expect(referralShare.buildReferralShareForCustomer).not.toHaveBeenCalled();
+  } finally {
+    if (prior === undefined) delete process.env.GATE_RESERVICE_REPORT_COPY;
+    else process.env.GATE_RESERVICE_REPORT_COPY = prior;
+  }
+});
+
+// Codex #8262 P0: the router-wide 120/min limiter runs ahead of every route,
+// so the dark card taps must skip it — over the budget they still answer the
+// generic 404, never a revealing 429. Real HTTP through the real router.
+test('gate off: more than the router budget of card taps all answer 404, never 429', async () => {
+  isEnabled.mockReturnValue(false);
+  const express = require('express');
+  const app = express();
+  app.use(express.json());
+  app.use('/t', router);
+  const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+  try {
+    const { port } = server.address();
+    const statuses = [];
+    for (let i = 0; i < 125; i += 1) {
+      const r = await fetch(`http://127.0.0.1:${port}/t/${TOKEN}/cross-sell`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      statuses.push(r.status);
+    }
+    expect(new Set(statuses)).toEqual(new Set([404]));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

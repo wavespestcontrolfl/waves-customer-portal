@@ -56,6 +56,8 @@ async function call(method, path, { body } = {}) {
   return { res, next };
 }
 
+afterEach(() => { delete process.env.GATE_RESERVICE_REPORT_COPY; });
+
 beforeEach(() => {
   jest.clearAllMocks();
   isEnabled.mockImplementation((key) => key === 'docCrossSell');
@@ -78,6 +80,10 @@ describe('GET /:token — the cards ride the receipt payload', () => {
     ['account billed to a third-party payer', () => mockFirst.mockResolvedValue({ ...INVOICE, customer_payer_id: 3 })],
     ['a service contact can also get this link', () => mockFirst.mockResolvedValue({ ...INVOICE, service_contact_name: 'Tenant Tina', service_contact_email: 't@example.com' })],
     ['not paid', () => mockFirst.mockResolvedValue({ ...INVOICE, status: 'refunded' })],
+    ['a callback visit (the report\'s rule)', () => {
+      process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+      mockFirst.mockResolvedValue({ ...INVOICE, visit_is_callback: true });
+    }],
   ])('%s → no cards', async (_label, arrange) => {
     arrange();
     const { res } = await call('get', '/:token');

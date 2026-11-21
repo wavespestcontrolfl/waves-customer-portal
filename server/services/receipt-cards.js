@@ -6,7 +6,9 @@
  *
  * Eligible: a PAID invoice whose link reaches the account holder alone (no
  * third-party payer on the invoice or the account, no service contact on the
- * account — linkReachesOnlyAccountHolder). The offer is the service report's
+ * account — linkReachesOnlyAccountHolder), and not for a complaint-driven
+ * visit (owner 2026-08-30, the report's rule: no upsell or referral ask after
+ * a callback). The offer is the service report's
  * own composer over the visit the invoice is for; an invoice with no visit
  * carries the referral card alone.
  */
@@ -20,10 +22,12 @@ function loadReceiptCardRow(where, database = db) {
   const { SERVICE_CONTACT_COLUMNS } = require('./customer-contact');
   return database('invoices as i')
     .leftJoin('customers as c', 'i.customer_id', 'c.id')
+    .leftJoin('service_records as sr', 'i.service_record_id', 'sr.id')
     .where(where)
     .first(
       'i.id', 'i.customer_id', 'i.status', 'i.payer_id', 'i.service_record_id',
       'c.payer_id as customer_payer_id',
+      'sr.is_callback as visit_is_callback',
       ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
     );
 }
@@ -35,6 +39,8 @@ function loadReceiptCardInvoice(token, database = db) {
 
 function receiptCardsEligible(row) {
   if (!isEnabled('docCrossSell') || !row?.customer_id || row.status !== 'paid') return false;
+  const { reserviceReportCopyGateOn } = require('./service-report/reservice-report');
+  if (reserviceReportCopyGateOn() && row.visit_is_callback === true) return false;
   const { linkReachesOnlyAccountHolder } = require('./service-report/cross-sell-tap');
   return linkReachesOnlyAccountHolder(row, [row.payer_id, row.customer_payer_id]);
 }
