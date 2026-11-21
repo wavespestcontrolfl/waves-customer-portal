@@ -365,10 +365,13 @@ round_log_row() {
 "
     fi
   done
-  row="$(jq -cn --arg sha "$1" --arg label "$2" --arg outcome "$3" --arg why "$4" \
+  # jq 1.6 (still on some runners) reserves keywords as variable names:
+  # `$label` does not compile there, and this function would drop every line
+  # in silence. Keep these names clear of jq's keywords.
+  row="$(jq -cn --arg sha "$1" --arg local_ref "$2" --arg outcome "$3" --arg why "$4" \
     --arg p0 "$5" --arg p1 "$6" --arg auditor "$7" --arg dests "$dests" \
     '($dests | split("\n") | map(select(length > 0))) as $refs
-     | {ref: ($refs[0] // $label), refs: $refs, sha: $sha, outcome: $outcome}
+     | {ref: ($refs[0] // $local_ref), refs: $refs, sha: $sha, outcome: $outcome}
        + (if $why == "" then {} else {why: $why} end)
        + {p0: ($p0 | tonumber), p1: ($p1 | tonumber)}
        + (if $auditor == "" then {} else {auditor: $auditor} end)' 2>/dev/null)" || return 0
@@ -400,7 +403,7 @@ round_log_unaudited_push() {
 
 # write_round_log <hook exit code>: appends the queued lines. EXIT trap only.
 write_round_log() {
-  local rc="$1" dir="${CODEX_REVIEW_ROUND_LOG:-}" lines=""
+  local rc="$1" dir="${CODEX_REVIEW_ROUND_LOG:-}" lines="" now=""
   [ "$dir" = "off" ] && return 0
   [ -n "${ROUND_LOG_ROWS:-}" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
@@ -408,11 +411,14 @@ write_round_log() {
     dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
   fi
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  # One clock read: the line's time and its month file must agree, also in
+  # the last second of a month.
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   lines="$(printf '%s' "$ROUND_LOG_ROWS" | jq -c \
-    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg rc "$rc" --arg seconds "${SECONDS:-0}" \
+    --arg ts "$now" --arg rc "$rc" --arg seconds "${SECONDS:-0}" \
     '{ts: $ts} + . + {exit: ($rc | tonumber), seconds: ($seconds | tonumber)}' 2>/dev/null)" || return 0
   [ -n "$lines" ] || return 0
-  printf '%s\n' "$lines" >> "$dir/codex-review-rounds-$(date -u +%Y-%m).jsonl" || return 0
+  printf '%s\n' "$lines" >> "$dir/codex-review-rounds-${now:0:7}.jsonl" || return 0
   # Month names sort by date, so the first matches are the oldest files.
   set -- "$dir"/codex-review-rounds-[0-9][0-9][0-9][0-9]-[0-9][0-9].jsonl
   while [ "$#" -gt "$ROUND_LOG_KEEP" ]; do

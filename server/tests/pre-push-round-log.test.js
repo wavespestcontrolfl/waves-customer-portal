@@ -295,6 +295,22 @@ describe('pre-push round log', () => {
     expect(monthFiles()).toEqual([]);
   }, 120000);
 
+  test('the round-log jq programs use no jq keyword as a variable name', () => {
+    // jq 1.6 rejects `$label`, `$end`, `$as` and the other keywords as variable names. The hook silences jq's
+    // errors so that a log fault can never block a push, so on jq 1.6 one such name would drop every line with
+    // no sign. No jq 1.6 runs in CI, so this reads the source instead.
+    const source = fs.readFileSync(HOOK, 'utf8');
+    const block = source.slice(source.indexOf('round_log_row() {'), source.indexOf("trap 'ROUND_LOG_RC=$?; write_round_log"));
+    const names = [...block.matchAll(/--arg ([A-Za-z_][A-Za-z0-9_]*)/g)].map((match) => match[1]);
+    expect(names.length).toBeGreaterThanOrEqual(11);
+    const keywords = ['def', 'module', 'import', 'include', 'if', 'then', 'else', 'elif', 'end', 'as', 'reduce', 'foreach', 'try', 'catch', 'label', 'and', 'or', 'not', '__loc__'];
+    expect(names.filter((name) => keywords.includes(name))).toEqual([]);
+    // Every `as $name` binding in the two jq programs, too.
+    const bound = [...block.matchAll(/ as \$([A-Za-z_][A-Za-z0-9_]*)/g)].map((match) => match[1]);
+    expect(bound).toEqual(['refs']);
+    expect(bound.filter((name) => keywords.includes(name))).toEqual([]);
+  });
+
   test('month files are appended to, never rewritten, and only the newest three are kept', () => {
     const dir = path.join(root, 'months');
     fs.mkdirSync(dir);
