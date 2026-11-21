@@ -1447,7 +1447,7 @@ describe('planStartBlocker', () => {
         ["the commercial flag among the extraction's own flags", CALL(extraction({ triage_flags: ['quote_promised', 'commercial_requires_quote'] }))],
         ['the commercial flag among the routing flags', CALL({ ai_validation: { routing: { flags: ['commercial_requires_quote'] } } })],
         ['the commercial flag among the flags that hold a booking', CALL({ ai_validation: { routing: { flags: [], appointment_blocking_flags: ['commercial_requires_quote'] } } })],
-        ['the HOA flag in a list of another name', CALL({ ai_validation: { routing: { flags: [] }, gates: { demoted: ['hoa_common_area_requires_approval'] } } })],
+        ['the HOA flag in a list of another name of the routing decision', CALL({ ai_validation: { routing: { flags: [], demoted: ['hoa_common_area_requires_approval'] } } })],
         ['a validation saved as JSON text', CALL({ ai_validation: JSON.stringify({ routing: { flags: ['commercial_requires_quote'] } }) })],
         ['an extraction saved as JSON text', CALL({ ai_extraction_enriched: JSON.stringify({ property: { property_type: 'commercial' } }) })],
         // The first format of the extraction: the service the caller asked for.
@@ -1677,6 +1677,57 @@ describe('planStartBlocker', () => {
         const failed = { ai_extraction_enriched: HOME_EXTRACTION, v2_extraction_status: 'schema_failed' };
         expect(await blocker(withCalls([CALL(), CALL({ ...failed, ...change })]))).toBe('commercial');
         expect(await blocker(withCalls([CALL(failed), CALL()]))).toBeNull();
+      });
+
+      // A flag is read in a list of flags only. The validation also keeps the schema errors of an extraction, and
+      // the error for a flag the schema does not know lists every flag it allows, the two commercial ones among
+      // them. The errors below are the app's own validator's, for a model output with one unknown flag.
+      test('the flags a schema error lists as allowed are no flag of the call', async () => {
+        const { errors } = require('../schemas/validate-extraction').validateModelOutput({ triage_flags: ['made_up_flag'] });
+        const allowed = errors.filter((error) => error.keyword === 'enum').flatMap((error) => error.params.allowedValues);
+        expect(allowed).toEqual(expect.arrayContaining(['commercial_requires_quote', 'hoa_common_area_requires_approval']));
+        // As the processor saves a call whose extraction failed its schema: no routing decision, and the errors.
+        const failed = CALL({ v2_extraction_status: 'schema_failed', ai_address_validation: null, ai_validation: { extraction_status: 'schema_failed', routing: null, errors } });
+        expect(await blocker(withCalls([failed, CALL()]))).toBeNull();
+        // The same errors beside a routing decision that raised nothing, and beside one that raised the flag.
+        const beside = (flags) => CALL({ ai_validation: { extraction_status: 'valid', routing: { allowed: true, reason: null, flags, appointment_blocking_flags: [] }, errors } });
+        expect(await blocker(withCalls([beside(['quote_promised']), CALL()]))).toBeNull();
+        expect(await blocker(withCalls([CALL(), beside(['commercial_requires_quote'])]))).toBe('commercial');
+      });
+
+      test.each([
+        ['at the root of the validation', { ai_validation: { routing: { flags: [] }, note: 'commercial_requires_quote', gates: { demoted: ['hoa_common_area_requires_approval'] } } }],
+        ["in the validation's verdict on the address on file", { ai_validation: { routing: { flags: [] }, on_file_address_validation: { status: 'validated_accept', flags: ['commercial_requires_quote'] } } }],
+        ['in a validation that is a list', { ai_validation: ['commercial_requires_quote', { flags: ['hoa_common_area_requires_approval'] }] }],
+        ["outside the extraction's own list of flags", extraction({ meta: { dropped_flags: ['commercial_requires_quote'] }, evidence: [{ field_path: '/triage_flags/0', quote: 'hoa_common_area_requires_approval' }] })],
+      ])('a flag word %s is no flag of the call: not commercial', async (_where, change) => {
+        expect(await blocker(withCalls([CALL(change), CALL()]))).toBeNull();
+      });
+
+      // The address check keeps what Google lists at the address at EVERY status, also at the candidate an
+      // ambiguous or incomplete match found. Only a check that confirmed the address is read: the two statuses
+      // the app's own readers take as a confirmed address. Each status of the validator is sorted here, so a
+      // status it adds later fails until someone sorts it.
+      test('a business use counts at the two statuses of a confirmed address, and at no other status of the validator', async () => {
+        const { STATUSES } = require('../services/address-validation');
+        const business = (status) => CALL({ ai_address_validation: { status, granularity: 'SUB_PREMISE', inServiceArea: true, hasUnconfirmed: false, addressUse: { business: true, residential: false, poBox: false } } });
+        const answers = [];
+        for (const status of Object.values(STATUSES)) answers.push([status, await blocker(withCalls([CALL(), business(status)]))]);
+        expect(answers).toEqual([
+          ['not_attempted', null], ['validated_accept', 'commercial'], ['corrected', 'commercial'], ['confirm_needed', null],
+          ['missing_component', null], ['out_of_service_area', null], ['ambiguous', null], ['api_unavailable', null],
+        ]);
+      });
+
+      test.each([[undefined], [null], [''], ['VALIDATED_ACCEPT'], ['validated_accept '], [true]])('a business use beside the status %j is not read: not commercial', async (status) => {
+        const check = { status, granularity: 'PREMISE', addressUse: { business: true, residential: false } };
+        expect(await blocker(withCalls([CALL({ ai_address_validation: check }), CALL()]))).toBeNull();
+      });
+
+      // A check the app waived the missing unit of keeps its own status in the saved row, with the waiver beside it.
+      test('a business use on an ambiguous check with a waived unit is not read by the address rule', async () => {
+        const waived = { status: 'ambiguous', granularity: 'PREMISE', missingComponents: ['subpremise'], wholeStructureUnitWaived: { originalStatus: 'ambiguous', reason: 'whole_structure' }, addressUse: { business: true, residential: false } };
+        expect(await blocker(withCalls([CALL({ ai_address_validation: waived }), CALL()]))).toBeNull();
       });
 
       // The first format is serialized JSON in a TEXT column. A text there that is not JSON is a failed read,

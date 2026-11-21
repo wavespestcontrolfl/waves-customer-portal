@@ -813,9 +813,14 @@ async function hasCommercialContract(database, customerId) {
 //   business name, a budget or a procurement remark). The extraction leaves
 //   the block null for a home.
 // - One of the two flags the triage raises for such a call
-//   (computeDeterministicTriageFlags in call-triage-flags.js), anywhere in
-//   either verdict: the model's own flags, the routing flags, the flags that
-//   hold a booking, or a list a later gate moved the flag to.
+//   (computeDeterministicTriageFlags in call-triage-flags.js), in a list of
+//   flags: the model's own (the extraction's triage_flags), or the routing
+//   decision of the validation (its flags, the flags that hold a booking, any
+//   list that decision keeps). No other part of either record is read for a
+//   flag. The validation also keeps the schema errors of an extraction, and
+//   the error for a flag the schema does not know lists every flag it allows
+//   (the allowedValues of an enum), these two among them: a list of what a
+//   model MAY say, on a call where the triage raised nothing.
 // - The service the caller asked for, by name (namesCommercialService above),
 //   on every object of both formats. The first format keeps it at its root
 //   under three names (requested_service, matched_service,
@@ -831,7 +836,13 @@ async function hasCommercialContract(database, customerId) {
 //   affirmative, as in the app's own rule for a business building
 //   (applyBusinessWholeBuildingUnitWaiver in call-triage-flags.js). An address
 //   Google reads as both (a home with a business listing), or does not know,
-//   says nothing.
+//   says nothing. And the check must have CONFIRMED the address: the status
+//   validated_accept or corrected (a complete match at the level of a
+//   premises, in the service area, with no unconfirmed part), which is what
+//   the app's readers of a check take as a confirmed address
+//   (call-triage-flags.js). The check keeps the use at every status, also of
+//   the candidate an ambiguous or incomplete match found, and a misheard
+//   home address can resolve to a business candidate.
 const COMMERCIAL_CALL_FLAGS = Object.freeze(['commercial_requires_quote', 'hoa_common_area_requires_approval']);
 const isCommercialCallFlag = (text) => COMMERCIAL_CALL_FLAGS.includes(text);
 const hasSetValue = (block) => Object.values(asObject(block)).some((value) => (Array.isArray(value) ? value.length > 0 : isSet(value)));
@@ -842,7 +853,10 @@ function describesCommercialProperty(node, managed) {
     || Boolean(commercialCategoryConflict({ extraction, intent: null }));
 }
 function isBusinessAddress(addressCheck) {
-  const use = asObject(asObject(addressCheck).addressUse);
+  const { STATUSES } = require('./address-validation');
+  const check = asObject(addressCheck);
+  if (![STATUSES.VALIDATED_ACCEPT, STATUSES.CORRECTED].includes(check.status)) return false;
+  const use = asObject(check.addressUse);
   return use.business === true && use.residential === false;
 }
 const VALID_EXTRACTION = 'valid';
@@ -857,7 +871,7 @@ function isCommercialCallRow(call, managed) {
   return Boolean(commercialCategoryConflict({ extraction, intent: null }))
     || someObject(extraction, describes) || someObject(firstFormat, describes)
     || hasSetValue(extraction.commercial_signals)
-    || someText(extraction, isCommercialCallFlag) || someText(validation, isCommercialCallFlag)
+    || someText(extraction.triage_flags, isCommercialCallFlag) || someText(asObject(validation).routing, isCommercialCallFlag)
     || someObject(firstFormat, namesCommercialService) || someObject(extraction, namesCommercialService)
     || isBusinessAddress(addressCheck);
 }

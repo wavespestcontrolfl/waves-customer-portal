@@ -993,6 +993,8 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a call with no extraction, no validation and no address check', { ai_extraction: null, ai_extraction_enriched: null, ai_validation: null, ai_address_validation: null }],
       ['a rental among the properties of the call', enriched({ property: { property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: 'rental_investment', property_type: 'condo' }] } })],
       ['an address the check reads as a business and as a home', { ai_address_validation: { status: 'validated_accept', addressUse: { business: true, residential: true, poBox: false } } }],
+      ['a business candidate of an address check that did not confirm the address', { ai_address_validation: { status: 'ambiguous', granularity: 'SUB_PREMISE', addressUse: { business: true, residential: false, poBox: false } } }],
+      ['a flag word in the schema errors a validation keeps', { ai_validation: { routing: null, errors: [{ keyword: 'enum', params: { allowedValues: ['commercial_requires_quote', 'hoa_common_area_requires_approval'] } }] } }],
       ['the tenant of an apartment', enriched({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: 'tenant' } })],
       ['a caller in a multi-family building, with no relationship named', enriched({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: null } })],
       ['the wording of a business premises in the summary of the call', { ai_extraction: { requested_service: 'Pest control', call_summary: 'Wants pest control for our restaurant next month.' } }],
