@@ -793,8 +793,11 @@ function stripPersonalizationTokens(content) {
   // url map) fall back to the homepage — defense-in-depth; the archive
   // and proof paths resolve them to the real event URLs first.
   const { resolveEvclickDirect } = require('./newsletter-event-clicks');
+  // A Waves Pest Insider issue's "Your home" tokens (pest-insider/home.js, a
+  // leaf module) go too: that block is per reader and never shows here.
+  const { neutralizeHomeTokens } = require('./pest-insider/home');
   return resolveEvclickDirect(neutralizeFeedbackTokens(neutralizeQuizTokens(
-    stripGreetingNameToken(content)
+    neutralizeHomeTokens(stripGreetingNameToken(content))
       .split(CITY_TOKEN).join(DEFAULT_CITY_LABEL)
       .split(GRASS_TYPE_TOKEN).join(DEFAULT_GRASS_LABEL),
   )));
