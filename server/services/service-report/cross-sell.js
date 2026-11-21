@@ -323,30 +323,148 @@ function positiveOrNull(value) {
 // dimensions into a DIFFERENT service's price would launder that into an
 // unqualified exact per-application figure, since the new price is graded
 // on its own inputs and knows nothing about the original's caveat.
-// Shape-tolerant on purpose: the stored blob has carried v1 and v2 result
-// shapes, and a missed marker would read as "clean" — anything that looks
-// like a verification flag demotes the offer to the quote CTA.
-function estimateRequiresFieldVerification(estData) {
+//
+// WHAT counts as a marker: a non-empty list of verify codes (fieldVerify,
+// fieldVerifyFlags, turfFlags), or the row test the
+// plan mint holds its own fresh result to (draft-builder's
+// lineNeedsReviewBeforeExactPrice: lineRequiresReview, a heuristic turf
+// grade, a LOW pricing confidence, a guessed footprint). A hand-kept subset
+// read a LOW turf confidence only, so a heuristic turf BASIS at MEDIUM
+// (plausibleMaxTurfCap), a measurement request, a list of manual-review
+// reasons or a guessed footprint read as clean (#8132 pre-push r31).
+// One engine note is a marker too (ENGINE_REVIEW_NOTE_TYPE): the engine
+// writes LAWN_CUSTOM_QUOTE into the result's notes exactly when a row carries
+// customQuoteFlag, and the mapped result keeps the note but drops that flag
+// from a one-time lawn row (pre-push r12 on this branch). No other note type
+// states a review requirement.
+// A stored row can also spell the quote-required flag in snake_case
+// (quote_required, requires_custom_quote). No writer in the code base does,
+// and on 2026-11-21 no stored estimate held either key, but the two readers
+// of stored recurring rows take both spellings (estimate-converter.js
+// recurringRowRequiresQuote, estimate-public.js), so a row they treat as
+// quote-required is not a clean seed here (pre-push r13).
+//
+// WHERE it looks: every object of the stored blob. The blob has kept its
+// rows in many places (raw lineItems, the mapped recurring.services and
+// one-time items, the selected lawn's lawnMeta, the result-level review
+// summaries), and a list of places misses the next one: on 2026-11-20, 19
+// accepted estimates held a review-marked row the old list did not read. A
+// missed marker reads as "clean", so an unknown key is read, never skipped.
+// Two parts of the blob are not markers of the price:
+//   - what was fed INTO the pricer:
+//       a. the stored requests (SEED_INPUT_KEYS), at any depth: the estimator
+//          also attaches the request to the result it saves. The lookup
+//          profile kept there lists verify flags for most properties. The
+//          check never read it, and reading it would end nearly every seeded
+//          price;
+//       b. the service picks at the root (`services` as an object keyed by
+//          service). The quote wizard stores the request body's picks there
+//          as submitted, beside the normalized engineInput, and the lead
+//          auto-draft stores its mapped picks there. A caller's option is not
+//          a priced row (pre-push r3 on this branch). Rows are kept in lists
+//          (result.recurring.services): a list under this key is read, and so
+//          is an object under it anywhere below the root.
+//   - the turf signal on a result's `property` summary (its turf grade and
+//     its turfFlags list): the engine's own lawn-size guess for the lot,
+//     which every result carries, a pest-only quote included. Whether that
+//     guess reached the quote's price is the engine's to say, and it says it
+//     in the result's fieldVerify list: the summary's flags for a quote that
+//     priced a turf service, empty for any other. That list is read like any
+//     other marker. So the summary itself counts in two cases only:
+//       1. the caller replays a lawn size (replaysLawnSize; the seed loader
+//          passes what it replays, and a caller that says nothing gets the
+//          strict reading). A replayed size is the one case where the guess
+//          could reach a new price as a supplied measurement. Without one, a
+//          new lawn price computes and grades its own turf.
+//       2. the result does not keep the engine's list, so nothing says
+//          whether the guess reached its price. It is read strictly.
+//
+// A SLIM engine result cannot show that its quote was clean, so it always
+// counts (pre-push r2 to r5 on this branch). The quote wizard and the lead
+// auto-draft store a projection under `engineResult` (public-quote.js;
+// lead-estimate-automation.js compactLineItem): they drop the engine's
+// fieldVerify list and row markers the shared row test reads. The wizard's
+// rows lose the review flag and its reasons, the turf confidence, the
+// footprint markers and the tree-count source; the auto-draft's rows keep
+// one folded quote-required flag. What is left can read as clean whatever
+// the engine said: a parcel-capped lawn quote did, and so did a Tree & Shrub
+// quote priced on a default of zero trees. The check does not rebuild the
+// engine's answer from the stored request or from the slim rows: a request
+// can be older than the result beside it, and the dropped markers are gone.
+// The missing list is
+// how it knows the projection: the engine's result and the mapped one both
+// keep it (on 2026-11-21 the 74 stored estimates with an `engineResult` and
+// no list were all wizard quotes or lead auto-drafts, none accepted). A
+// published website quote stores the full result
+// (website-quote-publication.js), so a quote the customer accepted online is
+// read as the engine graded it.
+//
+// BOTH results are read when an estimate holds a `result` and an
+// `engineResult` (pre-push r8 to r11 on this branch). A staff save stores the
+// mapped result and its raw twin from the same pricing run
+// (admin-estimate-persistence.js: "the RAW server engine result rides along
+// with its mapped twin"), and the mapped one does not carry every row marker:
+// an oversize one-time lawn row keeps its customQuoteFlag on the raw row only
+// (the mapped result keeps the engine's note for it, read above).
+// So the check does not pick one of the two as the estimate's price. Two
+// narrower readings were built and dropped: reading only the result that
+// estimate-result-container.js calls current lost that flag, and reading
+// the other one for a service priced only there needs the pricing audit's
+// line merge. The cost of reading both is on the safe side: an older
+// estimate whose `engineResult` was left behind by a revision keeps the
+// quote button for a marker on a row since corrected, as it does on main,
+// and a slim `engineResult` beside a full `result` counts. On 2026-11-21
+// no production seed's verdict depended on which of the two is read.
+const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
+const ENGINE_REVIEW_NOTE_TYPE = 'LAWN_CUSTOM_QUOTE';
+
+function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } = {}) {
   if (!estData || typeof estData !== 'object') return false;
-  const markedForReview = (c) => {
-    if (!c || typeof c !== 'object') return false;
-    if (Array.isArray(c.fieldVerify) && c.fieldVerify.length) return true;
-    if (Array.isArray(c.fieldVerifyFlags) && c.fieldVerifyFlags.length) return true;
-    if (c.requiresManualReview === true || c.customQuoteFlag === true) return true;
-    if (String(c.pricingConfidence || '').toLowerCase() === 'low') return true;
-    return String(c.turfConfidence || '').toLowerCase() === 'low';
-  };
-  const containers = [estData, estData.result, estData.estimate, estData.engineResult, estData.estimatorEngine];
-  return containers.some((c) => {
-    if (!c || typeof c !== 'object') return false;
-    if (markedForReview(c)) return true;
-    // PER-SERVICE markers live on the line items (codex #3367 PR r14): a
-    // normal engine-backed estimate records its review posture there, so a
-    // Tree & Shrub line at pricingConfidence 'low' sits under an empty
-    // top-level fieldVerify and read as clean. The engine's own quote
-    // grader reads the line first for exactly this reason.
-    return Array.isArray(c.lineItems) && c.lineItems.some(markedForReview);
-  });
+  const { lineNeedsReviewBeforeExactPrice } = require('../estimator-engine/draft-builder');
+  const listsCodes = (list) => Array.isArray(list) && list.length > 0;
+  // The row test's zero-tree marker asks for the row's service. The mapped
+  // result keeps the Tree & Shrub pricer's treeCountSource on the selected
+  // program's meta (results.tsMeta), which names no service, so a price on a
+  // default of zero trees read as clean (pre-push r6 on this branch). Only
+  // that pricer writes the field: an object that holds it and names no
+  // service is graded as the tree_shrub row it describes.
+  //
+  // The row test clears the marker when the palms priced: palms on the
+  // service line, or any palms with the reserve armed. The meta keeps the
+  // palm count, its source and the quote-time knobs, and not the row's
+  // palmReserveActive flag (pre-push r7). pricedTreeShrubPalmCount is the
+  // existing reader of that evidence on both shapes, so the meta's palms
+  // clear the marker exactly when the raw row's do.
+  const { pricedTreeShrubPalmCount } = require('../pricing-engine/tree-shrub-palm-priced');
+  const asRow = (c) => (c.treeCountSource !== undefined && c.service === undefined
+    ? { ...c, service: 'tree_shrub', palmReserveActive: pricedTreeShrubPalmCount(c) != null }
+    : c);
+  const markedForReview = (c, turfCounts) => listsCodes(c.fieldVerify) || listsCodes(c.fieldVerifyFlags)
+    || (turfCounts && listsCodes(c.turfFlags)) || c.type === ENGINE_REVIEW_NOTE_TYPE
+    || c.quote_required === true || c.requires_custom_quote === true
+    || lineNeedsReviewBeforeExactPrice(asRow(c), { turfGrade: turfCounts });
+  const turfSummaryCounts = (result) => replaysLawnSize || !Array.isArray(result.fieldVerify);
+  const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';
+  const servicePicks = (node, key, value) => node === estData && key === 'services' && isKeyed(value);
+  const slimResult = (key, value) => key === 'engineResult' && isKeyed(value) && !Array.isArray(value.fieldVerify);
+  // The stored JSON is a finite tree, so the walk needs no depth limit; a
+  // limit would be a place where a marker reads as clean.
+  const pending = [{ node: estData, turfCounts: true }];
+  while (pending.length) {
+    const { node, turfCounts } = pending.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const item of node) pending.push({ node: item, turfCounts });
+      continue;
+    }
+    if (markedForReview(node, turfCounts)) return true;
+    for (const [childKey, child] of Object.entries(node)) {
+      if (SEED_INPUT_KEYS.has(childKey) || servicePicks(node, childKey, child)) continue;
+      if (slimResult(childKey, child)) return true;
+      pending.push({ node: child, turfCounts: childKey !== 'property' || turfSummaryCounts(node) });
+    }
+  }
+  return false;
 }
 
 // Property-dimension seed from the customer's own estimate history: the
@@ -501,10 +619,11 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     delete cleanedFeatures.treeCount;
     zeroTreeCountAmbiguous = true;
   }
+  const seedLawnSqFt = positiveOrNull(inputs.lawnSqFt) || positiveOrNull(inputs.turfSf);
   const seed = {
     homeSqFt: positiveOrNull(inputs.homeSqFt),
     lotSqFt: positiveOrNull(inputs.lotSqFt),
-    lawnSqFt: positiveOrNull(inputs.lawnSqFt) || positiveOrNull(inputs.turfSf),
+    lawnSqFt: seedLawnSqFt,
     bedArea: positiveOrNull(inputs.bedArea),
     bedAreaSource: cleanString(inputs.bedAreaSource),
     stories: positiveOrNull(inputs.stories),
@@ -533,7 +652,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // must not be replayed into an exact price for a different service,
     // which would be graded high-confidence on inputs that were never
     // qualified. Demotes to the quote CTA; the offer itself still renders.
-    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData),
+    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData, { replaysLawnSize: seedLawnSqFt != null }),
     propertyType: cleanString(inputs.propertyType),
     yearBuilt: positiveOrNull(inputs.yearBuilt),
     constructionMaterial: cleanString(inputs.constructionMaterial),
