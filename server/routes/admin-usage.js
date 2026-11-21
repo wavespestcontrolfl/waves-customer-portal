@@ -22,7 +22,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
-const { servedPortalBuild } = require('../middleware/portal-build-header');
+const { servedPortalBuild, BOOT } = require('../middleware/portal-build-header');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -157,16 +157,20 @@ const ET_DAY_SQL = "(created_at AT TIME ZONE 'America/New_York')::date";
 // is null when either side has no build tag (a dev server, a tab from before
 // the beacon sent one). reload_hold, the code name of what kept the tab's last
 // page move from reloading it, is kept only for a stale tab, and only when it
-// is on RELOAD_BLOCKERS.
-function tabReloadFields(build, reloadHold) {
+// is on RELOAD_BLOCKERS. A server that started before the newest server the
+// tab has heard from (`boot`, client/src/lib/portalVersion.js) is an old one
+// still draining during a deploy: its build may not be the live one, so both
+// fields are unknown.
+function tabReloadFields(build, reloadHold, boot) {
   const served = servedPortalBuild();
-  const stale = typeof build === 'string' && BUILD_RE.test(build) && served ? build.toLowerCase() !== served : null;
+  const draining = typeof boot === 'number' && boot > Number(BOOT);
+  const stale = !draining && typeof build === 'string' && BUILD_RE.test(build) && served ? build.toLowerCase() !== served : null;
   return { stale_build: stale, reload_hold: stale && RELOAD_BLOCKERS.has(reloadHold) ? reloadHold : null };
 }
 
 router.post('/track', async (req, res, next) => {
   try {
-    const { pageKey, path, tab, source, eventType, build, reloadHold } = req.body || {};
+    const { pageKey, path, tab, source, eventType, build, boot, reloadHold } = req.body || {};
 
     if (typeof pageKey !== 'string' || !PAGE_KEY_RE.test(pageKey) || isIdSegment(pageKey)) {
       return res.status(400).json({ error: 'Invalid pageKey' });
@@ -214,7 +218,7 @@ router.post('/track', async (req, res, next) => {
       path: cleanPath,
       tab: tab || null,
       source: source || null,
-      ...tabReloadFields(build, reloadHold),
+      ...tabReloadFields(build, reloadHold, boot),
     });
     res.status(204).end();
   } catch (err) { next(err); }

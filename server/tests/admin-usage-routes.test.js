@@ -324,6 +324,19 @@ describe('admin usage: POST /track tab build', () => {
     await expect(stored(extra)).resolves.toEqual({ stale_build: staleBuild, reload_hold: reloadHold });
   });
 
+  test('an older server, still draining during a deploy, records both fields as unknown', async () => {
+    const { BOOT } = require('../middleware/portal-build-header');
+    setPortalBuildForTests('bbb222bbb222');
+    const tab = { build: 'aaa111aaa111', reloadHold: 'card-payment' };
+    // The tab has heard from a server that started after this one.
+    await expect(stored({ ...tab, boot: Number(BOOT) + 1 })).resolves.toEqual({ stale_build: null, reload_hold: null });
+    // It heard from this server, or from an older one: this server judges.
+    await expect(stored({ ...tab, boot: Number(BOOT) })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+    await expect(stored({ ...tab, boot: Number(BOOT) - 60000 })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+    // A start time that is not a number is not read.
+    await expect(stored({ ...tab, boot: String(Number(BOOT) + 1) })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+  });
+
   test('without a build tag on the server, whether the tab is out of date is unknown', async () => {
     setPortalBuildForTests(null);
     await expect(stored({ build: 'aaa111aaa111', reloadHold: 'current' })).resolves.toEqual({ stale_build: null, reload_hold: null });

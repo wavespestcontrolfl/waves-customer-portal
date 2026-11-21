@@ -7,7 +7,7 @@ import {
   trackAdminPageView,
   __resetAdminUsageForTests,
 } from './adminUsage';
-import { resetPortalVersionForTests } from './portalVersion';
+import { noteServerAnswer, resetPortalVersionForTests } from './portalVersion';
 import { noteMoveOutcome } from './portalReload';
 
 describe('normalizeAdminPath', () => {
@@ -152,7 +152,7 @@ describe('trackAdminPageView', () => {
     return JSON.parse(opts.body);
   }
 
-  it('carries the tab build, and what kept the last page move from reloading the tab for the page that move opened', () => {
+  it('carries the tab build, the start time of the server it heard from, and what kept the last page move from reloading the tab for the page that move opened', () => {
     resetPortalVersionForTests();
     document.head.insertAdjacentHTML('beforeend', '<meta name="portal-build" content="aaa111aaa111">');
     try {
@@ -160,10 +160,12 @@ describe('trackAdminPageView', () => {
       trackAdminPageView({ pathname: '/admin/pipeline', search: '' });
       settle();
       expect(lastBody()).toEqual({ pageKey: 'pipeline', path: '/admin/pipeline', source: 'load', build: 'aaa111aaa111', reloadHold: 'card-payment' });
-      // Another page, and a page whose move was due a reload, carry no name.
+      // Once a server's answer counts, its start time goes too. Another page,
+      // and a page whose move was due a reload, carry no name.
+      noteServerAnswer(new Headers({ 'X-Portal-Build': 'bbb222bbb222', 'X-Portal-Boot': '1700000000000' }));
       trackAdminPageView({ pathname: '/admin/dashboard', search: '' });
       settle();
-      expect(lastBody()).toEqual({ pageKey: 'dashboard', path: '/admin/dashboard', source: 'in-app', build: 'aaa111aaa111' });
+      expect(lastBody()).toEqual({ pageKey: 'dashboard', path: '/admin/dashboard', source: 'in-app', build: 'aaa111aaa111', boot: 1700000000000 });
       noteMoveOutcome('/admin/customers', null);
       trackAdminPageView({ pathname: '/admin/customers', search: '' });
       settle();
