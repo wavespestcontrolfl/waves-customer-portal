@@ -1452,6 +1452,43 @@ async function renderBrandCardUrl(cardInput, platform) {
 
 // ── Platform Posting ──
 
+// Facebook reads a link's page when it first sees the link, then fetches the
+// picture afterwards on its own clock. About 1 in 11 first shares of a blog
+// post got a small 200x200 thumbnail in place of the full picture (8 of 88,
+// 2026-08 to 2026-11-20), and a later re-read never changed a post already
+// made. So ask Facebook to read the page before the post, then give its picture
+// fetch a moment. Best-effort: a miss never blocks the post.
+const FACEBOOK_PREVIEW_SETTLE_DEFAULT_MS = 3000;
+const FACEBOOK_PREVIEW_SETTLE_MAX_MS = 10000;
+
+function facebookPreviewSettleMs() {
+  const raw = process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+  const ms = raw === undefined || raw === '' ? NaN : Number(raw);
+  if (!Number.isFinite(ms) || ms < 0) return FACEBOOK_PREVIEW_SETTLE_DEFAULT_MS;
+  return Math.min(ms, FACEBOOK_PREVIEW_SETTLE_MAX_MS);
+}
+
+async function refreshFacebookLinkPreview(link, token) {
+  try {
+    const res = await fetch('https://graph.facebook.com/v25.0/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: link, scrape: true, access_token: token }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) {
+      logger.warn(`[social] Facebook link preview refresh returned ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    // updated_time means Facebook read the page just now; its picture fetch
+    // starts after that read.
+    if (data && data.updated_time) await sleep(facebookPreviewSettleMs());
+  } catch (err) {
+    logger.warn(`[social] Facebook link preview refresh failed: ${err.name}`);
+  }
+}
+
 async function postToFacebook(message, link, imageUrl) {
   const token = process.env.FACEBOOK_ACCESS_TOKEN;
   if (!token) throw new Error('FACEBOOK_ACCESS_TOKEN not configured');
@@ -1474,7 +1511,10 @@ async function postToFacebook(message, link, imageUrl) {
   }
 
   const body = { message, access_token: token };
-  if (link) body.link = link;
+  if (link) {
+    body.link = link;
+    await refreshFacebookLinkPreview(link, token);
+  }
 
   const res = await fetch(`https://graph.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/feed`, {
     method: 'POST',

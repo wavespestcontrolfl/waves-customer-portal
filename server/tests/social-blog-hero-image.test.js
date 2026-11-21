@@ -266,11 +266,64 @@ describe('blogHeroSocialImageUrl', () => {
       });
 
       expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
-      expect(calls).toHaveLength(1);
-      expect(calls[0].url).toContain('/page-1/feed');
-      expect(calls[0].body).toMatchObject({ message: 'Lizard droppings caption', link: PAGE });
+      // Facebook reads the page first, so the post gets the full-size picture.
+      expect(calls).toHaveLength(2);
+      expect(calls[0].url).toBe('https://graph.facebook.com/v25.0/');
+      expect(calls[0].body).toMatchObject({ id: PAGE, scrape: true });
+      expect(calls[1].url).toContain('/page-1/feed');
+      expect(calls[1].body).toMatchObject({ message: 'Lizard droppings caption', link: PAGE });
       // The caption must NOT have the raw URL pasted into it.
-      expect(calls[0].body.message).not.toContain('https://');
+      expect(calls[1].body.message).not.toContain('https://');
+    });
+
+    test('after Facebook reads the page, the post waits for its picture fetch', async () => {
+      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '25';
+      const timers = jest.spyOn(global, 'setTimeout');
+      let waitedBeforePost = null;
+      global.fetch = jest.fn(async (url) => {
+        if (String(url) === 'https://graph.facebook.com/v25.0/') {
+          return { ok: true, json: async () => ({ id: PAGE, updated_time: '2026-11-21T02:06:03+0000' }), text: async () => '' };
+        }
+        waitedBeforePost = timers.mock.calls.some(([, ms]) => ms === 25);
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+
+      try {
+        const res = await social.publishToAll({
+          title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+          imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+          channels: ['facebook'], customContent: { facebook: 'Caption' },
+          noAiImage: true,
+        });
+
+        expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+        expect(waitedBeforePost).toBe(true);
+      } finally {
+        timers.mockRestore();
+        delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+      }
+    });
+
+    test.each([
+      ['rejects', () => { throw new Error('socket hang up'); }],
+      ['returns 500', () => ({ ok: false, status: 500, text: async () => 'boom' })],
+    ])('a preview refresh that %s never blocks the link post', async (_label, refresh) => {
+      const posted = [];
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        if (String(url) === 'https://graph.facebook.com/v25.0/') return refresh();
+        posted.push(String(url));
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+
+      const res = await social.publishToAll({
+        title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+        imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+        channels: ['facebook'], customContent: { facebook: 'Caption' },
+        noAiImage: true,
+      });
+
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+      expect(posted).toEqual([expect.stringContaining('/page-1/feed')]);
     });
 
     test('non-blog sources with an image keep the /photos post (caption carries the link — unchanged behavior)', async () => {
