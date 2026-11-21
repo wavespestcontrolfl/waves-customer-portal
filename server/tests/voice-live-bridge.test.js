@@ -1018,6 +1018,18 @@ describe('reply start on the continuous GPT-Live stream', () => {
       expect(s.after_barge_in_ambiguous_ms).toEqual([]);
     });
 
+    test('a knock right after the question and over 200 ms into the answer is not speech, so it is no barge-in: nothing is flushed', async () => {
+      const t = await start({ speech: [[500, 980], [1220, 1240]] });
+      delta(t, b64(160)); // greeting
+      t.advance(1000);
+      delta(t, silence(8000)); // one burst at +1000: 1000 ms of silence...
+      delta(t, b64(2400)); // ...then the answer: its voice plays +2000..+2300
+      t.advance(400);
+      said(t, 'do you treat ants', 500, 980); // at +1400: late
+      expect(clears(t)).toBe(0);
+      expect((await end(t)).interruptions).toBe(0);
+    });
+
     test('one noise frame after the answer began, then a late fragment of the finished question: nothing is flushed', async () => {
       const t = await start({ speech: [[500, 900], [1300, 1320]] }); // the question, then one 20 ms knock
       delta(t, b64(160)); // greeting
@@ -1025,7 +1037,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
       delta(t, silence(8000)); // one burst at +1000: 1000 ms of silence...
       delta(t, b64(2400)); // ...then the answer: its voice plays +2000..+2300
       t.advance(400);
-      said(t, 'do you treat ants', 500, 900); // at +1400: late, and the knock at +1320 is the caller's last sound
+      said(t, 'do you treat ants', 500, 900); // at +1400: late; the knock came at +1320
       expect(clears(t)).toBe(0);
       expect((await end(t)).interruptions).toBe(0);
     });
@@ -1154,18 +1166,23 @@ describe('reply start on the continuous GPT-Live stream', () => {
       expect(s.caller_voiced_pct).toBe(100);
     });
 
-    test('a late fragment of speech that ended before the reply before the current one times nothing', async () => {
-      const t = await start({ speech: [[500, 1000]] });
-      delta(t, b64(160)); // greeting
-      quiet(t, 1300);
-      delta(t, b64(800)); // reply A at +1300: no fragment has come yet
-      quiet(t, 900);
-      delta(t, b64(800)); // reply B at +2200, 900 ms of silent audio after A
-      quiet(t, 300);
-      said(t, 'hello there', 500, 1000); // at +2500: the caller's last sound was +1000, before reply A began
-      const s = await end(t);
-      expect(s.turns).toEqual([]); // A answered it; B must not get 1200 ms
-      expect(s.replies_over_caller).toBe(0);
+    test('a late fragment of speech that ended before the reply before the current one, or as that reply arrived, times nothing; speech that ended after it arrived times the current reply', async () => {
+      const turns = async (speechEnd) => {
+        const t = await start({ speech: [[500, speechEnd]] });
+        delta(t, b64(160)); // greeting
+        quiet(t, 1300);
+        delta(t, b64(800)); // reply A at +1300: no fragment has come yet
+        quiet(t, 900);
+        delta(t, b64(800)); // reply B at +2200, 900 ms of silent audio after A
+        quiet(t, 300);
+        said(t, 'hello there', 500, speechEnd); // at +2500: late
+        const s = await end(t);
+        expect(s.replies_over_caller).toBe(0);
+        return s.turns;
+      };
+      expect(await turns(1000)).toEqual([]); // A answered it; B must not get 1200 ms
+      expect(await turns(1300)).toEqual([]); // the caller's last frame came as A's chunk did
+      expect(await turns(1320)).toEqual([880]); // ...and 20 ms after it: B answers (+2200 minus +1320)
     });
 
     test('each reply over the caller is counted', async () => {
@@ -1319,10 +1336,10 @@ describe('reply start on the continuous GPT-Live stream', () => {
       expect(s.replies_over_caller).toBe(0);
     });
 
-    test("a voiced frame up to 300 ms after speech is the word's last sound: the delay runs from it; later than that it is no speech", async () => {
-      expect((await call({ speech: [[2000, 3000], [3200, 3220]] }, 2000, 3000)).turns).toEqual([880]);
-      expect((await call({ speech: [[2000, 3000], [3280, 3300]] }, 2000, 3000)).turns).toEqual([800]);
-      expect((await call({ speech: [[2000, 3000], [3300, 3320]] }, 2000, 3000)).turns).toEqual([1100]);
+    test('a sound under 100 ms right after the question moves no delay, however soon it comes; 100 ms of voice is speech', async () => {
+      expect((await call({ speech: [[2000, 3000], [3020, 3040]] }, 2000, 3000)).turns).toEqual([1100]);
+      expect((await call({ speech: [[2000, 3000], [3200, 3280]] }, 2000, 3000)).turns).toEqual([1100]);
+      expect((await call({ speech: [[2000, 3000], [3200, 3300]] }, 2000, 3000)).turns).toEqual([800]); // +4100 minus +3300
     });
 
     test("a knock (one voiced frame) after the answer began, then a late fragment of the finished question: the model's next reply, which no caller words came before, is not timed", async () => {
@@ -1343,6 +1360,85 @@ describe('reply start on the continuous GPT-Live stream', () => {
       expect(s.interruptions).toBe(0);
     });
 
+    test('a knock right after the question, when a reply has begun, is not speech: a late fragment arms nothing', async () => {
+      const t = await start({ speech: [[2000, 3000], [3200, 3220]] });
+      delta(t, b64(160)); // greeting
+      quiet(t, 3100);
+      delta(t, b64(800)); // a reply's voice at +3100, 100 ms after the question: it did not wait
+      t.advance(100);
+      quiet(t, 500); // +3200..+3700: the knock comes at +3220
+      said(t, 'when can you come', 2000, 3000); // at +3700: the only fragment, late
+      quiet(t, 500); // 1000 ms of silent audio since that reply's voice
+      delta(t, b64(800)); // the model goes on by itself at +4200
+      const s = await end(t);
+      expect(s.turns).toEqual([]);
+      expect(s.replies_over_caller).toBe(1);
+    });
+
+    test('a knock right after the question never makes that question name a later reply', async () => {
+      const t = await start({ speech: [[2000, 3000], [3200, 3220]] });
+      delta(t, b64(160)); // greeting
+      quiet(t, 3100);
+      delta(t, b64(800)); // a reply's voice at +3100
+      t.advance(100);
+      quiet(t, 1000); // +3200..+4200: the knock at +3220, then 1000 ms of silent audio
+      delta(t, b64(800)); // the model goes on by itself at +4200
+      t.advance(100);
+      said(t, 'when can you come', 2000, 3000); // at +4300: the only fragment, very late
+      const s = await end(t);
+      expect(s.turns).toEqual([]);
+      expect(s.replies_over_caller).toBe(0);
+    });
+
+    test("the caller's speech runs across a reply's start and its first fragment comes after they stop: that reply is counted as over the caller, and the next reply is timed", async () => {
+      const t = await start({ speech: [[2000, 3500]] });
+      delta(t, b64(160)); // greeting
+      quiet(t, 3000);
+      delta(t, b64(800)); // a reply's voice at +3000, while the caller speaks
+      t.advance(100);
+      quiet(t, 900); // +3100..+4000: the caller stops at +3500
+      said(t, 'when can you come', 2000, 3500); // at +4000: the first fragment
+      quiet(t, 500);
+      delta(t, b64(800)); // the answer at +4500
+      const s = await end(t);
+      expect(s.turns).toEqual([1000]); // +4500 minus +3500
+      expect(s.replies_over_caller).toBe(1);
+    });
+
+    test('the caller speaks again after a reply began and the first fragment is late: the reply is counted when its voice came under 200 ms after their speech before it; at 200 ms it is not', async () => {
+      const over = async (voiceAt) => {
+        const t = await start({ speech: [[2000, 3000], [3300, 3600]] });
+        delta(t, b64(160)); // greeting
+        quiet(t, 3100);
+        t.advance(voiceAt - 3100);
+        delta(t, b64(800)); // a reply's voice
+        t.advance(3300 - voiceAt);
+        quiet(t, 800); // +3300..+4100: the caller speaks again, to +3600
+        said(t, 'when can you come', 2000, 3600); // at +4100: the first fragment
+        quiet(t, 600);
+        delta(t, b64(800)); // the answer at +4700
+        const s = await end(t);
+        expect(s.turns).toEqual([1100]); // +4700 minus +3600
+        return s.replies_over_caller;
+      };
+      expect(await over(3180)).toBe(1);
+      expect(await over(3200)).toBe(0);
+    });
+
+    test("the caller first speaks in a reply's silent lead and the first fragment is late: that reply is counted as over the caller", async () => {
+      const t = await start({ speech: [[3000, 3400]] });
+      delta(t, b64(160)); // greeting
+      quiet(t, 2900);
+      t.openai.receive({ type: 'session.output_audio.delta', delta: Buffer.concat([Buffer.alloc(3200, 0xff), Buffer.alloc(800, 0x00)]).toString('base64') }); // at +2900: 400 ms of silence, then voice at +3300
+      quiet(t, 1100); // +2900..+4000: the caller speaks +3000..+3400
+      said(t, 'hello are you there', 3000, 3400); // at +4000
+      quiet(t, 500);
+      delta(t, b64(800)); // the answer at +4500
+      const s = await end(t);
+      expect(s.turns).toEqual([1100]); // +4500 minus +3400
+      expect(s.replies_over_caller).toBe(1);
+    });
+
     test('caller words over the answer (voice for 100 ms in a row) do arm the next reply; its delay runs from their last sound', async () => {
       const t = await start({ speech: [[2000, 3000], [4500, 4620]] });
       delta(t, b64(160)); // greeting
@@ -1355,7 +1451,9 @@ describe('reply start on the continuous GPT-Live stream', () => {
       said(t, ' today', 4500, 4620); // at +4700
       quiet(t, 500);
       delta(t, b64(800)); // the next reply at +5200
-      expect((await end(t)).turns).toEqual([1100, 580]);
+      const s = await end(t);
+      expect(s.turns).toEqual([1100, 580]);
+      expect(s.replies_over_caller).toBe(0); // the caller began after the answer had: the answer keeps its delay
     });
 
     test('the reply after one that did not wait for the caller is timed again, from the speech the caller went on with', async () => {
@@ -1393,8 +1491,8 @@ describe('reply start on the continuous GPT-Live stream', () => {
     // A chunk is timed when it arrives, but its first voiced sample may lie
     // behind silent audio: +4000 the chunk, +4400 the voice.
     test("silent audio leads a reply's chunk and the caller speaks on after the chunk came: that reply did not wait, so its delay is taken back and it is counted", async () => {
-      const reply = async (speechEnd) => {
-        const t = await start({ speech: [[2000, speechEnd]] });
+      const reply = async (speechEnd, ...more) => {
+        const t = await start({ speech: [[2000, speechEnd], ...more] });
         delta(t, b64(160)); // greeting
         quiet(t, 3000);
         said(t, 'when can you come', 2000, 3000); // at +3000: the caller is speaking
@@ -1413,6 +1511,9 @@ describe('reply start on the continuous GPT-Live stream', () => {
         expect(s.turns).toEqual([]);
         expect(s.replies_over_caller).toBe(1);
       }
+      // A new sound is speech once it has run 100 ms. At +4380 that is before the reply's first voice (+4400); at +4400 it is not.
+      expect((await reply(3000, [4280, 4500])).turns).toEqual([]);
+      expect((await reply(3000, [4300, 4500])).turns).toEqual([1400]);
     });
 
     // Two end-to-end runs on the live API: the real bridge, a synthetic caller,

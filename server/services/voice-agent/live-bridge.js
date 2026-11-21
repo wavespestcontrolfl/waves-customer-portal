@@ -41,8 +41,7 @@ const REPLY_SILENCE_MIN_MS = 800; // model audio silent this long before voice b
 const TAIL_SILENCE_MIN_MS = 600; // ...and this long inside the tail drop after a barge-in (main's boundary): there a muted answer is worse than a tail that plays on
 const VOICED_SAMPLE_MIN = 300; // a decoded sample at or above this magnitude (16-bit scale) is voice
 const CALLER_VOICED_RMS_MIN = 300; // a caller frame at or above this RMS (16-bit scale) holds voice
-const CALLER_SPEECH_MIN_MS = 100; // caller frames that hold voice this long in a row are speech; a shorter sound by itself (a click, a knock) is not
-const CALLER_SPEECH_HANG_MS = 300; // a voiced frame this soon after speech is speech too: the last sound of a word, after a stop
+const CALLER_SPEECH_MIN_MS = 100; // caller frames that hold voice this long in a row are speech; a shorter sound (a click, a knock) is not, wherever it comes
 const CALLER_END_LOOKBACK_MS = 2000; // a transcript fragment is about caller speech of at most this long before it arrived
 const CALLER_STOPPED_MIN_MS = 200; // a reply whose first voice comes sooner than this after the caller's last speech did not wait for the caller to stop
 const TAIL_DROP_MAX_MS = 1500; // after a barge-in, drop the cut-off reply's tail at most this long
@@ -225,7 +224,7 @@ class LiveBridge {
     this.replyVoiceWall = null; // ...and when its first voiced sample reached the bridge (delays run to it)
     this.prevReplyStartWall = null; // ...and the reply before it
     this.replyFirst = false; // the current reply is the first of the call
-    this.replyCallerEnd = null; // the caller's last frame of speech before the current reply began to arrive
+    this.replyCallerEnd = null; // the caller's last frame of speech before the current reply began to arrive: its delay starts there
     this.replyCallerSpokeOn = false; // ...and whether the caller spoke on between that arrival and the reply's first voice
     this.replyTimed = false; // caller words belong to the current reply: it answers them
     this.replySample = null; // index of the delay sample the current reply has, in its list
@@ -349,14 +348,15 @@ class LiveBridge {
 
   // Reads one caller frame's level: its RMS, so a stray sample at speech level
   // does not count. At CALLER_VOICED_RMS_MIN or more the frame holds voice.
-  // Caller SPEECH is voice for CALLER_SPEECH_MIN_MS in a row, and a voiced
-  // frame within CALLER_SPEECH_HANG_MS after speech. One voiced frame by itself
-  // (a click, a knock) is not speech: it times nothing, arms nothing and
-  // flushes nothing. The arrival of the latest frame of speech is kept
-  // (callerSpokeAt): a time, never audio. Every timing rule and the barge-in
-  // flush read that one value. Returns whether the frame holds any sound
-  // (OPENING_SOUND_RMS_MIN or more). That level is lower on purpose: speech for
-  // timing must be sure, and the opening audio must not lose quiet speech.
+  // Caller SPEECH is voice for CALLER_SPEECH_MIN_MS in a row, and nothing
+  // else. A shorter sound (a click, a knock) is never speech, also right after
+  // speech: it arms nothing, flushes nothing, marks no reply and moves no
+  // delay. The arrival of the latest frame of speech is kept (callerSpokeAt):
+  // every rule that needs to know when the caller spoke reads that one time.
+  // It is a time, never audio.
+  // Returns whether the frame holds any sound (OPENING_SOUND_RMS_MIN or more).
+  // That level is lower on purpose: speech for timing must be sure, and the
+  // opening audio must not lose quiet speech.
   noteCallerFrame(payload) {
     const audio = Buffer.from(payload, 'base64');
     let sum = 0;
@@ -365,11 +365,10 @@ class LiveBridge {
     const ms = audio.length / MULAW_BYTES_PER_MS;
     this.callerMs += ms;
     if (atLevel(CALLER_VOICED_RMS_MIN)) {
-      const now = this.deps.now();
       this.callerVoicedMs += ms;
       this.callerRunMs += ms;
-      const spoke = this.callerSpokeAt;
-      if (this.callerRunMs >= CALLER_SPEECH_MIN_MS || (spoke !== null && now - spoke <= CALLER_SPEECH_HANG_MS)) {
+      if (this.callerRunMs >= CALLER_SPEECH_MIN_MS) {
+        const now = this.deps.now();
         this.callerSpokeAt = now;
         // The current reply's chunk has arrived and its first voiced sample is
         // still ahead (silent audio leads the chunk): the caller speaks on, so
@@ -398,7 +397,9 @@ class LiveBridge {
   // - No reply yet: the first reply answers the words.
   // - The caller spoke after the current reply began to arrive: the NEXT
   //   reply answers the words (the model had sent that chunk before the
-  //   speech ended).
+  //   speech ended). The current reply is counted in replies_over_caller when
+  //   it did not wait for the caller (replyDidNotWait): the words show that
+  //   the sound it began on was speech.
   // - Otherwise the words came before the current reply and their transcript
   //   is late: the CURRENT reply answers them, when the caller spoke after the
   //   reply before it began.
@@ -414,6 +415,7 @@ class LiveBridge {
     }
     if (spoke !== null && spoke > this.replyStartWall && spoke >= since) {
       this.awaitingReply = true;
+      if (this.replyDidNotWait()) this.countReplyOverCaller();
       return;
     }
     const end = this.replyCallerEnd;
@@ -599,12 +601,20 @@ class LiveBridge {
     this.timeReply();
   }
 
+  // The current reply did not wait for the caller: the caller spoke on before
+  // its first voiced sample, or that sample came under CALLER_STOPPED_MIN_MS
+  // after the caller's last speech before the reply's chunk arrived. The model
+  // spoke over the caller, or the line is noisy and the bridge cannot hear the
+  // caller stop.
+  replyDidNotWait() {
+    if (this.replyCallerSpokeOn) return true;
+    return this.replyCallerEnd !== null && Math.round(this.replyVoiceWall - this.replyCallerEnd) < CALLER_STOPPED_MIN_MS;
+  }
+
   // The current reply's delay: from the caller's last speech before it to its
-  // first voiced sample. Under CALLER_STOPPED_MIN_MS, or when the caller spoke
-  // on before that sample, the model spoke over the caller, or the line is
-  // noisy and the bridge cannot hear the caller stop: that is no reply delay,
-  // so none is recorded (one recorded earlier is taken back) and the reply is
-  // counted in replies_over_caller, once.
+  // first voiced sample. A reply that did not wait for the caller has no reply
+  // delay: none is recorded (one recorded earlier is taken back) and the reply
+  // is counted in replies_over_caller, once.
   // The first reply is normally the greeting. When the caller spoke first it
   // may instead be the answer: that delay is kept apart, never in turns. A
   // reply inside the 1.5 s after a barge-in is kept apart as well
@@ -612,9 +622,8 @@ class LiveBridge {
   timeReply() {
     if (!this.replyTimed || this.replyCallerEnd === null) return;
     let delay = Math.round(this.replyVoiceWall - this.replyCallerEnd);
-    if (this.replyCallerSpokeOn || delay < CALLER_STOPPED_MIN_MS) {
-      if (!this.replyOverCaller) this.repliesOverCaller += 1;
-      this.replyOverCaller = true;
+    if (this.replyDidNotWait()) {
+      this.countReplyOverCaller();
       delay = null;
     }
     if (this.replyFirst && !this.replyAmbiguous) {
@@ -631,6 +640,11 @@ class LiveBridge {
       samples.push(delay);
       this.replySample = samples.length - 1;
     }
+  }
+
+  countReplyOverCaller() {
+    if (!this.replyOverCaller) this.repliesOverCaller += 1;
+    this.replyOverCaller = true;
   }
 
   onInputTranscript(msg) {
