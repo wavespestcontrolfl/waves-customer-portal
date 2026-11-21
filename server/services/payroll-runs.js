@@ -1025,7 +1025,15 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await syncTechRewards(trx, run, actorId);
     const evaluation = await evaluate(trx, run, { lock: true });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
-    if (!evaluation.checks.length) throw new PayrollError(409, 'There are no paychecks to finalize.');
+    if (!evaluation.checks.length) {
+      // A draft can still show checks that are gone: its only checks rode on a pay line that another run has paid since. Keep
+      // the fresh, empty numbers as the draft, as the token check below does, so the screen shows what changed.
+      if (!(await loadCheckRows(trx, runId)).length) throw new PayrollError(409, 'There are no paychecks to finalize.');
+      await replaceDraftChecks(trx, runId, []);
+      changed = true;
+      await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
+      return;
+    }
     if (await laterFinalCheckExists(trx, run, evaluation.checks.map((check) => check.technician_id))) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first, then finalize this one.');
     }

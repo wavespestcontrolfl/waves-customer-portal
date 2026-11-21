@@ -36,7 +36,8 @@
  *
  * READINESS. A sync NEVER blocks a check or holds a run. A technician who cannot get the gift at all is skipped with a reason
  * in the audit event and no note: hired after the gift date, or the run's week ended before Jan 1 of the gift year. A
- * technician who can get it but not on this run WAITS (waitOf): a later check of theirs in the tax year is already final, so
+ * technician with no hire date on file WAITS until it is entered (no money on a guess). A technician who can get it but not on
+ * this run WAITS (waitOf): a later check of theirs in the tax year is already final, so
  * finalize would refuse a run that holds a check of theirs (laterFinalCheckExists); or an earlier week of the year holds work (a
  * weekly timesheet with minutes, recorded work by workedDates, or paid time off) and has no FINALIZED check; or the pay run's own
  * line guards would hold a check for the span or for the run's own week (lineGuardWeek: a worked week with no approved
@@ -173,6 +174,7 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
  *   week_not_paid       an earlier week of its span holds work and has no finalized check
  *   week_needs_review   the pay run's own line guards would hold a check for an earlier week of its span
  *   no_paycheck         no check can be worked out for the technician on this run (week is null)
+ * (priceCandidate adds hire_date_missing before it asks: no hire date on file.)
  * The unpaid test asks only the weeks before the run's own: the span ends in the run's own week by design (spanOf), and that
  * week is the one this run pays. The line guards are asked for the WHOLE span, exactly as the run asks them of the line
  * (evaluate), and for the run's OWN week also when it lies after the span (a January run that carries last year's gift, whose
@@ -204,6 +206,9 @@ async function priceCandidate(trx, cand, tech, run) {
   if (tech.hire_date && tech.hire_date > decemberGiftDate(year)) return { skip: 'hired_after_gift_date' };
   // a run for a week that ended before Jan 1 of the gift year (an old week paid late) has no day of the year to cover
   if (run.week_start < addStaffWorkDays(ymd(year, 1, 1), -6)) return { skip: 'pay_week_before_gift_year' };
+  // No hire date on file: the run cannot tell whether they were hired by the gift date, and no money goes out on a guess. The
+  // gift waits, with a note, until the date is entered.
+  if (!tech.hire_date) return { wait: { reason: 'hire_date_missing', week: null } };
   const wait = await waitOf(trx, run, tech.id, spanOf(cand.key, run.week_start));
   return wait ? { wait } : { amountCents: DECEMBER_GIFT_CENTS };
 }
@@ -223,6 +228,7 @@ const WAIT_WORDS = {
   week_needs_review: (w) => `the week of ${dayLabel(w.week)} has a timesheet to approve or an automatic clock-out to review`,
   no_paycheck: () => 'no paycheck can be worked out for them on this pay run (check their pay rate, and the tax tables for the pay date)',
   later_check_final: () => 'a later paycheck of theirs is already final, so this pay run cannot hold one for them',
+  hire_date_missing: () => 'their hire date is not on file, so the pay run cannot tell whether they were hired by the gift date',
 };
 
 /** What waits as of this sync, kept on the draft run's row and replaced by every sync with the gate on. */
@@ -277,17 +283,22 @@ async function loadState(trx, run, lock) {
   // paid (or voided) lines are evidence: their keys are never read or written again
   const settled = new Set((await trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
     .select('source_id')).map((row) => row.source_id));
-  // The technicians who get a line (recipients). With lock the rows are read FOR SHARE, as payroll-family-employee.js
-  // familyExemptIds reads them: a change to one of these technicians waits for the pay run's transaction, so a finalize never
-  // pays a gift the change took away.
-  const techQuery = recipients(trx)
-    .orderBy('technicians.id')
-    .select('technicians.id', trx.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date"));
-  if (lock) techQuery.forShare();
-  const techs = await techQuery;
+  // The technicians who get a line (recipients), read only for a run that is dated for one: most runs of the year are not, and
+  // they read and lock no technician row. With lock the rows are read FOR SHARE, as payroll-family-employee.js familyExemptIds
+  // reads them: a change to one of these technicians waits for the pay run's transaction, so a finalize never pays a gift the
+  // change took away.
+  const due = dueInRun(run.pay_date);
+  let techs = [];
+  if (due.length) {
+    const techQuery = recipients(trx)
+      .orderBy('technicians.id')
+      .select('technicians.id', trx.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date"));
+    if (lock) techQuery.forShare();
+    techs = await techQuery;
+  }
   const candidates = new Map();
   for (const tech of techs) {
-    for (const { kind, key } of dueInRun(run.pay_date)) {
+    for (const { kind, key } of due) {
       candidates.set(sourceIdOf(kind, tech.id, key), { kind, key, technicianId: tech.id, due: true });
     }
   }

@@ -307,6 +307,24 @@ postgres('tech rewards pay lines: the December gift', () => {
   });
 
   describe('under the pay run lock', () => {
+    it('reads and locks no technician row for the gift on a run that is dated for none', async () => {
+      const tech = await readyTech('Sample Alpha');
+      await approvedWeek(tech, '2026-06-01');
+      const statements = [];
+      const listen = (query) => statements.push(String(query.sql));
+      database.on('query', listen);
+      let run;
+      try {
+        run = await draft('2026-06-01'); // dated Jun 12: no gift is due
+      } finally {
+        database.removeListener('query', listen);
+      }
+      expect(run.checks).toHaveLength(1);
+      // the sync ran (it looks for open lines of its week), and asked nothing of the technicians
+      expect(statements.some((sql) => /from "payroll_pay_lines" where .*"source_type" = /is.test(sql))).toBe(true);
+      expect(statements.filter((sql) => /from "technicians" where .*"employment_status" = .* for share/is.test(sql))).toEqual([]);
+    });
+
     it('reads the technicians FOR SHARE and asks a bounded number of questions for a year of covered weeks', async () => {
       // hired in December: almost every covered week of the year has no approved timesheet
       const alpha = await readyTech('Sample Alpha', { hire_date: '2026-12-01' });
@@ -511,6 +529,25 @@ postgres('tech rewards pay lines: the December gift', () => {
       await finalize(next.id);
       expect((await lineOf(alpha)).status).toBe('paid');
       expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('waits while the technician has no hire date on file: no gift on a guess, and it is written once the date is entered', async () => {
+      const tech = await readyTech('Sample Alpha', { hire_date: null });
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(await linesOf(tech)).toHaveLength(0);
+      expect(checkOf(run, tech)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha',
+        'their hire date is not on file, so the pay run cannot tell whether they were hired by the gift date')]);
+      // hired after the gift date: no gift, and nothing waits
+      await trx('technicians').where({ id: tech }).update({ hire_date: '2026-12-19' });
+      await recompute(run.id);
+      expect(await linesOf(tech)).toHaveLength(0);
+      expect(await notesOf(run.id)).toEqual([]);
+      // hired by the gift date: the gift is on the check
+      await trx('technicians').where({ id: tech }).update({ hire_date: '2026-12-18' });
+      const again = await recompute(run.id);
+      expect(checkOf(again, tech).techRewardsCents).toBe(GIFT);
     });
 
     it('says what waits when a week has nothing else to pay: no run is kept, and the message carries the note', async () => {
@@ -753,6 +790,28 @@ postgres('tech rewards pay lines: the December gift', () => {
       const paid = await finalize(earlier.id);
       expect(checkOf(paid, tech).techRewardsCents).toBe(GIFT);
       expect((await linesOf(tech)).map((l) => l.status)).toEqual(['paid']);
+    });
+
+    it('leaves a draft whose only checks were gifts with no check once another run paid them: its finalize shows the empty draft', async () => {
+      const alpha = await readyTech('Sample Alpha'); // no hours in either week
+      const bravo = await readyTech('Sample Bravo'); // hours in the later week only
+      await approvedWeek(bravo, NEXT_WEEK);
+      const earlier = await draft(GIFT_WEEK); // dated Dec 18: two checks, each a gift alone
+      expect(earlier.checks.map((c) => c.grossCents)).toEqual([GIFT, GIFT]);
+      const later = await draft(NEXT_WEEK); // dated Dec 25 and ready for both: the lines move to it
+      await finalize(later.id);
+      expect((await linesOf(alpha)).map((l) => l.status)).toEqual(['paid']);
+      expect((await linesOf(bravo)).map((l) => l.status)).toEqual(['paid']);
+      // The Dec 18 draft still shows the two checks. Its finalize is refused, and the draft is kept as it is now: no check.
+      const token = (await api('GET', `/runs/${earlier.id}`)).body.run.token;
+      const stale = await api('POST', `/runs/${earlier.id}/finalize`, { body: { token } });
+      expect([stale.status, stale.body.error]).toEqual([409, 'Hours or settings changed. Review the new numbers.']);
+      const shown = (await api('GET', `/runs/${earlier.id}`)).body.run;
+      expect([shown.status, shown.checks]).toEqual(['draft', []]);
+      const empty = await api('POST', `/runs/${earlier.id}/finalize`, { body: { token: shown.token } });
+      expect([empty.status, empty.body.error]).toEqual([409, 'There are no paychecks to finalize.']);
+      await voidRun(earlier.id);
+      expect(await linesOf(alpha)).toHaveLength(1); // the void of an empty draft takes no paid line
     });
 
     it('never stays with a finalized run: pay lines turned off before the finalize, the line comes off and the next run writes it', async () => {
