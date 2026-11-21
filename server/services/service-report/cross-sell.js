@@ -245,6 +245,9 @@ const { hasGlobalVerifyFlag } = require('../lookup-confidence');
 // take — the card treats a throw/false differently (excludes the one
 // unscoped row, not the whole card).
 const { customerHasOnlyPrimaryPremises } = require('./visit-property-scope');
+// The plan start offer's lookup (buildStartOffer). Its own file and its own
+// entry in lookup-callers.js; the module requires nothing until it is called.
+const { strictCacheOnlyPropertyLookup } = require('./start-offer-lookup');
 
 // Stable digest of every field the card RENDERS. Key order is fixed by
 // construction, so the same visible offer always hashes identically.
@@ -664,35 +667,16 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   return seed;
 }
 
-const CACHE_ONLY_FLAGS = Object.freeze({ cacheOnly: true, persist: false });
-const STRICT_CACHE_ONLY_FLAGS = Object.freeze({ ...CACHE_ONLY_FLAGS, strictCacheReads: true });
-
-// The cache-only lookup, in the two forms below. One call of the lookup in
-// this file: lookup-callers.js declares one. Lazy-required — property-lookup-v2
-// is heavy and cyclic-prone.
-async function runCacheOnlyLookup(address, flags) {
-  const { performPropertyLookup } = require('../../routes/property-lookup-v2');
-  // Scope decision: lookup-callers.js (report_cross_sell: customer report, cache-only).
-  const { lookupOptionsFor } = require('../property-lookup/lookup-callers');
-  return performPropertyLookup(address, lookupOptionsFor('report_cross_sell', flags));
-}
-
 // Default property lookup for the offer price: CACHE-ONLY. The live lookup
 // pipeline (geocode + satellite + AI vision, 60s budget) must never run
 // inside a report view; a cached row is adopted, a miss prices from the
 // stored profile alone and the card degrades to the CTA when that isn't
-// enough.
+// enough. Lazy-required — property-lookup-v2 is heavy and cyclic-prone.
 async function cacheOnlyPropertyLookup(address) {
-  return runCacheOnlyLookup(address, CACHE_ONLY_FLAGS);
-}
-
-// The plan start offer's lookup (buildStartOffer): the same cache-only read,
-// with a failed cache or correction read THROWN (LOOKUP_CACHE_READ_FAILED).
-// The default form answers a failed correction read as "no corrections" and
-// serves the cached home without them. A report view may degrade that way,
-// with a person looking at it. A job that prices alone must stop instead.
-async function strictCacheOnlyPropertyLookup(address) {
-  return runCacheOnlyLookup(address, STRICT_CACHE_ONLY_FLAGS);
+  const { performPropertyLookup } = require('../../routes/property-lookup-v2');
+  // Scope decision: lookup-callers.js (report_cross_sell: customer report, cache-only).
+  const { lookupOptionsFor } = require('../property-lookup/lookup-callers');
+  return performPropertyLookup(address, lookupOptionsFor('report_cross_sell', { cacheOnly: true, persist: false }));
 }
 
 // buildReportCrossSell(service, database) → crossSell payload | null.
@@ -1570,11 +1554,14 @@ async function buildPortalPurchaseBasis(customerId, database, opts = {}) {
 }
 
 // The start offer follows ONE visit, and that visit must be this customer's.
-// Where the visit was needs no second proof: the caller has proven the
+// Where the visit was needs no second proof: the caller then proves the
 // ACCOUNT single-premises in the strict form (resolvePortalOfferPremises,
 // unresolvedFails), and that proof reads every visit of the account. A stamp
 // or a link that names another home fails it, and so does a link that cannot
-// be resolved. A failed read throws, by buildStartOffer's contract.
+// be resolved. The order matters: this read runs FIRST, so the proof reads
+// the account after the visit is known to be on it, and a visit that joined
+// the account a moment ago is among the rows the proof reads. A failed read
+// throws, by buildStartOffer's contract.
 async function visitIsOfCustomer(database, customerId, visitId) {
   const visit = await database('scheduled_services').where({ id: visitId, customer_id: customerId }).first('id');
   return Boolean(visit);
@@ -1617,8 +1604,9 @@ const START_OFFER_REASON_OF_BLOCKER = Object.freeze({ has_plan: 'has_plan', comm
 // first option) are 'not_priced' here, never a price under the wrong name.
 // THROWS on a failed read: the caller is a job that tries again, and an
 // outage must never read as "this home cannot be priced". That covers the
-// lookup (the default is the strict cache-only form, so a failed cache read
-// is not a miss and a failed correction read is not "no corrections"), the
+// lookup (the default is the strict cache-only form of start-offer-lookup.js,
+// so a failed cache read is not a miss and a failed correction read is not
+// "no corrections"), the
 // staff-correction probe, the proof's reads and the price settings
 // (PRICING_CONFIG_UNAVAILABLE). One read does not throw: the pricer's read
 // of the turf profile. The pest price uses no value of it, so a failed read
@@ -1629,10 +1617,11 @@ async function buildStartOffer(customerId, database, targetKey, { propertyLookup
   if (!customerId || !database || !visitId || !START_OFFER_FAMILIES.includes(targetKey)) {
     throw new Error('buildStartOffer: a customer, a database, a start offer family and the visit the offer follows are required');
   }
+  // The visit first, then the account proof that reads it (visitIsOfCustomer).
+  if (!(await visitIsOfCustomer(database, customerId, visitId))) return { option: null, reason: 'premises' };
   const premises = await resolvePortalOfferPremises(database, customerId, { unresolvedFails: true });
   if (!premises) return { option: null, reason: 'premises' };
   const { customer, primaryStreet } = premises;
-  if (!(await visitIsOfCustomer(database, customerId, visitId))) return { option: null, reason: 'premises' };
   let pricing;
   try {
     pricing = await resolvePortalOfferPricingResult({
