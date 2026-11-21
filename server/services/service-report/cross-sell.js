@@ -365,15 +365,16 @@ function positiveOrNull(value) {
 //          strict reading). A replayed size is the one case where the guess
 //          could reach a new price as a supplied measurement. Without one, a
 //          new lawn price computes and grades its own turf.
-//       2. the result does not keep the engine's list. The quote wizard and
-//          the lead auto-draft store a slim result with the summary's flags
-//          and no list (public-quote.js), so a parcel-capped lawn quote read
-//          as clean (pre-push r2 on this branch). Such a result does not say
-//          what it priced, and the check does not work it out from the
-//          stored request or from the rows: a request can be older than the
-//          result beside it (pre-push r3), and only some turf-priced rows
-//          carry a turf basis. It reads the summary strictly. A writer that
-//          wants the exact reading keeps the list.
+//       2. the result does not keep the engine's list. The quote wizard
+//          stored a slim result with the summary's flags and no list until
+//          2026-11-21, so a parcel-capped lawn quote read as clean (pre-push
+//          r2 on this branch). Such a result does not say what it priced,
+//          and the check does not work it out from the stored request or
+//          from the rows: a request can be older than the result beside it
+//          (pre-push r3), and only some turf-priced rows carry a turf basis.
+//          It reads the summary strictly. The wizard's slim result keeps the
+//          list now (public-quote.js, pre-push r4), so a new quote is read
+//          as the engine graded it.
 const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
 
 function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } = {}) {

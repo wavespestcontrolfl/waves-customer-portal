@@ -285,6 +285,11 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
       expect(leads.map((row) => [row.id, row.lead_type])).toEqual([[handoff.lead_id, 'form_submission']]);
       expect(parsed(leads[0].extracted_data)).toMatchObject({ stage: 'quote_calculated', quiz: QUIZ, timeline: 'this_week' });
       expect(await estimatesOnPhone(body.phone)).toEqual([['quote_wizard', 'draft']]);
+      // The draft's slim result keeps the engine's verify list: empty for
+      // this pest-only quote. The estimate seed's review check reads a result
+      // without the list strictly (service-report/cross-sell.js).
+      const draft = await db('estimates').where({ id: priced.json.estimate_id }).first('estimate_data');
+      expect(parsed(draft.estimate_data).engineResult.fieldVerify).toEqual([]);
     }, 120000);
 
     test('the form\'s draft is why: with it on the phone, the price page gets no draft of its own', async () => {
