@@ -88,6 +88,15 @@ export function reviseOffer(applicationId, offerId, expectedStatus, startDate) {
   );
 }
 
+// Marks one first-days item done, or not done again (done: false). The answer is the checklist as the write left it.
+export function setChecklistItem(applicationId, offerId, key, done) {
+  return offerRequest(
+    `/admin/careers/${applicationId}/offer/${offerId}/checklist/${key}`,
+    { method: "POST", body: JSON.stringify({ done }) },
+    (b) => b?.firstDays?.offerId === offerId && Array.isArray(b.firstDays.items),
+  );
+}
+
 export function fetchSignedCopy(applicationId, offerId) {
   return offerRequest(`/admin/careers/${applicationId}/offer/${offerId}/signed-copy`, {}, (b) => typeof b?.markdown === "string");
 }
