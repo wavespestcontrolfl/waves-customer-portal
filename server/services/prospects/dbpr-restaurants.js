@@ -296,13 +296,17 @@ const CALLBACK_TYPE_RE = /call\W{0,3}back|follow\W{0,3}up|re\W{0,3}inspect/i;
 // character: characters a browser draws as nothing, which htmlText keeps), so a line break or such a character
 // inside a word ("Callba<br>ck", "Callba&zwj;ck") cannot hide it from a test that reads the text so.
 const compact = (text) => text.replace(/[\s\p{Default_Ignorable_Code_Point}]+/gu, '');
+// Whether text shows a word: a letter or a digit. Spaces, punctuation and the characters a browser draws as nothing
+// (a joiner, which htmlText keeps) name nothing, so text of only those is no inspection type and no observation.
+const hasWord = (text) => /[A-Za-z0-9]/.test(text);
 
-// Whether a report page's own inspection type names a first visit: given, and naming no callback, follow-up or
-// re-inspection. The page has the last word on that, not the files: the state can relabel a visit between files.
+// Whether a report page's own inspection type names a first visit: given (it shows a word), and naming no callback,
+// follow-up or re-inspection. The page has the last word on that, not the files: the state can relabel a visit
+// between files.
 // The type is tested compact, so a line break or a character a browser draws as nothing inside a word ("Callba<br>ck")
 // cannot hide a callback. Joined words can only add a match ("Structure Inspection"), which gives no answer.
 function namesFirstVisit(inspectionType) {
-  return typeof inspectionType === 'string' && inspectionType.trim() !== ''
+  return typeof inspectionType === 'string' && hasWord(inspectionType)
     && !CALLBACK_TYPE_RE.test(compact(inspectionType));
 }
 
@@ -352,7 +356,7 @@ function visitNotes(text) {
   if (!marks.length) return { routine: true };
   const ends = marks.map((mark, i) => (i + 1 < marks.length ? marks[i + 1].index : text.length));
   // A label with no observation after it ("From initial inspection : - From follow-up …") cannot be read.
-  if (marks.some((mark, i) => !/[A-Za-z0-9]/.test(text.slice(mark.index + mark[0].length, ends[i])))) return { unreadable: true };
+  if (marks.some((mark, i) => !hasWord(text.slice(mark.index + mark[0].length, ends[i])))) return { unreadable: true };
   const notes = marks.map((mark, i) => ({
     date: mark[1] || null,
     text: text.slice(mark.index, ends[i]).replace(/^-\s*/, '').trim(),
@@ -477,9 +481,9 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
     return { code: entry.code, text, notes: visitNotes(text) };
   });
   // A follow-up report (any violations row labelled with its visit) ties each row to a visit, so an unlabelled 35 row
-  // on it cannot be tied to one. A 35 row with no observation text cannot answer either.
+  // on it cannot be tied to one. A 35 row whose text shows no word (only a joiner, say) cannot answer either.
   const followUp = entries.some((entry) => !visitNotes(entry.parts.join(' ')).routine);
-  if (unreadable || rows35.some((row) => row.notes.unreadable || !row.text || (followUp && row.notes.routine))) return null;
+  if (unreadable || rows35.some((row) => row.notes.unreadable || !hasWord(row.text) || (followUp && row.notes.routine))) return null;
   // The read visit's own 35 rows: every row of a routine report; on a follow-up report, those with the initial note.
   const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => note.date === null));
   if (!ofVisit.length) return null;

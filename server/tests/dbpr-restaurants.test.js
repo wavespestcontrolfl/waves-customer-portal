@@ -283,7 +283,8 @@ describe('namesFirstVisit', () => {
       'Callba\u200dck - Food', 'Re\u200cinspection', 'Callba\ufe0fck - Food', 'Rein\u034fspection', 'Fol\u180elow-up',
       'Callba\u{e0020}ck - Food'];
     expect(split.map((type) => svc.namesFirstVisit(type))).toEqual(split.map(() => false));
-    const none = ['', '   ', null, undefined, 7];
+    // A type that shows no word (spaces, a dash, a soft hyphen, a joiner, which htmlText keeps) is not given.
+    const none = ['', '   ', null, undefined, 7, '-', ' - ', '\u00ad', '\u200d', '\u200c\u200d', ' \u200d '];
     expect(none.map((type) => svc.namesFirstVisit(type))).toEqual(none.map(() => false));
   });
 });
@@ -595,6 +596,17 @@ describe('parseInspectionReport', () => {
     const row = (text) => reportPage(`<tr><td>35A-02-8</td><td>&nbsp;</td><td>${text}</td></tr>`, '10/20/2026');
     expect(read(row('High Priority - - From follow-up inspec&shy;tion 2026-11-10: Live roaches.'))).toBeNull();
     expect(read(row('High Priority - Live ro&#8203;aches.')).findings).toEqual([{ code: '35A-02-8', text: 'High Priority - Live roaches.' }]);
+  });
+
+  test('an inspection type or an observation that shows no word (only a joiner, which htmlText keeps) gives no answer', () => {
+    const read = (html) => parse(html, { violation35: 1, visitDate: '2026-10-20' });
+    const typed = fixture('report-35a.html').replace('<td>Routine - Food</td>', '<td>&zwj;</td>');
+    expect(typed).toContain('<td>&zwj;</td>');
+    expect(read(typed)).toBeNull();
+    const row = (text) => reportPage(`<tr><td>35A-02-8</td><td>&nbsp;</td><td>${text}</td></tr>`, '10/20/2026');
+    expect(read(row('Live roaches.')).findings).toEqual([{ code: '35A-02-8', text: 'Live roaches.' }]);
+    expect(read(row('&zwj;'))).toBeNull();
+    expect(read(row('&zwnj; - &zwj;'))).toBeNull();
   });
 
   test('the page is read as a browser reads its markup: a quoted ">" stays in its value, a script hides its rows, a template gives no answer', () => {
