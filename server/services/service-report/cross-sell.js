@@ -377,18 +377,45 @@ function positiveOrNull(value) {
 // footprint markers and the tree-count source; the auto-draft's rows keep
 // one folded quote-required flag. What is left can read as clean whatever
 // the engine said: a parcel-capped lawn quote did, and so did a Tree & Shrub
-// quote priced on a default of zero trees. The check does not rebuild the engine's answer from
-// the stored request or from the slim rows: a request can be older than the
-// result beside it, and the dropped markers are gone. The missing list is
+// quote priced on a default of zero trees. The check does not rebuild the
+// engine's answer from the stored request or from the slim rows: a request
+// can be older than the result beside it, and the dropped markers are gone.
+// The missing list is
 // how it knows the projection: the engine's result and the mapped one both
 // keep it (on 2026-11-21 the 74 stored estimates with an `engineResult` and
 // no list were all wizard quotes or lead auto-drafts, none accepted). A
 // published website quote stores the full result
 // (website-quote-publication.js), so a quote the customer accepted online is
 // read as the engine graded it.
+//
+// That rule is about the estimate's CURRENT result (pre-push r8). An
+// estimate can hold a `result` beside the slim `engineResult`: the wizard
+// stores the engine's full result there for a quote-required quote, and a
+// server reprice rewrites `result` and leaves the earlier `engineResult`
+// behind. storedEstimateContainer (estimate-result-container.js) is the one
+// rule for which of the two is current. When it picks a `result` that keeps
+// the engine's list, the engine's answer for the current price is stored,
+// and the list the slim one lacks is that one: the slim `engineResult` is
+// then read as a result with a list. Its rows are still read like every
+// other row, so a marker left on them counts, as it does on main. A slim
+// `engineResult` that is the current result, or the only one, or beside a
+// `result` with no list, counts as before.
 const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
+const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';
 
-function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } = {}) {
+// The slim `engineResult` that sits behind the estimate's current `result`,
+// when that result keeps the engine's list; null in every other case. An
+// `engineResult` with its own list has nothing to decide, so the
+// current-result rule (which reads the priced lines) is not asked for it.
+function slimResultBehindCurrent(estData, pricingAuthority) {
+  const { result, engineResult } = estData;
+  if (!isKeyed(result) || !Array.isArray(result.fieldVerify)) return null;
+  if (!isKeyed(engineResult) || Array.isArray(engineResult.fieldVerify)) return null;
+  const { storedEstimateContainer } = require('../estimate-result-container');
+  return storedEstimateContainer(estData, { pricingAuthority }) === result ? engineResult : null;
+}
+
+function estimateRequiresFieldVerification(estData, { replaysLawnSize = true, pricingAuthority = null } = {}) {
   if (!estData || typeof estData !== 'object') return false;
   const { lineNeedsReviewBeforeExactPrice } = require('../estimator-engine/draft-builder');
   const listsCodes = (list) => Array.isArray(list) && list.length > 0;
@@ -412,10 +439,11 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } =
   const markedForReview = (c, turfCounts) => listsCodes(c.fieldVerify) || listsCodes(c.fieldVerifyFlags)
     || (turfCounts && listsCodes(c.turfFlags))
     || lineNeedsReviewBeforeExactPrice(asRow(c), { turfGrade: turfCounts });
-  const turfSummaryCounts = (result) => replaysLawnSize || !Array.isArray(result.fieldVerify);
-  const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';
+  const behindCurrent = slimResultBehindCurrent(estData, pricingAuthority);
+  const keepsList = (result) => Array.isArray(result.fieldVerify) || result === behindCurrent;
+  const turfSummaryCounts = (result) => replaysLawnSize || !keepsList(result);
   const servicePicks = (node, key, value) => node === estData && key === 'services' && isKeyed(value);
-  const slimResult = (key, value) => key === 'engineResult' && isKeyed(value) && !Array.isArray(value.fieldVerify);
+  const slimResult = (key, value) => key === 'engineResult' && isKeyed(value) && !keepsList(value);
   // The stored JSON is a finite tree, so the walk needs no depth limit; a
   // limit would be a place where a marker reads as clean.
   const pending = [{ node: estData, turfCounts: true }];
@@ -520,7 +548,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     const bodies = await database('estimates')
       .whereIn('id', batch.map((row) => row.id))
       .where({ customer_id: customerId, status: 'accepted' })
-      .select('id', 'address', 'estimate_data');
+      .select('id', 'address', 'estimate_data', 'pricing_authority');
     const bodyById = new Map(bodies.map((body) => [body.id, body]));
     // The batch's bodies in the listed order, so the first surviving row is
     // the most recently accepted same-property estimate; a row that left the
@@ -537,7 +565,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
       // service picks must not stop the scan before an older same-premises
       // estimate with measurements, whose review markers then apply.
       if (![inputs.homeSqFt, inputs.lotSqFt, inputs.lawnSqFt, inputs.turfSf, inputs.bedArea, inputs.stories].some(positiveOrNull)) continue;
-      pick = { inputs, estData };
+      pick = { inputs, estData, pricingAuthority: body.pricing_authority };
       break;
     }
   }
@@ -621,7 +649,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // must not be replayed into an exact price for a different service,
     // which would be graded high-confidence on inputs that were never
     // qualified. Demotes to the quote CTA; the offer itself still renders.
-    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData, { replaysLawnSize: seedLawnSqFt != null }),
+    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData, { replaysLawnSize: seedLawnSqFt != null, pricingAuthority: pick.pricingAuthority }),
     propertyType: cleanString(inputs.propertyType),
     yearBuilt: positiveOrNull(inputs.yearBuilt),
     constructionMaterial: cleanString(inputs.constructionMaterial),

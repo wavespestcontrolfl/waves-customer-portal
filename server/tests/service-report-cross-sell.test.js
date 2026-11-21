@@ -800,7 +800,7 @@ describe('buildReportCrossSell', () => {
           lineItems: full.lineItems.map((item) => ({ service: item.service, name: item.name, pricingConfidence: item.pricingConfidence, lawnSqFt: item.lawnSqFt, turfSf: item.turfSf, turfBasis: item.turfBasis })),
         };
         const beside = { services, engineInput: request(services, turf) };
-        return { full, slim, stored: { ...beside, engineResult: slim }, published: { engineInputs: beside.engineInput, engineResult: full } };
+        return { full, slim, stored: { ...beside, engineResult: slim }, published: { engineInputs: beside.engineInput, engineResult: full }, withResult: { ...beside, result: full, engineResult: slim } };
       };
       const slimMarked = (slim) => slim.lineItems.some((line) => lineNeedsReviewBeforeExactPrice(line));
 
@@ -832,6 +832,11 @@ describe('buildReportCrossSell', () => {
           const { full, stored, published } = quote(services, turf);
           expect([name, check(stored)]).toEqual([name, true]);
           expect([name, check(published)]).toEqual([name, engineResultNeedsReview(full)]);
+          // The same slim result behind the engine's full result under
+          // `result` (the wizard's quote-required shape; a server reprice
+          // that left the slim one behind): the full result is current and
+          // keeps the list, so the read is exact again (pre-push r8).
+          expect([name, check(quote(services, turf).withResult)]).toEqual([name, engineResultNeedsReview(full)]);
           graded[name] = engineResultNeedsReview(full);
         }
       }
@@ -872,6 +877,43 @@ describe('buildReportCrossSell', () => {
       expect(check({ result: { fieldVerify: [], lineItems: [{ service: 'lawn_care', turfFlags: ['FIELD_VERIFY_TURF_SQFT'] }] } })).toBe(true);
       expect(check({ result: { fieldVerify: [], lineItems: [{ service: 'lawn_care', turfFlags: [] }] } })).toBe(false);
 
+      // Which result is current is storedEstimateContainer's rule, and the
+      // slim rule is about the current one (pre-push r8).
+      const pricedSlim = { summary: {}, lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 45, annual: 540 }] };
+      const pricedFull = { fieldVerify: [], lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 45, annual: 540 }] };
+      const { storedEstimateContainer } = require('../services/estimate-result-container');
+      const behind = (result, slim = pricedSlim, extra = {}) => ({ inputs, result, engineResult: slim, ...extra });
+      // A current `result` that keeps the list: the slim one behind it is
+      // not a marker; a `result` with no list cannot stand in for it.
+      expect(storedEstimateContainer(behind(pricedFull))).toBe(pricedFull);
+      expect(check(behind(pricedFull))).toBe(false);
+      expect(check(behind({ lineItems: pricedFull.lineItems }))).toBe(true);
+      expect(check(behind({ fieldVerify: 'none', lineItems: pricedFull.lineItems }))).toBe(true);
+      // A marker in the current result still counts, and so does a marker
+      // left on the slim rows.
+      expect(check(behind({ fieldVerify: ['TURF_CAPPED_TO_PARCEL'], lineItems: pricedFull.lineItems }))).toBe(true);
+      expect(check(behind(pricedFull, { summary: {}, lineItems: [{ ...pricedSlim.lineItems[0], pricingConfidence: 'LOW' }] }))).toBe(true);
+      // The slim one's summary is read as a result with a list: its turf
+      // flags count only with a replayed lawn size.
+      const slimWithFlags = { ...pricedSlim, property: { turfFlags: ['FIELD_VERIFY_TURF_SQFT'] } };
+      expect(check(behind(pricedFull, slimWithFlags))).toBe(false);
+      expect(estimateRequiresFieldVerification(behind(pricedFull, slimWithFlags), { replaysLawnSize: true })).toBe(true);
+      expect(check({ inputs, engineResult: slimWithFlags })).toBe(true);
+      // A `result` that prices nothing beside a priced slim result is not
+      // current, so the slim one counts. After a server reprice (the row's
+      // authority, or the one frozen in the blob at the price lock) the
+      // `result` is current even when it prices nothing.
+      const pricesNothing = { fieldVerify: [], lineItems: [] };
+      expect(storedEstimateContainer(behind(pricesNothing))).toBe(pricedSlim);
+      expect(check(behind(pricesNothing))).toBe(true);
+      expect(estimateRequiresFieldVerification(behind(pricesNothing), { replaysLawnSize: false, pricingAuthority: 'SERVER' })).toBe(false);
+      expect(estimateRequiresFieldVerification(behind(pricesNothing), { replaysLawnSize: false, pricingAuthority: 'LOCKED' })).toBe(true);
+      expect(check(behind(pricesNothing, pricedSlim, { pricingAuthorityAtLock: 'SERVER' }))).toBe(false);
+      // Only the root's own pair has a current one: a slim result deeper in
+      // the blob counts, beside any `result`.
+      expect(check({ inputs, result: pricedFull, estimatorEngine: { result: pricedFull, engineResult: pricedSlim } })).toBe(true);
+      expect(check({ inputs, result: pricedFull, engineResult: { fieldVerify: [], engineResult: pricedSlim } })).toBe(true);
+
       // Through the loader: the wizard's request holds no lawn size to replay.
       const { loadEstimateSeed } = _private;
       const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(SEED_HERE);
@@ -880,6 +922,14 @@ describe('buildReportCrossSell', () => {
       expect(await seedOf(pestQuote.stored)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: true });
       expect(await seedOf(pestQuote.published)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: false });
       expect(await seedOf(lawnQuote.published)).toMatchObject({ homeSqFt: 2100, lawnSqFt: null, requiresFieldVerification: true });
+      // A clean result that is current clears the slim one behind it, and the
+      // loader passes the row's pricing authority to that rule.
+      expect(await seedOf(pestQuote.withResult)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: false });
+      expect(await seedOf(lawnQuote.withResult)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
+      const seedWithAuthority = (data, authority) => loadEstimateSeed(pagedEstimates([{ ...seedRow('est-1', SEED_HERE, 'accepted', 0, data), pricing_authority: authority }]).database, 'cust-1', street);
+      const removedAll = { engineInput: pestQuote.stored.engineInput, result: pricesNothing, engineResult: pricedSlim };
+      expect(await seedWithAuthority(removedAll, null)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
+      expect(await seedWithAuthority(removedAll, 'SERVER')).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: false });
     });
 
     test('an offer on a seed with a marked mapped row is a quote button, and input-side flags still price', async () => {
