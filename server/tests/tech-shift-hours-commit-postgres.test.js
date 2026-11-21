@@ -107,6 +107,18 @@ describeDb('technician shift hours at a commit (PostgreSQL)', () => {
       expect(await accept()).toMatchObject({ window_start: '11:00:00', window_end: null, reservation_expires_at: null });
     });
 
+    test('a long hold with no stored end is not wrapped at midnight: it still ends after the shift end', async () => {
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      await setShift('08:00', '18:00');
+      const held = await reserveSlot({ estimateId: first, slotId: f.signedSlot(first, 60, '16:00') });
+      // 16:00 plus a stored 480 minutes ends at midnight. As a clock time that end reads 00:00, before the start.
+      await f.db('scheduled_services').where({ id: held.scheduledServiceId })
+        .update({ window_end: null, estimated_duration_minutes: 480, source_estimate_id: null });
+      await expect(commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId: f.ids.customer }))
+        .rejects.toMatchObject(unavailable);
+      expect(await holdRow(held.scheduledServiceId)).toMatchObject({ customer_id: null });
+    });
+
     test('gate off: a hold outside the set hours is accepted, as before', async () => {
       const held = await reserveSlot({ estimateId: first, slotId: f.signedSlot(first, 30, '11:00') });
       await setShift('08:00', '11:00');
@@ -125,6 +137,24 @@ describeDb('technician shift hours at a commit (PostgreSQL)', () => {
       await setShift('08:00', '12:00');
       const { expiresAt } = await extendReservation({ estimateId: first, scheduledServiceId: held.scheduledServiceId });
       expect(new Date(expiresAt).getTime()).toBeGreaterThan(Date.now());
+    });
+
+    test('a hold with no stored end is judged on its stored length, and a long one is not wrapped at midnight', async () => {
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      await setShift('08:00', '18:00');
+      const held = await reserveSlot({ estimateId: first, slotId: f.signedSlot(first, 60, '16:00') });
+      const extend = () => extendReservation({ estimateId: first, scheduledServiceId: held.scheduledServiceId });
+      const store = (minutes) => f.db('scheduled_services').where({ id: held.scheduledServiceId })
+        .update({ window_end: null, estimated_duration_minutes: minutes });
+      // 16:00 plus 150 minutes ends at 18:30, after the 18:00 shift end.
+      await store(150);
+      await expect(extend()).rejects.toMatchObject(unavailable);
+      // 16:00 plus 480 minutes ends at midnight (00:00 as a clock time, before the start).
+      await store(480);
+      await expect(extend()).rejects.toMatchObject(unavailable);
+      // 16:00 plus 120 minutes ends at the shift end.
+      await store(120);
+      expect(new Date((await extend()).expiresAt).getTime()).toBeGreaterThan(Date.now());
     });
 
     test('gate off: the extend keeps a hold outside the set hours, as before', async () => {

@@ -183,11 +183,18 @@ function requireKnownBookingWindowConfig(slotIdOrNull) {
 // e.g. "2026-04-29_10-00_7d34c5e6-....1767216000000.90.dGhl..."
 const SLOT_ID_RE = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})_(.+)$/;
 
-// A hold's own block in minutes after midnight, for the shift check (technician-eligibility.js `hours`).
-// A time that cannot be read is null, and that check then leaves the hold to the others.
-function holdBlock(windowStart, windowEnd) {
+// A hold row's own block in minutes after midnight, for the shift check (technician-eligibility.js `hours`).
+// Its end is its start plus `minutes` (the length resolved now) when given, else its stored end, else its
+// start plus its stored length (60 minutes when none): the chain the occupancy checks read a hold by. A
+// computed end is not wrapped at midnight, so a long job late in the day still ends after it starts. A
+// time that cannot be read is null, and that check then leaves the hold to the others.
+function holdBlock(row, minutes = null) {
   const { parseHHMM } = require('./scheduling/window-rules');
-  return { startMin: parseHHMM(windowStart), endMin: parseHHMM(windowEnd) };
+  const startMin = parseHHMM(row.window_start);
+  const storedEnd = Number(minutes) > 0 ? null : parseHHMM(row.window_end);
+  const length = Number(minutes) > 0 ? Number(minutes)
+    : (Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : DEFAULT_DURATION_MINUTES);
+  return { startMin, endMin: storedEnd ?? (startMin == null ? null : startMin + length) };
 }
 
 function parseSlotId(slotId) {
@@ -2371,19 +2378,11 @@ async function commitReservation({
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
       throw err;
     }
-    // The end this visit occupies: the final window, else the held one, else the start plus the stored
-    // length (60 minutes when none). The shift check and the occupancy probes below share it.
-    const probeWindowEnd = windowEnd
-      || row.window_end
-      || (windowStart
-        ? addMinutesToTime(windowStart, Number(row.estimated_duration_minutes) > 0
-          ? Number(row.estimated_duration_minutes)
-          : DEFAULT_DURATION_MINUTES)
-        : null);
-    // The technician's shift (GATE_TECH_SHIFT_HOURS) on that same FINAL block: the office may have
-    // changed the hours since the reserve, or the profile lengthened the job past the shift end. Same
-    // recovery as the technician re-check above (the customer re-picks a time).
-    if (await shiftExcluding(client, row.technician_id, scheduledDate, holdBlock(windowStart, probeWindowEnd))) {
+    // The technician's shift (GATE_TECH_SHIFT_HOURS) on the FINAL block (holdBlock: the length resolved
+    // above, else the hold's stored end or length, as the occupancy probes below read it): the office may
+    // have changed the hours since the reserve, or the profile lengthened the job past the shift end.
+    // Same recovery as the technician re-check above (the customer re-picks a time).
+    if (await shiftExcluding(client, row.technician_id, scheduledDate, holdBlock(row, effectiveDurationMinutes))) {
       const err = new Error('slot technician is not available');
       err.code = 'SLOT_UNAVAILABLE';
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
@@ -2449,6 +2448,13 @@ async function commitReservation({
     // lapsed keeps includeHolds:false — it has been excluding rivals all
     // along, and counting live holds there would refuse a punctual accept
     // over a hold the reserve path already arbitrated.
+    const probeWindowEnd = windowEnd
+      || row.window_end
+      || (windowStart
+        ? addMinutesToTime(windowStart, Number(row.estimated_duration_minutes) > 0
+          ? Number(row.estimated_duration_minutes)
+          : DEFAULT_DURATION_MINUTES)
+        : null);
     if (scheduledDate && windowStart && probeWindowEnd) {
       const { parseHHMM } = require('./scheduling/window-rules');
       const probeWindowMinutes = parseHHMM(probeWindowEnd) - parseHHMM(windowStart);
@@ -3074,7 +3080,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     if (row.technician_id) {
       try {
         await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate, workDays: true,
-          hours: holdBlock(windowStart, windowEnd) });
+          hours: holdBlock(row) });
       } catch (eligErr) {
         if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
         const err = new Error('slot technician is not available');
