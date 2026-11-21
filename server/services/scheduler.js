@@ -10311,6 +10311,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 10:13AM — One-time job to plan offer, shadow step (owner 2026-11-19
+  // "build"): prices the Quarterly Pest Control Service plan for each
+  // completed one-time pest or cockroach job that is 3 to 14 days old, for a
+  // customer the offer is for, and emails one sample of the offer and of its
+  // reminder to the office inbox. No customer message and no estimate. A
+  // missed morning costs nothing: the next one reads the same jobs. Gate read
+  // per tick (GATE_ONETIME_PLAN_OFFER=shadow).
+  // =========================================================================
+  // 10:13: off the busy five-minute marks of the hour.
+  cron.schedule('13 10 * * *', async () => {
+    if (require('../config/feature-gates').onetimePlanOfferMode?.() !== 'shadow') return;
+    try {
+      await runExclusive('onetime-plan-offer', async () => {
+        const result = await require('./onetime-plan-offer').runOnetimePlanOfferJob();
+        logger.info(`[onetime-plan-offer] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[onetime-plan-offer] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 11AM — Owner heads-up for an imminent visit with a balance 30+ days
   // overdue. The customer-facing reminders (pre-visit tiers, account late
   // check) are retired: the 10:05 pre-visit balance reminder and the invoice
