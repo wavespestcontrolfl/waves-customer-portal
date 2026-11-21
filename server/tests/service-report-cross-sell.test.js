@@ -561,6 +561,146 @@ describe('buildReportCrossSell', () => {
     }
   });
 
+  describe('the seed review check reads every stored row (#8132 pre-push r31)', () => {
+    const { estimateRequiresFieldVerification } = _private;
+    const inputs = { homeSqFt: 2100, lotSqFt: 8000, stories: 1 };
+    const flagged = (extra) => estimateRequiresFieldVerification({ inputs, ...extra });
+
+    test('a marker demotes wherever the stored estimate keeps the row', () => {
+      const pestRow = { service: 'pest_control', requiresManualReview: true, manualReviewReasons: ['large_lot'] };
+      const shapes = {
+        // The mapped shape (estimates saved before the raw engine result was
+        // stored): 19 accepted estimates on production held a marker here.
+        'mapped recurring row': { result: { recurring: { services: [pestRow] } } },
+        'mapped recurring row, nested': { result: { results: { recurring: { services: [pestRow] } } } },
+        'mapped recurring row at the root': { recurring: { services: [pestRow] } },
+        'mapped one-time spec item': { result: { oneTime: { specItems: [{ service: 'pre_slab_termiticide', requiresManualReview: true }] } } },
+        'mapped one-time item, nested': { result: { results: { oneTime: { items: [{ service: 'pre_slab_termiticide', requiresManualReview: true }] } } } },
+        'top-level spec item': { result: { specItems: [{ service: 'pre_slab_termiticide', requiresManualReview: true }] } },
+        'quote-required item': { result: { quoteRequiredItems: [{ service: 'rodent_exclusion', quoteRequired: true }] } },
+        'raw line of the second container': { result: { lineItems: [] }, engineResult: { lineItems: [pestRow] } },
+        // The result-level summaries: 2 accepted estimates held a marker only here.
+        'pest production summary': { result: { productionDiagnostics: { pricingConfidence: 'low' } } },
+        'pricing summary reasons': { result: { pricingMetadata: { manualReviewReasons: ['large_lot'] } } },
+        // The selected lawn's provenance, at each depth it has been stored.
+        'lawn meta, mapped': { result: { results: { lawnMeta: { turfBasis: 'plausibleMaxTurfCap', turfConfidence: 'MEDIUM' } } } },
+        'lawn meta, flat': { result: { lawnMeta: { turfBasis: 'lotFallback', turfConfidence: 'LOW' } } },
+        'lawn meta at the root': { lawnMeta: { customQuoteFlag: true } },
+        // A place no list names.
+        'a row under an unknown key': { result: { nextShape: { rows: [[{ service: 'pest_control', requiresManualReview: true }]] } } },
+      };
+      for (const [name, extra] of Object.entries(shapes)) {
+        expect([name, flagged(extra)]).toEqual([name, true]);
+      }
+    });
+
+    test('every marker of the shared row test demotes, not a LOW turf confidence alone', () => {
+      const line = (fields) => ({ engineResult: { lineItems: [{ service: 'lawn_care', ...fields }] } });
+      const markers = {
+        // A heuristic turf BASIS is a field-verification price at MEDIUM too.
+        'capped turf at MEDIUM': { turfBasis: 'plausibleMaxTurfCap', turfConfidence: 'MEDIUM' },
+        'lot fallback turf': { turfBasis: 'lotFallback', turfConfidence: 'MEDIUM' },
+        'county prior turf': { turfBasis: 'countyPrior', turfConfidence: 'MEDIUM' },
+        'LOW turf confidence': { turfBasis: 'estimatedTurfSf', turfConfidence: 'LOW' },
+        'measurement request': { requiresMeasurement: true },
+        'custom quote request': { requiresCustomQuote: true },
+        'quote required': { quoteRequired: true },
+        'manual-review reasons': { manualReviewReasons: ['very_large_lot'] },
+        'low pricing confidence': { pricingConfidence: 'LOW' },
+      };
+      for (const [name, fields] of Object.entries(markers)) {
+        expect([name, flagged(line(fields))]).toEqual([name, true]);
+      }
+      expect(flagged({ engineResult: { lineItems: [{ service: 'tree_shrub', treeCountSource: 'default_zero' }] } })).toBe(true);
+    });
+
+    test('a clean estimate stays clean', () => {
+      const clean = {
+        'no result at all': {},
+        'measured turf on the line and the meta': {
+          engineResult: { lineItems: [{ service: 'lawn_care', turfBasis: 'measuredTurfSf', turfConfidence: 'HIGH', manualReviewReasons: [] }] },
+          result: { fieldVerify: [], results: { lawnMeta: { turfBasis: 'estimatedTurfSf', turfConfidence: 'MEDIUM', customQuoteFlag: false } } },
+        },
+        'clean rows in every place': {
+          result: {
+            recurring: { services: [{ service: 'pest_control', requiresManualReview: false, pricingConfidence: 'high' }] },
+            oneTime: { items: [{ service: 'pest_initial' }], specItems: [] },
+            pricingMetadata: { manualReviewReasons: [], warnings: ['note'] },
+            productionDiagnostics: { pricingConfidence: 'medium' },
+          },
+        },
+      };
+      for (const [name, extra] of Object.entries(clean)) {
+        expect([name, flagged(extra)]).toEqual([name, false]);
+      }
+    });
+
+    test('what was fed into the pricer is not a marker of the price', () => {
+      // The lookup profile lists verify flags for most properties (117 of 165
+      // seeds on production). The check never read it; reading it would end
+      // nearly every seeded price.
+      const profile = { fieldVerifyFlags: [{ field: 'estimatedTurfSf', priority: 'MEDIUM', reason: 'x' }] };
+      expect(flagged({ engineRequest: { profile }, enriched: profile })).toBe(false);
+      for (const key of ['inputs', 'engineInputs', 'engineInput']) {
+        expect([key, estimateRequiresFieldVerification({ [key]: { ...inputs, pricingMetadata: { manualReviewReasons: ['from_the_request'] } } })]).toEqual([key, false]);
+      }
+      // Only at the top: the same key inside a result is read like any other.
+      expect(flagged({ result: { engineRequest: { profile } } })).toBe(true);
+    });
+
+    test('the property summary turf grade counts only when the seed replays a lawn size', () => {
+      // Every result grades the lot's lawn-size guess, a pest-only quote too.
+      // With no replayed lawn size, a new lawn price computes and grades its own.
+      const guess = { property: { turfSf: 5200, turfEstimated: true, turfConfidence: 'LOW', turfBasis: 'legacyHardscapeEstimate' } };
+      expect(flagged({ result: guess })).toBe(false);
+      expect(flagged({ result: guess, engineResult: guess })).toBe(false);
+      // A replayed lawn size reaches a new price as a supplied measurement.
+      for (const lawn of [{ lawnSqFt: 5200 }, { turfSf: 5200 }]) {
+        expect(estimateRequiresFieldVerification({ inputs: { ...inputs, ...lawn }, result: guess })).toBe(true);
+        expect(estimateRequiresFieldVerification({ engineInputs: { ...inputs, ...lawn }, engineResult: guess })).toBe(true);
+        // A supplied size the engine graded as supplied is clean.
+        expect(estimateRequiresFieldVerification({ inputs: { ...inputs, ...lawn }, result: { property: { turfConfidence: 'HIGH', turfBasis: 'lawnSqFt' } } })).toBe(false);
+      }
+      // The summary's other markers count either way.
+      expect(flagged({ result: { property: { requiresManualReview: true } } })).toBe(true);
+      expect(flagged({ result: { property: { footprint: { fieldVerify: ['squareFootage'] } } } })).toBe(true);
+      // A row is never the summary: its turf grade counts with no replayed size.
+      expect(flagged({ result: { lineItems: [{ service: 'lawn_care', turfConfidence: 'LOW' }] } })).toBe(true);
+    });
+
+    test('an offer on a seed with a marked mapped row is a quote button, and input-side flags still price', async () => {
+      const args = (extra) => ({
+        serviceTypes: ['Pest Control'],
+        turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+        estimates: [{
+          id: 'est-seed',
+          address: '123 Gulf Dr, Sarasota, FL 34236',
+          status: 'accepted',
+          estimate_data: { inputs, ...extra },
+        }],
+      });
+      const demoted = await buildReportCrossSell(
+        SERVICE(),
+        dbFor(args({ result: { recurring: { services: [{ service: 'pest_control', requiresManualReview: true, manualReviewReasons: ['large_lot'] }] } } })),
+        { propertyLookup: missLookup },
+      );
+      expect(demoted).not.toBeNull();
+      expect(demoted.mode).toBe('quote_cta');
+      expect(demoted.option).toBeNull();
+
+      const priced = await buildReportCrossSell(
+        SERVICE(),
+        dbFor(args({
+          engineRequest: { profile: { fieldVerifyFlags: [{ field: 'estimatedTurfSf', priority: 'MEDIUM', reason: 'x' }] } },
+          result: { property: { turfConfidence: 'LOW', turfBasis: 'lotFallback' }, recurring: { services: [{ service: 'pest_control' }] } },
+        })),
+        { propertyLookup: missLookup },
+      );
+      expect(priced.mode).toBe('priced');
+      expect(priced.option.perVisit).toBeGreaterThan(0);
+    });
+  });
+
   test('the seed replays the top-level attachedGarage input (PR r15 P1)', async () => {
     // attachedGarage is a top-level estimator input, not a features member,
     // so copying inputs.features alone dropped it — while pest pricing adds

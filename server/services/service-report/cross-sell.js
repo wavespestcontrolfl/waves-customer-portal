@@ -323,30 +323,59 @@ function positiveOrNull(value) {
 // dimensions into a DIFFERENT service's price would launder that into an
 // unqualified exact per-application figure, since the new price is graded
 // on its own inputs and knows nothing about the original's caveat.
-// Shape-tolerant on purpose: the stored blob has carried v1 and v2 result
-// shapes, and a missed marker would read as "clean" — anything that looks
-// like a verification flag demotes the offer to the quote CTA.
+//
+// WHAT counts as a marker: a non-empty fieldVerify list, or the row test that
+// proposal generation and the plan mint gate on (lineRequiresReview,
+// lineHasHeuristicTurf, a LOW pricing confidence). A hand-kept subset read a
+// LOW turf confidence only, so a heuristic turf BASIS at MEDIUM
+// (plausibleMaxTurfCap), a measurement request or a list of manual-review
+// reasons read as clean (#8132 pre-push r31).
+//
+// WHERE it looks: every object of the stored blob. The blob has kept its
+// rows in many places (raw lineItems, the mapped recurring.services and
+// one-time items, the selected lawn's lawnMeta, the result-level review
+// summaries), and a list of places misses the next one: on 2026-11-20, 19
+// accepted estimates held a review-marked row the old list did not read. A
+// missed marker reads as "clean", so an unknown key is read, never skipped.
+// Two parts of the blob are not markers of the price:
+//   - what was fed INTO the pricer (SEED_INPUT_KEYS). The lookup profile kept
+//     there lists verify flags for most properties. The check never read it,
+//     and reading it would end nearly every seeded price;
+//   - the turf grade on a result's `property` summary: the engine's own
+//     lawn-size guess, which every result carries, a pest-only quote
+//     included. It counts only when the seed replays a lawn size
+//     (inputs.lawnSqFt / turfSf), the one case where a guess could reach a
+//     new price as a supplied measurement. Without one, a new lawn price
+//     computes and grades its own turf.
+const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
+
 function estimateRequiresFieldVerification(estData) {
   if (!estData || typeof estData !== 'object') return false;
-  const markedForReview = (c) => {
-    if (!c || typeof c !== 'object') return false;
-    if (Array.isArray(c.fieldVerify) && c.fieldVerify.length) return true;
-    if (Array.isArray(c.fieldVerifyFlags) && c.fieldVerifyFlags.length) return true;
-    if (c.requiresManualReview === true || c.customQuoteFlag === true) return true;
-    if (String(c.pricingConfidence || '').toLowerCase() === 'low') return true;
-    return String(c.turfConfidence || '').toLowerCase() === 'low';
-  };
-  const containers = [estData, estData.result, estData.estimate, estData.engineResult, estData.estimatorEngine];
-  return containers.some((c) => {
-    if (!c || typeof c !== 'object') return false;
-    if (markedForReview(c)) return true;
-    // PER-SERVICE markers live on the line items (codex #3367 PR r14): a
-    // normal engine-backed estimate records its review posture there, so a
-    // Tree & Shrub line at pricingConfidence 'low' sits under an empty
-    // top-level fieldVerify and read as clean. The engine's own quote
-    // grader reads the line first for exactly this reason.
-    return Array.isArray(c.lineItems) && c.lineItems.some(markedForReview);
-  });
+  const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
+  const inputs = estData.engineInputs || estData.inputs || estData.engineInput || {};
+  const replaysLawnSize = !!(positiveOrNull(inputs.lawnSqFt) || positiveOrNull(inputs.turfSf));
+  const markedForReview = (c, isPropertySummary) => (Array.isArray(c.fieldVerify) && c.fieldVerify.length > 0)
+    || (Array.isArray(c.fieldVerifyFlags) && c.fieldVerifyFlags.length > 0)
+    || lineRequiresReview(c)
+    || String(c.pricingConfidence || '').toLowerCase() === 'low'
+    || ((!isPropertySummary || replaysLawnSize) && lineHasHeuristicTurf(c));
+  // The stored JSON is a finite tree, so the walk needs no depth limit; a
+  // limit would be a place where a marker reads as clean.
+  const pending = [{ node: estData, key: null, top: true }];
+  while (pending.length) {
+    const { node, key, top } = pending.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const item of node) pending.push({ node: item, key, top: false });
+      continue;
+    }
+    if (markedForReview(node, key === 'property')) return true;
+    for (const [childKey, child] of Object.entries(node)) {
+      if (top && SEED_INPUT_KEYS.has(childKey)) continue;
+      pending.push({ node: child, key: childKey, top: false });
+    }
+  }
+  return false;
 }
 
 // Property-dimension seed from the customer's own estimate history: the
