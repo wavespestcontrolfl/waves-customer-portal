@@ -237,6 +237,14 @@ describe('the public state', () => {
     expect(J.publicStateOf({ status: 'accepted' }, { applicationStatus: 'hired' })).toBe('signed');
   });
 
+  test('a stored expiry reads as a clock expiry does: expired at the offer stage, withdrawn once the application left it', () => {
+    expect(J.publicStateOf({ status: 'expired' }, { ...at('2026-11-28T00:00:00Z'), applicationStatus: 'offer' })).toBe('expired');
+    for (const applicationStatus of ['hired', 'rejected', 'withdrawn', 'interview']) {
+      expect(J.publicStateOf({ status: 'expired' }, { ...at('2026-11-28T00:00:00Z'), applicationStatus })).toBe('withdrawn');
+      expect(J.publicStateOf(sent, { ...at('2026-11-28T00:00:00Z'), applicationStatus })).toBe('withdrawn');
+    }
+  });
+
   test('closed messages are the owner-approved words, with the main phone', () => {
     const snapshot = { owner: { name: 'Test Owner' } };
     expect(J.closedMessage('superseded', snapshot, {})).toBe('This offer was updated. Please use the newest link Test sent you.');

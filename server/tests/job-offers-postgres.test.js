@@ -959,6 +959,45 @@ jest.setTimeout(120000);
         expect(mockRaise).not.toHaveBeenCalled();
       });
 
+      test('storing an expiry the owner already saw changes no stamp: his open Send goes through, and the stage stamp holds', async () => {
+        const app = await newApplication();
+        const lapsed = (await sendNew(app)).offer;
+        await lapse(lapsed.id);
+        // The owner starts a new offer on the card that shows the old one closed. Then a pass stores the expiry.
+        const next = await JobOffers.saveDraft(app.id, {}, actor());
+        const { outStamp } = await JobOffers.adminPanel(app.id, actor());
+        const stageStamp = (await JobOffers.liveOfferStake(root, app.id)).stamp;
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 1, failed: 0 });
+        expect((await JobOffers.adminPanel(app.id, actor())).outStamp).toBe(outStamp);
+        expect((await JobOffers.liveOfferStake(root, app.id)).stamp).toBe(stageStamp);
+        const sent = await JobOffers.sendOffer(app.id, next.id, actor(), next.draftHash, new Date(), { expectedOut: outStamp });
+        expect(sent.offer.status).toBe('sent');
+      });
+
+      test('an offer that lapses after the owner opened Send refuses that Send, and the next read sends', async () => {
+        const app = await newApplication();
+        const out = (await sendNew(app)).offer;
+        const revision = await JobOffers.reviseOffer(app.id, out.id, { expectedStatus: 'sent' }, actor());
+        const { outStamp } = await JobOffers.adminPanel(app.id, actor());
+        await lapse(out.id);
+        await expect(JobOffers.sendOffer(app.id, revision.id, actor(), revision.draftHash, new Date(), { expectedOut: outStamp }))
+          .rejects.toMatchObject({ status: 409, code: 'OFFERS_CHANGED' });
+        expect(await statusOf(revision.id)).toBe('draft');
+        expect((await sendAsPage(app.id, revision.id, revision.draftHash)).offer.status).toBe('sent');
+      });
+
+      test('a stored expiry reads withdrawn once the owner closes the application, as a lapsed offer did', async () => {
+        const app = await newApplication();
+        const sent = (await sendNew(app)).offer;
+        await lapse(sent.id);
+        expect(await JobOffers.closeExpiredOffers()).toEqual({ closed: 1, failed: 0 });
+        const token = await tokenOf(sent.id);
+        expect((await JobOffers.publicView(token)).state).toBe('expired');
+        await root('job_applications').where({ id: app.id }).update({ status: 'rejected' });
+        const view = await JobOffers.publicView(token);
+        expect(view).toMatchObject({ state: 'withdrawn', message: expect.stringMatching(/^This offer is no longer open\./) });
+      });
+
       test('a Send that replaces a lapsed offer stores its expiry with no bell, and no later pass rings for it', async () => {
         const app = await newApplication();
         const lapsed = (await sendNew(app)).offer;

@@ -353,8 +353,8 @@ const ownerFirstName = (snapshot) => String((snapshot && snapshot.owner && snaps
 
 /**
  * What the applicant's page shows for a row: open | signed | declined | date_requested | expired | withdrawn |
- * superseded, or null for a draft. A sent offer past its expiry reads expired before the sweep flips the row; an offer
- * whose application was closed by the owner meanwhile reads withdrawn.
+ * superseded, or null for a draft. A sent offer past its expiry reads expired before the 7-day close stores that state
+ * and after it; an offer whose application was closed by the owner meanwhile reads withdrawn, expired or not.
  */
 function publicStateOf(offer, { now = new Date(), applicationStatus = null } = {}) {
   switch (offer.status) {
@@ -362,12 +362,14 @@ function publicStateOf(offer, { now = new Date(), applicationStatus = null } = {
     case 'declined': return 'declined';
     case 'withdrawn': return 'withdrawn';
     case 'superseded': return 'superseded';
-    case 'expired': return 'expired';
+    case 'expired':
     case 'sent':
     case 'date_requested': {
-      // A live offer belongs to an application sitting at 'offer': closed, or moved back to review or interview, it is dead.
+      // A live offer belongs to an application sitting at 'offer': closed, or moved back to review or interview, it is
+      // dead. An offer past its expiry reads the same whether or not the 7-day close has stored that state.
       if (applicationStatus && applicationStatus !== 'offer') return 'withdrawn';
       if (offer.status === 'date_requested') return 'date_requested';
+      if (offer.status === 'expired') return 'expired';
       return offer.expires_at && now.getTime() > new Date(offer.expires_at).getTime() ? 'expired' : 'open';
     }
     default: return null;
@@ -585,9 +587,10 @@ async function adminPanel(applicationId, actor, now = new Date()) {
     // The offer out now that sending the open draft replaces (its link stops working at the send), or null. `out` is
     // already null for an offer past its expiry, whose link no longer works.
     sendReplacesId: replacedBySend(out, revision),
-    // The offers out now (sent, date requested) as this read saw them, each with its version. Send carries it back
-    // (expectedOut), so an answer or a date request after this read refuses the send (commitSend).
-    outStamp: offerStampOf(rows.filter((r) => OUT_STATUSES.includes(r.status))),
+    // The offers the applicant holds now (a sent offer not past its expiry, a date request) as this read saw them, each
+    // with its version. Send carries it back (expectedOut), so an answer or a date request after this read refuses the
+    // send (commitSend). An offer past its expiry is left out, stored as expired or not: see liveOffersOf.
+    outStamp: offerStampOf(rows.filter((r) => isHeldOffer(r, now))),
     // The preview names the offer its letter belongs to (the open draft, else the frozen letter of the current offer, else
     // none: the defaults) and that draft's hash, so a Save, Send or Discard can be tied to what was read.
     letterPreview: {
@@ -802,10 +805,14 @@ function stageMoveClosesOffers(fromStatus, toStatus) {
     || (['rejected', 'withdrawn', 'hired'].includes(toStatus) && fromStatus !== toStatus);
 }
 
-// The live offers such a move withdraws (a draft, a sent offer, a date request).
-function liveOffersOf(knex, applicationId, { lock = false } = {}) {
+// The live offers a stamp names: a draft, a date request, and a sent offer not past its expiry. A sent offer past its
+// expiry is left out whether or not the 7-day close has stored that state (closeExpiredOffers): both pages already
+// show it closed, so storing it must not change a stamp the owner read. (A stage move still marks such a row
+// withdrawn, closeOffersWithApplication; no dialog names it, because the applicant no longer holds it.)
+async function liveOffersOf(knex, applicationId, { lock = false, now = new Date() } = {}) {
   const query = knex('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES);
-  return (lock ? query.forUpdate() : query).select('id', 'status', 'expires_at', 'updated_at');
+  const rows = await (lock ? query.forUpdate() : query).select('id', 'status', 'expires_at', 'updated_at');
+  return rows.filter((o) => !expiredByClock(o, now));
 }
 
 // One stamp for the offers a stage move withdraws, from their ids, statuses and versions (updated_at, which every offer
@@ -828,7 +835,7 @@ function nextVersion(row) {
 
 /** What such a move would withdraw, for the stage dialog's preview: a plain read (the move re-checks under its lock). */
 async function liveOfferStake(knex, applicationId, now = new Date()) {
-  const rows = await liveOffersOf(knex, applicationId);
+  const rows = await liveOffersOf(knex, applicationId, { now });
   return { held: rows.some((o) => isHeldOffer(o, now)), draft: rows.some((o) => o.status === 'draft'), stamp: offerStampOf(rows) };
 }
 
@@ -922,7 +929,7 @@ async function commitSend(applicationId, offerId, actor, now, draftHash, expecte
     // The owner sends on a read of the offers out now (the offer read's outStamp, which sendOffer requires). An answer, a
     // date request or any other write to them since that read refuses the send, before anything is replaced or sent: the
     // owner sees it first. Every offer writer locks the application row first, so this read holds until the commit.
-    const outNow = (await liveOffersOf(trx, applicationId, { lock: true })).filter((o) => OUT_STATUSES.includes(o.status));
+    const outNow = (await liveOffersOf(trx, applicationId, { lock: true, now })).filter((o) => OUT_STATUSES.includes(o.status));
     if (offerStampOf(outNow) !== expectedOut) {
       throw new OfferError(409, 'OFFERS_CHANGED', 'The offer you sent before changed after you opened this, so nothing was sent.');
     }
