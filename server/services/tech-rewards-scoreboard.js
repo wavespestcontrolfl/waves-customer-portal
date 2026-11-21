@@ -238,8 +238,11 @@ function lineComponents(line) {
  *   (regular_pay_cents + overtime_pay_      weighted by paid minutes; the week's        by work_date, overtime_minutes of the
  *   cents; the weekly OT premium is in      overtime minutes are the LAST minutes       check (hours past 40 are worked last)
  *   overtime_pay)                           worked, at 1.5x
- *   paid time off (pto_pay_cents)          the dated PTO records of the week,           payroll_time_off (kind pto)
- *                                           weighted by minutes
+ *   paid time off (pto_pay_cents)          the dated PTO records of the week,           payroll_time_off (kind pto); for a
+ *                                           weighted by minutes; for a check with a     check with a time-off bank,
+ *                                           time-off bank, the minutes the bank PAID    calc_snapshot.ptoBank.paidDays
+ *                                           on each date (it can pay one day of the
+ *                                           week and not the next)
  *   holiday pay (holiday_pay_cents)        the dated holiday records of the week,       payroll_time_off (kind holiday)
  *                                           weighted by minutes
  *   commission lines (commission_cents)    the payment day for a ledger line            payroll_pay_lines of the check:
@@ -413,7 +416,8 @@ async function readGross(conn, technicianId, from, to) {
     .whereRaw('c.week_start + 6 >= ?::date', [from])
     .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), conn.raw("to_char(r.pay_date, 'YYYY-MM-DD') AS pay_date"), 'c.gross_cents', 'c.regular_pay_cents',
       'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents', 'c.tech_rewards_cents',
-      conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"));
+      conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"),
+      conn.raw("c.calc_snapshot->'ptoBank'->'paidDays' AS pto_paid_days"));
   if (!rows.length) return 0;
   const lineRows = await conn('payroll_pay_lines as l')
     .whereIn('l.check_id', rows.map((row) => row.id))
@@ -454,6 +458,11 @@ async function readGross(conn, technicianId, from, to) {
     if (weekEnd >= from && check.weekStart <= to && (check.weekStart < from || weekEnd > to)) {
       check.dayMinutes = await readDayMinutes(conn, technicianId, check.weekStart);
       Object.assign(check, await readTimeOffRecords(conn, technicianId, check.weekStart));
+      // A time-off bank pays the booked days in date order and can leave a later day unpaid (payroll-time-off-bank.js
+      // settleWeek). The check stored what it paid on each date: its PTO pay was earned on those days, not on every booked one.
+      if (Array.isArray(row.pto_paid_days)) {
+        check.ptoRecords = row.pto_paid_days.map((day) => ({ workDate: day.workDate, minutes: Number(day.minutes) || 0 }));
+      }
     }
     checks.push(check);
   }

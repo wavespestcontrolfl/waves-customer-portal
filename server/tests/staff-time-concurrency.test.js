@@ -996,17 +996,19 @@ describe('Admin adds a missed shift', () => {
     edited_by: 'admin-1',
     ...overrides,
   });
-  // Query order inside the transaction: week lock (raw), technician lock, the
-  // same day / paid check / paid line / week guards an edit runs, the overlap
-  // check, then the insert.
+  // Query order inside the transaction: week lock (raw), the shared payroll lock
+  // (raw), technician lock, the same day / paid check / paid line / week guards an
+  // edit runs, with the closed-week read a new shift adds, the overlap check, then
+  // the insert.
   const guardSpecs = (guards = {}) => {
-    const { overlap, day, paid, line, week } = guards;
+    const { overlap, day, paid, line, closed, week } = guards;
     const technician = 'technician' in guards ? guards.technician : { id: TECH, active: true };
     return [
     { table: 'technicians', label: 'technicianLock', firstValue: technician },
     { table: 'time_entry_daily_summary', label: 'approvedDay', firstValue: day },
     { table: 'payroll_checks', label: 'paidWeek', firstValue: paid },
     { table: 'payroll_pay_lines', label: 'paidLine', firstValue: line },
+    { table: 'payroll_runs as r', label: 'closedWeek', firstValue: closed },
     { table: 'time_weekly_summary', label: 'approvedWeek', firstValue: week },
     { table: 'time_entries', label: 'overlap', firstValue: overlap },
     ];
@@ -1029,9 +1031,16 @@ describe('Admin adds a missed shift', () => {
       { table: 'time_weekly_summary', label: 'weeklyUpsert', returningValue: [{ id: 'weekly-1', status: 'pending', week_start: '2026-07-06' }] },
       { table: 'time_weekly_summary', label: 'signoffClear', thenValue: 0 },
     ];
-    installTransaction(specs, events);
+    const { trx } = installTransaction(specs, events);
 
     await expect(timeTracking.adminAddEntry(request())).resolves.toBe(saved);
+
+    // The shared payroll lock comes before the technician row: a finalize holds that lock and then
+    // locks technician rows, so the other order can deadlock.
+    const firstShared = trx.raw.mock.calls.findIndex(([sql]) => /pg_advisory_xact_lock_shared/.test(sql));
+    const rawsBeforeTechnician = events.slice(0, events.indexOf('technicianLock.forUpdate')).filter((event) => event === 'transaction.raw').length;
+    expect(firstShared).toBeGreaterThanOrEqual(0);
+    expect(firstShared).toBeLessThan(rawsBeforeTechnician);
 
     const insert = specs.find((spec) => spec.label === 'entryInsert').insertPayload;
     expect(insert).toMatchObject({
@@ -1097,6 +1106,7 @@ describe('Admin adds a missed shift', () => {
     ['an approved day', { day: { id: 1, status: 'approved' } }, 409, /Reopen the approved day/],
     ['a finalized pay check for the week', { paid: { id: 'check-1' } }, 409, /already paid/],
     ['a paid pay line covering the week', { line: { id: 'line-1' } }, 409, /paid pay line/],
+    ['a final pay run that left time off of the technician unpaid', { closed: { id: 'run-1' } }, 409, /This week's pay run is final/],
     ['an approved week', { week: { id: 1, status: 'approved' } }, 409, /Unlock the approved week/],
     ['an overlapping shift', { overlap: { id: 'other-shift' } }, 409, /overlaps a shift/],
   ])('refuses and writes nothing for %s', async (_name, guards, statusCode, message) => {

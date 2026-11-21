@@ -71,6 +71,7 @@ const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-
 
 // payroll-runs.js loads this file, so its helpers are read on first use.
 const payrollRuns = () => require('./payroll-runs');
+const timeOffBank = require('./payroll-time-off-bank');
 
 // The one home of the value is payroll-pay-lines.js, which pays these lines in their own week only (openLinesFor).
 const SOURCE_TYPE = TECH_REWARDS_SOURCE;
@@ -177,7 +178,9 @@ const recipients = (trx) => applyAssignable(trx('technicians').where({ 'technici
  * workedWeeks, which counts a shift that has no summary yet) that no approved timesheet settles. A week whose approved
  * timesheet has no minutes and that holds no payable time off gets no check from any run (evaluate), so it is settled: a gift
  * never waits for a check that cannot come. A week is paid when the technician has a FINALIZED check for it in a
- * finalized run. Whole weeks are asked, the weeks a line's overtime is priced from.
+ * finalized run. A week is settled too when its finalized run kept the technician's time off as not paid
+ * (payroll_runs.unpaid_time_off: a time-off bank that paid none of it makes no check, and no later run pays that week);
+ * a void of that run opens the week again. Whole weeks are asked, the weeks a line's overtime is priced from.
  */
 async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
   const from = staffWeekStartForWorkDate(coversFrom);
@@ -203,7 +206,9 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
     .whereIn('c.week_start', weeks)
     .select(trx.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"))).map((row) => row.week_start));
-  return weeks.filter((week) => !paid.has(week)).sort()[0] || null;
+  const open = weeks.filter((week) => !paid.has(week));
+  const decided = new Set(await timeOffBank.unpaidDecisionWeeks(trx, technicianId, open));
+  return open.filter((week) => !decided.has(week)).sort()[0] || null;
 }
 
 /**

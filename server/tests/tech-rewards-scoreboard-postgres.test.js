@@ -260,6 +260,22 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.seasonBonus.grossCents).toBe(10000 + 5000 + 3000);
   });
 
+  test('paid time off of a check with a time-off bank is dated by the days the bank paid, not by every booked day', async () => {
+    const [zeta] = await db('technicians').insert({ name: 'Sample Zeta', hire_date: '2024-01-15' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-09-07', pay_date: '2026-09-18' }).returning('id');
+    await insertChecks([
+      // the Aug 31 week: 8 hours booked on Aug 31 and 8 on Sep 1. The bank held 8 hours: it paid Aug 31 (10000) and left Sep 1 unpaid.
+      { run_id: run.id, technician_id: zeta.id, status: 'finalized', week_start: '2026-08-31', gross_cents: 10000, regular_pay_cents: 0, pto_pay_cents: 10000,
+        calc_snapshot: { ptoBank: { paidDays: [{ workDate: '2026-08-31', minutes: 480 }] } } },
+    ]);
+    await db('payroll_time_off').insert([
+      { technician_id: zeta.id, work_date: '2026-08-31', kind: 'pto', minutes: 480 },
+      { technician_id: zeta.id, work_date: '2026-09-01', kind: 'pto', minutes: 480 },
+    ]);
+    const board = await service.getScoreboard(zeta.id, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(10000); // all of it earned on Aug 31, inside the season; by booked days it would be 5000
+  });
+
   test('review asks count every delivered ask by its send day: a follow-up counts once even when stamped twice', async () => {
     await seed();
     const [c1, c2, c3, c4] = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];

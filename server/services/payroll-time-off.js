@@ -7,15 +7,21 @@
  * An admin records one paid day off per W-2 technician per date: kind 'pto' or
  * 'holiday', and the paid hours (up to 24, two decimals). A pay run for the week
  * that holds the date pays those hours at the straight rate (payroll-runs.js).
- * The benefits policy is not final, so no allowance and no holiday list live in
- * code: the yearly allowance is a setting on the technician and only warns.
+ * No holiday list lives in code.
+ *
+ * Time-off bank (owner 2026-11-21, payroll-time-off-bank.js): a technician whose
+ * yearly hours are set has a bank. The pay run pays paid time off only from the
+ * bank; here the bank only warns, and a day is never refused. A paid-time-off day
+ * can be marked as illness (the only kind the bank pays up to day 90). With no
+ * yearly hours set there is no bank and every recorded hour is paid.
  *
  * Once the pay run for the staff week that holds the date is finalized (not
  * voided), the day cannot be added, changed or removed, whichever technician the
  * run paid: a run finalized without a check for this technician would otherwise
  * never pay a day added afterwards. Void the pay run first. The write takes
  * the same advisory lock finalizeRun takes (lockPayrollMutations), so a finalize
- * and a time-off edit cannot interleave.
+ * and a time-off edit cannot interleave. Saving the yearly hours takes it too:
+ * that setting turns a bank on or off, and a finalize must read one answer.
  *
  * Recording time off here does not mark the technician out on the schedule
  * (technician_absences is a separate record).
@@ -27,6 +33,7 @@ const { PayrollError } = require('./payroll-w4');
 const { lockPayrollMutations } = require('./payroll-runs');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
+const bank = require('./payroll-time-off-bank');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KINDS = ['pto', 'holiday'];
@@ -42,9 +49,10 @@ function validate(schema, input) {
   return value;
 }
 
+// Returns the id as Postgres spells it (lowercase): the bank reads key their answers by the id of the row.
 const requireUuid = (id, what) => {
   if (!UUID_RE.test(String(id || ''))) throw new PayrollError(404, `${what} not found.`);
-  return String(id);
+  return String(id).toLowerCase();
 };
 const actorOf = (actor) => (actor && typeof actor === 'object' ? actor.id : actor) || null;
 
@@ -80,6 +88,10 @@ const hoursSchema = Joi.any().custom((value, helpers) => {
 const noteSchema = Joi.string().trim().max(MAX_NOTE).allow('', null).default(null)
   .messages({ 'string.max': `Note must be at most ${MAX_NOTE} characters`, 'string.base': 'Note must be text' });
 
+// A paid-time-off day for illness. A holiday is never an illness day.
+const illnessSchema = Joi.boolean().default(false).messages({ 'boolean.base': 'Illness must be yes or no' });
+const ILLNESS_KIND_MESSAGE = 'Only a paid time off day can be marked as illness';
+
 const createSchema = Joi.object({
   technicianId: Joi.string().trim().required()
     .messages({ 'any.required': 'Pick a technician', 'string.empty': 'Pick a technician', 'string.base': 'Pick a technician' }),
@@ -88,8 +100,13 @@ const createSchema = Joi.object({
   kind: kindSchema,
   hours: hoursSchema,
   note: noteSchema,
+  illness: illnessSchema,
 });
-const updateSchema = Joi.object({ kind: kindSchema, hours: hoursSchema, note: noteSchema });
+// No default on a change: a screen loaded before the illness mark existed sends none, and the mark must stay.
+const updateSchema = Joi.object({
+  kind: kindSchema, hours: hoursSchema, note: noteSchema,
+  illness: Joi.boolean().messages({ 'boolean.base': 'Illness must be yes or no' }),
+});
 const allowanceSchema = Joi.object({
   hoursPerYear: Joi.any().custom((value, helpers) => {
     if (value == null || value === '') return null;
@@ -116,7 +133,7 @@ function checkWorkDate(workDate, today = etDateString()) {
 // ---- Reading
 
 const entryColumns = (conn) => [
-  'o.id', 'o.technician_id', 'o.kind', 'o.minutes', 'o.note', 't.name',
+  'o.id', 'o.technician_id', 'o.kind', 'o.minutes', 'o.note', 'o.illness', 't.name',
   conn.raw("to_char(o.work_date, 'YYYY-MM-DD') as work_date"),
 ];
 
@@ -129,6 +146,7 @@ function serializeEntry(row) {
     kind: row.kind,
     hours: hoursText(row.minutes),
     note: row.note || null,
+    illness: row.illness === true,
   };
 }
 
@@ -170,13 +188,33 @@ async function allowanceOf(conn, technicianId) {
   return row && row.pto_hours_per_year != null ? Number(row.pto_hours_per_year) : null;
 }
 
-// The allowance only warns. Returns plain text, or null.
-async function allowanceWarning(conn, technicianId, name, year) {
-  const allowance = await allowanceOf(conn, technicianId);
-  if (allowance == null) return null;
-  const booked = await ptoMinutesBooked(conn, technicianId, year);
-  if (booked <= allowance * 60 + 1e-9) return null;
-  return `${name} now has ${hoursText(booked)} hours of paid time off booked in ${year}. The yearly allowance is ${allowance} hours. The day is saved.`;
+// The bank only warns here: the pay run decides what it pays. Plain text, or null for a technician
+// with no bank. `day` = { workDate, illness } of the paid-time-off day just saved.
+async function bankWarning(conn, technicianId, name, day) {
+  const tech = (await bank.bankTechnicians(conn, [technicianId])).get(technicianId);
+  if (!tech) return null;
+  const parts = [];
+  const sums = (await bank.bankSums(conn, [technicianId])).get(technicianId);
+  const usableFrom = bank.usableFromOf(tech.hireDate);
+  if (!usableFrom) {
+    parts.push(`Add the hire date of ${name} in Time Tracking, Team. The pay run needs it to pay time off.`);
+  } else if (day.workDate < tech.hireDate) {
+    parts.push(`This day is before the hire date of ${name}. The time-off bank does not pay it, so this day is unpaid.`);
+  } else if (day.workDate < usableFrom && !day.illness) {
+    parts.push(`This day is in the first ${bank.USE_AFTER_DAYS} days of the job. Until ${usableFrom} the time-off bank pays only illness days, up to ${bank.EARLY_ILLNESS_HOURS} hours, so this day is unpaid.`);
+  } else if (day.workDate < usableFrom) {
+    // An illness day in the first days of the job: the hours the rule allows can be used up.
+    const early = await bank.earlyIllnessWaiting(conn, technicianId, { hireDate: tech.hireDate, usableFrom, earlyPaid: sums.earlyPaid });
+    if (early.short > 0) {
+      parts.push(`Until ${usableFrom} the time-off bank pays illness days up to ${bank.EARLY_ILLNESS_HOURS} hours in all. ${name} has ${bank.hoursText(early.left)} of those hours left and ${bank.hoursText(early.waiting)} hours of illness days waiting for a pay run, so ${bank.hoursText(early.short)} hours are unpaid.`);
+    }
+  }
+  const held = Math.max(0, sums.bank);
+  const waiting = await bank.ptoWaiting(conn, technicianId);
+  if (waiting > held) {
+    parts.push(`${name} has ${bank.hoursText(held)} hours in the time-off bank today and ${bank.hoursText(waiting)} hours of paid time off waiting for a pay run. A pay run pays only the hours the bank holds then.`);
+  }
+  return parts.length ? `${parts.join(' ')} The day is saved.` : null;
 }
 
 async function balance(query, conn = db) {
@@ -201,6 +239,8 @@ async function balance(query, conn = db) {
     .where('pay_date', '>=', `${year}-01-01`)
     .where('pay_date', '<=', `${year}-12-31`)
     .first(conn.raw('COALESCE(SUM(pto_minutes), 0) AS minutes'));
+  // The time-off bank today (all years); only for a technician with a bank.
+  const banked = (await bank.bankTechnicians(conn, [technicianId])).get(technicianId);
   return {
     technicianId,
     year,
@@ -208,6 +248,15 @@ async function balance(query, conn = db) {
     ptoHoursBooked: hoursText(booked),
     ptoHoursPaid: hoursText(paid.minutes),
     holidayDaysBooked: Number(holidays.days),
+    ...(banked ? {
+      bank: {
+        balanceHours: bank.hoursText((await bank.bankSums(conn, [technicianId])).get(technicianId).bank),
+        waitingHours: bank.hoursText(await bank.ptoWaiting(conn, technicianId)),
+        fullWeekHours: (bank.fullWeekHundredths(banked.hoursPerYear) / 100).toFixed(2),
+        capHours: bank.CAP_HOURS,
+        usableFrom: bank.usableFromOf(banked.hireDate),
+      },
+    } : {}),
   };
 }
 
@@ -229,6 +278,7 @@ async function createTimeOff(input, actor, conn = db) {
   const v = validate(createSchema, input);
   const technicianId = requireUuid(v.technicianId, 'Technician');
   const workDate = checkWorkDate(v.workDate);
+  if (v.illness && v.kind !== 'pto') throw new PayrollError(400, ILLNESS_KIND_MESSAGE);
   const actorId = actorOf(actor);
   const duplicate = new PayrollError(409, 'That technician already has time off recorded for that date. Change that entry instead.');
   try {
@@ -240,11 +290,11 @@ async function createTimeOff(input, actor, conn = db) {
       await refuseWhenPaid(trx, workDate);
       const [inserted] = await trx('payroll_time_off').insert({
         technician_id: technicianId, work_date: workDate, kind: v.kind, minutes: minutesText(v.hours),
-        note: v.note || null, created_by: actorId,
+        note: v.note || null, illness: v.illness, created_by: actorId,
       }).returning('id');
       const id = inserted && inserted.id ? inserted.id : inserted;
       await audit(trx, actorId, 'payroll.time_off_added', id, { technician_id: technicianId, entry_id: id, work_date: workDate, kind: v.kind });
-      const warning = v.kind === 'pto' ? await allowanceWarning(trx, technicianId, tech.name, workDate.slice(0, 4)) : null;
+      const warning = v.kind === 'pto' ? await bankWarning(trx, technicianId, tech.name, { workDate, illness: v.illness }) : null;
       return { entry: await loadEntry(trx, id), warning };
     });
   } catch (err) {
@@ -256,21 +306,24 @@ async function createTimeOff(input, actor, conn = db) {
 async function updateTimeOff(id, input, actor, conn = db) {
   requireUuid(id, 'Time off entry');
   const v = validate(updateSchema, input);
+  if (v.illness && v.kind !== 'pto') throw new PayrollError(400, ILLNESS_KIND_MESSAGE);
   const actorId = actorOf(actor);
   return conn.transaction(async (trx) => {
     await lockPayrollMutations(trx);
     const row = await trx('payroll_time_off as o').where('o.id', id).forUpdate('o')
-      .first('o.technician_id', trx.raw("to_char(o.work_date, 'YYYY-MM-DD') as work_date"));
+      .first('o.technician_id', 'o.illness', trx.raw("to_char(o.work_date, 'YYYY-MM-DD') as work_date"));
     if (!row) throw new PayrollError(404, 'Time off entry not found.');
     await refuseWhenPaid(trx, row.work_date);
+    // With no illness field sent, a paid time off day keeps its mark. A holiday has none.
+    const illness = v.kind === 'pto' ? (v.illness ?? row.illness) : false;
     await trx('payroll_time_off').where({ id }).update({
-      kind: v.kind, minutes: minutesText(v.hours), note: v.note || null, updated_by: actorId, updated_at: trx.fn.now(),
+      kind: v.kind, minutes: minutesText(v.hours), note: v.note || null, illness, updated_by: actorId, updated_at: trx.fn.now(),
     });
     await audit(trx, actorId, 'payroll.time_off_changed', id, {
       technician_id: row.technician_id, entry_id: id, work_date: row.work_date, kind: v.kind,
     });
     const entry = await loadEntry(trx, id);
-    const warning = v.kind === 'pto' ? await allowanceWarning(trx, row.technician_id, entry.name, row.work_date.slice(0, 4)) : null;
+    const warning = v.kind === 'pto' ? await bankWarning(trx, row.technician_id, entry.name, { workDate: row.work_date, illness }) : null;
     return { entry, warning };
   });
 }
@@ -292,12 +345,16 @@ async function deleteTimeOff(id, actor, conn = db) {
   return { deleted: true };
 }
 
-// The yearly paid time off allowance, a setting. null clears it.
+// The yearly paid time off hours, a setting: what a year of full weeks adds to the technician's time-off bank
+// (payroll-time-off-bank.js). null clears it: no bank, and the pay run pays every recorded hour.
 async function setPtoAllowance(technicianId, input, actor, conn = db) {
   requireUuid(technicianId, 'Technician');
   const v = validate(allowanceSchema, input);
   const actorId = actorOf(actor);
   return conn.transaction(async (trx) => {
+    // The lock finalizeRun takes: a finalize in progress read "no bank" or "bank" for this technician, and the
+    // setting must not change under it. A finalize that starts after this save sees the new answer and a changed token.
+    await lockPayrollMutations(trx);
     const tech = await trx('technicians').where({ id: technicianId }).forUpdate().first('id', 'employment_type');
     if (!tech) throw new PayrollError(404, 'Technician not found.');
     if (tech.employment_type !== 'w2') throw new PayrollError(409, 'Paid time off is for W-2 employees.');

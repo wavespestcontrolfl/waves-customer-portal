@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PayrollSettings from './PayrollSettings';
 import { adminFetch } from '../../lib/adminFetch';
@@ -16,9 +16,11 @@ const TECHS = [
 const entry = (patch = {}) => ({
   id: 'off-1', technicianId: 'tech-a', name: 'Sample Alpha', workDate: '2026-10-14', kind: 'pto', hours: '8.00', note: 'Vacation', ...patch,
 });
+// Sample Alpha has yearly hours set, so the server sends a time-off bank; Sample Beta has none.
+const BANK = { balanceHours: '12.50', waitingHours: '8.00', fullWeekHours: '1.54', capHours: 120, usableFrom: '2026-04-05' };
 const balanceFor = (id, patch = {}) => ({
   technicianId: id, year: 2026, allowanceHours: id === 'tech-a' ? 80 : null, ptoHoursBooked: id === 'tech-a' ? '20.00' : '4.00',
-  ptoHoursPaid: '0.00', holidayDaysBooked: 0, ...patch,
+  ptoHoursPaid: '0.00', holidayDaysBooked: 0, ...(id === 'tech-a' ? { bank: BANK } : {}), ...patch,
 });
 const check = (patch = {}) => ({
   id: 'check-a', technicianId: 'tech-a', name: 'Sample Alpha', status: 'finalized', hourlyRate: '22.00', regularHours: '30.00',
@@ -87,7 +89,7 @@ const writes = () => calls.filter(c => c.method !== 'GET');
 const panel = () => screen.findByRole('region', { name: 'Time off' });
 
 describe('Time off panel (GATE_PAYROLL_TIME_OFF on)', () => {
-  it('lists the week and upcoming days with the year line per employee', async () => {
+  it('lists the week and upcoming days, with the bank of an employee who has one and the year line of one who has not', async () => {
     render(<PayrollSettings />);
     const view = within(await panel());
     const week = view.getByRole('table', { name: 'Time off this week' });
@@ -98,26 +100,35 @@ describe('Time off panel (GATE_PAYROLL_TIME_OFF on)', () => {
     const upcoming = view.getByRole('table', { name: 'Upcoming time off' });
     expect(within(upcoming).getByText('Holiday')).toBeInTheDocument();
     const lines = view.getByRole('list', { name: 'Paid time off in 2026' });
-    expect(lines).toHaveTextContent('Sample Alpha: Paid time off booked in 2026: 20 of 80 hours');
+    expect(lines).toHaveTextContent('Sample Alpha: Time-off bank: 12.5 hours. Waiting for a pay run: 8 hours. Earns 1.54 hours for a full week, up to 120 hours');
     expect(lines).toHaveTextContent('Sample Beta: Paid time off booked in 2026: 4 hours');
-    expect(lines).not.toHaveTextContent('Over the yearly allowance');
+    expect(lines).not.toHaveTextContent('does not hold all the waiting hours');
+    expect(lines).not.toHaveTextContent('illness days only');
     const listCall = calls.find(c => c.path.startsWith('/admin/payroll/time-off?'));
     expect(listCall.path).toBe('/admin/payroll/time-off?from=2026-10-12&to=2027-02-22');
   });
 
-  it('says so when a person is over the yearly allowance', async () => {
+  it('says so when the bank does not hold the waiting hours, and names the first 90 days and a missing hire date', async () => {
     const original = adminFetch.getMockImplementation();
+    let bank = { ...BANK, balanceHours: '2.00', waitingHours: '10.00', usableFrom: '2026-12-01' };
     adminFetch.mockImplementation((path, options) => (path.includes('balance?technicianId=tech-a')
-      ? reply({ balance: balanceFor('tech-a', { ptoHoursBooked: '84.50' }) })
+      ? reply({ balance: balanceFor('tech-a', { bank }) })
       : original(path, options)));
-    render(<PayrollSettings />);
+    const first = render(<PayrollSettings />);
     const lines = within(await panel()).getByRole('list', { name: 'Paid time off in 2026' });
-    await waitFor(() => expect(lines).toHaveTextContent('84.5 of 80 hours'));
-    expect(lines).toHaveTextContent('Over the yearly allowance by 4.5 hours.');
+    await waitFor(() => expect(lines).toHaveTextContent('Time-off bank: 2 hours. Waiting for a pay run: 10 hours'));
+    expect(lines).toHaveTextContent('Until Dec 1, 2026 the bank pays illness days only');
+    expect(lines).toHaveTextContent('The bank does not hold all the waiting hours today. A pay run pays only the hours the bank holds then.');
+    first.unmount();
+    bank = { ...BANK, waitingHours: '0.00', usableFrom: null };
+    render(<PayrollSettings />);
+    const again = within(await panel()).getByRole('list', { name: 'Paid time off in 2026' });
+    await waitFor(() => expect(again).toHaveTextContent('Time-off bank: 12.5 hours. Earns 1.54 hours for a full week, up to 120 hours. No hire date on file'));
+    expect(again).not.toHaveTextContent('Waiting for a pay run');
   });
 
-  it('adds a day and sends the typed values, then shows the allowance warning from the server', async () => {
-    writeReply = () => reply({ entry: entry({ id: 'off-9' }), warning: 'Sample Alpha now has 84.00 hours of paid time off booked in 2026. The yearly allowance is 80 hours. The day is saved.' }, true, 201);
+  it('adds a day and sends the typed values, then shows the bank warning from the server', async () => {
+    writeReply = () => reply({ entry: entry({ id: 'off-9' }), warning: 'Sample Alpha has 1.54 hours in the time-off bank today and 9.50 hours of paid time off waiting for a pay run. A pay run pays only the hours the bank holds then. The day is saved.' }, true, 201);
     render(<PayrollSettings />);
     const view = within(await panel());
     const form = view.getByRole('form', { name: 'Add time off' });
@@ -131,10 +142,33 @@ describe('Time off panel (GATE_PAYROLL_TIME_OFF on)', () => {
     await waitFor(() => expect(writes()).toHaveLength(1));
     expect(writes()[0]).toMatchObject({
       path: '/admin/payroll/time-off', method: 'POST',
-      body: { technicianId: 'tech-a', workDate: '2026-10-15', kind: 'holiday', hours: '7.5', note: 'Day off' },
+      body: { technicianId: 'tech-a', workDate: '2026-10-15', kind: 'holiday', hours: '7.5', note: 'Day off', illness: false },
     });
     expect(await screen.findByText('Time off saved.')).toBeInTheDocument();
-    expect(screen.getByText(/The yearly allowance is 80 hours\. The day is saved\./)).toBeInTheDocument();
+    expect(screen.getByText(/A pay run pays only the hours the bank holds then\. The day is saved\./)).toBeInTheDocument();
+  });
+
+  it('marks a paid-time-off day as illness with a checkbox that a holiday does not have', async () => {
+    entries = [entry({ illness: true })];
+    render(<PayrollSettings />);
+    const view = within(await panel());
+    expect(within(view.getByRole('table', { name: 'Time off this week' })).getByText('Paid time off (illness)')).toBeInTheDocument();
+    const form = view.getByRole('form', { name: 'Add time off' });
+    fireEvent.change(within(form).getByLabelText(/Employee/), { target: { value: 'tech-a' } });
+    fireEvent.change(within(form).getByLabelText(/Date/), { target: { value: '2026-10-15' } });
+    fireEvent.change(within(form).getByLabelText(/Hours/), { target: { value: '10' } });
+    fireEvent.click(within(form).getByLabelText('Illness'));
+    // A holiday has no illness mark: the checkbox goes, and a mark set before is not sent.
+    fireEvent.change(within(form).getByLabelText(/Kind/), { target: { value: 'holiday' } });
+    expect(within(form).queryByLabelText('Illness')).toBeNull();
+    fireEvent.change(within(form).getByLabelText(/Kind/), { target: { value: 'pto' } });
+    expect(within(form).getByLabelText('Illness')).toBeChecked();
+    fireEvent.click(within(form).getByRole('button', { name: 'Add time off' }));
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0].body).toMatchObject({ kind: 'pto', hours: '10', illness: true });
+    // Editing a day loads its mark.
+    fireEvent.click(view.getByRole('button', { name: 'Edit time off for Sample Alpha on Oct 14, 2026' }));
+    expect(within(view.getByRole('form', { name: 'Change time off' })).getByLabelText('Illness')).toBeChecked();
   });
 
   it('edits a day: employee and date are locked, kind, hours and note are sent', async () => {
@@ -193,6 +227,42 @@ describe('Time off in the pay run table and stub', () => {
     expect(within(stub).getByText('$88.00')).toBeInTheDocument();
   });
 
+  it('shows the time-off bank on the check and the stub, and lists time off the bank did not pay', async () => {
+    const bank = { earnedHours: '7.25', usedHours: '7.69', unpaidHours: '2.31', balanceHours: '7.25' };
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => {
+      if (path === '/admin/payroll/runs/run-1') {
+        return reply({ run: { ...RUN, checks: [check({ timeOffBank: bank })], unpaidTimeOff: [{ technicianId: 'tech-a', name: 'Sample Alpha', hours: '2.31', reason: '2.31 hours of time off are not paid, because the time-off bank does not hold them.' }] } });
+      }
+      if (path === '/admin/payroll/checks/check-a/stub') return reply({ stub: { ...STUB, timeOffBank: bank } });
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    const detail = await screen.findByLabelText(/Pay run for/);
+    expect(within(detail).getByText('Time-off bank: earned 7.25 h, used 7.69 h, balance 7.25 h')).toBeInTheDocument();
+    const notPaid = within(detail).getByRole('list', { name: 'Time off not paid' });
+    expect(notPaid).toHaveTextContent('Sample Alpha');
+    expect(notPaid).toHaveTextContent('2.31 hours of time off are not paid, because the time-off bank does not hold them.');
+    fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+    const stub = await screen.findByLabelText('Pay stub');
+    expect(within(stub).getByText('Time-off bank')).toBeInTheDocument();
+    expect(within(stub).getByText('Earned this pay').parentElement).toHaveTextContent('7.25 h');
+    expect(within(stub).getByText('Used this pay').parentElement).toHaveTextContent('7.69 h');
+    expect(within(stub).getByText('Time off not paid').parentElement).toHaveTextContent('2.31 h');
+    expect(within(stub).getByText('Balance after this pay').parentElement).toHaveTextContent('7.25 h');
+  });
+
+  it('shows no bank and no list on a run without them', async () => {
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    const detail = await screen.findByLabelText(/Pay run for/);
+    expect(within(detail).queryByText(/Time-off bank:/)).toBeNull();
+    expect(within(detail).queryByRole('list', { name: 'Time off not paid' })).toBeNull();
+    fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+    expect(within(await screen.findByLabelText('Pay stub')).queryByText('Time-off bank')).toBeNull();
+  });
+
   it('reloads the open pay run after a time-off change, so a stale draft shows', async () => {
     render(<PayrollSettings />);
     fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
@@ -201,6 +271,412 @@ describe('Time off in the pay run table and stub', () => {
     const view = within(await panel());
     fireEvent.click(view.getByRole('button', { name: 'Remove time off for Sample Alpha on Oct 14, 2026' }));
     await waitFor(() => expect(calls.filter(c => c.path === '/admin/payroll/runs/run-1').length).toBe(before + 1));
+  });
+});
+
+describe('The banks on the time off panel stay current', () => {
+  const balanceCalls = () => calls.filter(c => c.path.startsWith('/admin/payroll/time-off/balance?technicianId=tech-a')).length;
+
+  it('reloads the banks when the open pay run is finalized, and again when it is voided', async () => {
+    let status = 'draft';
+    const original = adminFetch.getMockImplementation();
+    const runNow = () => ({ ...RUN, status, checks: [check({ status })] });
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', weekEnd: '2026-10-18', payDate: '2026-10-23', status, totals }] });
+      if (path === '/admin/payroll/runs/run-1') { calls.push({ path, method }); return reply({ run: runNow() }); }
+      if (path === '/admin/payroll/runs/run-1/finalize' && method === 'POST') { status = 'finalized'; return reply({ run: runNow() }); }
+      if (path === '/admin/payroll/runs/run-1/void' && method === 'POST') { status = 'voided'; return reply({ run: runNow() }); }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    await screen.findByRole('button', { name: 'Finalize' });
+    await waitFor(() => expect(balanceCalls()).toBeGreaterThan(0));
+    const drafted = balanceCalls();
+    fireEvent.click(screen.getByRole('button', { name: 'Finalize' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, finalize' }));
+    await waitFor(() => expect(balanceCalls()).toBe(drafted + 1));
+    fireEvent.click(await screen.findByRole('button', { name: 'Void' }));
+    fireEvent.change(screen.getByLabelText(/Why are you voiding this pay run/), { target: { value: 'Redo' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Void pay run' }));
+    await waitFor(() => expect(balanceCalls()).toBe(drafted + 2));
+  });
+
+  it('finalizes a run that has no paycheck when it lists time off not paid, and says what that does', async () => {
+    let status = 'draft';
+    const notPaid = [{ technicianId: 'tech-a', name: 'Sample Alpha', hours: '10.00', reason: '10.00 hours of time off are not paid, because the time-off bank does not hold them.' }];
+    let list = notPaid;
+    const original = adminFetch.getMockImplementation();
+    const runNow = () => ({ ...RUN, status, checks: [], totals: { ...totals, checkCount: 0 }, ...(list.length ? { unpaidTimeOff: list } : {}) });
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', weekEnd: '2026-10-18', payDate: '2026-10-23', status, totals }] });
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: runNow() });
+      if (path === '/admin/payroll/runs/run-1/finalize' && method === 'POST') { calls.push({ path, method, body: options.body }); status = 'finalized'; return reply({ run: runNow() }); }
+      return original(path, options);
+    });
+    // With nothing to pay and nothing left unpaid, the run cannot be finalized.
+    list = [];
+    const first = render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    expect(await screen.findByRole('button', { name: 'Finalize' })).toBeDisabled();
+    first.unmount();
+    list = notPaid;
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    const finalize = await screen.findByRole('button', { name: 'Finalize' });
+    expect(finalize).toBeEnabled();
+    expect(screen.getByText('No paychecks in this run yet.')).toBeInTheDocument();
+    fireEvent.click(finalize);
+    expect(await screen.findByText(/It has no paycheck\. The week closes and the time off above stays unpaid\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, finalize' }));
+    await waitFor(() => expect(writes().map(c => c.path)).toEqual(['/admin/payroll/runs/run-1/finalize']));
+    expect(await screen.findByText('No paychecks in this run.')).toBeInTheDocument();
+    expect(screen.getByText(/10\.00 hours of time off are not paid/)).toBeInTheDocument();
+  });
+
+  it('keeps the newest banks when an older request answers last', async () => {
+    let hours = 80;
+    let asked = 0;
+    let answerOld;
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (path === '/admin/payroll/technicians') {
+        return reply({ technicians: TECHS.map(tech => (tech.id === 'tech-a' ? { ...tech, ptoHoursPerYear: hours } : tech)) });
+      }
+      if (path === '/admin/payroll/technicians/tech-a/pto-allowance') hours = 96;
+      if (path.startsWith('/admin/payroll/time-off/balance?technicianId=tech-a')) {
+        asked += 1;
+        // The first answer is held back; the answer after the save comes at once, with the new bank.
+        if (asked === 1) return new Promise(resolve => { answerOld = () => resolve(reply({ balance: balanceFor('tech-a') })); });
+        return reply({ balance: balanceFor('tech-a', { bank: { ...BANK, balanceHours: '20.00', waitingHours: '0.00' } }) });
+      }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    const input = await screen.findByLabelText('Paid time off hours per year for Sample Alpha');
+    await waitFor(() => expect(asked).toBe(1));
+    fireEvent.change(input, { target: { value: '96' } });
+    fireEvent.click(within(input.closest('form')).getByRole('button', { name: 'Save' }));
+    const view = await panel();
+    await waitFor(() => expect(view).toHaveTextContent('Time-off bank: 20 hours'));
+    // The held answer arrives now. It is the bank from before the save, and it must not come back.
+    await act(async () => { answerOld(); await Promise.resolve(); await Promise.resolve(); });
+    await waitFor(() => expect(asked).toBe(2));
+    expect(view).toHaveTextContent('Time-off bank: 20 hours');
+    expect(view).not.toHaveTextContent('Time-off bank: 12.5 hours');
+  });
+
+  it('reads the open draft again when a yearly-hours setting is saved, so it shows as out of date', async () => {
+    let hours = 80;
+    const original = adminFetch.getMockImplementation();
+    const runReads = () => calls.filter(c => c.path === '/admin/payroll/runs/run-1' && c.method === 'GET').length;
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (path === '/admin/payroll/technicians') {
+        return reply({ technicians: TECHS.map(tech => (tech.id === 'tech-a' ? { ...tech, ptoHoursPerYear: hours } : tech)) });
+      }
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', weekEnd: '2026-10-18', payDate: '2026-10-23', status: 'draft', totals }] });
+      if (path === '/admin/payroll/runs/run-1') {
+        calls.push({ path, method: 'GET' });
+        // The server compares the draft with today's settings: after the save it is out of date.
+        return reply({ run: { ...RUN, status: 'draft', checks: [check({ status: 'draft' })], stale: hours !== 80 } });
+      }
+      if (path === '/admin/payroll/technicians/tech-a/pto-allowance') hours = 96;
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    expect(await screen.findByRole('button', { name: 'Finalize' })).toBeEnabled();
+    const before = runReads();
+    const input = await screen.findByLabelText('Paid time off hours per year for Sample Alpha');
+    fireEvent.change(input, { target: { value: '96' } });
+    fireEvent.click(within(input.closest('form')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(runReads()).toBe(before + 1));
+    expect(await screen.findByText('Hours or settings changed since this draft. Press Recompute.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Finalize' })).toBeDisabled();
+  });
+
+  it('reloads the week on screen when a removal ends after the week changed', async () => {
+    let release;
+    writeReply = () => new Promise(resolve => { release = () => resolve(reply({ deleted: true })); });
+    const PREFIX = '/admin/payroll/time-off?from=';
+    const weeksLoaded = () => calls.filter(c => c.method === 'GET' && c.path.startsWith(PREFIX)).map(c => c.path.slice(PREFIX.length, PREFIX.length + 10));
+    render(<PayrollSettings />);
+    const view = within(await panel());
+    fireEvent.click(view.getByRole('button', { name: 'Remove time off for Sample Alpha on Oct 14, 2026' }));
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    // The owner picks another week while the removal is on its way.
+    fireEvent.change(within(screen.getByRole('form', { name: 'New pay run' })).getByLabelText('Week'), { target: { value: '2026-10-05' } });
+    await waitFor(() => expect(weeksLoaded().at(-1)).toBe('2026-10-05'));
+    const loads = weeksLoaded().length;
+    await act(async () => { release(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    await waitFor(() => expect(weeksLoaded().length).toBe(loads + 1));
+    expect(weeksLoaded().at(-1)).toBe('2026-10-05');
+  });
+
+  it('reloads the banks when a yearly-hours setting is saved', async () => {
+    let hours = 80;
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (path === '/admin/payroll/technicians') {
+        calls.push({ path, method: 'GET' });
+        return reply({ technicians: TECHS.map(tech => (tech.id === 'tech-a' ? { ...tech, ptoHoursPerYear: hours } : tech)) });
+      }
+      if (path === '/admin/payroll/technicians/tech-a/pto-allowance') hours = 96;
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    const input = await screen.findByLabelText('Paid time off hours per year for Sample Alpha');
+    await waitFor(() => expect(balanceCalls()).toBeGreaterThan(0));
+    const before = balanceCalls();
+    fireEvent.change(input, { target: { value: '96' } });
+    fireEvent.click(within(input.closest('form')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(balanceCalls()).toBe(before + 1));
+  });
+});
+
+describe('The open pay run stays the one the owner picked', () => {
+  const OTHER = { id: 'run-2', weekStart: '2026-10-05', weekEnd: '2026-10-11', payDate: '2026-10-16' };
+  const DRAFT = { ...RUN, status: 'draft', checks: [check({ status: 'draft' })] };
+  const LIST = [
+    { id: 'run-1', weekStart: '2026-10-12', weekEnd: '2026-10-18', payDate: '2026-10-23', status: 'draft', totals },
+    { ...OTHER, status: 'finalized', totals },
+  ];
+  const FIRST = 'Pay run for Oct 12, 2026 to Oct 18, 2026';
+  const SECOND = 'Pay run for Oct 5, 2026 to Oct 11, 2026';
+  // A yearly-hours save makes the screen read draft run-1 again. That read is held back until release() runs.
+  const holdTheReload = () => {
+    let hours = 80;
+    const held = { started: false, release: () => {} };
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/technicians') {
+        return reply({ technicians: TECHS.map(tech => (tech.id === 'tech-a' ? { ...tech, ptoHoursPerYear: hours } : tech)) });
+      }
+      if (path === '/admin/payroll/runs' && method === 'GET') return reply({ runs: LIST });
+      if (path === '/admin/payroll/runs' && method === 'POST') return reply({ run: { ...DRAFT, ...OTHER, id: 'run-9' } }, true, 201);
+      if (path === '/admin/payroll/runs/run-1') {
+        if (hours === 80) return reply({ run: DRAFT });
+        held.started = true;
+        return new Promise(resolve => { held.release = () => resolve(reply({ run: DRAFT })); });
+      }
+      if (path === '/admin/payroll/runs/run-2') return reply({ run: { ...RUN, ...OTHER } });
+      if (path === '/admin/payroll/technicians/tech-a/pto-allowance') hours = 96;
+      return original(path, options);
+    });
+    return held;
+  };
+  const openFirstThenSave = async () => {
+    const held = holdTheReload();
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    await screen.findByLabelText(FIRST);
+    const input = await screen.findByLabelText('Paid time off hours per year for Sample Alpha');
+    fireEvent.change(input, { target: { value: '96' } });
+    fireEvent.click(within(input.closest('form')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(held.started).toBe(true));
+    return held;
+  };
+  const afterTheOldReadLands = async (held) => {
+    await act(async () => { held.release(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    expect(screen.getByLabelText(SECOND)).toBeInTheDocument();
+    expect(screen.queryByLabelText(FIRST)).toBeNull();
+  };
+
+  it('keeps a run opened after a yearly-hours save when the older read of the draft answers last', async () => {
+    const held = await openFirstThenSave();
+    fireEvent.click(screen.getByRole('button', { name: 'Open pay run for Oct 5, 2026 to Oct 11, 2026' }));
+    await screen.findByLabelText(SECOND);
+    await afterTheOldReadLands(held);
+  });
+
+  it('does not read the draft again while the owner waits for another run, and keeps reading it after a read that failed', async () => {
+    let hours = 80;
+    let releaseTechnicians;
+    let releaseSecond;
+    let secondFails = false;
+    const original = adminFetch.getMockImplementation();
+    const firstReads = () => calls.filter(c => c.path === '/admin/payroll/runs/run-1').length;
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/technicians') {
+        const technicians = TECHS.map(tech => (tech.id === 'tech-a' ? { ...tech, ptoHoursPerYear: hours } : tech));
+        if (hours === 80 || releaseTechnicians) return reply({ technicians });
+        // The first reload after the save is held back: the settings change reaches the pay runs late.
+        return new Promise(resolve => { releaseTechnicians = () => resolve(reply({ technicians })); });
+      }
+      if (path === '/admin/payroll/runs' && method === 'GET') return reply({ runs: LIST });
+      if (path === '/admin/payroll/runs/run-1') { calls.push({ path, method }); return reply({ run: DRAFT }); }
+      if (path === '/admin/payroll/runs/run-2') {
+        if (secondFails) return reply({ error: 'Pay run not found.' }, false, 404);
+        return new Promise(resolve => { releaseSecond = () => resolve(reply({ run: { ...RUN, ...OTHER } })); });
+      }
+      if (path === '/admin/payroll/technicians/tech-a/pto-allowance') hours = 96;
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    await screen.findByLabelText(FIRST);
+    const before = firstReads();
+    const input = await screen.findByLabelText('Paid time off hours per year for Sample Alpha');
+    fireEvent.change(input, { target: { value: '96' } });
+    fireEvent.click(within(input.closest('form')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(releaseTechnicians).toBeTypeOf('function'));
+    // The owner opens the other run before the settings reload lands.
+    fireEvent.click(screen.getByRole('button', { name: 'Open pay run for Oct 5, 2026 to Oct 11, 2026' }));
+    await waitFor(() => expect(releaseSecond).toBeTypeOf('function'));
+    await act(async () => { releaseTechnicians(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    expect(firstReads()).toBe(before);
+    await act(async () => { releaseSecond(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    expect(screen.getByLabelText(SECOND)).toBeInTheDocument();
+    expect(screen.queryByLabelText(FIRST)).toBeNull();
+
+    // Back on the draft, a read of the other run fails. The draft stays, and a change still reads it again.
+    fireEvent.click(screen.getByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    await screen.findByLabelText(FIRST);
+    secondFails = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Open pay run for Oct 5, 2026 to Oct 11, 2026' }));
+    await screen.findByText('Pay run not found.');
+    const beforeChange = firstReads();
+    fireEvent.click(within(await panel()).getByRole('button', { name: 'Remove time off for Sample Alpha on Oct 14, 2026' }));
+    await waitFor(() => expect(firstReads()).toBe(beforeChange + 1));
+    expect(screen.getByLabelText(FIRST)).toBeInTheDocument();
+  });
+
+  it('keeps a run the owner opened while a recompute of the first run was on its way, and still shows a recompute they waited for', async () => {
+    const held = { started: 0, release: () => {} };
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs' && method === 'GET') return reply({ runs: LIST });
+      if (path === '/admin/payroll/runs/run-1/recompute' && method === 'POST') {
+        held.started += 1;
+        return new Promise(resolve => { held.release = () => resolve(reply({ run: DRAFT })); });
+      }
+      if (path === '/admin/payroll/runs/run-1') { calls.push({ path, method }); return reply({ run: DRAFT }); }
+      if (path === '/admin/payroll/runs/run-2') return reply({ run: { ...RUN, ...OTHER } });
+      return original(path, options);
+    });
+    const firstReads = () => calls.filter(c => c.path === '/admin/payroll/runs/run-1').length;
+    const land = () => act(async () => { held.release(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    await screen.findByLabelText(FIRST);
+    // The owner waits for the recompute: its answer reads the run again.
+    const before = firstReads();
+    fireEvent.click(screen.getByRole('button', { name: 'Recompute' }));
+    await waitFor(() => expect(held.started).toBe(1));
+    await land();
+    await waitFor(() => expect(firstReads()).toBe(before + 1));
+    expect(screen.getByLabelText(FIRST)).toBeInTheDocument();
+    // The owner opens another run while a second recompute is on its way: its answer does not take the screen back.
+    fireEvent.click(screen.getByRole('button', { name: 'Recompute' }));
+    await waitFor(() => expect(held.started).toBe(2));
+    fireEvent.click(screen.getByRole('button', { name: 'Open pay run for Oct 5, 2026 to Oct 11, 2026' }));
+    await screen.findByLabelText(SECOND);
+    await land();
+    expect(screen.getByLabelText(SECOND)).toBeInTheDocument();
+    expect(screen.queryByLabelText(FIRST)).toBeNull();
+    expect(firstReads()).toBe(before + 1);
+  });
+
+  it('reloads the banks and reads the run on screen again when a finalize of another run ends', async () => {
+    const held = { started: false, release: () => {} };
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs' && method === 'GET') return reply({ runs: LIST });
+      if (path === '/admin/payroll/runs/run-1/finalize' && method === 'POST') {
+        held.started = true;
+        return new Promise(resolve => { held.release = () => resolve(reply({ run: { ...DRAFT, status: 'finalized' } })); });
+      }
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: DRAFT });
+      if (path === '/admin/payroll/runs/run-2') { calls.push({ path, method }); return reply({ run: { ...RUN, ...OTHER } }); }
+      return original(path, options);
+    });
+    const balanceCalls = () => calls.filter(c => c.path.startsWith('/admin/payroll/time-off/balance?technicianId=tech-a')).length;
+    const secondReads = () => calls.filter(c => c.path === '/admin/payroll/runs/run-2').length;
+    const settle = () => act(async () => { await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finalize' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, finalize' }));
+    await waitFor(() => expect(held.started).toBe(true));
+    // The owner opens another run while the finalize is on its way: its banks load before the finalize is done.
+    fireEvent.click(screen.getByRole('button', { name: 'Open pay run for Oct 5, 2026 to Oct 11, 2026' }));
+    await screen.findByLabelText(SECOND);
+    await settle();
+    await settle();
+    const [loaded, read] = [balanceCalls(), secondReads()];
+    expect(loaded).toBeGreaterThan(0);
+    await act(async () => { held.release(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    // The finalize changed a time-off bank: the panel reloads, and the run on screen is read again (a draft would show as out of date).
+    await waitFor(() => expect(balanceCalls()).toBe(loaded + 1));
+    expect(secondReads()).toBe(read + 1);
+    expect(screen.getByLabelText(SECOND)).toBeInTheDocument();
+    expect(screen.queryByLabelText(FIRST)).toBeNull();
+  });
+
+  // A new pay run whose answer is held back until release() runs.
+  const holdTheNewRun = () => {
+    const NEW = { ...DRAFT, id: 'run-9', weekStart: '2026-09-28', weekEnd: '2026-10-04', payDate: '2026-10-09' };
+    const held = { started: false, release: () => {} };
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs' && method === 'GET') return reply({ runs: LIST });
+      if (path === '/admin/payroll/runs' && method === 'POST') {
+        held.started = true;
+        return new Promise(resolve => { held.release = () => resolve(reply({ run: NEW }, true, 201)); });
+      }
+      if (path === '/admin/payroll/runs/run-1') { calls.push({ path, method }); return reply({ run: DRAFT }); }
+      if (path === '/admin/payroll/runs/run-2') return reply({ run: { ...RUN, ...OTHER } });
+      return original(path, options);
+    });
+    return held;
+  };
+  const NEWEST = 'Pay run for Sep 28, 2026 to Oct 4, 2026';
+  const release = held => act(async () => { held.release(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+
+  it('keeps a run the owner opened while a new pay run was being made', async () => {
+    const held = holdTheNewRun();
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'New pay run' }));
+    await waitFor(() => expect(held.started).toBe(true));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 5, 2026 to Oct 11, 2026' }));
+    await screen.findByLabelText(SECOND);
+    await release(held);
+    expect(screen.getByLabelText(SECOND)).toBeInTheDocument();
+    expect(screen.queryByLabelText(NEWEST)).toBeNull();
+  });
+
+  it('does not read the shown run again while a new pay run is being made, and then shows the new run', async () => {
+    const held = holdTheNewRun();
+    const firstReads = () => calls.filter(c => c.path === '/admin/payroll/runs/run-1').length;
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    await screen.findByLabelText(FIRST);
+    const before = firstReads();
+    fireEvent.click(screen.getByRole('button', { name: 'New pay run' }));
+    await waitFor(() => expect(held.started).toBe(true));
+    // A time-off change asks for a refresh of the shown run. That read would take the place of the new run.
+    const view = within(await panel());
+    fireEvent.click(view.getByRole('button', { name: 'Remove time off for Sample Alpha on Oct 14, 2026' }));
+    await view.findByText('Time off removed.');
+    await waitFor(() => expect(view.getByRole('button', { name: 'Remove time off for Sample Alpha on Oct 14, 2026' })).toBeEnabled());
+    expect(firstReads()).toBe(before);
+    await release(held);
+    expect(await screen.findByLabelText(NEWEST)).toBeInTheDocument();
+    expect(screen.queryByLabelText(FIRST)).toBeNull();
+  });
+
+  it('keeps a new pay run when the older read of the draft answers last', async () => {
+    const held = await openFirstThenSave();
+    fireEvent.click(screen.getByRole('button', { name: 'New pay run' }));
+    await screen.findByLabelText(SECOND);
+    await afterTheOldReadLands(held);
   });
 });
 
@@ -218,7 +694,7 @@ describe('Paid time off hours per year (settings)', () => {
     fireEvent.click(saveFor(alpha));
     await waitFor(() => expect(writes()).toHaveLength(1));
     expect(writes()[0]).toMatchObject({ path: '/admin/payroll/technicians/tech-a/pto-allowance', method: 'PUT', body: { hoursPerYear: '96' } });
-    expect(await screen.findByText('Paid time off allowance saved for Sample Alpha.')).toBeInTheDocument();
+    expect(await screen.findByText('Paid time off hours per year saved for Sample Alpha.')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Paid time off hours per year for Sample Alpha'), { target: { value: '' } });
     fireEvent.click(saveFor(screen.getByLabelText('Paid time off hours per year for Sample Alpha')));
     await waitFor(() => expect(writes()).toHaveLength(2));
