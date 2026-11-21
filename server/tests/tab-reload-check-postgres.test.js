@@ -73,16 +73,17 @@ jest.setTimeout(60000);
   test('counts the stale page views of its window whose name shows a failed reload', async () => {
     const START = new Date('2026-11-01T03:50:00Z');
     const END = new Date('2026-11-02T04:50:00Z');
-    const at = (date, ms) => ({ ...view(0, { stale_build: true, reload_hold: 'reloaded', page_key: 'schedule', path: '/admin/schedule' }), created_at: new Date(date.getTime() + ms) });
+    const at = (date, ms, page) => ({ ...view(0, { stale_build: true, reload_hold: 'reloaded', page_key: page, path: `/admin/${page}` }), created_at: new Date(date.getTime() + ms) });
     await database('admin_usage_events').insert([
-      // The window's edges: its first moment counts; the moment before it,
-      // its end and the second after the end do not. The next run starts at
-      // that end.
-      at(START, 0),
-      at(START, -1),
-      at(END, -1),
-      at(END, 0),
-      at(END, 1000),
+      // The window's edges, each on a page of its own: its first moment and
+      // the moment before its end count; the moment before its start, its
+      // end and the second after the end do not. The next run starts at that
+      // end.
+      at(START, -1, 'before-start'),
+      at(START, 0, 'at-start'),
+      at(END, -1, 'before-end'),
+      at(END, 0, 'at-end'),
+      at(END, 1000, 'after-end'),
       view(10, { stale_build: true, reload_hold: null }),
       view(20, { stale_build: true, reload_hold: null }),
       view(30, { stale_build: true, reload_hold: 'reload-missed', page_key: 'dashboard', path: '/admin/dashboard' }),
@@ -112,8 +113,9 @@ jest.setTimeout(60000);
       ['none', 'pipeline', TECH, 2],
       ['reload-missed', 'dashboard', TECH, 1],
       ['reload-missed', 'pipeline', TECH, 1],
+      ['reloaded', 'at-start', TECH, 1],
+      ['reloaded', 'before-end', TECH, 1],
       ['reloaded', 'pipeline', TECH, 1],
-      ['reloaded', 'schedule', TECH, 2],
     ]);
   });
 
