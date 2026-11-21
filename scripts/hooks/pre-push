@@ -343,7 +343,9 @@ fi
 #   ROUND_LOG_WHY   — an exit before the loop (skip, preflight), the reason
 # A commit nobody marked is written as "unaudited", so an exit path that
 # reports nothing, today's or a later one, still leaves a line. The only
-# commit left out is one git proves has no diff against the base. Earlier
+# commit left out is one git proves has no diff against the base: the loop
+# marks that when it makes the comparison, and for a commit the loop never
+# reached write_round_log makes the comparison itself. Earlier
 # drafts logged at each exit site, and each audit of them found one more
 # site that left no line.
 #
@@ -373,7 +375,8 @@ ROUND_LOG_P0=()
 ROUND_LOG_P1=()
 ROUND_LOG_AUDITOR=()
 
-# round_log_mark <REF_SHAS index> <audited|unaudited> <why> <p0> <p1> <auditor>
+# round_log_mark <REF_SHAS index> <audited|unaudited|none> <why> <p0> <p1> <auditor>
+# "none" = the loop compared the commit with the base and found no diff.
 round_log_mark() {
   ROUND_LOG_OUTCOME[$1]="$2"
   ROUND_LOG_REASON[$1]="$3"
@@ -420,10 +423,16 @@ write_round_log() {
   # second of a month.
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   file="$dir/codex-review-rounds-${now:0:7}.jsonl"
+  # Append to a plain file, or make one. A pipe with no reader would hold the
+  # push here for ever, and a link would send the lines somewhere else.
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || return 0
+  fi
   for i in "${!REF_SHAS[@]}"; do
     sha="${REF_SHAS[$i]}"
     outcome="${ROUND_LOG_OUTCOME[$i]:-}"
     why="${ROUND_LOG_REASON[$i]:-}"
+    [ "$outcome" = "none" ] && continue
     if [ -z "$outcome" ]; then
       why="$(round_log_unmarked_why "$sha")"
       [ -n "$why" ] || continue
@@ -1313,11 +1322,20 @@ for i in "${!REF_SHAS[@]}"; do
   # pushing something we don't have an object for), skip rather than crash.
   if ! git cat-file -e "$AUDIT_SHA" 2>/dev/null; then
     echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): SHA not locally reachable — skipping this ref." >&2
+    round_log_mark "$i" unaudited sha_unreachable 0 0 ""
     continue
   fi
 
   DIFF="$(git diff --no-color "$BASE...$AUDIT_SHA" 2>/dev/null)"
+  DIFF_RC=$?
   if [ -z "$DIFF" ]; then
+    # The round log keeps what THIS comparison found: another worktree can
+    # move $BASE before the EXIT trap runs. A failed diff is not "no changes".
+    if [ "$DIFF_RC" -eq 0 ]; then
+      round_log_mark "$i" none "" 0 0 ""
+    else
+      round_log_mark "$i" unaudited diff_failed 0 0 ""
+    fi
     echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): no changes vs $BASE — skipping." >&2
     continue
   fi

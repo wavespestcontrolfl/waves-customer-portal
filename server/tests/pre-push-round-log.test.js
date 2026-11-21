@@ -59,16 +59,16 @@ function git(cwd, args) {
 
 // One hook run, as git would start it. `pushes` = [local ref, sha, destination ref] for each ref of the push;
 // the default is `git push origin feature`. An empty list is git's run for a push with every ref up to date.
-function runHook({ cwd = work, env = {}, pushes } = {}) {
+function runHook({ cwd = work, env = {}, pushes, timeout } = {}) {
   const tuples = pushes || [['refs/heads/feature', sha, 'refs/heads/feature']];
   const base = cleanEnv();
   for (const key of ['SKIP_CODEX_REVIEW', 'CODEX_REVIEW_ROUND_LOG', 'CODEX_REVIEW_BASE', 'CODEX_REVIEW_MAX_DIFF_BYTES']) delete base[key];
   const result = spawnSync('bash', [HOOK, 'origin', 'unused-url'], {
-    cwd, encoding: 'utf8',
+    cwd, encoding: 'utf8', timeout,
     input: tuples.map(([localRef, localSha, remoteRef]) => `${localRef} ${localSha} ${remoteRef} ${ZERO}\n`).join(''),
     env: { ...base, PATH: `${fakeBin}${path.delimiter}${process.env.PATH}`, SKIP_CLAUDE_FALLBACK: '1', FAKE_CODEX_VERDICT: CLEAN, ...env },
   });
-  return { status: result.status, stderr: String(result.stderr || '') };
+  return { status: result.status, stderr: String(result.stderr || ''), timedOut: Boolean(result.error && result.error.code === 'ETIMEDOUT') };
 }
 
 const gitDir = () => path.join(work, '.git');
@@ -87,7 +87,8 @@ beforeAll(() => {
   fakeBin = path.join(root, 'bin');
   fs.mkdirSync(fakeBin);
   // Stands in for `codex exec`: writes a verdict to the file the hook names. A diff that holds MARKER gets
-  // FAKE_CODEX_MARKED_VERDICT, so one push can carry a clean commit and a blocked one.
+  // FAKE_CODEX_MARKED_VERDICT, so one push can carry a clean commit and a blocked one. FAKE_CODEX_FIRST is a
+  // shell line it runs first: a case uses it to move the base while an audit is in progress.
   fs.writeFileSync(path.join(fakeBin, 'codex'), [
     '#!/usr/bin/env bash',
     'out=""',
@@ -97,6 +98,7 @@ beforeAll(() => {
     'done',
     'prompt="$(cat)"',
     '[ "${FAKE_CODEX_EXIT:-0}" = "0" ] || { echo "ERROR: fake codex failure" >&2; exit "$FAKE_CODEX_EXIT"; }',
+    '[ -z "${FAKE_CODEX_FIRST:-}" ] || eval "$FAKE_CODEX_FIRST"',
     'verdict="$FAKE_CODEX_VERDICT"',
     `case "$prompt" in *${MARKER}*) verdict="\${FAKE_CODEX_MARKED_VERDICT:-$FAKE_CODEX_VERDICT}" ;; esac`,
     'printf \'%s\' "$verdict" > "$out"',
@@ -237,6 +239,29 @@ describe('pre-push round log', () => {
     expect(rounds()).toEqual([expect.objectContaining({ sha: orphanSha, outcome: 'unaudited', why: 'diff_failed' })]);
   }, 120000);
 
+  test('the log keeps what the loop found for a skipped commit, also when the base moves before the hook ends', () => {
+    // Another worktree can fetch while an audit runs. Here the base moves to the no-history branch during the
+    // audit of the third commit. Read again at exit, the first commit (no diff) would look like a failed diff
+    // and get a line, and the second (a failed diff) would look like no diff and lose its line.
+    const pushes = [
+      ['refs/heads/main', baseSha, 'refs/heads/same-as-main'],
+      ['refs/heads/lonely', orphanSha, 'refs/heads/lonely'],
+      ['refs/heads/feature', sha, 'refs/heads/feature'],
+    ];
+    let run;
+    try {
+      run = runHook({ pushes, env: { FAKE_CODEX_FIRST: `git update-ref refs/remotes/origin/main ${orphanSha}` } });
+      expect(git(work, ['rev-parse', 'refs/remotes/origin/main'])).toBe(orphanSha);
+    } finally {
+      git(work, ['update-ref', 'refs/remotes/origin/main', baseSha]);
+    }
+    expect(run.status).toBe(0);
+    expect(rounds()).toEqual([
+      expect.objectContaining({ ref: 'refs/heads/lonely', sha: orphanSha, outcome: 'unaudited', why: 'diff_failed' }),
+      expect.objectContaining({ ref: 'refs/heads/feature', sha, outcome: 'audited' }),
+    ]);
+  }, 120000);
+
   test('a commit this clone does not hold is logged as un-audited', () => {
     const missingSha = 'f'.repeat(40);
     const run = runHook({ pushes: [['refs/heads/ghost', missingSha, 'refs/heads/ghost']] });
@@ -335,21 +360,49 @@ describe('pre-push round log', () => {
     expect(clean.stderr).toContain('clean — push allowed');
     expect(clean.stderr).not.toMatch(/No such file|codex-review-rounds|no-such-dir/);
     expect(fs.existsSync(missing)).toBe(false);
-    // A directory sits where the month file goes, so the append fails for any user, root too. Both this month's
-    // name and the next one's: a run across midnight UTC on the last day of a month must not pass by luck.
-    const blockedDir = path.join(root, 'blocked');
-    fs.mkdirSync(blockedDir);
-    const monthName = (date) => `codex-review-rounds-${date.toISOString().slice(0, 7)}.jsonl`;
-    const names = [...new Set([monthName(new Date()), monthName(new Date(Date.now() + 36 * 3600 * 1000))])];
-    for (const name of names) fs.mkdirSync(path.join(blockedDir, name));
-    const blocked = runHook({ env: { CODEX_REVIEW_ROUND_LOG: blockedDir, FAKE_CODEX_VERDICT: BLOCKING } });
-    expect(blocked.stderr).toContain('blocking push');
-    expect(blocked.status).toBe(1);
-    expect(blocked.stderr).not.toMatch(/[Ii]s a directory|Permission denied|codex-review-rounds/);
-    expect(fs.readdirSync(blockedDir).sort()).toEqual([...names].sort());
-    for (const name of names) expect(fs.readdirSync(path.join(blockedDir, name))).toEqual([]);
+    // A folder the user cannot write to: the append itself fails. Root can write anywhere, so root skips this part.
+    if (process.getuid && process.getuid() !== 0) {
+      const readOnly = path.join(root, 'read-only');
+      fs.mkdirSync(readOnly, { mode: 0o555 });
+      const blocked = runHook({ env: { CODEX_REVIEW_ROUND_LOG: readOnly, FAKE_CODEX_VERDICT: BLOCKING } });
+      expect(blocked.stderr).toContain('blocking push');
+      expect(blocked.status).toBe(1);
+      expect(blocked.stderr).not.toMatch(/Permission denied|codex-review-rounds|read-only/);
+      expect(fs.readdirSync(readOnly)).toEqual([]);
+    }
     expect(monthFiles()).toEqual([]);
   }, 120000);
+
+  test('the log is appended to a plain file only: a folder, a link or a pipe at its path gets nothing and holds nothing up', () => {
+    // Both this month's name and the next one's: a run across midnight UTC on the last day of a month must not
+    // pass by luck.
+    const monthName = (date) => `codex-review-rounds-${date.toISOString().slice(0, 7)}.jsonl`;
+    const names = [...new Set([monthName(new Date()), monthName(new Date(Date.now() + 36 * 3600 * 1000))])];
+    const dirWith = (label, make) => {
+      const dir = path.join(root, label);
+      fs.mkdirSync(dir);
+      for (const name of names) make(path.join(dir, name));
+      return dir;
+    };
+    const folders = dirWith('odd-folder', (file) => fs.mkdirSync(file));
+    const target = path.join(root, 'link-target.txt');
+    fs.writeFileSync(target, 'untouched\n');
+    const links = dirWith('odd-link', (file) => fs.symlinkSync(target, file));
+    // A pipe with no reader: an append to it never returns. The run gets a time limit so that a hang fails here.
+    const pipes = dirWith('odd-pipe', (file) => execFileSync('mkfifo', [file]));
+    for (const dir of [folders, links, pipes]) {
+      const before = fs.readdirSync(dir).sort();
+      const run = runHook({ env: { CODEX_REVIEW_ROUND_LOG: dir, FAKE_CODEX_VERDICT: BLOCKING }, timeout: 60000 });
+      expect(run.timedOut).toBe(false);
+      expect(run.stderr).toContain('blocking push');
+      expect(run.status).toBe(1);
+      expect(run.stderr).not.toMatch(/[Ii]s a directory|codex-review-rounds/);
+      expect(fs.readdirSync(dir).sort()).toEqual(before);
+    }
+    for (const name of names) expect(fs.readdirSync(path.join(folders, name))).toEqual([]);
+    expect(fs.readFileSync(target, 'utf8')).toBe('untouched\n');
+    expect(monthFiles()).toEqual([]);
+  }, 300000);
 
   test('the round-log jq programs use no jq keyword as a variable name', () => {
     // jq 1.6 rejects `$label`, `$end`, `$as` and the other keywords as variable names. The hook silences jq's
