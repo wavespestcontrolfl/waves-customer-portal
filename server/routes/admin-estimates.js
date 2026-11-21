@@ -51,6 +51,7 @@ const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
   estimateReviseBlock,
+  selfServeMintEditRefusal,
   estimateEditVersion,
   estimateViewUrl,
   reviseAdminEstimate,
@@ -6392,6 +6393,15 @@ router.patch('/:id', async (req, res, next) => {
       if (verdict.error) return res.status(400).json({ error: verdict.error });
       Object.assign(updates, verdict.updates);
     }
+    // A customer's own mint (plan_restart / plan_start) is never edited in place, and these two
+    // options change what its accept does (codex pre-push r29 on #8132): any change to either gets the
+    // revise refusal, in both directions. Turning one back OFF would make a quote the page already
+    // refused acceptable again on the same estimate, where a card that tab captured and dropped could
+    // be replayed (tenth pre-push audit). Such a quote is replaced instead: the customer's next portal
+    // tap archives it and mints a fresh one (reuseLiveQuote).
+    const mintRefusal = (req.body.showOneTimeOption !== undefined || req.body.billByInvoice !== undefined)
+      ? selfServeMintEditRefusal(estimate) : null;
+    if (mintRefusal) return res.status(409).json({ error: mintRefusal });
     if (req.body.showOneTimeOption !== undefined) {
       const nextShowOneTimeOption = !!req.body.showOneTimeOption;
       const deliveryError = nextShowOneTimeOption ? validateEstimateDeliveryOptions({

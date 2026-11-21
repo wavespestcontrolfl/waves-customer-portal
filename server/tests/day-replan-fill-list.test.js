@@ -127,7 +127,7 @@ const NO_RAIN = { checked: false, leftOut: 0 };
 // `addOns` are the plan visits' add-on services (scheduled_service_addons), and `planHolds` the plan_holds rows (read by
 // customer and family).
 function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = [], leads = [], leadEstimates = [], customerVisits = [],
-  plan = [], sameDay = null, addOns = [], planHolds = [], catalog = [] } = {}) {
+  plan = [], sameDay = null, addOns = [], planHolds = [], services = CATALOG, catalog = [] } = {}) {
   const calls = [];
   // The plan visits' own read (the one joined to customers), apart: other reads use some of the same clauses.
   const planCalls = [];
@@ -157,12 +157,14 @@ function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = 
       if (typeof args[0] === 'string' && args.length === 2) q.match[args[0]] = args[1];
       return q;
     };
-    // The catalog row of a service id (`catalog`: { id, service_key }, or { id, error } for a read that fails).
+    // A services row by id, as stored (apart from getServices' answer): `catalog` first ({ id, service_key }, or
+    // { id, error } for a read that fails: the rain class key), then `services` (the Leads screen's list: a lead's length).
     q.first = async (column) => {
       record('first', [column]);
-      const row = table === 'services' ? catalog.find((r) => r.id === q.match.id) : undefined;
+      if (table !== 'services') return null;
+      const row = catalog.find((r) => r.id === q.match.id) || services.find((r) => r.id === q.match.id);
       if (row && row.error) throw row.error;
-      return row;
+      return row || null;
     };
     q.select = async (first) => {
       if (table === 'estimates') return first === '*' ? estimates : leadEstimates;
@@ -1125,12 +1127,16 @@ describe('fillList', () => {
     expect(rainVerdict(only(12), DAY, { windowStart: '09:00', length: 120, startMin: 540, endMin: 585 }, today)).toBe('out');
   });
 
-  test('a lead\'s look is sized by the catalog (1 hour when it names none) and needs the technician\'s capability for it', async () => {
+  test('a lead\'s look is sized as the Leads screen books it (the stored catalog row, 1 hour when it names none) and needs the technician\'s capability for it', async () => {
     dayStops({ [DAY]: [stop('first', '08:00')] });
-    getServices.mockResolvedValue({ services: CATALOG.map((row) => (row.id === 'svc-wdo' ? { ...row, default_duration_minutes: null } : row)) });
+    // getServices gives a scheduling policy's length in capacity mode (30 here); the booking reads the row's own length.
+    getServices.mockResolvedValue({ services: CATALOG.map((row) => (row.id === 'svc-wdo' ? { ...row, default_duration_minutes: 30 } : row)) });
+    const stored = (minutes) => CATALOG.map((row) => (row.id === 'svc-wdo' ? { ...row, default_duration_minutes: minutes } : row));
     const wdo = () => [lead('wdo', { service_interest: 'WDO Inspection' })];
-    const { conn } = fakeConn({ leads: wdo() });
+    const { conn } = fakeConn({ leads: wdo(), services: stored(null) });
     expect((await fillList(conn, [morning], NOW)).byBlock).toEqual([[expect.objectContaining({ kind: 'lead', id: 'wdo', label: 'WDO Inspection Service', length: 60 })]]);
+    expect((await fillList(fakeConn({ leads: wdo(), services: stored(45) }).conn, [morning], NOW)).byBlock)
+      .toEqual([[expect.objectContaining({ kind: 'lead', id: 'wdo', length: 45 })]]);
     // The customer's rules for the service the lead asked for.
     expect(getCustomerSchedulingPreferences).toHaveBeenCalledWith('c-wdo', 'WDO Inspection Service', conn, { serviceId: 'svc-wdo', serviceKey: 'wdo_inspection' });
     // A technician set off for the inspection's category (termite) gets no line.

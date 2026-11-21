@@ -929,6 +929,17 @@ describe('mintPlanStartEstimate', () => {
       expect(JSON.parse(tables.estimates.find((r) => r.id === next.estimateId).estimate_data).sendSnapshot.pricingBundle).toBeTruthy();
     });
 
+    test.each(['show_one_time_option', 'bill_by_invoice'])('a live quote with %s turned on by staff is archived and re-minted, never handed back as staff changed it (codex pre-push r29 on #8132)', async (column) => {
+      const first = await mint();
+      tables.estimates[0] = { ...tables.estimates[0], [column]: true };
+      const next = await mint({ randomBytes: () => Buffer.from('0123456789abcdef') });
+      expect(next.reused).toBe(false);
+      expect(next.estimateId).not.toBe(first.estimateId);
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
+      const minted = tables.estimates.find((r) => r.id === next.estimateId);
+      expect(!!minted.show_one_time_option || !!minted.bill_by_invoice).toBe(false);
+    });
+
     test('a quote for ANOTHER option is archived and a fresh one minted', async () => {
       const first = await mint();
       recompute.mockResolvedValue(pricedAs(LAWN_LINE));
@@ -1071,6 +1082,16 @@ describe('assertPlanStartAcceptEligible', () => {
     await expect(actualRestart.assertPlanStartAcceptEligible(fakeTrx(ops, namedColumns), ESTIMATE))
       .rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
     expect(ops.filter((o) => o.includes('cust-2'))).toEqual([]);
+  });
+
+  test.each(['bill_by_invoice', 'show_one_time_option'])('a quote staff changed after the handler read it (%s on the locked row) refuses as changed and takes no lock (codex pre-push P1)', async (column) => {
+    // The handler read the row with both options off; a writer from before the write refusal
+    // turned one on before the accept took the estimate row lock.
+    tables.estimates[0][column] = true;
+    const ops = [];
+    await expect(actualRestart.assertPlanStartAcceptEligible(fakeTrx(ops, namedColumns), ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED', message: expect.stringMatching(/This estimate changed since it was created/) });
+    expect(ops).toEqual(['read:estimates']);
   });
 
   test('a quote stored without the ZIP the account has since gained names the same home and accepts (codex pre-push P1)', async () => {

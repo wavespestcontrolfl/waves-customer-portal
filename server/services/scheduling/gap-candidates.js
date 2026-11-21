@@ -101,9 +101,10 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
 
 /**
  * An open lead's visit as a gap candidate (the 07:05 fill list, owner 2026-11-20 *1a*): the Waves Assessment or the
- * inspection the lead asked for (`visit`: its catalog row, day-replan/fill-list.js leadVisit), at the catalog's length,
- * which the Leads screen's Schedule button books (admin-leads.js schedule-appointment: the catalog default, else 60
- * minutes). It stands at the lead's customer's stored location (`lead.latitude`/`lead.longitude`, the customer row the
+ * inspection the lead asked for (`visit`: its catalog row, day-replan/fill-list.js leadVisit), at the length the Leads
+ * screen's Schedule button books: admin-leads.js schedule-appointment reads the catalog row itself (its stored default,
+ * else 60 minutes), never the scheduling policy getServices applies in capacity mode (service-library.js
+ * withSchedulingDuration). It stands at the lead's customer's stored location (`lead.latitude`/`lead.longitude`, the customer row the
  * booking routes by), never geocoded. A new stop, checked as an estimate's first visit is (`prospective`). The
  * customer's day and time rules and the capability rule apply as for estimateGapCandidate; `rainServices()` names the
  * one visit by its catalog key. `{ unavailable: 'no_stored_location' }` when the customer has none. A failed read
@@ -115,7 +116,8 @@ async function leadGapCandidate(lead, visit, conn) {
   if (lead.latitude == null || lead.longitude == null || !Number.isFinite(lat) || !Number.isFinite(lng) || !lat || !lng) {
     return { unavailable: 'no_stored_location' };
   }
-  const length = Number(visit.default_duration_minutes);
+  const catalog = visit.id ? await conn('services').where('id', visit.id).first('default_duration_minutes') : null;
+  const length = Number(catalog?.default_duration_minutes);
   const service = {
     id: '__candidate__', customer_id: lead.customer_id, status: 'pending', lat, lng,
     estimated_duration_minutes: Number.isInteger(length) && length > 0 ? length : 60,

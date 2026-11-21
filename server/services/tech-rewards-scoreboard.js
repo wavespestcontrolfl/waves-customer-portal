@@ -122,7 +122,8 @@ function stayBonusBlock(hireDate, today, priorPayCents) {
   if (!next) return null;
   const years = next.rateBps === calc.STAY_BONUS_1_YEAR_BPS ? 1 : next.rateBps === calc.STAY_BONUS_3_YEAR_BPS ? 3 : 5;
   const earningsStart = yearBefore(next.dueDate);
-  const base = { dueDate: next.dueDate, years, rateBps: next.rateBps, estimate: true, earningsStart };
+  // the 12 months of pay end the day before the anniversary: that is the day the estimate is final
+  const base = { dueDate: next.dueDate, years, rateBps: next.rateBps, estimate: true, earningsStart, earningsEnd: addStaffWorkDays(next.dueDate, -1) };
   // the 12 months that earn this bonus have not begun: no amount to show yet (never $0.00), only the date
   if (earningsStart > today) return { ...base, estimateCents: null };
   // the estimate is the pay recorded so far in the 12 months before the due date; the due date's own pay run decides
@@ -205,14 +206,23 @@ const hundredths = (value) => Math.round(Number(value) * 100) || 0;
 // A pay line's components. A line with an earning DAY takes that day. Any other line with a span (covers_from..covers_to:
 // a hand-made commission or a monthly allowance) is split EQUALLY over the workweeks of the span, by the very helper the
 // overtime premium uses (payroll-regular-rate.js weeksOfLine, 29 CFR 778.120); the cents that do not divide go one each to the
-// earliest weeks. Each week then counts its in-window days / 7. A line with no span has only its earned pay week.
+// earliest weeks. A week's share is then spread over the days of that week the span COVERS (the first and last weeks of a
+// span cover fewer than 7), so it counts in a window by its covered days in the window / its covered days. A line with no
+// span has only its earned pay week: that week's in-window days / 7.
 function lineComponents(line) {
   if (line.earnedOn) return [{ cents: line.cents, spread: [{ date: line.earnedOn, weight: 1 }] }];
-  const spanned = line.coversFrom && line.coversTo;
-  const weeks = spanned ? weeksOfLine({ coversFrom: line.coversFrom, coversTo: line.coversTo, weekStart: line.weekStart }) : [line.weekStart];
+  if (!(line.coversFrom && line.coversTo)) return [{ cents: line.cents, week: line.weekStart }];
+  const weeks = weeksOfLine({ coversFrom: line.coversFrom, coversTo: line.coversTo, weekStart: line.weekStart });
   const base = Math.trunc(line.cents / weeks.length);
   const extra = line.cents - base * weeks.length;
-  return weeks.map((week, i) => ({ cents: base + (i < extra ? 1 : 0), week }));
+  return weeks.map((week, i) => {
+    const first = week < line.coversFrom ? line.coversFrom : week;
+    const weekEnd = addStaffWorkDays(week, 6);
+    const last = weekEnd > line.coversTo ? line.coversTo : weekEnd;
+    const spread = [];
+    for (let day = first; day <= last; day = addStaffWorkDays(day, 1)) spread.push({ date: day, weight: 1 });
+    return { cents: base + (i < extra ? 1 : 0), spread };
+  });
 }
 
 /**
@@ -237,7 +247,8 @@ function lineComponents(line) {
  *   (health_allowance_cents)               no such day (hand-made, allowance) only
  *                                           has its earned pay week: in-window days / 7;
  *                                           a spanned line (covers_from..covers_to) is split
- *                                           equally over its workweeks (weeksOfLine)
+ *                                           equally over its workweeks (weeksOfLine), each
+ *                                           week's share over that week's COVERED days
  *   catch-up overtime premium              the earned weeks of the line pay it          calc_snapshot.lineOvertimeWeeks
  *   (line_overtime_premium_cents)          comes from (each week's premiumCents)
  *   anything else (gross minus the above)  NO DATE: the check's own week, in-window     (a check with no day records, a
