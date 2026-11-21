@@ -112,18 +112,30 @@ describe('still deciding: what the customer said would help (owner 2026-11-21)',
   });
 
   test('it rings over a row that rang for a booking problem today, and once a day for still-deciding reasons', async () => {
-    await stuck.noteStillDeciding(REQ, EST, 'person');
+    await stuck.noteStillDeciding(REQ, EST, 'price');
     const { ringOnRefresh, metadata } = raised()[0].opts;
     const today = metadata.stuckDay;
-    expect(metadata.decidingDay).toBe(today);
+    expect(metadata).toMatchObject({ decidingDay: today, decidingReason: 'price' });
     // A row a booking problem rang today: the reason still rings.
     expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'stuck' })).toBe(true);
     expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'expired' })).toBe(true);
     // A second reason today is quiet, also after a booking problem rewrote the row in between.
-    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today })).toBe(false);
-    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'stuck', decidingDay: today })).toBe(false);
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today, decidingReason: 'quotes' })).toBe(false);
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'stuck', decidingDay: today, decidingReason: 'person' })).toBe(false);
     // A new day rings again.
-    expect(ringOnRefresh({}, { stuckDay: '2026-11-04', stuckReason: 'deciding', decidingDay: '2026-11-04' })).toBe(true);
+    expect(ringOnRefresh({}, { stuckDay: '2026-11-04', stuckReason: 'deciding', decidingDay: '2026-11-04', decidingReason: 'price' })).toBe(true);
+  });
+
+  // The page promises this customer a call, and a ring reopens a row the office had marked done.
+  test('the first request that day to talk to a person rings, also after another reason rang today', async () => {
+    await stuck.noteStillDeciding(REQ, EST, 'person');
+    const { ringOnRefresh, metadata } = raised()[0].opts;
+    const today = metadata.stuckDay;
+    expect(metadata).toMatchObject({ decidingDay: today, decidingReason: 'person' });
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today, decidingReason: 'price' })).toBe(true);
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today })).toBe(true);
+    // The row already says so today: a second request is quiet.
+    expect(ringOnRefresh({}, { stuckDay: today, stuckReason: 'deciding', decidingDay: today, decidingReason: 'person' })).toBe(false);
   });
 
   // The page says "We will call you" on this answer alone, so it is true only when the office was told and can call.
@@ -141,7 +153,7 @@ describe('still deciding: what the customer said would help (owner 2026-11-21)',
     bellPolicy.bellAllowed.mockResolvedValue(false);
     await expect(stuck.noteStillDeciding(REQ, EST, 'person')).resolves.toEqual({ raised: false, reason: 'silenced', callPromised: false });
     bellPolicy.bellAllowed.mockResolvedValue(true);
-    raiseAdminAlert.mockResolvedValueOnce(null);
+    episodes.raiseAdminAlertWithReopen.mockResolvedValueOnce(null);
     await expect(stuck.noteStillDeciding(REQ, EST, 'person')).resolves.toEqual({ raised: false, reason: 'notify_failed', callPromised: false });
     // A staff browser, a bot or the office network: no bell, so no answer and no promise.
     shouldRecord.mockReturnValue(false);
