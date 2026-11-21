@@ -16,8 +16,8 @@
 // tab, not the page: its build tag, the start time and the build of the
 // newest server it has heard from (lib/portalVersion.js), and the code name
 // of what kept its last page move from reloading it (lib/portalReload.js).
-// The route ignores those four until the columns that store them exist (the
-// server half of the tab-reload logging, which follows this change).
+// From those four the route stores only whether the tab's build is out of
+// date and, for such a tab, that code name (routes/admin-usage.js).
 // =============================================================================
 
 import { heardServerBoot, heardServerBuild, loadedBuild } from './portalVersion';

@@ -139,6 +139,8 @@ describe('admin usage: POST /track', () => {
         path: '/admin/customers/:id',
         tab: 'notes',
         source: 'sidebar',
+        stale_build: null,
+        reload_hold: null,
       });
     });
   });
@@ -278,6 +280,106 @@ describe('admin usage: POST /track', () => {
       expect(res.status).toBe(400);
       expect(chain.calls.insert).toBeNull();
     });
+  });
+});
+
+describe('admin usage: POST /track tab build', () => {
+  // The tab's build and the name of what kept its last page move from
+  // reloading it (client/src/lib/adminUsage.js), for a nightly read-only
+  // check.
+  const { setPortalBuildForTests } = require('../middleware/portal-build-header');
+  afterEach(() => setPortalBuildForTests(undefined));
+  const track = (baseUrl, extra) => fetch(`${baseUrl}/admin/usage/track`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pageKey: 'pipeline', path: '/admin/pipeline', ...extra }),
+  });
+  const stored = async (extra) => {
+    const chain = makeChain();
+    db.mockImplementation(() => chain);
+    let row;
+    await withServer(async (baseUrl) => {
+      expect((await track(baseUrl, extra)).status).toBe(204);
+      row = { stale_build: chain.calls.insert.stale_build, reload_hold: chain.calls.insert.reload_hold };
+    });
+    return row;
+  };
+
+  test('keeps whether the tab is out of date, and its blocker name only when it is', async () => {
+    setPortalBuildForTests('bbb222bbb222');
+    await expect(stored({ build: 'AAA111AAA111', reloadHold: 'card-payment' })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+    await expect(stored({ build: 'aaa111aaa111' })).resolves.toEqual({ stale_build: true, reload_hold: null });
+    await expect(stored({ build: 'BBB222bbb222', reloadHold: 'current' })).resolves.toEqual({ stale_build: false, reload_hold: null });
+  });
+
+  test.each([
+    ['a build of the wrong shape', { build: 'not a build', reloadHold: 'current' }, null, null],
+    ['a build that is not text', { build: 12, reloadHold: 'current' }, null, null],
+    ['a name with spaces', { build: 'aaa111aaa111', reloadHold: 'John Smith' }, true, null],
+    ['a slug-shaped name off the list, which could be an identifier', { build: 'aaa111aaa111', reloadHold: 'customer-12345' }, true, null],
+    ['an opaque token as the name', { build: 'aaa111aaa111', reloadHold: 'abcdef0123456789abcdef0123456789' }, true, null],
+    ['a name that is not text', { build: 'aaa111aaa111', reloadHold: 7 }, true, null],
+  ])('keeps the page view and drops %s', async (_label, extra, staleBuild, reloadHold) => {
+    setPortalBuildForTests('bbb222bbb222');
+    await expect(stored(extra)).resolves.toEqual({ stale_build: staleBuild, reload_hold: reloadHold });
+  });
+
+  test('an older server, still draining during a deploy, records both fields as unknown', async () => {
+    const { BOOT } = require('../middleware/portal-build-header');
+    setPortalBuildForTests('bbb222bbb222');
+    const tab = { build: 'aaa111aaa111', reloadHold: 'card-payment' };
+    // The tab has heard from a server that started after this one, on
+    // another build or on a build the tab does not name.
+    await expect(stored({ ...tab, boot: Number(BOOT) + 1, liveBuild: 'ccc333ccc333' })).resolves.toEqual({ stale_build: null, reload_hold: null });
+    await expect(stored({ ...tab, boot: Number(BOOT) + 1 })).resolves.toEqual({ stale_build: null, reload_hold: null });
+    await expect(stored({ ...tab, boot: Number(BOOT) + 1, liveBuild: 7 })).resolves.toEqual({ stale_build: null, reload_hold: null });
+    // It heard from this server, or from an older one: this server judges.
+    await expect(stored({ ...tab, boot: Number(BOOT) })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+    await expect(stored({ ...tab, boot: Number(BOOT) - 60000 })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+    // A start time that is not a number is not read.
+    await expect(stored({ ...tab, boot: String(Number(BOOT) + 1) })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+  });
+
+  test('a newer server on this server\'s build (a restart, another replica) leaves this server to judge', async () => {
+    const { BOOT } = require('../middleware/portal-build-header');
+    setPortalBuildForTests('bbb222bbb222');
+    // The newer server names this server's build, so this build is the live one.
+    const newer = { boot: Number(BOOT) + 1, liveBuild: 'BBB222bbb222' };
+    await expect(stored({ build: 'aaa111aaa111', reloadHold: 'card-payment', ...newer })).resolves.toEqual({ stale_build: true, reload_hold: 'card-payment' });
+    await expect(stored({ build: 'bbb222bbb222', reloadHold: 'current', ...newer })).resolves.toEqual({ stale_build: false, reload_hold: null });
+  });
+
+  test('without a build tag on the server, whether the tab is out of date is unknown', async () => {
+    setPortalBuildForTests(null);
+    await expect(stored({ build: 'aaa111aaa111', reloadHold: 'current' })).resolves.toEqual({ stale_build: null, reload_hold: null });
+  });
+
+  // The list is what keeps an identifier out of reload_hold, but a
+  // hardcoded list drifts. This test reads every code name the reload module
+  // quotes and each hold the client registers, and fails when one is added or
+  // removed without updating RELOAD_BLOCKERS in routes/admin-usage.js.
+  test('RELOAD_BLOCKERS holds every name a tab can send, and no other', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const { RELOAD_BLOCKERS } = require('../routes/admin-usage');
+    const src = path.join(__dirname, '..', '..', 'client', 'src');
+    const read = (file) => fs.readFileSync(path.join(src, file), 'utf8');
+    // Quoted in portalReload.js but never sent: a storage key, a typeof
+    // check, the page-use events, 'moved' (the gate drops it) and
+    // 'not-staff' (the beacon logs staff pages only).
+    const notSent = new Set(['portal-reloaded-for', 'undefined', 'pointerdown', 'click', 'keydown', 'input', 'change', 'moved', 'not-staff']);
+    const names = new Set([...read('lib/portalReload.js').matchAll(/'([a-z][a-z0-9-]*)'/g)].map((m) => m[1]).filter((name) => !notSent.has(name)));
+    // The gate notes only what the reload module returns: it quotes no name.
+    expect([...read('components/PortalUpdate.jsx').matchAll(/noteMoveOutcome\([^)]*'[a-z-]+'/g)]).toHaveLength(0);
+    const sources = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) return sources(file);
+      return /\.jsx?$/.test(entry.name) && !/\.test\./.test(entry.name) ? [file] : [];
+    });
+    const holds = sources(src).flatMap((file) => [...fs.readFileSync(file, 'utf8').matchAll(/(?:registerReloadHold|holdReloadWhileSending)\(\s*["']([a-z0-9-]+)["']/g)].map((m) => m[1]));
+    expect(holds.length).toBeGreaterThan(10);
+    holds.forEach((name) => names.add(name));
+    expect([...RELOAD_BLOCKERS].sort()).toEqual([...names].sort());
   });
 });
 
