@@ -2783,8 +2783,8 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`[job-offers] staff record pass failed: ${err.message}`);
     }
-    // The morning bell of the first-days checklist (job-offers.js ringDueChecklists): from 7:00 AM Eastern, once a
-    // day for each hire with an item due. Its own job. It writes an admin bell and sends no one anything.
+    // The bell of the first-days checklist (job-offers.js ringDueChecklists): each run keeps the one bell row of a
+    // hire true to the checklist. It rings from 7:00 AM Eastern only. Its own job. It sends no one anything.
     try {
       await runExclusive('job-offer-checklist', async () => {
         const { rung, closed, failed } = await require('./job-offers').ringDueChecklists();

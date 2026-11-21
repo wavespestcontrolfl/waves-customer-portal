@@ -161,8 +161,6 @@ const RERING = [
     decision: 'expire, capped: while Mercury still refuses the key, the next status poll (every 15 minutes) raises one fresh row' },
   { emitter: 'portal-message', files: ['services/portal-messages.js'], prefixes: ['portal-message:'], kind: 'event',
     decision: 'expire: only a new message the customer writes in their portal thread raises it again (one open row per thread)' },
-  { emitter: 'job-offer-checklist', files: ['services/job-offers.js'], prefixes: ['job-offer-checklist:'], kind: 'periodic',
-    decision: 'expire, capped: while a first-days item of a hire is still due, the next morning pass raises one fresh row (one open row per hire; a mark on the checklist closes it)' },
 ];
 
 const parseMeta = (metadata) => {
