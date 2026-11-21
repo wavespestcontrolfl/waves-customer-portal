@@ -262,3 +262,64 @@ describe('hasRepliedSince', () => {
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('19415550123');
   });
 });
+
+// The text arm's phone match: the estimate can hold the phone as staff typed it, while an inbound text's conversation
+// holds Twilio's E.164 form. Before this, a lead-only estimate with a formatted number never matched its own reply.
+describe('text arm: the stored phone and its E.164 form both match', () => {
+  const CUTOFF = new Date('2026-11-20T12:00:00Z');
+  const messagesCall = () => db._calls.find((call) => call.table === 'messages');
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db._calls.length = 0;
+    db._rows = null;
+  });
+
+  test('a lead-only estimate with a formatted phone matches the E.164 conversation', async () => {
+    setRows({ messages: { id: 'm1' } });
+    const lead = { id: 'est-3', customer_id: null, customer_phone: '(941) 555-0123', customer_email: null };
+    expect(await hasRepliedSince(lead, CUTOFF)).toBe(true);
+    expect(messagesCall().groupWheres).toEqual([
+      ['orWhere', 'conversations.contact_phone', '(941) 555-0123'],
+      ['orWhere', 'conversations.contact_phone', '+19415550123'],
+    ]);
+  });
+
+  test('a customer estimate keeps its customer match and adds each phone form once', async () => {
+    setRows({ messages: { id: 'm1' } });
+    expect(await hasRepliedSince(CUSTOMER_EST, CUTOFF)).toBe(true);
+    expect(messagesCall().groupWheres).toEqual([
+      ['where', 'conversations.customer_id', 'cust-1'],
+      ['orWhere', 'conversations.contact_phone', '+19415550123'],
+    ]);
+  });
+
+  test('a phone that cannot be read as a US number is matched as stored only', async () => {
+    setRows({ messages: null });
+    const lead = { id: 'est-4', customer_id: null, customer_phone: '555-0123', customer_email: null };
+    expect(await hasRepliedSince(lead, CUTOFF)).toBe(false);
+    expect(messagesCall().groupWheres).toEqual([['orWhere', 'conversations.contact_phone', '555-0123']]);
+  });
+
+  test('a foreign number typed without "+" never matches a US conversation by its last ten digits', async () => {
+    setRows({ messages: null });
+    const lead = { id: 'est-6', customer_id: null, customer_phone: '49 941 555 0123', customer_email: null };
+    expect(await hasRepliedSince(lead, CUTOFF)).toBe(false);
+    expect(messagesCall().groupWheres).toEqual([['orWhere', 'conversations.contact_phone', '49 941 555 0123']]);
+  });
+
+  test('a US number written as 1 + ten digits matches its E.164 form', async () => {
+    setRows({ messages: { id: 'm1' } });
+    const lead = { id: 'est-7', customer_id: null, customer_phone: '1-941-555-0123', customer_email: null };
+    expect(await hasRepliedSince(lead, CUTOFF)).toBe(true);
+    expect(messagesCall().groupWheres).toEqual([
+      ['orWhere', 'conversations.contact_phone', '1-941-555-0123'],
+      ['orWhere', 'conversations.contact_phone', '+19415550123'],
+    ]);
+  });
+
+  test('a lead with a blank phone has no text match and no phone predicate', async () => {
+    const lead = { id: 'est-5', customer_id: null, customer_phone: '   ', customer_email: null };
+    expect(await hasRepliedSince(lead, CUTOFF)).toBe(false);
+    expect(messagesCall().groupWheres).toEqual([]);
+  });
+});
