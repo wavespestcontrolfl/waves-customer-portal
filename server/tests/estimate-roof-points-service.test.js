@@ -203,8 +203,8 @@ describe('roofPointsDocBlock', () => {
 
   test('a stored label is screened again where it is shown: one that fails keeps the standard label of its point', async () => {
     const pins = [
-      { n: 1, x: 0.2, y: 0.3, type: 'gable_vents', label: 'Gable vent, front left', action: 'seal' },
-      { n: 2, x: 0.4, y: 0.5, type: 'gable_vents', label: 'Gable vent, gate code 1234', action: 'seal' },
+      { n: 1, x: 0.2, y: 0.3, type: 'gable_vents', label: 'Gable vent, front left', action: 'screen' },
+      { n: 2, x: 0.4, y: 0.5, type: 'gable_vents', label: 'Gable vent, gate code 1234', action: 'screen' },
       { n: 3, x: 0.6, y: 0.7, type: 'no_such_type', label: 'Entry point, safe to enter', action: 'seal' },
     ];
     const knex = fakeKnex({ point: point({ snapshot: { ...SNAPSHOT, pins } }), reads: [frozenRead()] });

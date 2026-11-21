@@ -258,7 +258,7 @@ describe('sendEstimateNow: roof points frozen at send', () => {
     reads = [read({ tech_pins: [{ x: 0.1, y: 0.1, type: 'chimney_or_flue' }] })];
     expect(JSON.stringify(store['est-1'].snapshot)).toBe(first);
     await router.sendEstimateNow(estimateRow(), 'email');
-    expect(store['est-1'].snapshot.pins).toEqual([{ n: 1, x: 0.1, y: 0.1, type: 'chimney_or_flue', label: 'Chimney or flue', action: 'seal' }]);
+    expect(store['est-1'].snapshot.pins).toEqual([{ n: 1, x: 0.1, y: 0.1, type: 'chimney_or_flue', label: 'Chimney or flue', action: 'screen' }]);
   });
 
   test('the newest finished read with saved points wins over an older one', async () => {

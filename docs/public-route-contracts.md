@@ -7045,7 +7045,8 @@ prints on the pin and in the list; `x` and `y` are 0-1 fractions of the photo fr
 entry type or `other`; `label` is the plain name, followed by the staff note when one was saved ("Roof return, front left"; the note passes
 the complete customer-copy screen `customerCopyViolations` where it is stored, a 400 for staff, again at the freeze,
 and again on this response, where a stored label that fails is replaced by the point's standard label);
-`action` is the repair word ("seal", "trim back"). No AI read, no read id, no suggestion source, no prices. The key is
+`action` is the repair word, set by the point's type: "screen" for a roof vent, a gable vent and a chimney or flue,
+"seal around" for a vent pipe, "trim back" for a branch, "seal" for every other point. No AI read, no read id, no suggestion source, no prices. The key is
 ABSENT unless all of these hold: a copy exists; the points were saved for the address the estimate has
 (`roof_entry_reads.points_address`: the address the staff lookup that gave the photo centre ran for, sent by the staff
 panel with the points and never read from the estimate row; checked at the freeze); the copy belongs to the estimate's

@@ -17,7 +17,7 @@ describe('RoofPointsCard', () => {
     render(<RoofPointsCard points={points([
       pin(1, { label: 'Roof return, front left', action: 'seal' }),
       pin(2, { label: 'Branch touching the roof', action: 'trim back' }),
-      pin(3, { label: 'Vent pipe', action: 'seal' }),
+      pin(3, { type: 'plumbing_vent_stacks', label: 'Vent pipe', action: 'seal around' }),
     ])} address="12 Synthetic Way" />);
     expect(screen.getByText('Your Waves technician found 3 places where rodents can get into your roof.')).toBeInTheDocument();
     expect(screen.getByText('The numbers match the list below.')).toBeInTheDocument();
@@ -25,7 +25,7 @@ describe('RoofPointsCard', () => {
     expect([...items].map((li) => li.textContent)).toEqual([
       'Roof return, front left: seal',
       'Branch touching the roof: trim back',
-      'Vent pipe: seal',
+      'Vent pipe: seal around',
     ]);
     expect(screen.getByText('Photo: county aerial, 2025.')).toBeInTheDocument();
     expect(screen.getByAltText('Aerial photo of the roof at 12 Synthetic Way, with 3 numbered places where rodents can get in')).toHaveAttribute('src', 'https://example.test/aerial.jpg');

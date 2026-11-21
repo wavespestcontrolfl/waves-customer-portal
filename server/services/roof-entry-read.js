@@ -101,8 +101,16 @@ const PIN_LABELS = Object.freeze({
   tile_eave_open_ends: 'Open tile end',
   other: 'Entry point',
 });
-// What the exclusion does at each point, printed after the label ("Roof return, front left: seal").
-const PIN_ACTIONS = Object.freeze({ trees_touching_roof: 'trim back' });
+// What the exclusion does at each point, printed after the label ("Roof return, front left: seal"). Owner ruling
+// 2026-11-21 (choice A): an opening that must keep its airflow (a roof vent, a gable vent, a chimney or flue) gets a
+// screen, a vent pipe is sealed around, a branch is trimmed back, and every other point is sealed.
+const PIN_ACTIONS = Object.freeze({
+  roof_vents_or_turbines: 'screen',
+  gable_vents: 'screen',
+  chimney_or_flue: 'screen',
+  plumbing_vent_stacks: 'seal around',
+  trees_touching_roof: 'trim back',
+});
 const pinAction = (type) => PIN_ACTIONS[type] || 'seal';
 const MAX_TECH_PINS = 20;
 const MAX_PIN_NOTE = 40;
@@ -875,7 +883,8 @@ function cropImageUrl(row) {
  * confirmed point, a stored crop centre, and not hidden by staff. Points are numbered in the order the technician saved
  * them; each carries its customer-facing label (PIN_LABELS, plus ", <note>" when the technician typed one and the note
  * passes the customer-copy screen: a stored note that fails it is left out, and the point keeps its standard label) and
- * its action ('seal', or 'trim back' for a branch).
+ * its action (PIN_ACTIONS: 'screen' for a roof vent, a gable vent and a chimney or flue, 'seal around' for a vent pipe,
+ * 'trim back' for a branch, 'seal' for the rest).
  */
 function customerPointsFromRow(row) {
   if (!row || row.status !== STATUS_DONE || row.ai_tier === TIER_UNKNOWN || row.hide_on_estimate) return null;

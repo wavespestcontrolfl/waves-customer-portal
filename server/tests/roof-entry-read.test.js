@@ -1769,13 +1769,44 @@ describe('cropImageUrl and customerPointsFromRow', () => {
       { n: 2, x: 0.5, y: 0.5, type: 'trees_touching_roof', label: 'Branch touching the roof', action: 'trim back' },
       { n: 3, x: 0.9, y: 0.1, type: 'other', label: 'Entry point', action: 'seal' },
     ]);
-    expect(svc.pinAction('trees_touching_roof')).toBe('trim back');
-    expect(svc.pinAction('chimney_or_flue')).toBe('seal');
+  });
+
+  // Owner ruling 2026-11-21 (choice A): the repair word for each point type.
+  it('gives each point type its repair word: screen, seal around, trim back, or seal', () => {
+    const words = Object.fromEntries(svc.TECH_PIN_TYPES.map((type) => [type, svc.pinAction(type)]));
+    expect(words).toEqual({
+      roof_returns_and_valleys: 'seal',
+      plumbing_vent_stacks: 'seal around',
+      roof_vents_or_turbines: 'screen',
+      chimney_or_flue: 'screen',
+      ac_or_utility_line_entry: 'seal',
+      soffit_or_fascia_gaps: 'seal',
+      gable_vents: 'screen',
+      trees_touching_roof: 'trim back',
+      tile_eave_open_ends: 'seal',
+      other: 'seal',
+    });
+    // A type the table does not know is sealed.
+    expect(svc.pinAction('no_such_type')).toBe('seal');
+    expect(svc.pinAction(undefined)).toBe('seal');
+  });
+
+  it('prints the repair word of each point on the customer estimate', () => {
+    const pins = ['roof_vents_or_turbines', 'gable_vents', 'chimney_or_flue', 'plumbing_vent_stacks', 'soffit_or_fascia_gaps']
+      .map((type, i) => ({ x: 0.1 * (i + 1), y: 0.1, type, note: null }));
+    const out = svc.customerPointsFromRow(row({ tech_pins: pins }));
+    expect(out.pins.map((p) => `${p.label}: ${p.action}`)).toEqual([
+      'Roof vent: screen',
+      'Gable vent: screen',
+      'Chimney or flue: screen',
+      'Vent pipe: seal around',
+      'Soffit or fascia gap: seal',
+    ]);
   });
 
   it('never passes a point source on to the customer estimate', () => {
     const out = svc.customerPointsFromRow(row({ tech_pins: [{ x: 0.1, y: 0.1, type: 'gable_vents', note: null, source: 'gable_vents:0' }] }));
-    expect(out.pins).toEqual([{ n: 1, x: 0.1, y: 0.1, type: 'gable_vents', label: 'Gable vent', action: 'seal' }]);
+    expect(out.pins).toEqual([{ n: 1, x: 0.1, y: 0.1, type: 'gable_vents', label: 'Gable vent', action: 'screen' }]);
     expect(JSON.stringify(out)).not.toContain('source');
   });
 
