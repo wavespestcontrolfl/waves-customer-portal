@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useState, useSyncExternalStore } from 'react';
 import { useLocation, useNavigationType } from 'react-router-dom';
 import { Button } from './ui';
 import { isAdminPath, isFieldPath } from '../lib/adminBookmarkMeta';
 import { newerBuild, subscribePortalVersion } from '../lib/portalVersion';
-import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
+import { browserOffline, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
+import { notePageInView, notePageMove, onPageUse, usedOnPageInView } from '../lib/staleChunkReload';
 
 // Wraps the route tree (App.jsx). At a page move that is due a reload
 // (lib/portalReload.js) it shows `fallback` in place of the routes, so the old
@@ -15,9 +16,9 @@ import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/porta
 // (the Ask Waves prompt included). Work that outlives a move is in a module,
 // in storage or in a send still running, and holds the reload
 // (reloadHolds.js). A held move opens the next page in the old code. If the
-// deploy removed that page's code, the stale-chunk reload
-// (staleChunkReload.js, App.jsx's lazyWithRetry) still runs as it does
-// without this gate, held work or not; a follow-up PR makes it obey the holds.
+// deploy removed that page's code, the stale-chunk reload obeys the same
+// holds (staleChunkReload.js): the page waits for open work, then reloads
+// once or shows its retry screen.
 export function PortalUpdateGate({ fallback, children }) {
   const { pathname } = useLocation();
   const navigationType = useNavigationType();
@@ -25,13 +26,30 @@ export function PortalUpdateGate({ fallback, children }) {
   // replace, as every <Navigate> in the routes is, and it continues that
   // move. So when the move started on a field page, its redirects leave that
   // page too: Today -> /admin -> the dashboard, Today -> /admin/leads ->
-  // Pipeline.
-  const [gate, setGate] = useState({ pathname, origin: pathname, reloading: false });
+  // Pipeline. A replace after a use of the page continues the move too. A
+  // use cannot tell a redirect from a replace the person caused: many
+  // redirects wait first, for a sign-in check, their code or their data, and
+  // a tap during that wait is a use. The staff layout renders no /admin
+  // route, a redirect included, until its session check ends. So a page that
+  // a replace opens keeps the rules of the move: a receipt that replaces a
+  // payment page that Back from Today opened keeps Today's bar.
+  // `from`: the page the move leaves, for the field-page rule. Once a move
+  // leaves a field page, each replace after it keeps that page, until the
+  // next push or Back: /admin -> Today -> the sign-in page -> the next page
+  // leaves Today, as Today -> the sign-in page does.
+  const [gate, setGate] = useState({ pathname, origin: pathname, from: null, reloading: false });
   if (gate.pathname !== pathname) {
-    const origin = navigationType === 'REPLACE' ? gate.origin : gate.pathname;
-    const from = isFieldPath(origin) ? origin : gate.pathname;
-    setGate({ pathname, origin, reloading: reloadDueAtMove(pathname, Date.now(), from) });
+    const replace = navigationType === 'REPLACE';
+    const origin = replace ? gate.origin : gate.pathname;
+    const from = replace && isFieldPath(gate.from) ? gate.from : gate.pathname;
+    // The stale-chunk reload follows the same rule (lib/staleChunkReload.js),
+    // from this render on: the new page's code can fail before the move is
+    // in view.
+    notePageMove(from, pathname, origin);
+    setGate({ pathname, origin, from, reloading: reloadDueAtMove(pathname, Date.now(), from) });
   }
+  // A layout effect, so that no tap comes between the move and this note.
+  useLayoutEffect(() => { notePageInView(gate.from, gate.pathname); }, [gate.from, gate.pathname]);
 
   useEffect(() => {
     if (!gate.reloading) return undefined;
@@ -71,68 +89,105 @@ const HOLD_TEXT = {
   offline: 'This device is offline. A reload may show an error page.',
 };
 
-// The Reload bar's button. It obeys the same holds as the automatic reload:
+// The reload button of the Reload bar, of PortalReloadPrompt (below) and of
+// the staff retry screen (App.jsx). It obeys the same holds as the automatic
+// reload:
 // when work holds it, a click names every held work instead of reloading, and
 // the button becomes "Reload anyway". Each click asks again, so "Reload
 // anyway" reloads only when nothing holds that the button has not named. A
 // new resetKey clears the named work, and so does any use of the page after
 // the naming (clearNamed): that use can start new work under a name already
 // shown, such as more typing after "Anything not saved on this page will be
-// lost.", so the next Reload asks again. `pageUsed`: a use of the page in view
-// since it opened (below).
-function useHoldAwareReload(resetKey) {
-  const [held, setHeld] = useState([]);
-  useEffect(() => { setHeld((named) => (named.length ? [] : named)); }, [resetKey]);
-  const clearNamed = useCallback(() => setHeld((named) => (named.length ? [] : named)), []);
+// lost.", so the next Reload asks again. `pageUsed`: whether the page in
+// view was used since it opened (usedOnPageInView,
+// lib/staleChunkReload.js). `beforeReload` runs right before the reload.
+export function useHoldAwareReload(resetKey, beforeReload) {
+  // A new resetKey clears the named work as it renders. An effect would run
+  // late on a button that just appeared and wipe what a first click named.
+  const [naming, setNaming] = useState({ key: resetKey, held: [] });
+  if (naming.key !== resetKey) setNaming({ key: resetKey, held: [] });
+  const { held } = naming;
+  const clearNamed = useCallback(() => setNaming((state) => (state.held.length ? { ...state, held: [] } : state)), []);
   const tryReload = (pageUsed) => {
     const blockers = [...reloadBlockers(), ...(pageUsed ? ['page-use'] : [])];
     if (blockers.some((name) => !held.includes(name))) {
-      setHeld(blockers);
+      setNaming({ key: resetKey, held: blockers });
       return;
     }
+    beforeReload?.();
     window.location.reload();
   };
   const heldText = [...new Set(held.map((name) => HOLD_TEXT[name] || 'Something in this tab is still open.'))].join(' ');
   return { named: held.length > 0, heldText, tryReload, clearNamed };
 }
 
-// A use of the page in view since it opened: a tap, a click, a key or a
-// field change anywhere but on this bar. The bar's Reload reloads that page
-// in place, and a page keeps unsaved work in many ways: a field, a toggle, a
-// picked slot, a signature on a canvas, a shape drawn on a map. No list of
-// controls names them all, so after any use the bar asks once first. A page
-// move ends the use: the move closes the page and its work. The automatic
-// reload waits for a move, so it never needs this. Each use also calls onUse.
-function usePageUsed(pathname, onUse) {
-  const used = useRef(false);
-  useEffect(() => { used.current = false; }, [pathname]);
-  useEffect(() => {
-    const noteUse = (event) => {
-      if (!(event.target instanceof Element) || event.target.closest('[data-portal-update-bar]')) return;
-      used.current = true;
-      onUse();
-    };
-    const types = ['pointerdown', 'click', 'keydown', 'input', 'change'];
-    types.forEach((type) => document.addEventListener(type, noteUse, true));
-    return () => types.forEach((type) => document.removeEventListener(type, noteUse, true));
-  }, [onUse]);
-  return () => used.current;
+// Calls onUse at each use of the page in view, from the tab's one record of
+// a use (onPageUse, lib/staleChunkReload.js). A Reload button clears what it
+// named, since that use can start new work under a name already shown. The
+// bar's Reload reloads the page in place, so it asks once first after a use
+// (usedOnPageInView). The automatic reload waits for a move, which ends
+// the use, so it never needs this.
+export function usePageUse(onUse) {
+  useEffect(() => onPageUse(onUse), [onUse]);
+}
+
+// The build the server names when it is newer than this tab's
+// (lib/portalVersion.js), else null. The Reload bar shows while there is one,
+// and only then do the screens for missing code say the portal has a new
+// version (App.jsx, LazyPanel.jsx).
+export function useNewerBuild() {
+  return useSyncExternalStore(subscribePortalVersion, newerBuild, () => null);
+}
+
+function subscribeOnlineState(listener) {
+  window.addEventListener('online', listener);
+  window.addEventListener('offline', listener);
+  return () => {
+    window.removeEventListener('online', listener);
+    window.removeEventListener('offline', listener);
+  };
+}
+
+// Whether the browser reports itself offline (browserOffline). A screen for
+// missing code that reads it changes as the device goes offline or comes
+// back (App.jsx, LazyPanel.jsx).
+export function useBrowserOffline() {
+  return useSyncExternalStore(subscribeOnlineState, browserOffline, () => false);
 }
 
 // Every staff page, Waves Admin and the field pages included: says that a
 // newer version is live. A page move or a new build clears the named work.
 export function PortalUpdateBar() {
   const { pathname } = useLocation();
-  const build = useSyncExternalStore(subscribePortalVersion, newerBuild, () => null);
+  const build = useNewerBuild();
   const { named, heldText, tryReload, clearNamed } = useHoldAwareReload(`${build} ${pathname}`);
-  const pageUsed = usePageUsed(pathname, clearNamed);
+  usePageUse(clearNamed);
   if (!build || !isAdminPath(pathname)) return null;
 
   return (
     <div role="status" data-portal-update-bar="" style={{ bottom: 'calc(80px + env(safe-area-inset-bottom, 0px))' }}
       className="fixed left-1/2 z-[10990] box-border flex w-max max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-sm border-hairline border-zinc-300 bg-white px-4 py-2 font-sans text-sm text-zinc-900 shadow-lg">
       <span>{named ? heldText : 'A new version of the portal is ready.'}</span>
-      <Button className="min-h-11 shrink-0 text-sm" onClick={() => tryReload(pageUsed())}>
+      <Button className="min-h-11 shrink-0 text-sm" onClick={() => tryReload(usedOnPageInView())}>
+        {named ? 'Reload anyway' : 'Reload'}
+      </Button>
+    </div>
+  );
+}
+
+// Shown in place of a part of a staff page whose code the live build no
+// longer serves (components/LazyPanel.jsx): a Reload like the bar's. The part
+// failed as it was opened, so the page was in use, and the first Reload asks
+// once about the page, with what holds the tab, as the bar does after a use.
+// A later use of the page clears what it named.
+export function PortalReloadPrompt({ message, className }) {
+  const { pathname } = useLocation();
+  const { named, heldText, tryReload, clearNamed } = useHoldAwareReload(pathname);
+  usePageUse(clearNamed);
+  return (
+    <div role="status" data-portal-reload-prompt="" className={className}>
+      <span>{named ? heldText : message}</span>
+      <Button className="min-h-11 shrink-0 text-sm" onClick={() => tryReload(true)}>
         {named ? 'Reload anyway' : 'Reload'}
       </Button>
     </div>
