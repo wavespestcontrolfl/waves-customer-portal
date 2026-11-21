@@ -99,6 +99,21 @@ describe('loadHomeFacts', () => {
     expect([...facts.keys()]).toEqual([1, 4]);
   });
 
+  test('the one saved property must be the home on file: a property at another address has no entry', async () => {
+    const home = { home_line1: '100 Palm Drive', home_line2: null, home_city: 'Bradenton', home_zip: '34202', home_property_id: 'p1' };
+    const pointer = [{ property_id: 'p1', address_line1: null, address_line2: null, city: null, zip: null, estimate_property_id: null, estimate_address: null, estimate_live_draft: null }];
+    const { conn } = fakeConn([[
+      row({ subscriber_id: 1, ...home, last_stamps: pointer, home_property: { address_line1: '100 Palm Dr', address_line2: null, city: 'Bradenton', zip: '34202' } }),
+      row({ subscriber_id: 2, ...home, last_stamps: pointer, home_property: { address_line1: '9 Other Road', address_line2: null, city: 'Bradenton', zip: '34202' } }),
+      row({ subscriber_id: 3, ...home, last_stamps: pointer, home_property: { address_line1: '100 Palm Drive', address_line2: 'Apt 4', city: 'Bradenton', zip: '34202' } }),
+      // A saved property with no street says nothing against the home on file.
+      row({ subscriber_id: 4, ...home, last_stamps: pointer, home_property: { address_line1: null, address_line2: null, city: null, zip: null } }),
+      row({ subscriber_id: 5, ...home, home_property_id: null, last_stamps: [], home_property: null }),
+    ]]);
+    const facts = await loadHomeFacts(conn, [1, 2, 3, 4, 5], NOW);
+    expect([...facts.keys()]).toEqual([1, 4, 5]);
+  });
+
   test('a live quote-wizard draft cannot place an appointment: with no other location, no entry', async () => {
     const home = { home_line1: '100 Palm Drive', home_line2: null, home_city: 'Bradenton', home_zip: '34202', home_property_id: 'p1' };
     const stamp = (over = {}) => ({ property_id: null, address_line1: null, address_line2: null, city: null, zip: null, estimate_property_id: null, estimate_address: null, estimate_live_draft: false, ...over });
@@ -188,6 +203,9 @@ describe('loadHomeFacts', () => {
     expect(calls[0].sql).toContain('LEFT JOIN estimates e ON e.id = ss.source_estimate_id');
     expect(calls[0].sql).toContain('c.has_multi_home IS NOT TRUE');
     expect(calls[0].sql).toContain("r.service_data->'reportIdentitySnapshot'->'address'");
+    // The outer SELECT returns what the lateral computed (a rule on a column the query does not return never runs).
+    expect(calls[0].sql).toContain('t.last_types, t.last_stamps, t.last_frozen,');
+    expect(calls[0].sql).toContain(') AS home_property\n');
     expect(calls[0].sql).toContain("e.source = 'quote_wizard' AND e.status = 'draft' AND e.archived_at IS NULL");
     expect(calls[0].sql).toContain("TRIM(COALESCE(c.address_line1, '')) <> ''");
     expect(calls[0].sql).toMatch(/LOWER\(TRIM\(ns\.email\)\) = LOWER\(TRIM\(c\.email\)\)/);

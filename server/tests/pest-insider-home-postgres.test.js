@@ -293,6 +293,23 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     expect(Object.keys(readers).filter((name) => facts.has(readers[name])).sort()).toEqual(['archivedDraft', 'noSnapshot', 'stayed']);
   });
 
+  test('the one saved property must be the home on file, also for an appointment that carries only the property pointer', async () => {
+    const pointerVisit = async (propertyAddress) => {
+      const c = await customer();
+      const [inserted] = await db('customer_properties')
+        .insert({ customer_id: c, occupancy_type: 'owner_occupied', active: true, ...propertyAddress }).returning('id');
+      await visitRecord(c, '2026-11-05', { property_id: typeof inserted === 'object' ? inserted.id : inserted });
+      return c;
+    };
+    const same = await pointerVisit({ address_line1: '100 Test Ln', city: 'Test City', zip: '00000' });
+    const other = await pointerVisit({ address_line1: '9 Other Road', city: 'Test City', zip: '00000' });
+    const noAddress = await pointerVisit({});
+    const readers = {};
+    for (const [name, id] of Object.entries({ same, other, noAddress })) readers[name] = await reader(id);
+    const facts = await loadHomeFacts(db, Object.values(readers), NOW);
+    expect(Object.keys(readers).filter((name) => facts.has(readers[name])).sort()).toEqual(['noAddress', 'same']);
+  });
+
   test('a customer staff marked multi-home, or one with no street on file, has no entry', async () => {
     // has_multi_home: a second premises that never got a customer_properties row.
     const { s: flagged } = await eligible({ has_multi_home: true });

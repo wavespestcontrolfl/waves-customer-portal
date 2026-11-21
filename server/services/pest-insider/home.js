@@ -114,6 +114,10 @@ function lastVisitIsAtHome(row) {
   // the one the customer's report shows). A customer who moved since has the old home there.
   const frozen = Array.isArray(row.last_frozen) ? row.last_frozen : [];
   const frozenAtHome = (a) => addressIsHome({ address_line1: a?.line1, address_line2: a?.line2, city: a?.city, zip: a?.zip }, home);
+  // The one saved property must be this home too. Its address can differ from the customer's
+  // (customer-properties.js recordCallProperty keeps an existing customer address when it
+  // makes the first property), and an appointment may carry only the property pointer.
+  if (row.home_property && !addressIsHome(row.home_property, home)) return false;
   return frozen.every(frozenAtHome) && stamps.every((stamp) => appointmentAtHome(stamp, home, homePropertyId));
 }
 
@@ -152,9 +156,11 @@ function homeFromRow(row, today) {
 // family_occupied stays out on purpose: that home's payer can be another person.
 const FACTS_SQL = (idList) => `
 SELECT ns.id AS subscriber_id, c.id AS customer_id, c.member_since, c.property_type, c.waveguard_tier,
-       LOWER(TRIM(ns.email)) AS reader_address, v.last_date, t.last_types, t.last_stamps,
+       LOWER(TRIM(ns.email)) AS reader_address, v.last_date, t.last_types, t.last_stamps, t.last_frozen,
        c.address_line1 AS home_line1, c.address_line2 AS home_line2, c.city AS home_city, c.zip AS home_zip,
-       (SELECT p.id FROM customer_properties p WHERE p.customer_id = c.id LIMIT 1) AS home_property_id
+       (SELECT p.id FROM customer_properties p WHERE p.customer_id = c.id LIMIT 1) AS home_property_id,
+       (SELECT json_build_object('address_line1', p.address_line1, 'address_line2', p.address_line2, 'city', p.city, 'zip', p.zip)
+        FROM customer_properties p WHERE p.customer_id = c.id LIMIT 1) AS home_property
 FROM newsletter_subscribers ns
 JOIN customers c ON c.id = ns.customer_id
 JOIN LATERAL (
