@@ -196,17 +196,41 @@ async function customerHoldsPlan(database, customer) {
 //   asked here of a property that carries the type alone): its commercial
 //   families and the common area of an association. The first two rules read
 //   a 'hotel', a 'motel', a 'resort', a 'church' and a 'flex space' as homes.
+// The estimator's rule reads one more input, the client: a property manager
+// on an apartment, a multi-family or a condo property is commercial. The
+// first two types read commercial alone, so the client decides a condo. The
+// rule is asked with a manager (`managed`) where the saved record has one:
+// - the account, by its contact role (property_manager). The role covers the
+//   whole profile (constants/contact-roles.js: a manager's primary property
+//   is never a residence), so it counts for every type saved for the account;
+// - a saved property, by its own relationship (managed_for_client);
+// - a payload or a call, where one object of it names a manager (namesManager
+//   below).
+// With no manager the owner of a condo stays a home.
 // The property a CALL describes is read by the call system's rule alone
 // (describesCommercialProperty below). That rule knows the caller: the tenant
 // of a multi-family building is a home there, and the engine's rule reads any
 // 'multi_family' as a business.
-function isCommercialPropertyType(propertyType) {
+const MANAGER_WORD = 'property_manager';
+const MANAGED_PROPERTY = 'managed_for_client';
+const MANAGER_CALLER = Object.freeze({ relationship_to_property: MANAGER_WORD });
+const isManagerWord = (value) => String(value ?? '').trim().toLowerCase() === MANAGER_WORD;
+function isCommercialPropertyType(propertyType, managed) {
   const { isCommercialAccount } = require('./self-booking-plan-sync');
   const { isCommercialProperty } = require('./pricing-engine/commercial-helpers');
   const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
+  const extraction = { property: { property_type: propertyType }, caller: managed ? MANAGER_CALLER : null };
   return isCommercialAccount({ property_type: propertyType }) || isCommercialProperty({ propertyType })
-    || Boolean(commercialCategoryConflict({ extraction: { property: { property_type: propertyType } }, intent: null }));
+    || Boolean(commercialCategoryConflict({ extraction, intent: null }));
 }
+// One object of a JSON record that names the client as a manager. The app
+// writes the role's word under two names: the relationship the estimator
+// resolved, in the unit scope a draft keeps (customerRelationship), and the
+// caller's relationship in a call's extraction (relationship_to_property).
+const RELATIONSHIP_NAMES = Object.freeze(['customerRelationship', 'relationship_to_property']);
+const namesManager = (node) => RELATIONSHIP_NAMES.some((name) => isManagerWord(node[name]));
+// Has this JSON record a manager: the account's, or one it names itself?
+const hasManager = (record, managed) => managed || someObject(record, namesManager);
 
 // A sold commercial scope in the account's service preferences
 // (commercial_interior_scope). Only the accept of a commercial pest estimate
@@ -225,16 +249,19 @@ function hasCommercialSoldScope(customer) {
 // and nothing on it mirrors a property's occupancy. So an account that reads
 // residential by its own row can have a saved property that says commercial:
 // by its occupancy (the property's own mark, which the tax rule and the
-// estimate tools read) or by its own type.
+// estimate tools read) or by its own type. The type is asked with a manager
+// where the customer manages the property for a client: by the property's
+// own relationship, or by the account's role.
 // EVERY saved property counts. Not only the primary one: this proof gets no
 // property to answer for, so it answers for the account, fail closed. And
 // also one that was removed from the account (active = false): the removal of
 // a business address does not make the account a home.
-async function hasCommercialProperty(database, customerId) {
+async function hasCommercialProperty(database, customerId, managed) {
   const properties = await database('customer_properties')
     .where({ customer_id: customerId })
-    .select('occupancy_type', 'property_type');
-  return properties.some((property) => property.occupancy_type === 'commercial' || isCommercialPropertyType(property.property_type));
+    .select('occupancy_type', 'property_type', 'relationship');
+  return properties.some((property) => property.occupancy_type === 'commercial'
+    || isCommercialPropertyType(property.property_type, managed || property.relationship === MANAGED_PROPERTY));
 }
 
 // The words the estimator forms, the lead intake and the engine save for a
@@ -265,8 +292,8 @@ const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && N
 //   property type by the engine's list ('Office', 'Restaurant', 'HOA Common
 //   Area'), a commercial subtype, a commercial category, a commercial service
 //   pick. It is the rule that decides whether the engine prices a home;
-// - the rule for a saved property type (isCommercialPropertyType), on either
-//   spelling of the name (property_type, propertyType);
+// - the kind of premises the object names (namesCommercialPremises below): a
+//   property type, an occupancy, or the estimator's verdict on its own draft;
 // - a commercial subtype in the engine's other spelling (commercial_subtype:
 //   the engine's intent, commercialSubtypeFromInput in estimate-engine.js);
 // - a commercial risk type (the business-type bucket that sets the visits per
@@ -389,11 +416,42 @@ const SERVICE_LABEL_NAMES = Object.freeze([
   'serviceType', 'service_type',
 ]);
 const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.map((name) => node[name]));
-function nodeSaysCommercial(node) {
+// The kind of premises one object of a payload names. Three marks:
+// - a property type, under either spelling of the name (property_type,
+//   propertyType), by the rule for a saved type and with the manager of the
+//   record (isCommercialPropertyType);
+// - an occupancy, under one of the four names a payload keeps one. The
+//   estimator form and the engine keep the occupancy of a bed bug job apart
+//   from the property type (bedbugOccupancyType in the form's inputs,
+//   occupancyType on the engine's service and on its priced line), and the
+//   form saves a residential type by default. The engine prices four
+//   occupancies and reads the three that are not a single-family home as an
+//   explicit commercial scope (estimate-engine.js): an apartment, a hotel,
+//   student housing. Each one is a mark here, also where the bed bug service
+//   was not picked in the end: staff typed the premises. A lead keeps the
+//   occupancy of each extra property the intake named (occupancy), and a
+//   property's own vocabulary has one value that is not a home:
+//   'commercial';
+// - the estimator's verdict on a draft it made (categoryConflict, in the
+//   property facts the draft keeps): the call or the lookup typed the
+//   premises commercial while the draft stayed residential. It is the saved
+//   answer of the rule this proof asks of a call (commercialCategoryConflict,
+//   with the caller) or of the lookup's own (lookupCategoryConflict). A draft
+//   can be the only record of that call on the account. Any value that is
+//   set counts.
+const OCCUPANCY_NAMES = Object.freeze(['bedbugOccupancyType', 'occupancyType', 'occupancy_type', 'occupancy']);
+const COMMERCIAL_OCCUPANCIES = Object.freeze(['apartment', 'hotel', 'studenthousing', 'commercial']);
+const isCommercialOccupancy = (value) => typeof value === 'string' && COMMERCIAL_OCCUPANCIES.includes(value.trim().toLowerCase());
+function namesCommercialPremises(node, managed) {
+  return [node.property_type, node.propertyType].some((type) => isCommercialPropertyType(type, managed))
+    || OCCUPANCY_NAMES.some((name) => isCommercialOccupancy(node[name]))
+    || isSet(node.categoryConflict);
+}
+function nodeSaysCommercial(node, managed) {
   const converter = require('./estimate-converter');
   return saysYes(node.isCommercial) || saysYes(node.is_commercial) || saysYes(node.commercialEstimatedPricing)
     || require('./pricing-engine/commercial-helpers').isCommercialProperty(node)
-    || [node.property_type, node.propertyType].some(isCommercialPropertyType)
+    || namesCommercialPremises(node, managed)
     || isSetSubtype(node.commercial_subtype) || isSet(node.commercialSubtype)
     || String(node.category ?? '').trim().toUpperCase() === 'COMMERCIAL'
     || factsSayCommercial(node) || lookupSaysBusiness(node)
@@ -424,12 +482,12 @@ function nodeSaysCommercial(node) {
 // and no text under that name counts.
 const COMMERCIAL_KEY_PREFIX = 'commercial_';
 const LISTING_NAME = 'businessIdentity';
-function payloadSaysCommercial(value) {
+function payloadSaysCommercial(value, managed) {
   if (typeof value === 'string') return value.trim().toLowerCase().startsWith(COMMERCIAL_KEY_PREFIX);
   if (!value || typeof value !== 'object') return false;
-  if (Array.isArray(value)) return value.some((item) => payloadSaysCommercial(item));
-  return nodeSaysCommercial(value)
-    || Object.entries(value).some(([name, item]) => name !== LISTING_NAME && payloadSaysCommercial(item));
+  if (Array.isArray(value)) return value.some((item) => payloadSaysCommercial(item, managed));
+  return nodeSaysCommercial(value, managed)
+    || Object.entries(value).some(([name, item]) => name !== LISTING_NAME && payloadSaysCommercial(item, managed));
 }
 
 // A value of a JSONB column, as the driver returns it. PostgreSQL checks a
@@ -493,7 +551,9 @@ function someText(value, test) {
 // - the classifier of the accept and slot routes
 //   (isCommercialAutoAcceptEstimate): commercial service rows;
 // - a mark on any object of the payload (nodeSaysCommercial above), or a text
-//   in it that starts with 'commercial_' (payloadSaysCommercial);
+//   in it that starts with 'commercial_' (payloadSaysCommercial). A type in
+//   the payload is asked with a manager where the account has one, or where
+//   an object of the payload names one (hasManager);
 // - the reader the pipeline shows an estimate's service lines with
 //   (inferEstimateServiceLines in estimate-service-lines.js): a line whose
 //   key starts with 'commercial_'. For an estimate with no service line it
@@ -509,7 +569,7 @@ function someText(value, test) {
 // mark it reads is read here (the toggle, the category, a subtype, a risk
 // type, a commercial property type, the tier column, a commercial service
 // key, a proposal).
-function isCommercialEstimateRow(estimate) {
+function isCommercialEstimateRow(estimate, managed) {
   if (String(estimate.category || '').trim().toUpperCase() === 'COMMERCIAL') return true;
   const { isCommercialAccount } = require('./self-booking-plan-sync');
   if (isCommercialAccount({ waveguard_tier: estimate.waveguard_tier })) return true;
@@ -521,7 +581,7 @@ function isCommercialEstimateRow(estimate) {
   return require('./estimate-proposal').isCommercialProposalData(payload)
     || require('./estimate-delivery-options').isCommercialEstimateData(payload)
     || require('./estimate-commercial-identity').isCommercialAutoAcceptEstimate({ estimate_data: payload })
-    || payloadSaysCommercial(payload)
+    || payloadSaysCommercial(payload, hasManager(payload, managed))
     || require('./estimate-service-lines').inferEstimateServiceLines({ ...estimate, estimate_data: payload })
       .some((line) => String(line.key || '').startsWith(COMMERCIAL_KEY_PREFIX));
 }
@@ -533,10 +593,10 @@ function isCommercialEstimateRow(estimate) {
 // The read carries the columns the rules above read. The reader of service
 // lines reads four of the row: the label, the notes, the payload, and the
 // pricing authority (it names the result the add-on lines come from).
-async function hasCommercialEstimate(database, customerId) {
+async function hasCommercialEstimate(database, customerId, managed) {
   const estimates = await database('estimates').where({ customer_id: customerId })
     .select('category', 'waveguard_tier', 'service_interest', 'notes', 'pricing_authority', 'estimate_data');
-  return estimates.some((estimate) => isCommercialEstimateRow(estimate));
+  return estimates.some((estimate) => isCommercialEstimateRow(estimate, managed));
 }
 
 // Does this lead say commercial? A lead keeps what the intake knew, each fact
@@ -555,25 +615,26 @@ async function hasCommercialEstimate(database, customerId) {
 // - the lead's own tier, by the account's rule for the tier;
 // - the payload the intake kept (extracted_data: a form, a quiz, the
 //   classification of an email), by the rules for an estimate payload: the
-//   marks on every object, the text prefix, and the payload scan of the save
+//   marks on every object (with the manager of the record, as for an
+//   estimate), the text prefix, and the payload scan of the save
 //   (isCommercialEstimateData). It keeps the same fields (isCommercial,
 //   category, commercialSubtype, propertyType), and a web form keeps the
 //   service label in it too (service_interest).
-function isCommercialLeadRow(lead) {
+function isCommercialLeadRow(lead, managed) {
   const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
   if (lead.is_commercial === true || lead.is_residential === false) return true;
   if (isCommercialLabel(lead.service_interest) || isCommercialServiceRow({ service_key: lead.service_key })) return true;
   if (isCommercialAccount({ waveguard_tier: lead.waveguard_tier })) return true;
   const payload = jsonbValue(lead.extracted_data);
-  return payloadSaysCommercial(payload) || require('./estimate-delivery-options').isCommercialEstimateData(payload);
+  return payloadSaysCommercial(payload, hasManager(payload, managed)) || require('./estimate-delivery-options').isCommercialEstimateData(payload);
 }
 
 // EVERY lead of the account counts. A deleted lead too: the removal of a lead
 // does not make the caller a home.
-async function hasCommercialLead(database, customerId) {
+async function hasCommercialLead(database, customerId, managed) {
   const leads = await database('leads').where({ customer_id: customerId })
     .select('is_commercial', 'is_residential', 'service_interest', 'service_key', 'waveguard_tier', 'extracted_data');
-  return leads.some((lead) => isCommercialLeadRow(lead));
+  return leads.some((lead) => isCommercialLeadRow(lead, managed));
 }
 
 // A visit or a service report of the account with a commercial service, by
@@ -676,7 +737,10 @@ async function hasCommercialContract(database, customerId) {
 //   a commercial occupancy ('commercial': the mark a saved property carries
 //   in occupancy_type) or by a type the rule above reads as commercial. A
 //   second address that is a business makes the account one with a business
-//   premises, as a saved property does.
+//   premises, as a saved property does. Each such property is asked with a
+//   manager where the call has one (its caller, or the account's role): the
+//   rule above reads the caller for the main property alone, and a manager's
+//   second property is a client's too.
 // - The extraction's commercial-signals block with a value set in it (a
 //   business name, a budget or a procurement remark). The extraction leaves
 //   the block null for a home.
@@ -703,23 +767,26 @@ async function hasCommercialContract(database, customerId) {
 const COMMERCIAL_CALL_FLAGS = Object.freeze(['commercial_requires_quote', 'hoa_common_area_requires_approval']);
 const isCommercialCallFlag = (text) => COMMERCIAL_CALL_FLAGS.includes(text);
 const hasSetValue = (block) => Object.values(asObject(block)).some((value) => (Array.isArray(value) ? value.length > 0 : isSet(value)));
-function describesCommercialProperty(node) {
+function describesCommercialProperty(node, managed) {
   const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
+  const extraction = { property: node, caller: managed ? MANAGER_CALLER : null };
   return node.service_address_occupancy === 'commercial' || node.occupancy === 'commercial'
-    || Boolean(commercialCategoryConflict({ extraction: { property: node }, intent: null }));
+    || Boolean(commercialCategoryConflict({ extraction, intent: null }));
 }
 function isBusinessAddress(addressCheck) {
   const use = asObject(asObject(addressCheck).addressUse);
   return use.business === true && use.residential === false;
 }
-function isCommercialCallRow(call) {
+function isCommercialCallRow(call, managed) {
   const extraction = asObject(jsonbValue(call.ai_extraction_enriched));
   const validation = jsonbValue(call.ai_validation);
   const firstFormat = asObject(jsonText(call.ai_extraction, "a call's first extraction"));
   const addressCheck = jsonbValue(call.ai_address_validation);
   const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
+  const managedCall = hasManager(extraction, managed);
+  const describes = (node) => describesCommercialProperty(node, managedCall);
   return Boolean(commercialCategoryConflict({ extraction, intent: null }))
-    || someObject(extraction, describesCommercialProperty) || someObject(firstFormat, describesCommercialProperty)
+    || someObject(extraction, describes) || someObject(firstFormat, describes)
     || hasSetValue(extraction.commercial_signals)
     || someText(extraction, isCommercialCallFlag) || someText(validation, isCommercialCallFlag)
     || someObject(firstFormat, namesCommercialService) || someObject(extraction, namesCommercialService)
@@ -729,10 +796,10 @@ function isCommercialCallRow(call) {
 // EVERY call of the account counts, whatever its age or direction: the caller
 // told the office about a business once. (Production, 2026-11-20: a call was
 // the only commercial mark of more live accounts than any other record.)
-async function hasCommercialCall(database, customerId) {
+async function hasCommercialCall(database, customerId, managed) {
   const calls = await database('call_log').where({ customer_id: customerId })
     .select('ai_extraction', 'ai_extraction_enriched', 'ai_validation', 'ai_address_validation');
-  return calls.some((call) => isCommercialCallRow(call));
+  return calls.some((call) => isCommercialCallRow(call, managed));
 }
 
 // A day-agreement decision of the account whose judge named the commercial
@@ -753,16 +820,16 @@ async function hasCommercialDayAgreement(database, customerId) {
 
 // Does a record of the account say commercial? Each kind of record is one
 // read on the caller's handle.
-async function hasCommercialRecord(database, customerId) {
-  return (await hasCommercialProperty(database, customerId))
-    || (await hasCommercialEstimate(database, customerId))
-    || (await hasCommercialLead(database, customerId))
+async function hasCommercialRecord(database, customerId, managed) {
+  return (await hasCommercialProperty(database, customerId, managed))
+    || (await hasCommercialEstimate(database, customerId, managed))
+    || (await hasCommercialLead(database, customerId, managed))
     || (await hasCommercialServiceIn(database, 'scheduled_services', customerId))
     || (await hasCommercialAddon(database, customerId))
     || (await hasCommercialSeriesTemplate(database, customerId))
     || (await hasCommercialServiceIn(database, 'service_records', customerId))
     || (await hasCommercialContract(database, customerId))
-    || (await hasCommercialCall(database, customerId))
+    || (await hasCommercialCall(database, customerId, managed))
     || (await hasCommercialDayAgreement(database, customerId));
 }
 
@@ -774,10 +841,10 @@ async function planStartBlocker(database, customerId) {
   // inactive account, so the plan check below cannot answer for one.
   if (!customer || customer.active === false || customer.deleted_at) return 'not_live';
   // The account-level rule (the 'commercial' tier, or a commercial or business
-  // property type) and the pricing engine's own rule for a property type. The
-  // membership predicate reads the 'commercial' tier as "no plan", so without
-  // this a commercial account between visits would read as a home with no
-  // plan.
+  // property type) and the rule for a saved property type, asked with a
+  // manager where the account's contact role is one. The membership predicate
+  // reads the 'commercial' tier as "no plan", so without this a commercial
+  // account between visits would read as a home with no plan.
   // Also a building use on the account. Only a won commercial proposal writes
   // one (recordProposalBuildingUse in proposal-win.js), and it marks the
   // account commercial only when the proposal has taxable lines. So the
@@ -791,9 +858,10 @@ async function planStartBlocker(database, customerId) {
   // the rule for a label, as on a lead or an estimate. It can be the only
   // place that label was kept.
   const { isCommercialAccount } = require('./self-booking-plan-sync');
-  if (isCommercialAccount(customer) || isCommercialPropertyType(customer.property_type) || customer.building_use) return 'commercial';
+  const managed = isManagerWord(customer.contact_role);
+  if (isCommercialAccount(customer) || isCommercialPropertyType(customer.property_type, managed) || customer.building_use) return 'commercial';
   if (hasCommercialSoldScope(customer) || isCommercialLabel(customer.lead_service_interest)) return 'commercial';
-  if (await hasCommercialRecord(database, customer.id)) return 'commercial';
+  if (await hasCommercialRecord(database, customer.id, managed)) return 'commercial';
   return (await customerHoldsPlan(database, customer)) ? 'has_plan' : null;
 }
 

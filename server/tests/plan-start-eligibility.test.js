@@ -180,6 +180,31 @@ describe('planStartBlocker', () => {
       expect(await blocker(world({ customer: { property_type } }))).toBeNull();
     });
 
+    // The estimator's rule for a typed premises reads the client too: a property manager on a condo is
+    // commercial, and the owner of a condo is a home. The account's contact role covers the whole profile.
+    describe('the account of a property manager', () => {
+      test.each([['condo'], ['Condo'], ['condo_ground'], ['Condo Upper'], ['condominium']])('with the type %j on its own row: commercial, and no plan record is read', async (property_type) => {
+        const reads = [];
+        const db = world({ ...ONGOING_COLUMN, customer: { contact_role: 'property_manager', property_type }, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
+
+      test.each([['Property_Manager'], [' property_manager ']])('the role in the spelling %j is a manager', async (contact_role) => {
+        expect(await blocker(world({ customer: { contact_role, property_type: 'condo' } }))).toBe('commercial');
+      });
+
+      test.each([['owner'], ['tenant'], [null], [undefined], ['']])('a contact with the role %j and a condo is a home', async (contact_role) => {
+        expect(await blocker(world({ customer: { contact_role, property_type: 'condo' } }))).toBeNull();
+      });
+
+      // The rule is for a unit of a multi-unit building. A manager's single home is a home by the app's rule.
+      test.each([['single_family'], ['townhome'], ['duplex'], ['mobile_home'], ['unknown'], [null]])('a property manager with the type %j, on the row and on a saved property, is not commercial', async (property_type) => {
+        const db = world({ customer: { contact_role: 'property_manager', property_type }, tables: { customer_properties: [PROPERTY({ property_type, relationship: 'managed_for_client' })] } });
+        expect(await blocker(db)).toBeNull();
+      });
+    });
+
     test.each([['Pest Control'], ['Quarterly Pest + Lawn'], ['Pest control for the home office'], ['Lawn care for my house'], [null], [undefined], ['']])('a service label of %j on the account is not commercial', async (lead_service_interest) => {
       expect(await blocker(world({ customer: { lead_service_interest } }))).toBeNull();
     });
@@ -249,6 +274,44 @@ describe('planStartBlocker', () => {
 
       test.each([['single_family'], ['townhome'], ['condo'], ['mobile_home'], ['duplex'], ['vacant_lot'], [null], ['']])('a saved property with the type %j is not commercial', async (property_type) => {
         expect(await blocker(world({ tables: { customer_properties: [PROPERTY({ property_type }), PROPERTY({ id: 'prop-2', is_primary: false, property_type })] } }))).toBeNull();
+      });
+
+      // A condo the customer manages for a client: by the property's own relationship, or by the account's
+      // role. The account row carries no type here, so the saved property is the only mark.
+      const MANAGED_CONDO = (change = {}) => PROPERTY({ property_type: 'condo', relationship: 'managed_for_client', occupancy_type: 'rental_investment', ...change });
+      test.each([
+        ['a condo managed for a client, on the account of a property manager, with a residential occupancy', { contact_role: 'property_manager' }, [MANAGED_CONDO({ occupancy_type: 'owner_occupied' })]],
+        ['a condo managed for a client, on an account with no role', {}, [MANAGED_CONDO()]],
+        ['a condo with no relationship, on the account of a property manager', { contact_role: 'property_manager' }, [MANAGED_CONDO({ relationship: null })]],
+        // The role covers the whole profile: the app reads every property of a manager's profile as a client's.
+        ['a condo recorded as an own home, on the account of a property manager', { contact_role: 'property_manager' }, [MANAGED_CONDO({ relationship: 'own_home', occupancy_type: 'owner_occupied' })]],
+        ['a second property is a managed condo and the primary one is a home', {}, [PROPERTY(), MANAGED_CONDO({ id: 'prop-2', is_primary: false, property_type: 'condo_upper' })]],
+        ['a removed property was a managed condo', {}, [PROPERTY(), MANAGED_CONDO({ id: 'prop-2', is_primary: false, active: false })]],
+      ])('%s: commercial, and no plan record is read', async (_label, customer, properties) => {
+        const reads = [];
+        const db = world({
+          ...ONGOING_COLUMN, customer: { property_type: null, ...customer }, visits: (calls) => { reads.push(calls); return [FLAGGED]; },
+          tables: { customer_properties: properties },
+        });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
+
+      // Every other relationship the schema knows, and a property with none: the owner of a condo is a home.
+      test.each([['own_home'], ['rental_owned'], ['family_home'], [null], [undefined]])('a condo with the relationship %j, on an account with no manager role, is a home', async (relationship) => {
+        const condo = PROPERTY({ property_type: 'condo', relationship, occupancy_type: 'owner_occupied' });
+        expect(await blocker(world({ customer: { property_type: 'condo' }, tables: { customer_properties: [condo, PROPERTY({ id: 'prop-2', is_primary: false, property_type: 'condo_ground', relationship })] } }))).toBeNull();
+      });
+
+      test.each([['single_family'], ['townhome'], ['duplex'], ['mobile_home'], [null]])('a property of the type %j that is managed for a client is not commercial', async (property_type) => {
+        expect(await blocker(world({ tables: { customer_properties: [PROPERTY({ property_type, relationship: 'managed_for_client' })] } }))).toBeNull();
+      });
+
+      // One managed property does not make the customer's own condo a business: the relationship is the
+      // property's own.
+      test('a managed single home beside an own condo: homes', async () => {
+        const properties = [PROPERTY({ property_type: 'condo', relationship: 'own_home' }), PROPERTY({ id: 'prop-2', is_primary: false, relationship: 'managed_for_client' })];
+        expect(await blocker(world({ customer: { property_type: 'condo' }, tables: { customer_properties: properties } }))).toBeNull();
       });
 
       // Three owners each keep a rule for a commercial property type: the account rule
@@ -671,6 +734,113 @@ describe('planStartBlocker', () => {
         expect(await blocker(withEstimates([ESTIMATE({ estimate_data: deep })]))).toBe('commercial');
       });
 
+      // The estimator form and the engine keep the occupancy of a bed bug job apart from the property type, and
+      // the form saves a residential type by default. The engine reads the three occupancies that are not a
+      // single-family home as an explicit commercial scope. A payload also keeps a property's own occupancy.
+      test.each([
+        ["a hotel as the estimator form's bed bug occupancy, beside the default property type", { inputs: { isCommercial: 'NO', propertyType: 'Single Family', bedbugOccupancyType: 'hotel' } }],
+        ["a hotel on the engine's bed bug service", { engineRequest: { services: { bedBug: { rooms: 2, method: 'CHEMICAL', severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } } } }],
+        ['student housing on a priced bed bug line', { engineResult: { lineItems: [{ service: 'bed_bug', rooms: 2, occupancyType: 'studentHousing' }] } }],
+        ['an apartment in another spelling', { inputs: { isCommercial: 'NO', propertyType: 'Single Family', bedbugOccupancyType: ' Apartment ' } }],
+        ['the commercial occupancy of a property row the payload keeps', { property: { occupancy_type: 'commercial', property_type: 'single_family' } }],
+        ['the commercial occupancy in the other spelling, far down', farDown({ occupancyType: 'commercial' })],
+        ['the commercial occupancy of an extra property', { additional_properties: [{ address_line1: '12 Example Test Way', occupancy: 'commercial', property_type: 'single_family' }] }],
+      ])('%s: commercial', async (_label, estimate_data) => {
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data }), ESTIMATE()]))).toBe('commercial');
+      });
+
+      test.each([
+        ["the estimator form's default bed bug occupancy", { inputs: { isCommercial: 'NO', propertyType: 'Single Family', bedbugOccupancyType: 'singleFamily' } }],
+        ["a single-family home on the engine's bed bug service and on its priced line, with the occupancy multiplier", {
+          engineRequest: { services: { bedBug: { rooms: 2, occupancyType: 'singleFamily' } } },
+          engineResult: { lineItems: [{ service: 'bed_bug', occupancyType: 'singleFamily', multipliers: { occupancy: 1.3, severity: 1 } }] },
+        }],
+        ['the word residential as an occupancy', { engineRequest: { services: { bedBug: { occupancyType: 'residential' } } } }],
+        ['the home occupancies of a property', { properties: [{ occupancy_type: 'owner_occupied' }, { occupancyType: 'rental_investment' }, { occupancy: 'unknown' }, { occupancy: null }, { occupancy_type: '' }] }],
+        ['a hotel under a name that keeps no occupancy', { inputs: { isCommercial: 'NO', bedbugNote: 'hotel', stayedAt: 'hotel' } }],
+      ])('%s is not commercial', async (_label, estimate_data) => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data }), ESTIMATE()]))).toBeNull();
+      });
+
+      test.each([['bedbugOccupancyType'], ['occupancyType'], ['occupancy_type'], ['occupancy']])('a hotel under the name %s is a mark, and a single-family home under it is none', async (name) => {
+        const kept = (value) => ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Single Family' }, job: { [name]: value } } });
+        expect(await blocker(withEstimates([ESTIMATE(), kept('hotel')]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE(), kept('singleFamily')]))).toBeNull();
+      });
+
+      // The engine's list of the occupancies it reads as a commercial scope is not exported, so the proof keeps
+      // its own. An occupancy the engine adds later fails here until someone sorts it.
+      test('every bed bug occupancy the engine prices is sorted: a single-family home, or a commercial scope', async () => {
+        const occupancies = Object.keys(require('../services/pricing-engine/constants').BED_BUG.occupancyType);
+        expect(occupancies).toContain('singleFamily');
+        const answers = [];
+        for (const occupancyType of occupancies) {
+          answers.push([occupancyType, await blocker(withEstimates([ESTIMATE({ estimate_data: { engineRequest: { services: { bedBug: { occupancyType } } } } })]))]);
+        }
+        expect(answers).toEqual(occupancies.map((occupancyType) => [occupancyType, occupancyType === 'singleFamily' ? null : 'commercial']));
+      });
+
+      // The estimator's verdict on a draft it made: the call or the lookup typed the premises commercial while
+      // the draft stayed residential. The draft keeps the verdict in its property facts, and it can be the only
+      // record of that call on the account.
+      const DRAFT = (categoryConflict, customerRelationship = 'unknown') => ESTIMATE({ estimate_data: {
+        inputs: { isCommercial: 'NO', propertyType: 'Condo' },
+        estimatorEngine: { version: 1, lane: 'red', laneReasons: [], propertyFacts: { unitScope: { propertyUse: 'condominium', serviceScope: 'residential_unit', customerRelationship }, categoryConflict } },
+      } });
+      test.each([['property_manager:condo'], ['owner:multi_family'], ['hotel'], ['hoa_common_area_service'], ['commercial_subtype:office'], ['lookup_category:commercial']])(
+        "a draft that keeps the estimator's category conflict %j: commercial", async (categoryConflict) => {
+          expect(await blocker(withEstimates([ESTIMATE(), DRAFT(categoryConflict), ESTIMATE()]))).toBe('commercial');
+        });
+
+      test.each([[null], [undefined], [''], ['  '], [false]])('a draft with a category conflict of %j (no conflict) is not commercial', async (categoryConflict) => {
+        expect(await blocker(withEstimates([DRAFT(categoryConflict), ESTIMATE()]))).toBeNull();
+      });
+
+      // The estimator's rule reads the client too: the manager of a condo is commercial, and its owner is a
+      // home. A type in a payload is asked with a manager where the account is one, or where the payload itself
+      // names one (the relationship the estimator resolved, or the caller of a call the payload keeps).
+      const MANAGER_ACCOUNT = { customer: { contact_role: 'property_manager' } };
+      test('a condo estimate on the account of a property manager, under either spelling of the type: commercial', async () => {
+        expect(await blocker(withEstimates([ESTIMATE(), DRAFT(null)], MANAGER_ACCOUNT))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data: farDown({ property_type: 'condo_upper' }) })], MANAGER_ACCOUNT))).toBe('commercial');
+      });
+
+      test('a condo estimate that names a property manager itself: commercial', async () => {
+        expect(await blocker(withEstimates([ESTIMATE(), DRAFT(null, 'property_manager')]))).toBe('commercial');
+        const keptCall = ESTIMATE({ estimate_data: { snapshot: { property_type: 'condo' }, call: farDown({ caller: { relationship_to_property: ' Property_Manager ' } }) } });
+        expect(await blocker(withEstimates([ESTIMATE(), keptCall]))).toBe('commercial');
+      });
+
+      test.each([['owner'], ['tenant'], ['unknown'], [null], [undefined]])('a condo estimate whose unit scope says %j is a home', async (customerRelationship) => {
+        expect(await blocker(withEstimates([DRAFT(null, customerRelationship), ESTIMATE()]))).toBeNull();
+      });
+
+      test('a condo under either spelling of the type is a home where no record names a manager', async () => {
+        const estimates = [
+          ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Condo' } } }),
+          ESTIMATE({ estimate_data: { snapshot: { property_type: 'condo' } } }),
+          ESTIMATE({ estimate_data: { inputs: { propertyType: 'Condo Upper' }, snapshot: { property_type: 'condo_ground' } } }),
+        ];
+        expect(await blocker(withEstimates(estimates))).toBeNull();
+      });
+
+      test('a manager and no unit of a multi-unit building: a home', async () => {
+        const home = ESTIMATE({ estimate_data: {
+          inputs: { isCommercial: 'NO', propertyType: 'Single Family' },
+          estimatorEngine: { version: 1, propertyFacts: { unitScope: { propertyUse: 'single_family', customerRelationship: 'property_manager' }, categoryConflict: null } },
+        } });
+        expect(await blocker(withEstimates([home, ESTIMATE()], MANAGER_ACCOUNT))).toBeNull();
+      });
+
+      // The manager an estimate names is the client of that estimate. It does not reach another estimate.
+      test('a manager named in one estimate and a condo in another: homes', async () => {
+        const managedHome = ESTIMATE({ estimate_data: {
+          inputs: { isCommercial: 'NO', propertyType: 'Single Family' },
+          estimatorEngine: { version: 1, propertyFacts: { unitScope: { propertyUse: 'single_family', customerRelationship: 'property_manager' } } },
+        } });
+        expect(await blocker(withEstimates([managedHome, DRAFT(null)]))).toBeNull();
+      });
+
       // Each of these rules belongs to another module, and most real marks are read by two or three of them at
       // once. So each is proved with a mark that ONLY that rule reads: the proof must ask every one of them.
       test.each([
@@ -825,6 +995,25 @@ describe('planStartBlocker', () => {
           spy.mockRestore();
         }
         expect(await blocker(withLeads(leads))).toBeNull();
+      });
+
+      // A lead keeps each extra property the intake named, with its occupancy. And a type in the payload is asked
+      // with a manager, as in an estimate.
+      const EXTRA_PROPERTY = (change) => ({ additional_properties: [{ address_line1: '12 Example Test Way', city: 'Parrish', is_rental: false, property_type: 'single_family', occupancy: 'owner_occupied', ...change }] });
+      test('a lead that keeps an extra property with the commercial occupancy: commercial', async () => {
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data: EXTRA_PROPERTY({ occupancy: 'commercial' }) }), LEAD()]))).toBe('commercial');
+      });
+
+      test.each([['owner_occupied'], ['rental_investment'], ['seasonal'], ['vacant'], ['unknown'], [null]])('a lead that keeps an extra property with the occupancy %j is not commercial', async (occupancy) => {
+        expect(await blocker(withLeads([LEAD({ extracted_data: EXTRA_PROPERTY({ occupancy }) }), LEAD()]))).toBeNull();
+      });
+
+      test('a lead about a condo: commercial on the account of a property manager or with a manager named in it, and a home with neither', async () => {
+        const condo = LEAD({ extracted_data: { isCommercial: false, propertyType: 'Condo' } });
+        const named = LEAD({ extracted_data: { ...EXTRA_PROPERTY({ property_type: 'condo' }), caller: { relationship_to_property: 'property_manager' } } });
+        expect(await blocker(withLeads([LEAD(), condo], { customer: { contact_role: 'property_manager' } }))).toBe('commercial');
+        expect(await blocker(withLeads([LEAD(), named]))).toBe('commercial');
+        expect(await blocker(withLeads([LEAD(), condo, LEAD({ extracted_data: EXTRA_PROPERTY({ property_type: 'condo' }) })]))).toBeNull();
       });
 
       // The payload is a jsonb column. A text in it is a valid value with no structured mark, never a failed
@@ -1186,6 +1375,43 @@ describe('planStartBlocker', () => {
         })],
       ])('%s is not commercial', async (_label, call) => {
         expect(await blocker(withCalls([call, CALL()]))).toBeNull();
+      });
+
+      // The app's rule reads the caller for the main property of a call alone. A manager's other property is a
+      // client's too, so every property of the call is asked with the manager of the call: its caller, or the
+      // account's role.
+      const MANAGER_CALLER = { caller: { relationship_to_property: 'property_manager' } };
+      const SECOND = (property_type) => ({ property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: 'rental_investment', property_type }] });
+      test.each([
+        ['the main property is a condo', CALL(extraction({ ...MANAGER_CALLER, property: { property_type: 'condo' } }))],
+        ['a second property is a condo', CALL(extraction({ ...MANAGER_CALLER, property: SECOND('condo') }))],
+        ['a second property is a multi-family building', CALL(extraction({ ...MANAGER_CALLER, property: SECOND('multi_family') }))],
+        ['a second property is a condo in the first format', CALL({
+          ai_extraction: JSON.stringify({ requested_service: 'Pest control', additional_properties: [{ address_line1: '12 Example Test Way', is_rental: true, occupancy: 'rental_investment', property_type: 'condo' }] }),
+          ...extraction(MANAGER_CALLER),
+        })],
+      ])('the call of a property manager where %s: commercial', async (_label, call) => {
+        expect(await blocker(withCalls([CALL(), call, CALL()]))).toBe('commercial');
+      });
+
+      test.each([['owner'], ['tenant'], ['hoa_board_member'], ['real_estate_agent'], ['unknown'], [null]])('a second property that is a condo, on the call of a caller with the relationship %j, is a home', async (relationship_to_property) => {
+        const call = CALL({
+          ai_extraction: JSON.stringify({ requested_service: 'Pest control', additional_properties: [{ address_line1: '12 Example Test Way', occupancy: 'rental_investment', property_type: 'condo' }] }),
+          ...extraction({ caller: { relationship_to_property }, property: SECOND('condo') }),
+        });
+        expect(await blocker(withCalls([call, CALL()]))).toBeNull();
+      });
+
+      test('the call of a property manager about single homes only: homes', async () => {
+        expect(await blocker(withCalls([CALL(extraction({ ...MANAGER_CALLER, property: SECOND('townhouse') })), CALL()]))).toBeNull();
+      });
+
+      // The manager of one call is the client of that call. The account's role covers every call.
+      test('a condo in a call with no caller named: commercial on the account of a property manager, and a home on another account', async () => {
+        const condo = CALL(extraction({ caller: { relationship_to_property: 'unknown' }, property: { property_type: 'condo' } }));
+        const managedHome = CALL(extraction({ ...MANAGER_CALLER, property: { property_type: 'single_family' } }));
+        expect(await blocker(withCalls([CALL(), condo], { customer: { contact_role: 'property_manager' } }))).toBe('commercial');
+        expect(await blocker(withCalls([managedHome, condo]))).toBeNull();
       });
 
       // The extraction, the validation and the address check are jsonb columns: a text there is a valid value

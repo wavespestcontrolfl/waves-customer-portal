@@ -261,6 +261,23 @@ postgres('planStartBlocker (live Postgres)', () => {
       expect(await planStartBlocker(trx, crypto.randomUUID())).toBe('not_live');
     });
 
+    // The estimator's rule for a typed premises reads the client too: the manager of a condo is commercial, and
+    // its owner is a home. The role is a value the account's column takes.
+    test.each([['condo'], ['condo_ground']])('the account of a property manager with the type %s on its own row: commercial', async (property_type) => {
+      const customer = await seedCustomer({ contact_role: 'property_manager', property_type });
+      expect(await planStartBlocker(trx, customer.id)).toBe('commercial');
+    });
+
+    test.each([['owner'], ['tenant'], [null]])('a contact with the role %s and a condo on its own row is not commercial', async (contact_role) => {
+      const customer = await seedCustomer({ contact_role, property_type: 'condo' });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+    });
+
+    test('a property manager with a single home on its own row is not commercial', async () => {
+      const customer = await seedCustomer({ contact_role: 'property_manager', property_type: 'single_family' });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+    });
+
     // The tier column accepts 'Commercial' (its check constraint), and the membership predicate reads that tier
     // as "no plan": without the rule this account would read as a home with no plan.
     test.each([
@@ -366,6 +383,41 @@ postgres('planStartBlocker (live Postgres)', () => {
         await seedProperty(customer);
         await seedProperty(customer, { ...SECOND, occupancy_type: 'rental_investment', property_type: 'townhome' });
       })).toBeNull();
+    });
+
+    // A condo the customer manages for a client: by the property's own relationship (the proof reads the
+    // column), or by the account's role. Each relationship is a value the column's check constraint takes.
+    const MANAGED = { relationship: 'managed_for_client' };
+    test.each([
+      ['a condo managed for a client, on the account of a property manager, with a residential occupancy', { contact_role: 'property_manager' }, [{ ...MANAGED, property_type: 'condo' }]],
+      ['a condo managed for a client, on an account with no role', {}, [{ ...MANAGED, property_type: 'condo', occupancy_type: 'rental_investment' }]],
+      ['a condo with no relationship, on the account of a property manager', { contact_role: 'property_manager' }, [{ property_type: 'condo_upper' }]],
+      ['a condo recorded as an own home, on the account of a property manager', { contact_role: 'property_manager' }, [{ property_type: 'condo', relationship: 'own_home' }]],
+      ['a second property is a managed condo, beside a home', {}, [{}, { ...SECOND, ...MANAGED, property_type: 'condo' }]],
+      ['a removed property was a managed condo, beside a home', {}, [{}, { ...SECOND, ...MANAGED, active: false, property_type: 'condo' }]],
+    ])('%s: commercial', async (_label, account, properties) => {
+      const customer = await seedCustomer(account);
+      for (const property of properties) await seedProperty(customer, property);
+      expect(customer.property_type).toBeNull();
+      expect(await planStartBlocker(trx, customer.id)).toBe('commercial');
+    });
+
+    test.each([['own_home'], ['rental_owned'], ['family_home'], [null]])('a condo with the relationship %s, on an account with no manager role, is not commercial', async (relationship) => {
+      expect(await blockerFor((customer) => seedProperty(customer, { property_type: 'condo', relationship }))).toBeNull();
+    });
+
+    test('single homes that are managed for a client, on the account of a property manager, are not commercial', async () => {
+      const customer = await seedCustomer({ contact_role: 'property_manager' });
+      await seedProperty(customer, { ...MANAGED, occupancy_type: 'rental_investment' });
+      await seedProperty(customer, { ...SECOND, ...MANAGED, property_type: 'townhome' });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+    });
+
+    test("another customer's managed condo says nothing about this customer", async () => {
+      const customer = await seedCustomer();
+      await seedProperty(customer, { property_type: 'condo', relationship: 'own_home' });
+      await seedProperty(await seedCustomer({ contact_role: 'property_manager' }), { ...MANAGED, property_type: 'condo' });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
     });
 
     // One mark is enough, whatever its age: the removal of a business address does not make the account a home.
@@ -663,6 +715,37 @@ postgres('planStartBlocker (live Postgres)', () => {
       }))).toBeNull();
     });
 
+    // The kind of premises an estimate payload names apart from the property type: the occupancy of a bed bug
+    // job (the estimator form saves it beside a residential default type), a property's own occupancy, and the
+    // estimator's verdict on a draft it made. And a condo whose payload names a property manager.
+    test.each([
+      ["a hotel as the form's bed bug occupancy, beside the default property type", { inputs: { isCommercial: 'NO', propertyType: 'Single Family', bedbugOccupancyType: 'hotel' } }],
+      ["student housing on the engine's bed bug service, 20 levels down", farDown({ bedBug: { rooms: 2, occupancyType: 'studentHousing' } })],
+      ['an apartment on a priced bed bug line', { engineResult: { lineItems: [{ service: 'bed_bug', rooms: 1, occupancyType: 'apartment' }] } }],
+      ['the commercial occupancy of an extra property', { additional_properties: [{ address_line1: '12 Example Test Way', occupancy: 'commercial' }] }],
+      ["the estimator's category conflict on a draft it made", { inputs: { isCommercial: 'NO', propertyType: 'Condo' }, estimatorEngine: { version: 1, lane: 'red', propertyFacts: { categoryConflict: 'property_manager:condo' } } }],
+      ['a condo and a unit scope that names a property manager', { inputs: { isCommercial: 'NO', propertyType: 'Condo' }, estimatorEngine: { version: 1, propertyFacts: { unitScope: { customerRelationship: 'property_manager' }, categoryConflict: null } } }],
+    ])('an estimate with %s: commercial', async (_label, estimate_data) => {
+      expect(await blockerFor(async (customer) => {
+        await seedEstimate(customer);
+        await seedEstimate(customer, { estimate_data });
+      })).toBe('commercial');
+    });
+
+    test("an estimate of a condo with the form's default bed bug occupancy, no category conflict and an owner in its unit scope is not commercial", async () => {
+      expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: {
+        inputs: { isCommercial: 'NO', propertyType: 'Condo', bedbugOccupancyType: 'singleFamily' },
+        engineResult: { lineItems: [{ service: 'bed_bug', occupancyType: 'singleFamily', multipliers: { occupancy: 1 } }] },
+        estimatorEngine: { version: 1, propertyFacts: { unitScope: { propertyUse: 'condominium', customerRelationship: 'owner' }, categoryConflict: null } },
+      } }))).toBeNull();
+    });
+
+    test('the estimate of a condo on the account of a property manager: commercial', async () => {
+      const customer = await seedCustomer({ contact_role: 'property_manager' });
+      await seedEstimate(customer, { estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Condo' } } });
+      expect(await planStartBlocker(trx, customer.id)).toBe('commercial');
+    });
+
     test("another customer's commercial estimate, and one with no customer on it, say nothing about this customer", async () => {
       const customer = await seedCustomer();
       const other = await seedCustomer();
@@ -762,6 +845,20 @@ postgres('planStartBlocker (live Postgres)', () => {
       expect(await blockerFor((customer) => seedLead(customer, change))).toBe('commercial');
     });
 
+    test('a lead that keeps an extra property: commercial with the commercial occupancy, and not with a home occupancy', async () => {
+      const extra = (occupancy) => ({ extracted_data: JSON.stringify({ additional_properties: [{ address_line1: '12 Example Test Way', property_type: 'single_family', occupancy }] }) });
+      expect(await blockerFor((customer) => seedLead(customer, extra('commercial')))).toBe('commercial');
+      expect(await blockerFor((customer) => seedLead(customer, extra('rental_investment')))).toBeNull();
+    });
+
+    test('a lead about a condo: commercial on the account of a property manager, and not on another account', async () => {
+      const condo = { extracted_data: JSON.stringify({ isCommercial: false, propertyType: 'Condo' }) };
+      const manager = await seedCustomer({ contact_role: 'property_manager' });
+      await seedLead(manager, condo);
+      expect(await planStartBlocker(trx, manager.id)).toBe('commercial');
+      expect(await blockerFor((customer) => seedLead(customer, condo))).toBeNull();
+    });
+
     test("another customer's commercial lead, and one with no customer on it, say nothing about this customer", async () => {
       const customer = await seedCustomer();
       const other = await seedCustomer();
@@ -859,6 +956,34 @@ postgres('planStartBlocker (live Postgres)', () => {
         await seedCall(customer);
         await seedCall(customer, change);
       })).toBeNull();
+    });
+
+    // The app's rule reads the caller for the main property alone. Every property of a manager's call is asked
+    // with the manager, in both formats.
+    const MANAGER_CALLER = { caller: { relationship_to_property: 'property_manager' } };
+    test.each([
+      ['a second property is a condo', enriched({ ...MANAGER_CALLER, property: { property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: 'rental_investment', property_type: 'condo' }] } })],
+      ['a second property is a condo in the first format', {
+        ai_extraction: { requested_service: 'Pest control', additional_properties: [{ address_line1: '12 Example Test Way', is_rental: true, property_type: 'condo' }] },
+        ...enriched(MANAGER_CALLER),
+      }],
+    ])('the call of a property manager where %s: commercial', async (_label, change) => {
+      expect(await blockerFor(async (customer) => {
+        await seedCall(customer);
+        await seedCall(customer, change);
+      })).toBe('commercial');
+    });
+
+    test('the call of a property manager about single homes only is not commercial', async () => {
+      expect(await blockerFor((customer) => seedCall(customer, enriched({ ...MANAGER_CALLER, property: { property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', property_type: 'townhouse' }] } })))).toBeNull();
+    });
+
+    test('a condo in a call with no caller named: commercial on the account of a property manager', async () => {
+      const condo = enriched({ caller: { relationship_to_property: 'unknown' }, property: { property_type: 'condo' } });
+      const manager = await seedCustomer({ contact_role: 'property_manager' });
+      await seedCall(manager, condo);
+      expect(await planStartBlocker(trx, manager.id)).toBe('commercial');
+      expect(await blockerFor((customer) => seedCall(customer, condo))).toBeNull();
     });
 
     test("another customer's commercial call, and one no account was matched to, say nothing about this customer", async () => {
