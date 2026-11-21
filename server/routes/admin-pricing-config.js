@@ -122,6 +122,8 @@ async function getInventoryCostEstimate(serviceKey, dimensions) {
         'products_catalog.cost_unit',
         'products_catalog.best_price',
         'products_catalog.unit_size_oz',
+        'products_catalog.container_size',
+        'products_catalog.inventory_unit',
         'products_catalog.best_vendor',
       );
 

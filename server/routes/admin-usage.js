@@ -11,13 +11,18 @@
  * Privacy contract: rows are staff-only navigation metadata. page_key /
  * path / tab are validated against strict slug patterns server-side, so a
  * customer id, search string, or free text can never be persisted even by
- * a buggy or hostile client.
+ * a buggy or hostile client. stale_build and reload_hold describe the tab:
+ * whether its build is not the one this server serves, and the code name of
+ * what kept its last page move from reloading it (client/src/lib/portalReload.js),
+ * kept only for a stale tab. A nightly read-only check reads them (owner
+ * 2026-11-19, option A).
  */
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { servedPortalBuild, BOOT } = require('../middleware/portal-build-header');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -42,6 +47,23 @@ const TAB_RE = /^(?=.{1,32}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 // always are (Codex #2961 r21). Mirrored client-side.
 const TAB_OPAQUE_RE = /^(?=[a-z0-9-]*\d)[a-z0-9-]{20,}$/;
 const SOURCES = new Set(['sidebar', 'tabbar', 'more', 'palette', 'load', 'in-app']);
+// The tab's build tag, as vite.config.js writes it (portal-build-header.js).
+const BUILD_RE = /^[a-f0-9]{8,64}$/i;
+// Every code name a tab sends as reloadHold, and the only values stored: a
+// slug-shaped name off this list could be an identifier. A name the list
+// lacks reads as no name. The client drift test keeps it in step with
+// client/src/lib/portalReload.js and the holds the client registers.
+const RELOAD_BLOCKERS = new Set([
+  // The page the tab loaded (pageLoadNote), page moves and the reload itself
+  // (reloadBlockerAtMove, reloadForNewBuild).
+  'first-page', 'reload-missed', 'admin-index', 'waves-admin', 'field-page', 'current',
+  'never-heard', 'offline', 'no-signal', 'storage', 'reloaded', 'stalled', 'saving', 'request',
+  // Holds (registerReloadHold, holdReloadWhileSending).
+  'ask-draft', 'bank-import', 'bank-link', 'card-payment', 'dictation', 'email-draft',
+  'estimate-send', 'misting-layout', 'photo-assessment', 'push-setup', 'recap-upload',
+  'schedule-notice', 'tap-to-pay', 'text-attachment', 'text-draft', 'time-clock',
+  'visit-step', 'visual-note', 'zone-map',
+]);
 const EVENT_TYPES = new Set(['page_view']);
 
 // Mirror of the client normalizer's ID detection (lib/adminUsage.js). The
@@ -131,9 +153,28 @@ function stripIdSegments(path) {
 // never interpolate request input into raw SQL.
 const ET_DAY_SQL = "(created_at AT TIME ZONE 'America/New_York')::date";
 
+// The two fields that describe the tab (client/src/lib/adminUsage.js), which
+// never cost the page view: a value of the wrong shape is dropped. stale_build
+// is null when either side has no build tag (a dev server, a tab from before
+// the beacon sent one). reload_hold, the code name of what kept the tab's last
+// page move from reloading it, is kept only for a stale tab, and only when it
+// is on RELOAD_BLOCKERS. A server that started before the newest server the
+// tab has heard from (`boot`, client/src/lib/portalVersion.js) may be an old
+// one still draining during a deploy: its build may not be the live one, so
+// both fields are unknown. When that newer server serves this server's build
+// (`liveBuild`: a restart with no new build, or another replica), this
+// server's build is the live one, and it judges.
+function tabReloadFields(build, reloadHold, boot, liveBuild) {
+  const served = servedPortalBuild();
+  const sameBuild = typeof liveBuild === 'string' && liveBuild.toLowerCase() === served;
+  const draining = typeof boot === 'number' && boot > Number(BOOT) && !sameBuild;
+  const stale = !draining && typeof build === 'string' && BUILD_RE.test(build) && served ? build.toLowerCase() !== served : null;
+  return { stale_build: stale, reload_hold: stale && RELOAD_BLOCKERS.has(reloadHold) ? reloadHold : null };
+}
+
 router.post('/track', async (req, res, next) => {
   try {
-    const { pageKey, path, tab, source, eventType } = req.body || {};
+    const { pageKey, path, tab, source, eventType, build, boot, liveBuild, reloadHold } = req.body || {};
 
     if (typeof pageKey !== 'string' || !PAGE_KEY_RE.test(pageKey) || isIdSegment(pageKey)) {
       return res.status(400).json({ error: 'Invalid pageKey' });
@@ -181,6 +222,7 @@ router.post('/track', async (req, res, next) => {
       path: cleanPath,
       tab: tab || null,
       source: source || null,
+      ...tabReloadFields(build, reloadHold, boot, liveBuild),
     });
     res.status(204).end();
   } catch (err) { next(err); }
@@ -286,3 +328,5 @@ module.exports = router;
 // Exposed for the App.jsx drift test only — the registry must track the
 // client route table, and the test is what enforces that.
 module.exports.KNOWN_PAGE_KEYS = KNOWN_PAGE_KEYS;
+// Exposed for the client drift test of the reload blocker names, likewise.
+module.exports.RELOAD_BLOCKERS = RELOAD_BLOCKERS;

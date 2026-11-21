@@ -237,12 +237,55 @@ describe('the public state', () => {
     expect(J.publicStateOf({ status: 'accepted' }, { applicationStatus: 'hired' })).toBe('signed');
   });
 
+  test('an offer past its expiry reads expired, stored or not, whatever stage the application is at', () => {
+    for (const applicationStatus of ['offer', 'hired', 'rejected', 'withdrawn', 'interview']) {
+      expect(J.publicStateOf({ status: 'expired' }, { ...at('2026-11-28T00:00:00Z'), applicationStatus })).toBe('expired');
+      expect(J.publicStateOf(sent, { ...at('2026-11-28T00:00:00Z'), applicationStatus })).toBe('expired');
+    }
+    // A date request does not expire: it follows the application.
+    const asked = { status: 'date_requested', expires_at: sent.expires_at };
+    expect(J.publicStateOf(asked, { ...at('2026-11-28T00:00:00Z'), applicationStatus: 'offer' })).toBe('date_requested');
+    expect(J.publicStateOf(asked, { ...at('2026-11-28T00:00:00Z'), applicationStatus: 'rejected' })).toBe('withdrawn');
+  });
+
   test('closed messages are the owner-approved words, with the main phone', () => {
     const snapshot = { owner: { name: 'Test Owner' } };
     expect(J.closedMessage('superseded', snapshot, {})).toBe('This offer was updated. Please use the newest link Test sent you.');
     expect(J.closedMessage('withdrawn', snapshot, {})).toBe('This offer is no longer open. Please call Test at (941) 297-5749.');
     expect(J.closedMessage('expired', snapshot, { expires_at: '2026-11-27T04:59:59.000Z' }))
       .toBe('This offer closed on Thu, Nov 26, 2026. Please call Test at (941) 297-5749 if you still want the job.');
+  });
+});
+
+describe('the locked read of the live offers', () => {
+  // Stands in for a transaction whose row locks are granted `waitMs` after the read was asked for.
+  const lockedAfter = (rows, waitMs) => () => {
+    const query = {
+      where: () => query,
+      whereIn: () => query,
+      forUpdate: () => query,
+      select: () => new Promise((resolve) => { setTimeout(() => resolve(rows), waitMs); }),
+    };
+    return query;
+  };
+
+  test('the clock is read after the rows are locked: an offer that passed its expiry during the wait is left out', async () => {
+    const asked = Date.now();
+    const rows = [
+      { id: 'lapsed', status: 'sent', expires_at: new Date(asked + 5), updated_at: new Date(asked) },
+      { id: 'open', status: 'sent', expires_at: new Date(asked + 60000), updated_at: new Date(asked) },
+      { id: 'asked', status: 'date_requested', expires_at: new Date(asked + 5), updated_at: new Date(asked) },
+      { id: 'draft', status: 'draft', expires_at: null, updated_at: new Date(asked) },
+    ];
+    const { now, offers } = await J.lockLiveOffers(lockedAfter(rows, 25), 'a1');
+    expect(now.getTime()).toBeGreaterThan(asked + 5);
+    expect(offers.map((o) => o.id)).toEqual(['open', 'asked', 'draft']);
+  });
+
+  test('a test clock is used as given', async () => {
+    const fixed = new Date('2026-11-20T00:00:00Z');
+    const rows = [{ id: 'o1', status: 'sent', expires_at: new Date('2026-11-27T04:59:59Z'), updated_at: fixed }];
+    expect(await J.lockLiveOffers(lockedAfter(rows, 0), 'a1', fixed)).toEqual({ now: fixed, offers: rows });
   });
 });
 

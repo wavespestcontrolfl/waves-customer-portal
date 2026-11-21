@@ -59,6 +59,8 @@ function makeDb() {
   let samePhoneQueries = [];
   let samePhoneFails = false;
   const closedOffers = [];
+  // The same close first stores the expiry of a sent offer already past its date (a second write, before the withdrawal).
+  const expiryStores = [];
   // Offers the applicant holds (job-offers.js heldOffersOf reads sent / date_requested rows, locked).
   let heldOffers = [];
   const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
@@ -76,11 +78,17 @@ function makeDb() {
       // Closing an application withdraws its live offers (services/job-offers.js closeOffersWithApplication).
       const filter = { where: null, statuses: null };
       const offers = {
-        where(cond) { filter.where = cond; return offers; },
+        where(cond, operator, value) {
+          if (typeof cond === 'string') filter.column = [cond, operator, value];
+          else filter.where = cond;
+          return offers;
+        },
         whereIn(_column, list) { filter.statuses = list; return offers; },
         forUpdate() { return offers; },
         select: async () => heldOffers.filter((o) => !filter.statuses || filter.statuses.includes(o.status)).map((o) => ({ ...o })),
-        update: async (payload) => { closedOffers.push({ ...filter, payload }); return 1; },
+        update: async (payload) => { (payload.status === 'expired' ? expiryStores : closedOffers).push({ ...filter, payload }); return 1; },
+        // The close then clears the "closed unsigned" bell of each expired offer: none here.
+        pluck: async () => [],
       };
       return offers;
     }
@@ -125,12 +133,13 @@ function makeDb() {
   const db = jest.fn((table) => tableApi(table));
   db.transaction = async (fn) => fn(tableApi);
   db.__closedOffers = () => closedOffers;
+  db.__expiryStores = () => expiryStores;
   db.__rows = () => rows;
   db.__setRows = (r) => { rows = r; };
   db.__setStaff = (list) => { staff = list; };
   db.__samePhoneQueries = () => samePhoneQueries;
   db.__setSamePhoneFails = (fails) => { samePhoneFails = fails; };
-  db.__resetSamePhone = () => { samePhoneQueries = []; samePhoneFails = false; closedOffers.length = 0; heldOffers = []; };
+  db.__resetSamePhone = () => { samePhoneQueries = []; samePhoneFails = false; closedOffers.length = 0; expiryStores.length = 0; heldOffers = []; };
   db.__setHeldOffers = (list) => { heldOffers = list; };
   db.schema = { hasTable: jest.fn(async () => true) };
   return db;
@@ -765,6 +774,13 @@ describe('PATCH /:id/status — closing an application withdraws its outstanding
       statuses: ['draft', 'sent', 'date_requested'],
       payload: expect.objectContaining({ status: 'withdrawn', withdrawn_by: mockStaffId }),
     })]);
+    // A sent offer already past its expiry is stored as expired, not withdrawn: it closed on that date.
+    expect(mockDb.__expiryStores()).toEqual([{
+      where: { application_id: APP_ID, status: 'sent' }, statuses: null, column: ['expires_at', '<', expect.any(Date)],
+      payload: { status: 'expired', updated_at: expect.any(Date) },
+    }]);
+    // One clock: the expiry cutoff is the instant the withdrawal is stamped with.
+    expect(mockDb.__expiryStores()[0].column[2]).toBe(mockDb.__closedOffers()[0].payload.withdrawn_at);
   });
 
   test.each(['reviewed', 'interview'])('moving back from offer to %s withdraws the live offers, so an old link cannot sign over the new decision', async (status) => {
@@ -781,6 +797,7 @@ describe('PATCH /:id/status — closing an application withdraws its outstanding
     mockDb.__setRows([appRow({ status: 'rejected' })]);
     await patch(APP_ID, { status: 'rejected', note: 'still no' });
     expect(mockDb.__closedOffers()).toEqual([]);
+    expect(mockDb.__expiryStores()).toEqual([]);
   });
 });
 

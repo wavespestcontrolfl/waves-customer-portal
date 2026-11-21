@@ -1437,9 +1437,16 @@ zone-day technician or answers `SLOT_TAKEN`. Its booking transaction checks the
 technician again under the date lock (`truckMayTakeDate`), so two commits that
 rebuilt the same new day before either booked never send two technicians south:
 the second answers `SLOT_TAKEN`. The estimate page's holds and accepts book the
-offered slot's own technician and do not check the rule again (follow-up): two
-offers held before either is written can send a second technician south that
-day, bounded by the offer-token TTL. The stop read counts a hold by the real
+offered slot's own technician and check it under the same date lock: `/reserve`
+for a new hold in the zone it stamps, and a re-tap, `/extend` and the accept in
+the hold's own zone stamp, the zone its list funneled (`slot-reservation.js`
+`holdKeepsSouthDay`), because another technician may have taken the day while
+the hold was lapsed. A refusal is the existing slot-taken answer (the 409 on
+`/reserve` and `/extend`, the accept's slot recovery), and a refused re-tap or
+`/extend` also releases the hold. A stamp whose zone row was renamed or removed
+since is checked in the same funneled pool (`zoneOfHoldStamp`), as the stop read
+counts it. A hold with no zone stamp (its estimate was in
+no zone when held) is not checked, as its list did not funnel it. The stop read counts a hold by the real
 clock, so a hold that ran out while its writer waited on the date lock no
 longer holds the day. Under that lock it also counts a visit staff booked that
 keeps its old hold time (`bookedVisitOrLiveHold`), and so do the lists when that
@@ -2145,8 +2152,11 @@ route or on site after ET midnight) and no annual prepay term covering today, si
 the option with no WaveGuard qualifiers. The account must also still pass the mint's residential and
 premises checks: a stored property type that is not commercial (the mint's stored-type guard,
 `isCommercialProperty`), and one provable premises (`singlePremisesStreet`, strict: not flagged
-multi-home, a primary street with a city or zip, at most one property row and that row at the
-primary street, and no visit whose stamped address, property row or creating estimate names another
+multi-home, a primary street with a city or zip on a first address line that carries a primary house
+number (`hasPrimaryStreetNumber`: the number leads the line or follows a leading unit, as in
+`Unit 4, 1 Main St`; a line that is only a unit, a number, the city or a street with no number has
+none), at most one property row and that row at the primary street,
+and no visit whose stamped address, property row or creating estimate names another
 address or cannot be resolved) whose street is both the estimate's own address and the home the mint
 priced (`estimate_data.planStart.premisesKey`), so a move or a second property since the mint refuses,
 even after a staff address change rewrote the open quote's address. The estimate must still belong to
@@ -5013,8 +5023,9 @@ per-recipient uuid `engagement_token` (newsletter_send_deliveries) — GET
 renders a confirm page only and the delivery-row write happens on a
 deliberate POST form submission (scanner-safe, mirrors confirm), answer/
 reaction keys validated against the server-side config allowlists
-(newsletter-quiz.js / newsletter-feedback.js); a Waves Newsletter poll
-answer (an `nl-poll-*` quiz id) is written only when the token's own send
+(newsletter-quiz.js / newsletter-feedback.js); a poll answer (a Waves
+Newsletter `nl-poll-*` or Waves Pest Insider `pi-poll-*` quiz id) is
+written only when the token's own send
 carried that poll (a `{{quiz:<id>}}` or `{{quiz-text:<id>}}` token in either
 body part: the tokens the sender renders as vote links), and a send that
 carried a poll takes answers only to the quizzes it carried, read the same
@@ -9382,7 +9393,7 @@ hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{n
 textConsent, version, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
 snapshot frozen at Send (`job_offers.snapshot`), never from live records, so the Terms the applicant reads are the
 issued version the owner sent; for `superseded`, `withdrawn` and `expired` it returns only `{state, message,
-contactPhone}` (no terms). A sent offer past `expires_at` reads `expired` before any sweep, and an offer whose
+contactPhone}` (no terms). A sent offer past `expires_at` reads `expired` by the clock; the 15-minute close sweep (`closeExpiredOffers`), a Send or a stage move then stores that state, and the answer stays `expired` whatever the application does later. An open offer or a date request whose
 application the owner moved to hired/rejected/withdrawn reads `withdrawn` (that stage change also marks the offer row withdrawn in the same transaction, so reopening the application cannot revive the link). The first GET stamps `opened_at`, every
 GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean, version}` -> `{textConsent, version}`, where
 `version` is the offer row's `updated_at` from the read the choice was made on: a choice already stored answers 200 with

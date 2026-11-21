@@ -234,11 +234,14 @@ describe('slot reservation helpers', () => {
       del: jest.fn().mockResolvedValue(1),
     };
   }
-  function makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders }) {
+  // `zones`: the service_zones rows the hold's zone resolves from (default: none, so the read throws and the hold
+  // degrades to zone:unknown).
+  function makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders, zones = null }) {
     const trx = jest.fn((table) => {
       if (table === 'estimates') return estimateBuilder;
       if (table === 'technicians') return technicianBuilder;
       if (table === 'scheduled_services') return scheduledBuilders.shift();
+      if (table === 'service_zones' && zones) return { select: jest.fn().mockResolvedValue(zones) };
       // reserveSlot's assignable-technician check now goes through
       // assertAssignableTechnician (technician-eligibility.js), which reads
       // technician_absences whenever a date is present — every reserveSlot
@@ -344,6 +347,356 @@ describe('slot reservation helpers', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  // Owner rule B per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19): the estimate page's hold writes check the
+  // truck under the date lock (zone-day-funnel.js truckMayTakeDate). A new hold checks the zone it stamps; a re-tap, an
+  // extend and an accept check the hold's own stamp (holdKeepsSouthDay), the zone its list funneled.
+  describe('owner rule B per truck at the estimate page\'s hold writes', () => {
+    const funnel = require('../services/scheduling/zone-day-funnel');
+    const { gates } = require('../config/feature-gates');
+    const VENICE = { id: 'zone-ven', zone_name: 'Venice / North Port', cities: ['Venice', 'North Port'] };
+    const SARASOTA = { id: 'zone-sar', zone_name: 'Sarasota / Lakewood Ranch', cities: ['Sarasota'] };
+    const SLOT = { estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 };
+    let spies = [];
+    let funnelGate;
+    let perTruckEnv;
+    beforeEach(() => {
+      funnelGate = gates.southZoneDayFunnel;
+      gates.southZoneDayFunnel = true;
+      perTruckEnv = process.env.GATE_MULTI_TECH_CONFIRM;
+    });
+    afterEach(() => {
+      for (const spy of spies) spy.mockRestore();
+      spies = [];
+      jest.useRealTimers();
+      gates.southZoneDayFunnel = funnelGate;
+      if (perTruckEnv === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM;
+      else process.env.GATE_MULTI_TECH_CONFIRM = perTruckEnv;
+    });
+
+    // The far-south stop read (zone-day-funnel.js zoneStopDays) on the hold's own transaction.
+    function makeStopReadBuilder(rows) {
+      const b = {};
+      for (const name of ['leftJoin', 'whereBetween', 'whereNotIn', 'whereNull', 'orWhereRaw']) b[name] = jest.fn(() => b);
+      b.andWhere = jest.fn((callback) => { callback(b); return b; });
+      b.select = jest.fn().mockResolvedValue(rows);
+      return b;
+    }
+
+    // A new hold for a Venice estimate on tech-1, with the real check: `stopRows` are that day's far-south stops, or
+    // null when the gate is off and nothing is read (a read would take the next builder and break the sequence).
+    function reserveVeniceHold({ perTruck = true, stopRows = null, liveHolds = [] } = {}) {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      if (perTruck) process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      else delete process.env.GATE_MULTI_TECH_CONFIRM;
+      const insertBuilder = makeInsertBuilder({ id: 'scheduled-123', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+      const zoneConflict = { ...makeConflictBuilder(null), leftJoin: jest.fn().mockReturnThis() };
+      const stopRead = stopRows ? makeStopReadBuilder(stopRows) : null;
+      // The estimate's other live holds (a changed hour) are dropped after the far-south read.
+      const dropped = { whereIn: jest.fn().mockReturnThis(), del: jest.fn().mockResolvedValue(liveHolds.length) };
+      // Per truck the global probe is scoped to the slot's technician plus unassigned rows (occupancy.js applyTechScope).
+      const globalProbe = makeGlobalProbeBuilder([]);
+      globalProbe.orWhere = jest.fn(() => globalProbe);
+      const trx = makeTrx({
+        estimateBuilder: makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', address: '1 Test Way, Venice, FL 34285' }),
+        technicianBuilder: makeTechnicianBuilder(),
+        scheduledBuilders: [makeLiveHoldsBuilder(liveHolds), ...(stopRead ? [stopRead] : []), ...(liveHolds.length ? [dropped] : []), makeConflictBuilder(null), zoneConflict, globalProbe, insertBuilder],
+        zones: [VENICE],
+      });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+      const run = slotReservation.reserveSlot({ estimateId: 'estimate-456', slotId: signedSlotId(SLOT), selectedFrequency: 'quarterly' });
+      return { run, insertBuilder, stopRead, trx, dropped };
+    }
+    const veniceStop = (technicianId) => ({ scheduled_date: '2027-05-20', zone: 'venice', service_city: null, customer_city: null, technician_id: technicianId });
+
+    test('a new hold on another truck\'s far-south day: slot-taken, read under the date lock by the real clock, nothing inserted', async () => {
+      const { run, insertBuilder, stopRead, trx } = reserveVeniceHold({ stopRows: [veniceStop('tech-2')] });
+      await expect(run).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: signedSlotId(SLOT) });
+      expect(stopRead.whereBetween).toHaveBeenCalledWith('scheduled_services.scheduled_date', ['2027-05-20', '2027-05-20']);
+      // The check's hold rule: a visit staff booked that keeps its old hold time counts, an unclaimed hold by the real clock.
+      expect(stopRead.orWhereRaw).toHaveBeenCalledWith(expect.stringContaining('clock_timestamp()'));
+      const occupancyLock = trx.raw.mock.calls.findIndex((c) => Array.isArray(c[1]) && c[1][1] === 'occupancy:2027-05-20');
+      expect(trx.raw.mock.invocationCallOrder[occupancyLock]).toBeLessThan(stopRead.select.mock.invocationCallOrder[0]);
+      expect(insertBuilder.insert).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['its own truck\'s far-south day', [veniceStop('tech-1')]],
+      ['a day with an unassigned far-south stop', [veniceStop(null), veniceStop('tech-2')]],
+      ['a day no truck goes south yet', []],
+    ])('a new hold on %s: inserted with the zone it checked', async (_label, stopRows) => {
+      const { run, insertBuilder, stopRead } = reserveVeniceHold({ stopRows });
+      await expect(run).resolves.toMatchObject({ scheduledServiceId: 'scheduled-123' });
+      expect(stopRead.select).toHaveBeenCalledTimes(1);
+      expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({ zone: 'venice', technician_id: 'tech-1', scheduled_date: '2027-05-20' }));
+    });
+
+    // A customer changes the hour: the hold being replaced is its truck's only far-south stop on a day another truck
+    // drives too. The list counted that hold when it offered the truck's other hours, so the check reads the day
+    // before the hold is dropped (pre-push P1 on 69000b1ef3).
+    const OWN_HOLD = {
+      id: 'held-old', scheduled_date: '2027-05-20', window_start: '11:00:00', technician_id: 'tech-1',
+      estimated_duration_minutes: 90, reservation_expires_at: '2027-05-20T13:05:00.000Z', zone: 'venice',
+    };
+
+    test('a changed hour on its own truck\'s day: the day is read before the replaced hold is dropped, then the new hold is written', async () => {
+      const { run, insertBuilder, stopRead, dropped } = reserveVeniceHold({ liveHolds: [OWN_HOLD], stopRows: [veniceStop('tech-1'), veniceStop('tech-2')] });
+      await expect(run).resolves.toMatchObject({ scheduledServiceId: 'scheduled-123' });
+      expect(dropped.whereIn).toHaveBeenCalledWith('id', ['held-old']);
+      expect(stopRead.select.mock.invocationCallOrder[0]).toBeLessThan(dropped.del.mock.invocationCallOrder[0]);
+      expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({ zone: 'venice', technician_id: 'tech-1' }));
+    });
+
+    test('a changed hour onto another truck\'s far-south day: slot-taken, and the held time is not dropped', async () => {
+      const { run, insertBuilder, dropped } = reserveVeniceHold({ liveHolds: [{ ...OWN_HOLD, scheduled_date: '2027-05-21' }], stopRows: [veniceStop('tech-2')] });
+      await expect(run).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: signedSlotId(SLOT) });
+      expect(dropped.del).not.toHaveBeenCalled();
+      expect(insertBuilder.insert).not.toHaveBeenCalled();
+    });
+
+    test('gate off (one truck): no far-south read, the hold inserts as before', async () => {
+      const { run, insertBuilder } = reserveVeniceHold({ perTruck: false });
+      await expect(run).resolves.toMatchObject({ scheduledServiceId: 'scheduled-123' });
+      expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({ zone: 'venice' }));
+    });
+
+    // A re-tap of the same slot keeps the customer's hold (the refresh branch). It may have lapsed while another truck
+    // took the day, so it is checked in its own stamp; refused, it is superseded like a clashing one (its delete commits
+    // before the 409, and it no longer blocks its truck's hour).
+    function retapHold({ verdict = true, zone = 'venice', refused = !verdict } = {}) {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      const refreshBuilder = {
+        where: jest.fn().mockReturnThis(),
+        update: jest.fn().mockReturnThis(),
+        returning: jest.fn().mockResolvedValue([{ id: 'held-1', reservation_expires_at: '2027-05-20T13:30:00.000Z' }]),
+      };
+      const deleteBuilder = {
+        where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), whereNotNull: jest.fn().mockReturnThis(),
+        del: jest.fn().mockResolvedValue(1),
+      };
+      const liveHold = {
+        id: 'held-1', scheduled_date: '2027-05-20', window_start: '09:00:00', technician_id: 'tech-1',
+        estimated_duration_minutes: 90, reservation_expires_at: '2027-05-20T13:05:00.000Z', zone,
+      };
+      const trx = makeTrx({
+        estimateBuilder: makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', address: '1 Test Way, Venice, FL 34285' }),
+        technicianBuilder: makeTechnicianBuilder(),
+        scheduledBuilders: [makeLiveHoldsBuilder([liveHold]), makeGlobalProbeBuilder([]), refused ? deleteBuilder : refreshBuilder],
+        zones: [VENICE],
+      });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+      const mayTake = jest.fn(async () => verdict);
+      spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const run = slotReservation.reserveSlot({ estimateId: 'estimate-456', slotId: signedSlotId(SLOT), selectedFrequency: 'quarterly' });
+      return { run, refreshBuilder, deleteBuilder, trx, mayTake };
+    }
+
+    test('a re-tap on its own truck\'s day: checked in the hold\'s stamp and refreshed', async () => {
+      const { run, refreshBuilder, trx, mayTake } = retapHold({ verdict: true });
+      await expect(run).resolves.toMatchObject({ scheduledServiceId: 'held-1' });
+      expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: VENICE, date: '2027-05-20', technicianId: 'tech-1' });
+      expect(refreshBuilder.update).toHaveBeenCalledTimes(1);
+      expect(refreshBuilder.update.mock.calls[0][0]).not.toHaveProperty('zone');
+    });
+
+    test('a re-tap on another truck\'s far-south day: slot-taken, and the hold is released, not refreshed', async () => {
+      const { run, refreshBuilder, deleteBuilder } = retapHold({ verdict: false });
+      await expect(run).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: signedSlotId(SLOT) });
+      expect(deleteBuilder.where).toHaveBeenCalledWith({ id: 'held-1' });
+      expect(deleteBuilder.del).toHaveBeenCalledTimes(1);
+      expect(refreshBuilder.update).not.toHaveBeenCalled();
+    });
+
+    test('a re-tap of a hold with no zone stamp is not checked: its list did not funnel it', async () => {
+      const { run, refreshBuilder, mayTake } = retapHold({ verdict: false, zone: null, refused: false });
+      await expect(run).resolves.toMatchObject({ scheduledServiceId: 'held-1' });
+      expect(mayTake).not.toHaveBeenCalled();
+      expect(refreshBuilder.update).toHaveBeenCalledTimes(1);
+    });
+
+    describe('holdKeepsSouthDay', () => {
+      const { holdKeepsSouthDay } = slotReservation._internals;
+      const ARGS = { stamp: 'venice', date: '2027-05-20', techId: 'tech-1' };
+      const zonesConn = (zones) => jest.fn((table) => {
+        if (table === 'service_zones') return { select: jest.fn().mockResolvedValue(zones) };
+        throw new Error(`unexpected table ${table}`);
+      });
+
+      test.each([[false, false], [true, true]])('per truck, truckMayTakeDate %s: %s, in the zone row the stamp names', async (verdict, kept) => {
+        const mayTake = jest.fn().mockResolvedValue(verdict);
+        spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+        const conn = zonesConn([SARASOTA, VENICE]);
+        await expect(holdKeepsSouthDay(conn, ARGS)).resolves.toBe(kept);
+        expect(mayTake).toHaveBeenCalledWith(conn, { estimateZone: VENICE, date: '2027-05-20', technicianId: 'tech-1' });
+      });
+
+      test('no stamp, a stamp outside the far south, no technician, or either gate off: true, with nothing read and nothing asked', async () => {
+        const mayTake = jest.fn().mockResolvedValue(false);
+        const perTruck = jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true);
+        spies = [perTruck, jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+        const conn = zonesConn([SARASOTA, VENICE]);
+        for (const stamp of [null, '', 'sarasota', 'bradenton', 'sarasota_east', 'venice_north_port']) {
+          await expect(holdKeepsSouthDay(conn, { ...ARGS, stamp })).resolves.toBe(true);
+        }
+        await expect(holdKeepsSouthDay(conn, { ...ARGS, techId: null })).resolves.toBe(true);
+        gates.southZoneDayFunnel = false;
+        await expect(holdKeepsSouthDay(conn, ARGS)).resolves.toBe(true);
+        gates.southZoneDayFunnel = true;
+        perTruck.mockReturnValue(false);
+        await expect(holdKeepsSouthDay(conn, ARGS)).resolves.toBe(true);
+        expect(conn).not.toHaveBeenCalled();
+        expect(mayTake).not.toHaveBeenCalled();
+      });
+
+      // A far-south stamp whose zone row was renamed or removed while the hold was held (pre-push P1s on 26816ae947 to
+      // 1caeec260d). The stop read still counts that hold as the far-south pool's stop (slugMatchesZone), so the check
+      // always runs: in the funneled row with the stamp's slug, else in the whole pool that is left.
+      describe('a far-south stamp whose zone row is gone', () => {
+        const PC_EMPTY = { id: 'zone-pc', zone_name: 'Port Charlotte', cities: [] };
+        const PC_FULL = { id: 'zone-pc', zone_name: 'Port Charlotte', cities: ['Port Charlotte', 'Punta Gorda'] };
+        // A second row with the Venice slug (zoneSlugOf drops what follows the first '/'): the stamp cannot tell them apart.
+        const VENICE_B = { id: 'zone-ven-b', zone_name: 'Venice / Englewood', cities: ['Englewood'] };
+        // A zone row whose own slug is a legacy compound: isFunnelZone does not funnel it.
+        const COMPOUND_ROW = { id: 'zone-x', zone_name: 'venice_north_port', cities: ['Venice'] };
+        const stopConn = (stopRows, zones = [SARASOTA, VENICE]) => jest.fn((table) => {
+          if (table === 'service_zones') return { select: jest.fn().mockResolvedValue(zones) };
+          if (table === 'scheduled_services') return makeStopReadBuilder(stopRows);
+          throw new Error(`unexpected table ${table}`);
+        });
+        const oldStampStop = (technicianId) => ({ ...veniceStop(technicianId), zone: 'port charlotte' });
+        // A booked visit with no zone stamp: it counts by its customer's city.
+        const cityStop = (technicianId, city) => ({ ...veniceStop(technicianId), zone: null, customer_city: city });
+
+        test.each([
+          ['a rival truck\'s Venice stop holds the day: refused', [SARASOTA, VENICE], [veniceStop('tech-2')], false],
+          ['its own truck is on the day too (its hold, under the old stamp): kept', [SARASOTA, VENICE], [oldStampStop('tech-1'), veniceStop('tech-2')], true],
+          ['no truck goes south that day: kept', [SARASOTA, VENICE], [], true],
+          ['a rival truck\'s unstamped stop in a city of the pool that is left: refused', [SARASOTA, VENICE], [cityStop('tech-2', 'North Port')], false],
+          ['a rival truck\'s unstamped stop in a city of no funneled row: kept', [SARASOTA, VENICE], [cityStop('tech-2', 'Sarasota')], true],
+          ['no far-south row left, a rival truck\'s stamped stop holds the day: refused', [SARASOTA], [veniceStop('tech-2')], false],
+          ['no far-south row left, its own truck is on the day too: kept', [SARASOTA], [veniceStop('tech-1'), veniceStop('tech-2')], true],
+          ['an empty zone table, a rival truck\'s stamped stop: refused', [], [veniceStop('tech-2')], false],
+        ])('the real check, %s', async (_label, zones, stopRows, kept) => {
+          process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+          await expect(holdKeepsSouthDay(stopConn(stopRows, zones), { ...ARGS, stamp: 'port charlotte' })).resolves.toBe(kept);
+        });
+
+        // Two rows share the hold's slug (pre-push P1 on 6b533119b1): the check reads the cities of both, in either
+        // row order, so a rival truck's unstamped stop in a city of either row holds the day.
+        test.each([
+          ['Englewood', [VENICE, VENICE_B]], ['Englewood', [VENICE_B, VENICE]], ['North Port', [VENICE, VENICE_B]], ['North Port', [VENICE_B, VENICE]],
+        ])('the real check with two rows of one slug, a rival truck\'s unstamped %s stop: refused', async (city, zones) => {
+          process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+          await expect(holdKeepsSouthDay(stopConn([cityStop('tech-2', city)], zones), ARGS)).resolves.toBe(false);
+        });
+
+        const { zoneOfHoldStamp } = funnel;
+
+        test('zoneOfHoldStamp: several funneled rows with the stamp\'s slug give the cities of all of them, in either order', () => {
+          for (const zones of [[VENICE, VENICE_B, PC_FULL], [PC_FULL, VENICE_B, VENICE]]) {
+            const zone = zoneOfHoldStamp(zones, 'venice');
+            expect(zone).toMatchObject({ id: null, zone_name: 'venice' });
+            expect([...zone.cities].sort()).toEqual(['Englewood', 'North Port', 'Venice']);
+          }
+        });
+
+        test('zoneOfHoldStamp: the one funneled row with the stamp\'s slug; else that slug with the cities of every funneled row left', () => {
+          // Its own row, even with no cities and whatever the row order: the row its list funneled by.
+          expect(zoneOfHoldStamp([VENICE, PC_EMPTY], 'port charlotte')).toBe(PC_EMPTY);
+          expect(zoneOfHoldStamp([PC_FULL, SARASOTA, VENICE], ' Venice ')).toBe(VENICE);
+          // The row is gone: the slug stands for the pool that is left (never a row that is not funneled).
+          expect(zoneOfHoldStamp([SARASOTA, VENICE], 'port charlotte')).toEqual({ id: null, zone_name: 'port charlotte', cities: ['Venice', 'North Port'] });
+          expect(zoneOfHoldStamp([PC_FULL, SARASOTA, COMPOUND_ROW], 'venice')).toEqual({ id: null, zone_name: 'venice', cities: ['Port Charlotte', 'Punta Gorda'] });
+          // No funneled row left: the slug alone, with no cities.
+          expect(zoneOfHoldStamp([SARASOTA], 'port charlotte')).toEqual({ id: null, zone_name: 'port charlotte', cities: [] });
+          expect(zoneOfHoldStamp([], 'venice')).toEqual({ id: null, zone_name: 'venice', cities: [] });
+        });
+
+        // ONE classification for the lists, a new hold and a kept hold (pre-push P1 on 1caeec260d): a hold's stamp is
+        // far-south exactly when isFunnelZone funnels the zone row reserveSlot took that stamp from. So a far-south
+        // stamp is always checked, for every zone table, and any other stamp never is: a legacy compound too, whose
+        // row the lists do not funnel and whose new hold was not checked either.
+        const TABLES = [[], [SARASOTA], [SARASOTA, VENICE], [PC_EMPTY], [VENICE, PC_EMPTY], [PC_FULL, VENICE], [COMPOUND_ROW], [COMPOUND_ROW, VENICE], [VENICE_B, VENICE]];
+        test.each([VENICE, PC_EMPTY, PC_FULL, SARASOTA, COMPOUND_ROW])('the stamp of zone row %j is checked exactly when the lists funnel that row', (row) => {
+          const stamp = row.zone_name.split('/')[0].trim().toLowerCase();
+          for (const zones of TABLES) {
+            const zone = zoneOfHoldStamp(zones, stamp);
+            expect(zone !== null).toBe(funnel.isFunnelZone(row));
+            if (zone) expect(funnel.isFunnelZone(zone)).toBe(true);
+          }
+        });
+        test.each(['sarasota', 'bradenton', 'sarasota_east', 'venice_north_port', 'port charlotte_murdock', 'lakewood_ranch', '', null, undefined])('a stamp that is not far-south (%j) names no zone', (stamp) => {
+          for (const zones of TABLES) expect(zoneOfHoldStamp(zones, stamp)).toBeNull();
+        });
+      });
+    });
+
+    // An accept graduates the hold: checked in its stamp under the accept's date lock, lapsed or live (a live hold
+    // passes on its own row), before the technician check; refused, the customer re-picks (slot-taken).
+    function commitHold({ zone = 'venice', lapsed = true, verdict = true } = {}) {
+      // A fixed clock, as the reserve and re-tap fixtures use: the held date must stay outside the booking notice
+      // window, which commitReservation checks before the far-south check.
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      const mayTake = jest.fn().mockResolvedValue(verdict);
+      spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const chainOf = (first) => {
+        const b = { first: jest.fn().mockResolvedValue(first) };
+        for (const name of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotIn', 'andWhereRaw', 'orWhereRaw', 'select', 'forUpdate']) b[name] = jest.fn().mockReturnValue(b);
+        b.modify = jest.fn((callback) => { callback(b); return b; });
+        b.andWhere = jest.fn((callback) => { callback(b); return b; });
+        return b;
+      };
+      const held = chainOf({
+        id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20', window_start: '09:00:00',
+        window_end: '10:00:00', technician_id: 'tech-1', reservation_expires_at: '2027-05-20T13:15:00.000Z', zone, _lapsed: lapsed,
+      });
+      const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn().mockResolvedValue([{ id: 'scheduled-123' }]) };
+      // The date probe, the held row, the rival live-hold read (a lapsed hold only), the technician's window probe, the
+      // global probe, the write.
+      const scheduledBuilders = [chainOf({ scheduled_date: '2027-05-20' }), held, ...(lapsed ? [chainOf(null)] : []), chainOf(null), makeGlobalProbeBuilder([]), updateBuilder];
+      const technicians = makeAssignableTechnicianBuilder();
+      const trx = jest.fn((table) => {
+        if (table === 'scheduled_services') return scheduledBuilders.shift();
+        if (table === 'service_zones') return { select: jest.fn().mockResolvedValue([SARASOTA, VENICE]) };
+        if (table === 'technicians') return technicians;
+        if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
+        throw new Error(`unexpected table ${table}`);
+      });
+      trx.raw = jest.fn((sql) => ({ raw: sql }));
+      const run = slotReservation.commitReservation({
+        scheduledServiceId: 'scheduled-123', customerId: 'customer-1',
+        estimate: { id: 'estimate-456', address: '1 Test Way, Venice, FL 34285', service_interest: 'Pest Control' }, trx,
+      });
+      return { run, trx, mayTake, updateBuilder, technicians };
+    }
+
+    test.each([['lapsed', true], ['live', false]])('an accept of a %s hold on its own truck\'s day: checked in its stamp, then graduated', async (_label, lapsed) => {
+      const { run, trx, mayTake, updateBuilder, technicians } = commitHold({ lapsed });
+      await expect(run).resolves.toMatchObject({ id: 'scheduled-123' });
+      expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: VENICE, date: '2027-05-20', technicianId: 'tech-1' });
+      expect(mayTake.mock.invocationCallOrder[0]).toBeLessThan(technicians.where.mock.invocationCallOrder[0]);
+      const [written] = updateBuilder.update.mock.calls[0];
+      expect(written).toMatchObject({ customer_id: 'customer-1', reservation_expires_at: null });
+      expect(written).not.toHaveProperty('zone');
+    });
+
+    test('an accept on another truck\'s far-south day: slot-taken with the hold\'s slot, nothing written', async () => {
+      const { run, updateBuilder, technicians } = commitHold({ verdict: false });
+      await expect(run).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: '2027-05-20_09-00_tech-1' });
+      expect(technicians.where).not.toHaveBeenCalled();
+      expect(updateBuilder.update).not.toHaveBeenCalled();
+    });
+
+    test('an accept of a hold with no zone stamp is not checked: its list did not funnel it', async () => {
+      const { run, mayTake, updateBuilder } = commitHold({ zone: null, verdict: false });
+      await expect(run).resolves.toMatchObject({ id: 'scheduled-123' });
+      expect(mayTake).not.toHaveBeenCalled();
+      expect(updateBuilder.update).toHaveBeenCalledTimes(1);
+    });
   });
 
   test('reserveSlot refuses a new-home estimate\'s slot before the move-in date, read under a lock in the hold transaction (moving PR B1)', async () => {

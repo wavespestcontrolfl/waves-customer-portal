@@ -10,6 +10,8 @@ const serviceLineMode = () => (typeof featureGates.serviceLineMapMode === 'funct
 // The Team tab card and its endpoints work in 'shadow' and 'live' alike.
 const serviceLineMapOn = () => ['shadow', 'live'].includes(serviceLineMode());
 const territoryReadoutOn = () => (typeof featureGates.territoryReadoutLive === 'function' ? featureGates.territoryReadoutLive() : false);
+// GATE_TECH_SHIFT_HOURS: the Team tab "Shift hours" row; looked up at call time like the readers above.
+const techShiftHoursOn = () => (typeof featureGates.techShiftHoursLive === 'function' ? featureGates.techShiftHoursLive() : false);
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
@@ -107,6 +109,8 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'hire_action', 'hire_password_unset', 'hire_link_pending', 'hire_link_expires_at',
   // Team tab "Work days" (GATE_TECH_WORK_DAYS); dropped from the response while the gate is off.
   'work_days',
+  // Team tab "Shift hours" (GATE_TECH_SHIFT_HOURS); dropped from the response while the gate is off.
+  'shift_start', 'shift_end',
 ];
 
 function pickTechResponseFields(tech, fields) {
@@ -140,6 +144,11 @@ function sanitizeTechForAdmin(tech) {
     if (out && out[f] != null) out[f] = Number(out[f]);
   }
   if (out && !techWorkDaysLive()) delete out.work_days;
+  // pg returns a time column as 'HH:MM:SS'; the API hands back 'HH:MM', the editor's format.
+  for (const f of ['shift_start', 'shift_end']) {
+    if (out && !techShiftHoursOn()) delete out[f];
+    else if (out && out[f] != null) out[f] = String(out[f]).slice(0, 5);
+  }
   // Team tab Google sign-in (GATE_STAFF_GOOGLE_SIGNIN): the linked address and
   // whether its first sign-in pinned a Google account; never Google's id.
   if (out && googleSignin.staffGoogleSigninLive()) {
@@ -168,6 +177,23 @@ function normalizeWorkDaysInput(value) {
     days.add(raw);
   }
   return { patch: { work_days: days.size === 7 ? null : [...days].sort((a, b) => a - b) } };
+}
+
+const SHIFT_HOURS_ERROR = 'shiftHours must be null (no set hours) or { start, end } as HH:MM times, with the end after the start';
+const SHIFT_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+// `shiftHours` on POST/PUT /technicians (GATE_TECH_SHIFT_HOURS). undefined, or the
+// gate off = leave alone (the columns are inert and the editor hidden). null = no
+// set hours (both columns NULL). Otherwise { start, end }: 'HH:MM' Eastern
+// wall-clock times on one day, the end after the start (the column CHECK too).
+function normalizeShiftHoursInput(value) {
+  if (value === undefined || !techShiftHoursOn()) return { patch: {} };
+  if (value === null) return { patch: { shift_start: null, shift_end: null } };
+  const { start, end } = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  if (typeof start !== 'string' || typeof end !== 'string' || !SHIFT_TIME.test(start) || !SHIFT_TIME.test(end) || end <= start) {
+    return { error: SHIFT_HOURS_ERROR };
+  }
+  return { patch: { shift_start: start, shift_end: end } };
 }
 
 const START_ADDRESS_MAX = 300;
@@ -853,6 +879,7 @@ async function listTechnicians(req, res, next) {
     res.json({
       technicians: enriched,
       ...(techWorkDaysLive() ? { workDaysEnabled: true } : {}),
+      ...(techShiftHoursOn() ? { shiftHoursEnabled: true } : {}),
       ...(serviceLineMapOn() ? { serviceLinesEnabled: true } : {}),
       ...(territoryReadoutOn() ? { territoryReadoutEnabled: true } : {}),
       ...(callerIsAdmin && googleSignin.staffGoogleSigninLive() ? { googleSigninEnabled: true } : {}),
@@ -1084,6 +1111,8 @@ async function createTechnician(req, res, next) {
     if (techLine.error) return res.status(400).json({ error: techLine.error });
     const workDays = normalizeWorkDaysInput(body.workDays);
     if (workDays.error) return res.status(400).json({ error: workDays.error });
+    const shiftHours = normalizeShiftHoursInput(body.shiftHours);
+    if (shiftHours.error) return res.status(400).json({ error: shiftHours.error });
 
     const insertRow = {
       name: name.trim(),
@@ -1106,6 +1135,7 @@ async function createTechnician(req, res, next) {
     if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
     Object.assign(insertRow, techLine.patch);
     Object.assign(insertRow, workDays.patch);
+    Object.assign(insertRow, shiftHours.patch);
     applyPayrollProfileFields(insertRow, body);
 
     const outcome = await db.transaction(async (trx) => {
@@ -1177,6 +1207,8 @@ async function updateTechnician(req, res, next) {
     if (startPoint.error) return res.status(400).json({ error: startPoint.error });
     const workDays = normalizeWorkDaysInput(body.workDays);
     if (workDays.error) return res.status(400).json({ error: workDays.error });
+    const shiftHours = normalizeShiftHoursInput(body.shiftHours);
+    if (shiftHours.error) return res.status(400).json({ error: shiftHours.error });
     const badPayRate = payRateError(body);
     if (badPayRate) return res.status(400).json({ error: badPayRate });
 
@@ -1234,6 +1266,7 @@ async function updateTechnician(req, res, next) {
       Object.assign(updates, techLine.patch);
       Object.assign(updates, startPoint.patch);
       Object.assign(updates, workDays.patch);
+      Object.assign(updates, shiftHours.patch);
 
       // Any transition that leaves `active` (→ inactive OR → prospective)
       // revokes sessions; entering active from prospective also rotates so a

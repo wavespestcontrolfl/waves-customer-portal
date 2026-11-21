@@ -17,7 +17,8 @@
  *      visible to step 1.
  *
  * Deliberate boundaries:
- *   - Offer-time only. There is NO redemption re-check in reserveSlot: the
+ *   - Offer-time only. There is NO redemption re-check of the cluster choice
+ *     in reserveSlot (owner rule B per truck, below, is a different check): the
  *     signed slot offer (slot-offer-token) already binds surface + estimate +
  *     date, so a customer can only tap a day this funnel genuinely offered —
  *     and unlike an owner blackout, a cluster day shifting between offer and
@@ -64,9 +65,12 @@
  * before either is written, so the assessment link's booking transaction
  * re-checks the truck under its date lock (truckMayTakeDate,
  * createSelfBooking callbackVisit.slotGuard) with the zone it stamps on its
- * row. The estimate page's holds do not re-check it: like the cluster choice
- * (Deliberate boundaries), two offers held before either is written can send
- * a second truck south that day, bounded by the offer-token TTL. The stop read
+ * row. The estimate page re-checks it under the same date lock at each hold
+ * write: a new hold in the zone it stamps (reserveSlot), and a re-tap, an
+ * extend and an accept in the hold's stamp (slot-reservation.js
+ * holdKeepsSouthDay), the zone its list funneled (zoneOfHoldStamp: a stamp whose
+ * row is gone is checked in the same funneled pool). A hold that list did not
+ * funnel (no stamp: its estimate in no zone when held) is not checked. The stop read
  * counts a hold by the real clock (clock_timestamp), not the writer's
  * transaction start; under the date lock it also counts a visit staff booked
  * that keeps its old hold time (zoneStopDays). The
@@ -325,12 +329,34 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = 
 // Owner rule B when a booking is written, under the writer's date lock: may `technicianId` still take `date` for a
 // booking in `estimateZone`, the zone the writer stamps on its row? Two bookings can pick the same new day for two
 // trucks before either is written; the date lock serializes them, and this read on the locked transaction sees the
-// first one's stop. Writer: the lead assessment link (createSelfBooking callbackVisit.slotGuard). true when the rule
+// first one's stop. Writers: the lead assessment link (createSelfBooking callbackVisit.slotGuard) and the estimate page's
+// hold writes (slot-reservation.js reserveSlot and holdKeepsSouthDay). true when the rule
 // does not apply (gate off, fleet view, no technician, no funneled zone), with no read. A query failure throws, so the writer's transaction fails closed like its other reads.
 async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
   if (technicianId == null || !perTruckLive() || !isFunnelZone(estimateZone)) return true;
   const { dates, techs } = await zoneStopDays(conn, estimateZone, date, date, { includeClaimedReservations: true });
   return !dates.has(date) || onZoneDay(date, technicianId, dates, techs);
+}
+
+// The zone a hold's zone stamp names, for the check at a kept hold's write (slot-reservation.js holdKeepsSouthDay).
+// ONE classification with the lists and the new-hold check: a stamp is far-south when isFunnelZone says so of a zone
+// with that slug (a funneled slug, exactly). reserveSlot stamps the slug of the zone row its list funneled by, so a
+// hold with such a stamp was funneled and checked when it was written, and it is ALWAYS checked again, whatever
+// happened to the zone rows since. Any other stamp names no zone (null) and is never checked: none, another zone, or
+// a legacy compound ('venice_north_port'), which isFunnelZone does not funnel either, so no list and no new hold
+// treated that hold as far-south. The zone is the ONE funneled row with that slug, the row the list funneled by. With
+// that row renamed or removed, the slug stands for the whole pool, because every funneled slug names the one
+// consolidated south pool the stop read counts that stamp in: it takes the cities of every funneled row left, so their
+// unstamped stops match by city (none left: no cities, and the stamped stops still count). When several rows share
+// the slug (zoneSlugOf drops what follows the first '/'), the stamp cannot tell them apart, so it takes the cities of
+// all of them. No row is ever picked by its order in the table.
+function zoneOfHoldStamp(zones, stamp) {
+  const slug = String(stamp || '').trim().toLowerCase();
+  if (!isFunnelZone({ zone_name: slug })) return null;
+  const pool = zones.filter(isFunnelZone);
+  const own = pool.filter((zone) => zoneSlugOf(zone) === slug);
+  if (own.length === 1) return own[0];
+  return { id: null, zone_name: slug, cities: (own.length ? own : pool).flatMap((zone) => zone.cities || []) };
 }
 
 // The funnel for an offer pool that is not built by the estimate page (the lead assessment link:
@@ -397,6 +423,7 @@ module.exports = {
   applyZoneDayFunnel,
   dropOtherTruckDays,
   truckMayTakeDate,
+  zoneOfHoldStamp,
   offerFunnelView,
   funnelOfferPool,
   funnelZoneRows,

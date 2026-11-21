@@ -394,6 +394,31 @@ describe('roster summary + new-hire seed', () => {
     }
   });
 
+  test('GATE_TECH_SHIFT_HOURS: the roster carries the shift hours as HH:MM and shiftHoursEnabled only while the gate is on; non-admin readers never see them', async () => {
+    const techs = [{ ...TECH, shift_start: '07:00:00', shift_end: '17:30:00' }];
+    installDb(jest.fn((table) => {
+      if (table === 'technicians') return makeChain({ rows: techs });
+      if (table === 'technician_capabilities') return makeChain({ rows: [] });
+      throw new Error(`Unexpected table: ${table}`);
+    }));
+    try {
+      const off = await invoke(listTechnicians, { technician: { role: 'admin' } });
+      expect(off.body).not.toHaveProperty('shiftHoursEnabled');
+      expect(off.body.technicians[0]).not.toHaveProperty('shift_start');
+      expect(off.body.technicians[0]).not.toHaveProperty('shift_end');
+
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const on = await invoke(listTechnicians, { technician: { role: 'admin' } });
+      expect(on.body.shiftHoursEnabled).toBe(true);
+      expect(on.body.technicians[0]).toMatchObject({ shift_start: '07:00', shift_end: '17:30' });
+      const asTech = await invoke(listTechnicians, { technician: { role: 'technician' } });
+      expect(asTech.body.technicians[0]).not.toHaveProperty('shift_start');
+      expect(asTech.body.technicians[0]).not.toHaveProperty('shift_end');
+    } finally {
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+    }
+  });
+
   test('creating a technician seeds all five categories at review_required on the same transaction', async () => {
     const conn = fakeConn();
     // createTechnician: email probe (first → none), then the insert.

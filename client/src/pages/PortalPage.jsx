@@ -6517,6 +6517,12 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const [paymentSmsOff, setPaymentSmsOff] = useState(false);
   const [paymentSmsReenabled, setPaymentSmsReenabled] = useState(false);
   const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
+  // The legacy form sends the receipt channel on every save; this marks a save where the customer changed it,
+  // so the server can tell a pick from an echo (routes/notifications.js dropLegacyReceiptAppEcho).
+  const [receiptChannelEdited, setReceiptChannelEdited] = useState(false);
+  // True when the server said it accepts that mark (preferences.receiptChannelEditMark). An older server's
+  // schema rejects an unknown key and would fail the whole billing save, so the mark is sent only then.
+  const [receiptEditMarkAccepted, setReceiptEditMarkAccepted] = useState(false);
   const [smsPrefEnabled, setSmsPrefEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
@@ -6660,6 +6666,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           setPaymentSmsOff(prefsData.paymentConfirmationSms === false);
           setPaymentSmsReenabled(false);
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
+          setReceiptChannelEdited(false);
+          setReceiptEditMarkAccepted(prefsData.receiptChannelEditMark === true);
           const nextBillingChannels = Object.fromEntries(BILLING_CHANNEL_FIELDS.map((field) => [
             field.key,
             normalizeBillingChannels(prefsData[field.key], prefsData[field.legacyKey] || 'sms'),
@@ -7374,18 +7382,27 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
     }
     setBillingPrefsSaving(true);
     setBillingPrefsStatus(null);
+    // The receipt channel the selector shows: with no deliverable email an Email choice is locked to Text.
+    const receiptShown = paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms';
+    // The receipt channel goes with this save only when the customer changed the selector, or when that lock
+    // changes the stored value. An untouched selector sends nothing: a second tab's untouched Text must not
+    // overwrite an App choice saved in the first tab.
+    const receiptChannelSent = receiptChannelEdited || receiptShown !== paymentConfirmationChannel;
+    // An App pick for receipts that this save carries. The server writes it only with the mark below.
+    const receiptAppPickSent = !billingChannelsAvailable && receiptChannelEdited && paymentConfirmationChannel === 'push';
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
       ...(paymentSmsReenabled ? { paymentConfirmationSms: true } : {}),
       // No email on file (or email messages opted out portal-wide) → the
       // dropdowns render locked to Text; persist what is shown so an
       // SMS-suppressing 'email' choice can't linger with no deliverable
-      // email leg.
+      // email leg. (The receipt channel: only when changed or locked, above.)
       ...(!billingChannelsAvailable ? {
         billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
         ...(appPreferencesAvailable && invoiceChannel !== savedInvoiceChannel ? { invoiceChannel } : {}),
         ...(appPreferencesAvailable && paymentIssueChannel !== savedPaymentIssueChannel ? { paymentIssueChannel } : {}),
-        paymentConfirmationChannel: paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms',
+        ...(receiptChannelSent ? { paymentConfirmationChannel: receiptShown } : {}),
+        ...(receiptChannelEdited && receiptEditMarkAccepted ? { paymentConfirmationChannelEdited: true } : {}),
       } : {}),
     })
       .then((result) => {
@@ -7397,18 +7414,33 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           setPaymentIssueChannel(result?.preferences?.paymentIssueChannel || savedPaymentIssueChannel);
           throw new Error('Billing delivery preference was not saved');
         }
+        // Read first what this server accepts, so a pick made again after a refusal carries the mark.
+        if (result?.preferences) setReceiptEditMarkAccepted(result.preferences.receiptChannelEditMark === true);
+        // The server did not store the App pick (it got no mark: the page loaded from a server that did not
+        // offer one). Show what is stored and report the failure, as the invoice selectors above do.
+        const storedReceipt = !billingChannelsAvailable ? result?.preferences?.paymentConfirmationChannel : undefined;
+        if (receiptAppPickSent && storedReceipt !== 'push') {
+          setPaymentConfirmationChannel(storedReceipt || 'sms');
+          setReceiptChannelEdited(false);
+          throw new Error('Receipt delivery preference was not saved');
+        }
+        // Show where receipts go now. Another tab may have changed the stored channel, or the server
+        // dropped an App value this page showed and did not change.
+        if (storedReceipt) setPaymentConfirmationChannel(storedReceipt);
         if (!billingChannelsAvailable) {
           setSavedInvoiceChannel(invoiceChannel);
           setSavedPaymentIssueChannel(paymentIssueChannel);
         }
         setSavedBillingEmail(billingEmail);
+        // The receipt selector is locked while this save runs, so the mark cleared here is the one just sent.
+        setReceiptChannelEdited(false);
         // Keep local state in step with the coerced save — otherwise
         // re-adding an email (or re-enabling email messages) in the same
         // session resurrects a stale Email/Both selection the server was
         // just normalized away from.
         if (!billingChannelsAvailable && !hasBillingEmail) {
           setBillingReminderChannel('sms');
-          if (paymentConfirmationChannel !== 'push') setPaymentConfirmationChannel('sms');
+          if ((storedReceipt || paymentConfirmationChannel) !== 'push') setPaymentConfirmationChannel('sms');
         }
         setBillingPrefsSaving(false);
         setPaymentSmsReenabled(false);
@@ -8232,8 +8264,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
                 return (
                   <CustomerSelect
                     value={paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms'}
-                    onChange={(e) => setPaymentConfirmationChannel(e.target.value)}
-                    disabled={opts.length <= 1}
+                    onChange={(e) => { setPaymentConfirmationChannel(e.target.value); setReceiptChannelEdited(true); }}
+                    disabled={opts.length <= 1 || billingPrefsSaving}
                     aria-label="Delivery method for payment confirmations"
                   >
                     {opts.map(o => <option key={o.value} value={o.value} disabled={o.value === 'push' && !billingApp.ready}>{o.label}</option>)}

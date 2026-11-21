@@ -37,7 +37,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
   const NOW = new Date('2026-11-04T18:00:00Z'); // 1:00 PM Eastern, Wednesday
   const CALL_AT = '2026-11-04T15:00:00Z'; // 10:00 AM Eastern; with 120 s of talk time it ends 10:02, due 12:02 PM
   const ids = { customers: [], leads: [], calls: [], promises: [], visits: [], texts: [], estimates: [] };
-  let seq = 0;
+  const usedPhones = new Set();
 
   beforeAll(() => {
     const target = new URL(process.env.DATABASE_URL);
@@ -64,10 +64,31 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     await db('customers').whereIn('id', ids.customers).del();
   });
 
+  // A number that no call or text row in this database has. The bell counts ANY inbound call or text from the
+  // caller's number after the fixture call ended (2026-11-04; no upper bound, since in production no row is newer than
+  // now), and other DB suites leave inbound rows on random +1941555NNNN numbers stamped with the real clock. The old
+  // fixed numbers (+19415551001 and up) met such a row at random: the caller then read as "called back", so the bell
+  // was missing, or closed as "They called back", or an open promise read fulfilled (four failed main runs on
+  // 2026-11-20). Suites run one at a time in a database, so a number that is clean here stays clean.
+  async function freshPhone() {
+    const { phoneWhereAny } = require('../services/call-commitments');
+    for (let tries = 0; tries < 500; tries += 1) {
+      const phone = `+1941555${1000 + Math.floor(Math.random() * 9000)}`;
+      if (usedPhones.has(phone)) continue;
+      const rows = await Promise.all(['call_log', 'sms_log'].map((table) => db(table).where((b) => {
+        phoneWhereAny(b, 'from_phone', [phone]);
+        phoneWhereAny(b, 'to_phone', [phone], { or: true });
+      }).first('id')));
+      if (rows.some(Boolean)) continue;
+      usedPhones.add(phone);
+      return phone;
+    }
+    throw new Error('No unused fixture number left in +1941555NNNN');
+  }
+
   // One synthetic new-lead caller: a lead, the inbound call that made it, and the caller's own call_back promise.
   async function caller({ nature = 'new_lead', leadStatus = 'new', callAt = CALL_AT, withCustomer = false, promiseOver = {} } = {}) {
-    seq += 1;
-    const phone = `+1941555${String(1000 + seq)}`;
+    const phone = await freshPhone();
     const leadId = randomUUID();
     const callId = randomUUID();
     const sid = `CA${randomUUID().replace(/-/g, '')}`;
@@ -122,6 +143,22 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
   }
 
   const run = (now = NOW) => Bell.runCallerCallbackBell({ now });
+
+  test('a fixture caller never gets a number that already has a call or a text', async () => {
+    // A row as another suite leaves it: inbound, on a +1941555NNNN number, stamped with the real clock.
+    const taken = await freshPhone();
+    usedPhones.delete(taken);
+    const left = await inboundText(taken, new Date().toISOString());
+    const draw = jest.spyOn(Math, 'random').mockReturnValueOnce((Number(taken.slice(-4)) - 1000 + 0.5) / 9000);
+    try {
+      const c = await caller();
+      expect(draw.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(c.phone).not.toBe(taken);
+      expect(await db('sms_log').where({ id: left }).first('id')).toBeTruthy();
+    } finally {
+      draw.mockRestore();
+    }
+  });
 
   test('a late callback raises one Leads bell with the right fields, and a repeat run adds nothing', async () => {
     const c = await caller();

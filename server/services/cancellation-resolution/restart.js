@@ -720,8 +720,16 @@ async function accountHasOtherProfile(dbh, customer) {
 // plan-free profile beside a member profile would sell a first plan. Any
 // other non-deleted profile counts, active or not, as the proof counts every
 // property row. Plan restart keeps the portal offer's default, as on main.
+// Both modes refuse a first line with no house number (codex pre-push r31
+// P1): blank with the unit on line 2, only a unit ("Apt 4", "#4", "4B"),
+// only the city, or a street with no number ("Main St"). Its key would name
+// no house. The bar is the linkage module's own, the one every
+// estimate-side key already passes (partialPartsHaveAddressEvidence, the
+// engine's house-number recognizer). It reads the front of the line only:
+// the words after the house number are not judged ("123 Apt 4" passes).
 async function singlePremisesStreet(dbh, customer, { proof, strict = false } = {}) {
   const linkage = require('../estimate-property-linkage');
+  if (!linkage.partialPartsHaveAddressEvidence(customer)) return null;
   const street = linkage.normalizedStampedStreet(customer.address_line1, customer.address_line2, customer.city, customer.zip);
   if (!street || linkage.scopeKeyLacksLocality(street)) return null;
   // Through the exports, so a suite can stand in for the account read.
