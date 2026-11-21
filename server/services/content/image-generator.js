@@ -135,7 +135,9 @@ const DEFAULT_CHAIN = 'gpt-image-2.6-sunburst,gpt-image-2.5-sunburst,gpt-image-2
 // the default ONLY while ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true, so the
 // documented kill switch restores the old fallback legs during an OpenAI
 // outage without also requiring a BLOG_/SOCIAL_IMAGE_PROVIDER change.
-const WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2.6-sunburst,gpt-image-2.5-sunburst,gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
+// The override keeps its shape: two OpenAI legs, then Gemini, so two OpenAI
+// timeouts cannot spend the whole chain budget before a healthy Gemini leg.
+const WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2.6-sunburst,gpt-image-2.5-sunburst,gemini-image-pro,gpt-image-2,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
 
 const MODEL_MAP = {
   'gpt-image-2.6-sunburst': { api: 'openai', model: 'gpt-image-2.6-sunburst', quality: 'high' },

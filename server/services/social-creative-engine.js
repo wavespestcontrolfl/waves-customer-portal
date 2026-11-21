@@ -35,7 +35,9 @@ function boolEnv(key, defaultValue = false) {
 const SOCIAL_DEFAULT_CHAIN = 'gpt-image-2.6-sunburst,gpt-image-2.5-sunburst,gpt-image-2,gpt-image-1.5,gpt-image-1';
 // Pre-2026-09-24 order; the default only while the override is set (see
 // image-generator.js — the kill switch alone must restore the old fallbacks).
-const SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2.6-sunburst,gpt-image-2.5-sunburst,gpt-image-2,gemini-image-best,gemini-image,gpt-image-1.5,gpt-image-1,gemini';
+// The override keeps its shape: Gemini right after the primary OpenAI leg,
+// so one OpenAI timeout still leaves budget for a healthy Gemini leg.
+const SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2.6-sunburst,gemini-image-best,gemini-image,gpt-image-2.5-sunburst,gpt-image-2,gpt-image-1.5,gpt-image-1,gemini';
 
 const CREATIVE_FLAGS = {
   get enabled() { return boolEnv('SOCIAL_CREATIVE_ENGINE_ENABLED', false); },
