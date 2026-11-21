@@ -397,10 +397,18 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } =
   // program's meta (results.tsMeta), which names no service, so a price on a
   // default of zero trees read as clean (pre-push r6 on this branch). Only
   // that pricer writes the field: an object that holds it and names no
-  // service is graded as the tree_shrub row it describes. The meta keeps the
-  // palm count and its source and not the reserve state, so palms priced
-  // through an armed reserve do not clear it here.
-  const asRow = (c) => (c.treeCountSource !== undefined && c.service === undefined ? { ...c, service: 'tree_shrub' } : c);
+  // service is graded as the tree_shrub row it describes.
+  //
+  // The row test clears the marker when the palms priced: palms on the
+  // service line, or any palms with the reserve armed. The meta keeps the
+  // palm count, its source and the quote-time knobs, and not the row's
+  // palmReserveActive flag (pre-push r7). pricedTreeShrubPalmCount is the
+  // existing reader of that evidence on both shapes, so the meta's palms
+  // clear the marker exactly when the raw row's do.
+  const { pricedTreeShrubPalmCount } = require('../pricing-engine/tree-shrub-palm-priced');
+  const asRow = (c) => (c.treeCountSource !== undefined && c.service === undefined
+    ? { ...c, service: 'tree_shrub', palmReserveActive: pricedTreeShrubPalmCount(c) != null }
+    : c);
   const markedForReview = (c, turfCounts) => listsCodes(c.fieldVerify) || listsCodes(c.fieldVerifyFlags)
     || (turfCounts && listsCodes(c.turfFlags))
     || lineNeedsReviewBeforeExactPrice(asRow(c), { turfGrade: turfCounts });

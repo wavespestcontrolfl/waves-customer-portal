@@ -629,7 +629,8 @@ describe('buildReportCrossSell', () => {
       // demotes; a stated count or a density estimate does not.
       const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
       const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
-      const mappedQuote = (features, treeShrub = {}) => mapV1ToLegacyShape(generateEstimate({ ...inputs, propertyType: 'Single Family', estimatedTurfSf: 2500, features, services: { treeShrub } }));
+      const rawQuote = (features, treeShrub = {}, extra = {}) => generateEstimate({ ...inputs, propertyType: 'Single Family', estimatedTurfSf: 2500, features, services: { treeShrub }, ...extra });
+      const mappedQuote = (...quoteArgs) => mapV1ToLegacyShape(rawQuote(...quoteArgs));
       const zeroTrees = mappedQuote({});
       expect(zeroTrees.results.tsMeta).toMatchObject({ treeCountSource: 'default_zero' });
       expect(zeroTrees.results.tsMeta.service).toBeUndefined();
@@ -638,11 +639,41 @@ describe('buildReportCrossSell', () => {
       for (const [name, quote, source] of [['stated count', mappedQuote({}, { treeCount: 4 }), 'explicit'], ['density', mappedQuote({ trees: 'moderate' }), 'density_estimate']]) {
         expect([name, quote.results.tsMeta.treeCountSource, flagged({ result: quote })]).toEqual([name, source, false]);
       }
-      // The meta alone, with the row test's palm rule: palms on the service
-      // line priced, so they clear it; a property palm count does not.
+      // Palms that priced clear the marker, on the mapped meta exactly as on
+      // the raw row (pre-push r7). The raw row holds palmReserveActive; the
+      // meta holds only the quote-time knobs. Real engine, real mapper, zero
+      // trees, palms on the property or on the service line, reserve armed
+      // on both legs, on one leg, or not armed.
+      const { engineResultNeedsReview } = require('../services/cancellation-resolution/restart');
+      const armedBoth = { treeShrubPricingKnobs: { perPalmAnnual: 16, minutesPerPalmVisit: 1.5 } };
+      const armedMaterial = { treeShrubPricingKnobs: { perPalmAnnual: 16, minutesPerPalmVisit: 0 } };
+      const armedLabor = { treeShrubPricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 1.5 } };
+      const unarmed = { treeShrubPricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 } };
+      const palmCases = [
+        ['property palms, reserve armed', { palmCount: 3 }, {}, armedBoth, 'property', false],
+        ['property palms, material leg armed', { palmCount: 3 }, {}, armedMaterial, 'property', false],
+        ['property palms, labor leg armed', { palmCount: 3 }, {}, armedLabor, 'property', false],
+        ['property palms, reserve not armed', { palmCount: 3 }, {}, unarmed, 'property', true],
+        ['service-line palms, reserve not armed', {}, { palmCount: 3 }, unarmed, 'service_line', false],
+        ['service-line palms, reserve armed', {}, { palmCount: 3 }, armedBoth, 'service_line', false],
+        ['no palms, reserve armed', {}, {}, armedBoth, 'none', true],
+      ];
+      for (const [name, features, treeShrub, knobs, source, needsReview] of palmCases) {
+        const raw = rawQuote(features, treeShrub, knobs);
+        const rawRow = raw.lineItems.find((li) => li.service === 'tree_shrub');
+        const mapped = mapV1ToLegacyShape(raw);
+        expect([name, rawRow.treeCountSource, rawRow.palmCountSource]).toEqual([name, 'default_zero', source]);
+        expect(mapped.results.tsMeta.palmReserveActive).toBeUndefined();
+        expect([name, engineResultNeedsReview(raw), flagged({ result: mapped })]).toEqual([name, needsReview, needsReview]);
+      }
+      // The meta alone: palms on the service line priced, so they clear it; a
+      // property palm count clears it only with a saved armed knob.
       const meta = (fields) => ({ result: { fieldVerify: [], results: { tsMeta: { eb: 900, et: 0, ...fields } } } });
       expect(flagged(meta({ treeCountSource: 'default_zero' }))).toBe(true);
       expect(flagged(meta({ treeCountSource: 'default_zero', palmCount: 2, palmCountSource: 'property' }))).toBe(true);
+      expect(flagged(meta({ treeCountSource: 'default_zero', palmCount: 2, palmCountSource: 'property', pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 } }))).toBe(true);
+      expect(flagged(meta({ treeCountSource: 'default_zero', palmCount: 2, palmCountSource: 'property', pricingKnobs: { perPalmAnnual: 16, minutesPerPalmVisit: 0 } }))).toBe(false);
+      expect(flagged(meta({ treeCountSource: 'default_zero', palmCount: 0, palmCountSource: 'none', pricingKnobs: { perPalmAnnual: 16, minutesPerPalmVisit: 1.5 } }))).toBe(true);
       expect(flagged(meta({ treeCountSource: 'default_zero', palmCount: 2, palmCountSource: 'service_line' }))).toBe(false);
       for (const source of ['explicit', 'density_estimate', null]) {
         expect([source, flagged(meta({ treeCountSource: source }))]).toEqual([source, false]);
@@ -652,7 +683,6 @@ describe('buildReportCrossSell', () => {
       // The mint holds a fresh result to the same row test: one function, so
       // a marker added for one is a marker for the other.
       const { lineNeedsReviewBeforeExactPrice } = require('../services/estimator-engine/draft-builder');
-      const { engineResultNeedsReview } = require('../services/cancellation-resolution/restart');
       for (const [name, fields] of Object.entries(markers)) {
         expect([name, lineNeedsReviewBeforeExactPrice(fields), engineResultNeedsReview({ lineItems: [fields] })]).toEqual([name, true, true]);
       }
