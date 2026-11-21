@@ -2756,6 +2756,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Job offers, the 7-day close (job-offers.js closeExpiredOffers; GATE_JOB_OFFERS): every 15 minutes a sent
+  // offer past its expiry is stored as expired and rings one bell for the owner. A catch-up pass: each tick
+  // closes all that is due, so a dropped tick loses nothing. It sends the applicant nothing. The gate is read
+  // before the lock, so off means no query and no job_health write.
+  cron.schedule('0 9,24,39,54 * * * *', async () => {
+    if (!isEnabled('jobOffers')) return;
+    try {
+      await runExclusive('job-offer-close', async () => {
+        const { closed, failed } = await require('./job-offers').closeExpiredOffers();
+        if (closed > 0) logger.info(`[job-offers] close sweep: closed=${closed}`);
+        if (failed > 0) throw new Error(`${failed} offer(s) did not close`);
+      });
+    } catch (err) {
+      logger.error(`[job-offers] close sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 06:35 — pin check after a visit (GATE_PIN_PARKED_CHECK, dark): compares the map pin of each
   // customer whose visit was completed in the last 2 ET days with where the technician's truck parked,
   // and SUGGESTS the parked point to staff. It never changes a pin and never contacts a customer.
