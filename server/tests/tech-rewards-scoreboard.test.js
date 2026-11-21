@@ -2,7 +2,7 @@
 // with synthetic fixtures. The reads run against Postgres in tech-rewards-scoreboard-postgres.test.js.
 jest.mock('../models/db', () => jest.fn());
 
-const { composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents } = require('../services/tech-rewards-scoreboard');
+const { composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents, ordinaryPremium } = require('../services/tech-rewards-scoreboard');
 
 const WEIGHTS = { onTime: 25, audit: 25, callbacks: 20, truck: 10, ownerRating: 20 };
 const CUTS = { top: 90, mid: 80, low: 70 };
@@ -61,6 +61,37 @@ describe('reviewRateBps', () => {
   });
 });
 
+describe('the overtime a bonus causes is not a bonus base', () => {
+  test('the premium a Tech Rewards line caused (techRewardsPremiumCents) is not left in the base as undated pay', () => {
+    const check = {
+      weekStart: '2026-09-14', grossCents: 100000 + 156000 + 6100, regularPayCents: 0, overtimePayCents: 0, overtimeMinutes: 0,
+      ptoPayCents: 0, holidayPayCents: 0, techRewardsCents: 156000, techRewardsPremiumCents: 606,
+      lines: [{ cents: 100000, weekStart: '2026-08-24' }], lineOvertimeWeeks: [{ weekStart: '2026-08-24', premiumCents: 5494 }],
+    };
+    // 100,000 line + 5,494 premium of the ordinary line: gross less the 156,000 bonus and its 606 premium
+    expect(earnedGrossCents([check], '2026-03-01', '2026-08-31')).toBe(105494);
+  });
+});
+
+describe('ordinaryPremium: the overtime a check paid for its ordinary lines only', () => {
+  // one week of 50 hours, 10 of them overtime; the check stored 4,000 of premium for 40,000 of line pay in that week
+  const stored = [{ weekStart: '2026-05-04', workedMinutes: 3000, overtimeMinutes: 600, premiumCents: 4000 }];
+  const commission = { kind: 'commission', cents: 10000, weekStart: '2026-05-04' };
+
+  test('a check with no season bonus, stay bonus or December gift keeps the premium it stored', () => {
+    expect(ordinaryPremium([commission], stored)).toEqual({ weeks: [{ weekStart: '2026-05-04', premiumCents: 4000 }], excludedCents: 0 });
+    expect(ordinaryPremium([], [])).toEqual({ weeks: [], excludedCents: 0 });
+  });
+
+  test('with one, the ordinary lines are priced again from the hours the check stored and the rest is left out', () => {
+    const reward = { kind: 'stay_bonus', cents: 30000, weekStart: '2026-06-01', coversFrom: '2026-05-04', coversTo: '2026-05-10' };
+    // 10,000 over 50 hours is 200 an hour; half of it for 10 overtime hours is 1,000. The other 3,000 came from the bonus.
+    expect(ordinaryPremium([commission, reward], stored)).toEqual({ weeks: [{ weekStart: '2026-05-04', premiumCents: 1000 }], excludedCents: 3000 });
+    // a check whose only line is the bonus: none of its premium is a base
+    expect(ordinaryPremium([reward], stored)).toEqual({ weeks: [], excludedCents: 4000 });
+  });
+});
+
 describe('earnedGrossCents (by component earning date)', () => {
   const FROM = '2026-03-01';
   const TO = '2026-08-31';
@@ -81,6 +112,13 @@ describe('earnedGrossCents (by component earning date)', () => {
     };
     expect(sum(full)).toBe(full.grossCents);
     expect(checkComponents(full).at(-1).cents).toBe(0); // nothing left undated
+  });
+
+  test('a season bonus, stay bonus or December gift on a check is never part of a bonus base (a bonus does not feed a bonus)', () => {
+    const paid = plain('2026-04-06', 70000 + 50000, { regularPayCents: 70000, techRewardsCents: 50000 });
+    expect(sum(paid)).toBe(70000); // the 50000 is not a component of the base
+    expect(earnedGrossCents([paid], FROM, TO)).toBe(70000);
+    expect(earnedGrossCents([plain('2026-04-06', 70000)], FROM, TO)).toBe(70000); // a check with none is as before
   });
 
   test('whole weeks inside the window count in full; a week before or after counts nothing', () => {

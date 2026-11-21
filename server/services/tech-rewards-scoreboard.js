@@ -28,7 +28,8 @@ const db = require('../models/db');
 const calc = require('./tech-rewards-calc');
 const scores = require('./tech-rewards-scores');
 const { countDeliveredAsksForTechnician } = require('./review-ask-history');
-const { weeksOfLine } = require('./payroll-regular-rate');
+const { weeksOfLine, lineOvertimePremium } = require('./payroll-regular-rate');
+const { TECH_REWARD_KINDS } = require('./payroll-pay-lines');
 const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
 const { SOURCE_TYPE: COMMISSION_SOURCE_TYPE } = require('./payroll-commission');
 const { SOURCE_TYPE: REVIEW_BONUS_SOURCE_TYPE } = require('./payroll-review-bonuses');
@@ -251,8 +252,10 @@ function lineComponents(line) {
  *                                           week's share over that week's COVERED days
  *   catch-up overtime premium              the earned weeks of the line pay it          calc_snapshot.lineOvertimeWeeks
  *   (line_overtime_premium_cents)          comes from (each week's premiumCents)
- *   anything else (gross minus the above)  NO DATE: the check's own week, in-window     (a check with no day records, a
- *                                           days / 7                                     sum that does not add up)
+ *   season bonus, stay bonus, December     NOT PAID BY WORK: left out of the base      payroll_checks.tech_rewards_cents
+ *   gift (tech_rewards_cents)              (D5-5: a bonus never feeds a bonus)
+ *   anything else (gross minus the above   NO DATE: the check's own week, in-window     (a check with no day records, a
+ *   and minus tech_rewards_cents)          days / 7                                     sum that does not add up)
  *
  * A component with no dated data (a straddling week with no daily summaries or time off records) falls back
  * to its week's in-window days / 7. The components of a check always add up to its gross_cents.
@@ -278,7 +281,10 @@ function checkComponents(check) {
     ...(check.lineOvertimeWeeks || []).map((w) => ({ cents: w.premiumCents, week: w.weekStart })),
   ];
   const known = components.reduce((sum, c) => sum + c.cents, 0);
-  components.push({ cents: check.grossCents - known, week: check.weekStart });
+  // Season bonus, stay bonus and December gift (D5-5) are rewards on top of the work, not pay earned by it, and neither is the
+  // overtime they cause (techRewardsPremiumCents, already taken out of lineOvertimeWeeks): they are not part of a bonus base, so no
+  // bonus feeds another and the board's base is the same before and after one is paid.
+  components.push({ cents: check.grossCents - known - (check.techRewardsCents || 0) - (check.techRewardsPremiumCents || 0), week: check.weekStart });
   return components;
 }
 
@@ -350,6 +356,32 @@ const lineEarnedOnBindings = () => [COMMISSION_SOURCE_TYPE, REVIEW_BONUS_SOURCE_
 const GROSS_LINE_KINDS = ['review_bonus', 'commission', 'health_allowance'];
 
 /**
+ * The overtime a finalized check's ORDINARY pay lines cause, taken out of the check's stored premium (a bonus never feeds a bonus):
+ * the Tech Rewards lines' part is left out of the base. It is priced again by the pay run's own rule (payroll-regular-rate.js
+ * lineOvertimePremium over every ordinary line together, the employer HSA included because it counts in the regular rate) from the
+ * hours the CHECK stored for each week (calc_snapshot.lineOvertimeWeeks workedMinutes and overtimeMinutes), never from timesheets as
+ * they are now, so an edit after the check was paid cannot move the base. A check with no Tech Rewards line keeps its stored
+ * premium. `lines`: every pay line of the check { kind, cents, weekStart, coversFrom, coversTo }; `storedWeeks`: the snapshot's
+ * [{ weekStart, workedMinutes, overtimeMinutes, premiumCents }]. Returns { weeks: [{ weekStart, premiumCents }], excludedCents }. Pure.
+ */
+function ordinaryPremium(lines, storedWeeks) {
+  const techKinds = new Set(TECH_REWARD_KINDS);
+  const plain = storedWeeks.map((w) => ({ weekStart: w.weekStart, premiumCents: w.premiumCents }));
+  if (!lines.some((line) => techKinds.has(line.kind)) || !storedWeeks.length) return { weeks: plain, excludedCents: 0 };
+  const ordinary = lines.filter((line) => !techKinds.has(line.kind) && line.cents > 0).map((line) => ({
+    amountCents: line.cents, weekStart: line.weekStart, coversFrom: line.coversFrom || null, coversTo: line.coversTo || null,
+  }));
+  const hours = storedWeeks.map((w) => ({
+    weekStart: w.weekStart,
+    regularMinutes: (Number(w.workedMinutes || 0) - Number(w.overtimeMinutes || 0)).toFixed(2),
+    overtimeMinutes: Number(w.overtimeMinutes || 0).toFixed(2),
+  }));
+  const weeks = ordinary.length ? lineOvertimePremium({ weeks: hours, lines: ordinary }).weeks.map((w) => ({ weekStart: w.weekStart, premiumCents: w.premiumCents })) : [];
+  const sum = (list) => list.reduce((total, w) => total + w.premiumCents, 0);
+  return { weeks, excludedCents: sum(plain) - sum(weeks) };
+}
+
+/**
  * The technician's finalized checks that can hold pay earned in [from, to] (every check whose pay week ends on or
  * after `from`: a catch-up line or premium can be paid long after it was earned), with their dated parts, then
  * earnedGrossCents. Day records are read only for a week that straddles a window edge.
@@ -360,18 +392,24 @@ async function readGross(conn, technicianId, from, to) {
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
     .whereRaw('c.week_start + 6 >= ?::date', [from])
     .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents', 'c.regular_pay_cents',
-      'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents',
+      'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents', 'c.tech_rewards_cents',
       conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"));
   if (!rows.length) return 0;
   const lineRows = await conn('payroll_pay_lines as l')
     .whereIn('l.check_id', rows.map((row) => row.id))
     .where('l.status', 'paid')
-    .whereIn('l.kind', GROSS_LINE_KINDS)
-    .select('l.check_id', 'l.amount_cents', conn.raw("to_char(l.earned_week_start, 'YYYY-MM-DD') AS week_start"),
+    .select('l.check_id', 'l.kind', 'l.amount_cents', conn.raw("to_char(l.earned_week_start, 'YYYY-MM-DD') AS week_start"),
       conn.raw("to_char(l.covers_from, 'YYYY-MM-DD') AS covers_from"), conn.raw("to_char(l.covers_to, 'YYYY-MM-DD') AS covers_to"),
       conn.raw(`to_char(${LINE_DAY_SQL}, 'YYYY-MM-DD') AS earned_on`, lineEarnedOnBindings()));
   const checks = [];
   for (const row of rows) {
+    const ownLines = lineRows.filter((line) => line.check_id === row.id);
+    const premium = ordinaryPremium(
+      ownLines.map((line) => ({ kind: line.kind, cents: toCents(line.amount_cents), weekStart: line.week_start, coversFrom: line.covers_from, coversTo: line.covers_to })),
+      (Array.isArray(row.line_overtime_weeks) ? row.line_overtime_weeks : []).map((w) => ({
+        weekStart: w.weekStart, workedMinutes: w.workedMinutes, overtimeMinutes: w.overtimeMinutes, premiumCents: toCents(w.premiumCents),
+      })),
+    );
     const check = {
       weekStart: row.week_start,
       grossCents: toCents(row.gross_cents),
@@ -380,9 +418,11 @@ async function readGross(conn, technicianId, from, to) {
       overtimeMinutes: Number(row.overtime_minutes) || 0,
       ptoPayCents: toCents(row.pto_pay_cents),
       holidayPayCents: toCents(row.holiday_pay_cents),
-      lines: lineRows.filter((line) => line.check_id === row.id).map((line) => ({ cents: toCents(line.amount_cents), earnedOn: line.earned_on, weekStart: line.week_start, coversFrom: line.covers_from, coversTo: line.covers_to })),
-      lineOvertimeWeeks: (Array.isArray(row.line_overtime_weeks) ? row.line_overtime_weeks : [])
-        .map((w) => ({ weekStart: w.weekStart, premiumCents: toCents(w.premiumCents) })),
+      techRewardsCents: toCents(row.tech_rewards_cents),
+      lines: ownLines.filter((line) => GROSS_LINE_KINDS.includes(line.kind))
+        .map((line) => ({ cents: toCents(line.amount_cents), earnedOn: line.earned_on, weekStart: line.week_start, coversFrom: line.covers_from, coversTo: line.covers_to })),
+      lineOvertimeWeeks: premium.weeks,
+      techRewardsPremiumCents: premium.excludedCents,
     };
     const weekEnd = addStaffWorkDays(check.weekStart, 6);
     if (weekEnd >= from && check.weekStart <= to && (check.weekStart < from || weekEnd > to)) {
@@ -477,4 +517,7 @@ async function listTechnicians(conn = db) {
   return rows.map((row) => ({ id: row.id, name: row.name }));
 }
 
-module.exports = { ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents };
+module.exports = {
+  ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents,
+  ordinaryPremium,
+};

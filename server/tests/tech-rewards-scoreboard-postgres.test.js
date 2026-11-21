@@ -60,6 +60,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.decimal('overtime_minutes', 10, 2).notNullable().defaultTo(0);
       t.integer('pto_pay_cents');
       t.integer('holiday_pay_cents');
+      t.integer('tech_rewards_cents');
       t.jsonb('calc_snapshot').notNullable().defaultTo('{}');
     });
     await s.createTable('payroll_time_off', (t) => {
@@ -356,6 +357,23 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     await db('payroll_pay_lines').insert({ technician_id: yan.id, check_id: check.id, kind: 'health_allowance', status: 'paid', earned_week_start: '2026-09-07', covers_from: '2026-08-01', covers_to: '2026-08-31', amount_cents: 6000 });
     const board = await service.getScoreboard(yan.id, { now: NOW });
     expect(board.seasonBonus.grossCents).toBe(6000); // six weeks of 1000, every covered day in August
+  });
+
+  test('a stay bonus on a check, and the overtime it caused, are not in the season base; the commission beside it and its overtime are', async () => {
+    const [rho] = await db('technicians').insert({ name: 'Sample Rho', hire_date: '2024-01-15' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-06-01', pay_date: '2026-06-12' }).returning('id');
+    // 70,000 of wages, a 10,000 commission and a 30,000 stay bonus both earned in the week of May 4 (50 hours, 10 of them
+    // overtime), and the 4,000 of overtime the two lines caused together: 1,000 from the commission, 3,000 from the bonus
+    const [check] = await insertChecks([{
+      run_id: run.id, technician_id: rho.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 114000, regular_pay_cents: 70000, tech_rewards_cents: 30000,
+      calc_snapshot: { lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 3000, overtimeMinutes: 600, premiumCents: 4000 }] },
+    }]).returning('id');
+    await db('payroll_pay_lines').insert([
+      { technician_id: rho.id, check_id: check.id, kind: 'commission', status: 'paid', earned_week_start: '2026-05-04', amount_cents: 10000 },
+      { technician_id: rho.id, check_id: check.id, kind: 'stay_bonus', status: 'paid', earned_week_start: '2026-06-01', covers_from: '2026-05-04', covers_to: '2026-05-10', amount_cents: 30000 },
+    ]);
+    const board = await service.getScoreboard(rho.id, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(70000 + 10000 + 1000);
   });
 
   test('review asks are counted in SQL on each send time: an initial ask outside the season does not drag its in-season follow-up out', async () => {
