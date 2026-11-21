@@ -534,6 +534,107 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     expect(writeBuilder.where).toHaveBeenCalledWith({ disposition: 'archived_unresolved' });
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('changed while you were unarchiving') });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  // A customer's own plan quote (plan_restart / plan_start) that a newer quote
+  // of the same lineage replaced stays archived (#8132 pre-push r40): the mint
+  // archives what it replaces and stamps nothing else, so Unarchive put the
+  // older price back beside the live quote. The lineage read and the write
+  // share one transaction under the customer-comms lock, the mint's first lock.
+  describe('a customer plan quote that a newer quote replaced', () => {
+    const planQuote = (extra = {}) => ({
+      id: 'e1', customer_id: 'cust-1', source: 'plan_start', status: 'expired', archived_at: 'THEN', disposition: null, estimate_data: {}, ...extra,
+    });
+    const REVIVED = { id: 'e1', archived_at: null };
+
+    async function unarchive(estimate, { newer = null, written = [REVIVED], fresh = null } = {}) {
+      const order = [];
+      const readBuilder = makeBuilder({ first: estimate });
+      const freshBuilder = makeBuilder({ first: fresh });
+      const writer = (via) => {
+        const builder = makeBuilder({});
+        builder.update = jest.fn(() => ({ returning: jest.fn(async () => { order.push(`write via ${via}`); return written; }) }));
+        return builder;
+      };
+      const dbWrite = writer('db');
+      const trxWrite = writer('trx');
+      const lineage = makeBuilder({});
+      lineage.join = jest.fn(() => lineage);
+      lineage.first = jest.fn(async () => { order.push('lineage read'); return newer; });
+      const trx = jest.fn((table) => (table === 'estimates as newer' ? lineage : trxWrite));
+      trx.raw = jest.fn(async (sql, bindings) => { order.push(`lock ${bindings[0]}`); });
+      db.transaction.mockImplementation(async (work) => work(trx));
+      db.mockImplementationOnce(() => readBuilder)
+        .mockImplementationOnce(() => (written.length || !fresh ? dbWrite : freshBuilder))
+        .mockImplementationOnce(() => freshBuilder);
+      const res = makeRes();
+      const next = jest.fn();
+      await unarchiveHandler({ params: { id: 'e1' }, body: {} }, res, next);
+      expect(next).not.toHaveBeenCalled();
+      return { order, res, lineage, trx, dbWrite, trxWrite };
+    }
+
+    beforeEach(() => { db.transaction.mockReset(); });
+
+    test('is refused with a 409 that says why, and nothing is written', async () => {
+      for (const source of ['plan_start', 'plan_restart']) {
+        for (const status of ['sent', 'viewed', 'expired', 'declined']) {
+          db.mockReset();
+          const { order, res, lineage, trx, dbWrite, trxWrite } = await unarchive(planQuote({ source, status }), { newer: { id: 'e2' } });
+          expect([source, status, order]).toEqual([source, status, ['lock customer-comms:cust-1', 'lineage read']]);
+          expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-comms:cust-1']);
+          // The lineage is read by the estimate's own id, newest by the stored (created_at, id).
+          expect(lineage.join).toHaveBeenCalledWith('estimates as old', expect.any(Function));
+          expect(lineage.where).toHaveBeenCalledWith('old.id', 'e1');
+          expect(lineage.whereRaw).toHaveBeenCalledWith('(newer.created_at, newer.id) > (old.created_at, old.id)');
+          expect(dbWrite.update).not.toHaveBeenCalled();
+          expect(trxWrite.update).not.toHaveBeenCalled();
+          expect(res.status).toHaveBeenCalledWith(409);
+          expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('A newer plan quote for this customer replaced this one') });
+        }
+      }
+    });
+
+    test('the newest quote of its lineage is unarchived inside that transaction, after the lock and the read', async () => {
+      const { order, res, trxWrite, dbWrite } = await unarchive(planQuote({ source: 'plan_restart', status: 'viewed', disposition: 'archived_unresolved' }));
+      expect(order).toEqual(['lock customer-comms:cust-1', 'lineage read', 'write via trx']);
+      expect(dbWrite.update).not.toHaveBeenCalled();
+      // The same guarded write as any other estimate's.
+      expect(trxWrite.where).toHaveBeenCalledWith({ id: 'e1', status: 'viewed' });
+      expect(trxWrite.whereNotNull).toHaveBeenCalledWith('archived_at');
+      expect(trxWrite.where).toHaveBeenCalledWith({ disposition: 'archived_unresolved' });
+      expect(trxWrite.update).toHaveBeenCalledWith(expect.objectContaining({ archived_at: null, disposition: null }));
+      expect(res.status).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(REVIVED);
+    });
+
+    test('a row that moved under the lock still gets the retry message', async () => {
+      const { order, res } = await unarchive(planQuote({ status: 'sent' }), { written: [], fresh: { status: 'declined', archived_at: 'THEN', disposition: 'declined_price' } });
+      expect(order).toEqual(['lock customer-comms:cust-1', 'lineage read', 'write via trx']);
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('changed while you were unarchiving') });
+    });
+
+    test('an accepted plan quote, a staff estimate and a quote with no customer are not held: no lock, no lineage read', async () => {
+      const notHeld = [
+        planQuote({ status: 'accepted' }),
+        planQuote({ source: 'plan_restart', status: 'accepted' }),
+        planQuote({ source: 'admin_estimator' }),
+        planQuote({ source: 'service_report_cta' }),
+        planQuote({ source: null }),
+        planQuote({ customer_id: null }),
+      ];
+      for (const [at, estimate] of notHeld.entries()) {
+        db.mockReset();
+        db.transaction.mockReset();
+        // A newer row would refuse it, were the lineage read.
+        const { order, res } = await unarchive(estimate, { newer: { id: 'e2' } });
+        expect([at, order]).toEqual([at, ['write via db']]);
+        expect(db.transaction).not.toHaveBeenCalled();
+        expect(res.json).toHaveBeenCalledWith(REVIVED);
+      }
+    });
   });
 });
 

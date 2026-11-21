@@ -1227,6 +1227,34 @@ async function retireLineage({
   }
 }
 
+// The readers of that lineage for staff Unarchive (admin-estimates.js POST
+// /:id/unarchive; #8132 pre-push r40). retireLineage archives the quotes a
+// new one replaces and stamps nothing else, so "was this quote replaced" is
+// read from the lineage itself.
+// retiresWithLineage: is this a quote retireLineage would retire: one of this
+// module's two mints, for a customer, not accepted (an accepted quote is
+// history and is never replaced).
+function retiresWithLineage(estimate) {
+  return !!estimate?.customer_id
+    && [SOURCE, PLAN_START_SOURCE].includes(String(estimate.source || ''))
+    && estimate.status !== 'accepted';
+}
+
+// newerLineageQuoteExists: does the customer hold a newer quote of the same
+// lineage (customer + source), in any status, archived or not. The order is
+// the stored (created_at, id), compared inside the database so no timestamp
+// loses its microseconds in JavaScript.
+async function newerLineageQuoteExists(dbh, estimateId) {
+  const newer = await dbh('estimates as newer')
+    .join('estimates as old', function sameLineage() {
+      this.on('old.customer_id', 'newer.customer_id').andOn('old.source', 'newer.source');
+    })
+    .where('old.id', estimateId)
+    .whereRaw('(newer.created_at, newer.id) > (old.created_at, old.id)')
+    .first('newer.id');
+  return !!newer;
+}
+
 // Publish the priced quote: insert the row, freeze its send snapshot, write the
 // timeline note. Returns { estimateId, token, url, reused: false }.
 async function publishMintedEstimate(mint, { offer, estimateData }) {
@@ -1757,5 +1785,7 @@ module.exports = {
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
   staffChangedQuoteRefusal,
+  retiresWithLineage,
+  newerLineageQuoteExists,
   _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },
 };

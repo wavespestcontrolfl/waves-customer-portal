@@ -30,6 +30,7 @@ const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { clearRouteCacheForRequest } = require('../utils/route-cache');
 const { nanpNationalDigits, isValidNanpNumber, nanpPhoneProblem } = require('../utils/phone');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
 const { soldByLive, setEstimateSoldBy, listSellerCandidates, loadSoldByForList, soldByRowFields } = require('../services/estimate-sold-by');
 const {
@@ -5845,7 +5846,23 @@ router.post('/:id/unarchive', async (req, res, next) => {
     if (markers.invalidatedAt) return res.status(409).json({ error: invalidatedMessage });
     if (markers.supersededAt) return res.status(409).json({ error: supersededMessage });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
-    const [updated] = await db('estimates')
+    // A customer's own plan quote (plan_restart / plan_start) that a newer
+    // quote of the same kind replaced is permanent as well (#8132 pre-push
+    // r40). The mint archives the quotes it replaces and stamps nothing else,
+    // so Unarchive put the older price, and for a restart the older
+    // cancellation scope, back beside the live quote, with its link working
+    // again. Read as a query, not a stamp: it also covers a quote the office
+    // archived before the customer minted the next one, and every quote
+    // replaced before this check existed. No other writer clears the archive
+    // stamp of such a quote (the quote wizard revives its own drafts only).
+    // An accepted quote is history, is never replaced, and is not held here.
+    // The read and the write share one transaction under the customer-comms
+    // advisory lock, which the mint takes first: a mint in flight has either
+    // committed its replacement, and this read sees it, or it waits here and
+    // then archives this row with the rest of the lineage.
+    const replacedMessage = 'A newer plan quote for this customer replaced this one, so it cannot be unarchived. The customer can start a new quote from their portal.';
+    const planQuotes = require('../services/cancellation-resolution/restart');
+    const writeUnarchive = (dbh) => dbh('estimates')
       .where({ id: req.params.id, status: estimate.status })
       // Observed-state guard, mirroring the archive route (codex pre-push
       // P1 TOCTOU): a concurrent decline/accept that resolved the archived
@@ -5878,6 +5895,18 @@ router.post('/:id/unarchive', async (req, res, next) => {
         } : {}),
       })
       .returning('*');
+    let updated = null;
+    if (planQuotes.retiresWithLineage(estimate)) {
+      const replaced = await db.transaction(async (trx) => {
+        await lockCustomerComms(trx, estimate.customer_id);
+        if (await planQuotes.newerLineageQuoteExists(trx, estimate.id)) return true;
+        [updated] = await writeUnarchive(trx);
+        return false;
+      });
+      if (replaced) return res.status(409).json({ error: replacedMessage });
+    } else {
+      [updated] = await writeUnarchive(db);
+    }
     if (!updated) {
       // Zero rows: either a linkage marker (permanent) or a concurrent
       // writer moved the row. Re-read once to say which.
