@@ -7,10 +7,14 @@
  * call: it reads the schedule and writes two system_settings rows.
  *
  *   ads.route_areas.last     the full record of the latest run
- *   ads.route_areas.history  the last HISTORY_MAX compact entries, newest last (no ZIP lists: they follow from the areas)
+ *   ads.route_areas.history  the last HISTORY_MAX compact entries, newest last, one per cron occurrence (`tick`). A
+ *                            ZIP list is kept only where the areas do not give it (a day whose ZIPs come from the
+ *                            technician's own territory); every other list follows from the areas.
+ * Both rows are written in one transaction, so they always describe the same run.
  *
  * Room on a technician-day: he is staffed, he has a stop left under the gap rule's limit for that weekday, and his open
- * minutes hold one more job with its drive (close-gaps SLOT_MIN).
+ * minutes hold one more job with its drive (close-gaps SLOT_MIN). Work with no technician yet is held against every
+ * technician, in the stop count and in the minutes.
  *
  * Every input of the rule is in the record, so a run can be counted again from the rows: per technician-day the stops,
  * the stops left, the gap rule's limit, the shift minutes, the booked and drive minutes, the open minutes, and the
@@ -18,7 +22,8 @@
  * the slot length, the shift, the limits and the service-line card the run used).
  *
  * The staffed rule is the hourly route check's (day-replan/route-check.js staffed): the date is not a blackout date,
- * the technician is assignable and not absent, and a Sunday counts only when he has a stop that day.
+ * the technician is assignable and not absent, and a Sunday counts only when he has a booked stop that day (not an
+ * unclaimed hold, not a windowless placeholder: route-check.js techsWithStops).
  * All dates are Eastern YYYY-MM-DD strings.
  */
 const db = require('../../models/db');
@@ -51,12 +56,15 @@ function limitFor(date, limits) {
 }
 
 /** Why a technician does not work a date (null = staffed): the route check's staffed rule, with the reason. */
-function closedReason(input, techId, date, stopCount) {
+function closedReason(input, techId, date, bookedCount) {
   if (input.blackout.has(date)) return 'closed';
   if (input.absent.has(`${techId}:${date}`)) return 'absent';
-  if (weekdayOf(date) === 0 && stopCount === 0) return 'sunday_no_stops';
+  if (weekdayOf(date) === 0 && bookedCount === 0) return 'sunday_no_stops';
   return null;
 }
+
+// The minutes a stop still needs: its not-completed services only (a visit with one service done keeps the rest).
+const minutesLeftOf = (stop) => (stop.minutesLeft === undefined ? stop.minutes : stop.minutesLeft);
 
 /** Minutes left in the shift: all of it for a later date, the part after now (and the start) for today. */
 function shiftMinutes(input, date) {
@@ -75,7 +83,7 @@ function unassignedByDate(input) {
       stops: rows.length,
       minutes: sum(rows, (s) => s.minutes),
       stops_left: left.length,
-      minutes_left: sum(left, (s) => s.minutes),
+      minutes_left: sum(left, minutesLeftOf),
     };
   });
 }
@@ -128,14 +136,16 @@ function techDay(input, ctx, techId, date) {
   const mine = input.stops.filter((s) => idOf(s.technicianId) === techId && s.date === date);
   const left = mine.filter((s) => !s.done);
   const unassigned = ctx.unassigned.get(date);
-  const reason = closedReason(input, techId, date, mine.length);
+  // A stop with no `booked` field counts as booked; the loader sets it false for a hold or a placeholder.
+  const reason = closedReason(input, techId, date, mine.filter((s) => s.booked !== false).length);
   const staffed = reason === null;
   const limit = limitFor(date, input.limits);
   const shiftMin = shiftMinutes(input, date);
-  const bookedMin = sum(left, (s) => s.minutes) + unassigned.minutes_left;
+  const bookedMin = sum(left, minutesLeftOf) + unassigned.minutes_left;
   const driveMin = (input.slotMin - JOB_MIN) * (left.length + unassigned.stops_left);
   const openMin = Math.max(0, shiftMin - bookedMin - driveMin);
-  const openStops = Math.max(0, limit - mine.length);
+  // Unassigned work still to do takes a place on someone's route, so it counts against every technician's limit.
+  const openStops = Math.max(0, limit - mine.length - unassigned.stops_left);
   // Room needs both: a stop left under the gap rule's limit for that weekday (the owner's setting, which the live
   // 7-day budget rule already follows) and the minutes for one more job with its drive. Both counts are stored, so
   // either test can be counted again alone.
@@ -211,6 +221,8 @@ function buildRouteAreas(input) {
   const hourEt = Math.floor(input.nowMin / 60);
   return {
     at: input.at,
+    // The cron occurrence this run belongs to (ET date + hour): the history keeps one entry per tick.
+    tick: `${input.dates[0]}T${String(hourEt).padStart(2, '0')}`,
     dates: input.dates,
     hour_et: hourEt,
     in_ad_hours: hourEt >= AD_HOURS_START && hourEt < AD_HOURS_END,
@@ -239,6 +251,12 @@ const STOP_KEY_SQL = `CASE
   ELSE 'c:' || COALESCE(ss.customer_id::text, 'hold:' || ss.id::text) || ':' || COALESCE(ss.window_start::text, '')
 END`;
 
+// A booked stop, as the route check counts one for a Sunday (route-check.js bookedStop + dispatchKeeps): not an
+// unclaimed hold (no customer yet, a live expiry), and a row dispatch keeps (a window start, a time window, or work
+// done or under way). A hold and a placeholder still hold their time; they only do not staff a Sunday.
+const BOOKED_STOP_SQL = `(ss.customer_id IS NOT NULL OR ss.reservation_expires_at IS NULL)
+  AND (ss.window_start IS NOT NULL OR COALESCE(ss.time_window, '') <> '' OR ss.status IN ('completed', 'en_route', 'on_site'))`;
+
 /** The physical stops of the two dates, one row each (same row filter as the gap rule's window read). */
 async function readStops(conn, dates) {
   const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -249,7 +267,10 @@ async function readStops(conn, dates) {
       ss.scheduled_date::text AS day,
       LEFT(COALESCE(MIN(NULLIF(TRIM(ss.service_address_zip), '')), MIN(NULLIF(TRIM(c.zip), ''))), 5) AS zip,
       SUM(COALESCE(ss.estimated_duration_minutes, sv.default_duration_minutes, ${JOB_MIN}))::int AS minutes,
-      bool_and(ss.status = 'completed') AS done
+      COALESCE(SUM(COALESCE(ss.estimated_duration_minutes, sv.default_duration_minutes, ${JOB_MIN}))
+        FILTER (WHERE ss.status <> 'completed'), 0)::int AS minutes_left,
+      bool_and(ss.status = 'completed') AS done,
+      bool_or(${BOOKED_STOP_SQL}) AS booked
     FROM scheduled_services ss
     LEFT JOIN customers c ON c.id = ss.customer_id
     LEFT JOIN services sv ON sv.id = ss.service_id
@@ -263,7 +284,9 @@ async function readStops(conn, dates) {
     date: String(r.day).slice(0, 10),
     zip: normalizeZip(r.zip),
     minutes: parseInt(r.minutes, 10) || 0,
+    minutesLeft: parseInt(r.minutes_left, 10) || 0,
     done: r.done === true,
+    booked: r.booked === true,
   }));
 }
 
@@ -290,7 +313,7 @@ async function readEligibility(conn, dates) {
   const to = dates[dates.length - 1];
   const blackout = await getBlackoutDates(from, to, conn, { strict: true });
   const techs = await applyAssignable(conn('technicians')).select('technicians.id');
-  const techIds = techs.map((t) => String(t.id));
+  const techIds = techs.map((t) => String(t.id)).sort();
   const absent = techIds.length ? await absentTechDays(conn, { dateFrom: from, dateTo: to, technicianIds: techIds }) : new Set();
   return { blackout, techIds, absent };
 }
@@ -322,13 +345,21 @@ async function loadRouteAreasInput(conn, now) {
   };
 }
 
-/** A line's compact history part: its area keys and open minutes (the sum over both dates). */
-const compactLine = (line) => ({ areas: line.areas, open_min: sum(line.days, (d) => d.open_min) });
+/** A line's compact history part: its area keys, its open minutes (both dates), and the technicians it followed each date. */
+const compactLine = (line) => ({
+  areas: line.areas,
+  open_min: sum(line.days, (d) => d.open_min),
+  days: line.days.map((d) => ({ date: d.date, technician_ids: d.technician_ids, open_min: d.open_min })),
+});
 
-/** A history entry: the record without its ZIP lists (they follow from the areas through territory_zips). */
+/**
+ * A history entry: the record without the ZIP lists that follow from the areas (territory_zips). A day whose ZIPs
+ * come from the technician's own territory keeps its list: those can be part of an area, which the area key cannot say.
+ */
 function compactEntry(record) {
   return {
     at: record.at,
+    tick: record.tick,
     hour_et: record.hour_et,
     lines: { pest: compactLine(record.lines.pest), lawn: compactLine(record.lines.lawn) },
     techs: record.technicians.map((t) => ({
@@ -342,6 +373,8 @@ function compactEntry(record) {
         open_stops: d.open_stops,
         open_min: d.open_min,
         areas: Object.fromEntries(d.areas.map((a) => [a.area, a.stops])),
+        zip_source: d.zip_source,
+        ...(d.zip_source === 'territory' ? { zips: d.zips } : {}),
       })),
     })),
   };
@@ -355,19 +388,25 @@ function parseHistory(stored) {
 }
 
 /**
- * Loads, builds and saves one record: system_settings 'ads.route_areas.last' and 'ads.route_areas.history' (last 120).
+ * Loads, builds and saves one record: system_settings 'ads.route_areas.last' and 'ads.route_areas.history' (last 120),
+ * in one transaction.
  * Reads and writes only: no budget, campaign, visit or message changes and no Google Ads call. Returns the record.
  */
 async function recordRouteAreas({ now = new Date(), conn = db } = {}) {
   const record = buildRouteAreas(await loadRouteAreasInput(conn, now));
-  const prior = await conn('system_settings').where({ key: HISTORY_KEY }).first();
-  const history = [...parseHistory(prior?.value), compactEntry(record)].slice(-HISTORY_MAX);
-  const upsert = (key, value, description) => conn('system_settings')
-    .insert({ key, value, category: 'ads', description })
-    .onConflict('key')
-    .merge({ value, updated_at: now });
-  await upsert(LAST_KEY, JSON.stringify(record), 'Latest ads route-areas record (shadow)');
-  await upsert(HISTORY_KEY, JSON.stringify(history), `Recent ads route-areas records (last ${HISTORY_MAX})`);
+  // One transaction: the latest record and the history always describe the same run. One entry per tick: a second
+  // run of the same cron occurrence (two instances during a deploy) replaces the first instead of counting twice.
+  await conn.transaction(async (trx) => {
+    const prior = await trx('system_settings').where({ key: HISTORY_KEY }).first();
+    const kept = parseHistory(prior?.value).filter((entry) => !entry || entry.tick !== record.tick);
+    const history = [...kept, compactEntry(record)].slice(-HISTORY_MAX);
+    const upsert = (key, value, description) => trx('system_settings')
+      .insert({ key, value, category: 'ads', description })
+      .onConflict('key')
+      .merge({ value, updated_at: now });
+    await upsert(LAST_KEY, JSON.stringify(record), 'Latest ads route-areas record (shadow)');
+    await upsert(HISTORY_KEY, JSON.stringify(history), `Recent ads route-areas records (last ${HISTORY_MAX})`);
+  });
   return record;
 }
 

@@ -1,5 +1,6 @@
 // Ads follow the route, step 1 (record only): the pure record builder and the save. Nothing here touches a budget,
-// a campaign or Google Ads; the save writes two system_settings rows (ads.route_areas.last / .history).
+// a campaign or Google Ads; the save writes two system_settings rows (ads.route_areas.last / .history) in one
+// transaction.
 
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
@@ -98,6 +99,20 @@ describe('buildRouteAreas: one technician', () => {
     expect(dayOf(withStop, T1, sunday[0])).toMatchObject({ staffed: true, reason: null, stops: 1 });
   });
 
+  test('an unclaimed hold or a windowless placeholder does not staff a Sunday, and still holds its time', () => {
+    const sunday = ['2026-11-22', '2026-11-23'];
+    const holdOnly = buildRouteAreas(input({ dates: sunday, stops: [stop({ date: sunday[0], booked: false })] }));
+    expect(dayOf(holdOnly, T1, sunday[0])).toMatchObject({
+      staffed: false, reason: 'sunday_no_stops', stops: 1, booked_min: 60, room: false, zip_reason: 'not_staffed',
+    });
+    const withBooked = buildRouteAreas(input({
+      dates: sunday, limits: { ...LIMITS, sunday_limit: 4 }, stops: [stop({ date: sunday[0], booked: false }), stop({ date: sunday[0], booked: true })],
+    }));
+    expect(dayOf(withBooked, T1, sunday[0])).toMatchObject({ staffed: true, reason: null, stops: 2, open_stops: 2, booked_min: 120 });
+    // A weekday does not need a booked stop.
+    expect(dayOf(buildRouteAreas(input({ stops: [stop({ booked: false })] })), T1, WEEKDAYS[1]).staffed).toBe(true);
+  });
+
   test('today after the shift ends: no shift left, no room', () => {
     const rec = buildRouteAreas(input({ nowMin: 19 * 60, stops: [stop({ date: WEEKDAYS[0] })] }));
     expect(dayOf(rec, T1, WEEKDAYS[0])).toMatchObject({ shift_min: 0, open_min: 0, room: false, zip_reason: 'full' });
@@ -116,6 +131,26 @@ describe('buildRouteAreas: one technician', () => {
     expect(d.areas).toEqual([{ area: 'a-north', stops: 1, stops_left: 0 }, { area: 'b-mid', stops: 1, stops_left: 1 }]);
   });
 
+  test('a visit with one service done keeps only the minutes of the rest, with one drive', () => {
+    const rec = buildRouteAreas(input({ stops: [stop({ minutes: 120, minutesLeft: 45 })] }));
+    expect(dayOf(rec, T1, WEEKDAYS[1])).toMatchObject({ stops: 1, stops_left: 1, booked_min: 45, drive_min: 20, open_min: 535 });
+    const unassigned = buildRouteAreas(input({ stops: [stop({ technicianId: null, minutes: 120, minutesLeft: 45 })] }));
+    expect(unassigned.unassigned[1]).toMatchObject({ stops: 1, minutes: 120, stops_left: 1, minutes_left: 45 });
+    expect(dayOf(unassigned, T1, WEEKDAYS[1])).toMatchObject({ booked_min: 45, drive_min: 20 });
+  });
+
+  test('unassigned work still to do takes a place under every technician\'s stop limit', () => {
+    // Limit 6: five own stops and one unassigned stop still to do leave no stop, whatever the minutes say.
+    const five = Array.from({ length: 5 }, () => stop({ minutes: 30 }));
+    const rec = buildRouteAreas(input({ stops: [...five, stop({ technicianId: null, minutes: 30 })] }));
+    const d = dayOf(rec, T1, WEEKDAYS[1]);
+    expect(d).toMatchObject({ stops: 5, limit: 6, open_stops: 0, room: false, zips: [], zip_reason: 'full' });
+    expect(d.open_min).toBeGreaterThanOrEqual(80);
+    // Done unassigned work takes no place.
+    const done = buildRouteAreas(input({ stops: [...five, stop({ technicianId: null, minutes: 30, done: true })] }));
+    expect(dayOf(done, T1, WEEKDAYS[1])).toMatchObject({ open_stops: 1, room: true });
+  });
+
   test('unassigned not-done work reduces the open minutes; done unassigned work does not', () => {
     const rec = buildRouteAreas(input({
       techIds: [T1, T2],
@@ -130,9 +165,9 @@ describe('buildRouteAreas: one technician', () => {
       { date: WEEKDAYS[1], stops: 2, minutes: 150, stops_left: 1, minutes_left: 90 },
     ]);
     // T1: own 60 + unassigned 90 = 150 booked; drive 20 * (1 + 1) = 40; 600 - 190 = 410
-    expect(dayOf(rec, T1, WEEKDAYS[1])).toMatchObject({ booked_min: 150, drive_min: 40, open_min: 410 });
+    expect(dayOf(rec, T1, WEEKDAYS[1])).toMatchObject({ booked_min: 150, drive_min: 40, open_min: 410, open_stops: 4 });
     // T2 has no stops of his own and still carries the unassigned work
-    expect(dayOf(rec, T2, WEEKDAYS[1])).toMatchObject({ stops: 0, booked_min: 90, drive_min: 20, open_min: 490 });
+    expect(dayOf(rec, T2, WEEKDAYS[1])).toMatchObject({ stops: 0, booked_min: 90, drive_min: 20, open_min: 490, open_stops: 5 });
   });
 
   test('a stop whose ZIP is missing or outside the territory counts as unmapped', () => {
@@ -169,7 +204,7 @@ describe('buildRouteAreas: one technician', () => {
 
   test('the record carries the run time, the ad-hours flag and the rule inputs', () => {
     const rec = buildRouteAreas(input({ nowMin: 6 * 60 + 59 }));
-    expect(rec).toMatchObject({ at: '2026-11-23T14:00:00.000Z', dates: WEEKDAYS, hour_et: 6, in_ad_hours: false });
+    expect(rec).toMatchObject({ at: '2026-11-23T14:00:00.000Z', tick: '2026-11-23T06', dates: WEEKDAYS, hour_et: 6, in_ad_hours: false });
     expect(rec.rule).toMatchObject({ now_min: 419, slot_min: 80, limits: LIMITS });
     expect(buildRouteAreas(input({ nowMin: 7 * 60 })).in_ad_hours).toBe(true);
     expect(buildRouteAreas(input({ nowMin: 18 * 60 + 59 })).in_ad_hours).toBe(true);
@@ -249,17 +284,27 @@ describe('buildRouteAreas: service lines', () => {
 });
 
 // A fake knex for the save: the reads the loader makes, plus system_settings.
-function fakeConn({ stopRows = [], history, targets = null, territory = TERRITORY, lineRows = [], techs = [{ id: T1 }] } = {}) {
+// conn.transaction runs its body on the same fake and undoes the body's writes when it throws, as Postgres does.
+// failKey makes the write of that key fail. Every system_settings call outside a transaction is counted in `loose`.
+function fakeConn({ stopRows = [], history, last, targets = null, territory = TERRITORY, lineRows = [], techs = [{ id: T1 }], failKey = null } = {}) {
   const store = {};
   if (history !== undefined) store[HISTORY_KEY] = history;
+  if (last !== undefined) store[LAST_KEY] = last;
   const upserts = [];
+  const state = { inTransaction: false, loose: 0 };
   const conn = jest.fn((table) => {
     if (table === 'system_settings') {
+      if (!state.inTransaction) state.loose += 1;
       return {
         where: jest.fn(({ key }) => ({ first: () => Promise.resolve(key in store ? { key, value: store[key] } : null) })),
         insert: jest.fn((row) => ({
           onConflict: jest.fn(() => ({
-            merge: jest.fn((patch) => { store[row.key] = row.value; upserts.push({ row, patch }); return Promise.resolve(); }),
+            merge: jest.fn((patch) => {
+              if (row.key === failKey) return Promise.reject(new Error(`write of ${row.key} failed`));
+              store[row.key] = row.value;
+              upserts.push({ row, patch });
+              return Promise.resolve();
+            }),
           })),
         })),
       };
@@ -271,7 +316,22 @@ function fakeConn({ stopRows = [], history, targets = null, territory = TERRITOR
     throw new Error(`Unexpected table in test: ${table}`);
   });
   conn.raw = jest.fn(() => Promise.resolve({ rows: stopRows }));
-  return { conn, store, upserts };
+  conn.transaction = jest.fn(async (body) => {
+    const before = { ...store };
+    const mark = upserts.length;
+    state.inTransaction = true;
+    try {
+      return await body(conn);
+    } catch (err) {
+      for (const key of Object.keys(store)) delete store[key];
+      Object.assign(store, before);
+      upserts.length = mark;
+      throw err;
+    } finally {
+      state.inTransaction = false;
+    }
+  });
+  return { conn, store, upserts, state };
 }
 
 describe('recordRouteAreas', () => {
@@ -285,11 +345,11 @@ describe('recordRouteAreas', () => {
   });
 
   test('reads the two dates and the gap rule row filter, writes both keys', async () => {
-    const { conn, store, upserts } = fakeConn({
+    const { conn, store, upserts, state } = fakeConn({
       stopRows: [
-        { technician_id: T1, day: '2026-11-23', zip: '34201', minutes: 60, done: true },
-        { technician_id: T1, day: '2026-11-24', zip: '34203', minutes: '90', done: false },
-        { technician_id: null, day: '2026-11-24', zip: null, minutes: 60, done: false },
+        { technician_id: T1, day: '2026-11-23', zip: '34201', minutes: 60, minutes_left: 0, done: true, booked: true },
+        { technician_id: T1, day: '2026-11-24', zip: '34203', minutes: '120', minutes_left: '90', done: false, booked: true },
+        { technician_id: null, day: '2026-11-24', zip: null, minutes: 60, minutes_left: 60, done: false, booked: false },
       ],
       lineRows: [{ service_category: 'general', home_technician_id: T1, gap_technician_id: T1 }],
     });
@@ -303,9 +363,14 @@ describe('recordRouteAreas', () => {
     expect(sql).toMatch(/ss\.visit_id IS NOT NULL/);
     // A live hold with no customer yet is its own stop: without the row id its key would be NULL.
     expect(sql).toMatch(/COALESCE\(ss\.customer_id::text, 'hold:' \|\| ss\.id::text\)/);
+    // The minutes left skip a completed service of a part-done visit.
+    expect(sql).toMatch(/FILTER \(WHERE ss\.status <> 'completed'\), 0\)::int AS minutes_left/);
+    // A booked stop is the route check's: a claimed row that dispatch keeps.
+    expect(sql).toMatch(/bool_or\(\(ss\.customer_id IS NOT NULL OR ss\.reservation_expires_at IS NULL\)\s+AND \(ss\.window_start IS NOT NULL OR COALESCE\(ss\.time_window, ''\) <> '' OR ss\.status IN \('completed', 'en_route', 'on_site'\)\)\) AS booked/);
 
     expect(record.dates).toEqual(['2026-11-23', '2026-11-24']);
     expect(record.hour_et).toBe(10);
+    expect(record.tick).toBe('2026-11-23T10');
     expect(record.rule.now_min).toBe(615);
     expect(record.rule.line_card.general).toEqual({ homeId: T1, gapId: null });
     expect(record.rule.line_card.lawn).toBeNull();
@@ -321,14 +386,53 @@ describe('recordRouteAreas', () => {
     expect(last.patch).toEqual({ value: store[LAST_KEY], updated_at: NOW });
     const history = JSON.parse(store[HISTORY_KEY]);
     expect(history).toHaveLength(1);
-    expect(history[0]).toMatchObject({ at: record.at, hour_et: 10 });
+    expect(history[0]).toMatchObject({ at: record.at, tick: '2026-11-23T10', hour_et: 10 });
+    // Both rows go in one transaction; nothing touches system_settings outside it.
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
+    expect(state.loose).toBe(0);
+    expect(upserts.map((u) => u.row.key)).toEqual([LAST_KEY, HISTORY_KEY]);
+  });
+
+  test('a history write that fails leaves the latest record as it was, and throws', async () => {
+    const { conn, store, upserts } = fakeConn({ last: '{"at":"before"}', history: '[{"at":"before"}]', failKey: HISTORY_KEY });
+    await expect(recordRouteAreas({ now: NOW, conn })).rejects.toThrow(`write of ${HISTORY_KEY} failed`);
+    expect(store[LAST_KEY]).toBe('{"at":"before"}');
+    expect(store[HISTORY_KEY]).toBe('[{"at":"before"}]');
+    expect(upserts).toHaveLength(0);
+  });
+
+  test('a second run of the same cron occurrence replaces its entry; another hour adds one', async () => {
+    const { conn, store } = fakeConn();
+    await recordRouteAreas({ now: NOW, conn });
+    // The other app instance of a deploy, 40 seconds later in the same hour.
+    const later = new Date(NOW.getTime() + 40e3);
+    await recordRouteAreas({ now: later, conn });
+    let history = JSON.parse(store[HISTORY_KEY]);
+    expect(history.map((h) => h.tick)).toEqual(['2026-11-23T10']);
+    expect(history[0].at).toBe(later.toISOString());
+    expect(JSON.parse(store[LAST_KEY]).at).toBe(later.toISOString());
+
+    await recordRouteAreas({ now: new Date(NOW.getTime() + 2 * 3600e3), conn });
+    history = JSON.parse(store[HISTORY_KEY]);
+    expect(history.map((h) => h.tick)).toEqual(['2026-11-23T10', '2026-11-23T12']);
+  });
+
+  test('a day whose ZIPs come from the technician\'s own territory keeps its ZIP list in the history', async () => {
+    // T1 owns one of the two ZIPs of c-south: the area key alone cannot say which.
+    const territory = [...TERRITORY, { zip: '34205', area: 'c-south', technicianId: T1 }];
+    const { conn, store } = fakeConn({ territory });
+    await recordRouteAreas({ now: NOW, conn });
+    const entry = JSON.parse(store[HISTORY_KEY])[0];
+    expect(entry.techs[0].days[1]).toMatchObject({ date: '2026-11-24', stops: 0, room: true, areas: {}, zip_source: 'territory', zips: ['34205'] });
+    expect(entry.lines.pest.areas).toEqual(['c-south']);
+    expect(entry.lines.pest.days[1]).toEqual({ date: '2026-11-24', technician_ids: [T1], open_min: 600 });
   });
 
   test('history keeps the last 120 compact entries, newest last, with no ZIP lists', async () => {
     const old = Array.from({ length: HISTORY_MAX + 5 }, (_, i) => ({ at: `old-${i}` }));
     const { conn, store } = fakeConn({
       history: JSON.stringify(old),
-      stopRows: [{ technician_id: T1, day: '2026-11-24', zip: '34201', minutes: 60, done: false }],
+      stopRows: [{ technician_id: T1, day: '2026-11-24', zip: '34201', minutes: 60, minutes_left: 60, done: false, booked: true }],
     });
     await recordRouteAreas({ now: NOW, conn });
     const history = JSON.parse(store[HISTORY_KEY]);
@@ -338,11 +442,19 @@ describe('recordRouteAreas', () => {
     expect(entry.at).toBe(NOW.toISOString());
     const weekdayLimit = JSON.parse(store[LAST_KEY]).rule.limits.weekday_limit;
     expect(entry.techs[0].days[1]).toEqual({
-      date: '2026-11-24', staffed: true, room: true, stops: 1, stops_left: 1, open_stops: weekdayLimit - 1, open_min: 520, areas: { 'a-north': 1 },
+      date: '2026-11-24', staffed: true, room: true, stops: 1, stops_left: 1, open_stops: weekdayLimit - 1, open_min: 520, areas: { 'a-north': 1 }, zip_source: 'stops',
     });
     expect(Object.keys(entry.lines)).toEqual(['pest', 'lawn']);
-    expect(entry.lines.pest).toEqual({ areas: ['a-north'], open_min: expect.any(Number) });
-    expect(JSON.stringify(entry)).not.toMatch(/zips/);
+    expect(entry.lines.pest).toEqual({
+      areas: ['a-north'],
+      open_min: expect.any(Number),
+      days: [
+        { date: '2026-11-23', technician_ids: [T1], open_min: expect.any(Number) },
+        { date: '2026-11-24', technician_ids: [T1], open_min: 520 },
+      ],
+    });
+    // A list that follows from the areas is not stored.
+    expect(JSON.stringify(entry)).not.toMatch(/"zips"/);
   });
 
   test.each([
