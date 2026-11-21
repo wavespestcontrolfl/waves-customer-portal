@@ -60,9 +60,10 @@ describe('runTabReloadCheck', () => {
   });
 
   test('missed reloads post one FIX row with the totals for each cause and page', async () => {
+    // Not in ranked order: the totals rank by views, then by name.
     const readRows = rows([
-      { reload_hold: null, page_key: 'pipeline', technician_id: TECH_A, views: '3' },
       { reload_hold: 'reloaded', page_key: 'dashboard', technician_id: TECH_A, views: '1' },
+      { reload_hold: null, page_key: 'pipeline', technician_id: TECH_A, views: '3' },
       { reload_hold: 'reloaded', page_key: 'pipeline', technician_id: TECH_B, views: '2' },
     ]);
 
