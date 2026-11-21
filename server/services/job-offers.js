@@ -1912,13 +1912,14 @@ async function raiseChecklistBell(trx, application, offer, open, due) {
 async function syncChecklistBell(applicationId, clock) {
   return db.transaction(async (trx) => {
     await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(STAFF_LOCK_WAIT_MS)]);
-    // A locked row is a write in progress: the next run takes the hire.
     const application = await trx('job_applications').where({ id: applicationId }).forUpdate().skipLocked().first();
-    if (!application) return null;
-    const held = await loadFirstDays(trx, application);
+    // No row: a write in progress holds it and the next run takes the hire, or the application was deleted.
+    if (!application && await trx('job_applications').where({ id: applicationId }).first('id')) return null;
+    const held = application ? await loadFirstDays(trx, application) : null;
     const now = clock();
     const today = etDateString(now);
-    const close = async (resolution) => (await closeChecklistBell(trx, application.id, now, resolution) ? 'closed' : null);
+    const close = async (resolution) => (await closeChecklistBell(trx, applicationId, now, resolution) ? 'closed' : null);
+    if (!application) return close('The application was deleted');
     if (!held) return close('The application is no longer Hired');
     const due = dueFirstDaysItems(held.signed, held.marks, held.firstDay, today);
     const open = FIRST_DAYS_ITEMS.filter((item) => !held.marks[item.key]).length;
@@ -1940,7 +1941,8 @@ async function syncChecklistBell(applicationId, clock) {
  *    first day), on the due day of Form I-9 and when an item passes its due day. Every other change rewrites it with
  *    no ring. A row the owner marked done stays done between those rings.
  *  - In every run, also at night: the row is closed when it has nothing left to ask for (the application is no longer
- *    Hired, every item is done, or no item is due that day). An item that is due again later rings again.
+ *    Hired or was deleted, every item is done, or no item is due that day). An item that is due again later rings
+ *    again.
  * It sends no one anything. Returns { rung, closed, failed }; the caller fails the job when failed > 0.
  * clock: the time source, for tests. The scheduler passes none.
  */

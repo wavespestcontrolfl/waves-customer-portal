@@ -110,12 +110,15 @@ jest.setTimeout(120000);
 
   // Each application has its own email: a signature makes a staff row, and a staff email is held by one row only.
   const applicantEmail = () => `jordan.rivera.${randomUUID().slice(0, 8)}@example.test`;
+  // Every application the suite made (a setup step that sets earlier tests' rows aside names only these).
+  const suiteApplications = [];
   async function newApplication(over = {}) {
     const [row] = await root('job_applications').insert({
       role: 'technician', status: 'reviewed',
       contact_snapshot: JSON.stringify({ name: 'Jordan Rivera', phone: '(941) 555-0100', email: applicantEmail() }),
       ...over,
     }).returning('*');
+    suiteApplications.push(row.id);
     return row;
   }
 
@@ -1949,13 +1952,13 @@ jest.setTimeout(120000);
 
         beforeEach(async () => {
           // The suite keeps its rows (one root transaction): the hires of earlier tests are not this test's. Their
-          // items are done and their bells are closed.
+          // items are done and their bells are closed. Only rows of the suite's own applications are written.
           const mark = { at: '2026-01-01T00:00:00.000Z' };
-          await root('job_offers').where({ status: 'accepted' }).update({
+          await root('job_offers').whereIn('application_id', suiteApplications).where({ status: 'accepted' }).update({
             checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: mark, license: mark, workers_comp: mark, i9: mark })]),
           });
           // The bell rows are real (the alert writer's own rules decide a ring, a rewrite and a close).
-          await root('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'job-offer-checklist:%'")
+          await root('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [suiteApplications.map((id) => `job-offer-checklist:${id}`)])
             .update({ done_at: new Date(), metadata: root.raw("metadata || '{\"autoCleared\": true}'::jsonb") });
           logger.error.mockClear();
         });
@@ -2172,6 +2175,13 @@ jest.setTimeout(120000);
           expect(await ring(morning(1, '07:15'))).toEqual({ ...NONE, closed: 1 });
           expect(await bellsOf(other.app.id)).toMatchObject([{ resolution: 'Closed by hand', metadata: expect.objectContaining({ autoCleared: true }) }]);
           expect(await ring(morning(1, '07:30'))).toEqual(NONE);
+          // A deleted application (its offers go with it): its row closes in the next run.
+          const gone = await hire();
+          expect(await ring(morning(1, '07:45'))).toEqual({ ...NONE, rung: 1 });
+          await root('job_applications').where({ id: gone.app.id }).del();
+          expect(await ring(morning(1, '08:00'))).toEqual({ ...NONE, closed: 1 });
+          expect(await bellsOf(gone.app.id)).toMatchObject([{ done_by: 'episodes', resolution: 'The application was deleted' }]);
+          expect(await ring(morning(1, '08:15'))).toEqual(NONE);
         });
 
         test('a mark takes the item off the row at once, so an undo before the next run rings a row the owner marked done; a name the alert rules refuse keeps the same row', async () => {
