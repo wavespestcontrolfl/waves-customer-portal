@@ -51,6 +51,7 @@
  */
 const db = require('../../models/db');
 const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
+const { dateOnlyString } = require('../../utils/date-only');
 
 const LAST_KEY = 'ads.route_areas.last';
 const HISTORY_KEY = 'ads.route_areas.history';
@@ -381,7 +382,7 @@ async function readStops(conn, dates) {
   [dates[0], dates[dates.length - 1], ...NOT_A_ROUTE_STOP_STATUSES]);
   return (result.rows || []).map((r) => ({
     technicianId: r.technician_id || null,
-    date: String(r.day).slice(0, 10),
+    date: dateOnlyString(r.day),
     zip: normalizeZip(r.zip),
     minutes: parseInt(r.minutes, 10) || 0,
     minutesLeft: parseInt(r.minutes_left, 10) || 0,
@@ -437,7 +438,7 @@ async function readRouteCheck(conn, now, today) {
   return {
     at: at.toISOString(),
     days: (Array.isArray(days) ? days : []).filter((d) => d && d.date && d.technician_id).map((d) => ({
-      date: String(d.date).slice(0, 10),
+      date: dateOnlyString(d.date),
       technicianId: String(d.technician_id),
       slots: d.skip ? null : Number(d.slots),
       stops: Number.isFinite(Number(d.stops)) ? Number(d.stops) : null,
