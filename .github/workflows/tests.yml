@@ -52,9 +52,11 @@ concurrency:
 permissions:
   contents: read
 
-# Installs and Jest compiles are cached between runs (2026-11-20, owner *a*):
-# .github/actions/npm-install and .github/actions/jest-cache-restore. Kept only
-# if 20 first-try PR runs show the median run 30 s or more faster.
+# Installs are cached between runs (2026-11-20, owner *a*): .github/actions/npm-install.
+# Kept only if 20 first-try PR runs show the median run 30 s or more faster.
+# Jest's compiled files are not cached (owner *drop*, 2026-11-20). With that cache warm,
+# server-unit (4) ran out of heap in public-route-allowlist.test.js in 8 of 13 runs,
+# against 1 in about 17 before it. .github/actions/jest-cache-restore can bring it back.
 jobs:
   server:
     runs-on: ubuntu-latest
@@ -115,11 +117,6 @@ jobs:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
       - uses: ./.github/actions/npm-install
-      - name: Restore Jest's compiled files
-        id: jest-cache
-        uses: ./.github/actions/jest-cache-restore
-        with:
-          name: server
       - parallel:
           - name: Migrate from an empty database
             env:
@@ -372,15 +369,6 @@ jobs:
         run: npx jest --ci --silent --runInBand tests/visit-completion-summary-postgres.test.js
       - name: Wait for the two background lanes (fails if either failed)
         wait-all:
-      - name: Save Jest's compiled files for this job's later runs today
-        # Only when today's cache missed. A red run's compiled files are as good
-        # as a green run's, so only a cancel skips this.
-        if: ${{ !cancelled() && steps.jest-cache.outputs.hit != 'true' }}
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ steps.jest-cache.outputs.dir }}
-          key: ${{ steps.jest-cache.outputs.key }}
 
   # The second half of the old `server` job's Postgres work (2026-11-20). It
   # runs on a runner of its own, in parallel with `server`, so neither job
@@ -447,11 +435,6 @@ jobs:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
       - uses: ./.github/actions/npm-install
-      - name: Restore Jest's compiled files
-        id: jest-cache
-        uses: ./.github/actions/jest-cache-restore
-        with:
-          name: server-pg
       - parallel:
           - name: Migrate the first server
             env:
@@ -805,15 +788,6 @@ jobs:
         run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js server/tests/invoice-property-history-db.test.js server/tests/customer-properties-db.test.js server/tests/intelligence-bar-properties-db.test.js server/tests/intelligence-bar-inventory-db.test.js server/tests/intelligence-bar-customer-estimates-db.test.js server/tests/intelligence-bar-billing-reader-db.test.js
       - name: Wait for the two background lanes (fails if either failed)
         wait-all:
-      - name: Save Jest's compiled files for this job's later runs today
-        # Only when today's cache missed. A red run's compiled files are as good
-        # as a green run's, so only a cancel skips this.
-        if: ${{ !cancelled() && steps.jest-cache.outputs.hit != 'true' }}
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ steps.jest-cache.outputs.dir }}
-          key: ${{ steps.jest-cache.outputs.key }}
 
   # Step 2 of the two-step design, on runners of their own (2026-11-01): the
   # DB-gated suites set the length of every run while they shared the
@@ -875,11 +849,6 @@ jobs:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
       - uses: ./.github/actions/npm-install
-      - name: Restore Jest's compiled files
-        id: jest-cache
-        uses: ./.github/actions/jest-cache-restore
-        with:
-          name: server-db-${{ matrix.part }}
       - parallel:
           - name: Migrate the first server
             env:
@@ -923,15 +892,6 @@ jobs:
             | xargs npx jest --ci --silent --runInBand --shard=${{ matrix.second }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js --testTimeout=15000
       - name: Wait for both lanes (fails if either failed)
         wait-all:
-      - name: Save Jest's compiled files for this job's later runs today
-        # Only when today's cache missed. A red run's compiled files are as good
-        # as a green run's, so only a cancel skips this.
-        if: ${{ !cancelled() && steps.jest-cache.outputs.hit != 'true' }}
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ steps.jest-cache.outputs.dir }}
-          key: ${{ steps.jest-cache.outputs.key }}
 
   # Step 1 of the two-step design: the full jest suite WITHOUT DATABASE_URL
   # (no Postgres service here, on purpose). It was the long pole of the whole
@@ -958,11 +918,6 @@ jobs:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
       - uses: ./.github/actions/npm-install
-      - name: Restore Jest's compiled files
-        id: jest-cache
-        uses: ./.github/actions/jest-cache-restore
-        with:
-          name: server-unit-${{ matrix.shard }}
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
@@ -970,15 +925,6 @@ jobs:
         # The default 5 s test timeout is raised to 15 s because a third worker slows
         # cold module loads; a test that sets its own timeout keeps it.
         run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js --config='{"workerIdleMemoryLimit":"2GB","testTimeout":15000}'
-      - name: Save Jest's compiled files for this job's later runs today
-        # Only when today's cache missed. A red run's compiled files are as good
-        # as a green run's, so only a cancel skips this.
-        if: ${{ !cancelled() && steps.jest-cache.outputs.hit != 'true' }}
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ steps.jest-cache.outputs.dir }}
-          key: ${{ steps.jest-cache.outputs.key }}
 
   client:
     runs-on: ubuntu-latest
