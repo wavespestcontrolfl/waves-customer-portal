@@ -60,13 +60,13 @@ export function attachedVisitInvoice(service) {
 // arrived at (on_site) that a payment holds open. With GATE_REPORT_AFTER_PAY
 // on, a payment on the visit day after the technician arrived no longer
 // closes the visit, so its report is still owed (owner 2026-11-19, *report
-// after pay*). The schedule row says so in reportAfterPayHeld (the server's
-// rule, not the row's newest bill: a bill the office adds after the payment
-// must not hide the badge), and reportAfterPayEnabled is true only while the
-// gate is on and the visit's completion sends the customer a report.
+// after pay*). The schedule row says so in reportAfterPayHeld, the server's
+// recorded hold. It is the badge's only source: not the row's newest bill (a
+// bill the office adds after the payment must not hide the badge), and no
+// second flag (the server records a hold only while the gate is on, for a
+// visit whose completion sends the customer a report).
 export function paidReportNotSent(service) {
-  return service?.reportAfterPayEnabled === true
-    && service.reportAfterPayHeld === true
+  return service?.reportAfterPayHeld === true
     && String(service.status || '').toLowerCase() === 'on_site';
 }
 

@@ -118,7 +118,7 @@ describe('visitInvoiceStatusNote', () => {
 
 describe('paidReportNotSent', () => {
   it('marks only an arrived visit that a payment holds open (the server\'s row flag)', () => {
-    const heldOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', checkoutInvoiceStatus: 'paid', reportAfterPayEnabled: true, reportAfterPayHeld: true };
+    const heldOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', checkoutInvoiceStatus: 'paid', reportAfterPayHeld: true };
     expect(paidReportNotSent(heldOnSite)).toBe(true);
     // Not arrived yet, or the report is already done.
     expect(paidReportNotSent({ ...heldOnSite, status: 'en_route' })).toBe(false);
@@ -129,18 +129,21 @@ describe('paidReportNotSent', () => {
   });
 
   it('reads the hold, not the newest bill: a bill the office adds after the payment keeps the badge (pre-push audit round 6)', () => {
-    const heldOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', reportAfterPayEnabled: true, reportAfterPayHeld: true };
+    const heldOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', reportAfterPayHeld: true };
     // The row's checkout invoice is now the newer draft: the report is still owed.
     expect(paidReportNotSent({ ...heldOnSite, checkoutInvoiceStatus: 'draft' })).toBe(true);
     // A paid attached invoice alone is not the hold.
     expect(paidReportNotSent({ ...heldOnSite, checkoutInvoiceStatus: 'paid', reportAfterPayHeld: undefined })).toBe(false);
   });
 
-  it('stays off unless the row says the gate is on and this visit sends a report', () => {
+  it('reads the hold alone: no second row flag can hide a held visit (pre-push audit round 12)', () => {
     const heldOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', checkoutInvoiceStatus: 'paid', reportAfterPayHeld: true };
-    // Gate off, or a completion that sends the customer no report (internal-only, delivery disabled): the server sends false.
-    expect(paidReportNotSent({ ...heldOnSite, reportAfterPayEnabled: false })).toBe(false);
-    // An older payload without the field.
-    expect(paidReportNotSent(heldOnSite)).toBe(false);
+    // The server records a hold only while the gate is on, for a visit whose completion sends the customer a report. A row without
+    // the retired reportAfterPayEnabled flag, or with it false (a server from before the change), still shows its hold.
+    expect(paidReportNotSent(heldOnSite)).toBe(true);
+    expect(paidReportNotSent({ ...heldOnSite, reportAfterPayEnabled: false })).toBe(true);
+    // Gate off, or no hold: the server sends the hold flag false, or an older payload carries none.
+    expect(paidReportNotSent({ ...heldOnSite, reportAfterPayHeld: false })).toBe(false);
+    expect(paidReportNotSent({ ...heldOnSite, reportAfterPayHeld: undefined })).toBe(false);
   });
 });

@@ -193,8 +193,9 @@ async function probeVisitRefusal(conn, svc) {
 }
 
 // GATE_REPORT_AFTER_PAY (owner 2026-11-19, *report after pay*): a payment on
-// an arrived visit's own day, while the paid invoice is the visit's only bill,
-// HOLDS the visit open for its technician's report instead of closing it.
+// an arrived visit's own day, while the paid invoice is the visit's only bill
+// and the visit's completion sends the customer a report, HOLDS the visit open
+// for its technician's report instead of closing it.
 // The hold is DECIDED ONCE, by a closeout of that payment (its pay rail's, or
 // a retry sweep's), where the closeout would otherwise close the visit, and
 // RECORDED as an audit_log row on the visit (no migration; the closeout pins
@@ -265,23 +266,47 @@ const heldOnOtherInvoice = (held, invoiceId) => Boolean(held) && String(held.id)
 
 // Would the payment on `invoice` hold `visit` now? The hold's own conditions,
 // read-only: the gate is on, the technician has arrived (on_site), it is the
-// visit's own ET day, no record_payment card approved the payment, and the
+// visit's own ET day, no record_payment card approved the payment, the
 // invoice is the visit's only bill (completionInvoicesOnVisits: every live
-// row, plus a refunded one). A visit with another bill on it closes on the
+// row, plus a refunded one), and the visit's completion sends the customer a
+// report. A visit with another bill on it closes on the
 // payment, as with the gate off, and the closeout pins the paid invoice by id.
 // A payment the Intelligence Bar's record_payment card approved carries that
 // card's pin (approvedPaidCloseoutTargetFor: the visit the card said the
 // payment completes, or 'none'), written in the payment's own transaction. It
 // holds nothing, so what the card said stands on every path, as with the gate
 // off (pre-push audit rounds 8-11: a card that deferred its close met the
-// hold in a new way each round). The resolver asks this, and the payment's
-// closeout asks it again under the visit's mint lock when it records the hold.
+// hold in a new way each round).
+// The report is what the hold waits for (pre-push audit round 12): a visit
+// whose completion sends the customer none closes on its payment, as with the
+// gate off. The answer is the completion's own: its profile, resolved STRICT
+// as probeVisitRefusal resolves it (a failed read throws and never becomes the
+// generic profile), and its delivery posture
+// (resolveCompletionDeliveryPosture, with the specialty report kill). No
+// report: an internal-only consultation, a profile whose delivery is
+// internal-only or disabled, and a project-backed visit, which the canonical
+// completion refuses. `visit` must carry the columns the profile is resolved
+// from (service_id, service_type, service_key_snapshot, is_recurring). So a
+// recorded hold says a report is owed, and the Dispatch badge reads the hold
+// alone (reportAfterPayHeldVisitIds).
+// The resolver asks this, and the payment's closeout asks it again under the
+// visit's mint lock when it records the hold.
 async function reportAfterPayWouldHold(conn, { visit, invoice, today }) {
   if (!reportAfterPayLive() || !isArrivedVisitStatus(visit?.status) || dateOnly(visit?.scheduled_date) !== today) return false;
   if (await approvedPaidCloseoutTargetFor(conn, invoice.id)) return false;
   const { completionInvoicesOnVisits } = require('./completion-invoice-candidate');
   const ids = (await completionInvoicesOnVisits(conn, [visit.id])).map((row) => String(row.id));
-  return ids.length > 0 && ids.every((id) => id === String(invoice.id));
+  if (!ids.length || !ids.every((id) => id === String(invoice.id))) return false;
+  const Profiles = require('./service-completion-profiles');
+  const profile = await Profiles.resolveCompletionProfileForScheduledService(visit, conn, { strict: true });
+  if (profile.requiresProject || profile.projectBacked) return false;
+  return !Profiles.resolveCompletionDeliveryPosture({
+    typedFindingsType: profile.findingsType || null,
+    completionMode: profile.completionMode,
+    profileDeliveryMode: profile.deliveryMode,
+    specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
+    profileCategory: profile.category,
+  }).suppressCustomerComms;
 }
 
 // The hold's write: the payment's closeout records it under the visit's mint
@@ -295,9 +320,11 @@ async function reportAfterPayWouldHold(conn, { visit, invoice, today }) {
 // gone: undone or charged back after the closeout read it, round 8, or undone
 // and made again, round 11: the invoice then carries another payment, and
 // that payment's own closeout decides for it). Returns null when this payment
-// no longer holds the visit (a bill added, the visit moved or closed, the gate
-// off): the closeout then judges the visit as with the gate off, and its
-// completion re-reads the hold and the payment under its own locks. A failed
+// no longer holds the visit (a bill added, the visit moved or closed, its
+// completion no longer sends a report, the gate off): the closeout then judges
+// the visit as with the gate off, and its completion re-reads the hold and the
+// payment under its own locks. The visit is read whole: the report condition
+// resolves its completion profile from the row's identity columns. A failed
 // read or write throws.
 async function recordReportAfterPayHold(conn, { visitId, invoiceId, today, paidAtMs = null }) {
   if (!reportAfterPayLive()) return null;
@@ -306,7 +333,7 @@ async function recordReportAfterPayHold(conn, { visitId, invoiceId, today, paidA
     const held = await reportAfterPayHold(trx, visitId);
     if (heldOnOtherInvoice(held, invoiceId)) return 'visit_paid_on_other_invoice';
     if (held) return true;
-    const visit = await trx('scheduled_services').where({ id: visitId }).first('id', 'status', 'scheduled_date');
+    const visit = await trx('scheduled_services').where({ id: visitId }).first();
     const invoice = await trx('invoices').where({ id: invoiceId })
       .first('id', 'status', 'scheduled_service_id', 'paid_at', trx.raw(`${paidAtMsSql('paid_at')} as paid_at_ms`));
     if (!visit || !invoice || String(invoice.scheduled_service_id) !== String(visitId)) return null;
@@ -365,8 +392,11 @@ async function linkReportAfterPayHold(conn, { visitId, serviceRecordId, technici
 
 // The visits among `visitIds` that a live hold keeps open, as a Set of ids;
 // empty with the gate off. The Dispatch row's "Paid, report not sent" badge
-// reads it, never the row's newest bill: a bill added after the payment is the
-// office's and must not hide the report still owed.
+// reads it and nothing else. Never the row's newest bill: a bill added after
+// the payment is the office's and must not hide the report still owed. Never
+// the visit's profile: a hold is recorded only where the completion sends the
+// customer a report (reportAfterPayWouldHold), so the badge and the hold
+// cannot disagree (pre-push audit round 12).
 async function reportAfterPayHeldVisitIds(conn, visitIds) {
   const ids = [...new Set((visitIds || []).filter(Boolean).map(String))];
   if (!ids.length || !reportAfterPayLive()) return new Set();
