@@ -215,6 +215,81 @@ async function estimateAcceptedForFollowUp(enrollment) {
   return !!accepted;
 }
 
+// GATE_ESTIMATE_EMAILS_NAME_SERVICE (owner 2026-11-21): the 2-hour estimate_sent email reads its estimate at delivery.
+// Only an enrollment that carries metadata.estimate_id, a real estimate row, gate on, and not a test send. Anything else
+// returns null and the email goes exactly as before.
+async function nameServiceEstimateFor(enrollment) {
+  if (require('../config/feature-gates').estimateEmailsNameServiceLive?.() !== true) return null;
+  const estimateId = enrollmentMetadata(enrollment).estimate_id;
+  if (!estimateId) return null;
+  return (await db('estimates').where({ id: estimateId }).first()) || null;
+}
+
+// The customer replied by text or email since the estimate went out (the engine's two reply arms). A failed read fails
+// OPEN, as the engine's cron path does: the email goes. Only the error code or name is logged (a knex message carries
+// phone numbers and addresses).
+async function customerRepliedSinceEstimate(estimate, enrollment) {
+  const since = estimate.sent_at || enrollment.enrolled_at;
+  if (!since) return false;
+  try {
+    return await require('./estimate-follow-up').hasRepliedSince(estimate, new Date(since));
+  } catch (e) {
+    logger.warn(`[automation-runner] estimate reply check skipped for estimate ${estimate.id}: ${(e && (e.code || e.name)) || 'error'}`);
+    return false;
+  }
+}
+
+// The estimate_sent stops, read at delivery; each ends the enrollment the same way. The accept stop is always on; the others
+// (GATE_ESTIMATE_EMAILS_NAME_SERVICE) are for an estimate no longer open to the customer (status not sent or viewed), one that
+// opted out of automated follow-up, or a customer who replied since it went out.
+async function estimateSentStop(enrollment) {
+  if (await estimateAcceptedForFollowUp(enrollment)) {
+    return { reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' };
+  }
+  return estimateSentNameServiceStop(enrollment);
+}
+
+async function estimateSentNameServiceStop(enrollment) {
+  const estimate = await nameServiceEstimateFor(enrollment);
+  if (!estimate) return null;
+  if (!['sent', 'viewed'].includes(estimate.status)) {
+    return { reason: 'The estimate is no longer open', cancelReason: 'estimate_closed' };
+  }
+  if (require('./estimate-comms-eligibility').estimateOptedOutOfEngagement(estimate)) {
+    return { reason: 'The estimate opted out of follow-ups', cancelReason: 'estimate_opted_out' };
+  }
+  if (await customerRepliedSinceEstimate(estimate, enrollment)) {
+    return { reason: 'The customer replied since the estimate went out', cancelReason: 'estimate_replied' };
+  }
+  return null;
+}
+
+// The View my estimate link: the engine's email-leg builder, behind the pricing-authority guard the manual follow-up route
+// applies. A refusal or a failed mint is no link; the rest of the email still goes.
+async function estimateSentLink(estimate) {
+  try {
+    if (!(await require('./pricing-authority-gate').estimateDeliverableUnderGate(db, estimate))) return null;
+    const { emailUrl } = await require('./estimate-follow-up')._private.mintStageLinks(
+      estimate, 'estimate_sent_automation', { emailOnly: true },
+    );
+    return emailUrl || null;
+  } catch (e) {
+    logger.warn(`[automation-runner] estimate link not minted for estimate ${estimate.id}: ${(e && (e.code || e.name)) || 'error'}`);
+    return null;
+  }
+}
+
+// The rendered content to send: the per-estimate body for the 2-hour estimate_sent email, else the content passed in
+// (today's step body: gate off, no estimate id, no estimate row, a test send, another template).
+async function withEstimateSentBody({ html, text }, { template, enrollment, testRecipient, personal, asmGroupId }) {
+  if (template.key !== 'estimate_sent' || testRecipient) return { html, text };
+  const estimate = await nameServiceEstimateFor(enrollment);
+  if (!estimate) return { html, text };
+  const { buildEstimateSentEmail } = require('./estimate-sent-email-by-service');
+  const body = buildEstimateSentEmail({ estimate, estimateUrl: await estimateSentLink(estimate) });
+  return renderAutomationStepContent({ template, htmlBody: body.html_body, textBody: body.text_body, customer: personal, asmGroupId });
+}
+
 async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null }) {
   if (testRecipient) return null;
   if (handedOffStep) return completeHandedOffRetry(enrollment, handedOffStep);
@@ -243,9 +318,9 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     return blockSendAndCancelEnrollment({ enrollment, sendId,
       reason: 'No termite bond on file', cancelReason: 'not_termite_bond' });
   }
-  if (template.key === 'estimate_sent' && await estimateAcceptedForFollowUp(enrollment)) {
-    return blockSendAndCancelEnrollment({ enrollment, sendId,
-      reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' });
+  if (template.key === 'estimate_sent') {
+    const stop = await estimateSentStop(enrollment);
+    if (stop) return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
   }
   if (template.key === 'referral_nudge') {
     const verdict = await referralNudgeVerdict(enrollment.customer_id);
@@ -1114,7 +1189,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   if (routed.blocked) return routed.blocked;
   const { recipient } = routed;
   const consultationBlock = await resolveConsultationBlock(step, enrollment, recipient);
-  const { html, text } = renderAutomationStepContent({
+  let { html, text } = renderAutomationStepContent({
     template,
     htmlBody: step.html_body,
     textBody: step.text_body,
@@ -1142,6 +1217,10 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     sendId: sendRow.id, testRecipient, billingSend, retryNotBound: sendRow.retryNotBound,
     handedOffStep: sendRow.retryHandedOff ? step : null });
   if (deliveryBlock) return deliveryBlock;
+
+  // GATE_ESTIMATE_EMAILS_NAME_SERVICE: the 2-hour estimate email, built for this estimate. Subject, sender and the
+  // wrapper stay the step's; a null body (gate off, no estimate) leaves today's content.
+  ({ html, text } = await withEstimateSentBody({ html, text }, { template, enrollment, testRecipient, personal, asmGroupId }));
 
   const handoff = { started: false, accepted: null };
   const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({

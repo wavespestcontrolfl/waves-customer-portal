@@ -229,8 +229,13 @@ async function hasInboundEmailSince(est, cutoff) {
 // handle it live. An inbound EMAIL in the same window pauses it too (SMS arm
 // checked first). Soft-fails if the tables aren't
 // present (e.g. fresh env) so we don't break the whole follow-up loop.
-async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {}) {
-  const cutoff = new Date(Date.now() - days * 86400000);
+async function hasRepliedRecently(est, days = 14, opts = {}) {
+  return hasRepliedSince(est, new Date(Date.now() - days * 86400000), opts);
+}
+
+// The two reply arms (text, then email) since an instant: the reply-pause window above is "the last N days", the 2-hour
+// estimate_sent email asks "since the estimate went out".
+async function hasRepliedSince(est, cutoff, { throwOnError = false } = {}) {
   try {
     if (await hasInboundSmsSince(est, cutoff)) return true;
     return await hasInboundEmailSince(est, cutoff);
@@ -1920,6 +1925,8 @@ module.exports = EstimateFollowUp;
 module.exports.deferredFollowupStillEligible = deferredFollowupStillEligible;
 // The replay's provider-boundary check (deferred-replay-registry).
 module.exports.followupTextProviderCheck = followupTextProviderCheck;
+// The reply check since an instant (the 2-hour estimate_sent email's stop, automation-runner.js).
+module.exports.hasRepliedSince = hasRepliedSince;
 module.exports._private = {
   sendDualChannel,
   estimateEmailPayload,
@@ -1941,6 +1948,7 @@ module.exports._private = {
   LEGACY_STAGE_TEMPLATES,
   mintStageLinks,
   hasRepliedRecently,
+  hasRepliedSince,
   wasRecentlyOpened,
   estimateMidCheckout,
   followupMayStillSend,
