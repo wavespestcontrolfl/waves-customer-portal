@@ -595,8 +595,7 @@ function retryableVisitFilter(q, today, settledSql) {
 //  - every `visit_*` reason of issuedCloseoutVisitRefusal and the resolver
 //    (visit_in_future, visit_en_route, visit_scheduled_today, visit_prepaid,
 //    visit_timer_running, visit_paid_on_other_invoice, and the historical
-//    visit_on_site that every arrived visit got before 2026-10-04), and a
-//    receipt resend card's visit_not_on_card (refuseUnapprovedTarget);
+//    visit_on_site that every arrived visit got before 2026-10-04);
 //  - a race under the completion's row lock (`issued_visit_*`);
 //  - a failure: `error`, or any 5xx the completion RETURNED rather than
 //    threw (a failed profile / prepay read answers 503 with its own code).
@@ -609,16 +608,24 @@ function isTransientRefusal(meta) {
   return code === 'error' || code.startsWith('visit_') || code.startsWith('issued_visit_') || Number(meta?.status) >= 500;
 }
 
+// A receipt resend card's refusal (refuseUnapprovedTarget). It says what that one card approved, so it is no verdict for a
+// retry: no sweep reads it, and the row under it, or none, decides as if that resend had not run. Read as a person's decision
+// it blocked a send's retry after an undone payment; read as a refusal of the moment it hid a person's decision under it
+// (pre-push audit, one finding each).
+const RESEND_CARD_REFUSAL_CODE = 'visit_not_on_card';
+
 // The latest closeout audit row for this (visit, invoice): `trigger` narrows
-// it to one trigger, null reads any. Returns { action, meta } or null; throws
-// on a failed read (the caller skips the row and the next pass re-reads).
+// it to one trigger, null reads any; a resend card's refusal is never read.
+// Returns { action, meta } or null; throws on a failed read (the caller
+// skips the row and the next pass re-reads).
 async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null, ignoreCodes = [] }) {
+  const unread = [RESEND_CARD_REFUSAL_CODE, ...ignoreCodes];
   const query = conn('audit_log')
     .where({ resource_type: 'scheduled_services', resource_id: visitId })
     .whereIn('action', CLOSEOUT_AUDIT_ACTIONS)
-    .whereRaw("metadata->>'invoiceId' = ?", [String(invoiceId)]);
+    .whereRaw("metadata->>'invoiceId' = ?", [String(invoiceId)])
+    .whereRaw(`COALESCE(metadata->>'code', '') NOT IN (${unread.map(() => '?').join(', ')})`, unread);
   if (trigger) query.whereRaw("metadata->>'trigger' = ?", [trigger]);
-  if (ignoreCodes.length) query.whereRaw(`COALESCE(metadata->>'code', '') NOT IN (${ignoreCodes.map(() => '?').join(', ')})`, ignoreCodes);
   const last = await query.orderBy('created_at', 'desc').first('action', 'metadata');
   if (!last) return null;
   let meta = last.metadata;
@@ -1062,8 +1069,8 @@ async function resolveCloseoutTarget(run) {
 // the closeout runs only for that visit. A different live visit is left open and audited as a refusal that
 // the retry sweeps do not reconsider (a person decides). A send with no approved target is unchanged.
 // A receipt resend's card names a target for its own run only (`targetBindsRetries: false`): the payment is not
-// the resend's. A visit that card did not name is left open with a refusal of the moment (`visit_not_on_card`,
-// a `visit_` code), so every retry sweep decides that visit again by its own rule.
+// the resend's. A visit that card did not name is left open under RESEND_CARD_REFUSAL_CODE, which no retry
+// sweep reads: each decides that visit as if the resend had not run.
 // The carded visit's facts (a record_payment card pins them): the closeout also runs only for that visit AS THE CARD SHOWED IT, compared
 // here on the resolved row and again by the completion under the visit lock (approvedVisit). A visit edited, rescheduled, reclassified
 // or cancelled since is left open: `approved_visit_changed`, not retried by the sweeps (a person decides; the payment stays recorded).
@@ -1085,7 +1092,7 @@ async function refuseUnapprovedTarget(run) {
     return { closed: false, reason: 'approved_visit_changed', visitId: run.svc.id, audited };
   }
   if (!run.approvedTarget || run.svc.id === run.approvedTarget) return null;
-  const code = run.targetBindsRetries ? 'approved_target_mismatch' : 'visit_not_on_card';
+  const code = run.targetBindsRetries ? 'approved_target_mismatch' : RESEND_CARD_REFUSAL_CODE;
   logger.warn(`[invoice-issued-closeout] ${run.label} → ${code}: approved ${run.approvedTarget}, live visit ${run.svc.id}; left open`);
   const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code });
   return { closed: false, reason: code, visitId: run.svc.id, approvedTarget: run.approvedTarget, audited };

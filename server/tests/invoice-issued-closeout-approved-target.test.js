@@ -51,8 +51,8 @@ describe('closeOutVisitForIssuedInvoice with an approved target', () => {
     expect(completeScheduledService).toHaveBeenCalledTimes(1);
   });
 
-  // A receipt resend's card (`targetBindsRetries: false`) limits its own run only: its refusal carries a `visit_` code, which
-  // the retry sweeps reconsider. Every other card's refusal is approved_target_mismatch, which they do not.
+  // A receipt resend's card (`targetBindsRetries: false`) limits its own run only: its refusal carries its own code, which no
+  // retry sweep reads. Every other card's refusal is approved_target_mismatch, which the sweeps keep to.
   test.each([
     ['another visit was approved', 'visit-other', {}, 'approved_target_mismatch'],
     ['the card said no visit would close', 'none', {}, 'approved_target_mismatch'],

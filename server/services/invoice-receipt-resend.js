@@ -160,8 +160,8 @@ async function verifyApproved(s, claim) {
 // closeout resolves the visit again, after verifyApproved, and what it finds can differ: a bill added in
 // between ends a hold the card read, a technician arrives. The closeout is handed the card's target and
 // leaves any other visit open (pre-push audit round 12 on #8239). The target limits this run only
-// (`targetBindsRetries: false`): the refusal is of the moment (`visit_not_on_card`), and every retry sweep
-// decides that visit again by its own rule. The Invoices route shows no card and names no target.
+// (`targetBindsRetries: false`): its refusal (`visit_not_on_card`) is read by no retry sweep, so each
+// decides that visit as if this resend had not run. The Invoices route shows no card and names no target.
 async function runCloseout(s, stillHeld) {
   if (!stillHeld('before_closeout')) return;
   const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
