@@ -44,7 +44,8 @@ const estimateContext = (estimate) => ({
 
 /**
  * Is this read the estimate's own, so its points and notes may go to whoever holds the estimate now?
- * One rule: points reach a customer only when a person saved them while that customer held the estimate.
+ * One rule: points reach a customer only when a person saved them FOR that customer: while that customer held the
+ * estimate, or on the read staff made for that customer while the estimate had no customer yet (the two-part read).
  *  - The read and the estimate must name the SAME customer, or both name none. A points save writes the customer who
  *    holds the estimate on a read that names none (saveTechCount), so the read's customer is the one the points were
  *    confirmed for. A read that names A is not B's once the estimate goes to B. A read that names no customer (points

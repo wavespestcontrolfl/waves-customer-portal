@@ -7027,8 +7027,9 @@ real provider handoff (the same test that moves the price snapshot; a group sibl
 published it), from `customerPointsFromRow` of the newest finished roof read of the estimate's own context whose points
 the technician set (a saved list, an empty list, or a cleared one, so a clear never brings an older list back); a
 re-read or an edit after the send never changes it until the next such send, and a send with no points deletes it. "Of
-the estimate's own context" is one rule (`ownRead`): points reach a customer only when a person saved them while that
-customer held the estimate. The read and the estimate must name the same customer, or both name none, and the roof
+the estimate's own context" is one rule (`ownRead`): points reach a customer only when a person saved them for that
+customer: while that customer held the estimate, or on the read staff made for that customer while the estimate had no
+customer yet (the roof read's two-part context). The read and the estimate must name the same customer, or both name none, and the roof
 read's own rule (`matchesContext`) must hold: the estimate's plain read, or the read taken for the customer the
 estimate belongs to now. A points save (a list or a clear) is checked under a lock on the estimate row
 (`saveTechCount`, `pointsCustomer`): the editor (the holder the panel loaded with the read, sent back as
