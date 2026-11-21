@@ -23,12 +23,25 @@ export const PREP_GUIDE_LINKS = [
   description: "Send by email, text, or both",
 }));
 
-// "Send it again" for the welcome email: the same send form, email only.
-export const WELCOME_EMAIL_LINK = {
-  key: "email:welcome", name: "Welcome email", category: "customer", sendForm: true,
-  keywords: "welcome new customer email resend again never got app sign in start",
-  description: "Send the welcome email again",
+// "Send it again" rows: an email the customer already had, through the same
+// send form, email only. `path` is the communications route that sends it.
+const EMAIL_AGAIN = {
+  "email:welcome": {
+    name: "Welcome email", path: "send-welcome", noun: "the email",
+    keywords: "welcome new customer email resend again never got app sign in start",
+    description: "Send the welcome email again",
+    about: "Sends the new-customer welcome email again: how to get the app, sign in and turn on notifications.",
+  },
+  "email:receipt": {
+    name: "Latest receipt email", path: "send-latest-receipt", noun: "the receipt",
+    keywords: "receipt paid payment email resend again never got invoice proof",
+    description: "Email the newest paid receipt again",
+    about: "Emails the receipt for this customer's newest paid invoice again. It goes to the receipt email on file, which can differ from the one shown here. Admin only.",
+  },
 };
+export const EMAIL_AGAIN_LINKS = Object.entries(EMAIL_AGAIN).map(([key, row]) => ({
+  key, name: row.name, keywords: row.keywords, description: row.description, category: "customer", sendForm: true,
+}));
 
 const CHANNELS = [
   { value: "both", label: "Email and text", action: "Send email and text" },
@@ -47,8 +60,8 @@ function customerName(customer) {
 export default function PrepGuideForm({ active, guide, initialSearch = "", initialChannel = "both", onSendingChange, onInsertSteps }) {
   const formId = useId();
   const howTo = Array.isArray(guide.steps);
-  const welcome = guide.key === WELCOME_EMAIL_LINK.key;
-  const emailOnly = howTo || welcome;
+  const again = EMAIL_AGAIN[guide.key];
+  const emailOnly = howTo || Boolean(again);
   const [channel, setChannel] = useState(initialChannel);
   const [search, setSearch] = useState(initialSearch);
   const [results, setResults] = useState([]);
@@ -93,8 +106,8 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
     onSendingChange(true);
     setResult(null);
     try {
-      const [path, body] = welcome
-        ? ["send-welcome", { customerId: selected.id }]
+      const [path, body] = again
+        ? [again.path, { customerId: selected.id }]
         : howTo
         ? ["send-howto", { customerId: selected.id, guideKey: guide.key.replace(/^howto:/, "") }]
         : ["send-prep", { customerId: selected.id, pestType: guide.pestType, channel }];
@@ -116,8 +129,8 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
       <div>
         <h2 className="text-16 font-medium mb-2">{guide.name}</h2>
         <p className="text-zinc-600 leading-relaxed">
-          {welcome
-            ? "Sends the new-customer welcome email again: how to get the app, sign in and turn on notifications."
+          {again
+            ? again.about
             : howTo
             ? "Sends this guide as an email, with a button that opens the right app screen. It is for customers with an active plan."
             : guide.pestType === "sprinkler_timer"
@@ -174,7 +187,7 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
           ))}
         </fieldset>
       )}
-      <p className="text-zinc-600 leading-relaxed">This sends {welcome ? "the email" : "the guide"} separately. Your message draft stays as written.</p>
+      <p className="text-zinc-600 leading-relaxed">This sends {again ? again.noun : "the guide"} separately. Your message draft stays as written.</p>
       {result && <p role={result.ok ? "status" : "alert"} className={result.ok ? "text-zinc-900" : "text-alert-fg"}>{result.text}</p>}
       <Button type="submit" className="w-full text-14" disabled={!selected || sending || result?.ok}>
         {sending ? "Sending…" : emailOnly ? "Send by email" : CHANNELS.find((choice) => choice.value === channel).action}

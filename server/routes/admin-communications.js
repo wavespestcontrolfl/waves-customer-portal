@@ -2034,6 +2034,35 @@ router.post('/send-welcome', async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
+// POST /api/admin/communications/send-latest-receipt — the receipt for the
+// customer's newest paid invoice, emailed again from Quick Links (owner
+// 2026-11-21). The send is sendInvoiceReceipt, the one writer behind the
+// Invoices page "Resend receipt" button: its lock, recipient, opt-out and
+// closeout rules apply unchanged. A payer-billed invoice is left out, since
+// its receipt goes to the payer and not to the customer picked here.
+router.post('/send-latest-receipt', requireAdmin, async (req, res, next) => {
+  try {
+    const { customerId } = req.body || {};
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    const invoice = await db('invoices')
+      .where({ customer_id: customerId, status: 'paid' })
+      .whereNull('payer_id')
+      .whereNull('archived_at')
+      .orderByRaw('paid_at DESC NULLS LAST, id DESC')
+      .first('id', 'invoice_number');
+    if (!invoice) return res.status(400).json({ error: 'This customer has no paid invoice to send a receipt for.' });
+    const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+    const { status, body, delivery } = await sendInvoiceReceipt(invoice.id, { via: 'email', actorTechnicianId: req.technicianId || null });
+    if (status === 200 && body?.email?.ok) {
+      return res.json({ success: true, message: `Receipt for invoice ${invoice.invoice_number} emailed.` });
+    }
+    const error = delivery?.email === 'unknown'
+      ? `The receipt email for invoice ${invoice.invoice_number} may or may not have gone out — check the customer's email log before sending it again.`
+      : `The receipt for invoice ${invoice.invoice_number} was not sent: ${body?.error || body?.email?.error || 'the email could not be delivered'}.`;
+    return res.status(status === 200 ? 400 : status).json({ error });
+  } catch (err) { return next(err); }
+});
+
 // GET /api/admin/communications/sender?phone=&customerId= — the line a
 // staff text to this person leaves from (home-line PR 3): the line they
 // texted within 30 days, else their home line, else main. GATE_HOME_LINE off
