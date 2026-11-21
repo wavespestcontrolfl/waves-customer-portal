@@ -628,8 +628,12 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       }
       // A flagged stories read keeps the 1-story default — same doctrine as
       // the untrusted vision features: the default stands, the flag's
-      // verification stays a human's job.
-      if (lookupDimensionIsTrustworthy(p, 'stories')) {
+      // verification stays a human's job. So does a count the lookup itself
+      // defaulted (storiesSource 'default': nobody knew, it fell back to 1,
+      // and it raises no flag for that). Adopted, that 1 was graded 'lookup'
+      // below, and the story-sensitive prices carried no stories_estimated
+      // marker. It is a gap, not a rejected read: the seed may fill it.
+      if (lookupDimensionIsTrustworthy(p, 'stories') && p.storiesSource !== 'default') {
         stories = positiveNumber(stories, p.stories, record.stories);
         // The AI stories-fallback stamps full provenance on the record
         // WITHOUT a fieldVerifyFlags entry — the flag check above cannot
