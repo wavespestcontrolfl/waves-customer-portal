@@ -6,7 +6,7 @@ jest.mock('../services/logger', () => ({
 
 const {
   step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars, STEP2_DEFAULTS,
-  friendInviteOfferLine, friendShareClause, newsletterFriendLine, memberCreditEmailLine,
+  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, newsletterFriendLine, memberCreditEmailLine,
 } = require('../services/referral-step2');
 
 describe('step2Settings', () => {
@@ -71,6 +71,8 @@ describe('the friend and credit-email words (gate on)', () => {
     expect(friendInviteOfferLine(3250)).toBe('Start a Waves plan and get a $32.50 credit on your Waves account after your first service. Our way of saying welcome.');
     expect(friendShareClause(5000, 'ABC123')).toBe("they'll give you a $50 credit after your first plan service with my code ABC123");
     expect(friendShareClause(3250, 'ABC123')).toBe("they'll give you a $32.50 credit after your first plan service with my code ABC123");
+    expect(memberInviteFriendClause(5000)).toBe('they get a $50 credit after their first plan service');
+    expect(memberInviteFriendClause(3250)).toBe('they get a $32.50 credit after their first plan service');
     // The newsletter is one text for every reader, so it promises the member nothing (a member at the yearly limit gets $0).
     expect(newsletterFriendLine(5000)).toBe('They get a $50 credit after their first plan service.');
     expect(newsletterFriendLine(3250)).toBe('They get a $32.50 credit after their first plan service.');

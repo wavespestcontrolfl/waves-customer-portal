@@ -752,7 +752,7 @@ const DAY = 86400000;
       await db('referral_program_settings').where({ id: 1 }).update({ step2_referrer_reward_cents: 3000 });
       const member = await customer({ email: 'member@example.invalid' });
       await sendReferralInviteEmail({ customerId: member.id });
-      expect(lineOf()).toBe('you get a $30 referral reward and they get $25 off their first service.');
+      expect(lineOf()).toBe('you get a $30 referral reward and they get a $25 credit after their first plan service.');
     });
 
     test('gate on, program_active cleared (null): the program counts as paused', async () => {
@@ -806,7 +806,7 @@ const DAY = 86400000;
         });
       }
       await sendReferralInviteEmail({ customerId: member.id });
-      expect(lineOf()).toBe('they get $25 off their first service.');
+      expect(lineOf()).toBe('they get a $25 credit after their first plan service.');
       expect(lineOf()).not.toMatch(/you get/);
       // No friend discount either: nothing to say, so no email.
       sendTemplate.mockClear();

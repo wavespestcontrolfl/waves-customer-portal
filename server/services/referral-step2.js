@@ -78,6 +78,9 @@ const friendInviteOfferLine = (refereeCents) => `Start a Waves plan and get a ${
 // The share text's clause, inside "We use Waves and ..." (SMS) and "We use Waves Pest Control and ..." (email).
 const friendShareClause = (refereeCents, code) => `they'll give you a ${dollars(refereeCents)} credit after your first plan service with my code ${code}`;
 
+// The friend's part of the member invitation email's reward line (referral.invite), after "you get a $25 referral reward and ".
+const memberInviteFriendClause = (refereeCents) => `they get a ${dollars(refereeCents)} credit after their first plan service`;
+
 // The Pest Insider newsletter's referral sentence about what the friend gets. It promises the member nothing: the
 // newsletter is one text for every reader, and a member at the yearly limit gets no credit.
 const newsletterFriendLine = (refereeCents) => `They get a ${dollars(refereeCents)} credit after their first plan service.`;
@@ -88,5 +91,5 @@ const memberCreditEmailLine = (rewardDollars) => `Your ${formatDollars(rewardDol
 
 module.exports = {
   STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars,
-  friendInviteOfferLine, friendShareClause, newsletterFriendLine, memberCreditEmailLine,
+  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, newsletterFriendLine, memberCreditEmailLine,
 };
