@@ -524,17 +524,24 @@ postgres('planStartBlocker (live Postgres)', () => {
     // A condo is a home. This is the estimate of a condo as the estimator saves one: a home tier, the empty
     // commercial fields and the pricing mode that every home estimate carries.
     // The reader of service lines reads four columns of the row. The proof hands it all four, as the pipeline does.
-    test("the reader of service lines gets the row's label, notes, pricing authority and payload", async () => {
+    test("the reader of service lines gets the row's label, pricing authority and payload, and the notes only where nothing names a service", async () => {
       const owner = require('../services/estimate-service-lines');
       const spy = jest.spyOn(owner, 'inferEstimateServiceLines');
       try {
+        // A home service line: the reader is asked once, without the notes.
         expect(await blockerFor((customer) => seedEstimate(customer, {
           service_interest: 'Pest Control', notes: 'Side gate is open.', pricing_authority: 'SERVER',
         }))).toBeNull();
         expect(spy).toHaveBeenCalledTimes(1);
         expect(spy).toHaveBeenCalledWith(expect.objectContaining({
-          service_interest: 'Pest Control', notes: 'Side gate is open.', pricing_authority: 'SERVER', estimate_data: HOME_ESTIMATE,
+          service_interest: 'Pest Control', notes: null, pricing_authority: 'SERVER', estimate_data: HOME_ESTIMATE,
         }));
+        // Nothing names a service: the reader is asked again, with the notes.
+        spy.mockClear();
+        expect(await blockerFor((customer) => seedEstimate(customer, { notes: 'Side gate is open.', pricing_authority: 'SERVER', estimate_data: {} }))).toBeNull();
+        expect(spy).toHaveBeenCalledTimes(2);
+        expect(spy).toHaveBeenNthCalledWith(1, expect.objectContaining({ notes: null, pricing_authority: 'SERVER', estimate_data: {} }));
+        expect(spy).toHaveBeenNthCalledWith(2, expect.objectContaining({ notes: 'Side gate is open.', pricing_authority: 'SERVER', estimate_data: {} }));
       } finally {
         spy.mockRestore();
       }
@@ -545,6 +552,22 @@ postgres('planStartBlocker (live Postgres)', () => {
         await seedEstimate(customer, { service_interest: 'Quarterly Pest Control', notes: 'Ants in the kitchen. Side gate is open.', estimate_data: {} });
         await seedEstimate(customer, { service_interest: 'Pest Control', notes: 'Pest plan for the house. Not a commercial account.' });
       })).toBeNull();
+    });
+
+    // The lookup's model answers the use of the property under the same name, and a use type beside it. The
+    // lookup's rule reads a mixed use, and a business use type, as a business.
+    test.each([
+      [{ propertyUse: 'MIXED', commercialUseType: 'NONE' }, 'commercial'], [{ propertyUse: 'RESIDENTIAL', commercialUseType: 'OFFICE_RETAIL' }, 'commercial'],
+      [{ propertyUse: 'RESIDENTIAL', commercialUseType: 'NONE' }, null], [{ propertyUse: 'UNKNOWN', commercialUseType: null }, null],
+    ])("an estimate that keeps the answer %j of the lookup's model: %j", async (analysis, expected) => {
+      const estimate_data = { inputs: { isCommercial: 'NO' }, lookup: { analysis } };
+      expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data }))).toBe(expected);
+    });
+
+    // An area add-on names the service of an estimate before a line is priced. Its notes are not sorted.
+    test('notes with the word on an estimate that names a service by an area add-on are not commercial', async () => {
+      const estimate_data = { inputs: { isCommercial: 'NO', areaAddOns: { fire_ant_yard: true } } };
+      expect(await blockerFor((customer) => seedEstimate(customer, { notes: 'Pest treatment for the house. No commercial service.', estimate_data }))).toBeNull();
     });
 
     // The estimator keeps the use of the building in the unit scope of a draft, and reads it from the land use of

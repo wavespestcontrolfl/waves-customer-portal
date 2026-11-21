@@ -434,7 +434,7 @@ const SERVICE_LABEL_NAMES = Object.freeze([
   'serviceType', 'service_type',
 ]);
 const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.map((name) => node[name]));
-// The kind of premises one object of a payload names. Five marks:
+// The kind of premises one object of a payload names. Six marks:
 // - a property type, under either spelling of the name (property_type,
 //   propertyType), by the rule for a saved type and with the manager of the
 //   record (isCommercialPropertyType);
@@ -465,9 +465,12 @@ const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.m
 //   building and a condominium with a manager. Not by the other two rules for
 //   a type: the engine's reads any multifamily building as a business, and
 //   the tenant of one unit is a home for the estimator (the owner ruling that
-//   module carries). The lookup keeps its model's answer under the same name
-//   (RESIDENTIAL, COMMERCIAL, MIXED, UNKNOWN), and the rule reads its
-//   COMMERCIAL as the lookup's own verdict does (detectCategory);
+//   module carries);
+// - the answer of the lookup's model on the use of the property, which the
+//   lookup keeps under the same name in four words of its own (RESIDENTIAL,
+//   COMMERCIAL, MIXED, UNKNOWN) and beside a use type (commercialUseType).
+//   It is asked by the lookup's rule for that answer (lookupModelSaysBusiness
+//   below): a mixed use is a business there, and it is here;
 // - the flag a call sets when the service is for the common areas of an
 //   association (hoa_common_area_service). The call system routes such a job
 //   commercial by definition: commercialCategoryConflict reads the flag
@@ -482,12 +485,29 @@ const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.m
 //   with the caller) or of the lookup's own (lookupCategoryConflict). A draft
 //   can be the only record of that call on the account. Any value that is
 //   set counts.
+// The lookup's rule for the answer of its model
+// (hasStructuredCommercialAiSignal in routes/property-lookup-v2.js, the last
+// vote of detectCategory for the category the lookup saves): the use
+// COMMERCIAL or MIXED, or a use type that is not one of the lookup's words
+// for "no" and that the pricing engine normalizes to commercial (or OTHER).
+// The rule is written out here with the engine's own normalizer: it lives in
+// a route module, and loading a route from this proof would load the whole
+// lookup.
+const LOOKUP_BUSINESS_USES = Object.freeze(['COMMERCIAL', 'MIXED']);
+const LOOKUP_NO_USE_TYPES = Object.freeze(['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL']);
+const upperWord = (value) => String(value || '').trim().toUpperCase();
+function lookupModelSaysBusiness(node) {
+  if (LOOKUP_BUSINESS_USES.includes(upperWord(node.propertyUse))) return true;
+  const useType = upperWord(node.commercialUseType);
+  if (!useType || LOOKUP_NO_USE_TYPES.includes(useType)) return false;
+  return useType === 'OTHER' || require('./pricing-engine/commercial-helpers').normalizePropertyType(useType) === 'commercial';
+}
 const OCCUPANCY_NAMES = Object.freeze(['bedbugOccupancyType', 'occupancyType', 'occupancy_type', 'occupancy', 'service_address_occupancy']);
 const COMMERCIAL_OCCUPANCIES = Object.freeze(['apartment', 'hotel', 'studenthousing', 'commercial']);
 const isCommercialOccupancy = (value) => COMMERCIAL_OCCUPANCIES.includes(String(value ?? '').trim().toLowerCase());
 function namesCommercialPremises(node, managed) {
   return [node.property_type, node.propertyType].some((type) => isCommercialPropertyType(type, managed))
-    || estimatorReadsCommercial(node.propertyUse, managed)
+    || estimatorReadsCommercial(node.propertyUse, managed) || lookupModelSaysBusiness(node)
     || OCCUPANCY_NAMES.some((name) => isCommercialOccupancy(node[name]))
     || node.hoa_common_area_service === true
     || isSet(node.categoryConflict);
@@ -659,11 +679,13 @@ function someText(value, test) {
 //   app's text patterns. (The label and its copies are also read on every
 //   estimate, by the rule for a label: the reader answers with the service
 //   lines first, where the estimate has one.) The reader looks for a
-//   RECURRING line there. An estimate for a one-time job keeps its priced
-//   line as a one-time item, so the reader would sort its notes too, and
-//   notes are free text ("No commercial service" carries the word). So the
-//   notes go to the reader only for an estimate with no line of either kind
-//   (oneTimeServicesFromData, the reader's own list of one-time lines).
+//   RECURRING line there, and it joins the notes to whatever else names a
+//   service: the picks of the form, the label, an area add-on. Notes are
+//   free text ("No commercial service" carries the word). So the reader is
+//   asked WITHOUT the notes first, and with them only where nothing of the
+//   estimate names a service: no line it answers but 'unknown', and no
+//   one-time line (oneTimeServicesFromData, the reader's own list: it does
+//   not answer with those for a home estimate).
 // Not the termite agreement's classifier itself (isCommercialEstimate in
 // termite-program-agreement.js). It is broad on purpose, and three of its
 // rules read homes: it parks a duplex, a condo and a townhome; it reads a
@@ -689,11 +711,15 @@ function isCommercialEstimateRow(estimate, managed) {
     || payloadSaysCommercial(payload, hasManager(payload, managed))
     || commercialServiceLine(estimate, payload);
 }
+const UNKNOWN_LINE_KEY = 'unknown';
 function commercialServiceLine(estimate, payload) {
   const { inferEstimateServiceLines, oneTimeServicesFromData } = require('./estimate-service-lines');
-  const notes = oneTimeServicesFromData(payload).length ? null : estimate.notes;
-  return inferEstimateServiceLines({ ...estimate, estimate_data: payload, notes })
-    .some((line) => String(line.key || '').startsWith(COMMERCIAL_KEY_PREFIX));
+  const linesWith = (notes) => inferEstimateServiceLines({ ...estimate, estimate_data: payload, notes });
+  const isCommercialLine = (line) => String(line.key || '').startsWith(COMMERCIAL_KEY_PREFIX);
+  const structured = linesWith(null);
+  if (structured.some(isCommercialLine)) return true;
+  const namesAServiceAlready = structured.some((line) => line.key !== UNKNOWN_LINE_KEY) || oneTimeServicesFromData(payload).length > 0;
+  return !namesAServiceAlready && linesWith(estimate.notes).some(isCommercialLine);
 }
 
 // EVERY estimate of the account counts, whatever its status: a won one (the

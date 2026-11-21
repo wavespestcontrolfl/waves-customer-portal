@@ -837,6 +837,28 @@ describe('planStartBlocker', () => {
         expect(await blocker(withEstimates([ESTIMATE({ notes: HOUSE_NOTES, estimate_data }), ESTIMATE()]))).toBeNull();
       });
 
+      // The reader joins the notes to whatever else names a service: an area add-on, a pick of the form, the label.
+      // The proof asks it without the notes first, and with them only where nothing of the estimate names a service.
+      test.each([
+        ['an area add-on of the form', { inputs: { areaAddOns: { fire_ant_yard: true } } }, {}],
+        ['an area add-on of the engine', { engineInputs: { services: { areaAddOns: [{ key: 'web_sweep' }] } } }, {}],
+        ['a one-time pick of the form', { inputs: { svcOnetimePest: true } }, {}],
+        ['a label', {}, { service_interest: 'Pest Control' }],
+        ['a copy of the label in the payload', { inputs: { leadServiceInterest: 'Lawn Care' } }, {}],
+      ])('the notes of an estimate that names a service by %s are not sorted: not commercial', async (_what, estimate_data, columns) => {
+        // The app's reader itself answers a commercial line with these notes, and a home line without them.
+        const { inferEstimateServiceLines } = require('../services/estimate-service-lines');
+        expect(inferEstimateServiceLines({ ...columns, notes: HOUSE_NOTES, estimate_data }).map((line) => line.key)).toContain('commercial_pest');
+        expect(inferEstimateServiceLines({ ...columns, notes: null, estimate_data }).map((line) => line.key)).not.toContain('unknown');
+        expect(await blocker(withEstimates([ESTIMATE({ ...columns, notes: HOUSE_NOTES, estimate_data }), ESTIMATE()]))).toBeNull();
+      });
+
+      test('a commercial service the estimate names itself is a mark, with or without notes', async () => {
+        const estimate = (notes) => ESTIMATE({ notes, service_interest: null, estimate_data: { engineInputs: { serviceInterest: 'Commercial Pest Control' } } });
+        expect(await blocker(withEstimates([ESTIMATE(), estimate(null)]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE(), estimate('Ants in the kitchen.')]))).toBe('commercial');
+      });
+
       // Any commercial key the reader answers is a mark, not the pest key alone. No other rule reads the notes.
       test.each([
         ['commercial_lawn', 'Quote the commercial lawn program for the plaza.'],
@@ -979,12 +1001,13 @@ describe('planStartBlocker', () => {
       // Every word of the estimator's vocabulary for the use, by the estimator's own rule for a typed premises:
       // a business building alone, a building of units with a manager (the tenant of one unit is a home), a
       // house never. The engine's rule for a type is not asked of a use: it reads any multifamily building as a
-      // business. The lookup keeps its model's answer under the same name, in four words of its own.
+      // business. The lookup keeps its model's answer under the same name, in four words of its own, and its
+      // rule for that answer reads a mixed use as a business.
       test.each([
         ['office', true, true], ['retail', true, true], ['industrial_flex', true, true],
         ['multifamily_rental', false, true], ['condominium', false, true],
         ['single_family', false, false], ['unknown', false, false], [null, false, false], [undefined, false, false], ['', false, false],
-        ['COMMERCIAL', true, true], ['RESIDENTIAL', false, false], ['MIXED', false, false], ['UNKNOWN', false, false],
+        ['COMMERCIAL', true, true], ['MIXED', true, true], [' mixed ', true, true], ['RESIDENTIAL', false, false], ['UNKNOWN', false, false],
       ])('the building use %j of a unit scope: commercial alone %j, with a manager %j', async (propertyUse, alone, withManager) => {
         const draft = (customerRelationship) => SCOPED({ propertyUse, serviceScope: 'entire_residential_structure', customerRelationship });
         expect(await blocker(withEstimates([ESTIMATE(), draft('unknown')]))).toBe(alone ? 'commercial' : null);
@@ -995,6 +1018,37 @@ describe('planStartBlocker', () => {
 
       test('a building use is read on any object of the payload, at any depth', async () => {
         expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data: farDown({ propertyUse: 'office' }) })]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data: farDown({ propertyUse: 'MIXED' }) })]))).toBe('commercial');
+      });
+
+      // The lookup's model answers a use type beside the use. The lookup's rule reads a type that is not one of
+      // its nine words for "no" and that the pricing engine normalizes to commercial, or the word OTHER.
+      test.each([
+        ['OFFICE_RETAIL', true], ['WAREHOUSE_LIGHT', true], ['RESTAURANT_FOOD_SERVICE', true], ['MEDICAL_OFFICE', true], ['INDUSTRIAL', true], ['SCHOOL_DAYCARE', true],
+        ['GOVERNMENT_MUNICIPAL', true], ['HOA_COMMON_AREA', true], ['MULTIFAMILY_COMMON_AREA', true], ['OTHER', true], [' office_retail ', true],
+        ['NONE', false], ['UNKNOWN', false], ['RESIDENTIAL', false], ['NO', false], ['FALSE', false], ['N/A', false], ['NA', false], ['NOT_COMMERCIAL', false], ['NON_COMMERCIAL', false],
+        ['SINGLE_FAMILY', false], ['YES', false], ['', false], [null, false], [undefined, false],
+      ])("the use type %j of the lookup's model, beside a residential use: commercial %j", async (commercialUseType, expected) => {
+        const analysis = ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO' }, lookup: { analysis: { propertyUse: 'RESIDENTIAL', commercialUseType } } } });
+        expect(await blocker(withEstimates([ESTIMATE(), analysis]))).toBe(expected ? 'commercial' : null);
+      });
+
+      // The proof writes the lookup's rule out (it cannot load a route module). This pins the rule it copies:
+      // when the lookup's rule changes, this fails, and lookupModelSaysBusiness in the proof follows it.
+      test("the lookup's rule for its model's answer is the one the proof copies", () => {
+        const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/property-lookup-v2.js'), 'utf8');
+        const start = source.indexOf('function hasStructuredCommercialAiSignal(');
+        const rule = source.slice(start, source.indexOf('\n}\n', start));
+        expect(rule.replace(/\s+/g, ' ')).toBe([
+          "function hasStructuredCommercialAiSignal(ai = {}) {",
+          "const propertyUse = String(ai?.propertyUse || '').trim().toUpperCase();",
+          "const commercialUseType = String(ai?.commercialUseType || '').trim().toUpperCase();",
+          "const nonCommercialUseTypes = ['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'];",
+          "if (['COMMERCIAL', 'MIXED'].includes(propertyUse)) return true;",
+          "if (!commercialUseType || nonCommercialUseTypes.includes(commercialUseType)) { return false; }",
+          "return commercialUseType === 'OTHER' || normalizePricingPropertyType(commercialUseType) === 'commercial';",
+        ].join(' '));
+        expect(source).toContain("const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');");
       });
 
       // The converter's two rules are rules for a SERVICE LINE: they read the word in a line's name, label or
