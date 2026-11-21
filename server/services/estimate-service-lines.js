@@ -459,6 +459,21 @@ function inferEstimateServiceLines(estimate = {}) {
   ];
 }
 
+// The lane keys the estimate names through CLOSED sources only: its commercial lines, else its recurring rows' keys,
+// else the estimator's ticked boxes. Never the free-text match (serviceKeysFromText over service_interest, notes and
+// description: its patterns are unanchored, so "want" reads as `ant`) and never the stored service_interest, which can
+// hold an AI label or the lead's own words. Customer copy that NAMES the service reads this, not inferEstimateServiceLines.
+function closedServiceKeys(estimate = {}) {
+  const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
+  const known = (lines) => unique(lines.map((line) => line.key).filter((key) => key && key !== 'unknown'));
+  const recurringKeys = known(recurringServicesFromData(data));
+  const priced = commercialPricedLinesFromData(data).filter((line) => !recurringKeys.includes(line.key));
+  const commercialKeys = known([...priced, ...commercialManualLinesFromData(data)]);
+  if (commercialKeys.length) return unique([...commercialKeys, ...recurringKeys]);
+  if (recurringKeys.length) return recurringKeys;
+  return selectedServiceKeysFromInputs(data?.inputs || data?.engineInputs || {});
+}
+
 function inferEstimateServiceInterest(estimate = {}) {
   const explicit = String(estimate.serviceInterest || estimate.service_interest || '').trim();
   if (explicit) return explicit;
@@ -471,6 +486,7 @@ function inferEstimateServiceInterest(estimate = {}) {
 
 module.exports = {
   SERVICE_LINE_LABELS,
+  closedServiceKeys,
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
   oneTimeServicesFromData,
