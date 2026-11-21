@@ -3,13 +3,13 @@
  * are nullable, they take the values POST /api/admin/usage/track writes, and
  * the migration runs twice either way, its down taking both columns away.
  *
- * Self-skips without DATABASE_URL. It runs in a schema of its own, so it
- * needs no migrated database.
+ * Self-skips without DATABASE_URL. It runs in a schema of its own, on a
+ * small admin_usage_events it makes itself, so it needs no migrated database
+ * and installs nothing in the database it borrows.
  */
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
-const createTable = require('../models/migrations/20260723000001_admin_usage_events');
 const addColumns = require('../models/migrations/20261120213000_admin_usage_reload_columns');
 
 jest.setTimeout(60000);
@@ -22,9 +22,16 @@ jest.setTimeout(60000);
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema, 'public'], pool: { min: 0, max: 2 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
-    await database.raw('CREATE TABLE ??.technicians (id uuid PRIMARY KEY)', [schema]);
-    await database('technicians').insert({ id: TECH });
-    await createTable.up(database);
+    // Not the table's own migration (20260723000001): that one also runs
+    // CREATE EXTENSION "uuid-ossp", and an extension must never land in a
+    // schema this test drops.
+    await database.schema.withSchema(schema).createTable('admin_usage_events', (t) => {
+      t.uuid('id').primary();
+      t.uuid('technician_id').notNullable();
+      t.string('page_key', 64).notNullable();
+      t.string('path', 160);
+      t.timestamp('created_at').notNullable().defaultTo(database.fn.now());
+    });
     await addColumns.up(database);
   });
   afterAll(async () => {
@@ -33,7 +40,7 @@ jest.setTimeout(60000);
     await database.destroy();
   });
 
-  const view = (fields) => ({ technician_id: TECH, page_key: 'pipeline', path: '/admin/pipeline', ...fields });
+  const view = (fields) => ({ id: randomUUID(), technician_id: TECH, page_key: 'pipeline', path: '/admin/pipeline', ...fields });
 
   test('a page view stores the tab fields, a view without them keeps both null, and a name has 32 characters at most', async () => {
     await database('admin_usage_events').insert([
