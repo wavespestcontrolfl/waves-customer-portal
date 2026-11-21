@@ -15,8 +15,9 @@
  *     (+ `r_organization_social` to read/verify). NOT `w_member_social` (that's
  *     personal-profile posting).
  *   - Posts API body shape (`/rest/posts`) — `author`, `commentary`, `visibility`,
- *     `distribution`, `lifecycleState`. Image posts need the separate Images API
- *     (register-upload → asset URN); deferred — text + article-link only for now.
+ *     `distribution`, `lifecycleState`. Pictures go through the Images API
+ *     (initializeUpload → urn:li:image): the article thumbnail on a link post,
+ *     or `content.media` on a post with no link.
  *   - Refresh tokens are only issued to LinkedIn-approved apps. If none is
  *     returned, access tokens last ~60 days and the admin must re-authorize.
  *
@@ -557,6 +558,17 @@ class LinkedInService {
         }
       }
       body.content = { article };
+    } else if (imageUrl) {
+      // No link means no article card, so the picture goes out as a
+      // single-image post (content.media). Before this, every link-less post
+      // (the studio's daily campaign card) reached LinkedIn as bare text
+      // although Google Business got the same picture. Same best-effort rule
+      // as the thumbnail: a failed upload posts the text alone.
+      try {
+        body.content = { media: { id: await this._uploadImageFromUrl(imageUrl, token) } };
+      } catch (err) {
+        logger.warn(`[linkedin] image upload failed (posting text only): ${err.message}`);
+      }
     }
 
     const res = await fetch(POSTS_URL, {
@@ -574,10 +586,12 @@ class LinkedInService {
     }
     const postId = res.headers.get('x-restli-id') || res.headers.get('x-linkedin-id') || null;
     logger.info(`[linkedin] company post created: ${postId}`);
-    // imageUrl is present ONLY when the thumbnail upload succeeded — a
-    // best-effort miss posts without a picture, and consumers (studio
-    // legacy-card alert) must not assume the image shipped.
-    return { platform: 'linkedin', postId, success: true, ...(body.content?.article?.thumbnail ? { imageUrl } : {}) };
+    // imageUrl is present ONLY when the picture upload succeeded (article
+    // thumbnail or single-image media) — a best-effort miss posts without a
+    // picture, and consumers (studio legacy-card alert) must not assume the
+    // image shipped.
+    const pictureShipped = !!(body.content?.article?.thumbnail || body.content?.media?.id);
+    return { platform: 'linkedin', postId, success: true, ...(pictureShipped ? { imageUrl } : {}) };
   }
 }
 

@@ -1644,8 +1644,8 @@ async function postToFacebookVideo(message, link, videoUrl) {
 
 // LinkedIn posting goes through the OAuth-backed service (services/linkedin.js):
 // stored company-page tokens + the versioned Posts API (/rest/posts). The legacy
-// env-token ugcPosts path is retired. imageUrl is accepted for call-site
-// compatibility but unused (LinkedIn image posts need the Images API — deferred).
+// env-token ugcPosts path is retired. imageUrl becomes the article thumbnail on
+// a link post, or a single-image post when there is no link (linkedin.js).
 async function postToLinkedIn(text, link, title, description, imageUrl) {
   const linkedin = require('./linkedin');
   return linkedin.createPost({ text, link, title, description, imageUrl });

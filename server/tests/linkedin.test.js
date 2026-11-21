@@ -274,6 +274,31 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(postBody.content.article.thumbnail).toBeUndefined();
   });
 
+  // The studio's daily campaign card has no link: 25 of 25 such posts reached
+  // LinkedIn as bare text (Oct-Nov 2026) while GBP carried the same picture.
+  test('no link + imageUrl → a single-image post (content.media), and the result reports the picture', async () => {
+    const calls = mockRoutes();
+
+    const res = await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: IMG });
+
+    expect(res).toMatchObject({ platform: 'linkedin', success: true, imageUrl: IMG });
+    expect(calls.some((c) => c.url === 'https://upload.example.com/u1' && c.method === 'PUT')).toBe(true);
+    const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
+    expect(postBody.content).toEqual({ media: { id: 'urn:li:image:abc' } });
+  });
+
+  test('no link + a failed picture upload → the text still posts, with no content and no imageUrl', async () => {
+    const calls = mockRoutes({ initFails: true });
+
+    const res = await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: IMG });
+
+    expect(res).toMatchObject({ platform: 'linkedin', success: true });
+    expect(res.imageUrl).toBeUndefined();
+    const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
+    expect(postBody.content).toBeUndefined();
+    expect(postBody.commentary).toBe('T');
+  });
+
   test('no imageUrl → no Images API traffic at all (unchanged text+article post)', async () => {
     const calls = mockRoutes();
 
