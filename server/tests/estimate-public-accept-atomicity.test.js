@@ -753,6 +753,49 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
 });
 
 describe('FIX 2 — already-accepted retry returns the full success payload', () => {
+  test.each(['redeemed', 'void'])('a receipt during promo redemption only reports a posted credit (%s)', async (outcome) => {
+    const accepted = recurringPestEstimate({
+      id: 'est-promo-pending', token: 'tok-promo-pending-0123456789', status: 'accepted', customer_id: 'cust-9',
+    });
+    resetStore(accepted);
+    const code = { estimate_id: accepted.id, code: 'QA25', credit_amount: '25.00', status: 'entered' };
+    db.__state.tables.estimate_promo_codes = [code];
+    const pending = await putAccept(accepted.token);
+    expect(pending.status).toBe(200);
+    expect(pending.data.alreadyAccepted).toBe(true);
+    expect(pending.data).not.toHaveProperty('promoCode');
+    expect(code.status).toBe('entered');
+
+    code.status = outcome;
+    const settled = await putAccept(accepted.token);
+    expect(settled.status).toBe(200);
+    if (outcome === 'redeemed') {
+      expect(settled.data.promoCode?.applied).toEqual({ code: 'QA25', creditAmount: 25, credited: true });
+    } else {
+      expect(settled.data).not.toHaveProperty('promoCode');
+    }
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['estimate_promo_codes', { code: 'QA25', credit_amount: '25.00', status: 'redeemed' },
+      { code: 'QA25', creditAmount: 25, credited: true }],
+    ['estimate_referral_codes', { code: 'QA-REF', status: 'confirmed' },
+      { code: 'QA-REF', referral: true, note: 'You’ll get a $12.00 account credit after your first recurring service.' }],
+  ])('the receipt includes the saved code from %s', async (table, persisted, applied) => {
+    const accepted = recurringPestEstimate({
+      id: 'est-code-receipt', token: 'tok-code-receipt-0123456789', status: 'accepted', customer_id: 'cust-9',
+    });
+    resetStore(accepted);
+    db.__state.tables[table] = [{ estimate_id: accepted.id, ...persisted }];
+    db.__state.tables.referral_program_settings = [{ id: 1, program_active: true, referee_discount_cents: 1200 }];
+    const receipt = await putAccept(accepted.token);
+    expect(receipt.status).toBe(200);
+    expect(receipt.data).toMatchObject({ alreadyAccepted: true, promoCode: { canEnter: false, applied } });
+    expect(db.__state.tables[table]).toEqual([{ estimate_id: accepted.id, ...persisted }]);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
   test('recurring accept retry rebuilds nextStep/invoice fields from persisted state with no side effects', async () => {
     const accepted = recurringPestEstimate({
       id: 'est-already-1',
@@ -787,6 +830,7 @@ describe('FIX 2 — already-accepted retry returns the full success payload', ()
     expect(res.status).toBe(200);
     expect(res.data.success).toBe(true);
     expect(res.data.alreadyAccepted).toBe(true);
+    expect(res.data).not.toHaveProperty('promoCode');
     // The full first-time payload shape, not the bare legacy one.
     expect(res.data.nextStep).toBe('pay_invoice');
     expect(res.data.serviceMode).toBe('recurring');
@@ -2337,6 +2381,27 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     expect(storedEstimate().status).toBe('sent');
     expect(storedEstimate().price_locked_at == null).toBe(true);
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('a restart already accepted while waiting for the transaction returns its receipt', async () => {
+    resetStore(restartEstimate());
+    db.__state.tables.customers = [churnedCustomer()];
+    const transaction = db.transaction;
+    const admission = jest.spyOn(db, 'transaction').mockImplementationOnce((callback) => {
+      storedEstimate().status = 'accepted';
+      db.__state.tables.customers[0].active = true;
+      return transaction(callback);
+    });
+    try {
+      const result = await putAccept('tok-restart-1-x0123456789');
+      expect(admission).toHaveBeenCalled();
+      expect(result.status).toBe(200);
+      expect(result.data).toMatchObject({ success: true, alreadyAccepted: true });
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+      expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+    } finally {
+      admission.mockRestore();
+    }
   });
 
   test('active drifted to NULL refuses too — only the exact churn stamp accepts', async () => {
@@ -4112,6 +4177,35 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
     const quote = await quoteOf();
     expect(quote).toMatchObject({ chargedAfterFirstVisit: true, consentVariant: 'after_visit_prepay', consentRequired: true });
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a concurrent acceptance that used the quoted account credit returns its invoice without requoting', async () => {
+    const credit = require('../services/customer-credit');
+    storedEstimate().customer_id = 'cust-1';
+    credit.getBalance.mockResolvedValueOnce(25);
+    const quote = await quoteOf();
+    credit.getBalance.mockImplementationOnce(async () => {
+      storedEstimate().status = 'accepted';
+      db.__state.tables.annual_prepay_terms.push({
+        id: 'term-winner', source_estimate_id: 'est-paf-prepay', prepay_invoice_id: 'inv-winner',
+      });
+      db.__state.tables.invoices.push({
+        id: 'inv-winner', token: 'paid-winner', status: 'paid', total: String(quote.total),
+        credit_applied: 25, amount_paid: quote.total,
+      });
+      return 0;
+    });
+    const result = await accept({
+      prepayChargeAcknowledgedTotalCents: quote.totalCents,
+      prepayChargeAcknowledgedMethodKey: quote.methodKey,
+      prepayChargeConsentAccepted: true, prepayChargeConsentVariant: 'after_visit_prepay',
+    });
+    expect(credit.getBalance).toHaveBeenCalledTimes(2);
+    expect(result.status).toBe(200);
+    expect(result.data).toMatchObject({ alreadyAccepted: true, invoiceId: 'inv-winner', invoicePayUrl: null });
+    expect(result.data).not.toHaveProperty('quote');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
   test('an acknowledgement without the after-visit attestation is re-quoted, nothing committed', async () => {

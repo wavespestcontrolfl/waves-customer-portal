@@ -820,17 +820,20 @@ describe('where the recheck runs (source order)', () => {
   test('the public accept runs it in the transaction, after the customer lock and the estimate row lock (the reserve order), before any other write of the accept', () => {
     const src = read('routes/estimate-public.js');
     const lock = src.indexOf('await lockCustomerComms(trx, acceptPreLockedCommsId);');
-    const rowLock = src.indexOf("const err = new Error('Estimate is no longer active');", src.indexOf('.update(withServedDisclosurePreserved(trx, acceptedUpdates));'));
+    const rowLock = src.indexOf("const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate()");
+    const acceptWrite = src.indexOf('.update(withServedDisclosurePreserved(trx, acceptedUpdates));', rowLock);
+    const checkUpdatedCount = src.indexOf('if (!acceptedCount)', acceptWrite);
     const check = src.indexOf('await require(\'../services/area-addon-limits\').assertAreaAddOnLimitsOpen(trx, {');
     const setupIntent = src.indexOf('// Bind the accept to the SetupIntent it verified');
     const account = src.indexOf('const account = await ensureCustomerAccount(trx, {');
     expect(lock).toBeGreaterThan(0);
     expect(rowLock).toBeGreaterThan(lock);
-    expect(check).toBeGreaterThan(rowLock);
+    expect(acceptWrite).toBeGreaterThan(rowLock);
+    expect(checkUpdatedCount).toBeGreaterThan(acceptWrite);
+    expect(check).toBeGreaterThan(checkUpdatedCount);
     // The recheck reads the handler's earlier copy of the estimate; the claim UPDATE just above it (after the FOR UPDATE) is a
     // compare-and-swap on that copy's updated_at, so a changed estimate is a 0-row 409 and the transaction rolls back before the recheck.
     expect(src).toContain("date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)");
-    expect(src.indexOf("const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate()")).toBeLessThan(src.indexOf('.update(withServedDisclosurePreserved(trx, acceptedUpdates));'));
     expect(setupIntent).toBeGreaterThan(check);
     // ... and before the account step creates the customer the recheck must have judged.
     expect(account).toBeGreaterThan(check);
