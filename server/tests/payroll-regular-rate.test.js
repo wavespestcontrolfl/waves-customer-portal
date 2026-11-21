@@ -16,9 +16,8 @@ describe('lineOvertimePremium', () => {
         { amountCents: 3000, weekStart: '2026-10-12' },
         { amountCents: 4615, weekStart: '2026-10-12' },
       ],
-      payWeek: '2026-10-12', // the week's own check
     });
-    // 1/2 x ($76.15 / 42 h) x 2 h = $1.8131 -> $1.81
+    // 1/2 x ($76.15 / 42 h) x 2 h = $1.81
     expect(result.extraPremiumCents).toBe(181);
     expect(result.weeks).toEqual([
       { weekStart: '2026-10-12', workedMinutes: 2520, overtimeMinutes: 120, allocatedCents: 7615, premiumCents: 181 },
@@ -29,7 +28,6 @@ describe('lineOvertimePremium', () => {
     const { extraPremiumCents } = lineOvertimePremium({
       weeks: [week('2026-10-12', '2400.00', '120.00')],
       lines: [{ amountCents: 3000, weekStart: '2026-10-12' }, { amountCents: 4615, weekStart: '2026-10-12' }],
-      payWeek: '2026-10-12',
     });
     const pay = computePaycheck({
       payDate: '2026-10-23', hourlyRate: '23.00', regularMinutes: '2400.00', overtimeMinutes: '120.00', w4: W4,
@@ -98,71 +96,94 @@ describe('lineOvertimePremium', () => {
         { amountCents: 100, coversFrom: '2026-09-14', coversTo: '2026-09-28' },
         { amountCents: 100, coversFrom: '2026-09-14', coversTo: '2026-09-20' },
       ],
-      payWeek: '2026-09-14',
     });
     // Week 1 holds 100/3 + 100 = 133.33 cents; 1/2 x (133.33 / 80 h) x 40 h = 33.33 -> 33.
     expect(result.weeks[0]).toMatchObject({ weekStart: '2026-09-14', allocatedCents: 133, premiumCents: 33 });
   });
 
-  describe('rounding: half up for the check\'s own pay week, up for any other week', () => {
+  describe('a week paid on more than one check: each check pays the difference', () => {
     // 45 h worked, 5 of them overtime: premium = line pay x 5 / 90
-    const hours = [week('2026-11-09', '2400.00', '300.00')];
-    const premium = (cents, payWeek) => lineOvertimePremium({
-      weeks: hours, lines: [].concat(cents).map((amountCents) => ({ amountCents, weekStart: '2026-11-09' })), payWeek,
-    }).extraPremiumCents;
-
-    it('rounds the pay week\'s own premium half up and another week\'s premium up; a whole cent never moves', () => {
-      expect(premium(600, '2026-11-09')).toBe(33); // 33.33 on the week's own check
-      expect(premium(600, '2026-12-14')).toBe(34); // the same share on a later check
-      expect(premium(600, '2026-11-12')).toBe(33); // any date in the pay week names it
-      expect(premium(600)).toBe(34); // no pay week given: up
-      expect(premium(609, '2026-11-09')).toBe(34); // 33.83: half up is already up
-      expect(premium(900, '2026-11-09')).toBe(50); // exact
-      expect(premium(900, '2026-12-14')).toBe(50);
-      expect(premium(1, '2026-12-14')).toBe(1); // 0.06 of a cent on a later check is 1 cent
-      expect(premium(1, '2026-11-09')).toBe(0);
+    const WEEK = '2026-11-09';
+    const hours = [week(WEEK, '2400.00', '300.00')];
+    const line = (amountCents) => ({ amountCents, weekStart: WEEK });
+    const price = (cents, earlierCents = [], paid = []) => lineOvertimePremium({
+      weeks: hours, lines: cents.map(line), earlierLines: earlierCents.map(line), earlierPremiums: paid.map((premiumCents) => ({ weekStart: WEEK, premiumCents })),
     });
 
-    it('two checks for one workweek never pay less than one check with both lines (33 + 34 against 67)', () => {
-      // a $6.00 commission on the week's own check, then the $6.00 weekly share of a bonus on a check months later
-      const own = premium(600, '2026-11-09');
-      const later = premium(600, '2026-12-14');
-      const together = premium([600, 600], '2026-11-09');
-      expect([own, later, together]).toEqual([33, 34, 67]);
-      expect(own + later).toBeGreaterThanOrEqual(together);
+    it('prices a week with no earlier line pay exactly as before, and stores no earlier figures', () => {
+      expect(price([600])).toEqual({
+        extraPremiumCents: 33,
+        weeks: [{ weekStart: WEEK, workedMinutes: 2700, overtimeMinutes: 300, allocatedCents: 600, premiumCents: 33 }],
+      });
+      // earlier pay for ANOTHER week changes nothing
+      expect(lineOvertimePremium({
+        weeks: hours, lines: [line(600)], earlierLines: [{ amountCents: 600, weekStart: '2026-11-02' }], earlierPremiums: [{ weekStart: '2026-11-02', premiumCents: 33 }],
+      })).toEqual(price([600]));
     });
 
-    it('holds for any amounts and hours: one own-week check and two later checks, against all three lines on one check', () => {
+    it('pays 34 after an earlier check paid 33 for the same week: together 67, the premium on both lines', () => {
+      // one check with both 6.00 lines: 1/2 x 12.00 / 45 h x 5 h = 66.67 -> 67
+      expect(price([600, 600]).extraPremiumCents).toBe(67);
+      const later = price([600], [600], [33]);
+      expect(later.extraPremiumCents).toBe(34);
+      expect(later.weeks).toEqual([{
+        weekStart: WEEK, workedMinutes: 2700, overtimeMinutes: 300, allocatedCents: 600, premiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33,
+      }]);
+    });
+
+    it('does not depend on the order of the checks or on the rule an older check was priced by', () => {
+      // two older checks each rounded their own line half up (33 + 33); the third check makes the week whole: 100 - 66
+      expect(price([600], [600, 600], [33, 33]).extraPremiumCents).toBe(34);
+      // the earlier premium arrives as one row or as several rows for the week: the same
+      expect(price([600], [600, 600], [66]).extraPremiumCents).toBe(34);
+      // an older check that paid more than its share: this check pays less, never under zero
+      expect(price([600], [600], [40]).extraPremiumCents).toBe(27);
+      expect(price([1], [600], [40]).extraPremiumCents).toBe(0);
+      expect(price([1], [600], [40]).weeks[0]).toMatchObject({ premiumCents: 0, earlierAllocatedCents: 600, earlierPremiumCents: 40 });
+    });
+
+    it('adds up to the premium on the whole line pay after every check, for any amounts and hours (2,000 generated weeks)', () => {
       let seed = 20261121;
       const next = (max) => { seed = (seed * 1103515245 + 12345) % 2147483648; return 1 + (seed % max); };
-      for (let i = 0; i < 3000; i += 1) {
-        const [a, b, c] = [next(50000), next(50000), next(50000)];
-        const overtime = next(1500); // up to 25 h of overtime
-        const weeks = [week('2026-11-09', '2400.00', `${overtime}.00`)];
-        const price = (cents, payWeek) => lineOvertimePremium({
-          weeks, lines: cents.map((amountCents) => ({ amountCents, weekStart: '2026-11-09' })), payWeek,
-        }).extraPremiumCents;
-        const split = price([a], '2026-11-09') + price([b], '2026-11-16') + price([c], '2026-12-14');
-        const together = price([a, b, c], '2026-11-09');
-        // never less, and at most 1 cent more for each later check
-        expect([i, split >= together, split - together <= 2]).toEqual([i, true, true]);
+      for (let i = 0; i < 2000; i += 1) {
+        const amounts = Array.from({ length: 1 + next(4) }, () => next(50000));
+        const weeks = [week(WEEK, '2400.00', `${next(1500)}.00`)];
+        const whole = (cents) => lineOvertimePremium({ weeks, lines: cents.map(line) }).extraPremiumCents;
+        let paidSoFar = 0;
+        amounts.forEach((cents, n) => {
+          paidSoFar += lineOvertimePremium({
+            weeks, lines: [line(cents)], earlierLines: amounts.slice(0, n).map(line), earlierPremiums: n ? [{ weekStart: WEEK, premiumCents: paidSoFar }] : [],
+          }).extraPremiumCents;
+          // after each check: exactly what one check with every line so far would pay
+          expect([i, n, paidSoFar]).toEqual([i, n, whole(amounts.slice(0, n + 1))]);
+        });
       }
     });
 
-    it('rounds each earlier week of a span up and its own pay week half up', () => {
-      // each week had 80 h worked, 40 of them overtime: premium = 1/2 x share x 40 / 80 = a quarter of the week's share
-      const weeks = ['2026-09-14', '2026-09-21', '2026-09-28'].map((w) => week(w, '2400.00', '2400.00'));
+    it('trues up each week of a span against the earlier lines that cover that week only', () => {
+      // a 12.00 line over 2 weeks (6.00 a week) after a 6.00 line that an earlier check paid in the first week only
+      const weeks = [week('2026-11-09', '2400.00', '300.00'), week('2026-11-16', '2400.00', '300.00')];
       const result = lineOvertimePremium({
-        weeks, lines: [{ amountCents: 100, coversFrom: '2026-09-14', coversTo: '2026-10-04' }], payWeek: '2026-09-28',
+        weeks,
+        lines: [{ amountCents: 1200, coversFrom: '2026-11-09', coversTo: '2026-11-22' }],
+        earlierLines: [{ amountCents: 600, weekStart: '2026-11-09' }, { amountCents: 99999, weekStart: '2026-10-05' }],
+        earlierPremiums: [{ weekStart: '2026-11-09', premiumCents: 33 }, { weekStart: '2026-10-05', premiumCents: 500 }],
       });
-      // 100 / 3 = 33.33 a week, a quarter is 8.33: up to 9 in the two earlier weeks, half up to 8 in the pay week
-      expect(result.weeks.map((w) => [w.weekStart, w.premiumCents])).toEqual([['2026-09-14', 9], ['2026-09-21', 9], ['2026-09-28', 8]]);
-      expect(result.extraPremiumCents).toBe(26);
+      expect(result.weeks.map((w) => [w.weekStart, w.premiumCents, w.earlierPremiumCents])).toEqual([
+        ['2026-11-09', 34, 33], // 67 on the week's 12.00, less 33
+        ['2026-11-16', 33, undefined], // no earlier pay: 33.33 -> 33
+      ]);
+      expect(result.extraPremiumCents).toBe(67);
+    });
+
+    it('refuses an earlier premium that is not a whole number of cents, zero or more', () => {
+      expect(() => price([600], [600], [-1])).toThrow(/whole number of cents/);
+      expect(() => price([600], [600], [1.5])).toThrow(/whole number of cents/);
     });
   });
 
   it('counts an HSA line like any other line (a cash-or-HSA choice is in the regular rate)', () => {
-    const base = { weeks: [week('2026-10-12', '2400.00', '120.00')], payWeek: '2026-10-12' };
+    const base = { weeks: [week('2026-10-12', '2400.00', '120.00')] };
     const without = lineOvertimePremium({ ...base, lines: [{ amountCents: 4615, weekStart: '2026-10-12' }] });
     const withHsa = lineOvertimePremium({ ...base, lines: [{ amountCents: 4615, weekStart: '2026-10-12' }, { amountCents: 20000, weekStart: '2026-10-12' }] });
     expect(without.extraPremiumCents).toBe(110);

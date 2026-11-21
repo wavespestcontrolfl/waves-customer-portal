@@ -288,7 +288,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await linesOf(tech)).toHaveLength(0);
     });
 
-    it('never pays less overtime for a week than one check would: the week\'s own check rounds half up, the gift\'s check rounds up', async () => {
+    it('pays the difference for a week an earlier check already paid line overtime for: 33 then 34, together the 67 of one check', async () => {
       const tech = await readyTech('Sample Alpha');
       const WEEK = '2026-11-09'; // 45 h worked, 5 of them overtime
       await approvedWeek(tech, WEEK, '2400.00', '300.00');
@@ -297,15 +297,51 @@ postgres('tech rewards pay lines: the December gift', () => {
       const own = await draft(WEEK);
       expect(checkOf(own, tech)).toMatchObject({ commissionCents: 600, lineOvertimePremiumCents: 33 });
       await finalize(own.id);
-      // the gift's share of that week is also 6.00 (30,000 over 50 workweeks). On its own check, months later: 33.33 -> 34
+      // the gift's share of that week is also 6.00 (30,000 over 50 workweeks). One check with both lines would owe
+      // 1/2 x 1,200 / 45 h x 5 h = 66.67 -> 67, and 33 is paid: the gift's check pays 34
       await approvedWeek(tech, GIFT_WEEK);
       const giftRun = await draft(GIFT_WEEK);
       const check = checkOf(giftRun, tech);
       expect(check).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 34 });
       const stored = await trx('payroll_checks').where({ id: check.id }).first();
-      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK).premiumCents).toBe(34);
-      // one check with both lines would owe 1/2 x 1,200 / 45 h x 5 h = 66.67 -> 67; the two checks pay 33 + 34
-      expect(33 + check.lineOvertimePremiumCents).toBeGreaterThanOrEqual(67);
+      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
+        allocatedCents: 600, premiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33,
+      });
+      // a week no earlier check paid for carries no earlier figures
+      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === '2026-11-02')).not.toHaveProperty('earlierPremiumCents');
+      // a recompute and the finalize give the same figure (the draft check itself is not an earlier check)
+      expect(checkOf(await recompute(giftRun.id), tech).lineOvertimePremiumCents).toBe(34);
+      await finalize(giftRun.id);
+      const final = await trx('payroll_checks').where({ run_id: giftRun.id, technician_id: tech, status: 'finalized' }).first();
+      expect(Number(final.line_overtime_premium_cents)).toBe(34);
+    });
+
+    it('pays the difference in either order: a late line on a later run first (33), then the week\'s own run with a later pay date (34)', async () => {
+      delete process.env.GATE_TECH_REWARDS_PAY_LINES; // commission lines only: the rule belongs to every pay line
+      const tech = await readyTech('Sample Alpha');
+      const WEEK = '2026-11-09'; // 45 h worked, 5 of them overtime
+      const AFTER = '2026-11-16';
+      await approvedWeek(tech, WEEK, '2400.00', '300.00');
+      await approvedWeek(tech, AFTER);
+      // the next week's run is finalized first and carries a 6.00 line earned in WEEK: 33.33 -> 33
+      const [first] = await trx('payroll_pay_lines').insert({ technician_id: tech, kind: 'commission', amount_cents: 600, earned_week_start: WEEK }).returning('id');
+      const later = await draft(AFTER);
+      expect(checkOf(later, tech)).toMatchObject({ commissionCents: 600, lineOvertimePremiumCents: 33 });
+      await finalize(later.id);
+      expect((await trx('payroll_pay_lines').where({ id: first.id || first }).first()).status).toBe('paid');
+      // then WEEK's own run, dated after that check, with another 6.00 line of the same week: 67 on the 12.00, less 33
+      await trx('payroll_pay_lines').insert({ technician_id: tech, kind: 'commission', amount_cents: 600, earned_week_start: WEEK });
+      const own = await draft(WEEK, '2026-12-04');
+      expect(checkOf(own, tech)).toMatchObject({ commissionCents: 600, lineOvertimePremiumCents: 34 });
+      await finalize(own.id);
+      const paid = await trx('payroll_checks').where({ technician_id: tech, status: 'finalized' }).whereIn('run_id', [later.id, own.id]);
+      expect(paid.map((c) => Number(c.line_overtime_premium_cents)).sort()).toEqual([33, 34]);
+      // a voided run's premium is not an earlier payment: void the first check, and a new line of that week pays in full again
+      await voidRun(own.id);
+      await voidRun(later.id);
+      const again = await draft(WEEK, '2026-12-04');
+      // both 6.00 lines are open again and ride on this one check: 67, with nothing paid before
+      expect(checkOf(again, tech)).toMatchObject({ commissionCents: 1200, lineOvertimePremiumCents: 67 });
     });
 
     it('adds the half-time premium of the overtime weeks it covers', async () => {
@@ -822,10 +858,11 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(checkOf(run, charlie)).not.toHaveProperty('techRewardsCents');
       expect(checkOf(run, delta).techRewardsCents).toBe(GIFT);
       expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', held), waits('Sample Bravo', held), waits('Sample Charlie', held)]);
-      const rows = await trx('payroll_pay_lines').where({ kind: 'december_gift' }).orderBy('amount_cents');
-      expect(rows.map((r) => [r.technician_id, Number(r.amount_cents), r.status])).toEqual([
-        [alpha, 12345, 'open'], [bravo, 12345, 'paid'], [delta, GIFT, 'open'],
-      ]);
+      // three rows, in no stated order: the two hand-made rows as they were, and Delta's gift
+      const rows = await trx('payroll_pay_lines').where({ kind: 'december_gift' });
+      expect(rows).toHaveLength(3);
+      expect(rows.map((r) => `${r.technician_id} ${Number(r.amount_cents)} ${r.status}`).sort())
+        .toEqual([`${alpha} 12345 open`, `${bravo} 12345 paid`, `${delta} ${GIFT} open`].sort());
       // a recompute changes nothing: the hand-made rows are never matched, moved or changed
       await recompute(run.id);
       expect((await trx('payroll_pay_lines').where({ kind: 'december_gift' })).map((r) => Number(r.amount_cents)).sort()).toEqual([12345, 12345, GIFT]);
@@ -884,7 +921,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       const [z] = await trx('payroll_pay_lines').insert({
         ...row, technician_id: zulu, earned_week_start: GIFT_WEEK, covers_from: GIFT_WEEK, covers_to: '2026-12-13', source_id: `december_gift:${zulu}:gift`,
       }).returning('id');
-      const handMade = async () => (await trx('payroll_pay_lines').whereIn('id', [a.id || a, z.id || z]).orderBy('amount_cents').orderBy('technician_id'))
+      const handMade = async () => (await trx('payroll_pay_lines').whereIn('id', [a.id || a, z.id || z]))
         .map((line) => [line.technician_id, line.status, dateOf(line.earned_week_start), Number(line.amount_cents)]).sort();
       const before = await handMade();
       const ownOf = async (technicianId) => (await linesOf(technicianId)).filter((line) => techRewardsOwnKey(line));

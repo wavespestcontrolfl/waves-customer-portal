@@ -372,12 +372,11 @@ postgres('payroll pay lines', () => {
       expect(refused.body.error).toMatch(/Sample Alpha: Timesheet for the week of 2026-09-14 is not approved yet/);
       expect((await lineRow(line.id)).status).toBe('open');
 
-      // W1 approved with 4 overtime hours of 44: 1/2 x (200.00 / 44) x 4 = 9.0909 on top of the commission. W1 is an earlier
-      // week on this check (the run pays W2), so its premium rounds up: 9.10.
+      // W1 approved with 4 overtime hours of 44: 1/2 x (200.00 / 44) x 4 = 9.09 on top of the commission.
       await approvedWeek(id, W1, '2400.00', '240.00');
       const recomputed = (await api('POST', `/runs/${created.body.run.id}/recompute`)).body.run;
       expect(recomputed.waiting).toEqual([]);
-      expect(byName(recomputed, 'Sample Alpha')).toMatchObject({ commissionCents: 40000, lineOvertimePremiumCents: 910 });
+      expect(byName(recomputed, 'Sample Alpha')).toMatchObject({ commissionCents: 40000, lineOvertimePremiumCents: 909 });
       expect((await finalize(recomputed.id)).status).toBe(200);
       expect((await lineRow(line.id)).status).toBe('paid');
     });
@@ -406,7 +405,7 @@ postgres('payroll pay lines', () => {
       await trx('time_entries').where({ id: shiftId }).update({ auto_close_reviewed_at: new Date(), auto_close_reviewed_by: ADMIN_ID });
       const released = (await api('POST', `/runs/${created.id}/recompute`)).body.run;
       expect(released.blocked).toEqual([]);
-      expect(byName(released, 'Sample Alpha')).toMatchObject({ commissionCents: 40000, lineOvertimePremiumCents: 910 }); // 9.0909, an earlier week: up
+      expect(byName(released, 'Sample Alpha')).toMatchObject({ commissionCents: 40000, lineOvertimePremiumCents: 909 });
       expect((await finalize(created.id)).status).toBe(200);
     });
 
@@ -427,9 +426,8 @@ postgres('payroll pay lines', () => {
       const line = await addLine(id, { amountCents: 7615, earnedWeekStart: W1 });
       const created = await draft(W2);
       const check = byName(created.body.run, 'Sample Alpha');
-      // The bonus belongs to W1, which had 2 overtime hours of 42: 1/2 x (76.15 / 42) x 2 = 1.8131. W1's own check is already
-      // final and rounded once, so on this later check the premium rounds up: 1.82 (on W1's own check it is 1.81, above).
-      expect(check).toMatchObject({ reviewBonusCents: 7615, lineOvertimePremiumCents: 182 });
+      // The bonus belongs to W1, which had 2 overtime hours of 42: 1/2 x (76.15 / 42) x 2 = 1.81.
+      expect(check).toMatchObject({ reviewBonusCents: 7615, lineOvertimePremiumCents: 181 });
       expect((await finalize(created.body.run.id)).status).toBe(200);
       expect((await lineRow(line.id)).status).toBe('paid');
     });
@@ -532,7 +530,7 @@ postgres('payroll pay lines', () => {
       await approvedWeek(id, W2, '2400.00', '0.00');
       await addLine(id, { kind: 'commission', amountCents: 40000, coversFrom: W1, coversTo: addDays(W2, 6), earnedWeekStart: W2 });
       const run = await draftAndFinalize(W2);
-      expect(byName(run, 'Sample Alpha').lineOvertimePremiumCents).toBe(910); // 9.0909 for W1, an earlier week on the W2 check: up
+      expect(byName(run, 'Sample Alpha').lineOvertimePremiumCents).toBe(909);
       expect(await trx('payroll_checks').where({ technician_id: id, week_start: W1 }).first('id')).toBeUndefined();
 
       await expect(unlock(id, W1)).rejects.toMatchObject({
