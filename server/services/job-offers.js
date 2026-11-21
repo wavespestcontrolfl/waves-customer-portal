@@ -1358,6 +1358,10 @@ const minuteOfDayEt = (now) => {
 };
 const mayClaimAt = (now) => minuteOfDayEt(now) >= REMINDER_DAY_ET.from && minuteOfDayEt(now) < REMINDER_DAY_ET.lastClaim;
 const maySendAt = (now) => minuteOfDayEt(now) >= REMINDER_DAY_ET.from && minuteOfDayEt(now) < REMINDER_DAY_ET.until;
+// The reminder's gates (GATE_JOB_OFFER_REMINDER and GATE_JOB_OFFERS), as the sender reads them for the stage. The
+// scheduler reads them before its lock. The pass reads them again before it takes an offer: a claim made with a
+// gate off would use up the offer's one attempt on a send that the sender refuses.
+const reminderOn = () => require('./recruiting-comms').stageEnabled('offer_reminder');
 // A channel that reached its provider, or may have.
 const WENT_OUT = ['sent', 'uncertain'];
 // A channel that did not go cleanly for a reason on our side. 'uncertain' is in both lists: the applicant may hold
@@ -1456,12 +1460,13 @@ async function deliverReminder({ application, offer, channels }, clock) {
  * text fail-loud (recruiting-comms triedOnceTextOutcome): a text that did not go is 'failed' unless the rail refused
  * it because of the applicant.
  * One offer can count as reminded and as failed (the email went and the text failed, or a result is not known).
+ * With either gate off the pass takes nothing, also on a direct call.
  * clock: the time source, for tests. The scheduler passes none.
  */
 async function sendDueReminders(clock = () => new Date()) {
   const now = clock();
   const result = { reminded: 0, notSent: 0, failed: 0 };
-  if (!mayClaimAt(now)) return result;
+  if (!reminderOn() || !mayClaimAt(now)) return result;
   const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
     .where('o.status', 'sent').where('a.status', 'offer').whereNull('o.reminder_claimed_at').whereNull('o.reminder_sent_at')
     .where('o.sent_at', '<=', new Date(now.getTime() - REMINDER_AFTER_MS)).where('o.expires_at', '>=', now)

@@ -1371,6 +1371,7 @@ module.exports = {
   appendCommsHistory,
   historyEntry,
   sendStageComms,
+  stageEnabled,
   maskOfferLink,
   // exposed for tests
   _internals: { renderStageSmsBody, sendRawEmail },

@@ -21,9 +21,12 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockSendStageComms = jest.fn(async () => ({ sms: 'sent', email: 'sent' }));
+// The gates of a recruiting stage, as job-offers.js asks the sender for them (the reminder pass). On in this suite.
+const mockStageEnabled = jest.fn(() => true);
 jest.mock('../services/recruiting-comms', () => ({
   ...jest.requireActual('../services/recruiting-comms'),
   sendStageComms: (...args) => mockSendStageComms(...args),
+  stageEnabled: (...args) => mockStageEnabled(...args),
 }));
 const mockRaise = jest.fn(async () => ({ id: 'bell-1' }));
 jest.mock('../services/admin-alert-compose', () => ({
@@ -1233,6 +1236,17 @@ jest.setTimeout(120000);
 
         expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
         expect(mockSendStageComms).toHaveBeenCalledTimes(1);
+      });
+
+      test('with a gate off a direct call takes nothing: the offer keeps its one attempt', async () => {
+        const { sent } = await dueOffer();
+        mockStageEnabled.mockReturnValueOnce(false);
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(none);
+        expect(mockStageEnabled).toHaveBeenLastCalledWith('offer_reminder');
+        expect(mockSendStageComms).not.toHaveBeenCalled();
+        expect((await offerRow(sent.id)).reminder_claimed_at).toBeNull();
+        // With the gates on again the same offer gets its reminder.
+        expect(await JobOffers.sendDueReminders(midday)).toEqual(one);
       });
 
       test('the check before each provider passes only while the offer is the open one with this link', async () => {

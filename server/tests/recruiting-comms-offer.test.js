@@ -315,6 +315,13 @@ describe('the gate', () => {
     expect(await withGates(['jobOffers', 'jobOfferReminder'])).toEqual({ sms: 'stale', email: 'stale' });
   });
 
+  test('stageEnabled is the same answer for the reminder pass, which asks before it takes an offer', () => {
+    const on = (gates) => { mockIsEnabled.mockImplementation((gate) => gates.includes(gate)); return RC.stageEnabled('offer_reminder'); };
+    expect(on(['jobOffers', 'recruitingComms'])).toBe(false);
+    expect(on(['jobOfferReminder', 'recruitingComms'])).toBe(false);
+    expect(on(['jobOffers', 'jobOfferReminder'])).toBe(true);
+  });
+
   test('the offer stage is disabled by jobOffers alone, even with recruitingComms on', async () => {
     mockIsEnabled.mockImplementation((gate) => gate === 'recruitingComms');
     expect(await RC.sendStageComms(app, 'offer_sent', opts)).toEqual({ sms: 'disabled', email: 'disabled' });
