@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, setupFeeBilledWithFirstVisit, standardInvoiceShape } from './PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, firstVisitTotalPreview, setupFeeBilledWithFirstVisit, standardInvoiceShape } from './PaymentPreferenceButtons';
 import { resolvePaymentTiming } from '../../lib/paymentTiming';
 import {
   AFTER_VISIT_CARD_CONSENT_TEXT as CLIENT_AFTER_VISIT_CARD_CONSENT_TEXT,
@@ -642,5 +642,49 @@ describe('confirmStepFirstVisitAmount', () => {
     ['monthly-billed plan with no first-visit amount', { selectedFrequency: { billingFrequencyKey: 'monthly', monthly: 45 } }],
   ])('returns null for %s', (_label, override) => {
     expect(confirmStepFirstVisitAmount({ ...base, ...override })).toBeNull();
+  });
+});
+
+// The line under the price states the first bill before a time is picked. It must be the
+// figure the invoice box shows afterwards, and stay silent wherever "application + one-time
+// setup" would not be that box's whole total.
+describe('firstVisitTotalPreview', () => {
+  const quarterly = { billingFrequencyKey: 'quarterly', monthly: 32.67, perVisit: 98 };
+  const setupFee = { amount: 99, service: 'waveguard_setup' };
+  // cardPerApplicationTotal: the price card's per-application price, which the page passes only
+  // for a one-service plan whose monthly average reconciles it with the plan's monthly, credit-free.
+  const base = { serviceMode: 'recurring', paymentPreference: null, setupFee, selectedFrequency: quarterly, cardPerApplicationTotal: 98 };
+
+  it('is the setup fee plus the first application, and equals the invoice box total', () => {
+    expect(firstVisitTotalPreview(base)).toEqual({ firstApplication: 98, setup: 99, total: 197 });
+    render(
+      <PaymentPreferenceButtons onSelect={vi.fn()} disabled={false} serviceMode="recurring" setupFee={setupFee} selectedFrequency={quarterly} />,
+    );
+    expect(screen.getByText('Invoice total').parentElement).toHaveTextContent('$197.00');
+  });
+
+  it.each([
+    ['one-time visit', { serviceMode: 'one_time' }],
+    ['annual prepay (setup waived)', { paymentPreference: 'prepay_annual' }],
+    ['invoice-mode estimate', { invoiceMode: true }],
+    ['on-site confirmation hold', { siteConfirmationHold: true }],
+    ['no setup fee (first visit costs what every visit costs)', { setupFee: null }],
+    ['another up-front row beside the setup fee', { extraInvoiceRows: [{ label: 'Bait Station Setup', amount: 250 }] }],
+    ['one-time services billed after completion', { oneTimeExtrasTotal: 150 }],
+    ['another first-visit fee (initial cockroach treatment)', {
+      firstVisitFees: [setupFee, { service: 'pest_initial_roach', amount: 150, label: 'Cockroach Treatment Service' }],
+    }],
+    ['monthly-billed plan with no first-application amount', { selectedFrequency: { billingFrequencyKey: 'monthly', monthly: 45 } }],
+    ['a credit the accept takes off the first bill (deposit, code, plan credit, a service turned off)', { creditApplies: true }],
+    ['no proven card price (a bundle, or a plan whose monthly average does not reconcile)', { cardPerApplicationTotal: null }],
+    ['a card price that is not the box amount', { cardPerApplicationTotal: 88 }],
+    ['a card price that is not a number', { cardPerApplicationTotal: 'n/a' }],
+  ])('returns null for %s', (_label, override) => {
+    expect(firstVisitTotalPreview({ ...base, ...override })).toBeNull();
+  });
+
+  it('keeps the line when the first-visit fee list holds only the setup fee (or a zero fee)', () => {
+    const firstVisitFees = [setupFee, { service: 'pest_initial_roach', amount: 0 }];
+    expect(firstVisitTotalPreview({ ...base, firstVisitFees })).toEqual({ firstApplication: 98, setup: 99, total: 197 });
   });
 });

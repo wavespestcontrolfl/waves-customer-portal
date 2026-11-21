@@ -49,14 +49,14 @@ import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import PromoCodeSection from '../components/estimate/PromoCodeSection';
 import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, monthlyText, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
-import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
+import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, selectedPlanCreditDeclared, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
 import { approveSlotLabel, firstVisitDayAndWindow } from '../lib/estimate-glass-slots';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, firstVisitTotalPreview, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
 import {
@@ -206,9 +206,15 @@ function scrollToBookingSection() {
   if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
 }
 
+// Scrolls to the Ask box and moves keyboard focus onto it (the box is focusable by script,
+// tabIndex -1), so the next Tab lands in the question field instead of walking the booking
+// controls in between. The box itself takes the focus, not the field: focusing the field
+// would open the on-screen keyboard over a link that only says where the box is.
 function scrollToAskSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(ASK_SECTION_ID) : null;
-  if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  if (!el) return;
+  el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  el.focus({ preventScroll: true });
 }
 
 // Once a slot is picked the approve CTAs land on the payment step (the actual
@@ -1333,7 +1339,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   }, [asking, askToken, question, selectedFrequency, serviceMode, token, preview]);
 
   return (
-    <section id={ASK_SECTION_ID} {...(glassCard ? { 'data-glass': 'card' } : {})} style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
+    <section id={ASK_SECTION_ID} tabIndex={-1} {...(glassCard ? { 'data-glass': 'card' } : {})} style={{ ...estimateCard(), display: 'grid', gap: 12, scrollMarginTop: 76, outline: 'none' }}>
       <div>
         <div style={{
           fontSize: 14,
@@ -3972,6 +3978,40 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
 // The sheet's entry point — a quiet text link under the page's ask/support
 // blocks. Rendered only when the payload stamped `softExit` (gate on, live
 // row, not a staff preview), so the page never offers a write it refuses.
+// Under the price (owner 2026-11-21, "ok a"). The first-visit line states the first bill
+// as one number before a time is picked: the same setup fee, first application and total
+// the "Reserve your spot" box lists afterwards (firstVisitTotalPreview), so that total is
+// no surprise. It is one real bill, not a plan total. It exists only on a one-service plan
+// (the setup fee is charged on a pest-only or mosquito-only plan, never on a bundle), so
+// "each visit after that" is that plan's one per-application price. The link goes down to
+// the Ask Waves box, which sits at the end of the page.
+// The sentence is the owner-approved one, word for word (decision page, 2026-11-21). "First
+// visit" and "Each visit after that" name bills; the unit on every price stays "per
+// application" (AGENTS.md). Change these words only on the owner's word.
+export function PriceFollowUps({ firstVisit = null, onAsk = null }) {
+  if (!firstVisit && !onAsk) return null;
+  return (
+    <div data-price-follow-ups="" style={{ display: 'grid', gap: 4, justifyItems: 'center', textAlign: 'center', margin: '4px 0 12px' }}>
+      {firstVisit ? (
+        <div data-first-visit-line="" style={{ fontSize: 16, color: ESTIMATE_TEXT, lineHeight: 1.5 }}>
+          First visit: <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(firstVisit.total)}</strong>
+          {` (${fmtMoney(firstVisit.firstApplication)} application + ${fmtMoney(firstVisit.setup)} one-time setup).`}
+          {` Each visit after that: ${fmtMoney(firstVisit.firstApplication)}.`}
+        </div>
+      ) : null}
+      {onAsk ? (
+        <button
+          type="button"
+          onClick={onAsk}
+          style={{ background: 'none', border: 'none', padding: '8px 12px', fontSize: 14, fontWeight: 600, color: ESTIMATE_BODY, textDecoration: 'underline', cursor: 'pointer' }}
+        >
+          Questions about this estimate? Ask Waves
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function SoftExitLink({ onOpen }) {
   return (
     <div style={{ textAlign: 'center', margin: '4px 0 12px' }}>
@@ -5411,7 +5451,9 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
 // payload's `promoCode` block. The page owns the endpoint; a staff preview
 // never posts, and the request it would make carries the same marker so the
 // route refuses it too.
-export function EstimatePromoCode({ promoCode, token, staffView = false }) {
+// `onApplied` tells the page a code went on in this session: the section keeps its own
+// state, so without it the page would still read the served `promoCode` until a reload.
+export function EstimatePromoCode({ promoCode, token, staffView = false, onApplied = null }) {
   if (!promoCode) return null;
   const submitCode = async (code) => {
     const url = `${API_BASE}/estimates/${token}/promo-code${staffView ? '?adminPreview=1' : ''}`;
@@ -5421,6 +5463,7 @@ export function EstimatePromoCode({ promoCode, token, staffView = false }) {
       body: JSON.stringify({ code }),
     });
     const result = await response.json().catch(() => ({}));
+    if (response.ok && result.promoCode?.applied && onApplied) onApplied();
     return response.ok ? { ok: true, promoCode: result.promoCode } : { ok: false, error: result.error };
   };
   // Keyed on the served state so a /data reload that changes it (the accept,
@@ -6237,6 +6280,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // payload flags measurementReviewEnabled.
   const [measurementReviewBasis, setMeasurementReviewBasis] = useState(null);
   const [softExitOpen, setSoftExitOpen] = useState(false);
+  // A promo or referral code applied in this session (the served promoCode block is older).
+  const [codeAppliedHere, setCodeAppliedHere] = useState(false);
   // Mirrors ctaPhase SYNCHRONOUSLY. ctaPhase is React state, so async work
   // started before a phase change — e.g. a SlotPicker AI slot search —
   // captures the OLD phase in its closure: when it resolved mid-submission
@@ -9671,6 +9716,47 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // shape is covered, the summary card carries the per-application prices and month
   // amounts, so the cards above drop their per-service "$X a month" slices (codex #6399 r2).
   const applicationMonths = monthlyAverage ? applicationMonthsBreakdown(monthlyAverage.model) : null;
+  // First-visit line under the price: the inputs are the ones the "Reserve your spot" box
+  // gets below, so the line and that box's "Invoice total" are one figure. The monthly
+  // average is the proof the helper asks for: its model exists only when the card price
+  // adds up to the plan's own monthly, and a plan credit shows as `credit`. One service
+  // only: the setup fee is never charged on a bundle.
+  const averageModel = monthlyAverage?.model || null;
+  // Credits the accept takes off the first invoice, which the box does not show: the booking
+  // deposit, a promo or referral code on this estimate (served, or entered in this session),
+  // a plan credit on the selected cadence and a pest service the customer turned off. The
+  // last two are read directly, not through the average: its rounding band would let a very
+  // small credit pass.
+  // Known limit: deposit collection is retired, so `required` is always false now, yet the
+  // accept still credits a deposit paid before that. /data carries no ledger balance, so the
+  // page cannot see one (the "Reserve your spot" box has the same blind spot). No open
+  // estimate held such a deposit on 2026-11-21. If deposits return, send the balance in
+  // /data and add it here.
+  const serviceTurnedOff = services.filter((section) => section?.isRecurring).some((section) => {
+    const chosen = selectedAddOns[section.key];
+    return (selectedFrequencyForSection(section, selected)?.addOns || [])
+      .some((addOn) => (chosen ? !chosen.has(addOn.key) : addOn.preChecked === false));
+  });
+  const firstBillCreditApplies = data?.depositPolicy?.required === true
+    || !!data?.promoCode?.applied
+    || codeAppliedHere
+    || serviceTurnedOff
+    || selectedPlanCreditDeclared({ services, selected, selectedCombo, combinedFrequency, pricing });
+  const firstVisitLine = invoiceOnlyAccept ? null : firstVisitTotalPreview({
+    serviceMode,
+    paymentPreference,
+    invoiceMode: !!estimate.billByInvoice,
+    siteConfirmationHold: !!estimate.siteConfirmationHold,
+    setupFee: setupFeeEffective,
+    extraInvoiceRows: rodentSetupInvoiceRows,
+    selectedFrequency: combinedFrequency,
+    oneTimeExtrasTotal: oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode),
+    firstVisitFees: pricing.firstVisitFees,
+    creditApplies: firstBillCreditApplies,
+    cardPerApplicationTotal: averageModel && !averageModel.credit && averageModel.services.length === 1
+      ? averageModel.services[0].perApplication
+      : null,
+  });
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -11011,6 +11097,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           <div id={PRICE_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {renderQuoteDetailCards()}
+            <PriceFollowUps
+              firstVisit={firstVisitLine}
+              // The link exists only where this layout renders the Ask bar at its end.
+              onAsk={glassContent && !isRegulatedCertificateSurface ? scrollToAskSection : null}
+            />
           </div>
 
           {/* Waves AI panel + Ask bar render AFTER the price/plan (matches the
@@ -11026,7 +11117,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
           {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
-          <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} />
+          <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} onApplied={() => setCodeAppliedHere(true)} />
 
           {slotIssueInBooking ? (
             <div id={SLOT_ISSUE_SECTION_ID} style={{ scrollMarginTop: 76 }}>{slotIssueBanner}</div>

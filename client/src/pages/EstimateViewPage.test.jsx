@@ -2592,9 +2592,10 @@ describe('oneTimeExtrasForPaymentNote', () => {
     expect(src).toContain('const rodentSetupInvoiceRows = [');
     expect(src).toContain("Number(pricing?.mistingInstallFee?.amount) > 0");
     expect(src).toContain("label: pricing.mistingInstallFee.label || 'Mosquito Misting System Installation', amount: Number(pricing.mistingInstallFee.amount)");
-    // the same rows feed the payment choices and the after-visit shape checks (rows beyond the WaveGuard setup)
+    // the same rows feed the payment choices, the after-visit shape checks (rows beyond the WaveGuard setup)
+    // and the first-visit line under the price, which shows no total when such a row exists
     expect(src.match(/extraInvoiceRows=\{rodentSetupInvoiceRows\}/g)).toHaveLength(2);
-    expect(src.match(/extraInvoiceRows: rodentSetupInvoiceRows,/g)).toHaveLength(2);
+    expect(src.match(/extraInvoiceRows: rodentSetupInvoiceRows,/g)).toHaveLength(3);
   });
 
   it('matches setup rows by label when the service key is missing', () => {
