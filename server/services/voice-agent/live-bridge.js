@@ -213,6 +213,7 @@ class LiveBridge {
     this.sessionStartWall = null; // when session.started arrived: transcript ms count from here
     this.callerRunMs = 0; // length of the caller's current run of voiced frames
     this.callerRunSince = null; // ...and when the audio of that run began
+    this.callerStampEnd = null; // Twilio's media timestamp at the end of the caller's last frame (ms from the stream start)
     this.callerSpokeAt = null; // arrival of the caller's latest frame of speech (noteCallerFrame)
     this.callerMs = 0; // caller audio received, and the part of it in voiced frames (caller_voiced_pct)
     this.callerVoicedMs = 0;
@@ -329,7 +330,7 @@ class LiveBridge {
     // only the final usage is still awaited). Before the session is confirmed,
     // the caller's opening audio is held (OPENING_AUDIO_MAX_FRAMES).
     if (this._finalizing || typeof media.payload !== 'string' || (media.track && media.track !== 'inbound')) return;
-    const sound = this.noteCallerFrame(media.payload);
+    const sound = this.noteCallerFrame(media.payload, media.timestamp);
     if (!this.ready) {
       this.openingAudio.push({ payload: media.payload, sound });
       if (this.openingAudio.length > OPENING_AUDIO_MAX_FRAMES) this.openingAudio.shift();
@@ -342,26 +343,36 @@ class LiveBridge {
   // level does not count. Only levels and times are kept, never audio.
   // At CALLER_VOICED_RMS_MIN or more the frame holds voice. Caller SPEECH is
   // voice for CALLER_SPEECH_MIN_MS in a row, and nothing else: a shorter sound
-  // (a click, a knock) times nothing. The arrival of the latest frame of
-  // speech is kept (callerSpokeAt); reply delays start there (onReplyStart).
+  // (a click, a knock) times nothing. Frames are in a row by Twilio's media
+  // timestamp, the frame's place in the stream: when a frame or more is
+  // missing before this one, that ends the run as a silent frame does. The
+  // arrival of the latest frame of speech is kept (callerSpokeAt); reply
+  // delays start there (onReplyStart). Speech from before session.started
+  // starts no delay: the model hears it only once the session is up, and the
+  // oldest of it may be gone from the held opening audio by then.
   // A frame holds the audio from just before it arrived, so a run of voice
   // began one frame length before its first frame arrived (callerRunSince).
   // Returns whether the frame holds any sound (OPENING_SOUND_RMS_MIN or more),
   // for the held opening audio. That level is lower on purpose: speech for
   // timing must be sure, and the opening audio must not lose quiet speech.
-  noteCallerFrame(payload) {
+  noteCallerFrame(payload, timestamp) {
     const audio = Buffer.from(payload, 'base64');
     let sum = 0;
     for (let i = 0; i < audio.length; i++) sum += MULAW_SQUARE[audio[i]];
     const atLevel = (rms) => audio.length > 0 && sum >= audio.length * rms ** 2;
     const ms = audio.length / MULAW_BYTES_PER_MS;
     this.callerMs += ms;
+    const stamp = Number.parseInt(timestamp, 10);
+    if (Number.isFinite(stamp)) {
+      if (this.callerStampEnd !== null && stamp - this.callerStampEnd >= ms) this.callerRunMs = 0;
+      this.callerStampEnd = stamp + ms;
+    }
     if (atLevel(CALLER_VOICED_RMS_MIN)) {
       const now = this.deps.now();
       if (this.callerRunMs === 0) this.callerRunSince = now - ms;
       this.callerVoicedMs += ms;
       this.callerRunMs += ms;
-      if (this.callerRunMs >= CALLER_SPEECH_MIN_MS) {
+      if (this.ready && this.callerRunMs >= CALLER_SPEECH_MIN_MS) {
         this.callerSpokeAt = now;
         // This speech began before the current reply's first voiced sample and
         // goes on now that the reply's chunk has arrived: that reply did not
@@ -542,11 +553,9 @@ class LiveBridge {
   // A reply answers the caller's last speech when that speech came after the
   // reply before it began to arrive. With no such speech (the model goes on by
   // itself) the reply has no delay. The first reply is normally the greeting.
-  // When the caller spoke first it may instead be the answer: that delay is
-  // kept apart, never in turns. It is the caller's wait: speech from before
-  // session.started counts from when it arrived, though the model hears it
-  // only once the session is up. A reply inside the 1.5 s after a barge-in is
-  // kept apart as well (onOutputAudio).
+  // When the caller spoke first (after session.started) it may instead be the
+  // answer: that delay is kept apart, never in turns. A reply inside the 1.5 s
+  // after a barge-in is kept apart as well (onOutputAudio).
   onReplyStart(t, ambiguous, voiceAt) {
     const prev = this.replyStartWall;
     const spoke = this.callerSpokeAt;

@@ -1185,7 +1185,7 @@ describe("the reply delay is read from the caller's own audio", () => {
     expect((await end(t)).caller_voiced_pct).toBe(null);
   });
 
-  test("the caller speaks before session.started: the first reply's kept-apart delay runs from when that speech arrived", async () => {
+  test('speech from before session.started starts no delay; a run of voice that goes on after session.started is speech from then on', async () => {
     const t = setup();
     await t.twilioStart();
     t.openai.emit('open');
@@ -1196,11 +1196,46 @@ describe("the reply delay is read from the caller's own audio", () => {
     t.advance(800);
     t.openai.receive({ type: 'session.started', session: { id: 's1' } });
     await flush();
+    expect(t.bridge.callerVoicedMs).toBe(200); // its voiced time counts all the same
     t.advance(1500);
-    delta(t, b64(160)); // the first reply, 2300 ms after the caller stopped
+    delta(t, b64(160)); // the first reply
     const s = await end(t);
-    expect(s.first_reply_ambiguous_ms).toBe(2300);
+    expect(s.first_reply_ambiguous_ms).toBe(null); // the model heard that speech only at session.started
     expect(s.turns).toEqual([]);
+
+    const on = setup();
+    await on.twilioStart();
+    on.openai.emit('open');
+    for (let i = 0; i < 3; i++) {
+      on.advance(20);
+      on.twilioMedia(b64(160)); // 60 ms of voice before the session is up...
+    }
+    on.openai.receive({ type: 'session.started', session: { id: 's1' } });
+    await flush();
+    for (let i = 0; i < 2; i++) {
+      on.advance(20);
+      on.twilioMedia(b64(160)); // ...and 40 ms after: 100 ms in a row
+    }
+    on.advance(1500);
+    delta(on, b64(160)); // the first reply, 1500 ms after the caller stopped
+    expect((await end(on)).first_reply_ambiguous_ms).toBe(1500);
+  });
+
+  test("audio missing between two frames (a jump in Twilio's media timestamps) ends a run of voice; a stamp under one frame late does not", async () => {
+    const speechAfter = async (stamps) => {
+      const t = setup();
+      await t.ready();
+      for (const stamp of stamps) {
+        t.advance(20);
+        t.twilio.emit('message', JSON.stringify({ event: 'media', media: { track: 'inbound', timestamp: String(stamp), payload: b64(160) } }));
+      }
+      return t.bridge.callerSpokeAt !== null;
+    };
+    expect(await speechAfter([20, 40, 60, 80, 100])).toBe(true); // 100 ms in a row
+    expect(await speechAfter([20, 40, 60, 80, 120])).toBe(false); // one frame is missing before the fifth: 80 ms, then 20 ms
+    expect(await speechAfter([20, 40, 60, 80, 119])).toBe(true);
+    expect(await speechAfter([20, 40, 60, 80, 2000])).toBe(false); // 80 ms of voice, 1.9 s missing, a click
+    expect(await speechAfter([20, 40, 60, 80, 2000, 2020, 2040, 2060, 2080])).toBe(true); // a new run of 100 ms after the gap
   });
 
   // Two end-to-end runs on the live API: the real bridge, a synthetic caller,
