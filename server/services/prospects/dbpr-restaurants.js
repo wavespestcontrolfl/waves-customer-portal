@@ -387,7 +387,9 @@ const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
 // The inspection table is a head row naming "Inspection Date" (and "Inspection Type"), then the rows under it: each
 // row up to the table's end is a visit, its date and type in those columns, so a second visit's row is a second visit.
 // A table that opens inside either table makes the page unreadable: its tags would end that table's reading early,
-// and a visit or a violation row after it (a callback's row) would go unread.
+// and a visit or a violation row after it (a callback's row) would go unread. A second violations head row makes the
+// page unreadable too: a page lists one inspection's violations, and another table's rows (an earlier inspection's,
+// say) could not be tied to the read visit.
 function readReportTables(page) {
   const entries = [];
   const visits = [];
@@ -396,6 +398,7 @@ function readReportTables(page) {
   let dateColumn = -1; // the Inspection Date column's position from its head row to the table's end, else -1
   let typeColumn = -1; // the Inspection Type column's position in that head row, -1 when it has none
   let violationsEnd = null; // where the last violations table's reading ended (a table tag), null while in it
+  let violationsHeads = 0; // the violations head rows read so far: a second one makes the page unreadable
   let row = []; // the cell texts of the row being read, blank cells kept so each keeps its position
   const endRow = () => {
     if (codeColumn >= 0 && row.some(Boolean)) {
@@ -423,6 +426,8 @@ function readReportTables(page) {
     endRow();
     const column = violationsColumn(row);
     if (column >= 0) {
+      violationsHeads += 1;
+      if (violationsHeads > 1) unreadable = true;
       codeColumn = column;
       violationsEnd = null;
     }
@@ -455,9 +460,10 @@ function readReportTables(page) {
  * - its violations table reads cleanly: the rows after the "Violation" / "Observation" head, up to the next table
  *   tag, each read whole by cell position (the cell in the Violation column is the code, the cells after it are the
  *   observation), so a code quoted in a note, a comment or a script never starts an entry. A row whose Violation cell
- *   is not a code alone (blank, or 35A-02-8*), a code cell outside that table (another table, the footer), or a table
- *   that opens inside the inspection table or the violations table means the page is not laid out as expected;
- * - each 35 row has observation text, and every visit label on them reads and has text after it. On a follow-up
+ *   is not a code alone (blank, or 35A-02-8*), a code cell outside that table (another table, the footer), a table
+ *   that opens inside the inspection table or the violations table, or a second violations table (an earlier
+ *   inspection's, say, whose rows could not be tied to the read visit) means the page is not laid out as expected;
+ * - each 35 row's observation shows a word, and every visit label on them reads and has text after it. On a follow-up
  *   report (any violations row labelled with its visit) each 35 row must be labelled, and its initial note is the
  *   first visit's citation;
  * - it lists at least as many 35A or 35B rows of the read visit as the file counted for it (violation35): the missing

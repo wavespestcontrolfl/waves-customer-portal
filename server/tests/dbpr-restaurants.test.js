@@ -524,6 +524,22 @@ describe('parseInspectionReport', () => {
     expect(parse(reportPage(fewer.replace('< 5', '&lt; 5'))).findings[0].text).toBe('Observed < 5 live roaches under the sink.');
   });
 
+  test('a page with a second violations table gives no answer: its rows could not be tied to the read visit', () => {
+    const read = (html) => parse(html, { violation35: 1, visitDate: '2026-10-21' });
+    const real = fixture('report-35b.html');
+    const end = '</table>\n<p>2601 Blair Stone Road';
+    const start = '<table>\n<tr>';
+    expect(real).toContain(end);
+    expect(real).toContain(start);
+    expect(read(real)).toEqual({ pestEvidence: false, findings: [] });
+    // An earlier inspection's table with a 35A row, after the visit's own table or before it.
+    const earlier = `<table>${VIOLATIONS_HEAD}<tr><td>35A-02-8</td><td>High Priority - Live roaches.</td></tr></table>`;
+    expect(read(real.replace(end, `</table>\n${earlier}<p>2601 Blair Stone Road`))).toBeNull();
+    expect(read(real.replace(start, `${earlier}${start}`))).toBeNull();
+    // One table with its head row twice cannot be read either.
+    expect(read(real.replace(end, `${VIOLATIONS_HEAD}<tr><td>35A-02-8</td><td>Live roaches.</td></tr>${end}`))).toBeNull();
+  });
+
   test('a table that opens inside the inspection table or the violations table gives no answer: a callback row after it would go unread', () => {
     const rows = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
     const read = (html) => parse(html, { violation35: 1, visitDate: '2026-10-20' });
