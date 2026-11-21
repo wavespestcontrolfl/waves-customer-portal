@@ -155,12 +155,15 @@ describe('earnedGrossCents (by component earning date)', () => {
   });
 
   test('a manual allowance covering August, paid in a September week, is split over its workweeks like the overtime premium', () => {
-    // Aug 1 - Aug 31 covers the weeks of Jul 27, Aug 3, 10, 17, 24 and 31: 6 x 1000; the Aug 31 week has 1 of 7 days in the season
+    // Aug 1 - Aug 31 covers the weeks of Jul 27 (2 covered days), Aug 3, 10, 17, 24 and 31 (1 covered day): 6 x 1000, every covered day in the season
     const allowance = plain('2026-09-07', 6000, { regularPayCents: 0, lines: [{ cents: 6000, earnedOn: null, weekStart: '2026-09-07', coversFrom: '2026-08-01', coversTo: '2026-08-31' }] });
-    expect(earnedGrossCents([allowance], FROM, TO)).toBe(5000 + 143);
+    expect(earnedGrossCents([allowance], FROM, TO)).toBe(6000);
+    // a span that runs past the season end: Aug 25 - Sep 6 is two weeks of 3000; the Aug 24 week (6 covered days) is all in, the Aug 31 week has 1 of its 7 covered days in
+    const straddle = plain('2026-09-07', 6000, { regularPayCents: 0, lines: [{ cents: 6000, earnedOn: null, weekStart: '2026-09-07', coversFrom: '2026-08-25', coversTo: '2026-09-06' }] });
+    expect(earnedGrossCents([straddle], FROM, TO)).toBe(3000 + 429);
     // the same line in the stay window of a later year takes the weeks by the same split; cents that do not divide go to the first weeks
     const odd = plain('2026-09-07', 1000, { regularPayCents: 0, lines: [{ cents: 1000, earnedOn: null, weekStart: '2026-09-07', coversFrom: '2026-04-06', coversTo: '2026-04-26' }] });
-    expect(checkComponents(odd).filter((c) => c.week).map((c) => c.cents).slice(0, 3)).toEqual([334, 333, 333]);
+    expect(checkComponents(odd).map((c) => c.cents).filter(Boolean)).toEqual([334, 333, 333]);
     expect(earnedGrossCents([odd], FROM, TO)).toBe(1000);
     // a ledger commission line (a span, but a payment day) keeps its one day
     const ledger = plain('2026-09-07', 4000, { regularPayCents: 0, lines: [{ cents: 4000, earnedOn: '2026-05-10', weekStart: '2026-05-04', coversFrom: '2026-03-02', coversTo: '2026-05-10' }] });
@@ -245,12 +248,12 @@ describe('composeScoreboard', () => {
   test('a milestone whose 12 months of pay have not begun keeps its date and has no amount', () => {
     const board = composeScoreboard(inputs({ priorYearGrossCents: 0 }));
     // hired 2025-04-01 -> the 3-year bonus is due 2028-04-01; its pay window opens 2027-04-01
-    expect(board.stayBonus).toEqual({ dueDate: '2028-04-01', years: 3, rateBps: 400, estimateCents: null, estimate: true, earningsStart: '2027-04-01' });
+    expect(board.stayBonus).toEqual({ dueDate: '2028-04-01', years: 3, rateBps: 400, estimateCents: null, estimate: true, earningsStart: '2027-04-01', earningsEnd: '2028-03-31' });
   });
 
   test('an open window gives an amount, with the window start named', () => {
     const board = composeScoreboard(inputs({ technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2025-12-01' }, priorYearGrossCents: 230000 }));
-    expect(board.stayBonus).toEqual({ dueDate: '2026-12-01', years: 1, rateBps: 200, estimateCents: 4600, estimate: true, earningsStart: '2025-12-01' });
+    expect(board.stayBonus).toEqual({ dueDate: '2026-12-01', years: 1, rateBps: 200, estimateCents: 4600, estimate: true, earningsStart: '2025-12-01', earningsEnd: '2026-11-30' });
   });
 
   test('past the 5-year bonus there is no next stay bonus', () => {
