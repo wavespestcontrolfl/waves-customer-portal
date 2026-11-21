@@ -653,7 +653,7 @@ describe('reply start on the continuous GPT-Live stream', () => {
     run(t, 5, silence(800)); // +1000..+1500
     delta(t, b64(800)); // reply 1 begins at +1500
     t.advance(100);
-    said(t, 'and', 1700, 1900); // arms the next measure
+    said(t, 'and', 1520, 1580); // at +1600: arms the next measure
     run(t, 5, silence(800)); // 500 ms pause inside the reply
     delta(t, b64(800)); // voice resumes: the same reply
     t.advance(100);
@@ -684,8 +684,8 @@ describe('reply start on the continuous GPT-Live stream', () => {
     const mixed = Buffer.concat([Buffer.alloc(800, 0x00), Buffer.alloc(4800, 0xff), Buffer.alloc(800, 0x00)]).toString('base64');
     const t = await start();
     delta(t, b64(160)); // greeting
-    said(t, 'hello', 10, 60);
     t.advance(100);
+    said(t, 'hello', 10, 60);
     delta(t, mixed); // at +100: 100 ms more greeting, 600 ms silent, the reply's voice at +800
     expect((await end(t)).turns).toEqual([740]);
     expect(mediaPayloads(t)).toContain(mixed);
@@ -786,9 +786,9 @@ describe('reply start on the continuous GPT-Live stream', () => {
       delta(t, b64(160)); // greeting
       t.advance(1000);
       delta(t, b64(8000)); // a reply: 1000 ms queued
-      t.advance(100);
-      said(t, 'wait', 1100, 1300); // barge-in at +1100
-      t.advance(500);
+      t.advance(300);
+      said(t, 'wait', 1100, 1300); // barge-in at +1300
+      t.advance(300);
       delta(t, silenceThenVoice(200)); // at +1600, after a gap: forwarded from its voice on
       expect(mediaPayloads(t)).toContain(b64(800));
       expect((await end(t)).after_barge_in_ambiguous_ms).toEqual([300]);
@@ -799,9 +799,9 @@ describe('reply start on the continuous GPT-Live stream', () => {
       delta(t, b64(160)); // greeting
       t.advance(1000);
       delta(t, b64(8000)); // a reply: 1000 ms queued
-      t.advance(100);
-      said(t, 'wait', 1100, 1300); // barge-in at +1100
       t.advance(300);
+      said(t, 'wait', 1100, 1300); // barge-in at +1300
+      t.advance(100);
       delta(t, b64(160)); // at +1400, after a gap: a short reply
       t.advance(100);
       said(t, ' so', 1450, 1500); // more speech, after that reply's audio has played: no barge-in
