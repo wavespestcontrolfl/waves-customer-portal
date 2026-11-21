@@ -56,7 +56,7 @@ import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, firstVisitTotalPreview, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
 import {
@@ -1333,7 +1333,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   }, [asking, askToken, question, selectedFrequency, serviceMode, token, preview]);
 
   return (
-    <section id={ASK_SECTION_ID} {...(glassCard ? { 'data-glass': 'card' } : {})} style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
+    <section id={ASK_SECTION_ID} {...(glassCard ? { 'data-glass': 'card' } : {})} style={{ ...estimateCard(), display: 'grid', gap: 12, scrollMarginTop: 76 }}>
       <div>
         <div style={{
           fontSize: 14,
@@ -3972,6 +3972,37 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
 // The sheet's entry point — a quiet text link under the page's ask/support
 // blocks. Rendered only when the payload stamped `softExit` (gate on, live
 // row, not a staff preview), so the page never offers a write it refuses.
+// Under the price (owner 2026-11-21, "ok a"). The first-visit line states the first bill
+// as one number before a time is picked: the same setup fee, first application and total
+// the "Reserve your spot" box lists afterwards (firstVisitTotalPreview), so that total is
+// no surprise. It is one real bill, not a plan total. `laterVisit` is the per-application
+// price of a one-service plan; a plan with several services bills different months
+// differently, so it gets no "each visit after that" sentence. The link goes down to the
+// Ask Waves box, which sits at the end of the page.
+export function PriceFollowUps({ firstVisit = null, laterVisit = null, severalServices = false, onAsk = null }) {
+  if (!firstVisit && !onAsk) return null;
+  return (
+    <div data-price-follow-ups="" style={{ display: 'grid', gap: 4, justifyItems: 'center', textAlign: 'center', margin: '4px 0 12px' }}>
+      {firstVisit ? (
+        <div data-first-visit-line="" style={{ fontSize: 16, color: ESTIMATE_TEXT, lineHeight: 1.5 }}>
+          First visit: <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(firstVisit.total)}</strong>
+          {` (${fmtMoney(firstVisit.firstApplication)} ${severalServices ? 'applications' : 'application'} + ${fmtMoney(firstVisit.setup)} one-time setup).`}
+          {laterVisit > 0 ? ` Each visit after that: ${fmtMoney(laterVisit)}.` : ''}
+        </div>
+      ) : null}
+      {onAsk ? (
+        <button
+          type="button"
+          onClick={onAsk}
+          style={{ background: 'none', border: 'none', padding: '8px 12px', fontSize: 14, fontWeight: 600, color: ESTIMATE_BODY, textDecoration: 'underline', cursor: 'pointer' }}
+        >
+          Questions about this estimate? Ask Waves
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function SoftExitLink({ onOpen }) {
   return (
     <div style={{ textAlign: 'center', margin: '4px 0 12px' }}>
@@ -9671,6 +9702,26 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // shape is covered, the summary card carries the per-application prices and month
   // amounts, so the cards above drop their per-service "$X a month" slices (codex #6399 r2).
   const applicationMonths = monthlyAverage ? applicationMonthsBreakdown(monthlyAverage.model) : null;
+  // First-visit line under the price: the inputs are the ones the "Reserve your spot" box
+  // gets below, so the line and that box's "Invoice total" are one figure.
+  const firstVisitLine = invoiceOnlyAccept ? null : firstVisitTotalPreview({
+    serviceMode,
+    paymentPreference,
+    invoiceMode: !!estimate.billByInvoice,
+    siteConfirmationHold: !!estimate.siteConfirmationHold,
+    setupFee: setupFeeEffective,
+    extraInvoiceRows: rodentSetupInvoiceRows,
+    selectedFrequency: combinedFrequency,
+    oneTimeExtrasTotal: oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode),
+  });
+  // "Each visit after that" only where one number is true: a one-service plan whose card
+  // price (the monthly-average model's per-application price) is that first application.
+  const firstVisitLaterAmount = firstVisitLine
+    && monthlyAverage?.model.services.length === 1
+    && !monthlyAverage.model.credit
+    && Math.abs(monthlyAverage.model.services[0].perApplication - firstVisitLine.firstApplication) < 0.005
+    ? firstVisitLine.firstApplication
+    : null;
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -11011,6 +11062,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           <div id={PRICE_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {renderQuoteDetailCards()}
+            <PriceFollowUps
+              firstVisit={firstVisitLine}
+              laterVisit={firstVisitLaterAmount}
+              severalServices={(combinedFrequency?.perServiceTreatments?.length || services.filter((s) => s?.isRecurring).length) > 1}
+              // The link exists only where this layout renders the Ask bar at its end.
+              onAsk={glassContent && !isRegulatedCertificateSurface ? scrollToAskSection : null}
+            />
           </div>
 
           {/* Waves AI panel + Ask bar render AFTER the price/plan (matches the

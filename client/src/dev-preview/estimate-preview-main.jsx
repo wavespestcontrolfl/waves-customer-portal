@@ -397,6 +397,39 @@ function pestMosquitoMonthsScenario() {
   };
 }
 
+// First-visit line (owner 2026-11-21): the same two plans with the $99 WaveGuard setup fee,
+// so the line under the price and the "Reserve your spot" total can be compared. The single
+// plan carries the plan-level frequency list the server sends beside the sections.
+const FIRST_VISIT_SETUP = {
+  setupFee: { amount: 99, service: 'waveguard_setup', label: 'WaveGuard setup', waivedWithPrepay: true },
+  oneTimeBreakdown: { total: 99, items: [{ service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, kind: 'charge' }] },
+};
+
+function pestFirstVisitScenario() {
+  const base = pestAverageScenario();
+  return {
+    ...base,
+    pricing: {
+      ...base.pricing,
+      ...FIRST_VISIT_SETUP,
+      frequencies: base.pricing.services[0].frequencies,
+      renderFlags: { ...base.pricing.renderFlags, showWaveGuardSetupFee: true },
+    },
+  };
+}
+
+function pestMosquitoFirstVisitScenario() {
+  const base = pestMosquitoMonthsScenario();
+  return {
+    ...base,
+    pricing: {
+      ...base.pricing,
+      ...FIRST_VISIT_SETUP,
+      renderFlags: { ...base.pricing.renderFlags, showWaveGuardSetupFee: true },
+    },
+  };
+}
+
 function acceptedScenario() {
   const base = pestScenario();
   return {
@@ -1077,6 +1110,8 @@ const PAYLOADS = {
   pest_average: pestAverageScenario,
   bundle_average: bundleAverageScenario,
   pest_mosquito_months: pestMosquitoMonthsScenario,
+  pest_first_visit: pestFirstVisitScenario,
+  pest_mosquito_first_visit: pestMosquitoFirstVisitScenario,
   mosquito: mosquitoScenario,
   tree_shrub: treeShrubScenario,
   termite_bait: termiteBaitScenario,

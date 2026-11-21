@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, setupFeeBilledWithFirstVisit, standardInvoiceShape } from './PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, firstVisitTotalPreview, setupFeeBilledWithFirstVisit, standardInvoiceShape } from './PaymentPreferenceButtons';
 import { resolvePaymentTiming } from '../../lib/paymentTiming';
 import {
   AFTER_VISIT_CARD_CONSENT_TEXT as CLIENT_AFTER_VISIT_CARD_CONSENT_TEXT,
@@ -642,5 +642,35 @@ describe('confirmStepFirstVisitAmount', () => {
     ['monthly-billed plan with no first-visit amount', { selectedFrequency: { billingFrequencyKey: 'monthly', monthly: 45 } }],
   ])('returns null for %s', (_label, override) => {
     expect(confirmStepFirstVisitAmount({ ...base, ...override })).toBeNull();
+  });
+});
+
+// The line under the price states the first bill before a time is picked. It must be the
+// figure the invoice box shows afterwards, and stay silent wherever "application + one-time
+// setup" would not be that box's whole total.
+describe('firstVisitTotalPreview', () => {
+  const quarterly = { billingFrequencyKey: 'quarterly', monthly: 32.67, perVisit: 98 };
+  const setupFee = { amount: 99, service: 'waveguard_setup' };
+  const base = { serviceMode: 'recurring', paymentPreference: null, setupFee, selectedFrequency: quarterly };
+
+  it('is the setup fee plus the first application, and equals the invoice box total', () => {
+    expect(firstVisitTotalPreview(base)).toEqual({ firstApplication: 98, setup: 99, total: 197 });
+    render(
+      <PaymentPreferenceButtons onSelect={vi.fn()} disabled={false} serviceMode="recurring" setupFee={setupFee} selectedFrequency={quarterly} />,
+    );
+    expect(screen.getByText('Invoice total').parentElement).toHaveTextContent('$197.00');
+  });
+
+  it.each([
+    ['one-time visit', { serviceMode: 'one_time' }],
+    ['annual prepay (setup waived)', { paymentPreference: 'prepay_annual' }],
+    ['invoice-mode estimate', { invoiceMode: true }],
+    ['on-site confirmation hold', { siteConfirmationHold: true }],
+    ['no setup fee (first visit costs what every visit costs)', { setupFee: null }],
+    ['another up-front row beside the setup fee', { extraInvoiceRows: [{ label: 'Bait Station Setup', amount: 250 }] }],
+    ['one-time services billed after completion', { oneTimeExtrasTotal: 150 }],
+    ['monthly-billed plan with no first-application amount', { selectedFrequency: { billingFrequencyKey: 'monthly', monthly: 45 } }],
+  ])('returns null for %s', (_label, override) => {
+    expect(firstVisitTotalPreview({ ...base, ...override })).toBeNull();
   });
 });
