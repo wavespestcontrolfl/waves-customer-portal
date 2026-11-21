@@ -360,7 +360,7 @@ function followupSmsHook(estimate) {
   return packForEstimate(estimate).smsHook;
 }
 
-// The two answers the 2-hour estimate_sent email gives every estimate (estimate-sent-email-by-service.js), whatever the service.
+// The two answers the 2-hour estimate_sent email gives an opened estimate (estimate-sent-opened-email.js), whatever the service.
 const ESTIMATE_SENT_FAQ = Object.freeze({ start: FAQ_START, price: FAQ_PRICE });
 
 module.exports = {

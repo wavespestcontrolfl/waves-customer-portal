@@ -283,8 +283,7 @@ const ESTIMATE_DELIVERY_TEMPLATE_KEYS = () => [
 ];
 const lowerTrim = (value) => String(value || '').trim().toLowerCase();
 
-// The personalized 2-hour body (the opened state, the button, the answers) goes only to the address the estimate was already
-// emailed to: this step's recipient is the estimate's current address AND the email log shows a delivery email for THIS
+// The opened-estimate 2-hour body goes only to the address the estimate was already emailed to: this step's recipient is the estimate's current address AND the email log shows a delivery email for THIS
 // estimate (email_messages.estimate_id, the delivery template keys, the same accepted-status set the signup email uses)
 // accepted for that address. An SMS-only send enrolls too, and has no such row. A failed read is no proof.
 async function estimateWasEmailedTo(estimate, address) {
@@ -304,37 +303,26 @@ async function estimateWasEmailedTo(estimate, address) {
   }
 }
 
-// The View my estimate link: the engine's email-leg builder, behind the pricing-authority guard the manual follow-up route
-// applies. A refusal or a failed mint is no link; the rest of the email still goes.
-async function estimateSentLink(estimate) {
-  try {
-    if (!(await require('./pricing-authority-gate').estimateDeliverableUnderGate(db, estimate))) return null;
-    const { emailUrl } = await require('./estimate-follow-up')._private.mintStageLinks(
-      estimate, 'estimate_sent_automation', { emailOnly: true },
-    );
-    return emailUrl || null;
-  } catch (e) {
-    logger.warn(`[automation-runner] estimate link not minted for estimate ${estimate.id}: ${(e && (e.code || e.name)) || 'error'}`);
-    return null;
-  }
-}
-
 // The seeded 2-hour step of the estimate_sent sequence (migration 20260424000009). Only it is rebuilt per estimate; any other
 // step of the template keeps its own configured body.
 const ESTIMATE_SENT_INITIAL_STEP_ORDER = 0;
 
-// The rendered content to send: the personalized body for the 2-hour estimate_sent email, else the content passed in (today's
-// step body: gate off, no estimate id, no estimate row, a test send, another template or another step, a recipient that is not
-// the estimate's address, or no proof the estimate was emailed to it). The estimate is the row the stops judged (one read for both).
+// The rendered content to send: for the 2-hour estimate_sent email (step 0), a fixed thank-you body when the estimate was opened
+// AND was emailed to the address this step goes to; else the content passed in (today's step body: gate off, no estimate id,
+// no estimate row, a test send, another template or another step, an unopened estimate, a recipient that is not the estimate's
+// address, or no proof the estimate was emailed to it). The estimate is the row the stops judged (one read for both).
+// No provider-boundary recheck is needed: the body carries no link, price or service name; its one estimate fact is that the
+// estimate was opened, and it goes only to the address that got the estimate.
 async function withEstimateSentBody({ html, text }, { template, step, enrollment, recipient, testRecipient, personal, asmGroupId }) {
   if (template.key !== 'estimate_sent' || testRecipient || Number(step?.step_order) !== ESTIMATE_SENT_INITIAL_STEP_ORDER) return { html, text };
   const estimate = stopEvaluatedEstimates.get(enrollment);
   if (!estimate) return { html, text };
   stopEvaluatedEstimates.delete(enrollment);
+  const { buildEstimateOpenedEmail, estimateWasOpened } = require('./estimate-sent-opened-email');
   const address = lowerTrim(recipient);
-  if (!address || address !== lowerTrim(estimate.customer_email) || !(await estimateWasEmailedTo(estimate, address))) return { html, text };
-  const { buildEstimateSentEmail } = require('./estimate-sent-email-by-service');
-  const body = buildEstimateSentEmail({ estimate, estimateUrl: await estimateSentLink(estimate) });
+  if (!estimateWasOpened(estimate) || !address || address !== lowerTrim(estimate.customer_email)
+    || !(await estimateWasEmailedTo(estimate, address))) return { html, text };
+  const body = buildEstimateOpenedEmail();
   return renderAutomationStepContent({ template, htmlBody: body.html_body, textBody: body.text_body, customer: personal, asmGroupId });
 }
 
