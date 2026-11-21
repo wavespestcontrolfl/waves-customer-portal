@@ -278,6 +278,10 @@ postgres('planStartBlocker (live Postgres)', () => {
       // The service label the intake saved on the account itself (lead_service_interest), with no lead and no
       // estimate that carries it.
       ['a commercial service label on the account', { lead_service_interest: 'Commercial Pest Control' }],
+      // A property type only the estimator's recognition of a typed premises knows, and a label with no such
+      // word that names a business premises in the wording the lead intake reads.
+      ['a hotel as the property type', { property_type: 'hotel' }],
+      ['a service label on the account that names a business premises', { lead_service_interest: 'Pest control for a hotel' }],
     ])('%s: commercial', async (_label, change) => {
       expect(await planStartBlocker(trx, (await seedCustomer(change)).id)).toBe('commercial');
     });
@@ -298,8 +302,8 @@ postgres('planStartBlocker (live Postgres)', () => {
       expect(await planStartBlocker(trx, (await seedCustomer({ service_preferences: JSON.stringify(preferences) })).id)).toBeNull();
     });
 
-    test('a home service label on the account is not commercial', async () => {
-      expect(await planStartBlocker(trx, (await seedCustomer({ lead_service_interest: 'Pest Control' })).id)).toBeNull();
+    test.each([['Pest Control'], ['Pest control for the home office']])('the home service label %j on the account is not commercial', async (lead_service_interest) => {
+      expect(await planStartBlocker(trx, (await seedCustomer({ lead_service_interest })).id)).toBeNull();
     });
 
     test.each([
@@ -335,6 +339,9 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['the commercial occupancy, with no property type', [{ occupancy_type: 'commercial', property_type: null }]],
       ['the primary property has a commercial type', [{ property_type: 'commercial' }]],
       ['the primary property has a business type', [{ property_type: 'business' }]],
+      // A type only the estimator's recognition of a typed premises knows.
+      ['the only property is a hotel', [{ property_type: 'hotel' }]],
+      ['a second property is a church, beside a home', [{}, { ...SECOND, property_type: 'church' }]],
       ['a second property has the commercial occupancy, beside a home', [{}, { ...SECOND, occupancy_type: 'commercial' }]],
       ['a second property has a commercial type, beside a home', [{}, { ...SECOND, property_type: 'commercial' }]],
     ])('%s, on an account whose own row says nothing: commercial', async (_label, properties) => {
@@ -349,6 +356,10 @@ postgres('planStartBlocker (live Postgres)', () => {
       'a home with the occupancy %s is not commercial', async (occupancy_type) => {
         expect(await blockerFor((customer) => seedProperty(customer, { occupancy_type }))).toBeNull();
       });
+
+    test.each([['mobile_home'], ['duplex'], ['vacant_lot']])('a saved property with the home type %s is not commercial', async (property_type) => {
+      expect(await blockerFor((customer) => seedProperty(customer, { property_type }))).toBeNull();
+    });
 
     test('two homes on one account are not commercial', async () => {
       expect(await blockerFor(async (customer) => {
@@ -515,6 +526,11 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['the whole building, as staff decided for a business at the address', { serviceScopeDecision: 'entire_commercial_building' }],
       ["staff's answer that the customer has the whole building", { occupancyAnswer: 'building' }],
       ['the source of a commercial verdict of the lookup', { commercialDetectionSource: 'property_record_property_type' }],
+      // The listing is not read, and the scope staff decided beside it still is.
+      ['one suite, as staff decided, beside the listing of the business', {
+        serviceScopeDecision: 'commercial_suite', serviceScopeSuggestion: 'suite',
+        businessIdentity: { name: 'Corner Cafe', type: 'restaurant_food_service', matchedBy: 'subpremise', tenantsAtNumber: 3, unitKey: 'business:place-1' },
+      }],
     ])("%s, in an estimate's saved lookup profile: commercial", async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedEstimate(customer);
@@ -527,6 +543,11 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a home', {}],
       ['an open question about a business at the address', { serviceScopeDecision: 'scope_unresolved', occupancyAnswer: null }],
       ["staff's answer that the customer is not the listed business", { serviceScopeDecision: null, occupancyAnswer: 'none' }],
+      // A listing only suggests, so the scan does not go into it: the name of the listed business can carry the word.
+      ['an open question beside a listing whose name carries the word', {
+        serviceScopeDecision: 'scope_unresolved', serviceScopeQuestion: 'Are we treating just your space or the whole building?', serviceScopeSuggestion: 'suite', occupancyAnswer: null,
+        businessIdentity: { name: 'Commercial Realty', type: 'office_retail', matchedBy: 'street_number', tenantsAtNumber: 1, unitKey: 'business:place-2' },
+      }],
     ])('the saved lookup profile of %s is not commercial', async (_label, change) => {
       expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: PROFILE(change) }))).toBeNull();
     });
@@ -557,12 +578,35 @@ postgres('planStartBlocker (live Postgres)', () => {
       ["the lead's interest the estimator form keeps", { inputs: { isCommercial: 'NO', propertyType: 'Single Family', leadServiceInterest: 'Commercial Lawn Care' } }],
       ['the interest the engine was given', { engineInputs: { isCommercial: false, serviceInterest: 'Commercial Lawn Care' } }],
       ['the service a call asked for, kept with a draft', { estimatorEngine: { version: 1, call: { requested_service: 'Lawn care for a commercial plaza', matched_service: 'Lawn Care' } } }],
+      // A copy with no such word that names a business premises, in the wording the lead intake reads.
+      ['a copy of the label that names a business premises', { inputs: { isCommercial: 'NO', propertyType: 'Single Family', leadServiceInterest: 'Lawn care at our office' } }],
     ])('%s, in an estimate payload with a home plan line: commercial', async (_label, labels) => {
       expect(await blockerFor(async (customer) => {
         await seedEstimate(customer);
         const estimate = await seedEstimate(customer, { estimate_data: { ...labels, result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care' }] } } } });
         expect([estimate.category, estimate.service_interest]).toEqual(['RESIDENTIAL', null]);
       })).toBe('commercial');
+    });
+
+    // The estimate's own label, and a type only the estimator's recognition knows under either spelling of the
+    // name: each on an estimate that the save left residential.
+    test.each([
+      ['its own service label names a business premises', { service_interest: 'Pest control for a hotel' }],
+      ['a hotel in the form inputs, beside a toggle set to no', { estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Hotel' } } }],
+      ['a church in the saved spelling of the type', { estimate_data: { snapshot: { property_type: 'church' } } }],
+    ])('an estimate where %s: commercial', async (_label, change) => {
+      expect(await blockerFor(async (customer) => {
+        await seedEstimate(customer);
+        const estimate = await seedEstimate(customer, change);
+        expect(estimate.category).toBe('RESIDENTIAL');
+      })).toBe('commercial');
+    });
+
+    test('service labels that name a home, on an estimate and in its payload, are not commercial', async () => {
+      expect(await blockerFor((customer) => seedEstimate(customer, { service_interest: 'Pest control for the home office', estimate_data: {
+        inputs: { isCommercial: 'NO', propertyType: 'Mobile Home', leadServiceInterest: 'Lawn care for my house' },
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control' }] } },
+      } }))).toBeNull();
     });
 
     test('home service labels in an estimate payload are not commercial', async () => {
@@ -667,6 +711,11 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a lead with a commercial service label in its payload, behind a home label in its column', {
         service_interest: 'Pest Control', extracted_data: JSON.stringify({ stage: 'lead_webhook_received', service_interest: 'Commercial Pest Control' }),
       }],
+      // A label with no such word that names a business premises, on a lead with the default flags.
+      ['a lead whose service label names a business premises', { service_interest: 'Pest control for a hotel' }],
+      ['a lead whose payload keeps such a label, behind a home label in its column', {
+        service_interest: 'Pest Control', extracted_data: JSON.stringify({ stage: 'lead_webhook_received', service_interest: 'Rodent control at the warehouse' }),
+      }],
     ])('%s, beside a home lead: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedLead(customer);
@@ -684,6 +733,7 @@ postgres('planStartBlocker (live Postgres)', () => {
       }],
       ["a quiz lead that answered 'house'", { extracted_data: JSON.stringify({ quiz: { kind: 'pest', seeing: 'ants', property: 'house' } }) }],
       ['a lead whose payload has a residential category', { extracted_data: JSON.stringify({ enriched: { category: 'RESIDENTIAL', propertyType: 'single_family' } }) }],
+      ['a lead whose label names a home', { service_interest: 'Pest control for the home office' }],
       ['a lead with a home service label and the words of a call in its payload', {
         extracted_data: JSON.stringify({ stage: 'lead_webhook_received', service_interest: 'Pest Control', pain_points: ['The commercial spray from the store did not work'] }),
       }],
@@ -778,6 +828,10 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a commercial catalog match that an adoption replaced in the first format', {
         ai_extraction: { requested_service: 'pest_general', matched_service: 'Pest Control', pre_adoption_service_fields: { matched_service: 'Commercial Pest Control', requested_service: null } },
       }],
+      // A request with no such word that names a business premises, in the wording the lead intake reads.
+      ['a request that names a business premises in the first format, with no other verdict', {
+        ai_extraction: { requested_service: 'Ant treatment for a school' }, ai_extraction_enriched: null, ai_validation: null,
+      }],
     ])('%s, beside a call about a home: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedCall(customer);
@@ -791,6 +845,8 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a rental among the properties of the call', enriched({ property: { property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: 'rental_investment', property_type: 'condo' }] } })],
       ['an address the check reads as a business and as a home', { ai_address_validation: { status: 'validated_accept', addressUse: { business: true, residential: true, poBox: false } } }],
       ['the tenant of an apartment', enriched({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: 'tenant' } })],
+      ['a caller in a multi-family building, with no relationship named', enriched({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: null } })],
+      ['the wording of a business premises in the summary of the call', { ai_extraction: { requested_service: 'Pest control', call_summary: 'Wants pest control for our restaurant next month.' } }],
       ['a commercial-signals block with nothing set', enriched({ commercial_signals: { business_name: null, decision_authority_confirmed: false, insurance_or_compliance_requirements: [] } })],
       ['the word in the summary of the call', { ai_extraction: { requested_service: 'Pest control at home', call_summary: 'Works at a commercial bakery. Wants service at home.' } }],
       ['the word in a price quote of the service request', enriched({ service_request: { specific_service_name: 'Pest control', price: { evidence_quote: 'The commercial rate is higher.' } } })],

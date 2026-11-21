@@ -186,13 +186,26 @@ async function customerHoldsPlan(database, customer) {
 // that gets a home price is the costly mistake. A home with one old
 // commercial mark only gets no automatic offer.
 
-// One rule for a property type, wherever it is saved: the account-level list
-// (commercial, business: isCommercialAccount in self-booking-plan-sync.js) or
-// the pricing engine's own rule (isCommercialProperty).
+// One rule for a property type the app SAVED (on the account, on a property,
+// in a payload). The app has three rules for a type, and any one is enough:
+// - the account-level list (commercial, business: isCommercialAccount in
+//   self-booking-plan-sync.js);
+// - the pricing engine's own rule (isCommercialProperty);
+// - the estimator's recognition of a typed premises
+//   (commercialCategoryConflict in estimator-engine/unit-scope-model.js,
+//   asked here of a property that carries the type alone): its commercial
+//   families and the common area of an association. The first two rules read
+//   a 'hotel', a 'motel', a 'resort', a 'church' and a 'flex space' as homes.
+// The property a CALL describes is read by the call system's rule alone
+// (describesCommercialProperty below). That rule knows the caller: the tenant
+// of a multi-family building is a home there, and the engine's rule reads any
+// 'multi_family' as a business.
 function isCommercialPropertyType(propertyType) {
   const { isCommercialAccount } = require('./self-booking-plan-sync');
   const { isCommercialProperty } = require('./pricing-engine/commercial-helpers');
-  return isCommercialAccount({ property_type: propertyType }) || isCommercialProperty({ propertyType });
+  const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
+  return isCommercialAccount({ property_type: propertyType }) || isCommercialProperty({ propertyType })
+    || Boolean(commercialCategoryConflict({ extraction: { property: { property_type: propertyType } }, intent: null }));
 }
 
 // A sold commercial scope in the account's service preferences
@@ -252,7 +265,8 @@ const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && N
 //   property type by the engine's list ('Office', 'Restaurant', 'HOA Common
 //   Area'), a commercial subtype, a commercial category, a commercial service
 //   pick. It is the rule that decides whether the engine prices a home;
-// - the same property-type rule on the saved spelling (property_type);
+// - the rule for a saved property type (isCommercialPropertyType), on either
+//   spelling of the name (property_type, propertyType);
 // - a commercial subtype in the engine's other spelling (commercial_subtype:
 //   the engine's intent, commercialSubtypeFromInput in estimate-engine.js);
 // - a commercial risk type (the business-type bucket that sets the visits per
@@ -321,7 +335,11 @@ const factsSayCommercial = (node) => node.occupancyClass === 'commercial' || COM
 //   ('staff_confirmed_business' is the one an answer stamps).
 // The listing itself (businessIdentity, serviceScopeSuggestion) is not read.
 // A listing only suggests (the owner ruling that module carries): a home
-// business at the number of a house is still a house.
+// business at the number of a house is still a house. So the scan of a
+// payload does not go into the listing (LISTING_NAME below): the name of the
+// listed business can carry the word, and a name is what the rule for a
+// service line reads. (The suggestion is one of two plain words, 'suite' or
+// 'building', and no rule reads those.)
 function lookupSaysBusiness(node) {
   const { SCOPE, normalizeOccupancyAnswer } = require('./property-lookup/business-scope');
   const answer = normalizeOccupancyAnswer(node.occupancyAnswer);
@@ -329,10 +347,29 @@ function lookupSaysBusiness(node) {
     || (Boolean(answer) && answer !== 'none')
     || isSet(node.commercialDetectionSource);
 }
-// A service the app keeps as a label or a name, away from a service line (the
-// converter's two rules read a line's own names). Three families of names.
-// Each is read on every object, as the label columns are read (the word in
-// the text: isCommercialServiceRow):
+// A service LABEL: the words a form, an office user or a model saved for the
+// service somebody asked about. It says commercial in two ways:
+// - the word in it ('Commercial Pest Control'), as the rule for a service row
+//   reads a text (isCommercialServiceRow);
+// - the wording the lead intake reads as a business premises ('Pest control
+//   for a hotel', 'lawn care at our office': commercialTextSignal in
+//   estimator-engine/unit-scope-model.js). The intake asks it of a lead's
+//   service interest, and a match keeps the lead out of the automatic
+//   residential draft (evaluateLeadEstimateAutomationReadiness in
+//   lead-estimate-automation.js). Only the lead webhook saves a match: on
+//   the lead's two flags, which the proof reads. A label from another writer
+//   (the office's lead form, a call, the quote page) and a label edited
+//   later carry no saved verdict, so the label is asked again here.
+// A catalog key or a booked service row is not a label: those are read by
+// the rule for a service row alone.
+const carriesCommercialWord = (text) => text.toLowerCase().includes('commercial');
+const labelSaysCommercial = (text) => carriesCommercialWord(text)
+  || require('./estimator-engine/unit-scope-model').commercialTextSignal(text);
+// The value of a label: a text, or a list or an object of texts.
+const isCommercialLabel = (value) => someText(value, labelSaysCommercial);
+// A label the app keeps away from a label column and away from a service line
+// (the converter's two rules read a line's own names). Three families of
+// names. Each is read on every object, by the rule for a label:
 // - the names of the label columns, in both spellings (service_interest on an
 //   estimate and a lead, lead_service_interest on an account). A payload
 //   keeps copies under them: the lead's interest the estimator form carries
@@ -346,19 +383,17 @@ function lookupSaysBusiness(node) {
 //   service resolvers read, CALL_SERVICE_VIEW_FIELDS in
 //   call-recording-processor.js). A payload made from a call keeps them too;
 // - the name of a row's own service text (service_type), in both spellings.
-// The value is a text, or a list or an object of texts.
 const SERVICE_LABEL_NAMES = Object.freeze([
   'serviceInterest', 'service_interest', 'leadServiceInterest', 'lead_service_interest',
   'requested_service', 'matched_service', 'specific_service_name',
   'serviceType', 'service_type',
 ]);
-const carriesCommercialWord = (text) => text.toLowerCase().includes('commercial');
-const namesCommercialService = (node) => someText(SERVICE_LABEL_NAMES.map((name) => node[name]), carriesCommercialWord);
+const namesCommercialService = (node) => isCommercialLabel(SERVICE_LABEL_NAMES.map((name) => node[name]));
 function nodeSaysCommercial(node) {
   const converter = require('./estimate-converter');
   return saysYes(node.isCommercial) || saysYes(node.is_commercial) || saysYes(node.commercialEstimatedPricing)
     || require('./pricing-engine/commercial-helpers').isCommercialProperty(node)
-    || isCommercialPropertyType(node.property_type)
+    || [node.property_type, node.propertyType].some(isCommercialPropertyType)
     || isSetSubtype(node.commercial_subtype) || isSet(node.commercialSubtype)
     || String(node.category ?? '').trim().toUpperCase() === 'COMMERCIAL'
     || factsSayCommercial(node) || lookupSaysBusiness(node)
@@ -384,12 +419,17 @@ function nodeSaysCommercial(node) {
 // 'commercial_' is also the name of a service pick that was not taken, and
 // of the lawn area the price card keeps for any lawn quote
 // (measuredBasisAnchor.commercial_lawn).
+// Not read at all: the listing of a business at the address, as the lookup
+// keeps it on a profile (lookupSaysBusiness above gives the reason). No rule
+// and no text under that name counts.
 const COMMERCIAL_KEY_PREFIX = 'commercial_';
+const LISTING_NAME = 'businessIdentity';
 function payloadSaysCommercial(value) {
   if (typeof value === 'string') return value.trim().toLowerCase().startsWith(COMMERCIAL_KEY_PREFIX);
   if (!value || typeof value !== 'object') return false;
   if (Array.isArray(value)) return value.some((item) => payloadSaysCommercial(item));
-  return nodeSaysCommercial(value) || Object.values(value).some((item) => payloadSaysCommercial(item));
+  return nodeSaysCommercial(value)
+    || Object.entries(value).some(([name, item]) => name !== LISTING_NAME && payloadSaysCommercial(item));
 }
 
 // A value of a JSONB column, as the driver returns it. PostgreSQL checks a
@@ -439,9 +479,10 @@ function someText(value, test) {
 // - the estimate's own tier column, by the account's rule for the tier (the
 //   'commercial' value);
 // - the estimate's own service label (service_interest), by the rule for a
-//   service text (isCommercialServiceRow: the word in the label). A quote
-//   request and the office save the label apart from the payload, so it can
-//   be the only mark ('Commercial Pest Control' over an empty payload);
+//   label (isCommercialLabel: the word in it, or the intake's wording for a
+//   business premises). A quote request and the office save the label apart
+//   from the payload, so it can be the only mark ('Commercial Pest Control'
+//   over an empty payload);
 // - a commercial proposal, authored or scaffolded (isCommercialProposalData).
 //   It is also the record of a WON proposal. A win marks the account
 //   commercial only when the proposal has taxable lines, and it writes a
@@ -470,9 +511,9 @@ function someText(value, test) {
 // key, a proposal).
 function isCommercialEstimateRow(estimate) {
   if (String(estimate.category || '').trim().toUpperCase() === 'COMMERCIAL') return true;
-  const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
+  const { isCommercialAccount } = require('./self-booking-plan-sync');
   if (isCommercialAccount({ waveguard_tier: estimate.waveguard_tier })) return true;
-  if (isCommercialServiceRow({ service_type: estimate.service_interest })) return true;
+  if (isCommercialLabel(estimate.service_interest)) return true;
   // The payload (a jsonb column). One that is not an object or a list (a
   // text, a number) carries no structured mark: only the rule for a text can
   // read it, and the columns above still answer.
@@ -506,9 +547,10 @@ async function hasCommercialEstimate(database, customerId) {
 // - the residential flag set to no (is_residential = false). The intake
 //   writes it with the commercial flag, and the office form can clear it
 //   alone;
-// - the service the lead asked for, as a label (service_interest) or as a
-//   catalog key (service_key), by the rule for a service text. The intake
-//   reads a commercial service label as a commercial lead
+// - the service the lead asked for: its label (service_interest) by the rule
+//   for a label, and its catalog key (service_key) by the rule for a service
+//   row. The intake reads a commercial service label as a commercial lead,
+//   and a label that names a business premises too
 //   (lead-estimate-automation.js);
 // - the lead's own tier, by the account's rule for the tier;
 // - the payload the intake kept (extracted_data: a form, a quiz, the
@@ -520,7 +562,7 @@ async function hasCommercialEstimate(database, customerId) {
 function isCommercialLeadRow(lead) {
   const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
   if (lead.is_commercial === true || lead.is_residential === false) return true;
-  if (isCommercialServiceRow({ service_type: lead.service_interest, service_key: lead.service_key })) return true;
+  if (isCommercialLabel(lead.service_interest) || isCommercialServiceRow({ service_key: lead.service_key })) return true;
   if (isCommercialAccount({ waveguard_tier: lead.waveguard_tier })) return true;
   const payload = jsonbValue(lead.extracted_data);
   return payloadSaysCommercial(payload) || require('./estimate-delivery-options').isCommercialEstimateData(payload);
@@ -647,10 +689,11 @@ async function hasCommercialContract(database, customerId) {
 //   under three names (requested_service, matched_service,
 //   specific_service_name) and again in the record of what an adoption
 //   replaced there (pre_adoption_service_fields). The extraction keeps it in
-//   service_request.specific_service_name. The word in it counts, as in the
-//   service label of a lead. The first format's other two service fields are
-//   the words of the call (call_summary, pain_points) and are not read, and
-//   the extraction's service categories have no commercial word.
+//   service_request.specific_service_name. It is read by the rule for a
+//   label, as the service label of a lead is. The first format's other two
+//   service fields are the words of the call (call_summary, pain_points) and
+//   are not read, and the extraction's service categories have no commercial
+//   word.
 // - The address check of the call's service address: Google reads it as a
 //   business and not as a home (addressUse). Both halves must be
 //   affirmative, as in the app's own rule for a business building
@@ -745,11 +788,11 @@ async function planStartBlocker(database, customerId) {
   // commercial accept writes (hasCommercialSoldScope).
   // And the service the intake saved on the account itself
   // (lead_service_interest: a form, a text thread or a quote writes it), by
-  // the rule for the service label of a lead or an estimate. It can be the
-  // only place that label was kept.
-  const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
+  // the rule for a label, as on a lead or an estimate. It can be the only
+  // place that label was kept.
+  const { isCommercialAccount } = require('./self-booking-plan-sync');
   if (isCommercialAccount(customer) || isCommercialPropertyType(customer.property_type) || customer.building_use) return 'commercial';
-  if (hasCommercialSoldScope(customer) || isCommercialServiceRow({ service_type: customer.lead_service_interest })) return 'commercial';
+  if (hasCommercialSoldScope(customer) || isCommercialLabel(customer.lead_service_interest)) return 'commercial';
   if (await hasCommercialRecord(database, customer.id)) return 'commercial';
   return (await customerHoldsPlan(database, customer)) ? 'has_plan' : null;
 }

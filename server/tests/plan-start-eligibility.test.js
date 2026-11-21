@@ -147,6 +147,13 @@ describe('planStartBlocker', () => {
       // Types only the engine's rule knows.
       ['an office', { property_type: 'office' }],
       ['an apartment complex', { property_type: 'multi_family' }],
+      // Types only the estimator's recognition of a typed premises knows.
+      ['a hotel', { property_type: 'hotel' }],
+      ['a motel in another case', { property_type: 'Motel' }],
+      ['a church', { property_type: 'church' }],
+      ['a resort', { property_type: 'resort' }],
+      ['a flex space', { property_type: 'flex space' }],
+      ['the grounds of an association', { property_type: 'neighborhood association' }],
       ['a commercial account that also carries a monthly rate', { waveguard_tier: 'Commercial', monthly_rate: 120 }],
       // A building use: only a won commercial proposal writes one. It marks the account commercial only when
       // the proposal has taxable lines, so a residential community or a builder keeps a residential row.
@@ -160,6 +167,8 @@ describe('planStartBlocker', () => {
       // The service label the intake saved on the account itself, by the rule for the label of a lead.
       ['a commercial service label on the account', { lead_service_interest: 'Commercial Pest Control' }],
       ['a commercial service label on the account in another spelling', { lead_service_interest: 'pest (COMMERCIAL)' }],
+      // A label with no such word that names a business premises, in the wording the lead intake reads.
+      ['a service label on the account that names a business premises', { lead_service_interest: 'Pest control for a hotel' }],
     ])('%s: commercial, and no plan record is read', async (_label, customer) => {
       const reads = [];
       const db = world({ ...ONGOING_COLUMN, customer, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
@@ -167,11 +176,11 @@ describe('planStartBlocker', () => {
       expect(reads).toEqual([]);
     });
 
-    test.each([['single_family'], ['condo_ground'], ['unknown'], [null], ['']])('a property type of %j with no tier is not commercial', async (property_type) => {
+    test.each([['single_family'], ['condo_ground'], ['mobile_home'], ['duplex'], ['vacant_lot'], ['house'], ['unknown'], [null], ['']])('a property type of %j with no tier is not commercial', async (property_type) => {
       expect(await blocker(world({ customer: { property_type } }))).toBeNull();
     });
 
-    test.each([['Pest Control'], ['Quarterly Pest + Lawn'], [null], [undefined], ['']])('a service label of %j on the account is not commercial', async (lead_service_interest) => {
+    test.each([['Pest Control'], ['Quarterly Pest + Lawn'], ['Pest control for the home office'], ['Lawn care for my house'], [null], [undefined], ['']])('a service label of %j on the account is not commercial', async (lead_service_interest) => {
       expect(await blocker(world({ customer: { lead_service_interest } }))).toBeNull();
     });
 
@@ -216,6 +225,9 @@ describe('planStartBlocker', () => {
         ['a business type in another case', [PROPERTY({ property_type: 'Business' })]],
         // A type only the engine's rule knows.
         ['an office', [PROPERTY({ property_type: 'office' })]],
+        // Types only the estimator's recognition knows, on an account whose own row carries no type.
+        ['a hotel', [PROPERTY({ property_type: 'hotel' })]],
+        ['a second property is a church and the primary one is a home', [PROPERTY(), PROPERTY({ id: 'prop-2', is_primary: false, property_type: 'Church' })]],
         ['a second property is commercial and the primary one is a home', [PROPERTY(), PROPERTY({ id: 'prop-2', is_primary: false, occupancy_type: 'commercial' })]],
         ['a second property has a commercial type and the primary one is a home', [PROPERTY(), PROPERTY({ id: 'prop-2', is_primary: false, property_type: 'commercial' })]],
         ['a removed property was commercial and the primary one is a home', [PROPERTY(), PROPERTY({ id: 'prop-2', is_primary: false, active: false, occupancy_type: 'commercial' })]],
@@ -235,21 +247,23 @@ describe('planStartBlocker', () => {
           expect(await blocker(world({ tables: { customer_properties: [PROPERTY({ occupancy_type })] } }))).toBeNull();
         });
 
-      test.each([['single_family'], ['townhome'], ['condo'], [null], ['']])('a saved property with the type %j is not commercial', async (property_type) => {
+      test.each([['single_family'], ['townhome'], ['condo'], ['mobile_home'], ['duplex'], ['vacant_lot'], [null], ['']])('a saved property with the type %j is not commercial', async (property_type) => {
         expect(await blocker(world({ tables: { customer_properties: [PROPERTY({ property_type }), PROPERTY({ id: 'prop-2', is_primary: false, property_type })] } }))).toBeNull();
       });
 
-      // Two owners each keep a list of commercial property types: the account rule (self-booking-plan-sync.js)
-      // and the pricing engine. Today the engine's list holds every type of the other one. Both are asked, for
-      // the account's type and for a saved property's, so a type that either owner adds counts.
+      // Three owners each keep a rule for a commercial property type: the account rule
+      // (self-booking-plan-sync.js), the pricing engine and the estimator (its rule for a typed premises). No
+      // one of them holds the other two. All three are asked, for the account's type and for a saved
+      // property's, so a type that any owner adds counts.
       test.each([
         ['the account rule', '../services/self-booking-plan-sync', 'isCommercialAccount'],
         ['the pricing engine', '../services/pricing-engine/commercial-helpers', 'isCommercialProperty'],
+        ['the estimator', '../services/estimator-engine/unit-scope-model', 'commercialCategoryConflict'],
       ])('a type only %s calls commercial counts, on the account row and on a saved property', async (_label, modulePath, rule) => {
         const owner = require(modulePath);
         const real = owner[rule];
         const spy = jest.spyOn(owner, rule).mockImplementation((given, ...rest) => (
-          given?.property_type === 'depot' || given?.propertyType === 'depot' || real(given, ...rest)));
+          given?.property_type === 'depot' || given?.propertyType === 'depot' || given?.extraction?.property?.property_type === 'depot' || real(given, ...rest)));
         try {
           expect(await blocker(world({ customer: { property_type: 'depot' } }))).toBe('commercial');
           expect(await blocker(world({ tables: { customer_properties: [PROPERTY({ property_type: 'depot' })] } }))).toBe('commercial');
@@ -326,6 +340,9 @@ describe('planStartBlocker', () => {
         // Marks only the pricing engine's rule for a profile reads: a type by its list, a commercial service pick.
         ['an office in the form inputs, under the default category', ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Office' } } })],
         ['a restaurant in the engine request', ESTIMATE({ estimate_data: { engineRequest: { profile: { propertyType: 'Restaurant' } } } })],
+        // Types only the estimator's recognition of a typed premises knows, under either spelling of the name.
+        ['a hotel in the form inputs, beside a toggle set to no', ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Hotel' } } })],
+        ['a church in the saved spelling', ESTIMATE({ estimate_data: { snapshot: { property_type: 'church' } } })],
         ['a commercial service pick in the engine inputs', ESTIMATE({ estimate_data: { engineInputs: { services: { commercialPest: { selected: true } } } } })],
         // The saved spelling of the type, and the engine's other spelling of the subtype.
         ['a business type in the saved spelling', ESTIMATE({ estimate_data: { snapshot: { property_type: 'Business' } } })],
@@ -345,6 +362,13 @@ describe('planStartBlocker', () => {
         // The estimate's own service label. A quote request and the office save it apart from the payload.
         ['the service label of the estimate, over an empty payload', ESTIMATE({ service_interest: 'Commercial Pest Control', estimate_data: null })],
         ['the service label beside home service lines', ESTIMATE({ service_interest: 'Lawn Care (commercial)' })],
+        // A label with no such word that names a business premises, in the wording the lead intake reads: in
+        // the column, and in a copy the payload keeps beside a home plan line.
+        ['a service label that names a business premises', ESTIMATE({ service_interest: 'Pest control for a hotel' })],
+        ['a label copy that names a business premises, on an estimate with a home plan line', ESTIMATE({ estimate_data: {
+          inputs: { isCommercial: 'NO', propertyType: 'Single Family', leadServiceInterest: 'Lawn care at our office' },
+          result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care' }] } },
+        } })],
         // Marks only the pipeline's reader of service lines reads, on an estimate with no service line.
         ["a copy of the service label in the form's inputs", ESTIMATE({ estimate_data: { inputs: { leadServiceInterest: 'Commercial Lawn Care' } } })],
         ['notes the app sorts as a commercial line', ESTIMATE({ notes: 'Quote the commercial pest program for the bakery.', estimate_data: {} })],
@@ -362,6 +386,11 @@ describe('planStartBlocker', () => {
         ["staff's answer that the customer has the whole building", ESTIMATE({ estimate_data: PROFILE({ occupancyAnswer: 'building' }) })],
         ["staff's answer that the customer has one suite, on a question still marked open", ESTIMATE({ estimate_data: PROFILE({ serviceScopeDecision: 'scope_unresolved', occupancyAnswer: 'suite' }) })],
         ['the source of a commercial verdict of the lookup', ESTIMATE({ estimate_data: PROFILE({ commercialDetectionSource: 'property_record_property_type' }) })],
+        // The listing is not read, and the scope staff decided beside it still is.
+        ['one suite, as staff decided, beside the listing of the business', ESTIMATE({ estimate_data: PROFILE({
+          serviceScopeDecision: 'commercial_suite', serviceScopeSuggestion: 'suite',
+          businessIdentity: { name: 'Corner Cafe', type: 'restaurant_food_service', matchedBy: 'subpremise', tenantsAtNumber: 3, unitKey: 'business:place-1' },
+        }) })],
         // Two marks of the scan of the save that no other rule holds, below the 12 levels that scan reads.
         ['the mark of an auto-priced commercial quote, far down', ESTIMATE({ estimate_data: farDown({ commercialEstimatedPricing: true }) })],
         ["the word none as a subtype in the form's spelling, beside a toggle set to no, far down", ESTIMATE({ estimate_data: farDown({ category: 'RESIDENTIAL', isCommercial: 'NO', commercialSubtype: 'none' }) })],
@@ -428,8 +457,25 @@ describe('planStartBlocker', () => {
         ["staff's answer that the customer is not the listed business", ESTIMATE({ estimate_data: PROFILE({ serviceScopeDecision: null, occupancyAnswer: 'none' }) })],
         ['a listing at the address that staff did not confirm', ESTIMATE({ estimate_data: PROFILE({
           serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: 'building',
-          businessIdentity: { name: 'Corner Cafe', type: 'restaurant', matchedBy: 'street_number', tenantsAtNumber: 2, unitKey: 'business:place-1' },
+          businessIdentity: { name: 'Corner Cafe', type: 'restaurant_food_service', matchedBy: 'street_number', tenantsAtNumber: 2, unitKey: 'business:place-1' },
         }) })],
+        // The name of a listed business can carry the word, and a name is what the rule for a service line reads.
+        // A listing only suggests, so the scan does not go into it: with the question open, after the answer
+        // "not this business", and wherever the payload keeps the profile.
+        ['a listing whose name carries the word, with the question still open', ESTIMATE({ estimate_data: PROFILE({
+          serviceScopeDecision: 'scope_unresolved', serviceScopeQuestion: 'Are we treating just your space or the whole building?', serviceScopeSuggestion: 'suite', occupancyAnswer: null,
+          businessIdentity: { name: 'Commercial Realty', type: 'office_retail', matchedBy: 'street_number', tenantsAtNumber: 1, unitKey: 'business:place-2' },
+        }) })],
+        ['such a listing after staff answered that the customer is not that business', ESTIMATE({ estimate_data: PROFILE({
+          serviceScopeDecision: null, occupancyAnswer: 'none',
+          businessIdentity: { name: 'Commercial Realty', type: 'office_retail', matchedBy: 'street_number', tenantsAtNumber: 1, unitKey: 'business:place-2' },
+        }) })],
+        ['such a listing far down in the payload', ESTIMATE({ estimate_data: farDown({ serviceScopeDecision: 'scope_unresolved', businessIdentity: { name: 'Commercial Realty', type: 'office_retail' } }) })],
+        // Wording near the intake's rule that names a home, and home types by every rule for a type.
+        ['service labels that name a home', ESTIMATE({ service_interest: 'Pest control for the home office', estimate_data: {
+          inputs: { isCommercial: 'NO', leadServiceInterest: 'Lawn care for my house' }, engineInputs: { serviceInterest: 'Mosquito service for a townhome' },
+        } })],
+        ['home types under either spelling of the name', ESTIMATE({ estimate_data: { inputs: { propertyType: 'Mobile Home' }, engineInputs: { propertyType: 'house' }, snapshot: { property_type: 'vacant_lot' } } })],
         ['a quote that is not auto-priced as commercial', ESTIMATE({ estimate_data: { quote: { commercialEstimatedPricing: false, commercialDisclaimer: null }, deep: farDown({ commercialEstimatedPricing: false }) } })],
         // Parameters of a commercial price are not verdicts: the form keeps a pricing mode on every estimate, and
         // a tool can set the interior service on any estimate.
@@ -732,6 +778,10 @@ describe('planStartBlocker', () => {
         // A web form keeps the service label in the payload too, and the column can hold another label.
         ['a commercial service label in the payload, behind a home label in the column', LEAD({ extracted_data: { stage: 'lead_webhook_received', service_interest: 'Commercial Pest Control' } })],
         ['a commercial request a call left in the payload', LEAD({ extracted_data: { requested_service: 'Pest control for a commercial kitchen', matched_service: 'Pest Control' } })],
+        // A label with no such word that names a business premises, on a lead with the default flags: in the
+        // column, and in the copy a web form keeps in the payload.
+        ['a service label that names a business premises', LEAD({ service_interest: 'Pest control for a hotel' })],
+        ['such a label in the payload, behind a home label in the column', LEAD({ extracted_data: { stage: 'lead_webhook_received', service_interest: 'Rodent control at the warehouse' } })],
       ])('%s: commercial, and no plan record is read', async (_label, lead) => {
         const reads = [];
         const db = withLeads([LEAD(), lead, LEAD()], { ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
@@ -750,6 +800,11 @@ describe('planStartBlocker', () => {
         ['a quiz with no property answer', LEAD({ extracted_data: { quiz: { kind: 'lawn', seeing: 'brown_patches' } } })],
         ['a residential category beside a residential type', LEAD({ extracted_data: { enriched: { category: 'RESIDENTIAL', propertyType: 'single_family' }, quote: { commercialEstimatedPricing: false } } })],
         ['an open question about a business at the address, and the answer "not this business"', LEAD({ extracted_data: { enriched: { serviceScopeDecision: 'scope_unresolved', occupancyAnswer: 'none', commercialDetectionSource: null } } })],
+        ['labels that name a home, in the column and in the payload', LEAD({ service_interest: 'Pest control for the home office', extracted_data: { stage: 'lead_webhook_received', service_interest: 'Lawn care for my house' } })],
+        // A listing only suggests: the scan does not go into it, also where a lead keeps the profile.
+        ['a listing whose name carries the word, with the question still open', LEAD({ extracted_data: { enriched: {
+          serviceScopeDecision: 'scope_unresolved', occupancyAnswer: null, businessIdentity: { name: 'Commercial Realty', type: 'office_retail', matchedBy: 'street_number', tenantsAtNumber: 1, unitKey: null },
+        } } })],
         // A home label in the payload, and the words of a call a payload can keep.
         ['a home service label and the words of a call in the payload', LEAD({ extracted_data: {
           stage: 'lead_webhook_received', service_interest: 'Pest Control', requested_service: 'Ant treatment', pain_points: ['The commercial spray from the store did not work'],
@@ -1055,6 +1110,9 @@ describe('planStartBlocker', () => {
         }) })],
         // The three names are read on every object of the extraction too.
         ['a service name on another object of the extraction', CALL(extraction({ adopted: { matched_service: 'Commercial Lawn Care' } }))],
+        // A service the caller asked for that names a business premises, with no such word, in each format.
+        ['a request that names a business premises in the first format', CALL({ ai_extraction: JSON.stringify({ requested_service: 'Ant treatment for a school' }) })],
+        ['a service name that names a business premises in the extraction', CALL(extraction({ service_request: { primary_service_category: 'pest_general', specific_service_name: 'Pest control for our restaurant' } }))],
         // The address check: Google reads the service address as a business and not as a home.
         ['an address the check reads as a business and not as a home', CALL(addressUse({ business: true, residential: false, poBox: false }))],
         ['an address check saved as JSON text', CALL({ ai_address_validation: JSON.stringify({ status: 'corrected', addressUse: { business: true, residential: false } }) })],
@@ -1109,6 +1167,18 @@ describe('planStartBlocker', () => {
           pain_points: ['The commercial spray from the store did not work'],
           pre_adoption_service_fields: { call_summary: 'Works at a commercial bakery. Wants service at home.', pain_points: ['Tried a commercial product'], matched_service: 'Pest Control' },
         }) })],
+        // The engine's rule for a saved type reads any multi-family building as a business. A call is read by the
+        // call system's rule, which knows the caller: with no owner and no manager named, the caller is a resident.
+        ['a caller in a multi-family building, with no relationship named', CALL(extraction({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: null } }))],
+        ['a request that names a home, in both formats', CALL({
+          ai_extraction: JSON.stringify({ requested_service: 'Pest control for the home office' }),
+          ...extraction({ service_request: { primary_service_category: 'pest_general', specific_service_name: 'Lawn care for my house' } }),
+        })],
+        // The wording of a business premises in the words of the call is not read either.
+        ['the wording of a business premises in the summary and the pain points', CALL({
+          ai_extraction: JSON.stringify({ requested_service: 'Pest control', call_summary: 'Wants pest control for our restaurant next month.', pain_points: 'Roaches at our office.' }),
+          ...extraction({ call_summary: 'Asked about pest control for a hotel where she works.' }),
+        })],
         // The words of a call are not read: the caller can name a workplace and want service at home.
         ['the word in the summaries of the call', CALL({
           ai_extraction: JSON.stringify({ requested_service: 'Pest control at home', call_summary: 'Works at a commercial bakery. Wants service at home.' }),
