@@ -37,9 +37,14 @@ const SESSION_CAP_MS = 10 * 60 * 1000;
 const CLOSE_WAIT_MS = 5000;
 const START_DEADLINE_MS = 10000; // session.started must arrive within this, or the call ends
 const BARGE_IN_MARGIN_MS = 200;
-const NEW_REPLY_GAP_MS = 250; // a model audio chunk this long after the one before starts a new reply
-const REPLY_SILENCE_MIN_MS = 600; // model audio silent this long before voice begins starts a new reply
+const REPLY_SILENCE_MIN_MS = 800; // model audio silent this long before voice begins starts a new reply
+const TAIL_SILENCE_MIN_MS = 600; // ...and this long inside the tail drop after a barge-in (main's boundary): there a muted answer is worse than a tail that plays on
 const VOICED_SAMPLE_MIN = 300; // a decoded sample at or above this magnitude (16-bit scale) is voice
+const CALLER_VOICED_RMS_MIN = 300; // a caller frame at or above this RMS (16-bit scale) holds voice
+const CALLER_SPEECH_MIN_MS = 100; // caller frames that hold voice this long in a row are speech; a shorter sound by itself (a click, a knock) is not
+const CALLER_SPEECH_HANG_MS = 300; // a voiced frame this soon after speech is speech too: the last sound of a word, after a stop
+const CALLER_END_LOOKBACK_MS = 2000; // a transcript fragment is about caller speech of at most this long before it arrived
+const CALLER_STOPPED_MIN_MS = 200; // a reply whose first voice comes sooner than this after the caller's last speech did not wait for the caller to stop
 const TAIL_DROP_MAX_MS = 1500; // after a barge-in, drop the cut-off reply's tail at most this long
 // Caller audio that arrives before session.started (admission and the OpenAI
 // start) is held in memory, never stored: the latest 3 s at most (Twilio sends
@@ -59,9 +64,10 @@ function mulawToLinear(byte) {
 
 // Whether each mu-law byte is voice (digital silence is 0xFF and 0x7F).
 const VOICED_BYTE = Uint8Array.from({ length: 256 }, (_, b) => (Math.abs(mulawToLinear(b)) >= VOICED_SAMPLE_MIN ? 1 : 0));
-const REPLY_SILENCE_MIN_SAMPLES = REPLY_SILENCE_MIN_MS * MULAW_BYTES_PER_MS;
 // The squared linear value of each mu-law byte, for a frame's RMS.
 const MULAW_SQUARE = Float64Array.from({ length: 256 }, (_, b) => mulawToLinear(b) ** 2);
+const REPLY_SILENCE_MIN_SAMPLES = REPLY_SILENCE_MIN_MS * MULAW_BYTES_PER_MS;
+const TAIL_SILENCE_MIN_SAMPLES = TAIL_SILENCE_MIN_MS * MULAW_BYTES_PER_MS;
 
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
 
@@ -114,15 +120,6 @@ function buildLiveInstructions() {
 // never spoken (9 s of silence, until the caller spoke). With this message the
 // model greeted 2.0 s after session.started (2026-11-21, Sandy's full prompt).
 // OpenAI does not promise the model speaks first.
-// Whether a caller frame holds sound: its RMS, so one stray sample does not
-// count. Only the level is read; no audio is kept.
-function frameHoldsSound(payload) {
-  const audio = Buffer.from(payload, 'base64');
-  let sum = 0;
-  for (let i = 0; i < audio.length; i++) sum += MULAW_SQUARE[audio[i]];
-  return audio.length > 0 && sum >= audio.length * OPENING_SOUND_RMS_MIN ** 2;
-}
-
 function buildSessionStart({ instructions, voice, greeting }) {
   const { OPENAI_VOICE_LIVE } = require('../../config/models');
   const say = String(greeting || '').replace(/"/g, "'").trim();
@@ -216,19 +213,26 @@ class LiveBridge {
     this.startSeen = false; // the Twilio start frame is handled once, whatever it holds
 
     this.startedAt = this.deps.now();
-    this.sessionStartWall = null; // when session.started arrived: transcript ms count from here
-    this.speechEndWall = null;
-    this.awaitingReply = false;
+    this.sessionStartWall = null; // when session.started arrived
+    this.callerRunMs = 0; // how long the caller's frames have held voice in a row
+    this.callerSpokeAt = null; // arrival of the caller's latest frame of speech (noteCallerFrame)
+    this.callerMs = 0; // caller audio received, and the part of it in frames that hold voice
+    this.callerVoicedMs = 0;
+    this.awaitingReply = false; // the caller said words the next reply answers
     this.playbackEndsAt = 0;
     this.voiceEndsAt = 0; // wall time Twilio finishes the last voiced sample forwarded (silence queued after it is nothing to cut)
     this.replyStartWall = null; // wall time the model's current reply began (its audio arrived)
     this.replyVoiceWall = null; // ...and when its first voiced sample reached the bridge (delays run to it)
     this.prevReplyStartWall = null; // ...and the reply before it
-    this.replySample = null; // { index, speechEnd } of the delay sample the current reply has
-    this.lastAudioAt = null; // arrival time of the last model audio chunk
+    this.replyFirst = false; // the current reply is the first of the call
+    this.replyCallerEnd = null; // the caller's last frame of speech before the current reply began to arrive
+    this.replyCallerSpokeOn = false; // ...and whether the caller spoke on between that arrival and the reply's first voice
+    this.replyTimed = false; // caller words belong to the current reply: it answers them
+    this.replySample = null; // index of the delay sample the current reply has, in its list
+    this.replyOverCaller = false; // the current reply began before the caller had stopped (counted once)
+    this.repliesOverCaller = 0;
     this.voiceSeen = false; // a voiced sample has arrived
     this.silentSamples = 0; // silent model audio samples since the last voiced sample
-    this.gapSinceVoice = false; // an arrival gap happened since the last voiced sample
     this.tailDropSince = null; // a barge-in cleared Twilio at this time: drop the old reply's tail
 
     this.latencies = [];
@@ -334,12 +338,89 @@ class LiveBridge {
     // only the final usage is still awaited). Before the session is confirmed,
     // the caller's opening audio is held (OPENING_AUDIO_MAX_FRAMES).
     if (this._finalizing || typeof media.payload !== 'string' || (media.track && media.track !== 'inbound')) return;
+    const sound = this.noteCallerFrame(media.payload);
     if (!this.ready) {
-      this.openingAudio.push({ payload: media.payload, sound: frameHoldsSound(media.payload) });
+      this.openingAudio.push({ payload: media.payload, sound });
       if (this.openingAudio.length > OPENING_AUDIO_MAX_FRAMES) this.openingAudio.shift();
       return;
     }
     this.toOpenAi({ type: 'session.input_audio.append', audio: media.payload });
+  }
+
+  // Reads one caller frame's level: its RMS, so a stray sample at speech level
+  // does not count. At CALLER_VOICED_RMS_MIN or more the frame holds voice.
+  // Caller SPEECH is voice for CALLER_SPEECH_MIN_MS in a row, and a voiced
+  // frame within CALLER_SPEECH_HANG_MS after speech. One voiced frame by itself
+  // (a click, a knock) is not speech: it times nothing, arms nothing and
+  // flushes nothing. The arrival of the latest frame of speech is kept
+  // (callerSpokeAt): a time, never audio. Every timing rule and the barge-in
+  // flush read that one value. Returns whether the frame holds any sound
+  // (OPENING_SOUND_RMS_MIN or more). That level is lower on purpose: speech for
+  // timing must be sure, and the opening audio must not lose quiet speech.
+  noteCallerFrame(payload) {
+    const audio = Buffer.from(payload, 'base64');
+    let sum = 0;
+    for (let i = 0; i < audio.length; i++) sum += MULAW_SQUARE[audio[i]];
+    const atLevel = (rms) => audio.length > 0 && sum >= audio.length * rms ** 2;
+    const ms = audio.length / MULAW_BYTES_PER_MS;
+    this.callerMs += ms;
+    if (atLevel(CALLER_VOICED_RMS_MIN)) {
+      const now = this.deps.now();
+      this.callerVoicedMs += ms;
+      this.callerRunMs += ms;
+      const spoke = this.callerSpokeAt;
+      if (this.callerRunMs >= CALLER_SPEECH_MIN_MS || (spoke !== null && now - spoke <= CALLER_SPEECH_HANG_MS)) {
+        this.callerSpokeAt = now;
+        // The current reply's chunk has arrived and its first voiced sample is
+        // still ahead (silent audio leads the chunk): the caller speaks on, so
+        // that reply did not wait for them.
+        if (this.replyVoiceWall !== null && now < this.replyVoiceWall) {
+          this.replyCallerSpokeOn = true;
+          this.timeReply();
+        }
+      }
+    } else {
+      this.callerRunMs = 0;
+    }
+    return atLevel(OPENING_SOUND_RMS_MIN);
+  }
+
+  // A transcript fragment says that the caller said words. When they said them
+  // comes from the caller's own audio, never from the fragment: OpenAI's
+  // start_ms and end_ms are not used. Measured on the live API (two sessions,
+  // 2026-11-20 and 11-21, four caller utterances): end_ms, counted from
+  // session.started, ran 1.3 to 2.5 s after the caller's true last sound (in
+  // three of the four, after the reply had begun), and its offset moved by
+  // more than a second inside one session (OpenAI: "approximate fragment
+  // timing rather than exact word boundaries"). The last fragment of an
+  // utterance arrived 0.75 to 1.2 s after its last sound, so a fragment at t
+  // is about caller audio of the CALLER_END_LOOKBACK_MS before t.
+  // - No reply yet: the first reply answers the words.
+  // - The caller spoke after the current reply began to arrive: the NEXT
+  //   reply answers the words (the model had sent that chunk before the
+  //   speech ended).
+  // - Otherwise the words came before the current reply and their transcript
+  //   is late: the CURRENT reply answers them, when the caller spoke after the
+  //   reply before it began.
+  // With no caller speech in the lookback (speech under the voice level, or a
+  // word with under CALLER_SPEECH_MIN_MS of voice in a row) the bridge did not
+  // hear the caller: the fragment times nothing.
+  noteCallerWords(t) {
+    const since = t - CALLER_END_LOOKBACK_MS;
+    const spoke = this.callerSpokeAt;
+    if (this.replyStartWall === null) {
+      if (spoke !== null && spoke >= since) this.awaitingReply = true;
+      return;
+    }
+    if (spoke !== null && spoke > this.replyStartWall && spoke >= since) {
+      this.awaitingReply = true;
+      return;
+    }
+    const end = this.replyCallerEnd;
+    if (end === null || end < since) return;
+    if (this.prevReplyStartWall !== null && end <= this.prevReplyStartWall) return;
+    this.replyTimed = true;
+    this.timeReply();
   }
 
   // ── OpenAI side ──────────────────────────────────────────────────────────
@@ -423,11 +504,10 @@ class LiveBridge {
   // One pass over a model audio chunk, sample by sample, so the result does
   // not depend on how OpenAI cuts the stream into chunks. A voiced sample
   // starts a reply when it is the first voice of the call, or follows at least
-  // REPLY_SILENCE_MIN_MS of silent audio, or follows an arrival gap. Returns
-  // the index of the first such sample (-1: none) and of the last voiced
-  // sample (-1: none). A chunk is one arrival: it marks one reply start at
-  // the most.
-  scanModelAudio(audio) {
+  // silenceMinSamples of silent audio. Returns the index of the first such
+  // sample (-1: none) and of the last voiced sample (-1: none). A chunk is one
+  // arrival: it marks one reply start at the most.
+  scanModelAudio(audio, silenceMinSamples) {
     let start = -1;
     let last = -1;
     for (let i = 0; i < audio.length; i++) {
@@ -435,9 +515,8 @@ class LiveBridge {
         this.silentSamples += 1;
         continue;
       }
-      if (start < 0 && (!this.voiceSeen || this.gapSinceVoice || this.silentSamples >= REPLY_SILENCE_MIN_SAMPLES)) start = i;
+      if (start < 0 && (!this.voiceSeen || this.silentSamples >= silenceMinSamples)) start = i;
       this.voiceSeen = true;
-      this.gapSinceVoice = false;
       this.silentSamples = 0;
       last = i;
     }
@@ -449,24 +528,27 @@ class LiveBridge {
     const t = this.deps.now();
     // Measured on the live API 2026-11-20: GPT-Live's audio is a continuous
     // real-time stream (about 100 ms chunks every 100 ms from session.started
-    // on) with digital silence (every mu-law byte 0xFF) between utterances, so
-    // an arrival gap alone does not mark a reply. A reply starts at the first
-    // voiced sample after at least REPLY_SILENCE_MIN_MS of silent audio (pauses
-    // inside one utterance are under about 500 ms), or after an arrival gap
-    // (OpenAI pausing the stream). A reply start marks its chunk whatever is
-    // still queued at Twilio, so a fast reply and a reply right after a
-    // barge-in are both timed.
+    // on) with digital silence (every mu-law byte 0xFF) between utterances. A
+    // reply starts at the first voiced sample after at least
+    // REPLY_SILENCE_MIN_MS of silent audio: a pause between two sentences of
+    // one reply ran to 593 ms on the live API, and the model answers about 1 s
+    // after the caller stops. A gap in arrival is delay on the way (the
+    // network, or a busy process), not a reply boundary: one of 358 ms came in
+    // a 24 s session, and the audio it held back arrived right after it. A
+    // reply start marks its chunk whatever is still queued at Twilio, so a fast
+    // reply and a reply right after a barge-in are both timed.
     const audio = Buffer.from(msg.delta, 'base64');
-    if (this.lastAudioAt !== null && t - this.lastAudioAt >= NEW_REPLY_GAP_MS) this.gapSinceVoice = true;
-    this.lastAudioAt = t;
-    const { start, last } = this.scanModelAudio(audio);
+    // Inside the tail drop after a barge-in the boundary is main's 600 ms: a
+    // new answer that follows a shorter silence than REPLY_SILENCE_MIN_MS must
+    // play, and its delay is kept apart from turns there in any case.
+    const dropping = this.tailDropSince !== null && t - this.tailDropSince < TAIL_DROP_MAX_MS;
+    const { start, last } = this.scanModelAudio(audio, dropping ? TAIL_SILENCE_MIN_SAMPLES : REPLY_SILENCE_MIN_SAMPLES);
     // After a barge-in, audio that starts no reply is the cut-off reply's
     // tail: it is dropped, so the caller never hears it restart mid-sentence
     // (for TAIL_DROP_MAX_MS at the most). A reply start ends that: its chunk
     // is forwarded from the reply's first voiced sample on.
     let from = 0;
     if (this.tailDropSince !== null) {
-      const dropping = t - this.tailDropSince < TAIL_DROP_MAX_MS;
       if (dropping && start < 0) return;
       if (dropping) from = start;
       this.tailDropSince = null;
@@ -494,45 +576,71 @@ class LiveBridge {
     this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload } });
   }
 
-  // The pending measure is consumed only here, by a reply start. The first
-  // reply start is the greeting (asked for in session.start): it is never timed,
-  // even when the caller spoke before it.
+  // A reply's delay comes from four facts: when its first voiced sample
+  // reached the bridge, the caller's last frame of speech before its chunk
+  // arrived, whether the caller spoke on after that arrival, and whether
+  // caller words belong to it (a fragment armed it, or a late fragment names
+  // it: noteCallerWords). timeReply derives the sample from them, again
+  // whenever one changes, so the order in which they arrive does not matter.
+  // The first reply start is the greeting (asked for in session.start): its
+  // delay is never in turns, even when the caller spoke before it.
   onReplyStart(t, ambiguous, voiceAt) {
-    const greeting = this.replyStartWall === null;
+    this.replyFirst = this.replyStartWall === null;
     this.prevReplyStartWall = this.replyStartWall;
     this.replyStartWall = t;
     this.replyVoiceWall = voiceAt;
-    this.replySample = null;
     this.replyAmbiguous = ambiguous;
-    if (ambiguous) {
-      if (this.awaitingReply && this.speechEndWall !== null) {
-        this.ambiguousReplies.push(Math.max(0, Math.round(voiceAt - this.speechEndWall)));
-        this.replySample = { index: this.ambiguousReplies.length - 1, speechEnd: this.speechEndWall };
-      }
-      this.awaitingReply = false;
+    this.replySample = null;
+    this.replyOverCaller = false;
+    this.replyCallerEnd = this.callerSpokeAt;
+    this.replyCallerSpokeOn = false;
+    this.replyTimed = this.awaitingReply;
+    this.awaitingReply = false;
+    this.timeReply();
+  }
+
+  // The current reply's delay: from the caller's last speech before it to its
+  // first voiced sample. Under CALLER_STOPPED_MIN_MS, or when the caller spoke
+  // on before that sample, the model spoke over the caller, or the line is
+  // noisy and the bridge cannot hear the caller stop: that is no reply delay,
+  // so none is recorded (one recorded earlier is taken back) and the reply is
+  // counted in replies_over_caller, once.
+  // The first reply is normally the greeting. When the caller spoke first it
+  // may instead be the answer: that delay is kept apart, never in turns. A
+  // reply inside the 1.5 s after a barge-in is kept apart as well
+  // (onOutputAudio).
+  timeReply() {
+    if (!this.replyTimed || this.replyCallerEnd === null) return;
+    let delay = Math.round(this.replyVoiceWall - this.replyCallerEnd);
+    if (this.replyCallerSpokeOn || delay < CALLER_STOPPED_MIN_MS) {
+      if (!this.replyOverCaller) this.repliesOverCaller += 1;
+      this.replyOverCaller = true;
+      delay = null;
+    }
+    if (this.replyFirst && !this.replyAmbiguous) {
+      this.firstReplyAmbiguousMs = delay;
       return;
     }
-    // The first reply is normally the greeting. When the caller spoke first,
-    // it may instead be the answer: that delay is kept apart, never mixed into
-    // the per-turn delays and never lost.
-    if (greeting && this.awaitingReply && this.speechEndWall !== null) {
-      this.firstReplyAmbiguousMs = Math.max(0, Math.round(voiceAt - this.speechEndWall));
+    const samples = this.replyAmbiguous ? this.ambiguousReplies : this.latencies;
+    if (delay === null) {
+      if (this.replySample !== null) samples.splice(this.replySample, 1);
+      this.replySample = null;
+    } else if (this.replySample === null) {
+      // (A sample already recorded holds this same delay: the facts it comes
+      // from do not move once the reply has begun.)
+      samples.push(delay);
+      this.replySample = samples.length - 1;
     }
-    if (!greeting && this.awaitingReply && this.speechEndWall !== null) {
-      this.latencies.push(Math.max(0, Math.round(voiceAt - this.speechEndWall)));
-      this.replySample = { index: this.latencies.length - 1, speechEnd: this.speechEndWall };
-    }
-    this.awaitingReply = false;
   }
 
   onInputTranscript(msg) {
     const text = typeof msg.delta === 'string' ? msg.delta : '';
     const t = this.deps.now();
-    // start_ms / end_ms count from the start of the Live session, so they map
-    // to wall time from session.started, not from the first caller packet.
-    const speechEnd = Number.isFinite(msg.end_ms) && this.sessionStartWall !== null ? this.sessionStartWall + msg.end_ms : null;
-    if (speechEnd !== null) this.noteSpeechEnd(speechEnd);
-    if (text.trim() && this.isBargeIn(t, speechEnd)) {
+    // A fragment with timing fields is caller speech (the fields' values are
+    // not used: noteCallerWords).
+    const words = Number.isFinite(msg.end_ms) && this.sessionStartWall !== null;
+    if (words) this.noteCallerWords(t);
+    if (words && text.trim() && this.isBargeIn(t)) {
       this.toTwilio({ event: 'clear', streamSid: this.streamSid });
       this.playbackEndsAt = t;
       this.voiceEndsAt = t;
@@ -542,49 +650,22 @@ class LiveBridge {
     }
   }
 
-  // Speech that ended after the current reply began arms the measure for the
-  // next reply. Speech that ended before it, whose transcript came late, timed
-  // the CURRENT reply, when it ended after the reply before that one began:
-  // it adds that reply's sample, or moves it to a later fragment's end. The
-  // greeting (no reply before it) is never timed.
-  noteSpeechEnd(speechEnd) {
-    if (this.replyStartWall === null || speechEnd > this.replyStartWall) {
-      this.speechEndWall = speechEnd;
-      this.awaitingReply = true;
-      return;
-    }
-    const delay = Math.max(0, Math.round(this.replyVoiceWall - speechEnd));
-    if (this.prevReplyStartWall === null) {
-      // A late transcript of speech that ended before the FIRST reply: that
-      // reply may be the greeting or an answer, so the delay refines the
-      // separate first_reply_ambiguous_ms (the latest speech end wins) and
-      // never enters turns.
-      this.firstReplyAmbiguousMs = this.firstReplyAmbiguousMs === null ? delay : Math.min(this.firstReplyAmbiguousMs, delay);
-      return;
-    }
-    if (speechEnd <= this.prevReplyStartWall) return;
-    // The latest speech end before the reply wins. An ambiguous reply's sample
-    // is refined the same way, in its own list: never in turns.
-    const samples = this.replyAmbiguous ? this.ambiguousReplies : this.latencies;
-    if (!this.replySample) {
-      samples.push(delay);
-      this.replySample = { index: samples.length - 1, speechEnd };
-    } else if (speechEnd > this.replySample.speechEnd) {
-      samples[this.replySample.index] = delay;
-      this.replySample.speechEnd = speechEnd;
-    }
-  }
-
   // A barge-in is caller speech that runs past the start of the reply still
   // playing. A late transcript of words the caller finished BEFORE the reply
   // began is not one: flushing then would cut the answer to their question.
-  // No timing, no flush. Silence queued at Twilio is nothing to cut: the check
+  // Silence queued at Twilio is nothing to cut: the check
   // runs to the last voiced sample queued. A pause inside a reply still to
   // play counts, because that reply is not over.
-  isBargeIn(t, speechEnd) {
+  // The proof is the caller's own audio: speech (noteCallerFrame) past the
+  // reply's start, in the CALLER_END_LOOKBACK_MS this fragment can be about.
+  // One noise frame after the reply began is not that: with it, a late
+  // fragment of the finished question would cut its answer.
+  isBargeIn(t) {
     if (t >= this.voiceEndsAt - BARGE_IN_MARGIN_MS) return false; // no voice (much) left to cut
-    if (speechEnd === null || this.replyStartWall === null) return false;
-    return speechEnd > this.replyStartWall + BARGE_IN_MARGIN_MS;
+    if (this.replyStartWall === null) return false;
+    const spoke = this.callerSpokeAt;
+    if (spoke === null || spoke < t - CALLER_END_LOOKBACK_MS) return false;
+    return spoke > this.replyStartWall + BARGE_IN_MARGIN_MS;
   }
 
   // usage.seconds is a running total ("use the latest usage.seconds"): keep
@@ -732,6 +813,13 @@ class LiveBridge {
       first_reply_ambiguous_ms: this.firstReplyAmbiguousMs,
       after_barge_in_ambiguous_ms: this.ambiguousReplies,
       interruptions: this.interruptions,
+      // Replies whose first voice came under CALLER_STOPPED_MIN_MS after the
+      // caller's last sound: no delay is recorded for them.
+      replies_over_caller: this.repliesOverCaller,
+      // The share of the caller's audio in frames that hold voice. Near 0: the
+      // bridge could not hear the caller. Near 100 (a noisy line): it could
+      // not hear the caller stop. Either way no delay is recorded.
+      caller_voiced_pct: this.callerMs ? Math.round((100 * this.callerVoicedMs) / this.callerMs) : null,
       delegations: this.delegations.size,
       errors,
     };
