@@ -138,6 +138,13 @@ describe('runTabReloadCheck', () => {
       categories: ['ops', OPS_KEY],
     }));
 
+    // The provider's answer can quote an address; the error goes to
+    // job_health and the log with the status only.
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('SendGrid 403: from a@b.example does not match a verified Sender Identity'), { status: 403 }));
+    await expect(sendEmail()).rejects.toThrow(/^the email to the ops inbox failed \(status 403\)$/);
+    sendgrid.sendOne.mockRejectedValueOnce(new Error('connect ETIMEDOUT a@b.example'));
+    await expect(sendEmail()).rejects.toThrow(/^the email to the ops inbox failed \(status unknown\)$/);
+
     sendgrid.sendOne.mockClear();
     sendgrid.isConfigured.mockReturnValue(false);
     await expect(sendEmail()).rejects.toThrow('mailer not configured');
@@ -145,58 +152,41 @@ describe('runTabReloadCheck', () => {
   });
 });
 
-// A run reads from the scheduled time of the run before it up to its own.
-// From one 11:51 PM Eastern to the next is 25 hours on the night the clocks
-// go back and 23 on the night they go forward.
+// A run reads the last whole window: from one 11:51 PM Eastern up to the
+// next, which is the run's own. That is 25 hours on the night the clocks go
+// back and 23 on the night they go forward.
 describe('readWindow', () => {
-  const iso = (text) => readWindow(new Date(text)).start.toISOString();
-  const end = (text) => readWindow(new Date(text)).end.toISOString();
+  const win = (text) => {
+    const { start, end } = readWindow(new Date(text));
+    return [start.toISOString(), end.toISOString()];
+  };
+  const NOV_19 = '2026-11-20T04:51:00.000Z';
+  const NOV_20 = '2026-11-21T04:51:00.000Z';
+  const NOV_21 = '2026-11-22T04:51:00.000Z';
 
-  test('a run reads up to its own scheduled time, so the next run starts where it ended', () => {
+  test('a nightly run reads from the scheduled time of the night before up to its own', () => {
     // Nov 20 2026, 11:51:02 PM EST: up to 11:51:00 PM, not up to now.
-    expect(end('2026-11-21T04:51:02Z')).toBe('2026-11-21T04:51:00.000Z');
-    expect(iso('2026-11-22T04:51:02Z')).toBe('2026-11-21T04:51:00.000Z');
-    // A moment early, and held up past midnight: the same night.
-    expect(end('2026-11-21T04:50:59.990Z')).toBe('2026-11-21T04:51:00.000Z');
-    expect(end('2026-11-21T05:20:00Z')).toBe('2026-11-21T04:51:00.000Z');
-    // The nights the clocks change: 25 hours, then 23.
-    expect(end('2026-11-02T04:51:02Z')).toBe('2026-11-02T04:51:00.000Z');
-    expect(end('2027-03-15T03:51:02Z')).toBe('2027-03-15T03:51:00.000Z');
-    // By hand at 10:00 AM EST: the night that ended half a day ago or more.
-    expect(end('2026-11-21T15:00:00Z')).toBe('2026-11-21T04:51:00.000Z');
+    expect(win('2026-11-21T04:51:02Z')).toEqual([NOV_19, NOV_20]);
+    // At its scheduled time to the millisecond, and held up past midnight.
+    expect(win('2026-11-21T04:51:00.000Z')).toEqual([NOV_19, NOV_20]);
+    expect(win('2026-11-21T05:20:00Z')).toEqual([NOV_19, NOV_20]);
+    // The next night starts where this one ended.
+    expect(win('2026-11-22T04:51:02Z')).toEqual([NOV_20, NOV_21]);
   });
 
-  test('a run starts its read at the scheduled time of the night before', () => {
-    // Nov 20 2026, 11:51:02 PM EST.
-    expect(iso('2026-11-21T04:51:02Z')).toBe('2026-11-20T04:51:00.000Z');
-    expect(iso('2026-11-21T04:51:00.000Z')).toBe('2026-11-20T04:51:00.000Z');
-    // A moment early, and held up past midnight: the same night before.
-    expect(iso('2026-11-21T04:50:59.990Z')).toBe('2026-11-20T04:51:00.000Z');
-    expect(iso('2026-11-21T05:20:00Z')).toBe('2026-11-20T04:51:00.000Z');
-  });
-
-  test('the night the clocks go back is read whole: 25 hours', () => {
+  test('the night the clocks go back is read whole (25 hours), and the night they go forward once (23)', () => {
     // Nov 1 2026, 11:51:02 PM EST. The run before it was Oct 31, 11:51 PM EDT.
-    expect(iso('2026-11-02T04:51:02Z')).toBe('2026-11-01T03:51:00.000Z');
-    // The night after is 24 hours again.
-    expect(iso('2026-11-03T04:51:02Z')).toBe('2026-11-02T04:51:00.000Z');
-  });
-
-  test('the night the clocks go forward is read once: 23 hours', () => {
+    expect(win('2026-11-02T04:51:02Z')).toEqual(['2026-11-01T03:51:00.000Z', '2026-11-02T04:51:00.000Z']);
     // Mar 14 2027, 11:51:02 PM EDT. The run before it was Mar 13, 11:51 PM EST.
-    expect(iso('2027-03-15T03:51:02Z')).toBe('2027-03-14T04:51:00.000Z');
+    expect(win('2027-03-15T03:51:02Z')).toEqual(['2027-03-14T04:51:00.000Z', '2027-03-15T03:51:00.000Z']);
   });
 
-  test('a run by hand in the day reads from the last scheduled run at least half a day old', () => {
-    // Nov 21 2026, 3:00 PM EST: the run of the night before.
-    expect(iso('2026-11-21T20:00:00Z')).toBe('2026-11-21T04:51:00.000Z');
-    // 10:00 AM EST: that run is 10 hours old, so the one before it.
-    expect(iso('2026-11-21T15:00:00Z')).toBe('2026-11-20T04:51:00.000Z');
-    // Half a day to the second, 11:51:00 AM EST, and one second short of it.
-    expect(iso('2026-11-21T16:51:00Z')).toBe('2026-11-21T04:51:00.000Z');
-    expect(iso('2026-11-21T16:50:59Z')).toBe('2026-11-20T04:51:00.000Z');
-    // 11:55 AM EST: half a day ago is 11:55 PM, after that day's scheduled time.
-    expect(iso('2026-11-21T16:55:00Z')).toBe('2026-11-21T04:51:00.000Z');
+  test('a run by hand reads the window of the nightly run before it, never a part of a day', () => {
+    // Nov 21 2026 at 10:00 AM and at 3:00 PM EST: the window that ended last night.
+    expect(win('2026-11-21T15:00:00Z')).toEqual([NOV_19, NOV_20]);
+    expect(win('2026-11-21T20:00:00Z')).toEqual([NOV_19, NOV_20]);
+    // One millisecond before tonight's scheduled time: still last night's.
+    expect(win('2026-11-22T04:50:59.999Z')).toEqual([NOV_19, NOV_20]);
   });
 });
 

@@ -34,7 +34,6 @@ const { retireIfClean } = require('./ops-digest-fall-off');
 const OPS_KEY = 'tab-reload-check';
 // The job's scheduled time, Eastern (scheduler.js; a test keeps both in step).
 const RUN_AT = '23:51';
-const HALF_DAY_MS = 12 * 60 * 60 * 1000;
 const FAILED_NAMES = ['no-server-heard', 'reloaded', 'reload-missed'];
 const OPS_INBOX = 'contact@wavespestcontrol.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || OPS_INBOX;
@@ -51,21 +50,20 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// What a run reads: from the scheduled time of the run before it (`start`)
-// up to its own (`end`, not included), in Eastern time. Each page view is so
-// read by one run: a run starts a moment after its scheduled time, and a
-// view of that moment belongs to the next night. From one scheduled time to
+// What a run reads: the last whole window, from one scheduled time (`start`)
+// up to the next (`end`, not included), in Eastern time. `end` is the latest
+// scheduled time that has come: the run's own, since a run starts a moment
+// after it (node-cron matches the clock's minute, so never before it). Each
+// page view is so read by one nightly run, and a view of that moment belongs
+// to the next night. A run by hand in the day reads the same window as the
+// night's run before it, never a part of a day. From one scheduled time to
 // the next is 23, 24 or 25 hours (the clocks change), so a fixed 24 hours
-// would skip the hour after the last run on the night the clocks go back.
-// `start` is the latest scheduled time at least half a day old: the
-// scheduled time on the Eastern day of the moment half a day ago, or the one
-// a day before it.
+// would skip an hour on the night the clocks go back.
 function readWindow(now = new Date()) {
-  const halfDayAgo = new Date(now.getTime() - HALF_DAY_MS);
   const scheduledOn = (day) => parseETDateTime(`${etDateString(day)}T${RUN_AT}`);
-  const sameDay = scheduledOn(halfDayAgo);
-  const start = sameDay.getTime() <= halfDayAgo.getTime() ? sameDay : scheduledOn(addETDays(halfDayAgo, -1));
-  return { start, end: scheduledOn(addETDays(start, 1)) };
+  const today = scheduledOn(now);
+  const end = today.getTime() <= now.getTime() ? today : scheduledOn(addETDays(now, -1));
+  return { start: scheduledOn(addETDays(end, -1)), end };
 }
 
 // Out-of-date staff page views of this run's window whose name shows a
@@ -141,16 +139,22 @@ function postDigest(found, mailer) {
       if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
         throw new Error('mailer not configured');
       }
-      return mailer.sendOne({
-        to: OPS_INBOX,
-        fromEmail: fromEmail(),
-        fromName: FROM_NAME,
-        subject: composed.subject,
-        html: composed.html,
-        text: composed.text,
-        categories: ['ops', OPS_KEY],
-        suppressErrorLog: true,
-      });
+      try {
+        return await mailer.sendOne({
+          to: OPS_INBOX,
+          fromEmail: fromEmail(),
+          fromName: FROM_NAME,
+          subject: composed.subject,
+          html: composed.html,
+          text: composed.text,
+          categories: ['ops', OPS_KEY],
+          suppressErrorLog: true,
+        });
+      } catch (err) {
+        // The provider's answer can quote an email address, and this error
+        // goes to job_health and the log: keep the status only.
+        throw new Error(`the email to the ops inbox failed (status ${Number(err?.status) || 'unknown'})`);
+      }
     },
   });
 }
