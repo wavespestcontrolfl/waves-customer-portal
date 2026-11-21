@@ -50,15 +50,25 @@ const gcd = (a, b) => (b === 0n ? a : gcd(b, a % b));
 const lcm = (a, b) => (a / gcd(a, b)) * b;
 
 // The Monday of every workweek a line covers, oldest first. No span: the earned week only.
+// The weeks of a span depend on its two dates only, and a span of a year is about 50 date steps (each one a time zone
+// conversion). A pay run asks for the same span several times per line, so the last answers are kept. Callers get a copy.
+const SPAN_WEEKS = new Map();
+const SPAN_WEEKS_MAX = 200;
+
 function weeksOfLine(line) {
   if (line.coversFrom == null && line.coversTo == null) return [staffWeekStartForWorkDate(line.weekStart)];
   if (line.coversFrom == null || line.coversTo == null || line.coversFrom > line.coversTo) {
     throw new Error('A pay line span needs both dates, the first not after the last');
   }
+  const key = `${line.coversFrom}|${line.coversTo}`;
+  const kept = SPAN_WEEKS.get(key);
+  if (kept) return [...kept];
   const last = staffWeekStartForWorkDate(line.coversTo);
   const weeks = [];
   for (let week = staffWeekStartForWorkDate(line.coversFrom); week <= last; week = addStaffWorkDays(week, 7)) weeks.push(week);
-  return weeks;
+  if (SPAN_WEEKS.size >= SPAN_WEEKS_MAX) SPAN_WEEKS.delete(SPAN_WEEKS.keys().next().value);
+  SPAN_WEEKS.set(key, weeks);
+  return [...weeks];
 }
 
 /**

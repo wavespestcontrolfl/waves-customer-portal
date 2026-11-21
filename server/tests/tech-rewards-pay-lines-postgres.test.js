@@ -191,7 +191,9 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(line).toMatchObject({ kind: 'december_gift', status: 'open', amount_cents: GIFT, source_id: `december_gift:${alpha}:2026` });
       expect([dateOf(line.earned_week_start), dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual([GIFT_WEEK, '2026-01-01', '2026-12-13']);
       expect(run.payDate).toBe('2026-12-18'); // the last Friday on or before Dec 20
-      expect((await lineOf(beta)).amount_cents).toBe(GIFT);
+      // hired during the year: the same $300, covering the weeks since the hire date
+      const betaLine = await lineOf(beta);
+      expect([betaLine.amount_cents, dateOf(betaLine.covers_from), dateOf(betaLine.covers_to)]).toEqual([GIFT, '2026-12-01', '2026-12-13']);
       expect(await linesOf(gone)).toHaveLength(0);
       expect(await linesOf(late)).toHaveLength(0);
       expect(await linesOf(office)).toHaveLength(0);
@@ -283,6 +285,32 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === '2026-06-01').premiumCents).toBe(60);
     });
 
+    it('covers a technician hired during the year from the hire date, so weeks before they started take no share of the gift', async () => {
+      // hired Mon Dec 7; 50 h that week, 10 h of them overtime
+      const tech = await readyTech('Sample Alpha', { hire_date: GIFT_WEEK });
+      await approvedWeek(tech, GIFT_WEEK, '2400.00', '600.00');
+      const run = await draft(GIFT_WEEK);
+      const line = await lineOf(tech);
+      expect([dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual([GIFT_WEEK, '2026-12-13']);
+      // the whole 30,000 is in their one week: 1/2 x 30,000 / 50 h x 10 h = 3,000 (a span from Jan 1 would give it 1/50: 60)
+      expect(checkOf(run, tech)).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 3000 });
+    });
+
+    it('waits on a run whose pay week ended before the technician was hired; the next week\'s run writes it from the hire date', async () => {
+      const tech = await readyTech('Sample Alpha', { hire_date: '2026-12-15' }); // after the week of Dec 7, and by the gift date
+      const other = await readyTech('Sample Bravo');
+      await approvedWeek(other, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(await linesOf(tech)).toHaveLength(0);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'they were hired after the week this pay run pays')]);
+      await finalize(run.id);
+      await approvedWeek(tech, NEXT_WEEK);
+      const next = await draft(NEXT_WEEK);
+      const line = await lineOf(tech);
+      expect([dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual(['2026-12-15', '2026-12-20']);
+      expect(checkOf(next, tech).techRewardsCents).toBe(GIFT);
+    });
+
     it('takes an open line off when its technician has left before it was paid', async () => {
       const alpha = await readyTech('Sample Alpha');
       const bravo = await readyTech('Sample Bravo');
@@ -326,9 +354,9 @@ postgres('tech rewards pay lines: the December gift', () => {
     });
 
     it('reads the technicians FOR SHARE and asks a bounded number of questions for a year of covered weeks', async () => {
-      // hired in December: almost every covered week of the year has no approved timesheet
-      const alpha = await readyTech('Sample Alpha', { hire_date: '2026-12-01' });
-      const bravo = await readyTech('Sample Bravo', { hire_date: '2026-12-01' });
+      // hired before the year: the gift covers every week of it, and almost none has an approved timesheet
+      const alpha = await readyTech('Sample Alpha');
+      const bravo = await readyTech('Sample Bravo');
       await approvedWeek(alpha, GIFT_WEEK);
       const statements = [];
       const listen = (query) => statements.push(String(query.sql));
@@ -544,10 +572,11 @@ postgres('tech rewards pay lines: the December gift', () => {
       await recompute(run.id);
       expect(await linesOf(tech)).toHaveLength(0);
       expect(await notesOf(run.id)).toEqual([]);
-      // hired by the gift date: the gift is on the check
-      await trx('technicians').where({ id: tech }).update({ hire_date: '2026-12-18' });
+      // hired by the gift date, in the week this run pays: the gift is on the check, covering the days since
+      await trx('technicians').where({ id: tech }).update({ hire_date: '2026-12-10' });
       const again = await recompute(run.id);
       expect(checkOf(again, tech).techRewardsCents).toBe(GIFT);
+      expect(dateOf((await lineOf(tech)).covers_from)).toBe('2026-12-10');
     });
 
     it('says what waits when a week has nothing else to pay: no run is kept, and the message carries the note', async () => {
@@ -577,6 +606,16 @@ postgres('tech rewards pay lines: the December gift', () => {
         waits: stored.tech_rewards_waits,
       }]);
       delete process.env.GATE_TECH_REWARDS_PAY_LINES;
+      expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('shows no note for a technician who left since: no run pays that gift', async () => {
+      const tech = await readyTech('Sample Alpha');
+      await approvedWeek(tech, '2026-11-02'); // approved, never paid
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Nov 2, 2026 is not paid yet')]);
+      await trx('technicians').where({ id: tech }).update({ employment_status: 'inactive' });
       expect(await notesOf(run.id)).toEqual([]);
     });
 

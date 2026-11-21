@@ -18,8 +18,8 @@
  * dated on or after that day, up to 60 days after it, that is ready for a technician writes their line; a run that is not ready
  * writes nothing for them and the next run tries again. The line is $300 (owner 2026-11-20), source_type 'tech_rewards', source
  * key 'december_gift:<technician id>:<year>' (the table's unique key stops a repeat in any status), and covers Jan 1 of the
- * year to the end of the run's pay week (Dec 31 at the latest): payroll_pay_lines refuses a line that covers days after the week
- * that pays it. The span is spread over its workweeks by payroll-regular-rate.js (29 CFR 778.209), so the gift adds overtime
+ * year (the hire date, for a technician hired during the year) to the end of the run's pay week (Dec 31 at the latest):
+ * payroll_pay_lines refuses a line that covers days after the week that pays it. The span is spread over its workweeks by payroll-regular-rate.js (29 CFR 778.209), so the gift adds overtime
  * premium to the weeks it covers. It is included in the regular rate on purpose, the conservative reading: whether the
  * 29 CFR 778.212 gift exclusion applies is a question for the employment lawyer / CPA, not decided here.
  *
@@ -96,13 +96,17 @@ function decemberGiftDate(year) {
 }
 
 /**
- * What the gift of `key` (the year, as text) covers when the run of the pay week starting `weekStart` pays it. Pure.
- * { earnedWeekStart, coversFrom, coversTo } for the pay line: Jan 1 to the end of the pay week, Dec 31 at the latest.
+ * What the gift of `key` (the year, as text) covers when the run of the pay week starting `weekStart` pays it to a technician
+ * hired on `hireDate`. Pure. { earnedWeekStart, coversFrom, coversTo } for the pay line: Jan 1 to the end of the pay week,
+ * Dec 31 at the latest. For a technician hired during the year it starts at the hire date: the gift is spread over the weeks
+ * they were employed, so weeks before they started take no share of it from the weeks they worked (29 CFR 778.209). When they
+ * were hired after the pay week ended, coversFrom is after coversTo: this run cannot cover it (priceCandidate makes it wait).
  */
-function spanOf(key, weekStart) {
+function spanOf(key, weekStart, hireDate = null) {
   const weekEnd = addStaffWorkDays(weekStart, 6);
+  const jan1 = ymd(Number(key), 1, 1);
   const dec31 = ymd(Number(key), 12, 31);
-  return { earnedWeekStart: weekStart, coversFrom: ymd(Number(key), 1, 1), coversTo: weekEnd < dec31 ? weekEnd : dec31 };
+  return { earnedWeekStart: weekStart, coversFrom: hireDate && hireDate > jan1 ? hireDate : jan1, coversTo: weekEnd < dec31 ? weekEnd : dec31 };
 }
 
 /**
@@ -174,7 +178,8 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
  *   week_not_paid       an earlier week of its span holds work and has no finalized check
  *   week_needs_review   the pay run's own line guards would hold a check for an earlier week of its span
  *   no_paycheck         no check can be worked out for the technician on this run (week is null)
- * (priceCandidate adds hire_date_missing before it asks: no hire date on file.)
+ * (priceCandidate adds two before it asks: hire_date_missing, no hire date on file; hired_after_pay_week, hired after the
+ * run's pay week ended, so the span would be empty.)
  * The unpaid test asks only the weeks before the run's own: the span ends in the run's own week by design (spanOf), and that
  * week is the one this run pays. The line guards are asked for the WHOLE span, exactly as the run asks them of the line
  * (evaluate), and for the run's OWN week also when it lies after the span (a January run that carries last year's gift, whose
@@ -200,7 +205,7 @@ async function waitOf(trx, run, technicianId, span) {
   return problem ? { reason: 'no_paycheck', week: null } : null;
 }
 
-/** { amountCents }, { skip: reason } (no gift for them) or { wait: { reason, week } } (not on this run) for one candidate. */
+/** { amountCents, span }, { skip: reason } (no gift for them) or { wait: { reason, week } } (not on this run) for one candidate. */
 async function priceCandidate(trx, cand, tech, run) {
   const year = Number(cand.key);
   if (tech.hire_date && tech.hire_date > decemberGiftDate(year)) return { skip: 'hired_after_gift_date' };
@@ -209,8 +214,12 @@ async function priceCandidate(trx, cand, tech, run) {
   // No hire date on file: the run cannot tell whether they were hired by the gift date, and no money goes out on a guess. The
   // gift waits, with a note, until the date is entered.
   if (!tech.hire_date) return { wait: { reason: 'hire_date_missing', week: null } };
-  const wait = await waitOf(trx, run, tech.id, spanOf(cand.key, run.week_start));
-  return wait ? { wait } : { amountCents: DECEMBER_GIFT_CENTS };
+  const span = spanOf(cand.key, run.week_start, tech.hire_date);
+  // Hired after this run's pay week ended (and by the gift date): a pay line cannot cover days after the week that pays it, so
+  // the run of a later week writes it.
+  if (span.coversFrom > span.coversTo) return { wait: { reason: 'hired_after_pay_week', week: null } };
+  const wait = await waitOf(trx, run, tech.id, span);
+  return wait ? { wait } : { amountCents: DECEMBER_GIFT_CENTS, span };
 }
 
 // ---- Sync
@@ -229,6 +238,7 @@ const WAIT_WORDS = {
   no_paycheck: () => 'no paycheck can be worked out for them on this pay run (check their pay rate, and the tax tables for the pay date)',
   later_check_final: () => 'a later paycheck of theirs is already final, so this pay run cannot hold one for them',
   hire_date_missing: () => 'their hire date is not on file, so the pay run cannot tell whether they were hired by the gift date',
+  hired_after_pay_week: () => 'they were hired after the week this pay run pays',
 };
 
 /** What waits as of this sync, kept on the draft run's row and replaced by every sync with the gate on. */
@@ -343,7 +353,7 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
     if (here) await trx('payroll_pay_lines').where({ id: open.id }).del();
     return { skip: priced.skip, wait: priced.wait, removed: here ? open.id : null };
   }
-  const span = spanOf(cand.key, run.week_start);
+  const { span } = priced;
   if (open) {
     if (here && !changed(open, span, priced.amountCents)) return {};
     await moveLine(trx, open.id, span, priced.amountCents);
@@ -407,7 +417,8 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {
  * carry it, e.g. "December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a pay run dated
  * Feb 16, 2027 or earlier can add it". The limit is a PAY date (dueInRun), not today's date: a run dated inside it can still be
  * worked out and finalized later, so the note states the limit and never says what today allows. Read from the run row
- * (saveWaits). None with either gate off, and none for a gift that is paid, so an old run never says "waits" about a paid gift.
+ * (saveWaits). None with either gate off, none for a gift that is paid, and none for a technician who no longer gets a line
+ * (left, or no longer a field technician), so an old run never says "waits" about a gift that is paid or that no run will pay.
  * A gift whose line is open on another draft still shows here: it is not paid, and on this run it waited.
  */
 async function waitNotes(conn, runId) {
@@ -418,7 +429,9 @@ async function waitNotes(conn, runId) {
   if (!waits.length) return [];
   const paid = new Set((await conn('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
     .whereIn('source_id', waits.map((w) => w.source_id)).select('source_id')).map((line) => line.source_id));
-  const names = new Map((await conn('technicians').whereIn('id', waits.map((w) => w.technician_id)).select('id', 'name')).map((t) => [t.id, t.name]));
+  // only for a technician who still gets a line (recipients): one who left since gets no gift from any run, so nothing waits
+  const names = new Map((await recipients(conn).whereIn('technicians.id', waits.map((w) => w.technician_id))
+    .select('technicians.id', 'technicians.name')).map((t) => [t.id, t.name]));
   return waits.filter((w) => !paid.has(w.source_id) && names.has(w.technician_id))
     .map((w) => {
       const last = lastPayDate(Number(SOURCE_ID_RE.exec(w.source_id)[3]));

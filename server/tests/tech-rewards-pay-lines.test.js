@@ -53,6 +53,17 @@ describe('spanOf: what the gift covers (it must stay inside what payroll_pay_lin
     expect(spanOf('2026', '2027-01-04')).toEqual({ earnedWeekStart: '2027-01-04', coversFrom: '2026-01-01', coversTo: '2026-12-31' });
   });
 
+  test('a technician hired during the year is covered from the hire date; one hired before it, or with none given, from Jan 1', () => {
+    expect(spanOf('2026', '2026-12-07', '2026-06-15')).toEqual({ earnedWeekStart: '2026-12-07', coversFrom: '2026-06-15', coversTo: '2026-12-13' });
+    expect(spanOf('2026', '2026-12-07', '2024-01-10').coversFrom).toBe('2026-01-01');
+    expect(spanOf('2026', '2026-12-07', '2026-01-01').coversFrom).toBe('2026-01-01');
+    expect(spanOf('2026', '2026-12-07', null).coversFrom).toBe('2026-01-01');
+    // hired after the pay week ended: the span is empty, and the sync makes the gift wait for a later week's run
+    const early = spanOf('2026', '2026-12-07', '2026-12-15');
+    expect(early.coversFrom > early.coversTo).toBe(true);
+    expect(spanOf('2026', '2026-12-14', '2026-12-15')).toEqual({ earnedWeekStart: '2026-12-14', coversFrom: '2026-12-15', coversTo: '2026-12-20' });
+  });
+
   test('the span ends in or before its pay week and spreads over whole workweeks for the overtime recalculation', () => {
     for (const week of ['2026-12-07', '2026-12-28', '2027-01-04']) {
       const span = spanOf('2026', week);
