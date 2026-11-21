@@ -499,35 +499,40 @@ async function workedTechnicianIds(conn, start, end) {
   return [...new Set([...daily, ...entries].map((row) => row.technician_id))];
 }
 
-// The same test by day, for the technicians in `ids`: Map of technician id -> Set of the work dates in [start, end] that hold
-// recorded work (a daily summary with worked time, or a time entry that is not voided). Two queries, whatever the span.
-async function workedDatesByTechnician(conn, ids, start, end) {
+// The Monday of a date's Monday-Sunday pay week, as a PostgreSQL date expression (staffWeekStartForWorkDate, in SQL).
+const weekStartSql = (dateSql) => `(${dateSql} - (EXTRACT(ISODOW FROM ${dateSql})::int - 1))`;
+
+// The same test by week, for the technicians in `ids`: Map of technician id -> Set of the pay weeks (their Mondays) in
+// [start, end] that hold recorded work (a daily summary with worked time, or a time entry that is not voided). `start` is a
+// Monday and `end` a Sunday. Two queries, whatever the span, and each returns at most one row per technician per week:
+// PostgreSQL finds the week, so a year of days and time entries is never read or converted here (the callers hold the
+// payroll lock).
+async function workedWeeksByTechnician(conn, ids, start, end) {
   const byTech = new Map(ids.map((id) => [id, new Set()]));
   if (!ids.length) return byTech;
   const daily = await conn('time_entry_daily_summary')
     .whereIn('technician_id', ids).where('work_date', '>=', start).where('work_date', '<=', end)
     .whereRaw(DAILY_WORK_SQL)
-    .select('technician_id', conn.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"));
-  // DISTINCT: a day holds many entries (the shift, every job, every drive), and a span of a year would return them all
+    .distinct('technician_id', conn.raw(`to_char(${weekStartSql('work_date')}, 'YYYY-MM-DD') AS week_start`));
   const entries = await conn('time_entries')
     .whereIn('technician_id', ids).where('status', '!=', 'voided')
     .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
-    .distinct('technician_id', conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
-  for (const row of [...daily, ...entries]) byTech.get(row.technician_id).add(row.work_date);
+    .distinct('technician_id', conn.raw(`to_char(${weekStartSql(STAFF_WORK_DATE_SQL)}, 'YYYY-MM-DD') AS week_start`));
+  for (const row of [...daily, ...entries]) byTech.get(row.technician_id).add(row.week_start);
   return byTech;
 }
 
-// One technician's work dates in [start, end], oldest first. Tech Rewards asks it to see which weeks a line covers still need
-// a finalized check (tech-rewards-pay-lines.js).
-async function workedDates(conn, technicianId, start, end) {
-  return [...(await workedDatesByTechnician(conn, [technicianId], start, end)).get(technicianId)].sort();
+// One technician's pay weeks with recorded work in [start, end] (a Monday to a Sunday), oldest first. Tech Rewards asks it to
+// see which weeks a line covers still need a finalized check (tech-rewards-pay-lines.js).
+async function workedWeeks(conn, technicianId, start, end) {
+  return [...(await workedWeeksByTechnician(conn, [technicianId], start, end)).get(technicianId)].sort();
 }
 
 // GATE_PAYROLL_PAY_LINES: a line's overtime is priced from the approved hours of every
 // week it covers. A covered week that holds worked time but no approved timesheet would
 // price as no hours, and the line would be paid without that week's overtime for good.
 // Map of technician id -> the oldest such week; that technician waits until it is approved.
-// The worked time of every missing week is read at once (workedDatesByTechnician, the test workedTechnicianIds applies to
+// The worked time of every missing week is read at once (workedWeeksByTechnician, the test workedTechnicianIds applies to
 // one week), so a line that covers a year costs the same two queries as a line that covers a week.
 async function lineWeeksWaiting(conn, priced) {
   const missing = [...priced].filter(([, { missingWeeks = [] }]) => missingWeeks.length)
@@ -535,11 +540,10 @@ async function lineWeeksWaiting(conn, priced) {
   const waitingOn = new Map();
   if (!missing.length) return waitingOn;
   const weeks = missing.flatMap(([, own]) => own).sort();
-  const worked = await workedDatesByTechnician(conn, missing.map(([technicianId]) => technicianId),
+  const worked = await workedWeeksByTechnician(conn, missing.map(([technicianId]) => technicianId),
     weeks[0], addStaffWorkDays(weeks[weeks.length - 1], 6));
   for (const [technicianId, own] of missing) {
-    const workedWeeks = new Set([...worked.get(technicianId)].map(staffWeekStartForWorkDate));
-    const week = own.find((candidate) => workedWeeks.has(candidate));
+    const week = own.find((candidate) => worked.get(technicianId).has(candidate));
     if (week) waitingOn.set(technicianId, week);
   }
   return waitingOn;
@@ -1305,7 +1309,8 @@ async function exportCsv(runId, conn = db) {
 }
 
 module.exports = {
-  workedDates,
+  workedWeeks,
+  weekStartSql,
   lineGuardWeek,
   lineOnlyCheckProblem,
   laterFinalCheckExists,

@@ -5,7 +5,7 @@
  *
  *   who is a technician                         recipients() here: W-2, the technician role, and technician-eligibility.js
  *                                               applyAssignable (active, field dispatchable). An admin account gets none.
- *   which days hold recorded work               payroll-runs.js workedDates (the test the pay run itself uses)
+ *   which weeks hold recorded work              payroll-runs.js workedWeeks (the test the pay run itself uses)
  *   which covered week would hold a pay run     payroll-runs.js lineGuardWeek (the two guards a run applies to every pay line)
  *   whether a check can be worked out at all    payroll-runs.js lineOnlyCheckProblem (buildCheck, the pay run's own builder)
  *   whether a later check is already final      payroll-runs.js laterFinalCheckExists (the guard finalize applies to a run)
@@ -47,7 +47,7 @@
  * last week the gift covers (priceCandidate). A technician who can get it but not on
  * this run WAITS (waitOf): a later check of theirs in the tax year is already final, so
  * finalize would refuse a run that holds a check of theirs (laterFinalCheckExists); or an earlier week of the year holds work (a
- * weekly timesheet with minutes, recorded work by workedDates, or paid time off) and has no FINALIZED check; or the pay run's own
+ * weekly timesheet with minutes, recorded work by workedWeeks, or paid time off) and has no FINALIZED check; or the pay run's own
  * line guards would hold a check for the span or for the run's own week (lineGuardWeek: a worked week with no approved
  * timesheet, an automatic clock-out nobody reviewed); or no check can be worked out for them on this run at all
  * (lineOnlyCheckProblem: no pay rate, a rate under the minimum wage). The technician rows are read FOR SHARE under the pay run's lock, so a change to a technician's status,
@@ -154,7 +154,7 @@ const recipients = (trx) => applyAssignable(trx('technicians').where({ 'technici
  * The oldest Monday-Sunday week in [coversFrom, coversTo] that a pay run still has to pay, or null. A week needs a check when it
  * has a weekly timesheet with minutes (what a check is worked out from), paid time off while the pay run pays time off
  * (GATE_PAYROLL_TIME_OFF; with it off a run ignores time off), or recorded work (the pay run's own test, payroll-runs.js
- * workedDates, which counts a shift that has no summary yet) that no approved timesheet settles. A week whose approved
+ * workedWeeks, which counts a shift that has no summary yet) that no approved timesheet settles. A week whose approved
  * timesheet has no minutes and that holds no payable time off gets no check from any run (evaluate), so it is settled: a gift
  * never waits for a check that cannot come. A week is paid when the technician has a FINALIZED check for it in a
  * finalized run. Whole weeks are asked, the weeks a line's overtime is priced from.
@@ -169,14 +169,14 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
       trx.raw('COALESCE(regular_minutes, 0) + COALESCE(overtime_minutes, 0) AS minutes'));
   const approved = new Set(timesheets.filter((row) => row.status === 'approved').map((row) => row.week_start));
   const withMinutes = timesheets.filter((row) => Number(row.minutes) > 0).map((row) => row.week_start);
-  const worked = (await payrollRuns().workedDates(trx, technicianId, from, to)).map(staffWeekStartForWorkDate)
-    .filter((week) => !approved.has(week));
+  // weeks, not days, from PostgreSQL: a year of days is never converted one by one under the payroll lock
+  const worked = (await payrollRuns().workedWeeks(trx, technicianId, from, to)).filter((week) => !approved.has(week));
   const off = timeOffOn()
     ? await trx('payroll_time_off')
       .where({ technician_id: technicianId }).where('work_date', '>=', from).where('work_date', '<=', to).where('minutes', '>', 0)
-      .select(trx.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"))
+      .distinct(trx.raw(`to_char(${payrollRuns().weekStartSql('work_date')}, 'YYYY-MM-DD') AS week_start`))
     : [];
-  const weeks = [...new Set([...withMinutes, ...worked, ...off.map((row) => staffWeekStartForWorkDate(row.work_date))])];
+  const weeks = [...new Set([...withMinutes, ...worked, ...off.map((row) => row.week_start)])];
   if (!weeks.length) return null;
   const paid = new Set((await trx('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')

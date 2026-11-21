@@ -33,6 +33,8 @@ const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
 const { syncTechRewardLines } = require('../services/tech-rewards-pay-lines');
+const { workedWeeks } = require('../services/payroll-runs');
+const { staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
 jest.setTimeout(60000);
 
@@ -353,6 +355,34 @@ postgres('tech rewards pay lines: the December gift', () => {
   });
 
   describe('under the pay run lock', () => {
+    it('reads worked weeks, not days, from PostgreSQL: one Monday for each week, by the ET work date', async () => {
+      const tech = await readyTech('Sample Alpha');
+      const shift = (clockIn, clockOut, status = 'completed') => ({ technician_id: tech, entry_type: 'shift', status, clock_in: clockIn, clock_out: clockOut });
+      await trx('time_entries').insert([
+        shift('2026-06-02T13:00:00Z', '2026-06-02T21:00:00Z'), // Tue Jun 2
+        shift('2026-06-03T13:00:00Z', '2026-06-03T21:00:00Z'), // Wed Jun 3, the same week
+        shift('2026-06-08T01:00:00Z', '2026-06-08T03:00:00Z'), // 9 PM ET on Sun Jun 7: still the week of Jun 1
+        shift('2026-06-15T13:00:00Z', '2026-06-15T21:00:00Z'), // Mon Jun 15
+        shift('2026-06-23T13:00:00Z', '2026-06-23T21:00:00Z', 'voided'), // voided: not work
+      ]);
+      const statements = [];
+      const listen = (query) => statements.push(String(query.sql));
+      database.on('query', listen);
+      let weeks;
+      try {
+        weeks = await workedWeeks(trx, tech, '2025-12-29', '2026-12-13');
+      } finally {
+        database.removeListener('query', listen);
+      }
+      expect(weeks).toEqual(['2026-06-01', '2026-06-15']);
+      // the weeks the JS helper gives for the same ET days
+      expect(['2026-06-02', '2026-06-03', '2026-06-07', '2026-06-15'].map(staffWeekStartForWorkDate))
+        .toEqual(['2026-06-01', '2026-06-01', '2026-06-01', '2026-06-15']);
+      // two queries, and each asks for distinct technician and week pairs
+      expect(statements).toHaveLength(2);
+      expect(statements.every((sql) => /^select distinct /i.test(sql) && /ISODOW/.test(sql))).toBe(true);
+    });
+
     it('reads and locks no technician row for the gift on a run that is dated for none', async () => {
       const tech = await readyTech('Sample Alpha');
       await approvedWeek(tech, '2026-06-01');
