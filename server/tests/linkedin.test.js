@@ -287,16 +287,23 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(postBody.content).toEqual({ media: { id: 'urn:li:image:abc' } });
   });
 
-  test('no link + a failed picture upload → the text still posts, with no content and no imageUrl', async () => {
-    const calls = mockRoutes({ initFails: true });
+  test('no link + a failed picture upload → the text still posts, with no content and no imageUrl; the warning omits the URL', async () => {
+    const calls = mockRoutes();
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
 
-    const res = await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: IMG });
+    // An untrusted host throws with the URL in the message.
+    const res = await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: 'https://evil.example.org/x.jpg?token=s3cret' });
 
     expect(res).toMatchObject({ platform: 'linkedin', success: true });
     expect(res.imageUrl).toBeUndefined();
     const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
     expect(postBody.content).toBeUndefined();
     expect(postBody.commentary).toBe('T');
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('[linkedin] image upload failed'));
+    expect(line).toBeTruthy();
+    expect(line).toContain('untrusted thumbnail URL host');
+    expect(line).not.toContain('evil.example.org');
+    expect(line).not.toContain('s3cret');
   });
 
   test('no imageUrl → no Images API traffic at all (unchanged text+article post)', async () => {

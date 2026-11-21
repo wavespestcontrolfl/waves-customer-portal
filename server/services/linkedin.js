@@ -39,6 +39,10 @@ const ORG_ACLS_URL = 'https://api.linkedin.com/rest/organizationAcls';
 // Article thumbnails are our own CDN-rehosted heroes (~100-300 KB); anything
 // bigger is a misconfiguration, not a legitimate thumbnail.
 const MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024;
+// Upload errors name the caller-supplied image URL (admin publish routes accept
+// any trusted-host URL, query string included); warnings keep the status and
+// reason but never the address.
+const withoutUrls = (msg) => String(msg || '').replace(/https?:\/\/\S+/g, '<url>');
 
 // LinkedIn-API specifics — confirmed against Microsoft Learn Posts API docs
 // (defaultMoniker li-lms-2026-06) on 2026-06. LinkedIn sunsets monthly versions,
@@ -554,7 +558,7 @@ class LinkedInService {
         try {
           article.thumbnail = await this._uploadImageFromUrl(imageUrl, token);
         } catch (err) {
-          logger.warn(`[linkedin] article thumbnail upload failed (posting without image): ${err.message}`);
+          logger.warn(`[linkedin] article thumbnail upload failed (posting without image): ${withoutUrls(err.message)}`);
         }
       }
       body.content = { article };
@@ -567,7 +571,7 @@ class LinkedInService {
       try {
         body.content = { media: { id: await this._uploadImageFromUrl(imageUrl, token) } };
       } catch (err) {
-        logger.warn(`[linkedin] image upload failed (posting text only): ${err.message}`);
+        logger.warn(`[linkedin] image upload failed (posting text only): ${withoutUrls(err.message)}`);
       }
     }
 
