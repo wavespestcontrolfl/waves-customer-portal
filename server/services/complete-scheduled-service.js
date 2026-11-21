@@ -6985,7 +6985,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged, reportAfterPayHold } = require('../services/invoice-issued-closeout');
+            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged, reportAfterPayHold, sameDayPaymentReversed } = require('../services/invoice-issued-closeout');
             // A closeout approved on a card (record_payment) carries the visit's facts as the card showed them: the LOCKED row must still
             // match (service type, scheduled date, status, edit time), or the visit is left open for a person (the payment stays recorded).
             if (issuedInvoiceCloseout.expectedVisit && approvedVisitChanged(lockedSvcRow, issuedInvoiceCloseout.expectedVisit)) {
@@ -7010,6 +7010,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const lockedHold = await reportAfterPayHold(trx, svc.id);
             if (lockedHold && String(lockedHold.id) !== String(lockedIssuedInvoice.id)) {
               throw Object.assign(new Error('visit held on another invoice\'s payment during the issued-invoice closeout'), { code: 'issued_visit_paid_on_other_invoice' });
+            }
+            // A close on a payment on the visit's own day needs that payment still standing on the invoice row locked above
+            // (gate on; pre-push audit round 8): one undone or charged back since the closeout read it leaves the visit open.
+            if (sameDayPaymentReversed(lockedIssuedInvoice, { trigger: issuedInvoiceCloseout.trigger, day: lockedDay, today: lockedToday })) {
+              throw Object.assign(new Error('payment reversed during the issued-invoice closeout'), { code: 'issued_visit_payment_reversed' });
             }
             const lockedRefusal = lockedDay !== serviceDateOnly(svc.scheduled_date)
               ? 'visit_moved'
@@ -9454,6 +9459,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit is held for its report on another invoice\'s payment — it completes on that payment, and stays open.',
             code: 'issued_visit_paid_on_other_invoice',
+          } });
+        }
+        if (err && err.code === 'issued_visit_payment_reversed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit\'s payment was undone while the visit was being closed on it — the visit stays open.',
+            code: 'issued_visit_payment_reversed',
           } });
         }
         if (err && err.code === 'issued_visit_in_progress') {

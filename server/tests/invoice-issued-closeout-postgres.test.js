@@ -1013,6 +1013,31 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(mockCompleteScheduledService).not.toHaveBeenCalled();
   });
 
+  // Pre-push audit round 8: a payment undone or charged back after its closeout started is gone by the time the hold is written.
+  // The visit stays open with its own code, which the retry sweep asks again; it is never closed quietly on the payment. The hold's
+  // write also leaves a visit held on another invoice's payment for that payment. Gate off, the closeout goes on as before.
+  test('report after pay: a payment undone or charged back before the hold is written leaves the visit open (visit_payment_reversed), never closed on it', async () => {
+    const { reportAfterPayHold, recordReportAfterPayHold } = require('../services/invoice-issued-closeout');
+    mockGate.reportAfterPay = true;
+    const svc = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
+    // The payment's closeout runs on a 'paid' trigger, but the invoice is due again.
+    const reversed = await invoice({ status: 'overdue', scheduled_service_id: svc.id, date: TODAY });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: reversed.id, trigger: 'paid', conn: trx, today: TODAY }))
+      .toMatchObject({ closed: false, reason: 'visit_payment_reversed', visitId: svc.id });
+    expect(await reportAfterPayHold(trx, svc.id)).toBeNull();
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    // Held on another invoice's payment, written after this payment's closeout read the visit: left for that payment.
+    const other = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
+    const first = await invoice({ status: 'paid', paid_at: PAID_AT, scheduled_service_id: other.id, date: TODAY });
+    expect(await recordReportAfterPayHold(trx, { visitId: other.id, invoiceId: first.id, today: TODAY })).toBe(true);
+    const second = await invoice({ status: 'paid', paid_at: PAID_AT, scheduled_service_id: other.id, date: TODAY });
+    expect(await recordReportAfterPayHold(trx, { visitId: other.id, invoiceId: second.id, today: TODAY })).toBe('visit_paid_on_other_invoice');
+    // Gate off: the payment's closeout closes the visit, as before the gate.
+    mockGate.reportAfterPay = false;
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: reversed.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ visitId: svc.id });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId)).toEqual([svc.id]);
+  });
+
   // Pre-push audit round 4: a bill made after the payment must not end the hold the payment (and the record_payment card)
   // promised for the day. The verdict reads the payment stamp, so a redelivered payment and the visit-day sweep hold the visit
   // too. Round 5: the next day the later bill's closeout leaves the held visit alone (visit_paid_on_other_invoice), whichever

@@ -319,7 +319,7 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
     try {
       // The payment's closeout: nobody has arrived (the visit is confirmed), so nothing is held.
-      expect(await recordHold(f)).toBe(false);
+      expect(await recordHold(f)).toBeNull();
       const laterId = await laterBill(f, new Date());
       // The office completes the visit with a typed time on site and no recorded start: the completion stamps an arrival
       // 90 minutes back, before the payment.
@@ -411,6 +411,65 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     } finally {
       if (saved === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = saved;
+      await cleanup(f);
+    }
+  });
+
+  // Pre-push audit round 8: the record_payment card said the visit stays open today, and its payment commits before the payment's
+  // closeout runs. The hold is recorded with the payment, in the settlement transaction, so a bill the office adds before that
+  // closeout runs changes nothing: the closeout leaves the visit open, and the technician's completion completes on the payment.
+  test('report after pay: the record_payment card\'s deferred close is held with the payment: a bill added before the payment\'s closeout runs leaves the visit open, and the completion completes on the payment', async () => {
+    const saved = process.env.GATE_REPORT_AFTER_PAY;
+    process.env.GATE_REPORT_AFTER_PAY = 'true';
+    const { chargeInvoiceWithSavedCard } = require('../services/stripe');
+    chargeInvoiceWithSavedCard.mockClear();
+    const closeout = require('../services/invoice-issued-closeout');
+    const { settlementFenceFor, pinnedColumnsOf } = require('../services/intelligence-bar/record-payment-fences');
+    const { recordManualPayment } = require('../services/invoice-manual-payment');
+    // The issued-invoice closeout's own gate (its table is built at module load).
+    const { gates } = require('../config/feature-gates');
+    const closesBefore = gates.invoiceIssuedClosesVisit;
+    gates.invoiceIssuedClosesVisit = true;
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
+    let laterId = null;
+    try {
+      const today = etDateString(new Date());
+      await arrive(f, new Date(Date.now() - 1800000));
+      // The card: the payment would hold the visit, so it names a close deferred past the visit's day, pinned as the card does.
+      const shown = await mockPg('invoices').where({ id: f.invoiceId }).first();
+      const target = await closeout.issuedCloseoutTarget(shown, { conn: mockPg, today, includeDeferred: true });
+      expect(target).toMatchObject({ visitId: f.serviceId, deferred: true });
+      const msOf = (value) => (value ? new Date(value).getTime() : null);
+      const fence = settlementFenceFor({ invoiceId: shown.id, status: shown.status, updatedAtMs: msOf(shown.updated_at), columns: pinnedColumnsOf(shown),
+        closeoutTarget: target.visitId, paymentDate: today,
+        closeout: { visitId: target.visitId, serviceType: target.serviceType || null, date: target.date || null, status: target.status ?? null, updatedAtMs: msOf(target.updatedAt), resuming: false, deferred: true } });
+      expect(fence.closeoutDeferred).toBe(true);
+      // The payment commits; its closeout has not run yet.
+      const ran = jest.spyOn(closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValueOnce({ closed: false, reason: 'error' });
+      await recordManualPayment(f.invoiceId, { method: 'check', reference: '1042', recordedBy: 'Fixture Office', sendReceipt: false,
+        expectedAmountCents: PRICE * 100, settlementFence: fence, requireSelfPay: true });
+      expect(ran).toHaveBeenCalledTimes(1);
+      expect(await closeout.reportAfterPayHold(mockPg, f.serviceId)).toMatchObject({ id: f.invoiceId, status: 'paid' });
+      // The office adds a bill, then the payment's closeout runs: the visit stays open, as the card said.
+      laterId = await laterBill(f, new Date());
+      expect(await closeout.closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', approvedTarget: fence.closeoutTarget, approvedVisit: fence.closeoutVisit }))
+        .toMatchObject({ closed: false, reason: 'visit_scheduled_today', visitId: f.serviceId });
+      expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first('status')).status).toBe('on_site');
+      // The technician completes on the payment: the later bill stays the office's.
+      expect((await complete(f, {})).status).toBe(200);
+      const record = await mockPg('service_records').where({ customer_id: f.customerId }).first('id');
+      const byId = Object.fromEntries((await invoicesOf(f)).map((row) => [row.id, row]));
+      expect(byId[f.invoiceId]).toMatchObject({ status: 'paid', service_record_id: record.id });
+      expect(byId[laterId]).toMatchObject({ status: 'draft', service_record_id: null });
+      expect(textsWithPayLink()).toEqual([]);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    } finally {
+      gates.invoiceIssuedClosesVisit = closesBefore;
+      if (saved === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = saved;
+      await mockPg('audit_log').whereIn('resource_id', [f.invoiceId, f.customerId, ...(laterId ? [laterId] : [])]).del().catch(() => {});
+      await mockPg('activity_log').where({ customer_id: f.customerId }).del().catch(() => {});
+      await mockPg('invoice_followup_sequences').where({ customer_id: f.customerId }).del().catch(() => {});
+      await mockPg('payments').where({ customer_id: f.customerId }).del().catch(() => {});
       await cleanup(f);
     }
   });

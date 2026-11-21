@@ -27,6 +27,7 @@
  *       expectedAmountCents, which for a part is the card's pinned amount owed (never the part): it must equal owedCentsSeen.
  *       The function also carries `closeoutTarget` (the visit the card said the payment would complete, or 'none') and `closeoutVisit`
  *       (that visit's facts as the card showed them): the settlement pins both and the closeout re-asserts the facts under the visit's lock.
+ *       `closeoutDeferred` (GATE_REPORT_AFTER_PAY): the card said the visit stays open today; the settlement records the hold.
  */
 const { etDateString } = require('../../utils/datetime-et');
 
@@ -102,6 +103,9 @@ function settlementFenceFor(pin) {
     return true;
   };
   fence.closeoutTarget = pin.closeoutTarget;
+  // GATE_REPORT_AFTER_PAY (pre-push audit round 8): the card said the visit stays open today, and the run under the lock asked that
+  // verdict again, so the settlement records the hold in its own transaction (invoice-manual-payment.js).
+  fence.closeoutDeferred = Boolean(pin.closeout?.deferred);
   // The carded visit's facts, pinned with the target and re-asserted by the closeout under the visit's lock. A deferred close pins no
   // edit time: the visit stays with its technician for the rest of its day, so an edit then is expected. A new date, service type or
   // status still leaves it open.

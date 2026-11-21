@@ -262,36 +262,62 @@ async function reportAfterPayWouldHold(conn, { visit, invoice, today }) {
   return ids.length > 0 && ids.every((id) => id === String(invoice.id));
 }
 
-// The payment's closeout records the hold. Under the visit's mint lock (every
-// invoice writer of the visit takes it, and so does the issued closeout's
-// completion), it reads the visit's hold, the visit and the invoice again and
-// records the row only if this payment holds the visit now. True: the visit is
-// held on this payment (recorded now, or before). False: it is not, and the
-// closeout judges the visit as with the gate off (its completion re-reads the
-// hold under the same lock). A failed read or write throws: the closeout
-// audits an error and the retry sweep asks again.
+// The hold's write, on a transaction that already keeps the visit's bills and
+// its hold readers in order: the payment's closeout (recordReportAfterPayHold
+// below, under the visit's mint lock, which every invoice writer of the visit
+// and the issued closeout's completion take), or the record_payment
+// settlement for a close its card deferred (invoice-manual-payment.js, under
+// the invoice and visit row locks it took before its fence; a new bill on the
+// visit waits on the visit row: pre-push audit round 8). It reads the visit's
+// hold, the visit and the invoice again and records the row only if this
+// payment holds the visit now. Returns true when the visit is held on this
+// payment (recorded now, or before). Returns a refusal code when the visit
+// stays open for another reason: 'visit_paid_on_other_invoice' (held on
+// another invoice's payment) or 'visit_payment_reversed' (the invoice is no
+// longer settled: its payment was undone or charged back after the closeout
+// read it, round 8). Returns null when this payment no longer holds the visit
+// (a bill added, the visit moved or closed, the gate off): the closeout then
+// judges the visit as with the gate off, and its completion re-reads the hold
+// and the payment under its own locks. A failed read or write throws.
+async function writeReportAfterPayHold(trx, { visitId, invoiceId, today }) {
+  if (!reportAfterPayLive()) return null;
+  const held = await reportAfterPayHold(trx, visitId);
+  if (held) return String(held.id) === String(invoiceId) ? true : 'visit_paid_on_other_invoice';
+  const visit = await trx('scheduled_services').where({ id: visitId }).first('id', 'status', 'scheduled_date');
+  const invoice = await trx('invoices').where({ id: invoiceId })
+    .first('id', 'status', 'scheduled_service_id', trx.raw(`${paidAtMsSql('paid_at')} as paid_at_ms`));
+  if (!visit || !invoice || String(invoice.scheduled_service_id) !== String(visitId)) return null;
+  if (!invoice.paid_at_ms || !SETTLED_INVOICE_STATUSES.includes(String(invoice.status))) return 'visit_payment_reversed';
+  if (!(await reportAfterPayWouldHold(trx, { visit, invoice, today }))) return null;
+  await require('./audit-log').recordAuditEvent({
+    actor_type: 'system',
+    action: REPORT_AFTER_PAY_HOLD_ACTION,
+    resource_type: 'scheduled_services',
+    resource_id: visitId,
+    metadata: { invoiceId: String(invoiceId), paidAtMs: invoice.paid_at_ms, day: today },
+    critical: true,
+    trx,
+  });
+  return true;
+}
+
+// The payment's closeout records the hold, under the visit's mint lock.
 async function recordReportAfterPayHold(conn, { visitId, invoiceId, today }) {
   return conn.transaction(async (trx) => {
     await require('./scheduled-invoice-mint').acquireScheduledInvoiceMintLock(trx, visitId);
-    const held = await reportAfterPayHold(trx, visitId);
-    if (held) return String(held.id) === String(invoiceId);
-    const visit = await trx('scheduled_services').where({ id: visitId }).first('id', 'status', 'scheduled_date');
-    const invoice = await trx('invoices').where({ id: invoiceId })
-      .first('id', 'status', 'scheduled_service_id', trx.raw(`${paidAtMsSql('paid_at')} as paid_at_ms`));
-    if (!visit || !invoice?.paid_at_ms || String(invoice.scheduled_service_id) !== String(visitId)
-      || !SETTLED_INVOICE_STATUSES.includes(String(invoice.status))) return false;
-    if (!(await reportAfterPayWouldHold(trx, { visit, invoice, today }))) return false;
-    await require('./audit-log').recordAuditEvent({
-      actor_type: 'system',
-      action: REPORT_AFTER_PAY_HOLD_ACTION,
-      resource_type: 'scheduled_services',
-      resource_id: visitId,
-      metadata: { invoiceId: String(invoiceId), paidAtMs: invoice.paid_at_ms, day: today },
-      critical: true,
-      trx,
-    });
-    return true;
+    return writeReportAfterPayHold(trx, { visitId, invoiceId, today });
   });
+}
+
+// GATE_REPORT_AFTER_PAY (pre-push audit round 8): a close on a payment on the
+// visit's own day needs that payment still standing, on the invoice row the
+// completion holds locked. A payment undone or charged back after the
+// closeout's unlocked reads leaves the visit open (the completion refuses
+// `issued_visit_payment_reversed`, which the retry sweep asks again). Gate
+// off: false, so the close is as before the gate.
+function sameDayPaymentReversed(invoice, { trigger, day, today }) {
+  return trigger === 'paid' && day === today && reportAfterPayLive()
+    && !SETTLED_INVOICE_STATUSES.includes(String(invoice?.status));
 }
 
 // The completion's read of the hold: the held invoice, linked to the service
@@ -1004,18 +1030,26 @@ async function refuseUnapprovedTarget(run) {
 
 // Phase 2c — GATE_REPORT_AFTER_PAY: a visit this payment holds (the
 // resolver's `deferred`). Where the gate off would close it, the closeout
-// records the hold instead (recordReportAfterPayHold) and leaves the visit
+// records the hold instead (recordReportAfterPayHold; a record_payment card's
+// deferred close is already recorded by its settlement) and leaves the visit
 // open, audited `visit_scheduled_today`; the retry sweep closes it on this
 // payment once its day has passed. After the approved-target refusal, so a
-// visit the card did not name is never held. If the locked re-read finds the
-// payment no longer holds the visit (a bill added, the visit moved or closed,
-// the gate off), the visit closes as with the gate off: the completion
-// re-checks the day, the job timer and the hold under its own locks.
+// visit the card did not name is never held. The locked re-read can leave the
+// visit open for another reason, with its own code: held on another invoice's
+// payment, or this payment undone or charged back since the resolver read it
+// (pre-push audit round 8: that visit stays open, never closed on a payment
+// that is gone). If it finds the payment no longer holds the visit (a bill
+// added, the visit moved or closed, the gate off), the visit closes as with
+// the gate off: the completion re-checks the day, the job timer, the hold and
+// the payment under its own locks.
 async function holdForReport(run) {
-  if (!run.deferred || !(await recordReportAfterPayHold(run.conn, { visitId: run.svc.id, invoiceId: run.invoice.id, today: run.today }))) return null;
-  logger.info(`[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} held for its report (visit_scheduled_today)`);
-  const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code: 'visit_scheduled_today' });
-  return { closed: false, reason: 'visit_scheduled_today', visitId: run.svc.id, audited };
+  if (!run.deferred) return null;
+  const held = await recordReportAfterPayHold(run.conn, { visitId: run.svc.id, invoiceId: run.invoice.id, today: run.today });
+  if (!held) return null;
+  const code = held === true ? 'visit_scheduled_today' : held;
+  logger.info(`[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${held === true ? 'held for its report' : 'left open'} (${code})`);
+  const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code });
+  return { closed: false, reason: code, visitId: run.svc.id, audited };
 }
 
 // Phase 3 — the canonical completion in its quiet backfill posture: no
@@ -1150,7 +1184,9 @@ module.exports = {
   issuedCloseoutVisitRefusal,
   reportAfterPayHold,
   reportAfterPayWouldHold,
+  writeReportAfterPayHold,
   recordReportAfterPayHold,
+  sameDayPaymentReversed,
   linkReportAfterPayHold,
   reportAfterPayHeldVisitIds,
   REPORT_AFTER_PAY_HOLD_ACTION,
