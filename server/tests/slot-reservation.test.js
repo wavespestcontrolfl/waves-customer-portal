@@ -549,8 +549,8 @@ describe('slot reservation helpers', () => {
       // remaining row instead of passing with no read.
       describe('a far-south stamp no zone row carries any more', () => {
         const PC_EMPTY = { id: 'zone-pc', zone_name: 'Port Charlotte', cities: [] };
-        const stopConn = (stopRows) => jest.fn((table) => {
-          if (table === 'service_zones') return { select: jest.fn().mockResolvedValue([SARASOTA, VENICE]) };
+        const stopConn = (stopRows, zones = [SARASOTA, VENICE]) => jest.fn((table) => {
+          if (table === 'service_zones') return { select: jest.fn().mockResolvedValue(zones) };
           if (table === 'scheduled_services') return makeStopReadBuilder(stopRows);
           throw new Error(`unexpected table ${table}`);
         });
@@ -565,7 +565,17 @@ describe('slot reservation helpers', () => {
           await expect(holdKeepsSouthDay(stopConn(stopRows), { ...ARGS, stamp: 'port charlotte' })).resolves.toBe(kept);
         });
 
-        test('zoneOfHoldStamp: the stamp\'s own row first; else a funneled row of the same pool, one with cities first; else none', () => {
+        // No far-south zone row is left at all (pre-push P1 on 266b6268b1): the stamp stands for itself, and the stops
+        // that carry a far-south stamp still count.
+        test.each([
+          ['a rival truck\'s stamped stop holds the day: refused', [veniceStop('tech-2')], false],
+          ['its own truck is on the day too: kept', [veniceStop('tech-1'), veniceStop('tech-2')], true],
+        ])('the real check with no far-south zone row left, %s', async (_label, stopRows, kept) => {
+          process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+          await expect(holdKeepsSouthDay(stopConn(stopRows, [SARASOTA]), { ...ARGS, stamp: 'port charlotte' })).resolves.toBe(kept);
+        });
+
+        test('zoneOfHoldStamp: the stamp\'s own row first; else a funneled row of the same pool, one with cities first; else the far-south stamp itself; else none', () => {
           const { zoneOfHoldStamp } = funnel;
           // Its own row, even with no cities: the row its list funneled by.
           expect(zoneOfHoldStamp([VENICE, PC_EMPTY], 'port charlotte')).toBe(PC_EMPTY);
@@ -575,7 +585,11 @@ describe('slot reservation helpers', () => {
           expect(zoneOfHoldStamp([SARASOTA, PC_EMPTY], 'venice')).toBe(PC_EMPTY);
           // Two pool rows match a legacy compound stamp: the one with cities.
           expect(zoneOfHoldStamp([PC_EMPTY, VENICE], 'venice_north_port')).toBe(VENICE);
+          // No funneled row left: a far-south stamp stands for itself, with no cities.
+          expect(zoneOfHoldStamp([SARASOTA], 'port charlotte')).toEqual({ id: null, zone_name: 'port charlotte', cities: [] });
+          expect(funnel.isFunnelZone(zoneOfHoldStamp([], 'venice'))).toBe(true);
           // Not a far-south stamp: no row, also for a compound of a zone that is not funneled.
+          expect(zoneOfHoldStamp([SARASOTA], 'bradenton')).toBeNull();
           expect(zoneOfHoldStamp([SARASOTA, VENICE], 'bradenton')).toBeNull();
           expect(zoneOfHoldStamp([SARASOTA, VENICE], 'sarasota_east')).toBeNull();
           expect(zoneOfHoldStamp([SARASOTA, VENICE], '')).toBeNull();
