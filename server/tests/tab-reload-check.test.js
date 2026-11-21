@@ -87,12 +87,28 @@ describe('runTabReloadCheck', () => {
     expect(sent.headline.length).toBeLessThanOrEqual(60);
     expect(sent.summary.length).toBeLessThanOrEqual(110);
     expect(sent.text).toContain('6 staff page views by 2 staff members');
-    expect(sent.text).toContain('Since the last check that finished, 6 staff page views');
+    // The window, in Eastern time (the formatter's space before PM is not a plain one).
+    expect(sent.text).toMatch(/^From Thu, Nov 19, 11:50\sPM to Fri, Nov 20, 11:50\sPM ET, 6 staff page views by 2 staff members ran/);
+    expect(sent.summary).toMatch(/^6 staff page views up to Fri, Nov 20, 11:50\sPM ET ran an out-of-date build/);
     expect(sent.text).toContain('- reloaded (3): three reloads for the live build');
     expect(sent.text).toContain('- no name (3): the move was due a reload');
     expect(sent.text).toContain('- pipeline: 5\n- dashboard: 1');
     expect(result.delivery).toEqual({ ok: true, channel: 'in_app', id: 'n1' });
     expect(markStore.set.mock.calls).toEqual([[END]]);
+  });
+
+  // A standing row with unchanged text is left as it is, also when staff
+  // marked it done (notifyAdmin, refreshOnDedupe). So the text names the window.
+  test('a later night with the same totals changes the text; a second run on the same window does not', async () => {
+    const sameRows = () => rows([{ reload_hold: null, page_key: 'pipeline', technician_id: TECH_A, views: 1 }]);
+    await run({ readRows: sameRows() });
+    await run({ readRows: sameRows() });
+    markStore.get.mockResolvedValue(END);
+    await run({ readRows: sameRows(), now: new Date('2026-11-22T04:51:02Z') });
+
+    const [first, again, nextNight] = deliverOpsDigest.mock.calls.map(([sent]) => [sent.summary, sent.text, sent.html]);
+    expect(again).toEqual(first);
+    nextNight.forEach((part, i) => expect(part).not.toBe(first[i]));
   });
 
   // The mark moves only once a window is handled, so the next run reads again

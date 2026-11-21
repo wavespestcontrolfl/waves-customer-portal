@@ -25,7 +25,7 @@
 // own mark of how far it has read (system_settings).
 
 const db = require('../models/db');
-const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, addETDays, formatETDayDate, formatETTime } = require('../utils/datetime-et');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const { deliverOpsDigest, resolveOpsDigest } = require('./ops-digest');
@@ -117,17 +117,21 @@ function summarize(rows) {
   return { views, people: people.size, names: ranked(names), pages: ranked(pages) };
 }
 
-function composeDigest({ views, people, names, pages }) {
+// The text names the window it reports. So a later window with the same
+// totals is a change to the standing row, and opens again a row that staff
+// marked done; a second run on the same window is no change.
+function composeDigest({ views, people, names, pages }, { start, end }) {
   const s = views === 1 ? '' : 's';
   const who = `${people} staff member${people === 1 ? '' : 's'}`;
-  const lead = `Since the last check that finished, ${views} staff page view${s} by ${who} ran an out-of-date portal build that should have reloaded.`;
+  const when = (at) => `${formatETDayDate(at)}, ${formatETTime(at)}`;
+  const lead = `From ${when(start)} to ${when(end)} ET, ${views} staff page view${s} by ${who} ran an out-of-date portal build that should have reloaded.`;
   const causeLine = ([name, n]) => `${name === 'none' ? 'no name' : name} (${n}): ${CAUSES[name]}`;
   const pageLine = ([page, n]) => `${page}: ${n}`;
   const source = 'Rows: admin_usage_events with stale_build true (routes/admin-usage.js).';
   return {
     subject: `FIX: ${views} staff page view${s} missed a reload to the live portal build`,
     headline: 'System — fix the reload of out-of-date staff tabs',
-    summary: `${views} staff page view${s} since the last finished check ran an out-of-date build that should have reloaded.`,
+    summary: `${views} staff page view${s} up to ${when(end)} ET ran an out-of-date build that should have reloaded.`,
     text: [lead, '', 'By cause:', ...names.map((e) => `- ${causeLine(e)}`), '', 'By page:', ...pages.map((e) => `- ${pageLine(e)}`), '', source].join('\n'),
     html: [
       `<p>${esc(lead)}</p>`,
@@ -138,8 +142,8 @@ function composeDigest({ views, people, names, pages }) {
   };
 }
 
-function postDigest(found, mailer) {
-  const composed = composeDigest(found);
+function postDigest(found, window, mailer) {
+  const composed = composeDigest(found, window);
   return deliverOpsDigest({
     fallOff: true, // retired on the first clean run (retireRow)
     key: OPS_KEY,
@@ -204,7 +208,7 @@ async function runTabReloadCheck({ readRows = readMissedReloads, mailer = sendgr
     return { views: 0 };
   }
   logger.warn(`[tab-reload-check] ${found.views} out-of-date staff page view(s) missed a reload`);
-  const delivery = await postDigest(found, mailer);
+  const delivery = await postDigest(found, { start, end }, mailer);
   if (!delivery || delivery.ok !== false) await markStore.set(end);
   return { views: found.views, delivery };
 }
