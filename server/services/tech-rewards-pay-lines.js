@@ -63,7 +63,9 @@
  */
 const { recordAuditEvent } = require('./audit-log');
 const { applyAssignable } = require('./technician-eligibility');
-const { KIND_WORDS, TECH_REWARDS_SOURCE } = require('./payroll-pay-lines');
+const {
+  KIND_WORDS, TECH_REWARDS_SOURCE, techRewardsSourceId, techRewardsOwnKey, techRewardsOwnedSql,
+} = require('./payroll-pay-lines');
 const { payrollPayLinesLive, techRewardsPayLinesLive, payrollTimeOffLive } = require('../config/feature-gates');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
@@ -144,18 +146,16 @@ function dueInRun(payDate) {
   return due;
 }
 
-const sourceIdOf = (kind, technicianId, key) => `${kind}:${technicianId}:${key}`;
+const sourceIdOf = techRewardsSourceId;
 
 /**
- * The parts of a pay line's source key when the WHOLE key is one this sync writes: the Tech Rewards source type, and a source id
- * of the line's own kind, its own technician and a year. Null for any other line: one with no source, another source type, or
- * the Tech Rewards source type with a source id that names another kind, another technician or no year. Pure.
+ * { kind, key } when the sync owns the pay line, else null. The rule has one home, payroll-pay-lines.js techRewardsOwnKey
+ * (and techRewardsOwnedSql for a query): the WHOLE source key, compared exactly. Every read, match, move and removal in this
+ * file goes through one of the two, so a row somebody made by hand with the Tech Rewards source type is never the sync's.
  */
 function ownKeyOf(line) {
-  if (line.source_type !== SOURCE_TYPE) return null;
-  const match = SOURCE_ID_RE.exec(line.source_id || '');
-  const own = match && match[1] === line.kind && match[2].toLowerCase() === String(line.technician_id).toLowerCase();
-  return own ? { kind: match[1], key: match[3] } : null;
+  const own = techRewardsOwnKey(line);
+  return own ? { kind: own.kind, key: own.year } : null;
 }
 
 /** The last pay date a run can carry the gift of `year` on: LOOKBACK_DAYS after the gift date. Pure. */
@@ -299,9 +299,9 @@ async function audit(trx, actorId, run, metadata) {
   });
 }
 
-/** Gate off: every open Tech Rewards line comes off. Paid lines stay. Returns the ids removed. */
+/** Gate off: every open line the sync owns comes off. Paid lines stay, and so does a hand-made row. Returns the ids removed. */
 async function dropOpenLines(trx, lock) {
-  const query = trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' }).select('id');
+  const query = trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' }).whereRaw(techRewardsOwnedSql()).select('id');
   if (lock) query.forUpdate();
   const ids = (await query).map((row) => row.id);
   if (ids.length) await trx('payroll_pay_lines').whereIn('id', ids).del();
@@ -309,13 +309,13 @@ async function dropOpenLines(trx, lock) {
 }
 
 /**
- * Deletes the OPEN Tech Rewards lines of one pay week. A voided run takes its lines with it (call it after payroll-pay-lines.js
- * reopenLinesOfRun, so the paid ones are open again), and a finalized run keeps none it did not pay (call it after
- * markLinesPaid). The next run dated for a deleted line writes it again. Returns the ids removed, for the caller's audit event.
+ * Deletes the OPEN Tech Rewards lines the sync owns in one pay week (never a hand-made row). A voided run takes its lines
+ * with it (call it after payroll-pay-lines.js reopenLinesOfRun, so the paid ones are open again), and a finalized run keeps
+ * none it did not pay (call it after markLinesPaid). The next run dated for a deleted line writes it again. Returns the ids removed, for the caller's audit event.
  */
 async function dropRewardLinesOfWeek(trx, weekStart) {
   const rows = await trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open', earned_week_start: weekStart })
-    .del().returning('id');
+    .whereRaw(techRewardsOwnedSql()).del().returning('id');
   return rows.map((row) => (row && row.id ? row.id : row));
 }
 

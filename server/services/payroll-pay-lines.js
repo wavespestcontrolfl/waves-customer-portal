@@ -34,8 +34,39 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // removed by hand: the pay run works them out, and a hand-made one would pay a bonus the plan never earned.
 const KINDS = ['review_bonus', 'commission', 'health_allowance', 'hsa_employer'];
 const TECH_REWARD_KINDS = ['season_bonus', 'stay_bonus', 'december_gift'];
-// source_type of the lines the pay run's Tech Rewards sync writes and owns (tech-rewards-pay-lines.js).
+// source_type of the lines the pay run's Tech Rewards sync writes (tech-rewards-pay-lines.js).
 const TECH_REWARDS_SOURCE = 'tech_rewards';
+// The kinds that sync writes today. The season bonus and the stay bonus come with part 3.
+const TECH_REWARDS_SYNC_KINDS = ['december_gift'];
+// The source id of the sync's line for one technician and one year.
+const techRewardsSourceId = (kind, technicianId, year) => `${kind}:${technicianId}:${year}`;
+
+/**
+ * OWNERSHIP of a Tech Rewards line: the one rule for every place that pays, moves, removes or counts one. The sync owns a
+ * line only when its WHOLE source key is the sync's: the Tech Rewards source type, a kind the sync writes, and a source id
+ * that is exactly techRewardsSourceId(the row's own kind, the row's own technician id as PostgreSQL prints it, a 4-digit
+ * year). The comparison is exact, case included: the unique source key is case-sensitive text, so a key in another case is
+ * another key. Any other row (no source, another source type, or the Tech Rewards source type with any other source id) is a
+ * line somebody made by hand. It carries forward and is paid like every manual line, and the sync never matches, moves or
+ * removes it.
+ * techRewardsOwnKey(line): { kind, year } or null, for a row with technician_id, kind, source_type and source_id. Pure.
+ * techRewardsOwnedSql(alias): the same test as SQL text for payroll_pay_lines, a boolean that is never null (so NOT is safe
+ * on a row with no source). It holds no value from a request: constants and column names only.
+ */
+function techRewardsOwnKey(line) {
+  if (line.source_type !== TECH_REWARDS_SOURCE || !TECH_REWARDS_SYNC_KINDS.includes(line.kind)) return null;
+  const year = String(line.source_id || '').slice(-4);
+  if (!/^[0-9]{4}$/.test(year)) return null;
+  return line.source_id === techRewardsSourceId(line.kind, line.technician_id, year) ? { kind: line.kind, year } : null;
+}
+
+function techRewardsOwnedSql(alias = null) {
+  const col = (name) => (alias ? `${alias}.${name}` : name);
+  const kinds = TECH_REWARDS_SYNC_KINDS.map((kind) => `'${kind}'`).join(', ');
+  return `(${col('source_type')} IS NOT NULL AND ${col('source_type')} = '${TECH_REWARDS_SOURCE}' AND ${col('kind')} IN (${kinds})`
+    + ` AND right(${col('source_id')}, 4) ~ '^[0-9]{4}$'`
+    + ` AND ${col('source_id')} = ${col('kind')} || ':' || ${col('technician_id')}::text || ':' || right(${col('source_id')}, 4))`;
+}
 const STATUSES = ['open', 'paid', 'voided'];
 const KIND_WORDS = {
   review_bonus: 'Review bonus',
@@ -237,12 +268,12 @@ async function openLinesFor(conn, end, { lock = false } = {}) {
     .join('technicians as t', 't.id', 'l.technician_id')
     .where('l.status', 'open')
     .where('l.earned_week_start', '<=', end)
-    // A line the Tech Rewards sync wrote is paid by the run of its own earned week only (the run that wrote it): a later run
-    // never picks up one that belongs to an earlier week (tech-rewards-pay-lines.js). Every other line carries forward as
-    // before, whatever its kind, also one with no source.
+    // A line the Tech Rewards sync owns (techRewardsOwnedSql: its whole source key) is paid by the run of its own earned week
+    // only (the run that wrote it): a later run never picks up one that belongs to an earlier week
+    // (tech-rewards-pay-lines.js). Every other line carries forward as before, whatever its kind: one with no source, and
+    // also a hand-made row that carries the Tech Rewards source type with a source id that is not the sync's.
     .where(function ownWeekOnly() {
-      this.whereNull('l.source_type').orWhereNot('l.source_type', TECH_REWARDS_SOURCE)
-        .orWhere('l.earned_week_start', addStaffWorkDays(end, -6));
+      this.whereRaw(`NOT ${techRewardsOwnedSql('l')}`).orWhere('l.earned_week_start', addStaffWorkDays(end, -6));
     })
     .where('t.employment_type', 'w2')
     .orderBy([{ column: 'l.earned_week_start' }, { column: 'l.created_at' }, { column: 'l.id' }]);
@@ -397,6 +428,10 @@ module.exports = {
   KINDS,
   TECH_REWARD_KINDS,
   TECH_REWARDS_SOURCE,
+  TECH_REWARDS_SYNC_KINDS,
+  techRewardsSourceId,
+  techRewardsOwnKey,
+  techRewardsOwnedSql,
   KIND_WORDS,
   payLinesOn,
   listPayLines,

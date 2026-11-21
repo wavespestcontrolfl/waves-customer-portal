@@ -33,6 +33,7 @@ const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
 const { syncTechRewardLines } = require('../services/tech-rewards-pay-lines');
+const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
 const { workedWeeks } = require('../services/payroll-runs');
 const { staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
@@ -829,6 +830,114 @@ postgres('tech rewards pay lines: the December gift', () => {
       await recompute(run.id);
       expect((await trx('payroll_pay_lines').where({ kind: 'december_gift' })).map((r) => Number(r.amount_cents)).sort()).toEqual([12345, 12345, GIFT]);
       expect((await syncEventOf(run.id, 'waits')).flatMap((m) => m.waits).filter((w) => w.reason !== 'other_gift_line')).toEqual([]);
+    });
+
+    it('has one ownership rule: the SQL form and the JS form pick the same rows, the sync\'s own keys only', async () => {
+      const tech = await readyTech('Sample Alpha');
+      const other = await readyTech('Sample Bravo');
+      const base = {
+        technician_id: tech, kind: 'december_gift', amount_cents: 100, earned_week_start: GIFT_WEEK, covers_from: GIFT_WEEK, covers_to: '2026-12-13',
+        source_type: 'tech_rewards',
+      };
+      const own = [`december_gift:${tech}:2026`, `december_gift:${tech}:2031`];
+      const rows = [
+        ...own.map((source_id) => ({ source_id })),
+        { source_id: `december_gift:${tech.toUpperCase()}:2027` }, // the id in capitals
+        { source_id: `DECEMBER_GIFT:${tech}:2028` },
+        { source_id: `december_gift:${other}:2026` }, // another technician's key
+        { source_id: `december_gift:${tech}:gift` },
+        { source_id: `december_gift:${tech}:12026` },
+        { source_id: `december_gift:${tech}:2026 ` },
+        { source_id: ` december_gift:${tech}:2026` },
+        { source_id: 'x' },
+        { source_id: `stay_bonus:${tech}:2026`, kind: 'stay_bonus' }, // a kind the sync does not write
+        { source_id: `commission:${tech}:2026`, kind: 'commission' },
+        { source_id: `december_gift:${tech}:2026`, source_type: 'commission_payment' }, // another source type
+        { source_id: null, source_type: null }, // no source
+      ];
+      expect(tech.toUpperCase()).not.toBe(tech);
+      await trx('payroll_pay_lines').insert(rows.map((row) => ({ ...base, ...row })));
+      const lines = () => trx('payroll_pay_lines').where({ technician_id: tech });
+      const all = await lines().select('technician_id', 'kind', 'source_type', 'source_id');
+      const bySql = (await lines().whereRaw(techRewardsOwnedSql()).select('source_id')).map((row) => row.source_id).sort();
+      const notBySql = await lines().whereRaw(`NOT ${techRewardsOwnedSql()}`).select('source_id'); // never null: the row with no source too
+      expect(all).toHaveLength(rows.length);
+      expect(bySql).toEqual(own);
+      expect(all.filter((row) => techRewardsOwnKey(row)).map((row) => row.source_id).sort()).toEqual(own);
+      expect(notBySql).toHaveLength(rows.length - own.length);
+      // and with a table alias, as the pay run reads it
+      const aliased = await trx('payroll_pay_lines as l').where('l.technician_id', tech).whereRaw(techRewardsOwnedSql('l')).select('l.source_id');
+      expect(aliased.map((row) => row.source_id).sort()).toEqual(own);
+    });
+
+    it('never removes or strands a hand-made row with the Tech Rewards source type: it carries forward, and a gate off, a finalize and a void all leave it', async () => {
+      const alpha = await readyTech('Sample Alpha'); // W-2: the row is paid like any manual line
+      const bravo = await readyTech('Sample Bravo'); // W-2, nothing in the way: gets the sync's own line
+      const zulu = await readyTech('Sample Zulu', { employment_type: '1099' }); // no pay run pays a contractor's line
+      await approvedWeek(alpha, GIFT_WEEK);
+      await approvedWeek(bravo, GIFT_WEEK);
+      const row = { kind: 'december_gift', amount_cents: 12345, source_type: 'tech_rewards' };
+      // Alpha's row was earned in an earlier week that no run paid; Zulu's sits in the gift week and no run pays it
+      const [a] = await trx('payroll_pay_lines').insert({
+        ...row, technician_id: alpha, earned_week_start: EARLY_WEEK, covers_from: EARLY_WEEK, covers_to: '2026-12-06', source_id: `december_gift:${alpha}:gift`,
+      }).returning('id');
+      const [z] = await trx('payroll_pay_lines').insert({
+        ...row, technician_id: zulu, earned_week_start: GIFT_WEEK, covers_from: GIFT_WEEK, covers_to: '2026-12-13', source_id: `december_gift:${zulu}:gift`,
+      }).returning('id');
+      const handMade = async () => (await trx('payroll_pay_lines').whereIn('id', [a.id || a, z.id || z]).orderBy('amount_cents').orderBy('technician_id'))
+        .map((line) => [line.technician_id, line.status, dateOf(line.earned_week_start), Number(line.amount_cents)]).sort();
+      const before = await handMade();
+      const ownOf = async (technicianId) => (await linesOf(technicianId)).filter((line) => techRewardsOwnKey(line));
+
+      // carried forward to the first run that can pay it, as a manual line is; the sync's own line is on the same run
+      const run = await draft(GIFT_WEEK);
+      expect(checkOf(run, alpha).techRewardsCents).toBe(12345);
+      expect(checkOf(run, bravo).techRewardsCents).toBe(GIFT);
+      expect(await ownOf(alpha)).toHaveLength(0); // no 300.00 beside the hand-made row
+      expect(await ownOf(bravo)).toHaveLength(1);
+      expect(await handMade()).toEqual(before);
+
+      // gate off: the sync's own open line comes off, the hand-made rows stay and Alpha's still rides on the check
+      delete process.env.GATE_TECH_REWARDS_PAY_LINES;
+      const off = await recompute(run.id);
+      expect(await ownOf(bravo)).toHaveLength(0);
+      expect(checkOf(off, alpha).techRewardsCents).toBe(12345);
+      expect(await handMade()).toEqual(before);
+      expect((await syncEventOf(run.id, 'gate'))[0]).toMatchObject({ gate: 'off', removed_count: 1 });
+
+      // finalize: Alpha's row is paid with the check; Zulu's row, open in that week and not paid, is not removed
+      process.env.GATE_TECH_REWARDS_PAY_LINES = 'true';
+      await recompute(run.id);
+      await finalize(run.id);
+      expect(await handMade()).toEqual([[alpha, 'paid', EARLY_WEEK, 12345], [zulu, 'open', GIFT_WEEK, 12345]].sort());
+      expect((await ownOf(bravo)).map((line) => line.status)).toEqual(['paid']);
+
+      // void: the run takes the sync's own line with it; the hand-made rows are open again, where they were
+      await voidRun(run.id);
+      expect(await ownOf(bravo)).toHaveLength(0);
+      expect(await handMade()).toEqual(before);
+    });
+
+    it('holds the gift when a paid gift row holds the same key in another letter case: no second 300.00', async () => {
+      const tech = await readyTech('Sample Alpha');
+      await approvedWeek(tech, GIFT_WEEK);
+      const paidRun = await paidWeek(tech, EARLY_WEEK);
+      const paidCheck = await trx('payroll_checks').where({ run_id: paidRun, technician_id: tech }).first('id');
+      const capitals = `december_gift:${tech.toUpperCase()}:2026`;
+      expect(capitals).not.toBe(`december_gift:${tech}:2026`);
+      await trx('payroll_pay_lines').insert({
+        technician_id: tech, kind: 'december_gift', amount_cents: GIFT, earned_week_start: EARLY_WEEK, covers_from: EARLY_WEEK, covers_to: '2026-12-06',
+        source_type: 'tech_rewards', source_id: capitals, status: 'paid', check_id: paidCheck.id,
+      });
+      const run = await draft(GIFT_WEEK);
+      const held = 'a December gift line that the pay run did not write is already on file for them, so check that line first';
+      expect(checkOf(run, tech)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', held)]);
+      await recompute(run.id);
+      await finalize(run.id);
+      // still the one paid row: nothing was written in the other letter case
+      expect((await trx('payroll_pay_lines').where({ technician_id: tech, kind: 'december_gift' })).map((line) => [line.source_id, line.status]))
+        .toEqual([[capitals, 'paid']]);
     });
 
     it('leaves every line the sync did not write to carry forward as before, also a reward kind with no source', async () => {

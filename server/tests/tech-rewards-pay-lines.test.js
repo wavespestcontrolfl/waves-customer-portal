@@ -9,6 +9,7 @@ const {
   decemberGiftDate, dueInRun, lastPayDate, spanOf, sourceIdOf, syncTechRewardLines, DECEMBER_GIFT_CENTS, SOURCE_TYPE,
 } = require('../services/tech-rewards-pay-lines');
 const { weeksOfLine } = require('../services/payroll-regular-rate');
+const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
 const { defaultPayDate } = require('../services/payroll-runs');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
@@ -110,6 +111,43 @@ describe('source key', () => {
   });
 });
 
+describe('ownership: the sync owns a line only by its whole source key, compared exactly', () => {
+  const TECH = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
+  const OTHER = '9a8b7c6d-5e4f-4d3c-2b1a-0f9e8d7c6b5a';
+  const row = (patch) => ({ technician_id: TECH, kind: 'december_gift', source_type: 'tech_rewards', source_id: `december_gift:${TECH}:2026`, ...patch });
+
+  test('the line the sync writes is its own', () => {
+    expect(techRewardsOwnKey(row())).toEqual({ kind: 'december_gift', year: '2026' });
+    expect(techRewardsOwnKey(row({ source_id: sourceIdOf('december_gift', TECH, '2031') }))).toEqual({ kind: 'december_gift', year: '2031' });
+  });
+
+  test.each([
+    ['no source', { source_type: null, source_id: null }],
+    ['another source type', { source_type: 'commission_payment' }],
+    ['the id in capitals', { source_id: `december_gift:${TECH.toUpperCase()}:2026` }],
+    ['the kind in capitals', { source_id: `DECEMBER_GIFT:${TECH}:2026` }],
+    ['another technician\'s id', { source_id: `december_gift:${OTHER}:2026` }],
+    ['no year', { source_id: `december_gift:${TECH}:gift` }],
+    ['a year of 5 digits', { source_id: `december_gift:${TECH}:12026` }],
+    ['a year of 2 digits', { source_id: `december_gift:${TECH}:26` }],
+    ['text after the year', { source_id: `december_gift:${TECH}:2026 ` }],
+    ['text before the kind', { source_id: ` december_gift:${TECH}:2026` }],
+    ['another kind in the id', { source_id: `stay_bonus:${TECH}:2026` }],
+    ['a kind the sync does not write', { kind: 'stay_bonus', source_id: `stay_bonus:${TECH}:2026` }],
+    ['a manual kind', { kind: 'commission', source_id: `commission:${TECH}:2026` }],
+    ['an empty id', { source_id: '' }],
+  ])('a row with %s is not the sync\'s', (_, patch) => {
+    expect(techRewardsOwnKey(row(patch))).toBeNull();
+  });
+
+  test('the SQL form names only constants and columns, and is never null for a row with no source', () => {
+    expect(techRewardsOwnedSql()).toBe("(source_type IS NOT NULL AND source_type = 'tech_rewards' AND kind IN ('december_gift')"
+      + " AND right(source_id, 4) ~ '^[0-9]{4}$' AND source_id = kind || ':' || technician_id::text || ':' || right(source_id, 4))");
+    expect(techRewardsOwnedSql('l')).toContain("l.source_id = l.kind || ':' || l.technician_id::text || ':' || right(l.source_id, 4)");
+    expect(techRewardsOwnedSql()).not.toContain('?');
+  });
+});
+
 describe('the gates', () => {
   const OLD = { pay: process.env.GATE_PAYROLL_PAY_LINES, rewards: process.env.GATE_TECH_REWARDS_PAY_LINES };
   beforeEach(() => recordAuditEvent.mockClear());
@@ -126,6 +164,7 @@ describe('the gates', () => {
       const chain = {
         where: jest.fn((where) => { calls.push(['where', table, where]); return chain; }),
         whereNotNull: jest.fn((column) => { calls.push(['whereNotNull', table, column]); return chain; }),
+        whereRaw: jest.fn((sql) => { calls.push(['whereRaw', table, sql]); return chain; }),
         whereIn: jest.fn((column, ids) => { calls.push(['whereIn', table, ids]); return chain; }),
         select: jest.fn(async () => { calls.push(['select', table]); return [{ id: 'line-1' }]; }),
         update: jest.fn(async (patch) => { calls.push(['update', table, patch]); return 0; }),
@@ -153,7 +192,7 @@ describe('the gates', () => {
     expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
-  test('rewards gate off: the stored waits are cleared and only the open Tech Rewards lines come off (paid lines are never selected)', async () => {
+  test('rewards gate off: the stored waits are cleared and only the open lines the sync owns come off (paid lines are never selected)', async () => {
     process.env.GATE_PAYROLL_PAY_LINES = 'true';
     delete process.env.GATE_TECH_REWARDS_PAY_LINES;
     const { trx, calls } = recorder();
@@ -161,6 +200,7 @@ describe('the gates', () => {
     expect(result.removed).toBe(1);
     expect(calls.slice(0, 3)).toEqual(CLEAR_WAITS);
     expect(calls).toContainEqual(['where', 'payroll_pay_lines', { source_type: 'tech_rewards', status: 'open' }]);
+    expect(calls).toContainEqual(['whereRaw', 'payroll_pay_lines', techRewardsOwnedSql()]); // only the lines the sync owns
     expect(calls).toContainEqual(['del', 'payroll_pay_lines']);
     expect(calls.filter(([method, table]) => method === 'update' && table !== 'payroll_runs')).toEqual([]);
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
