@@ -362,6 +362,24 @@ function storedShift(tech) {
 }
 
 /**
+ * Today's shift from a clock-in instant: the set length of day, in elapsed
+ * time, from that instant, as Eastern minutes after midnight. Elapsed time,
+ * not clock arithmetic: on a daylight-saving Sunday a clock-in before 2 AM
+ * ends an hour later on the clock (March) or an hour earlier (November) than
+ * start + length. Never past midnight. Never before the clock-in: a day
+ * shorter than an hour that ends inside November's repeated hour would read
+ * as earlier on the clock. Pure.
+ */
+function clockInShift(at, shift) {
+  const from = etParts(at);
+  const to = etParts(new Date(at.getTime() + (shift.endMin - shift.startMin) * 60000));
+  const startMin = from.hour * 60 + from.minute;
+  // The set length is under 24 hours: another day of the month is the next day.
+  const endMin = to.day === from.day ? to.hour * 60 + to.minute : 24 * 60;
+  return { startMin, endMin: Math.max(startMin, endMin), source: 'clock_in' };
+}
+
+/**
  * Each technician's shift for a date (GATE_TECH_SHIFT_HOURS; owner 2026-11-19,
  * page item D4: "each tech's 10-hour day on every booking path"; "Shifts come
  * from clock-in today and the roster ahead").
@@ -375,8 +393,9 @@ function storedShift(tech) {
  *   - today, once the technician has clocked in (the first shift clock-in that
  *     is not voided, on today's Staff work date, and not after `now`: an entry
  *     typed in ahead of time has not happened yet): the same length of day from
- *     that clock-in (source 'clock_in'). An earlier clock-in ends the day
- *     earlier, a later one ends it later; never past midnight.
+ *     that clock-in, in elapsed time (source 'clock_in', clockInShift). An
+ *     earlier clock-in ends the day earlier, a later one ends it later; never
+ *     past midnight.
  *   - null: the gate is off (no read at all), the technician has no set hours,
  *     or `date` is not a date. The caller keeps its own day bounds.
  * Work days, absences and closures stay with their own readers
@@ -417,9 +436,9 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
     const rows = await savepointRead(conn, read);
     for (const row of rows) {
       const at = row.clock_in instanceof Date ? row.clock_in : new Date(row.clock_in);
-      if (Number.isNaN(at.getTime())) continue;
-      const { hour, minute } = etParts(at);
-      clockIns.set(String(row.technician_id), hour * 60 + minute);
+      const shift = shifts.get(String(row.technician_id));
+      if (!shift || Number.isNaN(at.getTime())) continue;
+      clockIns.set(String(row.technician_id), clockInShift(at, shift));
     }
   } catch (err) {
     logger.warn(`[technician-eligibility] today's clock-ins unread (${err.message}); the set hours stand for today`);
@@ -433,9 +452,8 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
       ? (Number.isNaN(date.getTime()) ? null : dateOnlyString(date))
       : validCalendarDate(date);
     if (!shift || !day) return null;
-    const clockIn = day === today ? clockIns.get(String(technicianId)) : undefined;
-    if (clockIn === undefined) return { ...shift, source: 'roster' };
-    return { startMin: clockIn, endMin: Math.min(24 * 60, clockIn + (shift.endMin - shift.startMin)), source: 'clock_in' };
+    const clockedIn = day === today ? clockIns.get(String(technicianId)) : undefined;
+    return clockedIn ? { ...clockedIn } : { ...shift, source: 'roster' };
   };
 }
 

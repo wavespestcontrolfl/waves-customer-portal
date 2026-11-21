@@ -210,6 +210,18 @@ postgres('technician shift hours (real Postgres)', () => {
       expect(await db.schema.hasTable('time_entries')).toBe(true);
     });
 
+    test.each([
+      // 2031-03-09: 2:00 AM EST becomes 3:00 AM EDT. 05:30Z = 12:30 AM EST; ten hours later is 11:30 AM EDT.
+      ['spring forward', '2031-03-09', '2031-03-09T05:30:00Z', '2031-03-09T16:00:00Z', 690],
+      // 2031-11-02: 2:00 AM EDT becomes 1:00 AM EST. 04:30Z = 12:30 AM EDT; ten hours later is 9:30 AM EST.
+      ['fall back', '2031-11-02', '2031-11-02T04:30:00Z', '2031-11-02T15:00:00Z', 570],
+    ])('gate on, %s: a clock-in before the change is that day\'s entry and keeps ten elapsed hours', async (_label, day, at, now, endMin) => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      await clockIn(dayTech.id, at, 'completed');
+      const shiftOf = await eligibility.loadTechShifts(db, { technicianIds: ids(), now: new Date(now) });
+      expect(shiftOf(dayTech.id, day)).toEqual({ startMin: 30, endMin, source: 'clock_in' });
+    });
+
     test('gate on: the work date follows Eastern time across midnight UTC', async () => {
       process.env.GATE_TECH_SHIFT_HOURS = 'true';
       // 03:00Z on 2031-03-05 is still 10:00 PM EST on 2031-03-04: today is the 4th.
