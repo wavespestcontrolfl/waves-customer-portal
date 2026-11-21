@@ -11,6 +11,7 @@ const m3 = require('../models/migrations/20261119160000_roof_entry_read_ctx_key'
 const m4 = require('../models/migrations/20261119170000_roof_entry_read_rollback_guard');
 const m5 = require('../models/migrations/20261120200000_roof_entry_read_tech_pins');
 const m6 = require('../models/migrations/20261120220000_roof_entry_read_points_address');
+const m7 = require('../models/migrations/20261120230000_roof_entry_read_hide_per_estimate');
 
 jest.setTimeout(60000);
 (SKIP ? describe.skip : describe)('roof_entry_reads migrations on PostgreSQL', () => {
@@ -178,5 +179,28 @@ jest.setTimeout(60000);
     await m6.down(database);
     await m6.up(database);
     expect((await database('roof_entry_reads').where({ id: row.id }).first()).points_address).toBeNull();
+  });
+
+  test('the per-estimate hide migration hides every read of an estimate that has a hidden read, and changes no other read', async () => {
+    const [estA, estB] = [await id('estimates'), await id('estimates')];
+    const row = (name, extra) => read({ model: name, ...extra });
+    // Estimate A: one read hidden under part 1's per-read switch, two not. Estimate B: nothing hidden. Two reads with no estimate.
+    await row('a1', { estimate_id: estA, hide_on_estimate: true, tech_final_count: 4 });
+    await row('a2', { estimate_id: estA });
+    await row('a3', { estimate_id: estA, status: 'failed' });
+    await row('b1', { estimate_id: estB });
+    await row('b2', { estimate_id: estB });
+    await row('n1', { hide_on_estimate: true });
+    await row('n2', {});
+    const flags = async () => Object.fromEntries((await database('roof_entry_reads').select('model', 'hide_on_estimate')).map((r) => [r.model, r.hide_on_estimate]));
+    const want = { a1: true, a2: true, a3: true, b1: false, b2: false, n1: true, n2: false };
+    await m7.up(database);
+    expect(await flags()).toEqual(want);
+    // A second run and the down change nothing, and nothing else on a row moved.
+    await m7.up(database);
+    await m7.down(database);
+    expect(await flags()).toEqual(want);
+    expect((await database('roof_entry_reads').where({ model: 'a1' }).first()).tech_final_count).toBe(4);
+    expect(await database('roof_entry_reads').count('* as n').first()).toEqual({ n: '7' });
   });
 });

@@ -762,6 +762,8 @@ async function saveTechCount(id, { count, flags, pins, crop, address, expectedPi
   if (flags !== undefined) patch.tech_final_flags = db.raw("COALESCE(tech_final_flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify(flags)]);
   if (hideOnEstimate !== undefined) patch.hide_on_estimate = Boolean(hideOnEstimate);
   const where = { id };
+  // A clear leaves crop_lat / crop_lng in place: they mark the read as one whose points the technician set, so the clear
+  // stands at the next send and an older read's points do not come back (estimate-roof-points.js newestPointsRead).
   if (pins === null) patch.tech_pins = null;
   else if (pins !== undefined) {
     const pointsAddress = pointsAddressFrom(address);
@@ -845,6 +847,7 @@ module.exports = {
   REUSE_DAYS,
   FALLBACK_COST_CENTS,
   contextKey,
+  matchesContext,
   cropBounds,
   exportRequestUrl,
   fetchAerial,

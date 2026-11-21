@@ -130,7 +130,7 @@ const SNAPSHOT = {
   pins: [{ n: 1, x: 0.25, y: 0.4, type: 'roof_returns_and_valleys', label: 'Roof return, front left', action: 'seal' }],
 };
 const POINT = { estimate_id: 'est-roof-points', read_id: 'read-1', address: ADDRESS, snapshot: SNAPSHOT, delivered_at: new Date(SENT) };
-const READ = { id: 'read-1', estimate_id: 'est-roof-points', status: 'done', tech_pins: [{}], hide_on_estimate: false };
+const READ = { id: 'read-1', estimate_id: 'est-roof-points', context_key: 'e:est-roof-points', customer_id: null, status: 'done', tech_pins: [{}], hide_on_estimate: false };
 const base = (extra = {}) => ({
   estimates: estimateRow(extra.estimate),
   customer_turf_profiles: null,
@@ -165,6 +165,10 @@ describe('GET /:token/data: roofPoints', () => {
     expect(none).not.toContain('roofPoints');
 
     dbRows = base({ tables: { estimate_roof_points: POINT, roof_entry_reads: [{ ...READ, hide_on_estimate: true }] } });
+    await withServer(async (baseUrl) => { expect(diffPaths(JSON.parse(await getText(baseUrl)), JSON.parse(none))).toEqual([]); });
+
+    // The copy came from a read taken for another customer while the estimate had none: not this customer's to see.
+    dbRows = base({ tables: { estimate_roof_points: POINT, roof_entry_reads: [{ ...READ, context_key: 'e:est-roof-points|c:cust-other', customer_id: 'cust-other' }] } });
     await withServer(async (baseUrl) => { expect(diffPaths(JSON.parse(await getText(baseUrl)), JSON.parse(none))).toEqual([]); });
 
     // Hidden on a later read of the estimate that has no points: the copy's own read is not hidden, the estimate is.

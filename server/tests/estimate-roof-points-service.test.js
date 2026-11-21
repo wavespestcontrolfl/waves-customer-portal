@@ -20,27 +20,32 @@ const ADDRESS = '12 Synthetic Way, Bradenton, FL 34203';
 const SENT = '2026-11-20T16:00:00.000Z';
 const LATER = '2026-11-20T19:30:00.000Z';
 
-// The reads table answers one row per query (first), as the service asks: there is no list and no limit to hide behind.
+// The reads table answers by its where clauses, newest first: one row (first) or every row (select, no limit).
 function fakeKnex({ point, reads = [], throwOn = null }) {
   const knex = (table) => {
     const q = {};
     let where = {};
     let pointsOnly = false;
     q.where = (w) => { where = { ...where, ...w }; return q; };
-    // The one raw filter the service uses: reads that hold a saved points list.
+    // The one raw filter the service uses: reads whose points the technician set (a list, or a cleared one).
     q.whereRaw = (sql) => {
-      if (!/tech_pins IS NOT NULL AND jsonb_typeof\(tech_pins\) = 'array'/.test(sql)) throw new Error(`unexpected raw filter: ${sql}`);
+      if (sql !== "(crop_lat IS NOT NULL OR (tech_pins IS NOT NULL AND jsonb_typeof(tech_pins) = 'array'))") throw new Error(`unexpected raw filter: ${sql}`);
       pointsOnly = true;
       return q;
     };
     q.orderBy = () => q;
-    q.first = async () => {
+    const list = () => {
       if (throwOn === table) throw Object.assign(new Error(`${table} down: 12 Synthetic Way, note "front left"`), { code: '57014' });
-      if (table === 'estimate_roof_points') return point;
       return reads
         .filter((r) => Object.entries(where).every(([k, v]) => r[k] === v))
-        .filter((r) => !pointsOnly || Array.isArray(r.tech_pins))
-        .sort((a, b) => b.created_at - a.created_at)[0];
+        .filter((r) => !pointsOnly || r.crop_lat != null || Array.isArray(r.tech_pins))
+        .sort((a, b) => b.created_at - a.created_at);
+    };
+    q.select = async () => list();
+    q.first = async () => {
+      if (table !== 'estimate_roof_points') return list()[0];
+      if (throwOn === table) throw Object.assign(new Error(`${table} down: 12 Synthetic Way, note "front left"`), { code: '57014' });
+      return point;
     };
     return q;
   };
@@ -48,8 +53,11 @@ function fakeKnex({ point, reads = [], throwOn = null }) {
   return knex;
 }
 const point = (over = {}) => ({ estimate_id: 'est-1', read_id: 'read-1', address: ADDRESS, snapshot: SNAPSHOT, delivered_at: new Date(SENT), ...over });
-const frozenRead = (over = {}) => ({ id: 'read-1', estimate_id: 'est-1', status: 'done', tech_pins: [{}], hide_on_estimate: false, created_at: new Date('2026-11-20T15:00:00Z'), ...over });
-const est = (over = {}) => ({ id: 'est-1', address: ADDRESS, estimate_data: { deliveryState: { lastDeliveredAt: SENT } }, ...over });
+const frozenRead = (over = {}) => ({
+  id: 'read-1', estimate_id: 'est-1', context_key: 'e:est-1', customer_id: null, status: 'done', tech_pins: [{}], crop_lat: '27.46000',
+  hide_on_estimate: false, created_at: new Date('2026-11-20T15:00:00Z'), ...over,
+});
+const est = (over = {}) => ({ id: 'est-1', customer_id: 'cust-a', address: ADDRESS, estimate_data: { deliveryState: { lastDeliveredAt: SENT } }, ...over });
 const estimate = est();
 
 describe('roofPointsDocBlock', () => {
@@ -144,6 +152,26 @@ describe('roofPointsDocBlock', () => {
   test('the read the copy came from is hidden but no longer names the estimate: {}', async () => {
     const reads = [frozenRead({ estimate_id: null, hide_on_estimate: true })];
     expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads }) })).toEqual({});
+  });
+
+  test("the copy shows only while its read is one of the estimate's own: the plain read, or the two-part read of its customer now", async () => {
+    const show = async (estimateRow, read) => (await roofPointsDocBlock(estimateRow, { knex: fakeKnex({ point: point(), reads: read ? [read] : [] }) })).roofPoints;
+    const forA = frozenRead({ context_key: 'e:est-1|c:cust-a', customer_id: 'cust-a' });
+    const forB = frozenRead({ context_key: 'e:est-1|c:cust-b', customer_id: 'cust-b' });
+    expect(await show(estimate, forA)).toEqual(SNAPSHOT);
+    // The estimate went to another customer since the send, or has none now: A's read is not theirs.
+    expect(await show(est({ customer_id: 'cust-b' }), forA)).toBeUndefined();
+    expect(await show(est({ customer_id: null }), forA)).toBeUndefined();
+    expect(await show(estimate, forB)).toBeUndefined();
+    // After a duplicate merge the read's customer is the estimate's customer: it answers again (the roof read's own rule).
+    expect(await show(estimate, { ...forB, customer_id: 'cust-a' })).toEqual(SNAPSHOT);
+    // The plain read is the estimate's, whoever holds it.
+    expect(await show(est({ customer_id: 'cust-b' }), frozenRead())).toEqual(SNAPSHOT);
+    expect(await show(est({ customer_id: null }), frozenRead())).toEqual(SNAPSHOT);
+    // A read of another estimate, or a copy whose read is gone, proves nothing.
+    expect(await show(estimate, frozenRead({ context_key: 'e:est-2' }))).toBeUndefined();
+    expect(await show(estimate, null)).toBeUndefined();
+    expect((await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point({ read_id: null }), reads: [frozenRead()] }) })).roofPoints).toBeUndefined();
   });
 
   test('the estimate moved to another address since the send: {}; so does a missing or blank address on either side', async () => {

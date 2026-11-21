@@ -6,21 +6,21 @@
  * The customer estimate shows ONLY the roof points the technician confirmed, on the county roof photo, in the Waves AI
  * card in place of the satellite photo. Two halves:
  *   - freezeRoofPointsForEstimate: at every send with a real provider handoff (and for each group sibling once that send
- *     published it), copy what customerPointsFromRow gives for the newest finished read that has confirmed points into
- *     estimate_roof_points (a re-send replaces it; no points now deletes it). The points must have been saved for the
+ *     published it), copy what customerPointsFromRow gives for the newest finished read of the estimate's own context
+ *     whose points the technician set into estimate_roof_points (a re-send replaces it; no points now deletes it). The points must have been saved for the
  *     address the estimate has now (points_address: the address the staff lookup ran for, sent by the panel with the
  *     points and the photo centre), or nothing is copied. The copy names the handoff that wrote it (delivered_at).
  *     Between sends the copy never changes, so a re-read, an edit or a label change cannot alter an estimate the
  *     customer already holds. Fail-soft by contract: it never throws, so it can never block or fail a send.
  *   - roofPointsDocBlock: the /data key `{ roofPoints: { imageUrl, imageYear, pins } }`, or `{}` so a response with no
- *     snapshot stays byte-identical. Staff hiding is immediate (checked against the estimate's read rows NOW); the
- *     content is the frozen copy. An estimate moved to another address since the send prints nothing, and so does a copy older than
+ *     snapshot stays byte-identical. Staff hiding is immediate (checked against the estimate's read rows NOW), and
+ *     the read the copy came from must still be one of the estimate's own; the content is the frozen copy. An estimate moved to another address since the send prints nothing, and so does a copy older than
  *     the estimate's latest handoff (a later send could not replace or delete it).
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { customerPointsFromRow } = require('./roof-entry-read');
+const { customerPointsFromRow, matchesContext } = require('./roof-entry-read');
 const { addressKey, addressZip } = require('./misting-layout-validate');
 
 const TABLE = 'estimate_roof_points';
@@ -35,16 +35,31 @@ function parsed(v) {
   try { return JSON.parse(v); } catch { return null; }
 }
 
+// The estimate as a roof-read context (lower-case ids, as roof-entry-read builds them).
+const estimateContext = (estimate) => ({
+  estimateId: String(estimate.id).toLowerCase(),
+  customerId: estimate.customer_id ? String(estimate.customer_id).toLowerCase() : null,
+  estimateOwned: Boolean(estimate.customer_id),
+});
+
 /**
- * The newest finished read for the estimate on which the technician saved points (hidden or not), or undefined. A saved
- * empty list counts: the technician confirmed none, so an older read's points must not come back.
+ * The newest finished read of the estimate whose points the technician set, or undefined.
+ *  - "Set" is a saved list (an empty one counts: the technician confirmed none) or a cleared one (crop_lat is written
+ *    with every points list and a clear leaves it). So neither an empty list nor a clear lets an older read's points
+ *    come back. A read on which no list was ever saved is not "set".
+ *  - "Of the estimate" follows the roof read's own context rule (matchesContext): the estimate's plain row, or the
+ *    two-part row of the customer the estimate belongs to now. A read taken for another customer while the estimate had
+ *    no customer is never published on it, and an estimate with no customer takes its plain row only.
+ * Every candidate is judged: there is no limit.
  */
-function newestPointsRead(estimateId, knex) {
-  return knex(READS)
-    .where({ estimate_id: estimateId, status: 'done' })
-    .whereRaw("tech_pins IS NOT NULL AND jsonb_typeof(tech_pins) = 'array'")
+async function newestPointsRead(estimate, knex) {
+  const rows = await knex(READS)
+    .where({ estimate_id: estimate.id, status: 'done' })
+    .whereRaw("(crop_lat IS NOT NULL OR (tech_pins IS NOT NULL AND jsonb_typeof(tech_pins) = 'array'))")
     .orderBy(NEWEST)
-    .first();
+    .select();
+  const ctx = estimateContext(estimate);
+  return rows.find((row) => matchesContext(row, ctx));
 }
 
 // The misting layout's address comparison (addressKey: case, spacing, punctuation and a trailing ZIP or state are
@@ -68,7 +83,7 @@ const timeMs = (v) => (v ? new Date(v).getTime() : NaN);
 async function freezeRoofPointsForEstimate(estimate, { deliveredAt, knex = db } = {}) {
   if (!estimate?.id || !Number.isFinite(timeMs(deliveredAt))) return 'skipped';
   try {
-    const row = await newestPointsRead(estimate.id, knex);
+    const row = await newestPointsRead(estimate, knex);
     // The points were saved for the address the staff lookup ran for (the same lookup gave the photo centre). An
     // estimate that has another address now is another roof: it gets no points until staff read and confirm that one.
     const points = sameHome(row?.points_address, estimate.address) ? customerPointsFromRow(row) : null;
@@ -106,16 +121,21 @@ function copyIsCurrent(row, estimate) {
 }
 
 /**
- * True when staff hid the estimate's roof points NOW. Hide or show is one choice for the estimate: saveTechCount writes
- * it to every read of the estimate and a new read starts with it. So the answer is "any read of this estimate is
- * hidden" (plus the read the copy came from, by id): no later read, with or without points, brings hidden points back.
+ * May the copy be shown NOW, by the read rows as they stand?
+ *  - Staff did not hide the estimate's roof points. Hide or show is one choice for the estimate: saveTechCount writes it
+ *    to every read of the estimate and a new read starts with it. So "hidden" is "any read of this estimate is hidden"
+ *    (plus the read the copy came from, by id): no later read, with or without points, brings hidden points back.
+ *  - The read the copy came from is still one of this estimate's own reads (matchesContext), so an estimate handed to
+ *    another customer since the send does not show a read taken for the first one. A copy whose read is gone cannot be
+ *    judged, so it is not shown (no code deletes a read).
  */
-async function hiddenNow(estimateId, readId, knex) {
+async function readsAllowCopy(estimate, readId, knex) {
   const [frozen, anyHidden] = await Promise.all([
-    readId ? knex(READS).where({ id: readId }).first('hide_on_estimate') : null,
-    knex(READS).where({ estimate_id: estimateId, hide_on_estimate: true }).first('id'),
+    readId ? knex(READS).where({ id: readId }).first('hide_on_estimate', 'context_key', 'customer_id', 'estimate_id') : null,
+    knex(READS).where({ estimate_id: estimate.id, hide_on_estimate: true }).first('id'),
   ]);
-  return Boolean(frozen?.hide_on_estimate || anyHidden);
+  if (anyHidden || !frozen || frozen.hide_on_estimate) return false;
+  return matchesContext(frozen, estimateContext(estimate));
 }
 
 function cleanSnapshot(snapshot) {
@@ -144,7 +164,7 @@ async function roofPointsDocBlock(estimate, { knex = db } = {}) {
     if (!sameHome(row.address, estimate.address)) return {};
     const snapshot = cleanSnapshot(row.snapshot);
     if (!snapshot) return {};
-    if (await hiddenNow(estimate.id, row.read_id, knex)) return {};
+    if (!(await readsAllowCopy(estimate, row.read_id, knex))) return {};
     return { roofPoints: snapshot };
   } catch (err) {
     logger.warn(`[estimate-roof-points] section skipped for estimate ${estimate.id}: ${errCode(err)}`);

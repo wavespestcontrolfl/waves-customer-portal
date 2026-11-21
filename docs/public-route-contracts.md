@@ -7013,9 +7013,12 @@ with `prefers-reduced-motion`), and puts the satellite photo back when the pictu
 label, action }] }`, the roof entry points the Waves technician confirmed on the county roof photo
 (`services/estimate-roof-points.js`). It is a copy frozen into `estimate_roof_points` at the estimate's last send with a
 real provider handoff (the same test that moves the price snapshot; a group sibling takes its copy once that send
-published it), from `customerPointsFromRow` of the newest finished roof read for the estimate that has a saved points
-list; a re-read or an edit after the send never changes it until the next such send, and a send with no points deletes
-it. `imageUrl` is the county aerial export URL of the read's own crop, rebuilt by the server from the read's image source
+published it), from `customerPointsFromRow` of the newest finished roof read of the estimate's own context whose points
+the technician set (a saved list, an empty list, or a cleared one, so a clear never brings an older list back); a
+re-read or an edit after the send never changes it until the next such send, and a send with no points deletes it. "Of
+the estimate's own context" is the roof read's own rule (`matchesContext`): the estimate's plain read, or the read
+taken for the customer the estimate belongs to now; a read taken for another customer while the estimate had no
+customer is never published on it. `imageUrl` is the county aerial export URL of the read's own crop, rebuilt by the server from the read's image source
 and its stored centre (never caller-supplied, no key); `imageYear` is that photo's year. `n` is the 1-based number the page
 prints on the pin and in the list; `x` and `y` are 0-1 fractions of the photo from its top-left corner; `type` is a roof
 entry type or `other`; `label` is the plain name, followed by the staff note when one was saved ("Roof return, front left");
@@ -7025,8 +7028,9 @@ ABSENT unless all of these hold: a copy exists; the points were saved for the ad
 panel with the points and never read from the estimate row; checked at the freeze); the copy belongs to the estimate's
 latest handoff (`estimate_roof_points.delivered_at` is not older than `estimate_data.deliveryState.lastDeliveredAt`,
 so a copy that a later send could not replace or delete is not shown); the copy was frozen for the estimate's current
-address (the misting layout's address comparison, but an address missing on either side counts as no match); and
-staff have not hidden the points (checked at request time: hide or show is one choice for the estimate, written to
+address (the misting layout's address comparison, but an address missing on either side counts as no match); the
+read the copy came from still exists and is still one of the estimate's own reads by that rule (checked at request
+time, so an estimate handed to another customer since the send shows nothing); and staff have not hidden the points (checked at request time: hide or show is one choice for the estimate, written to
 every roof read of it and inherited by each new read, so the key is absent when the read the copy came from or any
 roof read of the estimate is hidden). "The same address" ignores case, spacing, punctuation and a trailing state, and
 a ZIP on one side only; two different ZIP codes are two homes. Every other response stays byte-identical. A storage failure omits the key, never the response. The interactive estimate page

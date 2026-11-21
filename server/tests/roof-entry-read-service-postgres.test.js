@@ -31,6 +31,7 @@ const m3 = require('../models/migrations/20261119160000_roof_entry_read_ctx_key'
 const m4 = require('../models/migrations/20261119170000_roof_entry_read_rollback_guard');
 const m5 = require('../models/migrations/20261120200000_roof_entry_read_tech_pins');
 const m6 = require('../models/migrations/20261120220000_roof_entry_read_points_address');
+const m7 = require('../models/migrations/20261120230000_roof_entry_read_hide_per_estimate');
 
 jest.setTimeout(60000);
 (SKIP ? describe.skip : describe)('roof entry read service on PostgreSQL', () => {
@@ -51,7 +52,7 @@ jest.setTimeout(60000);
     await database.raw('CREATE SCHEMA ??', [schema]);
     await database.raw('CREATE TABLE ??.estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, address text)', [schema]);
     await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deleted_at timestamptz, phone text)', [schema]);
-    for (const m of [m1, m2, m3, m4, m5, m6]) await m.up(database);
+    for (const m of [m1, m2, m3, m4, m5, m6, m7]) await m.up(database);
   });
   beforeEach(() => {
     mockDispatch.mockReset().mockImplementation(async () => goodAnswer());
@@ -263,6 +264,49 @@ jest.setTimeout(60000);
     await svc.saveTechCount(b.id, { count: 3 });
     expect((await hidden())[a.id]).toBe(true);
     expect((await hidden())[b.id]).toBe(false);
+  });
+
+  describe("the send's choice of read (estimate-roof-points newestPointsRead) on real SQL", () => {
+    const { newestPointsRead } = require('../services/estimate-roof-points');
+    const ADDRESS = '12 Synthetic Way, Bradenton, FL 34203';
+    const pinsFor = (note) => [{ x: 0.2, y: 0.3, type: 'gable_vents', note }];
+    const savePoints = (read, lat, note) => svc.saveTechCount(read.id, { pins: pinsFor(note), crop: { lat, lng: -82.57 }, address: ADDRESS, expectedPins: null });
+
+    test("an estimate takes only its own customer's read, never the newer read another customer had on it", async () => {
+      const [custA, custB] = [await insertId('customers'), await insertId('customers')];
+      const est = await insertId('estimates');
+      // The estimate has no customer yet: each customer's read gets its own two-part key.
+      const forA = (await svc.runRoofEntryRead(home({ estimateId: est, customerId: custA }))).read;
+      const forB = (await svc.runRoofEntryRead(home({ estimateId: est, customerId: custB }))).read;
+      expect(forB.id).not.toBe(forA.id);
+      await savePoints(forA, 27.46, 'for A');
+      await savePoints(forB, 27.46, 'for B');
+      const chosen = async (customerId) => (await newestPointsRead({ id: est, customer_id: customerId }, database))?.id;
+      expect(await chosen(custA)).toBe(forA.id);
+      expect(await chosen(custB)).toBe(forB.id);
+      expect(await chosen(null)).toBeUndefined();
+      // The estimate's own plain read answers every holder, and the newest read that answers wins.
+      const plain = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+      await savePoints(plain, 27.46, 'plain');
+      expect(await chosen(null)).toBe(plain.id);
+      expect(await chosen(custA)).toBe(plain.id);
+    });
+
+    test('a cleared read stays the newest read set, so an older list does not come back; a read never set does not count', async () => {
+      const est = await insertId('estimates');
+      const older = (await svc.runRoofEntryRead(home({ estimateId: est }))).read;
+      await savePoints(older, 27.46, 'older');
+      const newer = (await svc.runRoofEntryRead(home({ lat: 27.47, estimateId: est }))).read;
+      const chosen = () => newestPointsRead({ id: est, customer_id: null }, database);
+      // Not set yet: the older list is still the newest one set.
+      expect((await chosen()).id).toBe(older.id);
+      await savePoints(newer, 27.47, 'newer');
+      await svc.saveTechCount(newer.id, { pins: null, expectedPins: pinsFor('newer') });
+      const row = await chosen();
+      expect(row.id).toBe(newer.id);
+      expect(row.tech_pins).toBeNull();
+      expect(svc.customerPointsFromRow(row)).toBeNull();
+    });
   });
 
   // Settles to 'waiting' when the promise is still pending after `ms` (it is blocked on a row lock).

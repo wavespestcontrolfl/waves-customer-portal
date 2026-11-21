@@ -119,6 +119,8 @@ function makeBuilder(row) {
 const read = (over = {}) => ({
   id: 'read-1',
   estimate_id: 'est-1',
+  context_key: `e:${over.estimate_id || 'est-1'}`,
+  customer_id: null,
   status: 'done',
   tech_pins: [
     { x: 0.25, y: 0.4, type: 'roof_returns_and_valleys', note: 'front left' },
@@ -143,16 +145,18 @@ function readsBuilder() {
   let where = {};
   q.where = jest.fn((w) => { where = { ...where, ...w }; return q; });
   let pointsOnly = false;
-  q.whereRaw = jest.fn(() => { pointsOnly = true; return q; }); // the SQL filter (tech_pins saved as an array), applied in first()
+  // The SQL filter: reads whose points the technician set (a stored photo centre, or a list). Applied in list().
+  q.whereRaw = jest.fn(() => { pointsOnly = true; return q; });
   q.orderBy = jest.fn(() => q);
-  q.first = jest.fn(async () => {
+  const list = () => {
     if (failOn === 'reads') throw new Error('reads down');
-    const rows = reads
+    return reads
       .filter((r) => Object.entries(where).every(([k, v]) => r[k] === v))
-      .filter((r) => !pointsOnly || Array.isArray(r.tech_pins))
+      .filter((r) => !pointsOnly || r.crop_lat != null || Array.isArray(r.tech_pins))
       .sort((a, b) => b.created_at - a.created_at);
-    return rows[0];
-  });
+  };
+  q.select = jest.fn(async () => list());
+  q.first = jest.fn(async () => list()[0]);
   return q;
 }
 function pointsBuilder() {
@@ -260,10 +264,60 @@ describe('sendEstimateNow: roof points frozen at send', () => {
     reads = [
       read({ id: 'read-old', created_at: new Date('2026-11-19T15:00:00Z') }),
       read({ id: 'read-new', tech_pins: [{ x: 0.5, y: 0.5, type: 'gable_vents' }], created_at: new Date('2026-11-20T15:00:00Z') }),
-      read({ id: 'read-unsaved', tech_pins: null, created_at: new Date('2026-11-20T16:00:00Z') }),
+      read({ id: 'read-unsaved', tech_pins: null, crop_lat: null, crop_lng: null, created_at: new Date('2026-11-20T16:00:00Z') }),
     ];
     await router.sendEstimateNow(estimateRow(), 'email');
     expect(store['est-1'].read_id).toBe('read-new');
+  });
+
+  test("an estimate takes only its own customer's read: never the newer read another customer had on it, and none with no customer", async () => {
+    // While the estimate had no customer, staff read this roof for two customers. Each read is keyed to its customer.
+    const forA = read({ id: 'read-a', context_key: 'e:est-1|c:cust-1', customer_id: 'cust-1', tech_pins: [{ x: 0.2, y: 0.2, type: 'gable_vents', note: 'note for A' }] });
+    const forB = read({
+      id: 'read-b', context_key: 'e:est-1|c:cust-2', customer_id: 'cust-2', created_at: new Date('2026-11-20T16:00:00Z'),
+      tech_pins: [{ x: 0.3, y: 0.3, type: 'gable_vents', note: 'note for B' }],
+    });
+    const send = async (row) => {
+      db.mockImplementation((table) => {
+        if (table === 'roof_entry_reads') return readsBuilder();
+        if (table === 'estimate_roof_points') return pointsBuilder();
+        return makeBuilder(row);
+      });
+      await router.sendEstimateNow(row, 'email');
+      return row;
+    };
+    reads = [forA, forB];
+    // The estimate now belongs to customer A (cust-1): B's read is newer and is not taken.
+    const owned = await send(estimateRow());
+    expect(store['est-1'].read_id).toBe('read-a');
+    expect(JSON.stringify(store['est-1'].snapshot)).toContain('note for A');
+    expect(JSON.stringify(store['est-1'].snapshot)).not.toContain('note for B');
+    // Handed to customer B after the send, with no new send: the page does not show A's copy.
+    const stamp = { deliveryState: { lastDeliveredAt: stampedHandoff() } };
+    expect((await roofPointsDocBlock({ ...owned, estimate_data: stamp }, { knex: db })).roofPoints).toBeDefined();
+    expect(await roofPointsDocBlock({ ...owned, customer_id: 'cust-2', estimate_data: stamp }, { knex: db })).toEqual({});
+    // No customer on the estimate: neither customer's read can be shown to whoever holds the link.
+    await send(estimateRow({ customer_id: null }));
+    expect(store['est-1']).toBeUndefined();
+    // The estimate's own plain read is taken with or without a customer.
+    reads = [forA, forB, read({ id: 'read-plain', created_at: new Date('2026-11-20T14:00:00Z') })];
+    await send(estimateRow({ customer_id: null }));
+    expect(store['est-1'].read_id).toBe('read-plain');
+  });
+
+  test('points cleared on the newest read: the copy is deleted and the older list does not come back', async () => {
+    const later = new Date('2026-11-20T16:00:00Z');
+    reads = [read()];
+    await router.sendEstimateNow(estimateRow(), 'email');
+    expect(store['est-1'].read_id).toBe('read-1');
+    // A clear (pins: null) leaves the stored photo centre on the read, so the read still counts as the newest one set.
+    reads = [read(), read({ id: 'read-2', tech_pins: null, created_at: later })];
+    await router.sendEstimateNow(estimateRow(), 'email');
+    expect(store['est-1']).toBeUndefined();
+    // A newer read on which no list was ever saved is not a clear: the older read's points stay.
+    reads = [read(), read({ id: 'read-3', tech_pins: null, crop_lat: null, crop_lng: null, created_at: later })];
+    await router.sendEstimateNow(estimateRow(), 'email');
+    expect(store['est-1'].read_id).toBe('read-1');
   });
 
   test('points removed before the next send: the old copy is deleted', async () => {
