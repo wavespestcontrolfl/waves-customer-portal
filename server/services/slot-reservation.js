@@ -223,6 +223,35 @@ function addMinutesToTime(hhmmss, minutes) {
   return `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}:00`;
 }
 
+// A caller that priced an unclaimed hold may adopt a row claimed meanwhile
+// only when it is still the exact appointment that caller offered. This is
+// deliberately stricter than ordinary commit replay: customer + estimate
+// bind the commercial identity, while date/start/technician/status bind the
+// appointment identity. A legacy reservation expiry stamp is not identity —
+// some staff claim paths left it behind on a real booking.
+function claimedReservationMatches(row, expected) {
+  if (!row || !expected || row.customer_id == null) return false;
+  return String(row.id) === String(expected.scheduledServiceId)
+    && String(row.customer_id) === String(expected.customerId)
+    && String(row.source_estimate_id || '') === String(expected.estimateId || '')
+    && dateOnly(row.scheduled_date) === dateOnly(expected.scheduledDate)
+    && String(row.window_start || '').slice(0, 5) === String(expected.windowStart || '').slice(0, 5)
+    && (row.technician_id || null) === (expected.technicianId || null)
+    && ['pending', 'confirmed'].includes(String(row.status || '').toLowerCase());
+}
+
+function reservationClaimed() {
+  const err = new Error('the held appointment changed before confirmation');
+  err.code = 'RESERVATION_CLAIMED';
+  return err;
+}
+
+function purchaseReservationChanged() {
+  const err = new Error('the purchase selected another appointment');
+  err.code = 'PURCHASE_RESERVATION_CHANGED';
+  return err;
+}
+
 function applyWindowOverlapFilter(query, windowStart, windowEnd) {
   return query.andWhereRaw(
     "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), ?)::text || ' minutes')::interval)) > ?::time",
@@ -729,7 +758,7 @@ async function prepareReservationCommit(scheduledServiceId, options = {}) {
  * (by another committed visit, or by a live reservation that hasn't
  * expired), throws SLOT_UNAVAILABLE.
  *
- * opts: { estimateId, slotId, holdMinutes?, durationMinutes?, serviceMode?, selectedFrequency? }
+ * opts: { estimateId, slotId, holdMinutes?, durationMinutes?, serviceMode?, selectedFrequency?, previousScheduledServiceId? }
  * returns: { scheduledServiceId, expiresAt }
  */
 // Why a slot's date can't be reserved, or null. A past date never can; a
@@ -1098,6 +1127,16 @@ async function reserveSlot({
   serviceMode = 'recurring',
   selectedFrequency = '',
   serviceCadences = null,
+  // One-tap replacement pins the appointment its purchase currently names.
+  // Locking it in this transaction closes the staff-claim interleave between
+  // the caller's read and this reservation write.
+  previousScheduledServiceId = null,
+  // One-tap checkout asks the reservation transaction to own the purchase
+  // pointer write too. The row is locked before the estimate/hold rows and
+  // its current pointer is compared with the caller's snapshot; the winning
+  // hold and pointer therefore commit together, while a stale concurrent
+  // request creates nothing.
+  purchaseReservation = null,
   // Optional caller-supplied no-booking revalidation, run on the LOCKED estimate row before any hold is
   // minted - the SAME name and contract as extendReservation's: `(estimateRow, trx, { date }) => null | { status, body }`
   // (may be async; `trx` is the reservation transaction, for reads that must be locked with it; `date` is the selected slot's day). The public /reserve route passes it so a state that appeared after its pre-transaction
@@ -1294,6 +1333,46 @@ async function reserveSlot({
       // Dispatch can move another technician's visit into the unassigned route.
       // Acquire these before estimate/technician rows and the fingerprint check.
       await lockTechDays(trx, [{ techId, date }, ...(useCapacity ? [{ techId: null, date }] : [])]);
+
+      let lockedPurchase = null;
+      if (purchaseReservation) {
+        lockedPurchase = await trx('one_tap_purchases')
+          .where({ id: purchaseReservation.purchaseId })
+          .forUpdate()
+          .first('id', 'status', 'scheduled_service_id');
+        const expectedPointer = purchaseReservation.expectedScheduledServiceId == null
+          ? null : String(purchaseReservation.expectedScheduledServiceId);
+        const actualPointer = lockedPurchase?.scheduled_service_id == null
+          ? null : String(lockedPurchase.scheduled_service_id);
+        if (!lockedPurchase
+          || !['initiated', 'reserved'].includes(lockedPurchase.status)
+          || actualPointer !== expectedPointer) {
+          throw purchaseReservationChanged();
+        }
+      }
+      const finishReservation = async (result) => {
+        if (!lockedPurchase) return result;
+        if (result?.staleHoldSuperseded) {
+          await trx('one_tap_purchases')
+            .where({ id: lockedPurchase.id })
+            .update({
+              scheduled_service_id: null,
+              slot_id: null,
+              status: 'initiated',
+              updated_at: trx.fn.now(),
+            });
+          return result;
+        }
+        await trx('one_tap_purchases')
+          .where({ id: lockedPurchase.id })
+          .update({
+            scheduled_service_id: result.scheduledServiceId,
+            slot_id: String(slotId),
+            status: 'reserved',
+            updated_at: trx.fn.now(),
+          });
+        return result;
+      };
 
       // SELECT … FOR UPDATE on the estimate row serializes concurrent
       // reserves/accepts/declines for this estimate. Without this lock,
@@ -1628,6 +1707,19 @@ async function reserveSlot({
       // (service profile / duration / day-end / signature were all resolved
       // and verified ABOVE, right after the estimate row's state checks.)
 
+      let previousReservation = null;
+      if (previousScheduledServiceId) {
+        previousReservation = await trx('scheduled_services')
+          .where({ id: previousScheduledServiceId })
+          .forUpdate()
+          .first('id', 'customer_id', 'source_estimate_id', 'reservation_expires_at');
+        if (previousReservation && (previousReservation.customer_id != null
+          || String(previousReservation.source_estimate_id || '') !== String(estimateId)
+          || !previousReservation.reservation_expires_at)) {
+          throw reservationClaimed();
+        }
+      }
+
       // Idempotent self-hold handling: the conflict checks below have no
       // self-exclusion, so this estimate's OWN live hold would 409 the
       // customer's retry (the client re-POSTs /reserve with the same slotId
@@ -1717,7 +1809,7 @@ async function reserveSlot({
             scheduledServiceId: sameSlotHold.id,
             conflictIds: refreshClash.map((r) => r.id),
           });
-          return { staleHoldSuperseded: true };
+          return finishReservation({ staleHoldSuperseded: true });
         }
         // Restamp the authoritative identity from THIS reselection's profile
         // (Codex r3 P1) — a same-slot reselect under a different
@@ -1755,7 +1847,7 @@ async function reserveSlot({
           scheduledServiceId: sameSlotHold.id,
           expiresAt: refreshedExpiresAt instanceof Date ? refreshedExpiresAt.toISOString() : refreshedExpiresAt,
         });
-        return { scheduledServiceId: refreshed?.id || sameSlotHold.id, expiresAt: refreshedExpiresAt };
+        return finishReservation({ scheduledServiceId: refreshed?.id || sameSlotHold.id, expiresAt: refreshedExpiresAt });
       }
       // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
       // 2026-10-09): a NEW hold on a 17:00 offer signed before the gate
@@ -1772,6 +1864,16 @@ async function reserveSlot({
       }
       if ((liveHolds || []).length) {
         await trx('scheduled_services').whereIn('id', liveHolds.map((hold) => hold.id)).del();
+      }
+      // An expired prior hold is absent from liveHolds. Remove this exact,
+      // still-unclaimed row while its lock is held so a delayed staff claim
+      // cannot revive the superseded appointment after the replacement wins.
+      if (previousReservation
+        && !(liveHolds || []).some((hold) => String(hold.id) === String(previousReservation.id))) {
+        await uncommittedHoldQuery(trx, {
+          scheduledServiceId: previousReservation.id,
+          estimateId,
+        }).del();
       }
 
       // Conflict check + insert in the same txn so a concurrent reserve that
@@ -1958,7 +2060,7 @@ async function reserveSlot({
         expiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : expiresAt,
       });
 
-      return { scheduledServiceId, expiresAt };
+      return finishReservation({ scheduledServiceId, expiresAt });
     });
     if (reserved && reserved.staleHoldSuperseded) {
       // Post-commit throw so the supersede above sticks (the finally still
@@ -1995,7 +2097,7 @@ async function reserveSlot({
  * the acquisition below is a reentrant no-op (pg advisory xact locks are
  * re-acquirable by the owning transaction).
  *
- * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, preLockedTechId?, preparedCapacity?, trx? }
+ * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, preLockedTechId?, preparedCapacity?, claimedReservationIdentity?, trx? }
  * returns: updated scheduled_services row
  */
 async function commitReservation({
@@ -2011,6 +2113,7 @@ async function commitReservation({
   preLockedDate = null,
   preLockedTechId = null,
   preparedCapacity = null,
+  claimedReservationIdentity = undefined,
   trx,
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
@@ -2165,14 +2268,32 @@ async function commitReservation({
       err.code = 'RESERVATION_EXPIRED';
       throw err;
     }
-    if (!row.reservation_expires_at) {
+    // One-tap checkout priced an UNCLAIMED hold. If staff linked that exact
+    // row to the same customer while checkout was in flight, it is already
+    // the requested real booking: run the same locked occupancy/profile
+    // checks, restamp the authorized price, clear the obsolete hold stamp,
+    // and let conversion build the series from this row. Every ambiguous claim
+    // (other customer/estimate, moved time/tech, or changed/dead status)
+    // stays untouched and gets its own error so the caller preserves the
+    // appointment pointer instead of inviting a second booking.
+    let adoptingClaimedReservation = false;
+    if (claimedReservationIdentity !== undefined) {
+      if (row.customer_id != null) {
+        if (!claimedReservationMatches(row, claimedReservationIdentity)) throw reservationClaimed();
+        adoptingClaimedReservation = true;
+      }
+      // An unlinked row with no hold stamp is neither the hold checkout
+      // priced nor a proven booking. Never replay it as committed.
+      if (row.customer_id == null && !row.reservation_expires_at) throw reservationClaimed();
+    }
+    if (!row.reservation_expires_at && !adoptingClaimedReservation) {
       // Already committed. Idempotent — return the existing row rather
       // than throw; a double-click on accept shouldn't fail.
       return row;
     }
     // A make-room hold refreshed or re-assigned since the pre-read: same recoverable code as the capacity technician check.
-    requireMakeRoomUnchanged(row, preRow, preparedCapacity);
-    if (row._expired) {
+    if (!adoptingClaimedReservation) requireMakeRoomUnchanged(row, preRow, preparedCapacity);
+    if (!adoptingClaimedReservation && row._expired) {
       const err = new Error('reservation expired');
       err.code = 'RESERVATION_EXPIRED';
       throw err;
@@ -2183,7 +2304,7 @@ async function commitReservation({
     // already-committed replay above (an accepted visit is never un-accepted
     // by this rule) — so what the generator would no longer offer cannot be
     // graduated either. Same recoverable code the other slot-side rejects use.
-    if (visitInsideNoticeWindow(row)) {
+    if (!adoptingClaimedReservation && visitInsideNoticeWindow(row)) {
       const err = new Error('slot start is inside the booking notice window');
       err.code = 'SLOT_UNAVAILABLE';
       throw err;
@@ -2219,7 +2340,7 @@ async function commitReservation({
     // the window-scoped probes below cannot see a NON-overlapping rival on
     // another date or time. Graduating this one would book the older time
     // while the customer's newer hold sat live beside it.
-    if (row._lapsed && row.source_estimate_id) {
+    if (!adoptingClaimedReservation && row._lapsed && row.source_estimate_id) {
       const rivalLiveHold = await client('scheduled_services')
         .where({ source_estimate_id: row.source_estimate_id })
         .whereNot({ id: scheduledServiceId })
@@ -2400,7 +2521,7 @@ async function commitReservation({
         windowStart,
         windowEnd: probeWindowEnd,
         excludeServiceIds: [scheduledServiceId],
-        includeHolds: !!row._lapsed,
+        includeHolds: adoptingClaimedReservation || !!row._lapsed,
         technicianId: hourProbeTechnicianId(row.technician_id),
         // Travel gap: the pin reserveSlot stamped on the hold row, plus the
         // expected-minutes credit of the service ACTUALLY being scheduled
@@ -2421,9 +2542,25 @@ async function commitReservation({
       const interviewClash = useCapacity
         ? await findInterviewConflicts({ db: client, date: scheduledDate, windowStart, windowEnd: probeWindowEnd })
         : [];
-      const destinationClash = !committedClash.length && !interviewClash.length
+      // A staff claim is a booking even when a legacy claim path forgot to
+      // clear its expired hold stamp. The shared occupancy reader correctly
+      // drops expired unclaimed holds, so supplement it narrowly with linked
+      // stale-stamp rows before adopting this appointment. This probe is
+      // tech-blind and runs under the date-wide occupancy lock.
+      const staleClaimedClash = adoptingClaimedReservation
+        ? await client('scheduled_services')
+          .where({ scheduled_date: scheduledDate })
+          .whereNot({ id: scheduledServiceId })
+          .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+          .whereNotNull('customer_id')
+          .whereNotNull('reservation_expires_at')
+          .whereRaw('reservation_expires_at <= NOW()')
+          .modify((q) => applyWindowOverlapFilter(q, windowStart, probeWindowEnd))
+          .first('id')
+        : null;
+      const destinationClash = !committedClash.length && !interviewClash.length && !staleClaimedClash
         && await acceptedWindowOnMakeRoomDestination(client, { row, date: scheduledDate, windowStart, windowEnd: probeWindowEnd });
-      if (committedClash.length || interviewClash.length || destinationClash) {
+      if (committedClash.length || interviewClash.length || staleClaimedClash || destinationClash) {
         const err = new Error('slot no longer available');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;
@@ -3153,6 +3290,7 @@ module.exports = {
   cadenceCatalogKeyForProfile,
   _internals: {
     parseSlotId,
+    claimedReservationMatches,
     addMinutesToTime,
     cappedServiceType,
     canonicalServiceTypeForProfile,
