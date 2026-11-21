@@ -36,7 +36,7 @@ const BLOCKING = JSON.stringify({
   ],
 });
 
-let root; let work; let fakeBin; let baseSha; let sha; let markedSha; let orphanSha;
+let root; let work; let fakeBin; let baseSha; let sha; let markedSha; let orphanSha; let partialSha;
 
 // One environment for every git command and every hook run in this file. It keeps the machine out of the
 // fixture: no global or system git config (a developer's core.hooksPath, diff.external or aliases), and none of
@@ -131,6 +131,19 @@ beforeAll(() => {
   git(work, ['add', '-A']);
   git(work, ['commit', '-q', '-m', 'no shared history']);
   orphanSha = git(work, ['rev-parse', 'HEAD']);
+  // A branch whose diff git starts and cannot finish: the text filter of its last file fails, so git prints
+  // the patch of the first file and then exits with an error. The attribute is in the repo's info/attributes,
+  // not in a committed .gitattributes: git reads that file from the checked-out tree, and the cases run with
+  // another branch checked out.
+  git(work, ['checkout', '-q', '-b', 'partial', 'main']);
+  fs.writeFileSync(path.join(work, 'a-first.js'), 'module.exports = 5;\n');
+  fs.writeFileSync(path.join(work, 'z-last.broken'), 'data\n');
+  git(work, ['add', '-A']);
+  git(work, ['commit', '-q', '-m', 'a diff that fails part way']);
+  partialSha = git(work, ['rev-parse', 'HEAD']);
+  fs.mkdirSync(path.join(work, '.git', 'info'), { recursive: true });
+  fs.appendFileSync(path.join(work, '.git', 'info', 'attributes'), '*.broken diff=broken\n');
+  git(work, ['config', 'diff.broken.textconv', 'false']);
   git(work, ['checkout', '-q', '-b', 'feature', 'main']);
   fs.writeFileSync(path.join(work, 'a.js'), 'module.exports = 2;\n');
   git(work, ['commit', '-q', '-am', 'change']);
@@ -237,6 +250,21 @@ describe('pre-push round log', () => {
     // The same commit on a push that skips the audit: the more exact reason wins over "skipped".
     expect(runHook({ pushes: [['refs/heads/lonely', orphanSha, 'refs/heads/lonely']], env: { SKIP_CODEX_REVIEW: '1' } }).status).toBe(0);
     expect(rounds()).toEqual([expect.objectContaining({ sha: orphanSha, outcome: 'unaudited', why: 'diff_failed' })]);
+  }, 120000);
+
+  test('an audit of a diff git could not finish is logged as an audit of part of the change', () => {
+    // The fixture must really give a part diff with an error, or this case proves nothing.
+    const part = spawnSync('git', ['diff', '--no-color', `origin/main...${partialSha}`], { cwd: work, encoding: 'utf8', env: cleanEnv() });
+    expect(part.status).not.toBe(0);
+    expect(part.stdout).toContain('a-first.js');
+    // The hook audits the part, as it does on main. The mark changes neither the counts nor the verdict.
+    const run = runHook({ pushes: [['refs/heads/partial', partialSha, 'refs/heads/partial']], env: { FAKE_CODEX_VERDICT: BLOCKING } });
+    expect(run.stderr).toContain('auditing refs/heads/partial');
+    expect(run.stderr).toContain('blocking push');
+    expect(run.status).toBe(1);
+    const [round, ...rest] = rounds();
+    expect(rest).toEqual([]);
+    expect(round).toMatchObject({ ref: 'refs/heads/partial', sha: partialSha, outcome: 'audited', why: 'partial_diff', p0: 1, p1: 2, auditor: 'codex', exit: 1 });
   }, 120000);
 
   test('the log keeps what the loop found for a skipped commit, also when the base moves before the hook ends', () => {

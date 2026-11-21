@@ -356,6 +356,8 @@ fi
 # `why`: skipped (SKIP_CODEX_REVIEW=1), no_auditor, no_schema, no_agents_md,
 # no_base, diff_too_large, auditors_failed, sha_unreachable, diff_failed (git
 # could not compare the commit with the base), not_reached (anything else).
+# An "audited" line has no `why`, with one exception: partial_diff, when git
+# failed after it printed part of the diff and the auditor saw only that part.
 #
 # No line at all: a run with no ref update on stdin (an up-to-date push;
 # the hook audits HEAD then, but nothing was pushed), a delete-only push, a
@@ -1330,8 +1332,9 @@ for i in "${!REF_SHAS[@]}"; do
   DIFF_RC=$?
   # DIFF_RC is read by the round log only. What this loop does with a diff
   # git could not finish is unchanged: no output = skipped as "no changes"
-  # below, and part of a diff = audited as it is (the log then records that
-  # audit, because one ran). To change that is to change the audit, not the
+  # below, and part of a diff = audited as it is. The log says what that
+  # was: `diff_failed` for the first, and an audit marked `partial_diff` for
+  # the second. To change what the loop does is to change the audit, not the
   # log, and belongs in a change of its own.
   if [ -z "$DIFF" ]; then
     # The round log keeps what THIS comparison found: another worktree can
@@ -1564,7 +1567,12 @@ for i in "${!REF_SHAS[@]}"; do
   P1_COUNT="$(jq '[.findings[]? | select(.priority=="P1")] | length' "$OUT_FILE")"
   P0_TOTAL=$((P0_TOTAL + P0_COUNT))
   P1_TOTAL=$((P1_TOTAL + P1_COUNT))
-  round_log_mark "$i" audited "" "$P0_COUNT" "$P1_COUNT" "$AUDITOR"
+  # An audit of what git printed before it failed saw part of the change:
+  # zero findings there say nothing about the rest. Same counts, same push
+  # verdict; the line only carries the mark.
+  ROUND_LOG_NOTE=""
+  [ "$DIFF_RC" -eq 0 ] || ROUND_LOG_NOTE=partial_diff
+  round_log_mark "$i" audited "$ROUND_LOG_NOTE" "$P0_COUNT" "$P1_COUNT" "$AUDITOR"
 
   echo "" >&2
   echo "──────── Review · $AUDIT_LABEL ($SHORT_SHA) · auditor: $AUDITOR ────" >&2
