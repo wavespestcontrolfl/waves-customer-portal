@@ -2773,6 +2773,24 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Job offers, the 2-day reminder (job-offers.js sendDueReminders; GATE_JOB_OFFER_REMINDER, and GATE_JOB_OFFERS): every
+  // 15 minutes from 9 AM to 6 PM Eastern, each open offer sent two days ago or more gets its one reminder (an email,
+  // and a text when the applicant agreed to texts). It is the only message of the offer flow that no person presses. A
+  // catch-up pass: each tick takes all that is due, so a dropped tick loses nothing. Both gates are read before the
+  // lock, so off means no query and no job_health write.
+  cron.schedule('0 4,19,34,49 9-17 * * *', async () => {
+    if (!isEnabled('jobOffers') || !isEnabled('jobOfferReminder')) return;
+    try {
+      await runExclusive('job-offer-reminder', async () => {
+        const { reminded, notSent, failed } = await require('./job-offers').sendDueReminders();
+        if (reminded > 0 || notSent > 0) logger.info(`[job-offers] reminder pass: reminded=${reminded} not_sent=${notSent}`);
+        if (failed > 0) throw new Error(`${failed} reminder(s) failed`);
+      });
+    } catch (err) {
+      logger.error(`[job-offers] reminder pass failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 06:35 — pin check after a visit (GATE_PIN_PARKED_CHECK, dark): compares the map pin of each
   // customer whose visit was completed in the last 2 ET days with where the technician's truck parked,
   // and SUGGESTS the parked point to staff. It never changes a pin and never contacts a customer.
