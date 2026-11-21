@@ -37,14 +37,17 @@ const SESSION_CAP_MS = 10 * 60 * 1000;
 const CLOSE_WAIT_MS = 5000;
 const START_DEADLINE_MS = 10000; // session.started must arrive within this, or the call ends
 const BARGE_IN_MARGIN_MS = 200;
-const NEW_REPLY_GAP_MS = 250; // a model audio chunk this long after the one before starts a new reply
-const REPLY_SILENCE_MIN_MS = 600; // model audio silent this long before voice begins starts a new reply
+const REPLY_SILENCE_MIN_MS = 800; // model audio silent this long before voice begins starts a new reply
 const VOICED_SAMPLE_MIN = 300; // a decoded sample at or above this magnitude (16-bit scale) is voice
+const CALLER_VOICED_RMS_MIN = 300; // a caller frame at or above this RMS (16-bit scale) holds voice
+const CALLER_END_LOOKBACK_MS = 2000; // a transcript fragment's speech ended at the caller's last voiced frame, at most this long before it arrived
 const TAIL_DROP_MAX_MS = 1500; // after a barge-in, drop the cut-off reply's tail at most this long
 // Caller audio that arrives before session.started (admission and the OpenAI
-// start) is held in memory, never stored, and forwarded in order once the
-// session is up: the latest 3 s at most (Twilio sends 20 ms frames).
+// start) is held in memory, never stored: the latest 3 s at most (Twilio sends
+// 20 ms frames). It is forwarded in order once the session is up when the
+// caller spoke in it (onSessionStarted).
 const OPENING_AUDIO_MAX_FRAMES = 150;
+const OPENING_LEAD_FRAMES = 5; // held frames sent ahead of the caller's first voiced one (100 ms)
 const MULAW_BYTES_PER_MS = 8; // 8000 samples a second, one byte each
 // G.711 mu-law to a 16-bit linear sample.
 function mulawToLinear(byte) {
@@ -56,6 +59,8 @@ function mulawToLinear(byte) {
 
 // Whether each mu-law byte is voice (digital silence is 0xFF and 0x7F).
 const VOICED_BYTE = Uint8Array.from({ length: 256 }, (_, b) => (Math.abs(mulawToLinear(b)) >= VOICED_SAMPLE_MIN ? 1 : 0));
+// The squared linear value of each mu-law byte, for a frame's RMS.
+const MULAW_SQUARE = Float64Array.from({ length: 256 }, (_, b) => mulawToLinear(b) ** 2);
 const REPLY_SILENCE_MIN_SAMPLES = REPLY_SILENCE_MIN_MS * MULAW_BYTES_PER_MS;
 
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
@@ -102,13 +107,28 @@ function buildLiveInstructions() {
   return text;
 }
 
-function buildSessionStart({ instructions, voice }) {
+// The greeting is a developer message in session.start, as OpenAI's Live guide
+// says ("include greeting instructions in a developer message in
+// session.input"). The bridge used to send it as session.commentary.append
+// after session.started: on the live API 2026-11-20 that was acknowledged and
+// never spoken (9 s of silence, until the caller spoke). With this message the
+// model greeted 2.0 s after session.started (2026-11-21, Sandy's full prompt).
+// OpenAI does not promise the model speaks first.
+function buildSessionStart({ instructions, voice, greeting }) {
   const { OPENAI_VOICE_LIVE } = require('../../config/models');
+  const say = String(greeting || '').replace(/"/g, "'").trim();
   return {
     type: 'session.start',
     session: {
       model: OPENAI_VOICE_LIVE,
       instructions,
+      ...(say ? {
+        input: [{
+          type: 'message',
+          role: 'developer',
+          content: [{ type: 'input_text', text: `Greet the caller now in English. Say exactly: "${say}" Then pause and listen.` }],
+        }],
+      } : {}),
       audio: {
         format: { type: 'audio/pcmu', rate: 8000 },
         output: { voice: LIVE_VOICES.includes(voice) ? voice : DEFAULT_VOICE },
@@ -187,7 +207,10 @@ class LiveBridge {
     this.startSeen = false; // the Twilio start frame is handled once, whatever it holds
 
     this.startedAt = this.deps.now();
-    this.sessionStartWall = null; // when session.started arrived: transcript ms count from here
+    this.sessionStartWall = null; // when session.started arrived
+    this.callerVoiceAt = null; // arrival of the caller's latest frame that holds voice
+    this.callerMs = 0; // caller audio received, and the part of it in frames that hold voice
+    this.callerVoicedMs = 0;
     this.speechEndWall = null;
     this.awaitingReply = false;
     this.playbackEndsAt = 0;
@@ -196,10 +219,8 @@ class LiveBridge {
     this.replyVoiceWall = null; // ...and when its first voiced sample reached the bridge (delays run to it)
     this.prevReplyStartWall = null; // ...and the reply before it
     this.replySample = null; // { index, speechEnd } of the delay sample the current reply has
-    this.lastAudioAt = null; // arrival time of the last model audio chunk
     this.voiceSeen = false; // a voiced sample has arrived
     this.silentSamples = 0; // silent model audio samples since the last voiced sample
-    this.gapSinceVoice = false; // an arrival gap happened since the last voiced sample
     this.tailDropSince = null; // a barge-in cleared Twilio at this time: drop the old reply's tail
 
     this.latencies = [];
@@ -305,12 +326,48 @@ class LiveBridge {
     // only the final usage is still awaited). Before the session is confirmed,
     // the caller's opening audio is held (OPENING_AUDIO_MAX_FRAMES).
     if (this._finalizing || typeof media.payload !== 'string' || (media.track && media.track !== 'inbound')) return;
+    const voiced = this.noteCallerFrame(media.payload);
     if (!this.ready) {
-      this.openingAudio.push(media.payload);
+      this.openingAudio.push({ payload: media.payload, voiced });
       if (this.openingAudio.length > OPENING_AUDIO_MAX_FRAMES) this.openingAudio.shift();
       return;
     }
     this.toOpenAi({ type: 'session.input_audio.append', audio: media.payload });
+  }
+
+  // Whether a caller frame holds voice, by its RMS (a stray sample at speech
+  // level is not voice). The arrival time of the latest voiced frame is kept:
+  // a time, never audio.
+  noteCallerFrame(payload) {
+    const audio = Buffer.from(payload, 'base64');
+    let sum = 0;
+    for (let i = 0; i < audio.length; i++) sum += MULAW_SQUARE[audio[i]];
+    const voiced = audio.length > 0 && sum >= audio.length * CALLER_VOICED_RMS_MIN ** 2;
+    const ms = audio.length / MULAW_BYTES_PER_MS;
+    this.callerMs += ms;
+    if (voiced) {
+      this.callerVoicedMs += ms;
+      this.callerVoiceAt = this.deps.now();
+    }
+    return voiced;
+  }
+
+  // When the caller stopped speaking, for a transcript fragment that arrives
+  // at t: the arrival of the caller's last voiced frame. OpenAI's start_ms and
+  // end_ms are not used. Measured on the live API (two sessions, 2026-11-20
+  // and 11-21, four caller utterances): end_ms, counted from session.started,
+  // ran 1.3 to 2.5 s after the caller's true last sound (in three of the four,
+  // after the reply had begun), and its offset moved by more than a second
+  // inside one session (OpenAI: "approximate fragment timing rather than exact
+  // word boundaries").
+  // The caller's own audio is exact, and the last fragment of an utterance
+  // arrived 0.75 to 1.2 s after its last sound. With no voiced frame in the
+  // last CALLER_END_LOOKBACK_MS (speech under the voice level), the end is t.
+  // On a noisy line every frame is voiced, so the end is t as well. Either way
+  // the delay then reads about 1 s low; caller_voiced_pct shows which calls.
+  callerSpeechEnd(t) {
+    const voice = this.callerVoiceAt;
+    return voice !== null && voice >= t - CALLER_END_LOOKBACK_MS ? voice : t;
   }
 
   // ── OpenAI side ──────────────────────────────────────────────────────────
@@ -323,7 +380,7 @@ class LiveBridge {
     }
     let startMsg;
     try {
-      startMsg = buildSessionStart({ instructions: this.deps.buildInstructions(), voice: this.voice });
+      startMsg = buildSessionStart({ instructions: this.deps.buildInstructions(), voice: this.voice, greeting: this.deps.greeting() });
     } catch (err) {
       logger.error(`[voice-live] session setup failed callSid=${this.callSid}: ${err.message}`);
       this.noteError('setup_failed');
@@ -375,17 +432,25 @@ class LiveBridge {
     this.ready = true;
     this.sessionStartWall = this.deps.now();
     clearTimeout(this.startTimer);
-    if (this._finalizing) return; // shutting down: no greeting
-    this.toOpenAi({ type: 'session.commentary.append', delegation_id: null, content: this.deps.greeting() });
+    if (this._finalizing) return; // shutting down: nothing more is sent
+    // The held opening audio goes to OpenAI only when the caller spoke in it,
+    // and then from just before their first sound. Held silence is dropped: it
+    // holds nothing to answer. The one live session that got 1.6 s of it in a
+    // burst (2026-11-20) was the one where the greeting was never spoken; the
+    // session without it (11-21) greeted. From here on the caller's audio runs
+    // in real time, silence included, as OpenAI's guide asks ("Wait for
+    // session.started before sending audio", "keep input audio running").
     const opening = this.openingAudio;
     this.openingAudio = [];
-    for (const audio of opening) this.toOpenAi({ type: 'session.input_audio.append', audio });
+    const first = opening.findIndex((frame) => frame.voiced);
+    if (first < 0) return;
+    for (const frame of opening.slice(Math.max(0, first - OPENING_LEAD_FRAMES))) this.toOpenAi({ type: 'session.input_audio.append', audio: frame.payload });
   }
 
   // One pass over a model audio chunk, sample by sample, so the result does
   // not depend on how OpenAI cuts the stream into chunks. A voiced sample
   // starts a reply when it is the first voice of the call, or follows at least
-  // REPLY_SILENCE_MIN_MS of silent audio, or follows an arrival gap. Returns
+  // REPLY_SILENCE_MIN_MS of silent audio. Returns
   // the index of the first such sample (-1: none) and of the last voiced
   // sample (-1: none). A chunk is one arrival: it marks one reply start at
   // the most.
@@ -397,9 +462,8 @@ class LiveBridge {
         this.silentSamples += 1;
         continue;
       }
-      if (start < 0 && (!this.voiceSeen || this.gapSinceVoice || this.silentSamples >= REPLY_SILENCE_MIN_SAMPLES)) start = i;
+      if (start < 0 && (!this.voiceSeen || this.silentSamples >= REPLY_SILENCE_MIN_SAMPLES)) start = i;
       this.voiceSeen = true;
-      this.gapSinceVoice = false;
       this.silentSamples = 0;
       last = i;
     }
@@ -411,16 +475,16 @@ class LiveBridge {
     const t = this.deps.now();
     // Measured on the live API 2026-11-20: GPT-Live's audio is a continuous
     // real-time stream (about 100 ms chunks every 100 ms from session.started
-    // on) with digital silence (every mu-law byte 0xFF) between utterances, so
-    // an arrival gap alone does not mark a reply. A reply starts at the first
-    // voiced sample after at least REPLY_SILENCE_MIN_MS of silent audio (pauses
-    // inside one utterance are under about 500 ms), or after an arrival gap
-    // (OpenAI pausing the stream). A reply start marks its chunk whatever is
-    // still queued at Twilio, so a fast reply and a reply right after a
-    // barge-in are both timed.
+    // on) with digital silence (every mu-law byte 0xFF) between utterances. A
+    // reply starts at the first voiced sample after at least
+    // REPLY_SILENCE_MIN_MS of silent audio: a pause between two sentences of
+    // one reply ran to 593 ms on the live API, and the model answers about 1 s
+    // after the caller stops. A gap in arrival is delay on the way (the
+    // network, or a busy process), not a reply boundary: one of 358 ms came in
+    // a 24 s session, and the audio it held back arrived right after it. A
+    // reply start marks its chunk whatever is still queued at Twilio, so a fast
+    // reply and a reply right after a barge-in are both timed.
     const audio = Buffer.from(msg.delta, 'base64');
-    if (this.lastAudioAt !== null && t - this.lastAudioAt >= NEW_REPLY_GAP_MS) this.gapSinceVoice = true;
-    this.lastAudioAt = t;
     const { start, last } = this.scanModelAudio(audio);
     // After a barge-in, audio that starts no reply is the cut-off reply's
     // tail: it is dropped, so the caller never hears it restart mid-sentence
@@ -457,7 +521,7 @@ class LiveBridge {
   }
 
   // The pending measure is consumed only here, by a reply start. The first
-  // reply start is the greeting (sent at session.started): it is never timed,
+  // reply start is the greeting (asked for in session.start): it is never timed,
   // even when the caller spoke before it.
   onReplyStart(t, ambiguous, voiceAt) {
     const greeting = this.replyStartWall === null;
@@ -490,9 +554,9 @@ class LiveBridge {
   onInputTranscript(msg) {
     const text = typeof msg.delta === 'string' ? msg.delta : '';
     const t = this.deps.now();
-    // start_ms / end_ms count from the start of the Live session, so they map
-    // to wall time from session.started, not from the first caller packet.
-    const speechEnd = Number.isFinite(msg.end_ms) && this.sessionStartWall !== null ? this.sessionStartWall + msg.end_ms : null;
+    // A fragment with timing fields is caller speech. Its end_ms is not a
+    // usable clock: callerSpeechEnd reads the caller's audio instead.
+    const speechEnd = Number.isFinite(msg.end_ms) && this.sessionStartWall !== null ? this.callerSpeechEnd(t) : null;
     if (speechEnd !== null) this.noteSpeechEnd(speechEnd);
     if (text.trim() && this.isBargeIn(t, speechEnd)) {
       this.toTwilio({ event: 'clear', streamSid: this.streamSid });
@@ -694,6 +758,10 @@ class LiveBridge {
       first_reply_ambiguous_ms: this.firstReplyAmbiguousMs,
       after_barge_in_ambiguous_ms: this.ambiguousReplies,
       interruptions: this.interruptions,
+      // The share of the caller's audio in frames that hold voice. Near 100
+      // (a noisy line) or 0 (the caller never passed the voice level) means the
+      // caller's speech end could not be heard: each delay reads about 1 s low.
+      caller_voiced_pct: this.callerMs ? Math.round((100 * this.callerVoicedMs) / this.callerMs) : null,
       delegations: this.delegations.size,
       errors,
     };
