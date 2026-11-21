@@ -201,6 +201,21 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(linkedin._isTrustedImageUrl('https://evil.example.com/x.jpg')).toBe(false);
     expect(linkedin._isTrustedImageUrl('https://notwavespestcontrol.com/x.jpg')).toBe(false);
     expect(linkedin._isTrustedImageUrl('not a url')).toBe(false);
+    // userinfo: Node's fetch would quote the whole URL, password included, in its error.
+    expect(linkedin._isTrustedImageUrl('https://user:pw@cdn.example.com/x.jpg')).toBe(false);
+    expect(linkedin._isTrustedImageUrl('https://user@www.wavespestcontrol.com/x.jpg')).toBe(false);
+  });
+
+  test('a credential-bearing URL on a trusted host is refused, and the warning omits it', async () => {
+    const calls = mockRoutes();
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
+
+    await linkedin.createPost({ text: 'T', title: 'Topic', imageUrl: 'https://user:pw-s3cret@cdn.example.com/x.jpg' });
+
+    const line = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('[linkedin] image upload failed'));
+    expect(line).toContain('untrusted thumbnail URL host');
+    expect(line).not.toContain('s3cret');
+    expect(calls.some((c) => c.url.includes('user:pw'))).toBe(false);
   });
 
   test('linkedinEngagementReady: requires connection AND the r_organization_social_feed grant', async () => {

@@ -385,6 +385,9 @@ class LinkedInService {
     try {
       const u = new URL(String(imageUrl));
       if (u.protocol !== 'https:') return false;
+      // userinfo never belongs on our image hosts, and Node's fetch rejects it
+      // with an error that quotes the whole URL (credentials included).
+      if (u.username || u.password) return false;
       const host = u.hostname.toLowerCase();
       const cdn = String(process.env.SOCIAL_MEDIA_CDN_DOMAIN || '').toLowerCase();
       return (!!cdn && host === cdn)
