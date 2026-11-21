@@ -372,7 +372,11 @@ async function reportAfterPayHeldVisitIds(conn, visitIds) {
 // then, and the sweep checks it again) keeps it open, and every other refusal
 // still does. The answer carries `deferred: true`: the closeout records the
 // hold there (holdForReport), and the card discloses and pins the later close.
-async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null, deferSameDay = false } = {}) {
+// noHold (an approved record_payment target that is not a deferred close,
+// approvalForbidsHold; pre-push audit round 10): the payment holds nothing,
+// so the visit is judged as with the gate off, as the completion judges it
+// under its lock. A hold already recorded still counts.
+async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null, deferSameDay = false, noHold = false } = {}) {
   if (!invoice) return { svc: null, reason: 'no_invoice' };
   const linked = await linkedVisitForInvoice(conn, invoice);
   if (!linked.svc) return { svc: null, reason: linked.reason, ...(linked.visit ? { visit: linked.visit } : {}) };
@@ -389,7 +393,7 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   try {
     issuedDay = await issuedDayForInvoice(conn, invoice, trigger);
     held = await reportAfterPayHold(conn, svc.id);
-    holdable = trigger === 'paid' && await reportAfterPayWouldHold(conn, { visit: svc, invoice, today });
+    holdable = !noHold && trigger === 'paid' && await reportAfterPayWouldHold(conn, { visit: svc, invoice, today });
   } catch (err) {
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
   }
@@ -634,6 +638,17 @@ async function approvedPaidCloseoutTargetFor(conn, invoiceId) {
   const meta = pin ? parseMeta(pin.metadata) : {};
   return meta.approvedTarget ? { target: meta.approvedTarget, ...(meta.approvedVisit ? { visit: meta.approvedVisit } : {}) } : null;
 }
+// GATE_REPORT_AFTER_PAY (pre-push audit rounds 9-10): the card decision a paid closeout keeps to when its caller brings no target of
+// its own (a receipt resend, another pay rail): the payment's stored pin, as the retry sweep honors it. The closeout adopts it
+// (adoptPaymentApproval) and its read-only probe applies it (issuedCloseoutTarget), so the resend card shows what the run does. Null
+// with the gate off, for a send, and for a payment no card approved.
+async function storedPaymentApproval(conn, invoiceId, trigger) {
+  if (trigger !== 'paid' || !reportAfterPayLive()) return null;
+  return approvedPaidCloseoutTargetFor(conn, invoiceId);
+}
+// Only a pin marked `deferred` lets a payment hold its visit (round 9). Any other approved target is the card's verdict that the
+// payment closes the visit now (another bill was on it) or closes nothing, kept when a bill is voided after the payment.
+const approvalForbidsHold = (target, visit) => Boolean(target) && visit?.deferred !== true;
 
 // The claim's delivery finalized: the pin written under this claim token is now the invoice's delivery episode.
 async function recordApprovedCloseoutDelivery(invoiceId, claimToken, { conn = db, actorTechnicianId = null } = {}) {
@@ -979,8 +994,12 @@ async function refuseVoidedInvoice(run) {
 // recorded like a refused completion (GitHub r1 P2); an invoice with no visit
 // link has nothing to audit against — the send / payment itself is logged.
 // Sets run.svc / run.resuming and returns null to continue, else the refusal.
+// GATE_REPORT_AFTER_PAY: an approved target that is not a deferred close lets
+// the payment hold nothing (approvalForbidsHold).
 async function resolveCloseoutTarget(run) {
-  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today, trigger: run.trigger, deferSameDay: true });
+  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, {
+    today: run.today, trigger: run.trigger, deferSameDay: true, noHold: approvalForbidsHold(run.approvedTarget, run.approvedVisit),
+  });
   run.linkedVisitId = resolved.visit?.id || null;
   if (resolved.svc) {
     run.svc = resolved.svc;
@@ -1016,32 +1035,38 @@ function approvedVisitChanged(svc, approved) {
   const live = visitFactsOf(svc);
   return ['serviceType', 'date', 'status', 'updatedAtMs'].some((key) => (approved[key] === undefined ? false : (approved[key] ?? null) !== live[key]));
 }
-// Phase 2b — GATE_REPORT_AFTER_PAY (pre-push audit round 9): before a payment
-// holds a visit, a caller with no approved target of its own (a receipt
-// resend, another pay rail) adopts the payment's stored record_payment pin,
-// as the retry sweep does, because the card's decision for this payment
-// outranks the hold. A card that named another visit, or none, then leaves
-// this visit for a person (the approved-target refusal below), and one that
-// said the visit closes now is kept to it (holdForReport). Never refuses.
+// Phase 1b — GATE_REPORT_AFTER_PAY (pre-push audit rounds 9-10): a paid
+// closeout whose caller brings no approved target (a receipt resend, another
+// pay rail) adopts the payment's stored record_payment pin, as the retry
+// sweep does, before it resolves the visit: the card's decision for this
+// payment stands on every path. A card that named another visit, or none,
+// leaves the visit for a person (the approved-target refusal below); one that
+// said the visit closes now lets the payment hold nothing (resolveCloseoutTarget).
+// Never refuses.
 async function adoptPaymentApproval(run) {
-  if (!run.deferred || run.approvedTarget) return null;
-  const stored = await approvedPaidCloseoutTargetFor(run.conn, run.invoice.id);
+  if (run.approvedTarget) return null;
+  const stored = await storedPaymentApproval(run.conn, run.invoice.id, run.trigger);
   if (stored) Object.assign(run, { approvedTarget: stored.target, approvedVisit: stored.visit || null });
   return null;
 }
+// The approved target's verdict on the resolved visit: null (no target, or this visit as the card showed it), 'approved_target_mismatch'
+// (the card named another visit, or none) or 'approved_visit_changed'. The last is not for a proven resume of THIS invoice's own
+// committed attempt: the completion already ran, so the visit no longer reads as the card showed it (completed, newer edit time) and the
+// post-commit work (invoice back-link, tracker, snapshot) must be allowed to finish; the target-id check still holds. The closeout refuses
+// on it, and its read-only probe names no visit (issuedCloseoutTarget).
+function approvalRefusal(svc, { target, visit, resuming }) {
+  if (!target) return null;
+  if (svc.id !== target) return 'approved_target_mismatch';
+  return visit && !resuming && approvedVisitChanged(svc, visit) ? 'approved_visit_changed' : null;
+}
 async function refuseUnapprovedTarget(run) {
-  // Not for a proven resume of THIS invoice's own committed attempt: the completion already ran, so the visit no longer reads as the card
-  // showed it (completed, newer edit time) and the post-commit work (invoice back-link, tracker, snapshot) must be allowed to finish. The
-  // target-id check below still holds.
-  if (run.approvedVisit && !run.resuming && run.svc.id === run.approvedTarget && approvedVisitChanged(run.svc, run.approvedVisit)) {
-    logger.warn(`[invoice-issued-closeout] ${run.label} → approved_visit_changed: visit ${run.svc.id} changed since the card; left open`);
-    const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code: 'approved_visit_changed' });
-    return { closed: false, reason: 'approved_visit_changed', visitId: run.svc.id, audited };
-  }
-  if (!run.approvedTarget || run.svc.id === run.approvedTarget) return null;
-  logger.warn(`[invoice-issued-closeout] ${run.label} → approved_target_mismatch: approved ${run.approvedTarget}, live visit ${run.svc.id}; left open`);
-  const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code: 'approved_target_mismatch' });
-  return { closed: false, reason: 'approved_target_mismatch', visitId: run.svc.id, approvedTarget: run.approvedTarget, audited };
+  const code = approvalRefusal(run.svc, { target: run.approvedTarget, visit: run.approvedVisit, resuming: run.resuming });
+  if (!code) return null;
+  logger.warn(code === 'approved_visit_changed'
+    ? `[invoice-issued-closeout] ${run.label} → approved_visit_changed: visit ${run.svc.id} changed since the card; left open`
+    : `[invoice-issued-closeout] ${run.label} → approved_target_mismatch: approved ${run.approvedTarget}, live visit ${run.svc.id}; left open`);
+  const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code });
+  return { closed: false, reason: code, visitId: run.svc.id, ...(code === 'approved_target_mismatch' ? { approvedTarget: run.approvedTarget } : {}), audited };
 }
 
 // Phase 2c — GATE_REPORT_AFTER_PAY: a visit this payment holds (the
@@ -1058,13 +1083,13 @@ async function refuseUnapprovedTarget(run) {
 // added, the visit moved or closed, the gate off), the visit closes as with
 // the gate off: the completion re-checks the day, the job timer, the hold and
 // the payment under its own locks. Only a record_payment pin marked
-// `deferred` lets the payment hold its visit: a pin without it is the card's
-// close-now verdict (another bill was on the visit), kept when that bill is
-// voided after the payment (pre-push audit round 9). A main-era pin, which
-// names only a close-now visit, reads the same way.
+// `deferred` lets the payment hold its visit: the resolver gives any other
+// approved target no `deferred` (approvalForbidsHold), the card's close-now
+// verdict (another bill was on the visit), kept when that bill is voided
+// after the payment (pre-push audit round 9). A main-era pin, which names
+// only a close-now visit, reads the same way.
 async function holdForReport(run) {
   if (!run.deferred) return null;
-  if (run.approvedTarget && run.approvedVisit?.deferred !== true) return null;
   const held = await recordReportAfterPayHold(run.conn, { visitId: run.svc.id, invoiceId: run.invoice.id, today: run.today });
   if (!held) return null;
   const code = held === true ? 'visit_scheduled_today' : held;
@@ -1128,9 +1153,18 @@ const issuedCloseoutIdempotencyKey = (invoiceId) => `invoice-issued:${invoiceId}
 // which the retry sweep closes after that day, marked `deferred: true` (see
 // resolveVisitForIssuedInvoice deferSameDay). The other cards disclose only
 // what their own run closes now, so they keep the default.
+// GATE_REPORT_AFTER_PAY (pre-push audit round 10): a paid closeout with no
+// target of its own keeps to the payment's stored card decision
+// (adoptPaymentApproval), so the probe applies it the same way: a card that
+// named another visit, or none, or a visit changed since, closes nothing, and
+// a close-now card closes the visit now, also after the other bill is voided.
+// The receipt resend card and its confirmation recheck read this probe.
 async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, today = etDateString(), includeDeferred = false } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return null;
-  const resolved = await resolveVisitForIssuedInvoice(conn, invoice, { today, trigger, deferSameDay: includeDeferred });
+  const approval = await storedPaymentApproval(conn, invoice.id, trigger);
+  const resolved = await resolveVisitForIssuedInvoice(conn, invoice, {
+    today, trigger, deferSameDay: includeDeferred, noHold: approvalForbidsHold(approval?.target, approval?.visit),
+  });
   let visit = resolved.svc;
   let resuming = false;
   if (!visit && resolved.reason === 'visit_completed'
@@ -1138,6 +1172,7 @@ async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, toda
     visit = resolved.visit;
     resuming = true;
   }
+  if (visit && approvalRefusal(visit, { target: approval?.target, visit: approval?.visit, resuming })) return null;
   return visit ? { visitId: visit.id, serviceType: visit.service_type || null, date: dateOnly(visit.scheduled_date), updatedAt: visit.updated_at || null, status: visit.status ?? null, resuming, ...(resolved.deferred ? { deferred: true } : {}) } : null;
 }
 
@@ -1176,17 +1211,17 @@ async function auditCloseoutFailure(run, err) {
 // the AUTHENTICATED staff role behind actorTechnicianId (req.techRole —
 // 'admin' | 'technician'), used ONLY for the audit identity — see
 // auditCloseoutOutcome and runQuietCloseout. Bounded phases share one
-// `run` context (GitHub r11 P2 #4127): void refusal → target resolution →
-// (GATE_REPORT_AFTER_PAY) the payment's stored approval for a caller with
-// none → the approved-target refusal → (GATE_REPORT_AFTER_PAY) the hold →
-// the quiet canonical completion.
+// `run` context (GitHub r11 P2 #4127): void refusal → (GATE_REPORT_AFTER_PAY)
+// the payment's stored approval for a caller with none → target resolution →
+// the approved-target refusal → (GATE_REPORT_AFTER_PAY) the hold → the quiet
+// canonical completion.
 async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), approvedTarget = null, approvedVisit = null } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
   const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, approvedTarget: approvedTarget || null, approvedVisit: approvedVisit || null, invoice: null, linkedVisitId: null, svc: null, resuming: false, deferred: false, label: null, idempotencyKey: null };
   try {
     if (!(await loadCloseoutInvoice(run))) return { closed: false, reason: 'no_invoice' };
-    const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run)) || (await adoptPaymentApproval(run))
+    const refused = (await refuseVoidedInvoice(run)) || (await adoptPaymentApproval(run)) || (await resolveCloseoutTarget(run))
       || (await refuseUnapprovedTarget(run)) || (await holdForReport(run));
     return refused || await runQuietCloseout(run);
   } catch (err) {

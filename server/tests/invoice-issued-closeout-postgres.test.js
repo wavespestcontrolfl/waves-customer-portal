@@ -908,6 +908,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   // Now, the completion and the sweep. The gate holds only a visit its paid invoice alone bills; any other closes as with it off.
   // Round 9: the card's close-now verdict is pinned with the payment (no `deferred` mark), so the other bill voided after the
   // payment does not turn it into a hold: the payment's closeout, and a later caller with no target of its own, close the visit.
+  // Round 10: the receipt resend card's preview shows that close.
   test('report after pay: a visit with another invoice on it is not held: the card names an immediate close, and the same-day payment closes it on the paid invoice, as with the gate off; the close-now verdict outlasts a bill voided after the payment', async () => {
     const { reportAfterPayHold } = require('../services/invoice-issued-closeout');
     const { settlementFenceFor } = require('../services/intelligence-bar/record-payment-fences');
@@ -929,6 +930,11 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(fence.closeoutVisit).not.toHaveProperty('deferred');
     await pinPayment(open.id, fence.closeoutTarget, fence.closeoutVisit);
     await trx('invoices').where({ id: draft.id }).update({ status: 'void' });
+    // Round 10: the receipt resend card's preview applies the same pin, so it shows the close, though the payment alone would now
+    // hold the visit.
+    const preview = await issuedCloseoutTarget(await trx('invoices').where({ id: open.id }).first(), { today: TODAY, conn: trx });
+    expect(preview).toMatchObject({ visitId: svc.id, status: 'on_site', resuming: false });
+    expect(preview).not.toHaveProperty('deferred');
     mockCompleteScheduledService.mockClear();
     expect(await closeOutVisitForIssuedInvoice({ invoiceId: open.id, trigger: 'paid', conn: trx, today: TODAY, approvedTarget: fence.closeoutTarget, approvedVisit: fence.closeoutVisit }))
       .toMatchObject({ closed: true, visitId: svc.id });
@@ -1027,23 +1033,41 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   // The record_payment card's pin outranks the hold: a payment whose card named another visit, or none, leaves this visit for a
   // person (approved_target_mismatch, which the sweeps never retry) and records no hold on it, though the payment would hold it.
   // Round 9: also on a later caller with no target of its own (a receipt resend after the technician arrived): it adopts the
-  // payment's stored pin first, as the sweep does. Gate off, that caller closes the visit, as before the gate.
-  test('report after pay: a payment whose card named another visit, or none, records no hold on this one, also on a later caller with no target of its own', async () => {
+  // payment's stored pin first, as the sweep does. Round 10: also where the payment would hold nothing (the office added a bill on
+  // the visit), and the resend card's preview applies the pin too. A send is not the payment's closeout and adopts no pin. Gate
+  // off, that caller closes the visit, as before the gate.
+  test('report after pay: a payment whose card named another visit, or none, records no hold on this one and closes nothing, also on a later caller with no target of its own', async () => {
     const { reportAfterPayHold } = require('../services/invoice-issued-closeout');
     mockGate.reportAfterPay = true;
     const svc = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
     const inv = await invoice({ status: 'paid', paid_at: PAID_AT, scheduled_service_id: svc.id, date: TODAY });
     expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY, approvedTarget: 'none' }))
       .toMatchObject({ closed: false, reason: 'approved_target_mismatch', visitId: svc.id });
+    // A card that deferred the close of another visit does not hold this one either.
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY, approvedTarget: randomUUID(),
+      approvedVisit: { serviceType: svc.service_type, date: TODAY, status: 'on_site', deferred: true } }))
+      .toMatchObject({ closed: false, reason: 'approved_target_mismatch', visitId: svc.id });
     expect(await reportAfterPayHold(trx, svc.id)).toBeNull();
     // The card pinned none (the payment came before the arrival); the receipt is resent after it, with no target.
     await pinPayment(inv.id, 'none');
-    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY }))
-      .toMatchObject({ closed: false, reason: 'approved_target_mismatch', visitId: svc.id });
+    const resend = () => closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY });
+    expect(await resend()).toMatchObject({ closed: false, reason: 'approved_target_mismatch', visitId: svc.id });
     expect(await reportAfterPayHold(trx, svc.id)).toBeNull();
+    // The office then adds a bill on the visit, so the payment alone would close it at once: the pin still leaves it open, and
+    // the resend card shows no close.
+    await invoice({ status: 'draft', scheduled_service_id: svc.id, date: TODAY });
+    expect(await issuedCloseoutTarget(inv, { today: TODAY, conn: trx })).toBeNull();
+    expect(await resend()).toMatchObject({ closed: false, reason: 'approved_target_mismatch', visitId: svc.id });
     expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    // A send of a paid invoice adopts no payment pin (a past-day visit, which a send closes).
+    const past = await visit({ status: 'on_site', arrived_at: new Date(`${YESTERDAY}T14:00:00Z`) });
+    const pastInv = await invoice({ status: 'paid', paid_at: PAID_AT, sent_at: PAID_AT, scheduled_service_id: past.id });
+    await pinPayment(pastInv.id, 'none');
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: pastInv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: true, visitId: past.id });
     mockGate.reportAfterPay = false;
-    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: true, visitId: svc.id });
+    expect(await issuedCloseoutTarget(inv, { today: TODAY, conn: trx })).toMatchObject({ visitId: svc.id });
+    expect(await resend()).toMatchObject({ closed: true, visitId: svc.id });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId)).toEqual([past.id, svc.id]);
   });
 
   // Pre-push audit round 8: a payment undone or charged back after its closeout started is gone by the time the hold is written.
