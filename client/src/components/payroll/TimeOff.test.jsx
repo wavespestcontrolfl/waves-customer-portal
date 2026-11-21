@@ -764,6 +764,37 @@ describe('The open pay run stays the one the owner picked', () => {
     expect(screen.getByLabelText(FIRST)).toBeInTheDocument();
   });
 
+  it('says so and keeps Finalize off when the draft cannot be read again after a change, until a read of it succeeds', async () => {
+    let fails = false;
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      const method = options.method || 'GET';
+      if (path === '/admin/payroll/runs' && method === 'GET') return reply({ runs: LIST });
+      if (path === '/admin/payroll/runs/run-1/recompute' && method === 'POST') { fails = false; return reply({ run: DRAFT }); }
+      if (path === '/admin/payroll/runs/run-1') return fails ? reply({ error: 'Server error.' }, false, 500) : reply({ run: DRAFT });
+      return original(path, options);
+    });
+    const NOT_READ = 'This draft could not be read again after a change. Press Recompute.';
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    expect(await screen.findByRole('button', { name: 'Finalize' })).toBeEnabled();
+    expect(screen.queryByText(NOT_READ)).toBeNull();
+    // A day off is removed, and the read of the draft after it fails: its numbers can be from before the change.
+    fails = true;
+    fireEvent.click(within(await panel()).getByRole('button', { name: 'Remove time off for Sample Alpha on Oct 14, 2026' }));
+    expect(await screen.findByText(NOT_READ)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Finalize' })).toBeDisabled();
+    // The list reload after the failure clears the failure message. The line on the draft stays.
+    await act(async () => { await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    await waitFor(() => expect(screen.queryByText('Server error.')).toBeNull());
+    expect(screen.getByText(NOT_READ)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Finalize' })).toBeDisabled();
+    // Recompute works the numbers out again, and the read after it succeeds.
+    fireEvent.click(screen.getByRole('button', { name: 'Recompute' }));
+    await waitFor(() => expect(screen.queryByText(NOT_READ)).toBeNull());
+    expect(screen.getByRole('button', { name: 'Finalize' })).toBeEnabled();
+  });
+
   // A new pay run whose answer is held back until release() runs.
   const holdTheNewRun = () => {
     const NEW = { ...DRAFT, id: 'run-9', weekStart: '2026-09-28', weekEnd: '2026-10-04', payDate: '2026-10-09' };

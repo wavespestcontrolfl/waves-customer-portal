@@ -487,9 +487,19 @@ function SendToMercury({ call, run, onChanged, onMessage }) {
 // A run with no paycheck can still be finalized when it lists time off a time-off bank did not pay: that
 // closes the week, and those hours stop waiting for a pay run.
 const closesUnpaidOnly = run => run.checks.length === 0 && (run.unpaidTimeOff || []).length > 0;
-const canFinalizeRun = run => run.status === 'draft' && !run.stale
+// `unverified`: the last read of the run failed, so its numbers can be from before a change.
+const canFinalizeRun = (run, unverified) => run.status === 'draft' && !run.stale && !unverified
   && run.blocked.length + run.waiting.length === 0
   && (run.checks.length > 0 || closesUnpaidOnly(run));
+
+// Why the owner cannot trust a draft's numbers yet. Recompute works them out again and reads them.
+function DraftNotices({ run, unverified }) {
+  if (run.status !== 'draft') return null;
+  return <>
+    {run.stale && <p role="status" className="m-0 text-ui-caption text-warn-fg">Hours or settings changed since this draft. Press Recompute.</p>}
+    {unverified && <p role="status" className="m-0 text-ui-caption text-warn-fg">This draft could not be read again after a change. Press Recompute.</p>}
+  </>;
+}
 
 function ConfirmFinalize({ run, busy, onYes, onCancel }) {
   return <div role="group" aria-label="Confirm finalize" className="grid gap-2 rounded-sm border-hairline border-zinc-300 p-3">
@@ -503,14 +513,14 @@ function ConfirmFinalize({ run, busy, onYes, onCancel }) {
   </div>;
 }
 
-export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
+export function RunDetail({ call, run, unverified, onChanged, onMessage, onRunsChanged }) {
   // While the finalize prompt is open: the review token of the numbers on screen when Finalize was pressed.
   const [confirmToken, setConfirmToken] = useState(null);
   const [voiding, setVoiding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [stubFor, setStubFor] = useState(null);
-  const canFinalize = canFinalizeRun(run);
+  const canFinalize = canFinalizeRun(run, unverified);
   // A read in the background can bring other numbers under the open prompt. Time off that a time-off bank
   // does not pay changes the token and does not make the draft out of date, so "Yes" would finalize numbers
   // the owner did not confirm. The prompt closes, and the owner reviews them and presses Finalize again.
@@ -566,7 +576,7 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
     </div>
 
     {run.status === 'voided' && <p className="m-0 text-ui-caption">Voided{run.voidReason ? `: ${run.voidReason}` : ''}</p>}
-    {run.stale && <p role="status" className="m-0 text-ui-caption text-warn-fg">Hours or settings changed since this draft. Press Recompute.</p>}
+    <DraftNotices run={run} unverified={unverified} />
 
     <Problems title="Waiting for approval" items={run.waiting} />
     <Problems title="Blocked" items={run.blocked} />
@@ -620,6 +630,9 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  // The last read of the run on screen failed. The list reload clears `error`, so this stays apart from it:
+  // the run keeps a line that says so, and Finalize waits until a read of it succeeds.
+  const [unverified, setUnverified] = useState(false);
 
   const loadList = useCallback(async () => {
     try {
@@ -642,7 +655,7 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
   const readThrough = useRef(0);
   const show = useCallback((next, seen) => {
     shown.current = next.id; wanted.current = next.id; readThrough.current = seen;
-    setRun(next);
+    setRun(next); setUnverified(false);
   }, []);
   // `kept` is the failure that sent the owner back to the run on screen. It stays up while that run is read
   // again: the list is not reloaded then, because a list reload clears the message.
@@ -663,6 +676,7 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
       if (mine !== newestOpen.current) return;
       wanted.current = shown.current;
       setError(failure.message);
+      if (shown.current === id) setUnverified(true);
       // The owner is back on the run on screen. A change that ended while they waited is not in it (its read
       // was held back, or dropped for this one): read it now.
       if (shown.current && shown.current !== id && readThrough.current !== changes.current) {
@@ -760,7 +774,7 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
     </Card>
 
     {run && <RunDetail
-      key={run.id} call={call} run={run}
+      key={run.id} call={call} run={run} unverified={unverified}
       onChanged={changed} onMessage={setMessage} onRunsChanged={onRunsChanged}
     />}
 

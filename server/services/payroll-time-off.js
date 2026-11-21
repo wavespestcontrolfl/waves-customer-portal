@@ -225,6 +225,12 @@ async function balance(query, conn = db) {
     throw new PayrollError(400, 'Year must be a four-digit year');
   }
   const year = Number(raw);
+  // One read-only snapshot for every figure. A pay run that is finalized between two reads would show the
+  // bank from before it next to the waiting hours from after it.
+  return conn.transaction((trx) => balanceAt(trx, technicianId, year), { isolationLevel: 'repeatable read', readOnly: true });
+}
+
+async function balanceAt(conn, technicianId, year) {
   const tech = await conn('technicians').where({ id: technicianId }).first('id');
   if (!tech) throw new PayrollError(404, 'Technician not found.');
   const allowance = await allowanceOf(conn, technicianId);

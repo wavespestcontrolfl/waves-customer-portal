@@ -273,6 +273,27 @@ postgres('payroll time-off bank', () => {
       expect((await api('POST', `/runs/${run.id}/void`, { body: { reason: 'Redo' } })).status).toBe(200);
       expect((await balanceOf(id)).bank.balanceHours).toBe('0.00');
     });
+
+    it('reads every figure of the balance in one read-only snapshot, so a finalize between two reads cannot split the bank from the waiting hours', async () => {
+      const id = await tech('Sample Alpha', { hours: '80' });
+      await fullWeek(id, W1);
+      // Here the snapshot is a savepoint inside the suite's transaction, which takes no isolation level. So the
+      // options are checked as passed, and every table read is checked to go through that one transaction.
+      const [inside, outside, options] = [[], [], []];
+      const recording = (conn, seen, extra = {}) => new Proxy(conn, {
+        apply: (target, _self, args) => { seen.push(String(args[0])); return target(...args); },
+        get: (target, key) => (key in extra ? extra[key] : target[key]),
+      });
+      mockConnection = recording(trx, outside, {
+        transaction: (work, config) => { options.push({ ...config }); return trx.transaction((inner) => work(recording(inner, inside)), config); },
+      });
+      let balance;
+      try { balance = await balanceOf(id); } finally { mockConnection = trx; }
+      expect(balance.bank).toMatchObject({ balanceHours: '1.54', waitingHours: '0.00' });
+      expect(options).toEqual([{ isolationLevel: 'repeatable read', readOnly: true }]);
+      expect(outside).toEqual([]);
+      for (const table of ['technicians', 'payroll_checks', 'payroll_time_off']) expect(inside.join(' | ')).toContain(table);
+    });
   });
 
   describe('paying time off from the bank', () => {
