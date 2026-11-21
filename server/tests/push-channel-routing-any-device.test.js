@@ -1,7 +1,16 @@
-// App first on any device (owner 2026-11-04): a push_first notice reaches a
-// customer whose app has an active device however long ago the app was opened,
-// and the text still goes whenever no device accepts. A contact's device never
-// counts for the holder. The companion push and an explicit App choice keep the
+// WITHDRAWN 2026-11-20 (owner: "lets revert to text, if they want to setup app
+// notifications, let them do it on their own"). No routed send reaches the
+// any-device path any more: decidePushRoute never returns push_first
+// (push-channel-routing.test.js pins it), and twilio.js calls attemptPushFirst
+// only for a customer's own App choice (explicitPushOnly). The cases below call
+// attemptPushFirst and sendCompanionPush directly and cover code that the
+// follow-up PR deletes together with this file. The last describe covers the
+// live decision for a technician's On-my-way tap.
+//
+// What the any-device path did (owner 2026-11-04): a push_first notice reached a
+// customer whose app had an active device however long ago the app was opened,
+// and the text still went whenever no device accepted. A contact's device never
+// counted for the holder. The companion push and an explicit App choice keep the
 // 72 hour rule.
 
 const mockDevices = [];
@@ -516,30 +525,33 @@ describe('only the customer switches back to text (explicit-choice markers)', ()
 
 describe("a technician's On-my-way tap keeps the customer's channel (useCustomerChannel)", () => {
   // sendTechEnRoute marks a manual tap operatorInitiated (send-window marker) AND
-  // metadata.useCustomerChannel. Before this rule the operator flag forced SMS, so
-  // no tapped en-route notice ever reached the app (0 of 34 in 30 days, 11-04 audit).
+  // metadata.useCustomerChannel. The mark lifts the operator text lock, so the notice
+  // follows the policy. Since 2026-11-20 (owner: "lets revert to text") the policy for
+  // an on-the-way notice is text; the customer's own App choice goes through
+  // wantsAppFirst, which honors the same mark.
   const route = (overrides = {}) => PushRouting.decidePushRoute({
     gateOn: true, customerId: 'c-1', messageType: 'tech_en_route', hasMedia: false, humanAuthored: false,
     operatorInitiated: true, useCustomerChannel: true, ...overrides,
   });
 
-  it('a tapped en-route notice routes push_first like an automated one', () => {
-    expect(route()).toBe('push_first');
+  it('a tapped en-route notice goes by text, like an automated one', () => {
+    expect(route()).toBe('sms_only');
+    expect(route({ operatorInitiated: false, useCustomerChannel: false })).toBe('sms_only');
   });
 
-  it('a tapped reminder follows the any-device policy too', () => {
-    expect(route({ messageType: 'appointment_reminder' })).toBe('push_first');
+  it('a marked reminder follows the policy too: the text alone', () => {
+    expect(route({ messageType: 'appointment_reminder' })).toBe('sms_only');
   });
 
   it('an operator send WITHOUT the mark still stays a text (staff chose Text)', () => {
     expect(route({ useCustomerChannel: undefined })).toBe('sms_only');
     expect(route({ useCustomerChannel: 'true' })).toBe('sms_only');
-    expect(route({ messageType: 'receipt', useCustomerChannel: false })).toBe('sms_only');
+    expect(route({ messageType: 'billing_reminder', useCustomerChannel: false })).toBe('sms_only');
   });
 
   it('an admin-attributed send with the mark follows the policy; without it, a text', () => {
-    expect(route({ operatorInitiated: false, adminAttributed: true })).toBe('push_first');
-    expect(route({ operatorInitiated: false, adminAttributed: true, useCustomerChannel: false })).toBe('sms_only');
+    expect(route({ operatorInitiated: false, adminAttributed: true, messageType: 'billing_reminder' })).toBe('push_and_sms');
+    expect(route({ operatorInitiated: false, adminAttributed: true, messageType: 'billing_reminder', useCustomerChannel: false })).toBe('sms_only');
   });
 
   it('the mark never lifts the other text-only rules', () => {
