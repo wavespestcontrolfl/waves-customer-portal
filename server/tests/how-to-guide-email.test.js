@@ -61,10 +61,14 @@ describe('sendHowToGuideToCustomer', () => {
   let inserts;
   let sendTemplate;
 
-  function mockDb(row) {
+  // `prefs` is the notification_prefs row; an Error makes the read reject.
+  function mockDb(row, prefs = undefined) {
     inserts = [];
     db.mockImplementation((table) => ({
-      where: () => ({ whereNull: () => ({ first: async () => (table === 'customers' ? row : null) }) }),
+      where: () => ({
+        whereNull: () => ({ first: async () => (table === 'customers' ? row : null) }),
+        first: async () => { if (prefs instanceof Error) throw prefs; return prefs; },
+      }),
       insert: async (data) => { inserts.push({ table, data }); },
     }));
   }
@@ -92,6 +96,14 @@ describe('sendHowToGuideToCustomer', () => {
     mockDb(null);
     expect(await sendHowToGuideToCustomer({ customerId: 'c1', guideKey: 'refer' })).toMatchObject({ ok: false, reason: 'customer_not_found' });
     expect(await sendHowToGuideToCustomer({ customerId: 'c1', guideKey: 'flea' })).toMatchObject({ ok: false, reason: 'unsupported_guide' });
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('the portal email switch stops the guide, and an unreadable preference sends nothing', async () => {
+    mockDb(customer, { email_enabled: false });
+    expect(await sendHowToGuideToCustomer({ customerId: 'c1', guideKey: 'refer' })).toMatchObject({ ok: false, reason: 'email_opted_out' });
+    mockDb(customer, new Error('connection lost'));
+    expect(await sendHowToGuideToCustomer({ customerId: 'c1', guideKey: 'refer' })).toMatchObject({ ok: false, reason: 'prefs_unavailable' });
     expect(sendTemplate).not.toHaveBeenCalled();
   });
 

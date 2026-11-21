@@ -1977,6 +1977,8 @@ const HOW_TO_REFUSAL_COPY = {
   customer_not_found: 'That customer could not be found.',
   no_email: 'This customer has no email on file — put the steps in your message instead.',
   email_blocked: "This customer's email address is blocked or unsubscribed — the guide was not sent.",
+  email_opted_out: 'This customer turned off email — put the steps in your message instead.',
+  prefs_unavailable: "Couldn't confirm this customer's email preference — try again.",
   unsupported_guide: 'That guide is not available.',
 };
 router.post('/send-howto', async (req, res, next) => {

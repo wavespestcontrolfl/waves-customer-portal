@@ -52,6 +52,18 @@ async function sendHowToGuideToCustomer({ customerId, guideKey, actorId = null }
   const result = { ok: false, guideKey, label: guide.label, emailAddress: email || null };
   if (!email) return { ...result, reason: 'no_email' };
 
+  // The portal's "Email messages" switch stops every email (PortalPage's own
+  // promise); the suppression list the template library checks is separate.
+  // Fail closed, like the welcome sender: an unreadable preference sends nothing.
+  let prefs;
+  try {
+    prefs = await db('notification_prefs').where({ customer_id: customer.id }).first('email_enabled');
+  } catch (err) {
+    logger.warn(`[how-to-guide-sender] email preference lookup failed for customer ${customer.id}: ${err.name} (code=${err.code})`);
+    return { ...result, reason: 'prefs_unavailable' };
+  }
+  if (prefs?.email_enabled === false) return { ...result, reason: 'email_opted_out' };
+
   const templateKey = `howto.${guideKey}`;
   let dispatched = false;
   try {
