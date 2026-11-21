@@ -891,7 +891,6 @@ describe('StripeService.refund', () => {
     test('a recent pre-UUID attempt is read-only and cannot issue a new refund', async () => {
       eligibleCard();
       paymentRow.metadata = JSON.stringify({
-        settled_card_refund_ledger: 1,
         pending_refund_key: 'refund_pay_pay-1_4000_0',
         pending_refund_request: '4000',
         pending_refund_base: '4000',
@@ -902,6 +901,12 @@ describe('StripeService.refund', () => {
 
       await expect(loadService().refund('pay-1', { amount: 40 }))
         .rejects.toThrow(/no exact supported Stripe refund identifier/i);
+      expect(mockVerifySettledCardCharge).toHaveBeenCalledWith(stripeClient, {
+        chargeId: 'ch_abc', paymentIntentId: 'pi_abc', expectedAmountCents: 10000,
+      });
+      expect(JSON.parse(paymentRow.metadata)).toMatchObject({
+        settled_card_refund_ledger: 1, pending_refund_key: 'refund_pay_pay-1_4000_0',
+      });
       expect(mockListPaymentRefunds).toHaveBeenCalledWith(stripeClient, { charge: 'ch_abc' });
       expect(stripeClient.refunds.create).not.toHaveBeenCalled();
     });
@@ -923,10 +928,13 @@ describe('StripeService.refund', () => {
       expect(updatePayments).not.toHaveBeenCalled();
     });
 
-    test('the locked charge and PI must still exactly match the verified read', async () => {
+    test.each([
+      ['stripe_payment_intent_id', 'pi_changed'],
+      ['amount', '99.00'],
+    ])('a change to the locked %s stops the verified charge from being refunded', async (field, value) => {
       eligibleCard();
       mockVerifySettledCardCharge.mockImplementationOnce(async () => {
-        paymentRow.stripe_payment_intent_id = 'pi_changed';
+        paymentRow[field] = value;
         return {
           id: 'ch_abc', payment_intent: 'pi_abc', paid: true, captured: true, status: 'succeeded',
           amount: 10000, amount_captured: 10000,

@@ -3696,11 +3696,20 @@ const StripeService = {
       if (typeof chargeId !== 'string' || !chargeId
         || locked.stripe_charge_id !== originalStripeChargeId
         || locked.stripe_payment_intent_id !== originalStripePaymentIntentId
+        || Math.round(Number(locked.amount) * 100) !== paidCents
         || chargeId !== originalStripeChargeId) {
         throw new Error('This payment changed while the refund was starting. Refresh it before retrying.');
       }
     };
+    const verifyOriginalCardCharge = () => verifySettledCardCharge(stripe, {
+      chargeId: originalStripeChargeId,
+      paymentIntentId: originalStripePaymentIntentId,
+      expectedAmountCents: paidCents,
+    });
     const claimExistingSettledAttempt = async () => {
+      // A pending refund can predate enrollment. Prove its charge before
+      // making the card-only behavior survive a gate rollback.
+      if (!settledLedgerEnrolled) await verifyOriginalCardCharge();
       await db.transaction(async (trx) => {
         const locked = await trx('payments').where({ id: paymentId }).forUpdate().first();
         if (!locked) throw new Error('Payment not found');
@@ -3710,6 +3719,7 @@ const StripeService = {
         assertLockedStripeIdentity(locked, claimedChargeId);
         if (current.pending_refund_key !== meta.pending_refund_key
           || current.pending_refund_id !== meta.pending_refund_id
+          || (settledLedgerEnrolled && current.settled_card_refund_ledger !== SETTLED_CARD_REFUND_LEDGER_VERSION)
           || (current.pending_refund_base ?? current.pending_refund_request) !== enteredTag
           || Number(locked.refund_amount || 0) !== priorCents / 100) {
           throw new Error('This payment changed while the refund was starting. Verify which refund was recorded in Stripe before submitting another.');
@@ -3732,11 +3742,7 @@ const StripeService = {
       if (useSettledCardLedger) {
         remainingShareCents = Math.max(0, surchargeCents - alreadyRefundedSurchargeCents);
         originalRemainingCents = remainingCents;
-        const verified = await verifySettledCardCharge(stripe, {
-          chargeId: originalStripeChargeId,
-          paymentIntentId: originalStripePaymentIntentId,
-          expectedAmountCents: paidCents,
-        });
+        const verified = await verifyOriginalCardCharge();
         frozenChargeId = verified.id;
         attemptId = uuidv4();
         await db.transaction(async (trx) => {

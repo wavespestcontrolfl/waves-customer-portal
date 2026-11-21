@@ -409,6 +409,31 @@ postgres('settled Stripe card refund ids (real PostgreSQL)', () => {
     expect(rowMeta(row).stamped_refund_ids).toEqual([providerRefunds[0].id]);
   });
 
+  test('retrying a legacy refund preserves the pending attempt when Stripe identifies a bank debit', async () => {
+    const f = await fixture();
+    const pending = {
+      invoice_id: f.invoiceId,
+      pending_refund_key: `refund_pay_${f.paymentId}_2500_0`,
+      pending_refund_request: '2500',
+      pending_refund_at: new Date().toISOString(),
+    };
+    await db('payments').where({ id: f.paymentId }).update({ metadata: JSON.stringify(pending) });
+    mockChargesRetrieve.mockResolvedValueOnce({
+      id: f.chargeId, payment_intent: f.paymentIntentId, status: 'succeeded',
+      paid: true, captured: true, amount_captured: 10000, payment_method_details: { type: 'us_bank_account' },
+    });
+
+    await expect(StripeService.refund(f.paymentId, { amount: 25 }))
+      .rejects.toThrow('Stripe did not confirm the original charge as a settled card payment');
+
+    const after = await payment(f);
+    expect(rowMeta(after)).toEqual(pending);
+    expect(dollars(after.refund_amount)).toBe(0);
+    expect(mockChargesRetrieve).toHaveBeenCalledWith(f.chargeId);
+    expect(mockRefundsList).not.toHaveBeenCalled();
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+  });
+
   test('an aged admin attempt adopts only the refund carrying its durable identity', async () => {
     const f = await fixture();
     const attemptId = randomUUID();
