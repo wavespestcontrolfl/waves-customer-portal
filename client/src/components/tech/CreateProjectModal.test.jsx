@@ -793,6 +793,47 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     }));
   });
 
+  it('halves the auto-filled gallons when the tech types the Crosscheck Plus chart dilution (0.12%)', async () => {
+    const baseFetch = fetch;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      if (String(url).includes('/admin/projects/scheduled-service/55/application-prefill')) {
+        const crosscheck = {
+          _scheduled_service_label: 'Termite Pretreatment Service',
+          treatment_method: 'Soil barrier (chemical)',
+          product_name: 'LESCO Crosscheck Plus',
+        };
+        return jsonResponse({ applications: [crosscheck, { ...crosscheck }] });
+      }
+      return baseFetch(url, opts);
+    }));
+    renderCertificateSheet();
+    await screen.findAllByDisplayValue('LESCO Crosscheck Plus');
+
+    // The primary application (the form's sync effect) and an additional row (the repeater) follow the same label chart.
+    const base = 'create-project-pre_treatment_termite_certificate';
+    for (const prefix of [base, `${base}-additional_applications-0`]) {
+      const input = (key) => document.getElementById(`${prefix}-${key}`);
+      fireEvent.change(input('linear_feet'), { target: { value: '200' } });
+      fireEvent.change(input('trench_depth_ft'), { target: { value: '1' } });
+      await waitFor(() => expect(input('gallons_applied').value).toBe('80'));
+      expect(input('concentration_pct').value).toBe('0.060');
+
+      fireEvent.change(input('concentration_pct'), { target: { value: '0.12' } });
+      await waitFor(() => expect(input('gallons_applied').value).toBe('40'));
+      expect(input('concentration_pct').value).toBe('0.12');
+
+      fireEvent.change(input('concentration_pct'), { target: { value: '' } });
+      await waitFor(() => expect(input('gallons_applied').value).toBe('80'));
+      expect(input('concentration_pct').value).toBe('0.060');
+
+      // A hand-typed gallons figure survives a dilution change.
+      fireEvent.change(input('gallons_applied'), { target: { value: '75' } });
+      fireEvent.change(input('concentration_pct'), { target: { value: '0.12' } });
+      await waitFor(() => expect(input('concentration_pct').value).toBe('0.12'));
+      expect(input('gallons_applied').value).toBe('75');
+    }
+  });
+
   it('loads planned service products into the primary and additional application rows', async () => {
     renderCertificateSheet();
 

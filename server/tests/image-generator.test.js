@@ -42,9 +42,9 @@ describe('parseChain', () => {
     // Bake-off 2026-09-05: Nano Banana Pro second (fast, cheaper, close on
     // photo/cartoon); gpt-image-1 stays the last fallback.
     // OpenAI-only since 2026-09-24 (owner: no invisible watermarks — every
-    // Gemini image model embeds SynthID in the pixels). gpt-image-2.5-sunburst
-    // leads since 2026-09-25 (owner: render on Images 2.5 — see MODEL_MAP header).
-    expect(parseChain(undefined)).toEqual(['gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+    // Gemini image model embeds SynthID in the pixels). gpt-image-2.6-sunburst
+    // leads since 2026-11-20 (owner: latest model), Images 2.5 right behind it.
+    expect(parseChain(undefined)).toEqual(['gpt-image-2.6-sunburst', 'gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
   });
   test('respects env override (chain mechanics, watermark policy explicitly relaxed)', () => {
     expect(parseChain('gemini,gpt-image-2', { allowPixelWatermark: true })).toEqual(['gemini', 'gpt-image-2']);
@@ -87,16 +87,16 @@ describe('no pixel-watermarked providers (owner directive 2026-09-24)', () => {
     expect(parseChain(undefined)).toContain('gemini-image-pro');
     expect(new ImageGenerator({ envChain: undefined, fetchFn: jest.fn() }).chain).toContain('gemini-image-pro');
     delete process.env[PIXEL_WATERMARK_OVERRIDE_ENV];
-    expect(parseChain(undefined)).toEqual(['gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+    expect(parseChain(undefined)).toEqual(['gpt-image-2.6-sunburst', 'gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
   });
   test('a Gemini-only env chain falls back to the OpenAI default instead of reaching Gemini', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     process.env.GEMINI_API_KEY = 'gem-test';
     const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
     const gen = new ImageGenerator({ envChain: 'gemini-image-best,gemini', fetchFn: mockFetch });
-    expect(gen.chain).toEqual(['gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+    expect(gen.chain).toEqual(['gpt-image-2.6-sunburst', 'gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
     const r = await gen.generate({ title: 'Test' });
-    expect(r.model).toBe('gpt-image-2.5-sunburst');
+    expect(r.model).toBe('gpt-image-2.6-sunburst');
     for (const call of mockFetch.mock.calls) expect(String(call[0])).not.toMatch(/generativelanguage|gemini/i);
   });
   test('an all-invalid env chain falls back to the caller\'s defaultChain, not the blog default', () => {
@@ -415,7 +415,7 @@ describe('ImageGenerator: invalid env chain falls back to default', () => {
     const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
     const gen = new ImageGenerator({ envChain: 'nothing,bogus', fetchFn: mockFetch });
     const r = await gen.generate({ title: 'Test' });
-    expect(r.model).toBe('gpt-image-2.5-sunburst'); // first in DEFAULT_CHAIN
+    expect(r.model).toBe('gpt-image-2.6-sunburst'); // first in DEFAULT_CHAIN
   });
 });
 

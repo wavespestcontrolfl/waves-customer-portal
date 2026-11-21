@@ -2,8 +2,8 @@
  * image-generator.js — provider-chained image generation for blog
  * heroes + social squares.
  *
- * Provider chain via env BLOG_IMAGE_PROVIDER (default:
- * "gpt-image-2,gpt-image-1.5,gpt-image-1"). Each provider is tried in
+ * Provider chain via env BLOG_IMAGE_PROVIDER (default: DEFAULT_CHAIN below,
+ * gpt-image-2.6-sunburst first). Each provider is tried in
  * order; on 404 / model-not-found / 5xx we fall through to the next. On the
  * first 2xx with image bytes we return.
  *
@@ -126,14 +126,21 @@ function loadVanWrapReferences() {
 // correct chest 8 of 8 times where gpt-image-2 managed 1 of 12, and drew one
 // correct van every time (~45 s per image). gpt-image-2 stays the first
 // fallback.
-const DEFAULT_CHAIN = 'gpt-image-2.5-sunburst,gpt-image-2,gpt-image-1.5,gpt-image-1';
+// gpt-image-2.6-sunburst leads since 2026-11-20 (owner: "update to latest
+// model, for all areas for chatgpt images"; OpenAI released it 2026-10-28 at
+// the same token rates as 2.5). Images 2.5 stays the first fallback, so a
+// 2.6 refusal or outage drops back to the model that passed the 09-25 test.
+const DEFAULT_CHAIN = 'gpt-image-2.6-sunburst,gpt-image-2.5-sunburst,gpt-image-2,gpt-image-1.5,gpt-image-1';
 // The pre-2026-09-24 chain (bake-off order, Gemini legs interleaved). Used as
 // the default ONLY while ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true, so the
 // documented kill switch restores the old fallback legs during an OpenAI
 // outage without also requiring a BLOG_/SOCIAL_IMAGE_PROVIDER change.
-const WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2.5-sunburst,gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
+// The override keeps its shape: two OpenAI legs, then Gemini, so two OpenAI
+// timeouts cannot spend the whole chain budget before a healthy Gemini leg.
+const WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2.6-sunburst,gpt-image-2.5-sunburst,gemini-image-pro,gpt-image-2,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
 
 const MODEL_MAP = {
+  'gpt-image-2.6-sunburst': { api: 'openai', model: 'gpt-image-2.6-sunburst', quality: 'high' },
   'gpt-image-2.5-sunburst': { api: 'openai', model: 'gpt-image-2.5-sunburst', quality: 'high' },
   'gpt-image-2':   { api: 'openai', model: 'gpt-image-2',   quality: 'high' },
   'gpt-image-1.5': { api: 'openai', model: 'gpt-image-1.5', quality: 'high' },

@@ -126,6 +126,56 @@ const QUIZZES = {
   },
 };
 
+// Waves Newsletter polls: the list the owner approved on 2026-11-20 (NL1-NL10
+// on the Pest Insider look page; "other than that looks good"), in his order.
+// Just for fun: no interest tags, no visit promise, and landingCtaSuppressed
+// keeps the thank-you page from pitching a booking. A vote takes the same two
+// taps as every quiz (the answer, then Confirm). The autopilot adds one poll
+// to at most every 3rd issue (chooseNewsletterPoll); nothing else adds one.
+const NEWSLETTER_POLL_PREFIX = 'nl-poll-';
+const NEWSLETTER_POLLS = [
+  ['nl-poll-weekend-v1', 'Poll: weekend plans', 'Where will you be this weekend?',
+    [['beach', 'Beach'], ['park', 'Park'], ['home', 'Home'], ['out-to-eat', 'Out to eat']]],
+  ['nl-poll-drive-v1', 'Poll: drive for an event', 'How far will you drive for a good event?',
+    [['15-minutes', '15 minutes'], ['half-hour', 'Half an hour'], ['hour', 'An hour'], ['road-trip', 'Road trip!']]],
+  ['nl-poll-sunset-spot-v1', 'Poll: sunset spot', 'Your Gulf sunset spot?',
+    [['siesta-key', 'Siesta Key'], ['anna-maria', 'Anna Maria'], ['st-pete-beach', 'St. Pete Beach'], ['somewhere-else', 'Somewhere else']]],
+  ['nl-poll-classic-v1', 'Poll: Florida classic', 'Pick one Florida classic',
+    [['grouper-sandwich', 'Grouper sandwich'], ['cuban-sandwich', 'Cuban sandwich'], ['stone-crab', 'Stone crab'], ['key-lime-pie', 'Key lime pie']]],
+  ['nl-poll-rainy-v1', 'Poll: rainy afternoon', 'Rainy afternoon plan?',
+    [['museum', 'Museum'], ['movie', 'Movie'], ['mall', 'Mall'], ['nap', 'Nap']]],
+  ['nl-poll-whats-on-v1', "Poll: finding what's on", "How do you find out what's on?",
+    [['waves-newsletter', 'Waves Newsletter'], ['friends', 'Friends'], ['social-media', 'Social media'], ['wing-it', 'I wing it']]],
+  ['nl-poll-dogs-v1', 'Poll: dogs at events', 'Dogs at events: more, please?',
+    [['more', 'More, please'], ['fine', "They're fine"], ['fewer', 'Fewer, please'], ['no-opinion', 'No opinion']]],
+  ['nl-poll-sunrise-v1', 'Poll: sunrise or sunset', 'Sunrise or sunset?',
+    [['sunrise', 'Sunrise'], ['sunset', 'Sunset'], ['both', 'Both'], ['asleep', "I'm asleep"]]],
+  ['nl-poll-season-v1', 'Poll: best season', 'Best Florida season?',
+    [['winter', 'Winter'], ['spring', 'Spring'], ['summer', 'Summer'], ['fall', 'Fall (what fall?)']]],
+  ['nl-poll-music-v1', 'Poll: live music', "Live music: what's your speed?",
+    [['rock', 'Rock'], ['country', 'Country'], ['jazz-blues', 'Jazz or blues'], ['anything-live', 'Anything live']]],
+];
+for (const [id, label, question, answers] of NEWSLETTER_POLLS) {
+  QUIZZES[id] = {
+    label,
+    question,
+    emailCta: 'Tap one, then confirm. Just for fun.',
+    landingLine: 'Your vote is in. See you in the next Waves Newsletter.',
+    // The archive and the owner's Monday copy show the poll with no links.
+    neutralLine: 'Readers vote right in the email. Just for fun.',
+    landingCtaSuppressed: true,
+    poll: true,
+    bookLabel: 'Book a visit',
+    bookService: 'pest_control',
+    answers: answers.map(([key, text]) => ({ key, label: text, tags: [] })),
+  };
+}
+/** The polls in the owner's order: the autopilot uses each once, then stops. */
+const NEWSLETTER_POLL_IDS = Object.freeze(NEWSLETTER_POLLS.map(([id]) => id));
+const isNewsletterPoll = (quizId) => NEWSLETTER_POLL_IDS.includes(quizId);
+/** Sent issues between two polls: a poll shows in at most every 3rd issue, never two in a row. */
+const POLL_ISSUE_GAP = 2;
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Brand palette resolved from the active email theme (glass) so quiz blocks
@@ -307,7 +357,7 @@ function renderQuizNeutralHtml({ quizId = DEFAULT_QUIZ_ID } = {}) {
   return `<div class="dm-box" style="margin:24px 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;text-align:center;">
 <p style="margin:0 0 12px 0;font-size:18px;font-weight:700;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(quiz.question)}</p>
 <div>${chips}</div>
-<p style="margin:12px 0 0 0;font-size:14px;color:${C.muted};font-family:Inter,Arial,sans-serif;">Subscribers tap an answer right in the email to get a free check.</p>
+<p style="margin:12px 0 0 0;font-size:14px;color:${C.muted};font-family:Inter,Arial,sans-serif;">${esc(quiz.neutralLine || 'Subscribers tap an answer right in the email to get a free check.')}</p>
 </div>`;
 }
 
@@ -363,8 +413,21 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
 
     const delivery = await db('newsletter_send_deliveries')
       .where({ engagement_token: token })
-      .first('id', 'subscriber_id');
+      .first('id', 'subscriber_id', 'send_id');
     if (!delivery) return { ok: false, reason: 'no-delivery' };
+
+    // A Waves Newsletter poll answer counts only from an issue that showed
+    // that poll, and an issue that showed a poll takes answers only to the
+    // quizzes it showed (quizzesInIssue, the rule the poll history reads
+    // too): an older issue's token must not record a poll its reader never
+    // saw, and a hand-made link must not overwrite a poll vote (or add
+    // service tags) with another quiz's answer. An issue with no poll keeps
+    // the old rule. The public route answers the same either way.
+    const answeredQuiz = quizId || DEFAULT_QUIZ_ID;
+    const shown = quizzesInIssue(await db('newsletter_sends').where({ id: delivery.send_id }).first('html_body', 'text_body'));
+    if ((isNewsletterPoll(answeredQuiz) || shown.some(isNewsletterPoll)) && !shown.includes(answeredQuiz)) {
+      return { ok: false, reason: 'not-in-issue' };
+    }
 
     // Stamp the answer on the delivery row regardless (engagement record).
     await db('newsletter_send_deliveries').where({ id: delivery.id }).update({
@@ -410,7 +473,109 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
   }
 }
 
+/**
+ * The quizzes an issue shows: every quiz token, of either form, in either
+ * part, in any letter case. These are the tokens the sender renders as vote
+ * links: newsletter-sender.js builds one substitution map from both parts
+ * joined (buildQuizSubstitutions), and SendGrid applies it to both parts.
+ */
+function quizzesInIssue(issue) {
+  return parseQuizTokens(`${issue?.html_body || ''}\n${issue?.text_body || ''}`).map((token) => token.quizId);
+}
+
+// The Waves Newsletter poll an issue shows, or null.
+function pollInIssue(issue) {
+  return quizzesInIssue(issue).find(isNewsletterPoll) || null;
+}
+
+/**
+ * The poll for the next Waves Newsletter issue, or null. `recent` lists the
+ * newest POLL_ISSUE_GAP issues readers got (newest first), each as the poll
+ * it showed or null; `used` lists every poll an issue holds
+ * (newsletterIssuePolls). No poll when one of the recent issues had one, so a
+ * poll shows in at most every 3rd issue and never in two in a row. Otherwise
+ * the first poll in the owner's order that no issue holds; none once the list
+ * is used up.
+ */
+function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
+  if (recent.slice(0, POLL_ISSUE_GAP).some(Boolean)) return null;
+  const taken = new Set(used);
+  return NEWSLETTER_POLL_IDS.find((id) => !taken.has(id)) || null;
+}
+
+/**
+ * Reads what chooseNewsletterPoll needs from the issues of one newsletter
+ * type: the polls of the newest POLL_ISSUE_GAP issues that readers got, and
+ * every poll an issue holds. An issue reached readers when one of its delivery
+ * rows reached its reader by the sender's own rule (newsletter-sender.js
+ * reachedDelivery), whatever the issue's status: a send its deadline stopped,
+ * or one the stale-claim recovery ended, is 'failed' although its first
+ * batches reached readers; a 'sent' issue whose every recipient dropped out
+ * before dispatch, or whose every message hard-bounced, reached no one (its
+ * recipient_count is no proof either way: a worker that stopped after a
+ * batch leaves it at 0).
+ * Sent bodies keep their quiz tokens (the per-reader buttons are SendGrid
+ * substitutions), so the tokens in html_body and text_body are the record,
+ * read as the sender renders them (pollInIssue).
+ * An issue's time is its sent_at, else the earliest time any of its delivery
+ * rows records (a worker that failed after a batch leaves sent_at empty, a
+ * lost SendGrid answer leaves a row's sent_at empty while the webhook still
+ * stamps the delivery, and a resume clears scheduled_for), else its schedule,
+ * else its draft time.
+ *
+ * An issue no reader got yet still holds its poll while a Resume could mail
+ * one of its rows (newsletter-sender.js outstandingEligibleDeliveries: a
+ * retryable row of a still-eligible reader): sendCampaign skips the Tuesday
+ * window for a resume of existing rows, so that issue can go out after a
+ * later one. Its poll is never chosen again, and is skipped if the issue is
+ * never resumed. It is held, not every poll: a failed issue nobody resumes
+ * would otherwise stop the polls for good.
+ * Any other unsent issue holds nothing: a fresh send of a flagship issue goes
+ * out only on its own Tuesday at 6:00 AM ET (newsletter-sender.js
+ * isCurrentFlagshipTarget + isFlagshipDeliveryWindow), and its approval needs
+ * that Tuesday still ahead (newsletter-proof.js resolveFlagshipCalendarContext),
+ * so last week's unsent issue cannot follow this week's.
+ */
+async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
+  // Loaded here, not at the top: newsletter-sender.js loads this module first.
+  const { reachedDelivery, outstandingEligibleDeliveries } = require('./newsletter-sender');
+  const issues = () => knex('newsletter_sends as s').where('s.newsletter_type', newsletterType);
+  const deliveryRows = (sub) => sub.select(knex.raw('1'))
+    .from('newsletter_send_deliveries as d').whereRaw('d.send_id = s.id');
+  // reachedDelivery's unqualified columns are d's: SQL resolves a name in the
+  // innermost FROM first, before the outer newsletter_sends row.
+  const reachedRow = (sub) => { reachedDelivery(deliveryRows(sub)); };
+  const resumableRow = () => outstandingEligibleDeliveries('s.id', { database: knex, correlate: true })
+    .select(knex.raw('1'));
+  const newest = await issues()
+    .whereExists(reachedRow)
+    .orderByRaw(`COALESCE(s.sent_at,
+      (SELECT LEAST(MIN(f.sent_at), MIN(f.delivered_at), MIN(f.opened_at), MIN(f.clicked_at),
+          MIN(f.complained_at), MIN(f.unsubscribed_at))
+        FROM newsletter_send_deliveries f WHERE f.send_id = s.id),
+      s.scheduled_for, s.created_at) DESC`)
+    .limit(POLL_ISSUE_GAP)
+    .select('s.html_body', 's.text_body');
+  // A loose prefilter (any token form, either part, any letter case);
+  // pollInIssue then reads the tokens exactly as the sender renders them.
+  const holding = await issues()
+    .where((issue) => issue.whereExists(reachedRow).orWhereExists(resumableRow()))
+    .where((body) => body.where('s.html_body', 'ilike', `%{{quiz%${NEWSLETTER_POLL_PREFIX}%`)
+      .orWhere('s.text_body', 'ilike', `%{{quiz%${NEWSLETTER_POLL_PREFIX}%`))
+    .select('s.html_body', 's.text_body');
+  return {
+    recent: newest.map(pollInIssue),
+    used: holding.map(pollInIssue).filter(Boolean),
+  };
+}
+
 module.exports = {
+  NEWSLETTER_POLL_IDS,
+  POLL_ISSUE_GAP,
+  isNewsletterPoll,
+  pollInIssue,
+  chooseNewsletterPoll,
+  newsletterIssuePolls,
   QUIZ_HTML_TOKEN,
   QUIZ_TEXT_TOKEN,
   QUIZ_TOKEN_PATTERN,

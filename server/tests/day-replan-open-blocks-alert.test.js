@@ -26,7 +26,13 @@ jest.mock('../services/day-replan/fill-list', () => ({
   MAX_PER_BLOCK: 3, MOVE_UP_DAYS: 7,
 }));
 
+// The rain note's own reads are its suite's (day-replan-rain-note.test.js): here, a dry forecast unless a test says so.
+jest.mock('../services/day-replan/rain-note', () => ({
+  rainNote: jest.fn(async () => ({ days: [{ day: '2026-11-18', areas: [], gaps: [] }], unread: [], outlooks: { sarasota: [] } })),
+}));
+
 const { composeAdminAlert, raiseAdminAlert } = require('../services/admin-alert-compose');
+const { rainNote } = require('../services/day-replan/rain-note');
 const { openAdminAlertKeys, closeAdminAlertKeys } = require('../services/admin-alert-episodes');
 const { absentTechDays } = require('../services/technician-eligibility');
 const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
@@ -277,13 +283,77 @@ describe('runOpenBlocksAlert', () => {
       byBlock: blocks.map((_b, i) => (i ? [] : [{ kind: 'estimate', id: 'e1', name: 'Pat e1', label: 'Pest Control', length: 60, windowStart: '11:00', startMin: 720, endMin: 780, addedDriveMin: 7 }])) }));
     const { conn } = saturday();
     await runOpenBlocksAlert({ conn, now: NOW });
-    expect(fillList).toHaveBeenCalledWith(conn, [expect.objectContaining({ day: '2026-11-21', techId: TECH, start: 695, min: 325 })], NOW);
+    // The rain note's NWS hours give the list its rain rule (the default mock: a dry Sarasota answer).
+    expect(fillList).toHaveBeenCalledWith(conn, [expect.objectContaining({ day: '2026-11-21', techId: TECH, start: 695, min: 325 })], NOW, { outlooks: { sarasota: [] } });
     const [, spec, opts] = raiseAdminAlert.mock.calls[0];
     expect(spec.why).toBe('Biggest block: Sat Nov 21, 11:35 AM to 5:00 PM. 1 open estimate fits an opening.');
     expect(opts.detail).toContain('- Sat Nov 21, Pat: 11:35 AM to 5:00 PM (5 h 25 min, room for 4 jobs)\n  - Open estimate, Pat e1 (Pest Control, 1 h): +7 min drive, finishes 1:00 PM');
     // The 11:00 window with the van there at noon: the row keeps both, so a booking at 11:00 matches the line.
     expect(opts.metadata.fill).toEqual({ checked: 1, fitted: 1, leads: { checked: 0, fitted: 0 }, visits: { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0 },
       lines: [{ kind: 'estimate', estimateId: 'e1', day: '2026-11-21', techId: TECH, window: '11:00', start: 720, addedDriveMin: 7 }] });
+  });
+
+  test('the rain note: each day\'s rain hours by area reach the detail and the row; a failed read never holds the notice', async () => {
+    const days = [
+      { day: '2026-11-18', areas: [{ zone: 'sarasota', spans: [{ start: 780, end: 1020, max: 80 }] },
+        { zone: 'venice_north_port', spans: [{ start: 480, end: 540, max: 60 }, { start: 840, end: 960, max: 70 }] }], gaps: [] },
+      { day: '2026-11-19', areas: [], gaps: ['palmetto', 'sarasota'] },
+      { day: '2026-11-20', areas: [{ zone: 'sarasota', spans: [{ start: 600, end: 660, max: 65 }] }], gaps: ['palmetto'] },
+    ];
+    rainNote.mockResolvedValueOnce({
+      days,
+      unread: ['parrish'],
+      outlooks: { parrish: null, sarasota: [], venice_north_port: [] },
+    });
+    await runOpenBlocksAlert({ conn: saturday().conn, now: NOW });
+    expect(rainNote).toHaveBeenCalledWith(NOW);
+    let [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain([
+      'Rain hours by area (NWS chance of rain 60% or more, 8:00 AM to 5:00 PM):',
+      '- Wed Nov 18: Sarasota 1:00 PM to 5:00 PM (up to 80%); Venice/N.Port 8:00 AM to 9:00 AM (up to 60%), 2:00 PM to 4:00 PM (up to 70%)',
+      '- Thu Nov 19: none; no NWS reading for some hours in Palmetto, Sarasota',
+      '- Fri Nov 20: Sarasota 10:00 AM to 11:00 AM (up to 65%); no NWS reading for some hours in Palmetto',
+      'The NWS forecast did not answer for Parrish.',
+    ].join('\n'));
+    expect(opts.metadata.rain).toEqual({ days, unread: ['parrish'] });
+
+    // No area answered: one line says so.
+    raiseAdminAlert.mockClear();
+    rainNote.mockResolvedValueOnce({ days: [{ day: '2026-11-18', areas: [], gaps: [] }], unread: ['parrish', 'sarasota'], outlooks: { parrish: null, sarasota: null } });
+    await runOpenBlocksAlert({ conn: saturday().conn, now: NOW });
+    [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain('Rain hours: the NWS forecast did not answer this morning.');
+    expect(opts.detail).not.toContain('Rain hours by area');
+
+    // A read that throws: the notice still goes out and says why.
+    raiseAdminAlert.mockClear();
+    rainNote.mockRejectedValueOnce(new Error('nws down'));
+    await expect(runOpenBlocksAlert({ conn: saturday().conn, now: NOW })).resolves.toMatchObject({ status: 'raised', openMin: 325 });
+    [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain('Rain hours: not read this morning (a read failed).');
+    expect(opts.metadata.rain).toEqual({ error: 'a read failed' });
+  });
+
+  test('rain: a rain-safe line says it runs in rain hours, the jobs left out are counted, and the row keeps both', async () => {
+    fillList.mockImplementationOnce(async (_c, blocks) => ({ checked: 2, fitted: 0, noLocation: 0, unread: 0,
+      leads: { checked: 1, fitted: 1, noLocation: 0, unread: 0 }, visits: { checked: 1, fitted: 0, remindersOff: 0, sharedDay: 0, unread: 0 },
+      rain: { checked: true, leftOut: 3 },
+      byBlock: blocks.map((_b, i) => (i ? [] : [{ kind: 'lead', id: 'l1', name: 'Dana l1', label: 'Waves Assessment', length: 30, windowStart: '12:00', startMin: 720, endMin: 750, addedDriveMin: 9, inRain: true }])) }));
+    await runOpenBlocksAlert({ conn: saturday().conn, now: NOW });
+    const [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain('  - Lead, Dana l1 (Waves Assessment, 30 min): +9 min drive, finishes 12:30 PM; runs in rain hours (rain-safe work)');
+    expect(opts.detail).toContain(' Rain: 3 jobs left out of an opening in rain hours (the rain rules: only rain-safe work runs in rain).');
+    expect(opts.metadata.fill.rain).toEqual({ checked: true, leftOut: 3 });
+    expect(opts.metadata.fill.lines).toEqual([expect.objectContaining({ kind: 'lead', inRain: true })]);
+  });
+
+  test('rain: a rain note that was not read gives the fill list no rain rule', async () => {
+    rainNote.mockRejectedValueOnce(new Error('nws down'));
+    const { conn } = saturday();
+    await runOpenBlocksAlert({ conn, now: NOW });
+    expect(fillList).toHaveBeenCalledWith(conn, expect.any(Array), NOW, { outlooks: null });
+    const [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).not.toContain(' Rain: ');
   });
 
   test('a fill list that fails leaves the notice as it was, with the reason', async () => {

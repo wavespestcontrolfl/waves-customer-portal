@@ -48,7 +48,7 @@ export function WebsiteEstimateFrame({ title, timer, stage = null, children }) {
 export default function WebsiteEstimateFlow({
   services, selected, onFrequencyChange, lockedSection, oneTime,
   oneTimeBreakdown, combinedFrequency, fees, bookingContent, reviewContent,
-  reviewing, busy, timer, phone, phoneHref, canBook, error, callbackContent, quoteNotice = null,
+  reviewing, busy, timer, phone, phoneHref, canBook, error, callbackContent, quoteNotice,
 }) {
   const cadenceSections = oneTime ? [] : services.filter(section => (
     section.isRecurring && section.frequencies?.length > 1 && !lockedSection(section)

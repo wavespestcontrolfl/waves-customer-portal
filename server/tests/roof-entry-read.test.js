@@ -22,6 +22,7 @@ let mockEvents;
 let mockOnConflict;
 let mockOnClaimed;
 let mockSelectError;
+let mockUpdateError;
 let mockOnTransaction;
 const mockForShare = jest.fn();
 jest.mock('../models/db', () => {
@@ -30,12 +31,21 @@ jest.mock('../models/db', () => {
     let notWhere = {};
     let createdAfter = null;
     let claimedBefore = null;
+    // tech_pins IS NOT DISTINCT FROM ?::jsonb (the stale-save check): undefined = no check.
+    let pinsExpected;
+    const canon = (v) => {
+      if (v == null) return 'null';
+      const sorted = (x) => (Array.isArray(x) ? x.map(sorted) : x && typeof x === 'object'
+        ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, sorted(x[k])])) : x);
+      return JSON.stringify(sorted(typeof v === 'string' ? JSON.parse(v) : v));
+    };
     const source = () => (name === 'roof_entry_reads' ? mockRows : mockRefs[name] || []);
     const match = () => source()
       .filter((r) => Object.entries(where).every(([k, v]) => (r[k] === undefined ? null : r[k]) === v))
       .filter((r) => Object.entries(notWhere).every(([k, v]) => r[k] !== v))
       .filter((r) => createdAfter == null || new Date(r.created_at).getTime() > createdAfter)
       .filter((r) => claimedBefore == null || new Date(r.claimed_at).getTime() < claimedBefore)
+      .filter((r) => pinsExpected === undefined || canon(r.tech_pins) === canon(pinsExpected))
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     const settled = (fn) => {
       const run = async () => fn();
@@ -45,7 +55,8 @@ jest.mock('../models/db', () => {
       where(w) { where = { ...where, ...w }; return b; },
       whereNot(w) { notWhere = w; return b; },
       whereRaw(sql, [n]) {
-        if (sql.includes('claimed_at')) claimedBefore = Date.now() - n * 60000;
+        if (sql.includes('tech_pins')) pinsExpected = n;
+        else if (sql.includes('claimed_at')) claimedBefore = Date.now() - n * 60000;
         else createdAfter = Date.now() - n * 86400000;
         return b;
       },
@@ -92,6 +103,7 @@ jest.mock('../models/db', () => {
         const mergeFlags = patch.tech_final_flags && patch.tech_final_flags.raw ? JSON.parse(patch.tech_final_flags.bindings[0]) : null;
         if (mergeFlags) delete patch.tech_final_flags;
         return settled(() => {
+          if (mockUpdateError && name === 'roof_entry_reads') { const err = mockUpdateError; mockUpdateError = null; throw err; }
           mockEvents.push(renewing ? 'renew' : `update:${patch.status || ''}`);
           const rows = match();
           rows.forEach((r) => {
@@ -201,6 +213,7 @@ beforeEach(() => {
   mockOnConflict = null;
   mockOnClaimed = null;
   mockSelectError = null;
+  mockUpdateError = null;
   mockOnTransaction = null;
   mockForShare.mockClear();
   require('../models/db').transaction.mockClear();
@@ -1339,5 +1352,368 @@ describe('PATCH /:id/tech-count', () => {
   it('keeps a technician out', async () => {
     expect((await call('PATCH', `/${READ_A}/tech-count`, { role: 'technician', body: { count: 1 } })).status).toBe(403);
     expect(mockRows[0].tech_final_count).toBeNull();
+  });
+});
+
+// ── Technician-confirmed points (owner ruling 2026-11-20, choice 4A) ──────────────────────────────────────────────────
+
+describe('validateTechPins', () => {
+  const pin = (over = {}) => ({ x: 0.25, y: 0.5, type: 'gable_vents', ...over });
+
+  it('lists the types the staff editor offers: every entry type, plus other', () => {
+    expect(svc.TECH_PIN_TYPES).toEqual([...svc.ENTRY_TYPES, 'other']);
+    for (const t of svc.TECH_PIN_TYPES) expect(typeof svc.PIN_LABELS[t]).toBe('string');
+    expect(svc.MAX_TECH_PINS).toBe(20);
+  });
+
+  it('normalizes: rounds to 4 decimals, keeps the order, and gives a missing or blank note null', () => {
+    expect(svc.validateTechPins([pin({ x: 0.123456, y: 0.987654 }), pin({ note: '   ' }), pin({ x: 0, y: 1, type: 'other' })])).toEqual([
+      { x: 0.1235, y: 0.9877, type: 'gable_vents', note: null },
+      { x: 0.25, y: 0.5, type: 'gable_vents', note: null },
+      { x: 0, y: 1, type: 'other', note: null },
+    ]);
+    expect(svc.validateTechPins([])).toEqual([]);
+  });
+
+  it('trims a note, turns control characters and runs of spaces into one space, and allows exactly 40 characters', () => {
+    expect(svc.validateTechPins([pin({ note: '  front\tleft \n side  ' })])[0].note).toBe('front left side');
+    const forty = 'a'.repeat(40);
+    expect(svc.validateTechPins([pin({ note: forty })])[0].note).toBe(forty);
+    expect(svc.validateTechPins([pin({ note: `${forty}b` })])).toBeNull();
+  });
+
+  it('keeps an optional source naming the AI suggestion a point came from, and leaves it out when none is sent', () => {
+    const [withSource, without, nullSource] = svc.validateTechPins([
+      pin({ source: 'gable_vents:0' }), pin(), pin({ source: null }),
+    ]);
+    expect(withSource).toEqual({ x: 0.25, y: 0.5, type: 'gable_vents', note: null, source: 'gable_vents:0' });
+    expect(Object.keys(without)).not.toContain('source');
+    expect(Object.keys(nullSource)).not.toContain('source');
+    // A moved and retyped point keeps naming the suggestion it began as.
+    expect(svc.validateTechPins([pin({ type: 'other', source: 'plumbing_vent_stacks:12' })])[0].source).toBe('plumbing_vent_stacks:12');
+  });
+
+  it.each([
+    ['a type that is not an entry type', 'other:0'],
+    ['an unknown type', 'attic_door:0'],
+    ['no index', 'gable_vents'],
+    ['a three digit index', 'gable_vents:100'],
+    ['a negative index', 'gable_vents:-1'],
+    ['a dash instead of a colon', 'gable_vents-0'],
+    ['upper case', 'Gable_vents:0'],
+    ['trailing text', 'gable_vents:0 '],
+    ['a number', 4],
+    ['an object', { a: 1 }],
+  ])('rejects a source with %s', (_name, source) => {
+    expect(svc.validateTechPins([pin({ source })])).toBeNull();
+  });
+
+  it('accepts exactly 20 points and rejects 21', () => {
+    expect(svc.validateTechPins(Array.from({ length: 20 }, () => pin()))).toHaveLength(20);
+    expect(svc.validateTechPins(Array.from({ length: 21 }, () => pin()))).toBeNull();
+  });
+
+  it.each([
+    ['not a list', { x: 0.5, y: 0.5, type: 'other' }],
+    ['a string', 'pins'],
+    ['null', null],
+    ['undefined', undefined],
+    ['a null entry', [null]],
+    ['a list entry', [[0.5, 0.5]]],
+    ['x below 0', [pin({ x: -0.01 })]],
+    ['x above 1', [pin({ x: 1.01 })]],
+    ['y below 0', [pin({ y: -0.0001 })]],
+    ['y above 1', [pin({ y: 2 })]],
+    ['a string x', [pin({ x: '0.5' })]],
+    ['a missing y', [{ x: 0.5, type: 'other' }]],
+    ['NaN', [pin({ x: NaN })]],
+    ['Infinity', [pin({ y: Infinity })]],
+    ['an unknown type', [pin({ type: 'attic_door' })]],
+    ['a missing type', [{ x: 0.5, y: 0.5 }]],
+    ['a number note', [pin({ note: 4 })]],
+    ['an object note', [pin({ note: { a: 1 } })]],
+  ])('rejects %s', (_name, input) => {
+    expect(svc.validateTechPins(input)).toBeNull();
+  });
+});
+
+describe('saveTechCount pins', () => {
+  const PINS = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }, { x: 0.8, y: 0.7, type: 'other', note: null }];
+  const CROP = { lat: 27.46, lng: -82.57 };
+  beforeEach(() => {
+    mockRows.push({
+      id: READ_A, lookup_key: CROP_KEY(), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
+      ai_flags: {}, ai_tier: 'med', status: 'done', tech_final_count: null, tech_final_flags: null, tech_pins: null,
+      hide_on_estimate: false, crop_lat: null, crop_lng: null, created_at: new Date().toISOString(),
+    });
+  });
+
+  it('saves the points with the crop centre that hashes to the row, and stores the rounded centre', async () => {
+    const read = await svc.saveTechCount(READ_A, { pins: PINS, crop: { lat: 27.460004, lng: -82.570004 } });
+    expect(read.tech_pins).toEqual(PINS);
+    expect(read.hide_on_estimate).toBe(false);
+    expect(mockRows[0].crop_lat).toBe(27.46);
+    expect(mockRows[0].crop_lng).toBe(-82.57);
+  });
+
+  it.each([
+    ['another roof', { lat: 27.47, lng: -82.57 }],
+    ['a missing crop', undefined],
+    ['a crop without numbers', { lat: '27.46', lng: '-82.57' }],
+    ['an out of range crop', { lat: 270, lng: -82.57 }],
+  ])('refuses points drawn on %s with crop_mismatch and writes nothing', async (_name, c) => {
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: c, count: 3 })).rejects.toMatchObject({ code: 'crop_mismatch' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].crop_lat).toBeNull();
+    expect(mockRows[0].tech_final_count).toBeNull();
+  });
+
+  it.each(['failed', 'pending'])('refuses points on a %s read with read_not_usable and writes nothing', async (status) => {
+    mockRows[0].status = status;
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, count: 3 })).rejects.toMatchObject({ code: 'read_not_usable' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].crop_lat).toBeNull();
+    expect(mockRows[0].tech_final_count).toBeNull();
+  });
+
+  it('saves only while the row still holds the list the edit started from, else points_changed with no write', async () => {
+    const first = await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, expectedPins: null });
+    expect(first.tech_pins).toEqual(PINS);
+    // A second window still holds the empty list it loaded: its save must not erase the first window's points.
+    await expect(svc.saveTechCount(READ_A, { pins: [PINS[1]], crop: CROP, expectedPins: null }))
+      .rejects.toMatchObject({ code: 'points_changed' });
+    expect(JSON.parse(mockRows[0].tech_pins)).toEqual(PINS);
+    // Started from the saved list (any key order), the save lands.
+    const reordered = PINS.map((pt) => ({ note: pt.note, type: pt.type, y: pt.y, x: pt.x }));
+    const next = await svc.saveTechCount(READ_A, { pins: [PINS[0]], crop: CROP, expectedPins: reordered });
+    expect(next.tech_pins).toEqual([PINS[0]]);
+  });
+
+  it('refuses points on a finished read whose tier is unknown (an unreadable roof is never reopened)', async () => {
+    mockRows[0].ai_tier = 'unknown';
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, expectedPins: null })).rejects.toMatchObject({ code: 'read_not_usable' });
+    expect(mockRows[0].tech_pins).toBeNull();
+  });
+
+  it('clears the points with null, and keeps the stored crop centre', async () => {
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
+    const read = await svc.saveTechCount(READ_A, { pins: null });
+    expect(read.tech_pins).toBeNull();
+    expect(mockRows[0].crop_lat).toBe(27.46);
+  });
+
+  it('saves an empty list: the technician confirmed none', async () => {
+    const read = await svc.saveTechCount(READ_A, { pins: [], crop: CROP });
+    expect(read.tech_pins).toEqual([]);
+  });
+
+  it('changes the hide flag alone, and leaves the points, count and flags alone', async () => {
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, count: 2 });
+    const hidden = await svc.saveTechCount(READ_A, { hideOnEstimate: true });
+    expect(hidden.hide_on_estimate).toBe(true);
+    expect(hidden.tech_pins).toEqual(PINS);
+    expect(hidden.tech_final_count).toBe(2);
+    expect((await svc.saveTechCount(READ_A, { hideOnEstimate: false })).hide_on_estimate).toBe(false);
+  });
+
+  it('leaves the points alone when only a count is saved', async () => {
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
+    const read = await svc.saveTechCount(READ_A, { count: 5 });
+    expect(read.tech_pins).toEqual(PINS);
+    expect(read.tech_final_count).toBe(5);
+  });
+
+  it('returns null for an unknown id', async () => {
+    expect(await svc.saveTechCount(MISSING, { pins: PINS, crop: CROP })).toBeNull();
+    expect(await svc.saveTechCount(MISSING, { hideOnEstimate: true })).toBeNull();
+  });
+});
+
+describe('cropImageUrl and customerPointsFromRow', () => {
+  const row = (over = {}) => ({
+    status: 'done', image_source: 'manatee_2025_rgb', image_year: 2025, crop_lat: '27.46000', crop_lng: '-82.57000',
+    hide_on_estimate: false,
+    tech_pins: JSON.stringify([
+      { x: 0.2, y: 0.3, type: 'roof_returns_and_valleys', note: 'front left' },
+      { x: 0.5, y: 0.5, type: 'trees_touching_roof', note: null },
+      { x: 0.9, y: 0.1, type: 'other', note: null },
+    ]),
+    ...over,
+  });
+
+  it('builds the county crop URL from the stored centre, and returns null without one or for an unknown source', () => {
+    const url = svc.cropImageUrl(row());
+    expect(url).toMatch(/^https:\/\/www\.mymanatee\.org\/.*exportImage\?bbox=/);
+    expect(url).toContain('f=image');
+    expect(svc.cropImageUrl(row({ crop_lat: null }))).toBeNull();
+    expect(svc.cropImageUrl(row({ crop_lng: null }))).toBeNull();
+    expect(svc.cropImageUrl(row({ crop_lat: 'x' }))).toBeNull();
+    expect(svc.cropImageUrl(row({ image_source: 'unknown_source' }))).toBeNull();
+    expect(svc.cropImageUrl(null)).toBeNull();
+  });
+
+  it('shows nothing from a read whose tier is unknown', () => {
+    expect(svc.customerPointsFromRow(row({ ai_tier: 'unknown' }))).toBeNull();
+    expect(svc.customerPointsFromRow(row({ ai_tier: 'low' }))).not.toBeNull();
+  });
+
+  it('numbers the points in saved order, with customer labels, notes and the action at each', () => {
+    const out = svc.customerPointsFromRow(row());
+    expect(out.imageUrl).toBe(svc.cropImageUrl(row()));
+    expect(out.imageYear).toBe(2025);
+    expect(out.pins).toEqual([
+      { n: 1, x: 0.2, y: 0.3, type: 'roof_returns_and_valleys', label: 'Roof return, front left', action: 'seal' },
+      { n: 2, x: 0.5, y: 0.5, type: 'trees_touching_roof', label: 'Branch touching the roof', action: 'trim back' },
+      { n: 3, x: 0.9, y: 0.1, type: 'other', label: 'Entry point', action: 'seal' },
+    ]);
+    expect(svc.pinAction('trees_touching_roof')).toBe('trim back');
+    expect(svc.pinAction('chimney_or_flue')).toBe('seal');
+  });
+
+  it('never passes a point source on to the customer estimate', () => {
+    const out = svc.customerPointsFromRow(row({ tech_pins: [{ x: 0.1, y: 0.1, type: 'gable_vents', note: null, source: 'gable_vents:0' }] }));
+    expect(out.pins).toEqual([{ n: 1, x: 0.1, y: 0.1, type: 'gable_vents', label: 'Gable vent', action: 'seal' }]);
+    expect(JSON.stringify(out)).not.toContain('source');
+  });
+
+  it('accepts points already parsed (a jsonb column)', () => {
+    expect(svc.customerPointsFromRow(row({ tech_pins: [{ x: 0.1, y: 0.1, type: 'gable_vents', note: null }] })).pins[0].label).toBe('Gable vent');
+  });
+
+  it.each([
+    ['hidden by staff', { hide_on_estimate: true }],
+    ['no points saved', { tech_pins: null }],
+    ['an empty list of points', { tech_pins: '[]' }],
+    ['no stored crop centre', { crop_lat: null, crop_lng: null }],
+    ['a read that is not done', { status: 'pending' }],
+  ])('shows nothing for %s', (_name, over) => {
+    expect(svc.customerPointsFromRow(row(over))).toBeNull();
+  });
+
+  it('shows nothing for no row', () => {
+    expect(svc.customerPointsFromRow(null)).toBeNull();
+  });
+});
+
+describe('PATCH /:id/tech-count with points', () => {
+  const PINS = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }, { x: 0.8, y: 0.7, type: 'other' }];
+  const CROP = { lat: 27.46, lng: -82.57 };
+  const patch = (body, opts) => call('PATCH', `/${READ_A}/tech-count`, { body, ...opts });
+  beforeEach(() => {
+    mockRows.push({
+      id: READ_A, lookup_key: CROP_KEY(), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
+      ai_flags: {}, ai_tier: 'med', status: 'done', tech_final_count: null, tech_final_flags: null, tech_pins: null,
+      hide_on_estimate: false, crop_lat: null, crop_lng: null, created_at: new Date().toISOString(),
+    });
+  });
+
+  it('saves points with the crop and the hide flag, and answers with the normalized read', async () => {
+    const res = await patch({ pins: PINS, crop: CROP, expected_pins: null, hide_on_estimate: true });
+    expect(res.status).toBe(200);
+    expect(res.json.read.tech_pins).toEqual([
+      { x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' },
+      { x: 0.8, y: 0.7, type: 'other', note: null },
+    ]);
+    expect(res.json.read.hide_on_estimate).toBe(true);
+    expect(mockRows[0].crop_lat).toBe(27.46);
+  });
+
+  it('stores and returns a point source, and refuses a bad one with 400', async () => {
+    const res = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'gable_vents:1' }], crop: CROP, expected_pins: null });
+    expect(res.status).toBe(200);
+    expect(res.json.read.tech_pins).toEqual([{ x: 0.2, y: 0.3, type: 'other', note: null, source: 'gable_vents:1' }]);
+    const bad = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'other:1' }], crop: CROP, expected_pins: null });
+    expect(bad.status).toBe(400);
+    expect(mockRows[0].tech_pins).toBe(JSON.stringify([{ x: 0.2, y: 0.3, type: 'other', note: null, source: 'gable_vents:1' }]));
+  });
+
+  it('saves the hide flag alone without touching the points, and clears the points with null', async () => {
+    await patch({ pins: PINS, crop: CROP, expected_pins: null });
+    const hide = await patch({ hide_on_estimate: true });
+    expect(hide.status).toBe(200);
+    expect(hide.json.read.tech_pins).toHaveLength(2);
+    expect((await patch({ pins: null })).status).toBe(400);
+    const cleared = await patch({ pins: null, expected_pins: hide.json.read.tech_pins });
+    expect(cleared.status).toBe(200);
+    expect(cleared.json.read.tech_pins).toBeNull();
+  });
+
+  it('answers 409 for a clear that started from an older list, and keeps the saved points', async () => {
+    expect((await patch({ pins: PINS, crop: CROP, expected_pins: null })).status).toBe(200);
+    const stale = await patch({ pins: null, expected_pins: null });
+    expect(stale.status).toBe(409);
+    expect(JSON.parse(mockRows[0].tech_pins)).toHaveLength(2);
+  });
+
+  it('still takes a count and flags with the points in one save', async () => {
+    const res = await patch({ count: 3, flags: { gable_vents: 'yes' }, pins: PINS, crop: CROP, expected_pins: null });
+    expect(res.status).toBe(200);
+    expect(res.json.read).toEqual(expect.objectContaining({ tech_final_count: 3, tech_final_flags: { gable_vents: 'yes' } }));
+  });
+
+  it.each([
+    ['nothing but a crop', { crop: CROP }],
+    ['points without a crop', { pins: PINS, expected_pins: null }],
+    ['points with a crop that has no numbers', { pins: PINS, crop: { lat: 'a', lng: 'b' }, expected_pins: null }],
+    ['points with a crop out of range', { pins: PINS, crop: { lat: 91, lng: 0 }, expected_pins: null }],
+    ['21 points', { pins: Array.from({ length: 21 }, () => PINS[0]), crop: CROP, expected_pins: null }],
+    ['a point outside the photo', { pins: [{ x: 1.2, y: 0.5, type: 'other' }], crop: CROP, expected_pins: null }],
+    ['an unknown point type', { pins: [{ x: 0.5, y: 0.5, type: 'attic_door' }], crop: CROP, expected_pins: null }],
+    ['a note over 40 characters', { pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'n'.repeat(41) }], crop: CROP, expected_pins: null }],
+    ['points as an object', { pins: { x: 0.5 }, crop: CROP, expected_pins: null }],
+    ['a string hide flag', { hide_on_estimate: 'true' }],
+    ['a number hide flag', { hide_on_estimate: 1 }],
+  ])('rejects %s with 400 and writes nothing', async (_name, body) => {
+    const res = await patch(body);
+    expect(res.status).toBe(400);
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].hide_on_estimate).toBe(false);
+  });
+
+  it('answers 400 with the photo message for a crop that is not this read\'s, and writes nothing', async () => {
+    const res = await patch({ pins: PINS, crop: { lat: 28.1, lng: -82.1 }, expected_pins: null, hide_on_estimate: true });
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'These points were not drawn on this roof photo' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].hide_on_estimate).toBe(false);
+  });
+
+  it('answers 400 with the read-again message for points on a failed read, and writes nothing', async () => {
+    mockRows[0].status = 'failed';
+    const res = await patch({ pins: PINS, crop: CROP, expected_pins: null });
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'This roof read did not work. Read the roof again before adding points.' });
+    expect(mockRows[0].tech_pins).toBeNull();
+  });
+
+  it('answers 400 for a points list without expected_pins, and writes nothing', async () => {
+    const res = await patch({ pins: PINS, crop: CROP });
+    expect(res.status).toBe(400);
+    expect(mockRows[0].tech_pins).toBeNull();
+  });
+
+  it('answers 409 with the other-window message for a stale save, and keeps the saved points', async () => {
+    expect((await patch({ pins: PINS, crop: CROP, expected_pins: null })).status).toBe(200);
+    const stale = await patch({ pins: [PINS[0]], crop: CROP, expected_pins: null });
+    expect(stale.status).toBe(409);
+    expect(stale.json).toEqual({ error: 'These points were changed in another window. Read the roof again to load them.' });
+    expect(JSON.parse(mockRows[0].tech_pins)).toHaveLength(2);
+  });
+
+  it('logs and answers a database failure without the notes or the crop centre in either', async () => {
+    logger.error.mockClear();
+    mockUpdateError = Object.assign(new Error('update "roof_entry_reads" set "tech_pins" = $1 - SECRET NOTE 27.46 failed'), { code: '57014' });
+    const res = await patch({ pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'SECRET NOTE' }], crop: CROP, expected_pins: null });
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(res.json)).not.toMatch(/SECRET|27\.46/);
+    const logged = logger.error.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('57014');
+    expect(logged).not.toMatch(/SECRET|27\.46/);
+  });
+
+  it('answers 404 for an unknown read, and keeps a technician out', async () => {
+    expect((await call('PATCH', `/${MISSING}/tech-count`, { body: { pins: PINS, crop: CROP, expected_pins: null } })).status).toBe(404);
+    expect((await patch({ pins: PINS, crop: CROP, expected_pins: null }, { role: 'technician' })).status).toBe(403);
+    expect(mockRows[0].tech_pins).toBeNull();
   });
 });

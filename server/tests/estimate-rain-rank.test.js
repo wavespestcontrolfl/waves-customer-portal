@@ -190,3 +190,15 @@ describe('slotRainTierOf', () => {
     expect(hourlyRain).not.toHaveBeenCalled();
   });
 });
+
+describe('estimateServiceIdentities (the fill list reads it strict)', () => {
+  test('a failed read inside the real catalog lookup reads the label; strict throws', async () => {
+    const { estimateServiceIdentities } = require('../services/scheduling/customer-rain-rank');
+    const conn = { transaction: jest.fn(async () => { throw new Error('catalog down'); }) };
+    const row = { service: 'waves_assessment', label: 'Waves Assessment', engineKey: 'waves_assessment' };
+    const profile = { services: [row] };
+    expect(await estimateServiceIdentities([row], { profile, db: conn })).toEqual([{ name: 'Waves Assessment', serviceKey: null }]);
+    await expect(estimateServiceIdentities([row], { profile, db: conn, strict: true })).rejects.toThrow('catalog down');
+    expect(conn.transaction).toHaveBeenCalledTimes(2);
+  });
+});
