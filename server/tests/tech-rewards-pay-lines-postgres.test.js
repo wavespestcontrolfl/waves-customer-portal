@@ -122,6 +122,8 @@ postgres('tech rewards pay lines: the December gift', () => {
   const dateOf = (value) => (value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10));
   const checkOf = (run, technicianId) => run.checks.find((c) => c.technicianId === technicianId);
   const notesOf = async (runId) => (await api('GET', `/runs/${runId}`)).body.run.techRewardsNotes || [];
+  // the note for a gift of 2026 that waits: the reason, then the last pay date that can carry it (Dec 18 + 60 days)
+  const waits = (name, why) => `December gift for ${name} waits: ${why}. A pay run dated Feb 16, 2027 or earlier can add it`;
   const syncEvents = () => trx('audit_log').where({ action: 'payroll.tech_rewards_lines_synced' }).orderBy('created_at');
   const runRow = async (runId) => {
     const row = await trx('payroll_runs').where({ id: runId }).first();
@@ -181,6 +183,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       const gone = await readyTech('Sample Gone', { employment_status: 'inactive' });
       const late = await readyTech('Sample Late', { hire_date: '2026-12-19' }); // hired after the Friday
       const office = await readyTech('Sample Office', { field_dispatchable: false }); // an office account is not a technician
+      const manager = await readyTech('Sample Manager', { role: 'admin' }); // an admin account gets none, even one that takes field work
       const run = await draft(GIFT_WEEK);
       const line = await lineOf(alpha);
       expect(line).toMatchObject({ kind: 'december_gift', status: 'open', amount_cents: GIFT, source_id: `december_gift:${alpha}:2026` });
@@ -190,6 +193,8 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await linesOf(gone)).toHaveLength(0);
       expect(await linesOf(late)).toHaveLength(0);
       expect(await linesOf(office)).toHaveLength(0);
+      expect(await linesOf(manager)).toHaveLength(0);
+      expect(checkOf(run, manager)).toBeUndefined();
       // a technician with no hours that week gets a check for the gift alone; it is taxable pay
       expect(checkOf(run, alpha)).toMatchObject({ techRewardsCents: GIFT, grossCents: GIFT, medicareCents: Math.round(GIFT * 0.0145) });
       expect((await syncEvents()).flatMap((e) => e.metadata.skipped || []))
@@ -335,7 +340,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await linesOf(alpha)).toHaveLength(0);
       expect((await lineOf(bravo)).amount_cents).toBe(GIFT);
       expect([run.waiting, run.blocked]).toEqual([[], []]); // no gift line, so the pay run's covered-week guard has nothing to hold
-      expect(await notesOf(run.id)).toEqual(['December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet']);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Nov 2, 2026 is not paid yet')]);
       // the wait does not stop the run: both checks finalize, Bravo's with the gift and Alpha's without
       const final = await finalize(run.id);
       expect(checkOf(final, bravo).techRewardsCents).toBe(GIFT);
@@ -365,7 +370,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       await approvedWeek(tech, GIFT_WEEK);
       const run = await draft(GIFT_WEEK);
       expect(await linesOf(tech)).toHaveLength(0);
-      expect(await notesOf(run.id)).toEqual(['December gift for Sample Alpha waits: the week of Jun 1, 2026 is not paid yet']);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Jun 1, 2026 is not paid yet')]);
       // the shift was a mistake and is voided: the next sync writes the line and the note goes
       await trx('time_entries').where({ technician_id: tech }).update({ status: 'voided' });
       const again = await recompute(run.id);
@@ -385,11 +390,47 @@ postgres('tech rewards pay lines: the December gift', () => {
       const run = await draft(GIFT_WEEK);
       expect(await linesOf(tech)).toHaveLength(0);
       expect([run.waiting, run.blocked]).toEqual([[], []]);
-      expect(await notesOf(run.id)).toEqual(['December gift for Sample Alpha waits: the week of May 4, 2026 has a timesheet to approve or an automatic clock-out to review']);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of May 4, 2026 has a timesheet to approve or an automatic clock-out to review')]);
       await trx('time_entries').where({ technician_id: tech }).update({ auto_close_reviewed_at: trx.fn.now() });
       const again = await recompute(run.id);
       expect(checkOf(again, tech).techRewardsCents).toBe(GIFT);
       expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('waits when the run would hold the check for its own week: no hours, and an automatic clock-out nobody reviewed', async () => {
+      process.env.GATE_SHIFT_CLOSE_REVIEW = 'true';
+      const alpha = await readyTech('Sample Alpha');
+      const bravo = await readyTech('Sample Bravo');
+      // Alpha's week is approved with no minutes (no check of their own) and holds a shift the system closed
+      await approvedWeek(alpha, GIFT_WEEK, '0.00', '0.00');
+      await trx('time_entries').insert({
+        technician_id: alpha, entry_type: 'shift', status: 'completed', clock_in: '2026-12-08T13:00:00Z', clock_out: '2026-12-09T03:00:00Z', auto_closed_at: '2026-12-09T03:00:00Z',
+      });
+      await approvedWeek(bravo, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect([run.waiting, run.blocked]).toEqual([[], []]); // a gift line here would be a check the run must hold
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Dec 7, 2026 has a timesheet to approve or an automatic clock-out to review')]);
+      const final = await finalize(run.id);
+      expect(checkOf(final, bravo).techRewardsCents).toBe(GIFT);
+      // reviewed: the next run writes the gift
+      await trx('time_entries').where({ technician_id: alpha }).update({ auto_close_reviewed_at: trx.fn.now() });
+      await approvedWeek(bravo, NEXT_WEEK);
+      const next = await draft(NEXT_WEEK);
+      expect(checkOf(next, alpha)).toMatchObject({ techRewardsCents: GIFT, grossCents: GIFT });
+    });
+
+    it('says when no pay run can add a gift any more: 60 days after the gift date the note stops promising one', async () => {
+      const tech = await readyTech('Sample Alpha');
+      await approvedWeek(tech, '2026-11-02'); // approved, never paid
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      await finalize(run.id);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Nov 2, 2026 is not paid yet')]);
+      jest.setSystemTime(Date.parse('2027-02-16T17:00:00Z')); // the last day
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Nov 2, 2026 is not paid yet')]);
+      jest.setSystemTime(Date.parse('2027-02-17T17:00:00Z'));
+      expect(await notesOf(run.id)).toEqual(['December gift for Sample Alpha was not paid: the week of Nov 2, 2026 is not paid yet, and no pay run dated Feb 16, 2027 or earlier added it. No pay run adds it now']);
     });
 
     it('waits when no paycheck can be worked out for the technician, so a gift alone never blocks the run', async () => {
@@ -399,7 +440,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       const run = await draft(GIFT_WEEK);
       expect(await linesOf(alpha)).toHaveLength(0);
       expect([run.waiting, run.blocked]).toEqual([[], []]);
-      expect(await notesOf(run.id)).toEqual(['December gift for Sample Alpha waits: no paycheck can be worked out for them on this pay run (check the pay rate)']);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'no paycheck can be worked out for them on this pay run (check the pay rate)')]);
       const final = await finalize(run.id);
       expect(checkOf(final, bravo).techRewardsCents).toBe(GIFT);
       expect(checkOf(final, alpha)).toBeUndefined();
@@ -424,7 +465,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await linesOf(alpha)).toHaveLength(0);
       expect(checkOf(run, alpha)).toBeUndefined();
       expect([run.waiting, run.blocked]).toEqual([[], []]);
-      expect(await notesOf(run.id)).toEqual(['December gift for Sample Alpha waits: a later paycheck of theirs is already final, so this pay run cannot hold one for them']);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'a later paycheck of theirs is already final, so this pay run cannot hold one for them')]);
       const final = await finalize(run.id); // a gift-only check for Alpha would make finalize refuse the whole run
       expect(checkOf(final, bravo).techRewardsCents).toBe(GIFT);
       // a run dated after that paycheck writes the gift

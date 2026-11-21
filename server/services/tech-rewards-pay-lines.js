@@ -3,7 +3,8 @@
  * line (payroll-pay-lines.js), dark behind GATE_TECH_REWARDS_PAY_LINES (which needs GATE_PAYROLL_PAY_LINES). The season bonus
  * and the stay bonus are not written here yet. Nothing here invents a rule; each one lives in one place:
  *
- *   who is a technician                         technician-eligibility.js applyAssignable (active, field dispatchable)
+ *   who is a technician                         recipients() here: W-2, the technician role, and technician-eligibility.js
+ *                                               applyAssignable (active, field dispatchable). An admin account gets none.
  *   which days hold recorded work               payroll-runs.js workedDates (the test the pay run itself uses)
  *   which covered week would hold a pay run     payroll-runs.js lineGuardWeek (the two guards a run applies to every pay line)
  *   whether a check can be worked out at all    payroll-runs.js lineOnlyCheckProblem (buildCheck, the pay run's own builder)
@@ -55,6 +56,7 @@ const { applyAssignable } = require('./technician-eligibility');
 const { KIND_WORDS } = require('./payroll-pay-lines');
 const { payrollPayLinesLive, techRewardsPayLinesLive } = require('../config/feature-gates');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
+const { etDateString } = require('../utils/datetime-et');
 
 // payroll-runs.js loads this file, so its helpers are read on first use.
 const payrollRuns = () => require('./payroll-runs');
@@ -107,24 +109,34 @@ function spanOf(key, weekStart) {
  * Friday on or before Dec 20) to LOOKBACK_DAYS after it, so a run early in January can still carry last year's.
  */
 function dueInRun(payDate) {
-  const earliest = addStaffWorkDays(payDate, -LOOKBACK_DAYS);
   const due = [];
   for (const year of [yearOf(payDate) - 1, yearOf(payDate)]) {
-    const giftDate = decemberGiftDate(year);
-    if (giftDate <= payDate && giftDate >= earliest) due.push({ kind: GIFT, key: String(year) });
+    if (decemberGiftDate(year) <= payDate && payDate <= lastPayDate(year)) due.push({ kind: GIFT, key: String(year) });
   }
   return due;
 }
 
 const sourceIdOf = (kind, technicianId, key) => `${kind}:${technicianId}:${key}`;
 
+/** The last pay date a run can carry the gift of `year` on: LOOKBACK_DAYS after the gift date. Pure. */
+const lastPayDate = (year) => addStaffWorkDays(decemberGiftDate(year), LOOKBACK_DAYS);
+
+/**
+ * Who gets a Tech Rewards line, as a technicians query: a W-2 employee (pay lines are for W-2 employees) whose role is
+ * technician (an admin account gets none, even one that takes field work) and who is active and takes field work
+ * (technician-eligibility.js applyAssignable). A role that is not set is not a technician here: no money on a guess.
+ */
+const recipients = (trx) => applyAssignable(trx('technicians').where({ 'technicians.employment_type': 'w2', 'technicians.role': 'technician' }));
+
 // ---- Readiness
 
 /**
- * The oldest Monday-Sunday week in [coversFrom, coversTo] that holds work and has no finalized check, or null. A week holds work
- * when it has a weekly timesheet with minutes (what a check is worked out from), recorded work by the pay run's own test
- * (payroll-runs.js workedDates, which counts a shift that has no summary yet) or paid time off. It is paid when the technician
- * has a FINALIZED check for it in a finalized run. Whole weeks are asked, the weeks a line's overtime is priced from.
+ * The oldest Monday-Sunday week in [coversFrom, coversTo] that a pay run still has to pay, or null. A week needs a check when it
+ * has a weekly timesheet with minutes (what a check is worked out from), paid time off, or recorded work (the pay run's own
+ * test, payroll-runs.js workedDates, which counts a shift that has no summary yet) that no approved timesheet settles. A week
+ * whose approved timesheet has no minutes and that holds no time off gets no check from any run (evaluate), so it is settled:
+ * a gift never waits for a check that cannot come. A week is paid when the technician has a FINALIZED check for it in a
+ * finalized run. Whole weeks are asked, the weeks a line's overtime is priced from.
  */
 async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
   const from = staffWeekStartForWorkDate(coversFrom);
@@ -132,13 +144,16 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
   const to = addStaffWorkDays(lastWeek, 6);
   const timesheets = await trx('time_weekly_summary')
     .where({ technician_id: technicianId }).where('week_start', '>=', from).where('week_start', '<=', lastWeek)
-    .whereRaw('COALESCE(regular_minutes, 0) + COALESCE(overtime_minutes, 0) > 0')
-    .select(trx.raw("to_char(week_start, 'YYYY-MM-DD') AS work_date"));
-  const dates = await payrollRuns().workedDates(trx, technicianId, from, to);
+    .select('status', trx.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"),
+      trx.raw('COALESCE(regular_minutes, 0) + COALESCE(overtime_minutes, 0) AS minutes'));
+  const approved = new Set(timesheets.filter((row) => row.status === 'approved').map((row) => row.week_start));
+  const withMinutes = timesheets.filter((row) => Number(row.minutes) > 0).map((row) => row.week_start);
+  const worked = (await payrollRuns().workedDates(trx, technicianId, from, to)).map(staffWeekStartForWorkDate)
+    .filter((week) => !approved.has(week));
   const off = await trx('payroll_time_off')
     .where({ technician_id: technicianId }).where('work_date', '>=', from).where('work_date', '<=', to).where('minutes', '>', 0)
     .select(trx.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"));
-  const weeks = [...new Set([...timesheets.map((row) => row.work_date), ...dates, ...off.map((row) => row.work_date)].map(staffWeekStartForWorkDate))];
+  const weeks = [...new Set([...withMinutes, ...worked, ...off.map((row) => staffWeekStartForWorkDate(row.work_date))])];
   if (!weeks.length) return null;
   const paid = new Set((await trx('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
@@ -155,8 +170,11 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
  *   week_not_paid       an earlier week of its span holds work and has no finalized check
  *   week_needs_review   the pay run's own line guards would hold a check for an earlier week of its span
  *   no_paycheck         no check can be worked out for the technician on this run (week is null)
- * Only the weeks before the run's own are asked: the span ends in the run's own week by design (spanOf), and that week is the
- * run's to settle. A line that passes never makes the run wait, hold a check or block.
+ * The unpaid test asks only the weeks before the run's own: the span ends in the run's own week by design (spanOf), and that
+ * week is the one this run pays. The line guards are asked for the WHOLE span, the run's own week too, exactly as the run asks
+ * them of the line (evaluate): a technician who has no check on this run otherwise (an approved timesheet with no minutes) and
+ * an automatic clock-out nobody reviewed in that week would get a check the run must hold. A line that passes never makes the
+ * run wait, hold a check or block.
  */
 async function waitOf(trx, run, technicianId, span) {
   if (await payrollRuns().laterFinalCheckExists(trx, run, [technicianId])) return { reason: 'later_check_final', week: null };
@@ -165,9 +183,11 @@ async function waitOf(trx, run, technicianId, span) {
   if (earlier.coversFrom <= earlier.coversTo) {
     const unpaid = await oldestUnpaidWeek(trx, technicianId, earlier);
     if (unpaid) return { reason: 'week_not_paid', week: unpaid };
-    const guarded = await payrollRuns().lineGuardWeek(trx, technicianId, { amountCents: DECEMBER_GIFT_CENTS, earnedWeekStart: run.week_start, ...earlier });
-    if (guarded) return { reason: 'week_needs_review', week: guarded };
   }
+  const guarded = await payrollRuns().lineGuardWeek(trx, technicianId, {
+    amountCents: DECEMBER_GIFT_CENTS, earnedWeekStart: run.week_start, coversFrom: span.coversFrom, coversTo: span.coversTo,
+  });
+  if (guarded) return { reason: 'week_needs_review', week: guarded };
   const problem = await payrollRuns().lineOnlyCheckProblem(trx, run, technicianId, { kind: GIFT, amountCents: DECEMBER_GIFT_CENTS });
   return problem ? { reason: 'no_paycheck', week: null } : null;
 }
@@ -251,10 +271,10 @@ async function loadState(trx, run, lock) {
   // paid (or voided) lines are evidence: their keys are never read or written again
   const settled = new Set((await trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
     .select('source_id')).map((row) => row.source_id));
-  // technicians: active, W-2 (pay lines are for W-2 employees) and the plan's technician test, not office or admin accounts.
-  // With lock the rows are read FOR SHARE, as payroll-family-employee.js familyExemptIds reads them: a change to one of these
-  // technicians waits for the pay run's transaction, so a finalize never pays a gift the change took away.
-  const techQuery = applyAssignable(trx('technicians').where({ employment_type: 'w2' }))
+  // The technicians who get a line (recipients). With lock the rows are read FOR SHARE, as payroll-family-employee.js
+  // familyExemptIds reads them: a change to one of these technicians waits for the pay run's transaction, so a finalize never
+  // pays a gift the change took away.
+  const techQuery = recipients(trx)
     .orderBy('technicians.id')
     .select('technicians.id', trx.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date"));
   if (lock) techQuery.forShare();
@@ -398,7 +418,7 @@ async function claimBeforeFinal(run, trx, technicianIds, { actorId = null } = {}
   const owners = new Map((await trx('payroll_runs').whereIn('week_start', lines.map((line) => line.earned_week_start)).where({ status: 'draft' })
     .select(trx.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"), trx.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date")))
     .map((row) => [row.week_start, row]));
-  const techs = new Map((await applyAssignable(trx('technicians').where({ employment_type: 'w2' }))
+  const techs = new Map((await recipients(trx)
     .whereIn('technicians.id', lines.map((line) => line.technician_id)).forShare()
     .select('technicians.id', trx.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date"))).map((row) => [row.id, row]));
   const due = dueInRun(run.pay_date);
@@ -420,22 +440,30 @@ async function claimBeforeFinal(run, trx, technicianIds, { actorId = null } = {}
 }
 
 /**
- * Plain notes for a run's summary: what waited at the run's latest sync and that no run has written since, e.g.
- * "December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet". Read from the run row (saveWaits). None with
+ * Plain notes for a run's summary: what waited at the run's latest sync and that no run has written since, with the last pay
+ * date that can still carry it, e.g. "December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. A pay run
+ * dated Feb 16, 2027 or earlier can add it". After that day (`today`, the Eastern date) the note says the gift was not paid and
+ * that no pay run adds it now, so the screen never promises a run that cannot come. Read from the run row (saveWaits). None with
  * either gate off, and none for a gift that has its line now (a later run claimed it), so an old run never says "waits" about a
  * paid gift.
  */
-async function waitNotes(conn, runId) {
+async function waitNotes(conn, runId, { today = etDateString() } = {}) {
   if (!payLinesOn() || !techRewardsOn()) return [];
   const row = await conn('payroll_runs').where({ id: runId }).first('tech_rewards_waits');
   const waits = (row && Array.isArray(row.tech_rewards_waits) ? row.tech_rewards_waits : [])
-    .filter((w) => KIND_WORDS[w.kind] && WAIT_WORDS[w.reason]);
+    .filter((w) => KIND_WORDS[w.kind] && WAIT_WORDS[w.reason] && SOURCE_ID_RE.test(w.source_id || ''));
   if (!waits.length) return [];
   const written = new Set((await conn('payroll_pay_lines').where({ source_type: SOURCE_TYPE })
     .whereIn('source_id', waits.map((w) => w.source_id)).select('source_id')).map((line) => line.source_id));
   const names = new Map((await conn('technicians').whereIn('id', waits.map((w) => w.technician_id)).select('id', 'name')).map((t) => [t.id, t.name]));
   return waits.filter((w) => !written.has(w.source_id) && names.has(w.technician_id))
-    .map((w) => `${KIND_WORDS[w.kind]} for ${names.get(w.technician_id)} waits: ${WAIT_WORDS[w.reason](w)}`)
+    .map((w) => {
+      const who = `${KIND_WORDS[w.kind]} for ${names.get(w.technician_id)}`;
+      const last = lastPayDate(Number(SOURCE_ID_RE.exec(w.source_id)[3]));
+      return today > last
+        ? `${who} was not paid: ${WAIT_WORDS[w.reason](w)}, and no pay run dated ${dayLabel(last)} or earlier added it. No pay run adds it now`
+        : `${who} waits: ${WAIT_WORDS[w.reason](w)}. A pay run dated ${dayLabel(last)} or earlier can add it`;
+    })
     .sort();
 }
 
@@ -444,6 +472,7 @@ module.exports = {
   DECEMBER_GIFT_CENTS,
   decemberGiftDate,
   dueInRun,
+  lastPayDate,
   spanOf,
   sourceIdOf,
   syncTechRewardLines,

@@ -6,7 +6,7 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () =
 const { recordAuditEvent } = require('../services/audit-log');
 
 const {
-  decemberGiftDate, dueInRun, spanOf, sourceIdOf, syncTechRewardLines, DECEMBER_GIFT_CENTS, SOURCE_TYPE,
+  decemberGiftDate, dueInRun, lastPayDate, spanOf, sourceIdOf, syncTechRewardLines, DECEMBER_GIFT_CENTS, SOURCE_TYPE,
 } = require('../services/tech-rewards-pay-lines');
 const { weeksOfLine } = require('../services/payroll-regular-rate');
 
@@ -34,6 +34,12 @@ describe('dueInRun: which lines a run dated that day may write (from the due dat
     expect(kinds('2027-02-17')).toEqual([]);
     expect(kinds('2024-12-20')).toEqual(['december_gift:2024']);
     expect(kinds('2026-06-05')).toEqual([]);
+  });
+
+  test('the last pay date is 60 days after the gift date, the day the waiting note shows', () => {
+    expect(lastPayDate(2026)).toBe('2027-02-16');
+    expect(lastPayDate(2024)).toBe('2025-02-18');
+    expect(kinds(lastPayDate(2026))).toEqual(['december_gift:2026']);
   });
 });
 
