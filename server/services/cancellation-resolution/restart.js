@@ -1227,6 +1227,23 @@ async function retireLineage({
   }
 }
 
+// lineageOrderStamp: the created_at of a quote the mint publishes, as a value
+// for its INSERT (#8245 pre-push r1, r2). The lineage's order is the stored
+// (created_at, id). The column's default is the transaction's start, and
+// that is not the order the mints ran in: of two mints for one customer, the
+// one that began first can take the customer-comms lock second. Its quote,
+// the live one, was then the OLDER row, and "which quote replaced which" read
+// backwards once staff archived it. So a new quote is stamped after every
+// stored quote of its lineage (customer + source), in any status. The mint
+// holds the customer-comms lock, so no other mint of the lineage is in
+// flight and this read sees every earlier one. With no later row stored,
+// the stamp is the transaction's start, as the default was.
+const lineageOrderStamp = (trx, customerId, source) => trx.raw(
+  `GREATEST(now(), (SELECT max(prior.created_at) + interval '1 microsecond'
+    FROM estimates prior WHERE prior.customer_id = ? AND prior.source = ?))`,
+  [customerId, source],
+);
+
 // The readers of that lineage for staff Unarchive (admin-estimates.js POST
 // /:id/unarchive; #8132 pre-push r40). retireLineage archives the quotes a
 // new one replaces and stamps nothing else, so "was this quote replaced" is
@@ -1248,10 +1265,10 @@ function retiresWithLineage(estimate) {
 //                source) that is newer, in any status, archived or not; or
 //                one that is still open (not archived, not accepted).
 // "Newer" is the stored (created_at, id), compared inside the database so no
-// timestamp loses its microseconds in JavaScript. It is not enough alone: a
-// mint leaves created_at to the database, which stamps the transaction's
-// start, so of two mints that took the lock in the other order the live
-// quote is the OLDER row. That quote is open, which the second test reads.
+// timestamp loses its microseconds in JavaScript. The mint assigns that order
+// (lineageOrderStamp), so the newest row is the last mint's, also after
+// staff archive it. The second test covers a lineage that a customer merge
+// joined: the open quote that moved in can be the older row.
 const LINEAGE_REPLACES_SQL = `((other.created_at, other.id) > (old.created_at, old.id)
   OR (other.archived_at IS NULL AND other.status <> 'accepted'))`;
 async function lineageUnarchiveBlock(dbh, estimate) {
@@ -1300,6 +1317,8 @@ async function publishMintedEstimate(mint, { offer, estimateData }) {
     followup_final_sent: true,
     followup_expiring_sent: true,
     source,
+    // The quote's place in its lineage, assigned under the mint's lock.
+    created_at: lineageOrderStamp(trx, fresh.id, source),
     service_interest: families.map((f) => FAMILY_LABELS[f] || f).join(' + '),
     category: fresh.property_type === 'commercial' ? 'COMMERCIAL' : 'RESIDENTIAL',
     pricing_authority: 'SERVER',
@@ -1797,6 +1816,7 @@ module.exports = {
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
   staffChangedQuoteRefusal,
+  lineageOrderStamp,
   retiresWithLineage,
   lineageUnarchiveBlock,
   _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },
