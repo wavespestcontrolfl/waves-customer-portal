@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
   default: {
+    // Billing mounts Home's add-a-service card (owner 2026-11-21).
+    getPropertyRecommendations: vi.fn(async () => ({ available: false })),
     getSchedule: vi.fn(),
     getNotificationPrefs: vi.fn(),
     getPropertyNotificationPrefs: vi.fn(),
@@ -72,6 +74,39 @@ describe('BillingTab — cancelled account is read-only (C4)', () => {
     await renderBilling({ ...baseCustomer, cancelled: false });
     expect(screen.getByText('Payment Methods')).toBeInTheDocument();
     expect(screen.getByText('Billing Preferences')).toBeInTheDocument();
+  });
+});
+
+// Owner 2026-11-21: Billing also carries Home's add-a-service offer (pest or
+// lawn, from the same recommendations read) and a refer-a-friend card. Home's
+// other cards (the mosquito note, irrigation advice) stay on Home, and a
+// cancelled account sees neither card.
+describe('BillingTab — add-a-service and refer cards', () => {
+  const RECS = {
+    available: true,
+    oneTap: false,
+    cards: [
+      { id: 'lawn_offer', kind: 'offer', title: 'Lawn Care', body: 'Not on your plan yet.', serviceKey: 'lawn_care', mode: 'quote_cta', option: null, fingerprint: 'fp', ctaLabel: 'Request a quote' },
+      { id: 'mosquito_note', kind: 'ask', title: 'Mosquito coverage', body: 'Season is here.' },
+    ],
+  };
+
+  it('an active account sees the offer (offers only) and the refer card', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(RECS);
+    const onSwitchTab = vi.fn();
+    render(<BillingTab customer={{ ...baseCustomer, cancelled: false }} refreshCustomer={vi.fn()} onSwitchTab={onSwitchTab} />);
+    expect(await screen.findByText('Lawn Care')).toBeInTheDocument();
+    expect(screen.queryByText('Mosquito coverage')).not.toBeInTheDocument();
+    screen.getByRole('button', { name: 'Refer a friend' }).click();
+    expect(onSwitchTab).toHaveBeenCalledWith('refer');
+  });
+
+  it('a cancelled account sees neither and never asks for recommendations', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(RECS);
+    await renderBilling({ ...baseCustomer, cancelled: true, cancelledAt: '2026-08-22' });
+    expect(api.getPropertyRecommendations).not.toHaveBeenCalled();
+    expect(screen.queryByText('Lawn Care')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Refer a friend' })).not.toBeInTheDocument();
   });
 });
 
