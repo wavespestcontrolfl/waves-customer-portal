@@ -701,11 +701,12 @@ describe('updateProductPage', () => {
       product_aliases: [{ alias_name: 'Talstar P' }, { alias_name: 'Crosscheck Plus' }, { alias_name: 'Bifen I/T 7.9%' }],
       treatment_outcomes: outcomes,
       service_products: servicePrd,
-      // The alias events: one that moved a name off Talak, and one that removed this product's own duplicate row, which names no
-      // other product and is no evidence against the name. (pg hands jsonb back parsed; a text copy is read the same way.)
+      // The alias events: one that moved a name off Talak, and two that name only this product (its own duplicate row removed, its
+      // own alias inserted), which are no evidence against the name. (pg hands jsonb back parsed; a text copy is read the same way.)
       audit_log: [
         { metadata: JSON.stringify({ kind: 'moved', alias_name: 'Bifen I/T 7.9%', from: 'pc-talak', to: 'pc-cross' }) },
         { metadata: { kind: 'removed', alias_name: 'Crosscheck Plus', row: { id: 'a9', product_id: 'pc-cross', alias_name: 'crosscheck plus' } } },
+        { metadata: { kind: 'inserted', alias_name: 'Crosscheck Plus', product_id: 'pc-cross' } },
       ],
       knowledge_entries: [],
     });
@@ -718,7 +719,7 @@ describe('updateProductPage', () => {
     expect(outcomeOps).toContainEqual(['service_record_id IN (SELECT service_record_id FROM service_products WHERE product_id = ?)', ['pc-cross']]);
     // The move evidence is read from the alias events only, whatever migration wrote them.
     const moveRead = state.calls.audit_log.find((rec) => rec.ops.some(([m, a]) => m === 'where' && a[0]?.resource_type === 'product_aliases'));
-    expect(moveRead.ops).toContainEqual(['whereRaw', ["metadata->>'kind' IN ('moved', 'removed')"]]);
+    expect(moveRead.ops).toContainEqual(['whereRaw', ["metadata->>'kind' IN ('moved', 'removed', 'inserted')"]]);
   });
 
   test.each([
@@ -729,6 +730,8 @@ describe('updateProductPage', () => {
     ['the swap removed Talak\'s copy of it, and no visit stored it', 'Bifen IT', 'product/bifen-it', { audit_log: [{ metadata: { kind: 'removed', alias_name: 'bifen it', row: { id: 'a3', product_id: 'pc-talak', alias_name: 'bifen it' } } }] }],
     // A rollback returned the name to the product it left: the product that held it in between still shares it.
     ['a rollback returned it from Talak, and no visit stored it', 'Bifen I/T 7.9%', 'product/bifen-i-t-7-9', { audit_log: [{ metadata: { kind: 'moved', alias_name: 'Bifen I/T 7.9%', from: 'pc-cross', to: 'pc-talak' } }] }],
+    // A rollback deleted the alias an insert gave Talak (the event stays): Talak carried the name before Crosscheck took it.
+    ['a rollback deleted Talak\'s inserted copy of it, and no visit stored it', 'Bifen I/T', 'product/bifen-i-t', { audit_log: [{ metadata: { kind: 'inserted', alias_name: 'Bifen I/T', product_id: 'pc-talak' } }] }],
   ])('a variant page under a name another product carried is kept (%s): the Crosscheck refresh folds only its own names', async (_label, alias, kept, evidence) => {
     const pageOf = (rec) => rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0]?.slug;
     const state = useDb({
