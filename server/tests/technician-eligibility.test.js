@@ -23,6 +23,7 @@ const {
   loadTechShifts,
   shiftMinutes,
   storedShift,
+  shiftBounds,
 } = require('../services/technician-eligibility');
 const logger = require('../services/logger');
 
@@ -466,6 +467,22 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
     expect(shiftMinutes('17:30:00')).toBe(1050);
     expect(shiftMinutes('07:45:00.000')).toBe(465);
     for (const bad of ['8:00', '24:00', '12:60', '', null, undefined, 480, 'noon']) expect(shiftMinutes(bad)).toBeNull();
+  });
+
+  // The rule every offer path applies (owner 2026-11-19, page item D4): a job starts at or after
+  // the shift start and ends by the shift end, inside the caller's own day.
+  test('shiftBounds narrows the caller\'s day to the shift and never widens it', () => {
+    const shift = { startMin: 600, endMin: 900, source: 'roster' };
+    // A day wider than the shift on both sides takes the shift.
+    expect(shiftBounds(shift, 480, 1080)).toEqual({ openMin: 600, closeMin: 900 });
+    // A day narrower than the shift on both sides stays as it is.
+    expect(shiftBounds(shift, 660, 840)).toEqual({ openMin: 660, closeMin: 840 });
+    // Each side on its own: a later open with an earlier shift end, and the reverse.
+    expect(shiftBounds(shift, 660, 1080)).toEqual({ openMin: 660, closeMin: 900 });
+    expect(shiftBounds(shift, 480, 840)).toEqual({ openMin: 600, closeMin: 840 });
+    // No shift (the gate off, or no set hours): the caller's day.
+    expect(shiftBounds(null, 480, 1080)).toEqual({ openMin: 480, closeMin: 1080 });
+    expect(shiftBounds(undefined, 0, 1440)).toEqual({ openMin: 0, closeMin: 1440 });
   });
 
   test('storedShift needs both times with the end after the start', () => {

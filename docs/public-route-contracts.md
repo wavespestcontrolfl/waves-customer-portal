@@ -1002,6 +1002,21 @@ HTTP requests and fall back to the conservative model when exhausted; response
 data remains request-local. Existing stops are planned at the owner planning
 minutes (`scheduling/planning-minutes.js`, owner 2026-09-25) rather than their
 window span; the visit being offered keeps its own resolved allowance.
+With default-off `GATE_TECH_SHIFT_HOURS` (owner 2026-11-19, strict `'true'`),
+the slot finder behind every public availability surface (the estimate
+`find-slots` and `available-slots`, `/api/booking/availability` and
+`/find-slots`, the `/capture-intent` revalidation, public reschedule, public
+re-service and inspection booking) finds, for a technician who has set shift
+hours (`technicians.shift_start` / `shift_end`, the Team tab), only a start at
+or after the shift start whose visit ends by the shift end. On today's date
+the shift runs from that technician's clock-in, for the same length of day. A
+technician without set hours is unchanged, and the shift never adds a start.
+The hours a surface adds to the finder's own (an open day's block, a gap's
+later hours and a snapped start on the `/book` surfaces; the estimate page's
+ASAP lane and rounded-up starts) are held to the shift in the next release,
+and the gate stays off until then. Offers only: no field is added or removed,
+and the reserve and confirm routes do not check the shift yet. Gate off:
+byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
 browse horizon answers `400 { error: 'date is beyond the booking horizon',
 lastBookableDate, horizonDays }` (owner 2026-11-06, new-customer walk E2):
