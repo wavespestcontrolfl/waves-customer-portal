@@ -134,6 +134,10 @@ describe('what a visit and the reading of its call say about the price', () => {
     // A call booking never prices a Waves Assessment (by its key or its name) or a free re-service, even when
     // the call names that visit and speaks of a treatment price: that price is the quote, not this visit's charge.
     for (const row of ASSESSMENT_AND_RE_SERVICE) expect(verdict(row)).toBe('agrees');
+    // Completion billing always treats these labels as free, on a one-time catalog row too: a price would be skipped.
+    for (const label of ['Waves Pest Control Appointment Service', 'Estimate Visit', 'Pest Follow-Up']) {
+      expect(verdict(namedVisit(label, 'general_appointment'))).toBe('agrees');
+    }
     // A visit with a price agrees whatever became of the reading, and when its catalog row is gone.
     expect(verdict(unpriced({ estimated_price: 250, v2_extraction_status: 'schema_failed', ai_extraction_enriched: null }))).toBe('agrees');
     expect(verdict(unpriced({ estimated_price: 250, row_name: null, row_service_key: null, row_billing_type: null }))).toBe('agrees');
@@ -184,6 +188,14 @@ describe('what a visit and the reading of its call say about the price', () => {
     expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 250 })] }))).toBe('unknown');
     // A term nobody accepted does not count against the total, next to the one the caller accepted.
     expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350 }), statedTerm({ amount_usd: 99, unit: 'per_month', accepted: false })] }))).toBe('problem');
+    // A one-time fee the reading ties to a plan tier or to an annual prepay is the plan's fee, on both price paths.
+    for (const mark of [{ tier_mentioned: 'gold' }, { prepay_term: 'annual' }]) {
+      expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350, ...mark })] }))).toBe('unknown');
+      expect(verdict(pricedAs({ prices: [statedTerm(mark)] }))).toBe('unknown');
+    }
+    // A prepay the call ruled out is no plan mark.
+    expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350, prepay_term: 'none', tier_mentioned: null })] }))).toBe('problem');
+    expect(verdict(pricedAs({ prices: [statedTerm({ prepay_term: 'none', tier_mentioned: null })] }))).toBe('problem');
     // Terms of which the caller accepted none contradict a total: the price was declined, or got no answer.
     expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350, accepted: false, caller_response: 'declined' })] }))).toBe('unknown');
     expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350, accepted: null, caller_response: 'no_response' })] }))).toBe('unknown');
@@ -266,6 +278,8 @@ describe('when an open bell closes', () => {
     expect(closeKeyFor('price', unpriced({ estimated_price: 275 }), BILLING)).toBe('price');
     expect(closeKeyFor('price', unpriced({ estimated_price: 0 }), BILLING)).toBe('price');
     expect(closeKeyFor('price', unpriced({ primary_line_price: 275 }), BILLING)).toBe('price');
+    // The office changed the visit to an appointment, which completion never bills: no price is needed.
+    expect(closeKeyFor('price', unpriced({ service_type: 'Waves Pest Control Appointment Service' }), BILLING)).toBe('noPriceNeeded');
     // Staff set a price on a visit whose catalog row is gone: the bell still closes.
     expect(closeKeyFor('price', unpriced({ estimated_price: 275, row_name: null, row_service_key: null, row_billing_type: null }), BILLING)).toBe('price');
     for (const row of ASSESSMENT_AND_RE_SERVICE) expect(closeKeyFor('price', row, BILLING)).toBe('noPriceNeeded');

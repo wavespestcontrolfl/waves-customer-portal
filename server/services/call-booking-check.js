@@ -43,7 +43,7 @@ const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
-const { resolveStatedOneTimeCallPrice } = require('../utils/call-agreed-price');
+const { resolveStatedOneTimeCallPrice, statedPriceTerms, exactOneTimeAmount } = require('../utils/call-agreed-price');
 
 const OWN_PREFIX = 'call-booking-check:';
 const AREA = 'Schedule';
@@ -115,27 +115,28 @@ const catalogRowOf = (visit) => ({ name: visit.row_name, service_key: visit.row_
 
 // A visit a call booking never prices, whatever the call said (resolveCallBookingPrice refuses each): a service
 // that is not one-time, a free re-service, and a Waves Assessment, the free look-before-quote visit (a treatment
-// price said on the same call is the quote, not this visit's charge). Also a free callback.
+// price said on the same call is the quote, not this visit's charge). Also a free callback, and a visit whose
+// label completion billing always treats as free (isAlwaysFreeServiceType: an appointment, an estimate, a
+// follow-up), where a price would be skipped at completion.
 function takesNoCallPrice(visit) {
   const row = catalogRowOf(visit);
   return row.billing_type !== 'one_time' || Boolean(visit.is_callback)
+    || require('./no-cost-visit-types').isAlwaysFreeServiceType(visit.service_type)
     || require('./call-booking-catalog').isReServiceCatalogRow(row)
     || require('./assessment-booking').isAssessmentServiceRow(row);
 }
 
 // Whether the reading's total can be a one-time total, by its price terms: none at all (an older reading
-// carries only the total), or exactly one accepted term, with the total's own exact amount and the one-time
-// unit. "$90" next to an accepted "$90 per quarter" is a plan rate; a second accepted term, a range or a term
-// with no unit leaves the visit's share unknown; and terms of which the caller accepted none (a declined
-// price) contradict a total.
+// carries only the total), or exactly one accepted term that is the total's own exact one-time amount
+// (exactOneTimeAmount, the stated price's rule: one-time unit, no range, no plan tier, no annual prepay).
+// "$90" next to an accepted "$90 per quarter" is a plan rate, and "$99" marked with a WaveGuard tier is a
+// plan's setup fee; a second accepted term, a range or a term with no unit leaves the visit's share unknown;
+// and terms of which the caller accepted none (a declined price) contradict a total.
 function totalIsOneTime(request) {
-  const terms = (Array.isArray(request.prices) && request.prices.length ? request.prices : [request.price])
-    .filter((entry) => entry && typeof entry === 'object'
-      && (typeof entry.amount_usd === 'number' || typeof entry.amount_max_usd === 'number' || entry.accepted === true));
+  const terms = statedPriceTerms(request);
   if (!terms.length) return true;
   const accepted = terms.filter((entry) => entry.accepted === true);
-  const [term] = accepted;
-  return accepted.length === 1 && term.unit === 'one_time' && term.amount_max_usd == null && term.amount_usd === request.quoted_price_usd;
+  return accepted.length === 1 && exactOneTimeAmount(accepted[0]) === request.quoted_price_usd;
 }
 
 // The price the reading holds for the job it names, as the booking's own price rule would put it on this

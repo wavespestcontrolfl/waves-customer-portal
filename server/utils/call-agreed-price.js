@@ -90,9 +90,13 @@ function statedPriceTerms(svc) {
       && (typeof entry.amount_usd === 'number' || typeof entry.amount_max_usd === 'number' || entry.accepted === true));
 }
 
-// One exact one-time number: unit one_time, a positive amount, and no range
-// field at all (a malformed range, high end under the low end, is not exact).
+// One exact one-time number that no plan claims: unit one_time, a positive
+// amount, no range field at all (a malformed range, high end under the low
+// end, is not exact), and no plan mark on the term. A one-time fee the reading
+// ties to a WaveGuard tier or to an annual prepay is a plan's fee (a setup
+// fee, a year paid up front), not the price of a one-time job.
 function exactOneTimeAmount(entry) {
+  if (entry.tier_mentioned || entry.prepay_term === 'annual') return null;
   return entry.unit === 'one_time' && entry.amount_max_usd == null && positiveAmount(entry.amount_usd) ? entry.amount_usd : null;
 }
 
@@ -112,7 +116,8 @@ function exactOneTimeAmount(entry) {
  *     stated it;
  *   - that term is the ONLY term accepted on the call, whoever stated the
  *     others ("$99 to start, then $31 a month" is two agreed terms);
- *   - its unit is one_time and it is one exact positive amount, never a range.
+ *   - its unit is one_time and it is one exact positive amount, never a range,
+ *     with no plan tier and no annual prepay on the term.
  * A number the CALLER spoke (a competitor's quote) is never a Waves price, and
  * does not count against the one-price rule unless it was accepted.
  *
@@ -153,5 +158,7 @@ function formatAgreedPriceLabel(agreedPrice) {
 module.exports = {
   resolveCallAgreedPrice,
   resolveStatedOneTimeCallPrice,
+  statedPriceTerms,
+  exactOneTimeAmount,
   formatAgreedPriceLabel,
 };

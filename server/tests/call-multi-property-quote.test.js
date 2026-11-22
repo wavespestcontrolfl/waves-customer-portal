@@ -565,6 +565,13 @@ describe('resolveStatedOneTimeCallPrice', () => {
     expect(resolveStatedOneTimeCallPrice(call([stated({ amount_usd: 0 })]))).toBeNull();
   });
 
+  test('a one-time fee the reading ties to a plan tier or an annual prepay is the plan\'s fee', () => {
+    expect(resolveStatedOneTimeCallPrice(call([stated({ tier_mentioned: 'silver' })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated({ prepay_term: 'annual' })]))).toBeNull();
+    // A prepay the call ruled out is no plan mark.
+    expect(resolveStatedOneTimeCallPrice(call([stated({ prepay_term: 'none', tier_mentioned: null })]))).toBe(250);
+  });
+
   test('two staff prices on one call: nothing here can tell which one stands', () => {
     expect(resolveStatedOneTimeCallPrice(call([stated(), stated({ amount_usd: 150, accepted: false })]))).toBeNull();
     // A price nobody is named for could be a second staff price.
