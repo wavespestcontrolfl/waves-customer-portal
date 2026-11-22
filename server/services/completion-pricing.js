@@ -208,6 +208,14 @@ function rowRateConflicts(raw, rate) {
     .some((recorded) => recorded != null && Number(recorded) !== Number(rate));
 }
 
+// Whether a tier share can hide in what is left of a row's saving on a tier estimate: the row carries no discount
+// record at all, or it recorded a rate of its own above zero and that share is not already its own row (`tierRowed`).
+function tierShareHidden(raw, tierRowed) {
+  if (!raw.discount) return true;
+  const discount = object(raw.discount);
+  return !tierRowed && [discount.appliedDiscountPercent, discount.effectiveDiscount].some((recorded) => Number(recorded) > 0);
+}
+
 // The tier record that names a line's saving. The one on the line wins. Saved engine rows keep the tier on the
 // estimate's recurring block instead, with the list price on the row: such a line takes the estimate's tier only when
 // the row's saved figures prove that tier's rate priced it (tierPricedRow), no service credit shares the saving, the
@@ -246,7 +254,8 @@ function acceptedDiscountRows(raw, base, savings, { manualName = null, tierDisco
     rest = money(savings - dollars);
   }
   if (rest > 0) {
-    const named = !!manualName && !credited && !(tierDiscounted && !raw.discount);
+    // The rest is the staff discount's only when no tier share can hide in it (tierShareHidden).
+    const named = !!manualName && !credited && !(tierDiscounted && tierShareHidden(raw, rows.length > 0));
     rows.push({ name: named ? manualName : rows.length ? 'Other accepted discount' : 'Accepted estimate discount', dollars: rest, named });
   }
   return rows;

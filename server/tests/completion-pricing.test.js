@@ -129,6 +129,13 @@ describe('completion estimate evidence', () => {
     expect(names(acceptedPricing(row(96, { manualFinalAnnual: 384 }), platinum))).toEqual([['WaveGuard Platinum', 24, 20, true]]);
     expect(names(acceptedPricing(row(96), { tierDiscounted: true, estimateTier: null }))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96), { tierDiscounted: true, estimateTier: { tier: 'platinum', amount: 0 } }))).toEqual(unnamed(24));
+    // A tier share and a staff discount on one row with no split (the mapped lawn shape: a rate, no tier record): the
+    // staff discount cannot name the whole saving. A row that recorded 0% took no tier, so the saving is staff's.
+    const staffed = { manualName: 'Military Discount', tierDiscounted: true, estimateTier: null };
+    const lawn = (discount) => row(80, { service: 'lawn_care', perTreatment: 100, annualAfterDiscount: 340, manualFinalAnnual: 320, discount });
+    expect(names(acceptedPricing(lawn({ effectiveDiscount: 0.15, appliedDiscountPercent: 0.15 }), staffed))).toEqual(unnamed(20));
+    expect(names(acceptedPricing(lawn({ effectiveDiscount: 0, appliedDiscountPercent: 0 }), staffed)))
+      .toEqual([['Military Discount', 20, undefined, true]]);
     // The line's own record still wins over the estimate's.
     expect(names(acceptedPricing(row(102, { discount: { appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.15 }] } }), platinum)))
       .toEqual([['WaveGuard Gold', 18, 15, true]]);
