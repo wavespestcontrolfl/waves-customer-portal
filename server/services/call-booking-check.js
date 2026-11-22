@@ -7,14 +7,21 @@
 // named the plan. The owner corrected the visit 82 minutes later. Nothing told the office in between.
 //
 // Every 15 minutes in office hours this job reads each open visit the call agent booked in the last 7 days and
-// the stored reading of its call. One problem today, one Schedule bell, raised once for a visit:
+// the stored reading of its call. Two problems, one Schedule bell each, raised once for a visit:
 //   service  the call named a one-time service and the visit is a plan visit.
-// A bell's key and metadata carry the problem's name, so a second problem adds a row to KINDS and CLOSED.
+//   price    the visit is the one-time service the call named, it has no price, and the reading holds a price
+//            for that job: the total the call agreed, or the one-time price staff stated and the caller accepted
+//            ("One-time service is $250, but it varies"). The booking never takes the stated price: the reading
+//            marks a hedge and an added charge the same way. So the bell shows the number to the office, and a
+//            person sets the price.
+// A visit has one problem at a time: `service` needs a plan visit and `price` a one-time visit. A bell's key and
+// metadata carry the problem's name.
 //
 // CLOSE: each run first judges every open bell again from the visit as it stands now. A bell closes itself only
-// on evidence: the visit and the reading agree now, or the visit is done, cancelled or gone. While the reading
-// or the catalog cannot be read (a call being processed again, a name the catalog no longer holds) the bell
-// stays open, because a closed bell never rings again: the dedupe key holds a visit to one bell for each problem.
+// on evidence: its problem is gone (the visit and the reading agree on the service; the visit has a price or is
+// no longer a one-time visit), or the visit is done, cancelled or gone. While the reading or the catalog cannot
+// be read (a call being processed again, a name the catalog no longer holds) the bell stays open, because a
+// closed bell never rings again: the dedupe key holds a visit to one bell for each problem.
 //
 // The check does not run the recurring-intent rule (applyRecurringIntentDefault) before it judges. That rule
 // reads cadence words in the transcript, and it is the step this check watches: in a 90-day replay it changed
@@ -33,6 +40,7 @@ const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+const { resolveStatedOneTimeCallPrice } = require('../utils/call-agreed-price');
 
 const OWN_PREFIX = 'call-booking-check:';
 const AREA = 'Schedule';
@@ -50,11 +58,13 @@ const CLOSED_VISIT_STATUSES = new Set([...VISIT_NEVER_RAN_STATUSES, 'completed']
 // Why a bell closed: the reason code stored on the row, and the one line a person reads.
 const CLOSED = Object.freeze({
   service: { reason: 'service_agrees', text: 'The visit and the call now agree on the service' },
+  price: { reason: 'price_set', text: 'The visit has a price now' },
+  noPriceNeeded: { reason: 'price_not_needed', text: 'The visit is no longer a one-time visit that needs a price' },
   visitClosed: { reason: 'visit_closed', text: 'The visit is done or cancelled' },
   gone: { reason: 'visit_gone', text: 'The visit is gone' },
 });
 // The problems this job knows. A bell's metadata.problem is one of these.
-const KINDS = Object.freeze(['service']);
+const KINDS = Object.freeze(['service', 'price']);
 
 const nameKey = (name) => String(name || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
@@ -91,14 +101,72 @@ function judgeService(visit, billingByName) {
   return { verdict: 'problem', heard };
 }
 
+// The visit's own price: a stamped price (a stamped $0 too: a free visit is a decision), or a price decision
+// completion pricing honors over it (a primary-line price, a recorded discount).
+function visitHasPrice(visit) {
+  return visit.estimated_price != null || require('./completion-pricing').visitPriceDecisionRecorded(visit);
+}
+
+// The price the reading holds for the job it names, inside the bounds a call booking accepts: the total the
+// call agreed ({ amount, agreed: true }), else the one-time price staff stated and the caller accepted
+// ({ amount, agreed: false }). null when it holds neither. A $0 total is a free booking, not a missing price.
+function readingPrice(reading) {
+  const { sanitizeQuotedCallPrice } = require('./call-booking-catalog');
+  const strict = reading.service_request.quoted_price_usd;
+  const amount = sanitizeQuotedCallPrice(strict != null ? strict : resolveStatedOneTimeCallPrice(reading));
+  return amount == null ? null : { amount, agreed: strict != null };
+}
+
+// What the visit and the reading of its call say about the price, as they stand now:
+//   problem  a one-time visit with no price, and the reading holds a price for that same job
+//            ({ verdict, amount, agreed });
+//   agrees   the visit needs no price from the call: it has one, it is not a one-time visit, or it is a free
+//            callback;
+//   unknown  the visit has no catalog row, the reading cannot be read or holds no price, or the price cannot
+//            be tied to this visit: the reading names another service than the visit's, or the call spoke of
+//            more than one property (the reading's price block does not say which job a price covers).
+function judgePrice(visit) {
+  if (!visit.row_billing_type) return { verdict: 'unknown' };
+  if (visit.row_billing_type !== 'one_time' || visit.is_callback || visitHasPrice(visit)) return { verdict: 'agrees' };
+  const reading = visit.v2_extraction_status === 'valid' ? readingOf(visit) : null;
+  const request = reading && reading.service_request;
+  if (!request || typeof request !== 'object') return { verdict: 'unknown' };
+  if (!nameKey(visit.row_name) || nameKey(request.specific_service_name) !== nameKey(visit.row_name)) return { verdict: 'unknown' };
+  const others = reading.property && reading.property.additional_properties;
+  if (Array.isArray(others) && others.length) return { verdict: 'unknown' };
+  const price = readingPrice(reading);
+  return price ? { verdict: 'problem', ...price } : { verdict: 'unknown' };
+}
+
+// The one problem a visit has now ({ kind, ...facts }), or null.
+function problemOf(visit, billingByName) {
+  const service = judgeService(visit, billingByName);
+  if (service.verdict === 'problem') return { kind: 'service', heard: service.heard };
+  const { verdict, ...facts } = judgePrice(visit);
+  return verdict === 'problem' ? { kind: 'price', ...facts } : null;
+}
+
 // What an open bell should do now: a CLOSED key, or null to stay open.
 function closeKeyFor(kind, visit, billingByName) {
   if (!visit) return 'gone';
   if (CLOSED_VISIT_STATUSES.has(String(visit.status))) return 'visitClosed';
+  if (kind === 'price') {
+    if (judgePrice(visit).verdict !== 'agrees') return null;
+    return visitHasPrice(visit) ? 'price' : 'noPriceNeeded';
+  }
   return judgeService(visit, billingByName).verdict === 'agrees' ? kind : null;
 }
 
 // ------------------------------------------------------------------- copy (pure)
+
+// The parts every bell of this job shares. The link opens the visit on the day it has when the bell rings.
+const bellBase = (visit) => ({
+  area: AREA,
+  severity: 'needs-you',
+  who: 'person',
+  link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(visit.visit_date)}&appointment=${encodeURIComponent(visit.id)}`,
+  subject: { type: 'visit', id: String(visit.id) },
+});
 
 function specFor({ visit, heard, name }) {
   const { cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
@@ -107,11 +175,7 @@ function specFor({ visit, heard, name }) {
   // Each service name gets half of the room the fixed words leave.
   const room = Math.floor((MAX_WHY_CHARS - 'Booked as ; the call asked for .'.length) / 2);
   return {
-    area: AREA,
-    severity: 'needs-you',
-    who: 'person',
-    link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(visit.visit_date)}&appointment=${encodeURIComponent(visit.id)}`,
-    subject: { type: 'visit', id: String(visit.id) },
+    ...bellBase(visit),
     action: name
       ? fitAction(AREA, name, [(who) => `check the service on ${who}'s visit`, (who) => `check ${who}'s visit`])
       : 'check the service on a phone-booked visit',
@@ -127,6 +191,38 @@ function detailFor({ visit, heard, name }) {
     + 'Change the visit\'s service if the caller asked for a one-time job. '
     + 'Nothing was changed and the customer was not contacted.';
 }
+
+const dollars = (amount) => `$${Number.isInteger(amount) ? amount : amount.toFixed(2)}`;
+
+function priceSpecFor({ visit, amount, agreed, name }) {
+  const { fitAction } = require('./admin-alert-names');
+  return {
+    ...bellBase(visit),
+    action: name
+      ? fitAction(AREA, name, [(who) => `set the price on ${who}'s visit`, (who) => `price ${who}'s visit`])
+      : 'set the price on a phone-booked visit',
+    why: agreed
+      ? `The call agreed ${dollars(amount)} for this one-time job; the visit has no price.`
+      : `Staff said ${dollars(amount)} on the call, not confirmed as final; the visit has no price.`,
+    doneWhen: 'visit_priced',
+  };
+}
+
+function priceDetailFor({ visit, amount, agreed, name }) {
+  const booked = tidy(visit.row_name || visit.service_type || 'a visit');
+  return `${name || 'A customer'}: the visit booked from a phone call for ${visit.visit_date} is "${booked}", a one-time visit with no price. `
+    + (agreed
+      ? `The call's reading holds ${dollars(amount)} as the total the caller accepted. `
+      : `On the call staff stated ${dollars(amount)} for a one-time job and the caller accepted it. The call did not confirm that price as final: it can vary, or a charge was added. `)
+    + 'Set the visit\'s price before it is billed. '
+    + 'Nothing was changed and the customer was not contacted.';
+}
+
+// The bell copy of each problem.
+const COPY = Object.freeze({
+  service: { spec: specFor, detail: detailFor },
+  price: { spec: priceSpecFor, detail: priceDetailFor },
+});
 
 // ------------------------------------------------------------------- reads
 
@@ -191,19 +287,19 @@ async function closePass(episodes, billingByName, now) {
   return tally;
 }
 
-// Raise one bell. Returns 1 when a new row rang, 0 when the visit already has a row for this problem. The row
+// Raise one bell for a visit's problem. Returns 1 when a new row rang, 0 when the visit already has a row for this problem. The row
 // is never rewritten: like every bell that opens a visit, its link holds the visit's day at the time it rang.
-async function raiseBell(visit, heard) {
+async function raiseBell(visit, { kind, ...facts }) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const { lookupCustomerName } = require('./admin-alert-names');
   const name = await lookupCustomerName(db, visit.customer_id);
-  const result = await raiseAdminAlert('schedule', specFor({ visit, heard, name }), {
+  const result = await raiseAdminAlert('schedule', COPY[kind].spec({ visit, ...facts, name }), {
     bell: true,
-    dedupeKey: `${OWN_PREFIX}service:${visit.id}`,
-    detail: detailFor({ visit, heard, name }),
+    dedupeKey: `${OWN_PREFIX}${kind}:${visit.id}`,
+    detail: COPY[kind].detail({ visit, ...facts, name }),
     metadata: {
       scheduledServiceId: String(visit.id), customerId: visit.customer_id && String(visit.customer_id),
-      callLogId: String(visit.source_call_log_id), problem: 'service',
+      callLogId: String(visit.source_call_log_id), problem: kind,
     },
   });
   if (!result) throw new Error('call booking check bell was not written');
@@ -218,8 +314,8 @@ async function raisePass(billingByName, now) {
   const tally = { raised: 0, failed: 0, candidates: visits.length };
   for (const visit of visits) {
     try {
-      const judged = judgeService(visit, billingByName);
-      if (judged.verdict === 'problem') tally.raised += await raiseBell(visit, judged.heard);
+      const problem = problemOf(visit, billingByName);
+      if (problem) tally.raised += await raiseBell(visit, problem);
     } catch (err) {
       tally.failed += 1;
       logger.warn(`[call-booking-check] bell failed for visit ${visit.id}: ${err.message}`);
@@ -253,5 +349,5 @@ async function runCallBookingCheck({ now = new Date() } = {}) {
 module.exports = {
   runCallBookingCheck,
   OWN_PREFIX,
-  _private: { judgeService, closeKeyFor, specFor, detailFor, CLOSED },
+  _private: { judgeService, judgePrice, problemOf, closeKeyFor, specFor, detailFor, priceSpecFor, priceDetailFor, CLOSED },
 };

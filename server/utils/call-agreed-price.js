@@ -80,6 +80,58 @@ function resolveCallAgreedPrice(v2Extraction = null) {
   return additionalTerms.length ? { ...primary, additionalTerms } : { ...primary };
 }
 
+// Every price term a call carries, for resolveStatedOneTimeCallPrice. A term
+// counts as soon as it holds a number ($0 too: a waived fee is a term) or was
+// accepted with no number: a term that is dropped before it is counted could
+// make two agreed terms read as one.
+function statedPriceTerms(svc) {
+  return (Array.isArray(svc.prices) && svc.prices.length ? svc.prices : [svc.price])
+    .filter((entry) => entry && typeof entry === 'object'
+      && (typeof entry.amount_usd === 'number' || typeof entry.amount_max_usd === 'number' || entry.accepted === true));
+}
+
+// One exact one-time number: unit one_time, a positive amount, and no range
+// field at all (a malformed range, high end under the low end, is not exact).
+function exactOneTimeAmount(entry) {
+  return entry.unit === 'one_time' && entry.amount_max_usd == null && positiveAmount(entry.amount_usd) ? entry.amount_usd : null;
+}
+
+/**
+ * The one-time price STAFF stated and the caller went ahead on, for a call whose
+ * strict agreed-price field (quoted_price_usd) stayed empty. 2026-11-21: staff
+ * said "One-time service is $250, but it varies" and the caller booked. The
+ * hedge kept quoted_price_usd null, so the visit got no price, and nothing told
+ * the office which number the call held.
+ *
+ * Narrow on purpose. Returns the amount only when ALL of these hold, else null:
+ *   - quoted_price_usd is null or absent. Any strict total keeps its own path,
+ *     a $0 one too (a free booking stays free);
+ *   - the call carries exactly ONE price term that is not the caller's own
+ *     number (a second one is a correction, an add-on or a waived fee, and
+ *     nothing here can tell which one stands), and the extraction says staff
+ *     stated it;
+ *   - that term is the ONLY term accepted on the call, whoever stated the
+ *     others ("$99 to start, then $31 a month" is two agreed terms);
+ *   - its unit is one_time and it is one exact positive amount, never a range.
+ * A number the CALLER spoke (a competitor's quote) is never a Waves price, and
+ * does not count against the one-price rule unless it was accepted.
+ *
+ * This is NOT a price to bill. The extraction marks a hedge ("it varies") and
+ * an added charge ("plus a trip fee") the same way (price_is_final false), and
+ * the price block is call-wide: it does not say which service a price covers.
+ * Its one reader is the call booking check (services/call-booking-check.js),
+ * which shows the number to the office and changes nothing.
+ */
+function resolveStatedOneTimeCallPrice(v2Extraction = null) {
+  const svc = v2Extraction?.service_request;
+  if (!svc || typeof svc !== 'object' || svc.quoted_price_usd != null) return null;
+  const terms = statedPriceTerms(svc);
+  const accepted = terms.filter((entry) => entry.accepted === true);
+  const notCallers = terms.filter((entry) => entry.stated_by !== 'caller');
+  if (accepted.length !== 1 || notCallers.length !== 1 || accepted[0] !== notCallers[0] || accepted[0].stated_by !== 'agent') return null;
+  return exactOneTimeAmount(accepted[0]);
+}
+
 function formatAgreedTerm(term) {
   const amount = term?.amount;
   if (typeof amount !== 'number' || !Number.isFinite(amount)) return '$0.00';
@@ -100,5 +152,6 @@ function formatAgreedPriceLabel(agreedPrice) {
 
 module.exports = {
   resolveCallAgreedPrice,
+  resolveStatedOneTimeCallPrice,
   formatAgreedPriceLabel,
 };
