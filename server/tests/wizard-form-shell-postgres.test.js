@@ -156,6 +156,9 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   test.each([
     ['an office estimate', () => ({ source: 'manual' })],
     ['a sent office estimate', () => ({ source: 'manual', status: 'sent', sent_at: new Date() })],
+    // Not in the duplicate block's own status list, but live work for the phone.
+    ['an estimate that is being sent right now', () => ({ source: 'manual', status: 'sending' })],
+    ['an estimate whose send failed', () => ({ source: 'manual', status: 'send_failed' })],
     ['a web-form draft with a price', () => ({ monthly_total: 59 })],
     ['the wizard\'s own older draft', () => ({ source: 'quote_wizard', monthly_total: 59 })],
     ['a wizard estimate that was already sent', () => ({ source: 'quote_wizard', status: 'sent', sent_at: new Date(), monthly_total: 59 })],

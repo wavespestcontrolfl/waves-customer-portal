@@ -341,7 +341,8 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *
  * Any other open estimate of the phone still blocks: a draft with a price, a
  * touched draft, a draft of another contact or for another property, an
- * office or estimator estimate, a sent estimate.
+ * office or estimator estimate, a sent estimate, an estimate that is being
+ * sent or whose send failed.
  *
  * No lock beyond the caller's phone lock (the web form creates its shell
  * under the same lock). A shell that changes after the read costs nothing
@@ -417,7 +418,12 @@ function sameContact(row, { customerId, email }) {
 async function onlyUntouchedWebFormShellsOpen(database, { phone, address, customerId, email, now = new Date() } = {}) {
   const values = phoneLookupValues(phone);
   if (!database || !values.last10) return false;
-  const open = await listOpenEstimatesByPhone(phone, { database });
+  // Wider than the duplicate block's own list: an estimate that is being
+  // sent right now, or whose send failed, is live work for the phone too.
+  const open = await listOpenEstimatesByPhone(phone, {
+    database,
+    statuses: [...OPEN_ESTIMATE_STATUSES, 'sending', 'send_failed'],
+  });
   if (!open.length) return false;
   const shells = await untouchedWebFormShells(database, values.last10, { now })
     .whereIn('id', open.map((row) => row.id))
