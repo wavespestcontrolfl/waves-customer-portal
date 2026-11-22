@@ -3469,7 +3469,16 @@ report identity for any family in `GUARDED_OWNERSHIP_FAMILIES`
 though termite left the ladder itself) fails the WHOLE report card closed
 — the unseeded-next-visit gap and a just-cancelled plan are
 indistinguishable, so offering the family and advancing past it are each
-wrong in one of those worlds.
+wrong in one of those worlds. The same live render (`mode === 'live'`,
+under `GATE_REPORT_CROSS_SELL`) carries the `referral` card from
+`composeReferralCard` (`services/referral-share.js`); a callback report
+carries neither card while `GATE_RESERVICE_REPORT_COPY` is on, and with
+that gate off a callback report carries them like any other report:
+the static headline + CTA, and with `GATE_REFERRAL_STEP2` on an `offer`
+string whose amounts come from the live referral settings (the member
+sentence is dropped at the yearly limit; no card at all when the
+program is paused or its settings are unreadable). Read-only: a render
+enrolls no promoter, writes nothing and carries no personal data.
 Pest price photo facts (`GATE_PEST_PRICE_PHOTO_FACTS`, owner 2026-11-21, "1, 2";
 dark by default): the gate adds no field and removes none. On, the pest
 offer's per-application price (`crossSell.option.perVisit`, and the same
@@ -9374,8 +9383,11 @@ Same composer as the service report's tap — `services/referral-share.js`
 `enrollPromoter` with the household 23505 fallback scoped to account_id,
 owner-voice share copy, exact-cents referee amount). The RENDER payloads
 (/data, the accept response, the already-accepted retry) carry only the
-static headline + CTA via `composeReferralCard`; enrollment happens on the
-tap only, never on a read. Guards: gate with a gate-aware limiter skip
+static headline + CTA via `composeReferralCard`, plus an `offer` string
+while `GATE_REFERRAL_STEP2` is on (amounts from the live referral
+settings; the member sentence is dropped at the yearly limit; no card
+when the program is paused or its settings are unreadable; read-only,
+no personal data); enrollment happens on the tap only, never on a read. Guards: gate with a gate-aware limiter skip
 (dark = generic 404), token format gate, 5/min shared IPv6-safe key, the
 durable call-side linkage verdict, full customer-viewability +
 accepted-only + linked-customer, inactive program = 404, `err.code`-only

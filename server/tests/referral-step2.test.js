@@ -6,7 +6,7 @@ jest.mock('../services/logger', () => ({
 
 const {
   step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars, STEP2_DEFAULTS,
-  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, memberCreditEmailLine,
+  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, shareCardOffer, memberCreditEmailLine,
 } = require('../services/referral-step2');
 
 describe('step2Settings', () => {
@@ -73,6 +73,18 @@ describe('the friend and credit-email words (gate on)', () => {
     expect(friendShareClause(3250, 'ABC123')).toBe("they'll give you a $32.50 credit after your first plan service with my code ABC123");
     expect(memberInviteFriendClause(5000)).toBe('they get a $50 credit after their first plan service');
     expect(memberInviteFriendClause(3250)).toBe('they get a $32.50 credit after their first plan service');
+  });
+  test('the share card offer line: both sentences, each dropped on its own, to the cent', () => {
+    expect(shareCardOffer({ refereeCents: 5000, memberCents: 2500, atLimit: false })).toBe('They get a $50 credit after their first plan service. You get $25.');
+    // At the yearly limit the member sentence never shows, whatever the amount.
+    expect(shareCardOffer({ refereeCents: 5000, memberCents: 2500, atLimit: true })).toBe('They get a $50 credit after their first plan service.');
+    expect(shareCardOffer({ refereeCents: 0, memberCents: 2500 })).toBe('You get $25.');
+    expect(shareCardOffer({ refereeCents: 5000, memberCents: 0 })).toBe('They get a $50 credit after their first plan service.');
+    expect(shareCardOffer({ refereeCents: 0, memberCents: 2500, atLimit: true })).toBe('');
+    expect(shareCardOffer({ refereeCents: 0, memberCents: 0 })).toBe('');
+    expect(shareCardOffer({})).toBe('');
+    // Cents-accurate: $25.50 and $32.50, never rounded up.
+    expect(shareCardOffer({ refereeCents: 3250, memberCents: 2550 })).toBe('They get a $32.50 credit after their first plan service. You get $25.50.');
   });
   test('the member credit email line says how to use the credit, for whole dollars and cents', () => {
     expect(memberCreditEmailLine(25, { canTurnOnAutomaticCredit: true })).toBe('Your $25 referral reward has been added to your Waves account as a credit. To use it, turn on "Apply my credit to invoices automatically" in the Waves app.');

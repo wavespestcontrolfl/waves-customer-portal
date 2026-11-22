@@ -588,6 +588,14 @@ describe('offer composition is opt-in, and only the render path opts in (PR r15 
     expect(src).toMatch(/mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true/);
   });
 
+  test('the report card comes from the one shared composer, keyed to the visit\'s own customer, never enrolling on a render', () => {
+    expect(src).toMatch(/referral = await require\('\.\.\/services\/referral-share'\)\.composeReferralCard\(\{ customerId: service\.customer_id \}\)/);
+    // No second copy of the static spread, no enrollment on a GET render.
+    expect(src).not.toMatch(/\.\.\.require\('\.\.\/services\/referral-share'\)\.REFERRAL_CARD_COPY/);
+    const render = src.slice(src.indexOf('const callbackSuppressesOffers'), src.indexOf('async function findProjectByReportSegment'));
+    expect(render).not.toMatch(/enrollPromoter|resolvePromoter|buildReferralShareForCustomer/);
+  });
+
   test('the Q&A call site does NOT opt in', () => {
     // The ask handler's call, verbatim — it must stay offer-free.
     expect(src).toMatch(/buildServiceReportV1ResponseData\(service, req\.params\.token, \{ mode: 'live' \}\)/);

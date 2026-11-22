@@ -5497,8 +5497,8 @@ export function ExistingPlanUpgradeCard({ membership, waveGuardTier, readOnly = 
 
 // Referral share card on the accepted / just-accepted screens
 // (GATE_ESTIMATE_SUCCESS_REFERRAL). The render payload carries only the
-// headline + CTA; the tap POSTs /:token/referral-link, which enrolls the
-// promoter — so a render never does. Same shared card as the service report.
+// headline + CTA (and the offer line while GATE_REFERRAL_STEP2 is on); the tap
+// POSTs /:token/referral-link, which enrolls the promoter — so a render never does. Same shared card as the service report.
 // `staffView` — a staff preview of a PUBLISHED accepted estimate
 // (?adminPreview=1) must never enroll the customer as a promoter: the card
 // renders its staff state and never fetches, and the fetch it would make
@@ -5521,6 +5521,7 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
       // are inert here, so the estimate's own card typography rides inline.
       styles={{
         heading: { fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: COLORS.navy, margin: '0 0 14px' },
+        offer: { fontSize: 16, lineHeight: 1.5, color: COLORS.navy, margin: '-6px 0 14px' },
         button: { ...estimateCtaStyle, display: 'inline-block', fontSize: 16 },
         link: { ...estimateCtaStyle, display: 'inline-block', fontSize: 16, textDecoration: 'none', margin: '10px 6px 0' },
         code: { fontSize: 20, fontWeight: 700, color: COLORS.navy, letterSpacing: '0.04em', marginRight: 10 },
