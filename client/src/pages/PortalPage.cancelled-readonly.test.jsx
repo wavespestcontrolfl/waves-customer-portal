@@ -14,6 +14,8 @@ vi.mock('../utils/api', () => ({
     // Billing mounts Home's add-a-service card (owner 2026-11-21).
     getPropertyRecommendations: vi.fn(async () => ({ available: false })),
     requestPropertyRecommendation: vi.fn(),
+    saveStripeCard: vi.fn(),
+    oneTapGet: vi.fn(),
     getSchedule: vi.fn(),
     getNotificationPrefs: vi.fn(),
     getPropertyNotificationPrefs: vi.fn(),
@@ -106,6 +108,25 @@ describe('BillingTab — add-a-service and refer cards', () => {
     await waitFor(() => expect(api.requestPropertyRecommendation).toHaveBeenCalledWith(
       expect.objectContaining({ cardId: 'plan_offer', serviceKey: 'lawn_care', surface: 'billing' }),
     ));
+  });
+
+  // The offer's purchase overlay can save a payment method. Billing shows the
+  // Payment Methods list on the same tab, so it must read the list again;
+  // Home has no such list. Driven here by the return from a bank page, the
+  // save the card component runs by itself at mount.
+  it('a payment method saved from the offer reloads the Billing card list', async () => {
+    window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
+    try {
+      api.getPropertyRecommendations.mockResolvedValue(RECS);
+      api.saveStripeCard.mockResolvedValue({});
+      api.oneTapGet.mockResolvedValue({ open: false });
+      await renderBilling({ ...baseCustomer, cancelled: false }, { onSwitchTab: vi.fn() });
+      await waitFor(() => expect(api.saveStripeCard).toHaveBeenCalledWith(null, 'si_1'));
+      // Once at mount, once after the save.
+      await waitFor(() => expect(api.getCards).toHaveBeenCalledTimes(2));
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
   });
 
   it('a cancelled account sees neither and never asks for recommendations', async () => {

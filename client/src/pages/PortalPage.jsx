@@ -1101,7 +1101,7 @@ const ADD_SERVICE_HEADING = {
   subtitle: 'Priced for this property. You pay per application, after each visit.',
 };
 
-function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface = 'home' }) {
+function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface = 'home', onCardSaved = null }) {
   // Per-card request state: idle → sending → sent | stale | failed.
   const [requestStates, setRequestStates] = useState({});
   // One-tap purchase overlay target (bet 3) — a priced offer card while the
@@ -1112,6 +1112,12 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface 
   // reopens the overlay at the right step.
   const [purchaseResume, setPurchaseResume] = useState(null);
   const resumeProcessedRef = useRef(false);
+  // The host tab's "a payment method was saved here" hook (Billing reloads
+  // its card list). A ref, so the mount-only resume effect below calls the
+  // current one.
+  const onCardSavedRef = useRef(onCardSaved);
+  onCardSavedRef.current = onCardSaved;
+  const notifyCardSaved = () => { onCardSavedRef.current?.(); };
   useEffect(() => {
     if (resumeProcessedRef.current) return;
     const returned = getReturnedSetupIntent('one_tap_card');
@@ -1125,6 +1131,10 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface 
         await api.saveStripeCard(null, returned.setupIntentId);
         cardJustSaved = true;
       } catch { /* state fetch below reports hasCardOnFile either way */ }
+      // After the attempt, saved or not: the host tab read its card list
+      // before this save, and a failed call can still be a card that an
+      // earlier try already saved.
+      notifyCardSaved();
       let resolved = false;
       try {
         const state = await api.oneTapGet(resumeId);
@@ -1158,6 +1168,7 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface 
         card={null}
         resume={purchaseResume}
         onClose={() => setPurchaseResume(null)}
+        onCardSaved={notifyCardSaved}
       />
     );
   }
@@ -1326,6 +1337,7 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface 
           card={purchaseCard}
           resume={purchaseCard ? null : purchaseResume}
           onClose={() => { setPurchaseCard(null); setPurchaseResume(null); }}
+          onCardSaved={notifyCardSaved}
         />
       )}
     </section>
@@ -1358,7 +1370,7 @@ function oneTapDayLabel(date) {
   return dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
-function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
+function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved = null }) {
   useLockBodyScroll(open);
   // Close is LOCKED while a confirmation is in flight (same guard as
   // "Change time"): unmounting races the in-flight /confirm — a commit
@@ -1598,6 +1610,9 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       }
       if (setupIntent.payment_method) {
         await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
+        // The card is on the account now, whether or not the customer
+        // finishes this purchase: the host tab reloads what it shows.
+        if (onCardSaved) onCardSaved();
       }
       setCardSaved(true);
       setNeedsCard(false);
@@ -8325,7 +8340,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
       </form>
       )}
 
-      {!cancelledAccount && <RecommendationsCard data={billingOffers} surface="billing" />}
+      {/* A card saved in the offer's purchase overlay is on the account at
+          once, so the Payment Methods list above reloads. */}
+      {!cancelledAccount && <RecommendationsCard data={billingOffers} surface="billing" onCardSaved={refreshCards} />}
       {!cancelledAccount && onSwitchTab && (
         <section data-glass="card" data-section="billing-refer" style={{ ...card, padding: 20, marginTop: 16, textAlign: 'center' }}>
           <h2 style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, margin: '0 0 6px' }}>Know someone who could use Waves?</h2>
