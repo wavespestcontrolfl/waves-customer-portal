@@ -7,11 +7,13 @@ import { Table, TBody, TD, TH, THead, TR } from '../ui/Table';
 import { adminFetch } from '../../lib/adminFetch';
 import useTechScoreboard from '../../hooks/useTechScoreboard';
 import { centsToDollars, dayLabel } from '../payroll/payrollFormat';
+import YearStatement from './YearStatement';
 
 // Tech Rewards Plan D5-4 (owner 2026-11-20). The technician's OWN scoreboard (Staff page, Time > Scoreboard, behind
 // GATE_TECH_REWARDS_SCOREBOARD) and the owner's preview of any one technician (Staff > Team > Scoreboard preview, not gated).
 // Both render ScoreboardView from the same server object. Every figure except commission is an estimate; the pay itself
-// comes later. Nothing here changes pay or sends a message. No customer data is shown.
+// comes later. Under the board both show that person's yearly pay statement (YearStatement.jsx, D5-6): paid amounts.
+// Nothing here changes pay or sends a message. No customer data is shown.
 
 const PART_LABELS = {
   onTime: 'Reports on time',
@@ -143,6 +145,8 @@ export default function Scoreboard() {
     {board.status === 'loading' && <p role="status" className="m-0">Loading…</p>}
     {board.status === 'error' && <p role="alert" className="m-0 text-ui-caption text-alert-fg">{board.error}</p>}
     {board.status === 'ready' && <ScoreboardView scoreboard={board.scoreboard} />}
+    {/* once the board request has answered: a 404 (gate off) never reaches here, so the statement is never asked for then */}
+    {board.status !== 'loading' && <YearStatement path="/tech/rewards-scoreboard/year-statement" />}
   </Card>;
 }
 
@@ -190,5 +194,6 @@ export function ScoreboardPreview() {
     {error && <p role="alert" className="m-0 text-ui-caption text-alert-fg">{error}</p>}
     {technicianId && !board && !error && <p role="status" className="m-0">Loading…</p>}
     {board && <ScoreboardView scoreboard={board} />}
+    {technicianId && <YearStatement key={technicianId} path={`/admin/tech-rewards-scoreboard/${encodeURIComponent(technicianId)}/year-statement`} />}
   </Card>;
 }

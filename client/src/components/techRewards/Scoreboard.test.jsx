@@ -7,6 +7,8 @@ import useTechScoreboardAvailability from '../../hooks/useTechScoreboardAvailabi
 import { adminFetch } from '../../lib/adminFetch';
 
 vi.mock('../../lib/adminFetch', () => ({ adminFetch: vi.fn() }));
+// The yearly pay statement under the board has its own test (YearStatement.test.jsx); here only where it shows and whose it is.
+vi.mock('./YearStatement', () => ({ default: ({ path }) => <div data-testid="year-statement">{path}</div> }));
 
 const reply = (body, ok = true, status = ok ? 200 : 400) => Promise.resolve({ ok, status, json: async () => body });
 
@@ -76,6 +78,8 @@ describe('Tech scoreboard tab', () => {
   it('a 404 when the tab opens renders nothing', async () => {
     adminFetch.mockImplementation(() => reply({ enabled: false }, false, 404));
     const { container } = render(<Scoreboard />);
+    // not while the board request is out either: with the gate off the statement is never asked for
+    expect(screen.queryByTestId('year-statement')).not.toBeInTheDocument();
     await waitFor(() => expect(container).toBeEmptyDOMElement());
     expect(adminFetch).toHaveBeenCalledTimes(1);
   });
@@ -84,6 +88,13 @@ describe('Tech scoreboard tab', () => {
     adminFetch.mockImplementation(() => reply({ error: 'boom' }, false, 500));
     render(<Scoreboard />);
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
+    // the pay statement is its own request: it still shows under a board that failed
+    expect(screen.getByTestId('year-statement')).toBeInTheDocument();
+  });
+
+  it('shows the caller own yearly pay statement under the board', async () => {
+    await showBoard(BOARD);
+    expect(screen.getByTestId('year-statement')).toHaveTextContent(/^\/tech\/rewards-scoreboard\/year-statement$/);
   });
 
   it('shows a season bonus payroll has paid as the paid amount, with no estimate words', async () => {
@@ -167,6 +178,18 @@ describe('Admin scoreboard preview', () => {
     fireEvent.change(select, { target: { value: 'tech-2' } });
     expect(await screen.findByLabelText('Scoreboard for Sample Beta')).toBeInTheDocument();
     expect(adminFetch.mock.calls.map(c => c[0])).toEqual(['/admin/tech-rewards-scoreboard', '/admin/tech-rewards-scoreboard/tech-2']);
+  });
+
+  it('shows the picked technician yearly pay statement, and none before one is picked', async () => {
+    adminFetch.mockImplementation(path => (path === '/admin/tech-rewards-scoreboard'
+      ? reply({ technicians: [{ id: 'tech 2', name: 'Sample Beta' }] })
+      : reply({ scoreboard: { ...BOARD, technician: { id: 'tech 2', name: 'Sample Beta' } } })));
+    render(<ScoreboardPreview />);
+    const select = await screen.findByLabelText('Technician');
+    await waitFor(() => expect(select).not.toBeDisabled());
+    expect(screen.queryByTestId('year-statement')).not.toBeInTheDocument();
+    fireEvent.change(select, { target: { value: 'tech 2' } });
+    expect(await screen.findByTestId('year-statement')).toHaveTextContent(/^\/admin\/tech-rewards-scoreboard\/tech%202\/year-statement$/);
   });
 
   it('shows a server error', async () => {
