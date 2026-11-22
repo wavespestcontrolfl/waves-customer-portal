@@ -1381,6 +1381,13 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       db.__script = script({ members, landed: [{ id: 'a', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', technician_id: 't1' }, { id: 'b', scheduled_date: '2026-08-30', window_start: '13:00', window_end: '14:00', technician_id: 't1' }] });
       const same = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', reason: 'weather_rain', initiatedBy: 'tech', options: { expect: { technician_id: 't9' } } }).catch((e) => e);
       expect(same.code).not.toBe('SLOT_TAKEN');
+      // The same when another service of the stop does change: the unit names t9, the first service is on t9 already
+      // at these hours, and only b (on t1) changes. The caller's fence has no write to ride, so it refuses nothing.
+      shifts.t1 = { startMin: 480, endMin: 900 };
+      const onlyB = pair({}, { technician_id: 't9' });
+      db.__script = script({ members: onlyB, landed: onlyB.map((m) => ({ id: m.id, scheduled_date: '2026-08-30', window_start: m.window_start, window_end: m.window_end, technician_id: 't9' })) });
+      const sibling = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', reason: 'auto_dispatch', initiatedBy: 'auto_dispatch', options: { technicianId: 't9', expect: { technician_id: 't1' } } });
+      expect(sibling.visitMove).toMatchObject({ moved: ['b'], unchanged: ['a'], failed: [] });
       // Gate off: the fence rides the write, as before.
       delete process.env.GATE_TECH_SHIFT_HOURS;
       db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
