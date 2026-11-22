@@ -1396,103 +1396,20 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       expect(off.reschedule.mock.calls[0][5].expect).toMatchObject({ technician_id: 't9' });
     });
 
-    // A unit that names a technician assigns each member in a later write of its own, after the
-    // member's move. The plan's verdict and the move's length pin do not reach that write.
-    describe('the assignment to a named technician', () => {
-      // The member's locked read at its assignment: the row as it now stands.
-      const withStanding = (standing, landedRows) => {
-        const base = script({ members: pair(), landed: landedRows });
-        db.__script = { ...base, scheduled_services: { ...base.scheduled_services,
-          first: (ops, cols) => (ops.some((o) => o[0] === 'forUpdate') && cols.includes('estimated_duration_minutes')
-            ? standing[ops.find((o) => o[0] === 'where')[1].id] || null : null) } };
-      };
-      const row = (start, end, over = {}) => ({ scheduled_date: '2026-09-02', window_start: start, window_end: end, estimated_duration_minutes: 60, ...over });
-      const onT9 = landed('10:00', '11:00', 't9');
-      const split = [{ ...onT9[0], technician_id: 't1' }, onT9[1]];
-      const lockedReads = () => db.__calls.filter((c) => c.table === 'scheduled_services' && c.op === 'first'
-        && c.ops.some((o) => o[0] === 'forUpdate') && c.cols.includes('estimated_duration_minutes'));
-      const ownDayLocked = () => db.__rawCalls.some((c) => c[1][0] === 'slot-reserve' && c[1][1] === 't1:2026-09-02');
-      const assigned = () => assignDispatchJob.mock.calls.map((c) => c[0].jobId);
-      const toT9 = (by = 'auto_dispatch', technicianId = 't9') => unit(fakeRebooker(), '10:00-11:00', by, { technicianId });
-      const reset = () => { jest.clearAllMocks(); db.__calls.length = 0; db.__rawCalls.length = 0; };
-      beforeEach(() => { reset(); process.env.GATE_TECH_SHIFT_HOURS = 'true'; });
-
-      test('a member made longer after its move is not assigned: it is judged again on a locked read, and the others go on', async () => {
-        // t9 stops at 12:00. The plan judged a at 10:00 and b at 11:00, an hour each. a is now a four-hour job.
-        withStanding({ a: row('10:00', '11:00', { estimated_duration_minutes: 240 }), b: row('11:00', '12:00') }, split);
-        const out = await toT9();
-        expect(out.visitMove.moved).toEqual(['a', 'b']);
-        expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'SLOT_TAKEN', movedButUnassigned: true })]);
-        expect(assigned()).toEqual(['b']);
-        expect(lockedReads().map((c) => c.ops.find((o) => o[0] === 'where')[1].id)).toEqual(['a', 'b']);
-        // Both technician-days are locked in one call, in the canonical (sorted) order, before the row.
-        expect(db.__rawCalls.filter((c) => c[1][0] === 'slot-reserve').map((c) => c[1][1]))
-          .toEqual(['t1:2026-09-02', 't9:2026-09-02', 't1:2026-09-02', 't9:2026-09-02']);
-        // The second verdict is on the named technician alone.
-        expect(loadTechShifts.mock.calls.slice(1).map((c) => c[1])).toEqual([{ technicianIds: ['t9'] }, { technicianIds: ['t9'] }]);
-      });
-
-      test('the row is judged with the hours it now has: a later end is refused, an end at the shift end is assigned', async () => {
-        // Dispatch stretched a's window to 12:30 after its move.
-        withStanding({ a: row('10:00', '12:30'), b: row('11:00', '12:00') }, split);
-        expect((await toT9()).visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'SLOT_TAKEN' })]);
-        reset();
-        // A two-hour job from 10:00 ends at 12:00, the shift end.
-        withStanding({ a: row('10:00', '11:00', { estimated_duration_minutes: 120 }), b: row('11:00', '12:00') }, onT9);
-        expect((await toT9()).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-        expect(assigned()).toEqual(['a', 'b']);
-      });
-
-      test('a row dispatch moved after its move is not assigned: another start, or another day, is a stale plan', async () => {
-        // The verdict and the clash probes were for 10:00 on the new day. Both new slots would fit t9's shift.
-        withStanding({ a: row('09:00', '10:00'), b: row('11:00', '12:00') }, split);
-        expect((await toT9()).visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'ASSIGNMENT_STALE', movedButUnassigned: true })]);
-        expect(assigned()).toEqual(['b']);
-        reset();
-        withStanding({ a: row('10:00', '11:00', { scheduled_date: '2026-09-03' }), b: row('11:00', '12:00') }, split);
-        expect((await toT9()).visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'ASSIGNMENT_STALE' })]);
-        expect(assigned()).toEqual(['b']);
-      });
-
-      test('the start is compared by value: a move asked as "9:00-10:00" is not a stale plan against the stored "09:00:00"', async () => {
-        withStanding({ a: row('09:00:00', '10:00:00'), b: row('10:00:00', '11:00:00') }, landed('09:00', '10:00', 't9'));
-        const out = await unit(fakeRebooker(), '9:00-10:00', 'auto_dispatch', { technicianId: 't9' });
-        // This step assigns both. (The mover's later steps compare hours as text, so every caller sends padded hours.)
-        expect(assigned()).toEqual(['a', 'b']);
-        expect(out.visitMove.failed.some((x) => x.code === 'ASSIGNMENT_STALE')).toBe(false);
-      });
-
-      test('the hours are read again: a technician given set hours after the plan is judged at the assignment', async () => {
-        // The plan finds no set hours for t9, so it judges nobody and pins no length.
-        loadTechShifts.mockImplementationOnce(async () => () => null);
-        withStanding({ a: row('10:00', '11:00', { estimated_duration_minutes: 240 }), b: row('11:00', '12:00') }, split);
-        const rebooker = fakeRebooker();
-        const out = await unit(rebooker, '10:00-11:00', 'auto_dispatch', { technicianId: 't9' });
-        expect(rebooker.reschedule.mock.calls.every((c) => !('estimated_duration_minutes' in c[5].expect))).toBe(true);
-        expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'SLOT_TAKEN' })]);
-        expect(assigned()).toEqual(['b']);
-      });
-
-      test('no second verdict: the office\'s own move, a technician without set hours, the gate off', async () => {
-        const late = { a: row('10:00', '11:00', { estimated_duration_minutes: 240 }), b: row('11:00', '12:00') };
-        withStanding(late, onT9);
-        expect((await toT9('admin')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-        expect(loadTechShifts).not.toHaveBeenCalled();
-        // t7 has no set hours: the hours are read, and the step is as before (the destination lock alone, a plain read).
-        withStanding(late, landed('10:00', '11:00', 't7'));
-        expect((await toT9('auto_dispatch', 't7')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-        expect(lockedReads()).toEqual([]);
-        expect(ownDayLocked()).toBe(false);
-        // Gate off: not even the hours are read at the assignment (the stub would answer).
-        delete process.env.GATE_TECH_SHIFT_HOURS;
-        loadTechShifts.mockClear();
-        withStanding(late, onT9);
-        expect((await toT9()).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-        expect(loadTechShifts).toHaveBeenCalledTimes(1);
-        expect(lockedReads()).toEqual([]);
-        expect(ownDayLocked()).toBe(false);
-        expect(assignDispatchJob).toHaveBeenCalledTimes(6);
-      });
+    // A unit that names a technician assigns each member in a later write of its own, after the member's move.
+    // The plan's verdict and the move's pins do not reach that write, so an automatic move asks the assignment's own
+    // locked re-check to judge the row as it now is (assignDispatchJob `shiftHours`: its cases are in
+    // dispatch-assignment-eligibility.test.js and, on real rows, in tech-shift-hours-move-postgres.test.js).
+    test('a unit that names a technician: an automatic move asks each assignment to judge the shift; the office\'s own move does not', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const shiftAsked = () => assignDispatchJob.mock.calls.map((c) => [c[0].jobId, c[0].shiftHours]);
+      db.__script = script({ members: pair(), landed: landed('10:00', '11:00', 't9') });
+      expect((await unit(fakeRebooker(), '10:00-11:00', 'auto_dispatch', { technicianId: 't9' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      expect(shiftAsked()).toEqual([['a', true], ['b', true]]);
+      jest.clearAllMocks(); db.__calls.length = 0;
+      db.__script = script({ members: pair(), landed: landed('13:00', '14:00', 't9') });
+      expect((await unit(fakeRebooker(), '13:00-14:00', 'admin', { technicianId: 't9' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      expect(assignDispatchJob.mock.calls.map((c) => [c[0].jobId, 'shiftHours' in c[0]])).toEqual([['a', false], ['b', false]]);
     });
 
     test('a member with no technician is not judged', async () => {

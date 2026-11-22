@@ -400,10 +400,12 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       });
 
       // A unit that names a technician moves each service on its old technician, then assigns it in a
-      // later write of its own. The edit lands on another connection as that assignment begins: after
-      // the service's move, before the step's locks (at its first statement, the date's occupancy lock).
+      // later write of its own (assignDispatchJob, asked to judge the shift). The edit lands on another
+      // connection: as that step begins (at its first statement, the date's occupancy lock), or inside
+      // the assignment, after its read of the row and before its write (at its technician-day locks).
       describe('a unit that names a technician', () => {
         const occupancy = require('../services/scheduling/occupancy');
+        const techDayLock = require('../services/scheduling/tech-day-lock');
         let spy = null;
         const editAtAssignment = (id, patch) => {
           const real = occupancy.acquireOccupancyLock;
@@ -411,6 +413,15 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
           spy = jest.spyOn(occupancy, 'acquireOccupancyLock').mockImplementation(async (...args) => {
             if (!done && (await rowOf(id)).day === nextDay) { done = true; await f.db('scheduled_services').where({ id }).update(patch); }
             return real(...args);
+          });
+        };
+        // Only the assignment locks the named technician's day.
+        const editAfterAssignmentRead = (id, patch) => {
+          const real = techDayLock.lockTechDays;
+          let done = false;
+          spy = jest.spyOn(techDayLock, 'lockTechDays').mockImplementation(async (trx, pairs) => {
+            if (!done && pairs.some((pair) => pair.techId === f.ids.otherTech)) { done = true; await f.db('scheduled_services').where({ id }).update(patch); }
+            return real(trx, pairs);
           });
         };
         const lengthenAtAssignment = (id) => editAtAssignment(id, { estimated_duration_minutes: 240 });
@@ -437,23 +448,39 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
           // 10:00 for 240 minutes ends at 14:00, after the named technician's 12:00 shift end.
           lengthenAtAssignment(stop.a);
           const out = await toOtherTech(stop);
-          expect(out.visitMove.failed).toMatchObject([{ id: stop.a, code: 'SLOT_TAKEN', movedButUnassigned: true }]);
+          expect(out.visitMove.failed).toMatchObject([{ id: stop.a, code: 'TECH_NOT_ASSIGNABLE', movedButUnassigned: true }]);
           expect(await stopOf(stop)).toMatchObject([
             { day: nextDay, window_start: '10:00:00', technician_id: f.ids.technician },
             { day: nextDay, window_start: '11:00:00', technician_id: f.ids.otherTech },
           ]);
         });
 
-        test('a service dispatch moved to another hour after its move is not assigned: the plan is stale', async () => {
+        test('a service dispatch moved to another hour after its move is judged at the hours it now has', async () => {
+          const late = await seedStop();
+          // 12:00 to 13:00 starts at the named technician's 12:00 shift end.
+          editAtAssignment(late.a, { window_start: '12:00', window_end: '13:00' });
+          expect((await toOtherTech(late)).visitMove.failed).toMatchObject([{ id: late.a, code: 'TECH_NOT_ASSIGNABLE', movedButUnassigned: true }]);
+          expect(await rowOf(late.a)).toMatchObject({ day: nextDay, window_start: '12:00:00', technician_id: f.ids.technician });
+          spy.mockRestore();
+          await f.db('scheduled_services').del();
+          await f.db('service_visits').del();
+          const early = await seedStop();
+          // 08:00 to 09:00 is inside the shift: the service is assigned at this step, as before.
+          editAtAssignment(early.a, { window_start: '08:00', window_end: '09:00' });
+          await toOtherTech(early);
+          expect(await rowOf(early.a)).toMatchObject({ day: nextDay, window_start: '08:00:00', technician_id: f.ids.otherTech });
+        });
+
+        test.each([
+          ['made longer', { estimated_duration_minutes: 240 }],
+          ['given a later end', { window_end: '12:30' }],
+          ['given another start', { window_start: '09:30' }],
+        ])('a service %s after the assignment read it is not assigned: the write holds the hours and the length that were judged', async (_label, patch) => {
           const stop = await seedStop();
-          // 08:00 to 09:00 fits the named technician's shift, but the verdict and the clash checks were for 10:00.
-          editAtAssignment(stop.a, { window_start: '08:00', window_end: '09:00' });
+          editAfterAssignmentRead(stop.a, patch);
           const out = await toOtherTech(stop);
-          expect(out.visitMove.failed).toMatchObject([{ id: stop.a, code: 'ASSIGNMENT_STALE', movedButUnassigned: true }]);
-          expect(await stopOf(stop)).toMatchObject([
-            { day: nextDay, window_start: '08:00:00', technician_id: f.ids.technician },
-            { day: nextDay, window_start: '11:00:00', technician_id: f.ids.otherTech },
-          ]);
+          expect(out.visitMove.failed).toMatchObject([{ id: stop.a, movedButUnassigned: true, reason: expect.stringMatching(/reassigned or rescheduled concurrently/) }]);
+          expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.technician, f.ids.otherTech]);
         });
 
         test('gate off: the same edits do not stop the assignment, as before', async () => {
@@ -467,10 +494,18 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
           await f.db('scheduled_services').del();
           await f.db('service_visits').del();
           const second = await seedStop();
-          // The moved service is still assigned at this step; the stop's later steps report the stale plan, as before.
-          editAtAssignment(second.a, { window_start: '08:00', window_end: '09:00' });
-          await toOtherTech(second);
-          expect(await rowOf(second.a)).toMatchObject({ day: nextDay, window_start: '08:00:00', technician_id: f.ids.otherTech });
+          // An edit after the assignment's own read of the row: the write does not hold the hours or the length.
+          editAfterAssignmentRead(second.a, { estimated_duration_minutes: 240 });
+          expect((await toOtherTech(second)).visitMove).toMatchObject({ moved: [second.a, second.b], failed: [] });
+          expect((await stopOf(second)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
+        });
+
+        test('the office\'s own move is not judged at the assignment', async () => {
+          const stop = await seedStop();
+          lengthenAtAssignment(stop.a);
+          const out = await move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
+          expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+          expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
         });
       });
 

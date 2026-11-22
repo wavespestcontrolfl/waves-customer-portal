@@ -306,7 +306,7 @@ async function assertRowMovableAlone(t, rowId, observedVisitId) {
   }
 }
 
-async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null, noticeActorId, noticePrevious } = {}) {
+async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null, noticeActorId, noticePrevious, shiftHours } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
   // actorId: the staff row behind a unit move (dispatch_alerts.resolved_by
   // + the broadcast). noticeActorId: who the tech's card names when that is
@@ -316,6 +316,8 @@ async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = f
   await assignDispatchJob({
     jobId: rowId, technicianId, actorId, emit: true, trx: t, skipVisitSeam,
     ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}),
+    // GATE_TECH_SHIFT_HOURS: an automatic unit move asks the assignment to judge the shift too.
+    ...(shiftHours ? { shiftHours: true } : {}),
     ...(noticeActorId !== undefined ? { noticeActorId } : {}),
     ...(noticePrevious ? { noticePrevious } : {}),
   });
@@ -1741,6 +1743,18 @@ function planMemberTargets({ members, primary, visitWindowStart, win, newDateStr
   });
 }
 
+// GATE_TECH_SHIFT_HOURS: the keys of a caller's own fence that the unit move's
+// shift verdict depends on (moveVisitAsUnit's plan). Each row: the key, when a
+// caller value that differs from the plan's locked read is a stale request
+// ('changes': the first service will change; 'judged': a shift judged it), and
+// the form the two values are compared in.
+const CALLER_FENCE_KEYS = [
+  ['technician_id', 'changes', (value) => String(value || '')],
+  ['estimated_duration_minutes', 'judged', (value) => value ?? null],
+  ['window_start', 'judged', toMinutes],
+  ['window_end', 'judged', toMinutes],
+];
+
 /**
  * GATE_TECH_SHIFT_HOURS: the id of the first landing its technician's shift
  * on `date` does not hold, else null. A landing is one member as a unit move
@@ -1750,9 +1764,10 @@ function planMemberTargets({ members, primary, visitWindowStart, win, newDateStr
  * member with no technician, no set hours or no start is not judged. A bound
  * that is there but is no clock time (a request can carry one) refuses the
  * member: the block cannot be read from it, and a write could still take a
- * time from it. Pure.
+ * time from it. `judged` (optional) is filled with the stored length of every
+ * member a shift judged, by id: what that member's own write then pins.
  */
-function memberOutsideShift(shiftOf, date, landings) {
+function memberOutsideShift(shiftOf, date, landings, judged = {}) {
   const { shiftBounds } = require('./technician-eligibility');
   const { rowBlockMinutes, parseHHMM } = require('./scheduling/window-rules');
   // PostgreSQL's TIME also holds 24:00:00 as an end; rowBlockMinutes reads it.
@@ -1760,6 +1775,7 @@ function memberOutsideShift(shiftOf, date, landings) {
   for (const landing of landings) {
     const shift = landing.technicianId ? shiftOf(landing.technicianId, date) : null;
     if (!shift) continue;
+    judged[landing.id] = landing.durationMinutes ?? null;
     if (unread(landing.start, false) || unread(landing.end, true)) return landing.id;
     const { startMin, endMin } = rowBlockMinutes({ window_start: landing.start, window_end: landing.end, estimated_duration_minutes: landing.durationMinutes });
     if (startMin == null) continue;
@@ -2185,12 +2201,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             technicianId: options.technicianId !== undefined ? (options.technicianId || null) : (m.technician_id || null),
           })).filter((landing, index) => !targets[index].alreadyAtTarget);
           const shiftOf = await require('./technician-eligibility').loadTechShifts(t, { technicianIds: [...new Set(landings.map((x) => x.technicianId).filter(Boolean).map(String))] });
-          const outside = memberOutsideShift(shiftOf, newDateStr, landings);
+          const outside = memberOutsideShift(shiftOf, newDateStr, landings, shiftJudgedLengths);
           if (outside != null) {
             throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), { statusCode: 409, status: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: outside });
-          }
-          for (const landing of landings) {
-            if (landing.technicianId && shiftOf(landing.technicianId, newDateStr)) shiftJudgedLengths[landing.id] = landing.durationMinutes ?? null;
           }
           // The first service's own write carries the caller's fence, and that
           // fence wins there over the plan's. A caller that pinned another
@@ -2200,15 +2213,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           // gate on, a first service that will change and whose caller fence
           // names another technician is refused here, before any write; so is
           // a fence that names another length or other stored hours than a
-          // verdict used (hours compared by value). The write can then never
-          // pass on a technician, length or hours no verdict judged.
-          const callerPin = options.expect || {};
-          const pinned = (key) => Object.prototype.hasOwnProperty.call(callerPin, key);
-          const firstChanges = require('../config/feature-gates').techShiftHoursLive() && landings.some((landing) => String(landing.id) === String(primary.id));
-          if ((firstChanges && pinned('technician_id') && String(callerPin.technician_id || '') !== String(primary.technician_id || ''))
-            || (Object.prototype.hasOwnProperty.call(shiftJudgedLengths, primary.id)
-              && ((pinned('estimated_duration_minutes') && (callerPin.estimated_duration_minutes ?? null) !== (primary.estimated_duration_minutes ?? null))
-                || ['window_start', 'window_end'].some((key) => pinned(key) && toMinutes(callerPin[key]) !== toMinutes(primary[key]))))) {
+          // verdict used (CALLER_FENCE_KEYS; hours compared by value). The
+          // write can then never pass on a technician, length or hours no
+          // verdict judged.
+          const callerPin = { ...options.expect };
+          const fenceApplies = {
+            changes: require('../config/feature-gates').techShiftHoursLive() && landings.some((landing) => String(landing.id) === String(primary.id)),
+            judged: Object.prototype.hasOwnProperty.call(shiftJudgedLengths, primary.id),
+          };
+          if (CALLER_FENCE_KEYS.some(([key, when, form]) => fenceApplies[when]
+            && Object.prototype.hasOwnProperty.call(callerPin, key) && form(callerPin[key]) !== form(primary[key]))) {
             throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), { statusCode: 409, status: 409, isOperational: true, code: 'SLOT_TAKEN' });
           }
         }
@@ -2689,57 +2703,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               // destination tech's slot-reserve lock, then row locks — the
               // rebooker's own order.
               const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
-              // GATE_TECH_SHIFT_HOURS (D4 part 3b-2b): the plan judged this
-              // member on the destination technician under the stop lock, and
-              // the member's own move pinned the judged length through that
-              // write only. The assignment is this later transaction, so an
-              // automatic move judges the member again here, with the hours
-              // read again. When the destination technician has set hours
-              // that day (shiftJudged), the step locks both technician-days
-              // in one call (the canonical order; assignDispatchJob takes the
-              // same pair) and reads the row FOR UPDATE, and that one locked
-              // row serves the checks below and the clash probes after them:
-              // an edit that landed since is seen, and one that comes later
-              // waits for this commit.
-              //   - The row is no longer on the day and at the start this move
-              //     left it (dispatch moved it since): the plan is for another
-              //     slot. The newer placement wins: refused as stale.
-              //   - Its block (the end and the stored length it now has) is
-              //     outside the shift: refused as a clash below is.
-              // Either way the row stays moved on its old technician and is
-              // reported failed. The office's own move, a technician without
-              // set hours that day, and the gate off take the path below as
-              // it was: the destination lock alone and a plain read.
-              // The hours themselves are a point-in-time read with no lock of
-              // their own, as in every shift check (technician-eligibility
-              // shiftExcluding): a change of the hours that lands after this
-              // read leaves the same state as one that lands after the commit.
-              const shiftOf = initiatedBy !== 'admin' && require('../config/feature-gates').techShiftHoursLive()
-                ? await require('./technician-eligibility').loadTechShifts(t, { technicianIds: [String(options.technicianId)] }) : null;
-              const shiftJudged = !!(shiftOf && shiftOf(options.technicianId, newDateStr));
               await acquireOccupancyLock(t, newDateStr);
-              if (shiftJudged) {
-                await require('./scheduling/tech-day-lock').lockTechDays(t, [
-                  { techId: target.expect.technician_id || null, date: newDateStr }, { techId: options.technicianId, date: newDateStr },
-                ]);
-              } else {
-                await t.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['slot-reserve', `${options.technicianId}:${newDateStr}`]);
-              }
+              await t.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['slot-reserve', `${options.technicianId}:${newDateStr}`]);
               // the row's COMMITTED window (a start-only landing derived its end); the landed contract is the fallback
-              const row = shiftJudged
-                ? await t('scheduled_services').where({ id: target.id }).forUpdate().first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'scheduled_date')
-                : await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type').catch(() => null);
-              if (shiftJudged && row) {
-                // The start is compared by value: a caller's "9:00" and the stored "09:00:00" are one start.
-                if (dateOnly(row.scheduled_date) !== newDateStr || toMinutes(row.window_start) !== toMinutes(landed.window_start)) {
-                  throw Object.assign(new Error('Job was moved concurrently - the planned slot is stale'), { statusCode: 409, isOperational: true, code: 'ASSIGNMENT_STALE', memberId: target.id });
-                }
-                if (memberOutsideShift(shiftOf, newDateStr, [{
-                  id: target.id, technicianId: options.technicianId, start: row.window_start, end: row.window_end, durationMinutes: row.estimated_duration_minutes,
-                }]) != null) {
-                  throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), { statusCode: 409, status: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: target.id });
-                }
-              }
+              const row = await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type').catch(() => null);
               const windowStart = (row && row.window_start) || landed.window_start || target.startHHMM || null;
               const windowEnd = (row && row.window_end) || landed.window_end || null;
               const probeEnd = windowEnd ? String(windowEnd).slice(0, 5) : (windowStart ? shiftClock(String(windowStart).slice(0, 5), Number(row && row.estimated_duration_minutes) || 60) : null);
@@ -2778,6 +2745,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             await alignMemberTechnician(t, target.id, options.technicianId || null, {
               skipVisitSeam: true,
               expectTechnicianId: target.expect.technician_id || null,
+              // GATE_TECH_SHIFT_HOURS (D4 part 3b-2b): the plan judged this
+              // member on the destination technician under the stop lock, and
+              // the member's own move pinned what that verdict used through
+              // that write only. This assignment is a later transaction, so an
+              // automatic move asks the assignment's own locked re-check to
+              // judge the row as it now is against that technician's shift
+              // (assignDispatchJob `shiftHours`). Refused: the row stays moved
+              // on its old technician and is reported failed, as for any other
+              // refused assignment. The office's own move does not ask.
+              shiftHours: initiatedBy !== 'admin',
               // Staff UUID only — assignDispatchJob's actorId also stamps
               // dispatch_alerts.resolved_by; a system label never goes there.
               actorId: options.actorId || null,
