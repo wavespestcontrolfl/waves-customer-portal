@@ -97,6 +97,12 @@
 //            completed first visit keeps its original service; the schedulers apply
 //            the same gated overlay, recurring-template-overrides.js). Bait
 //            detection reads the same overlaid fields.
+//            A VISIT moves by its OWN line (its own service_id / service_key_snapshot /
+//            service_type): staff can change one appointment of a series to another
+//            service ("this appointment only"). A visit of an in-scope series whose own
+//            line is not in --lines (a pest series visit changed to lawn or to rodent
+//            exclusion) stays with --from (visit_other_line). A visit whose own line
+//            moves under another movable line adds that line to the capability check.
 //   VISITS   the parent row (when still ahead) plus its children
 //            (recurring_parent_id = parent). OPEN = status pending | confirmed |
 //            rescheduled (the app's "not started" set) and track_state not
@@ -409,7 +415,8 @@ const outsideZips = (zips) => (p) => Array.isArray(zips) && !zips.includes(p.zip
  *   bait_customers_kept    bait customers a run WITHOUT termite keeps, whatever rule their series met first: a customer
  *                          whose only series is the bait plan itself stays as other_line, and is kept all the same.
  *                          A --zips run counts its ZIPs only.
- *   capability_lines       the lines --to must be able to take: each line with a series to move, and termite when ANY
+ *   capability_lines       the lines --to must be able to take: each line with a series to move, the own line of
+ *                          each visit that moves (a visit changed to another service), and termite when ANY
  *                          series of a bait customer moves. A bait customer's bait work reaches --to with the series,
  *                          now or at a later visit: the combined pest + bait plan and a pest series with a bait add-on
  *                          move as general, and the scheduler decides visit by visit which add-ons are due
@@ -506,6 +513,9 @@ function buildPlan({
     ['unassigned_left', (v) => !v.technician_id],
     ['other_technician', (v) => v.technician_id !== from],
     ['bad_date', (v) => dayOfWeekOfDate(v.scheduled_date) === null],
+    // Last: only a visit that would otherwise move. Its own line (the reader sets it; null = unknown) is not a line
+    // this run moves. A row with no `line` field goes with its series.
+    ['visit_other_line', (v) => v.line !== undefined && !lines.includes(v.line)],
   ];
   // What happens to one visit of an in-scope series: the first rule it stays for, 'off_day' (it stays with --from on a
   // target day off) or 'move'. The weekend-customer test and the moves read the same answer.
@@ -515,6 +525,7 @@ function buildPlan({
     return workDays.includes(dayOfWeekOfDate(v.scheduled_date)) ? 'move' : 'off_day';
   };
   const inScope = [];
+  const movedVisitLines = new Set();
 
   // Pass 1: each series on --from gets its skip reason, or joins the in-scope list with its visits' outcomes.
   for (const p of onFrom) {
@@ -556,6 +567,7 @@ function buildPlan({
         skip(outcome, p.id);
       } else {
         moved += 1;
+        movedVisitLines.add(v.line);
         recordMove(plan, p, v, kind, { weekend, dateMoveCustomers });
       }
     }
@@ -573,7 +585,8 @@ function buildPlan({
   }
   const retemplated = new Set(plan.ids.retemplate);
   Object.assign(plan, baitFigures({
-    onFrom, moving: onFrom.filter((p) => retemplated.has(p.id)), baitCustomers, termiteOut, zips, movingLines: Object.keys(plan.retemplate_by_line),
+    onFrom, moving: onFrom.filter((p) => retemplated.has(p.id)), baitCustomers, termiteOut, zips,
+    movingLines: [...Object.keys(plan.retemplate_by_line), ...movedVisitLines].filter(Boolean),
   }));
   // One per-visit technician notice would fire for each visit whose technician changes.
   plan.notices_to_suppress = plan.would_change.visits;
@@ -623,6 +636,8 @@ async function loadVisits(db, parentIds, today) {
       .where(function aheadOrWaiting() { this.where('ss.scheduled_date', '>=', today).orWhere('ss.status', 'rescheduled'); })
       .select('ss.id', 'ss.recurring_parent_id', db.raw('ss.scheduled_date::text as scheduled_date'), 'ss.status',
         'ss.track_state', 'ss.technician_id', 'ss.visit_id', 'sv.status as group_status',
+        // The visit's OWN service: one appointment of a series can be another service (LINE).
+        'ss.service_id', 'ss.service_key_snapshot', 'ss.service_type',
         // --weekend-move: what the day-60 run needs to move a date (second-tech-handover-weekend.js).
         'ss.is_recurring', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.customer_confirmed',
         'ss.auto_dispatch_locked', 'ss.auto_dispatch_excluded', 'ss.date_exception', 'ss.recurring_dispatch_due_date', 'ss.auto_dispatch_change_count',
@@ -742,19 +757,24 @@ async function planHandover(db, {
     for (const r of await db('services').whereIn('id', ids).select('id', 'service_key')) catalogKeys.set(r.id, r.service_key);
   }
   const cache = new Map();
-  for (const p of parents) {
-    p.catalog_key = (p.service_id && catalogKeys.get(p.service_id)) || null;
-    const key = [p.service_id || '', p.service_key_snapshot || '', p.service_type || ''].join('|');
+  // The line of a row's own service (a series' current template, or one visit), read once per service.
+  const lineOf = async (row) => {
+    const key = [row.service_id || '', row.service_key_snapshot || '', row.service_type || ''].join('|');
     if (!cache.has(key)) {
       cache.set(key, (await serviceLineFor(db, {
-        serviceId: p.service_id, serviceKey: p.service_key_snapshot, serviceType: p.service_type,
+        serviceId: row.service_id, serviceKey: row.service_key_snapshot, serviceType: row.service_type,
       })).line || null);
     }
-    p.line = cache.get(key);
+    return cache.get(key);
+  };
+  for (const p of parents) {
+    p.catalog_key = (p.service_id && catalogKeys.get(p.service_id)) || null;
+    p.line = await lineOf(p);
   }
   const territory = await loadZipScope(db, zips, parents);
   const parentIds = parents.map((p) => p.id);
   const visits = await loadVisits(db, parentIds, today);
+  for (const v of visits) v.line = await lineOf(v);
   const liveSeriesIds = await loadLiveSeriesIds(db, parentIds, today);
   const baitAddonSeriesIds = await loadBaitAddonSeriesIds(db, parentIds);
   const plan = await planWithWeekend(db, {
@@ -837,7 +857,7 @@ function printPlan(plan, { list }) {
   out.push('  (the second handover run, --weekend-move, moves these customers and their dates)');
   out.push('');
   out.push('Skipped, by reason (series / visits):');
-  const reasons = ['other_line', 'no_line', 'outside_zips', 'termite_bait_customer', 'off_day_customer', ...Object.keys(plan.skipped).filter((r) => r.startsWith('weekend_kept_')), 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
+  const reasons = ['other_line', 'no_line', 'outside_zips', 'termite_bait_customer', 'off_day_customer', ...Object.keys(plan.skipped).filter((r) => r.startsWith('weekend_kept_')), 'visit_other_line', 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
   let any = false;
   for (const r of reasons) {
     const s = plan.skipped[r];

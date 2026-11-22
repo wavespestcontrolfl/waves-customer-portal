@@ -90,6 +90,33 @@ describe('second-tech-handover planner', () => {
     expect(noTermite.skipped.other_line).toEqual({ series: 3, visits: 3 });
   });
 
+  test('a visit moves by its own line: one appointment of a series changed to another service', () => {
+    // Staff can change one appointment to another service ("this appointment only"). The series is termite; the
+    // reader gives each visit the line of its own service.
+    const termite = parent({ line: 'termite', service_type: 'Termite Monitoring Service' });
+    const own = visit(termite, MON, { line: 'termite' });
+    const lawnVisit = visit(termite, TUE, { line: 'lawn' });
+    const exclusionVisit = visit(termite, WED, { line: 'exclusion' });
+    const unknownVisit = visit(termite, THU, { line: null });
+    const trapVisit = visit(termite, MON_LATE, { line: 'rodent' });
+    // A lawn visit on a day off never makes its customer a weekend customer: it is not the hire's work.
+    const lawnFriday = visit(termite, FRI, { line: 'lawn' });
+    const all = [own, lawnVisit, exclusionVisit, unknownVisit, trapVisit, lawnFriday];
+    const p = plan([termite], all);
+    expect(new Set(p.ids.visits)).toEqual(new Set([own.id, trapVisit.id]));
+    expect(p.skipped.visit_other_line).toEqual({ series: 1, visits: 4 });
+    expect(p.skipped.off_day_customer).toBeUndefined();
+    // The trap visit moves under the rodent line: the hire must be able to take it.
+    expect(p.capability_lines).toEqual(['rodent', 'termite']);
+    // A run that leaves rodent out keeps the trap visit with the owner too.
+    const termiteOnly = plan([termite], all, { lines: ['termite'] });
+    expect(termiteOnly.ids.visits).toEqual([own.id]);
+    expect(termiteOnly.skipped.visit_other_line).toEqual({ series: 1, visits: 5 });
+    expect(termiteOnly.capability_lines).toEqual(['termite']);
+    // A row with no line field (an older caller) goes with its series.
+    expect(plan([termite], [visit(termite, MON)]).ids.visits).toHaveLength(1);
+  });
+
   test('--lines narrows what moves', () => {
     const pest = parent();
     const rodent = parent({ line: 'rodent' });

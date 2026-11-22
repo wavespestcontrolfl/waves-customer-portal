@@ -174,7 +174,11 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     // Gate off: the app ignores the overrides, and so does the plan.
     const historical = await loadWith('false').planHandover(knex, { from: ownerB, start: START, today: TODAY, lines: NO_TERMITE });
     expect(historical.template_overrides).toBe('not_applied_gate_off');
-    expect(new Set(historical.ids.series)).toEqual(new Set([changed.id, pest.id]));
+    // Both pest templates change technician. The first series' one visit is a lawn appointment by its OWN service,
+    // so it stays with the owner (visit_other_line): a visit moves by its own line, whatever its series template says.
+    expect(new Set(historical.ids.retemplate)).toEqual(new Set([changed.id, pest.id]));
+    expect(historical.ids.series).toEqual([pest.id]);
+    expect(historical.skipped.visit_other_line).toEqual({ series: 1, visits: 1 });
     expect(historical.skipped.other_line).toEqual({ series: 1, visits: 1 }); // the WDO inspection (termite line)
     expect(historical.skipped.termite_bait_customer).toBeUndefined();
   });
@@ -265,6 +269,37 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     expect(pastPlan.ids.visits).toContain(pestOnly.id);
     expect(pastPlan.bait_customers_moving).toBe(1);
     expect(pastPlan.capability_lines).toEqual(['general', 'termite']);
+  });
+
+  test('one appointment changed to another service moves by its own line, not its series line', async () => {
+    const ownerV = randomUUID();
+    const hireV = randomUUID();
+    await knex('technicians').insert([tech(ownerV), tech(hireV, { work_days: [1, 2, 3, 4] })]);
+    extraTechIds.push(ownerV, hireV);
+    const on = (o) => ({ technician_id: ownerV, ...o });
+    // A termite series. Three of its appointments were changed to another service for that appointment only.
+    const termite = await series(await customer(), on({ service_type: 'Termite Monitoring Service' }));
+    const own = await child(termite, '2099-07-06', on());
+    const sealing = await child(termite, '2099-07-07', on({ service_type: 'Rodent Exclusion' }));
+    const lawn = await child(termite, '2099-07-08', on({ service_type: 'Lawn Care Program' }));
+    const trapping = await child(termite, '2099-07-09', on({ service_type: 'Rodent Trapping Service' }));
+
+    const args = { from: ownerV, to: hireV, start: START, today: TODAY };
+    const plan = await handover.planHandover(knex, args);
+    expect(plan.ids.retemplate).toEqual([termite.id]);
+    expect(new Set(plan.ids.visits)).toEqual(new Set([own.id, trapping.id]));
+    expect(plan.ids.visits).not.toContain(sealing.id);
+    expect(plan.ids.visits).not.toContain(lawn.id);
+    expect(plan.skipped.visit_other_line).toEqual({ series: 1, visits: 2 });
+    expect(plan.capability_lines).toEqual(['rodent', 'termite']);
+
+    // The trapping visit is rodent work: a hire set to Off for rodent refuses the run, and a run that leaves rodent
+    // out keeps that visit with the owner.
+    await knex('technician_capabilities').insert({ technician_id: hireV, service_category: 'rodent', capability_level: 'review_required', active: false });
+    await expect(handover.planHandover(knex, args)).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
+    const noRodent = await handover.planHandover(knex, { ...args, lines: ['general', 'mosquito', 'termite'] });
+    expect(noRodent.ids.visits).toEqual([own.id]);
+    expect(noRodent.capability_lines).toEqual(['termite']);
   });
 
   test('termite and WDO series move in every run, bait customers too; lawn stays; --zips limits; --to Off refuses', async () => {
