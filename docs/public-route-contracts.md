@@ -7199,8 +7199,14 @@ the engine's not-measured marks: a dwelling unit priced from the bedroom count t
 `one_time_pest` too); or any mark of the engine's predicate for a priced row whose price is not exact yet
 (`lineNeedsReviewBeforeExactPrice` in `estimator-engine/draft-builder.js`: a fallback footprint, a low
 `pricingConfidence`, a heuristic or low-grade turf size, `requiresMeasurement`, `quoteRequired`, a custom quote flag,
-tree and shrub priced with no tree count). The office's own review marks (`requiresManualReview`, `manualReviewReasons`:
-a large lot, a large pool cage) are left out on purpose: a reviewed price from measured sizes is still measured. A row
+tree and shrub priced with no tree count); or a mosquito area taken from a lot-category proxy (`missingAreaData:
+true`); or a tree and shrub row priced from a palm count the caller gave (`palmCountSource: 'service_line'` without
+`palmCountFromLookup: true`). The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
+its reasons. Only a reason that says a measured size is large keeps the key (`large_lot`,
+`pest_large_lot_manual_review`, `large_pool_cage`, `pest_large_or_oversized_pool_cage`): a reviewed price from measured
+sizes is still measured. Every other reason, a reason that is not text, and a review mark with no reason take the key
+away (for example `stories_estimated`, `mosquito_treatable_area_unverified`,
+`termite_measurement_manual_override_used`, and any reason added later). A row
 container that is there and is not a list, or an entry that is there and is not a row, cannot be read and takes the key
 away. Three reads, each failing closed. (1)
 The saved estimate grants the key: the rows of `guaranteeServiceRows` without the served price (both saved result shapes,

@@ -565,13 +565,65 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     // Tree and shrub priced with no tree count and no density data.
     expect(estimateIsRemoteMeasured({ result: { ...plan('tree_shrub'), lineItems: [{ service: 'tree_shrub', monthly: 50, treeCountSource: 'default_zero' }] } }, {})).toBe(false);
     expect(estimateIsRemoteMeasured({ result: { ...plan('tree_shrub'), lineItems: [{ service: 'tree_shrub', monthly: 50, treeCountSource: 'property_density' }] } }, {})).toBe(true);
-    // The office's own review of a price is not a missing measurement: a large lot, a large pool cage, an office measurement.
-    for (const manualReviewReasons of [['large_lot', 'pest_large_lot_manual_review'], ['large_pool_cage'], ['stories_estimated'], ['termite_measurement_manual_override_used']]) {
-      const label = manualReviewReasons.join('|');
+    // The office's review of a price, read by its reasons. A measured size that is large keeps the answer.
+    for (const manualReviewReasons of [['large_lot', 'pest_large_lot_manual_review'], ['large_pool_cage', 'pest_large_or_oversized_pool_cage'], ['large_lot'], 'large_lot']) {
+      const label = JSON.stringify(manualReviewReasons);
       expect([label, estimateIsRemoteMeasured(pestLine({ requiresManualReview: true, manualReviewReasons, pricingConfidence: 'medium' }), {})]).toEqual([label, true]);
     }
-    // A review mark does not hide another mark on the same row.
-    expect(estimateIsRemoteMeasured(pestLine({ requiresManualReview: true, manualReviewReasons: ['missing_lot_size'], pricingConfidence: 'low' }), {})).toBe(false);
+    // Every other reason takes it away: a size that is unsure, a reason the rule does not know, a reason that is not
+    // text, a review with no reason.
+    for (const manualReviewReasons of [
+      ['stories_estimated', 'pest_production_stories_default_or_estimated'], ['termite_measurement_manual_override_used'], ['missing_lot_size'],
+      ['mosquito_treatable_area_unverified'], ['very_large_lot', 'pest_low_confidence_large_lot'], ['large_lot', 'pool_cage_size_inferred'],
+      ['a_reason_added_next_year'], [null], [{ code: 'large_lot' }], [], undefined,
+    ]) {
+      const label = String(JSON.stringify(manualReviewReasons));
+      expect([label, estimateIsRemoteMeasured(pestLine({ requiresManualReview: true, manualReviewReasons }), {})]).toEqual([label, false]);
+    }
+    expect(estimateIsRemoteMeasured(pestLine({ requiresManualReview: false, manualReviewReasons: [] }), {})).toBe(true);
+    expect(estimateIsRemoteMeasured(pestLine({ manualReviewReasons: ['stories_estimated'] }), {})).toBe(false);
+    // A large-size review does not hide another mark on the same row.
+    expect(estimateIsRemoteMeasured(pestLine({ requiresManualReview: true, manualReviewReasons: ['large_lot'], pricingConfidence: 'low' }), {})).toBe(false);
+    // The served price carries the reasons on its rows too.
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', manualReviewReasons: ['stories_estimated'] }] }] })).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', manualReviewReasons: ['large_lot'] }] }] })).toBe(true);
+  });
+
+  test('a mosquito area nobody measured, and a palm count the caller gave, on the real engine', () => {
+    const lineOf = (inputs, service) => generateEstimate(inputs).lineItems.find((line) => line.service === service);
+    const ruleFor = (inputs) => estimateIsRemoteMeasured({ engineInputs: inputs }, {});
+    const home = { homeSqFt: 2000, lotSqFt: 8000 };
+    // Barrier mosquito from a measured lot.
+    const measured = { ...home, services: { mosquito: { tier: 'monthly12' } } };
+    expect(lineOf(measured, 'mosquito')).toMatchObject({ missingAreaData: false, requiresManualReview: false });
+    expect(ruleFor(measured)).toBe(true);
+    // The same lot, marked as not measured (a synthetic lot size).
+    const unverified = { ...measured, lotSizeMeasured: false };
+    expect(lineOf(unverified, 'mosquito').manualReviewReasons).toContain('mosquito_treatable_area_unverified');
+    expect(ruleFor(unverified)).toBe(false);
+    // No lot size: the area is a proxy.
+    const noLot = { homeSqFt: 2000, services: { mosquito: { tier: 'monthly12' } } };
+    expect(lineOf(noLot, 'mosquito').missingAreaData).toBe(true);
+    expect(ruleFor(noLot)).toBe(false);
+    const oneTimeNoLot = { homeSqFt: 2000, services: { oneTimeMosquito: {} } };
+    expect(lineOf(oneTimeNoLot, 'one_time_mosquito').missingAreaData).toBe(true);
+    expect(ruleFor(oneTimeNoLot)).toBe(false);
+    expect(ruleFor({ ...home, services: { oneTimeMosquito: {} } })).toBe(true);
+    // The proxy mark alone, on a stored row and on the served price.
+    expect(estimateIsRemoteMeasured({ result: { ...plan('mosquito'), lineItems: [{ service: 'mosquito', monthly: 80, missingAreaData: true }] } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('mosquito') }, { oneTimeBreakdown: { items: [{ service: 'one_time_mosquito', amount: 150, missingAreaData: true }] } })).toBe(false);
+
+    // Tree and shrub: no palms, palms the caller counted, palms read off the image.
+    const yard = { ...home, treeDensity: 'moderate', shrubDensity: 'moderate' };
+    const treeShrub = (service) => ({ ...yard, services: { treeShrub: { tier: 'standard', ...service } } });
+    expect(ruleFor(treeShrub({}))).toBe(true);
+    expect(lineOf(treeShrub({ palmCount: 4 }), 'tree_shrub')).toMatchObject({ palmCount: 4, palmCountSource: 'service_line' });
+    expect(lineOf(treeShrub({ palmCount: 4 }), 'tree_shrub').palmCountFromLookup).not.toBe(true);
+    expect(ruleFor(treeShrub({ palmCount: 4 }))).toBe(false);
+    expect(lineOf(treeShrub({ palmCount: 4, palmCountFromLookup: true }), 'tree_shrub')).toMatchObject({ palmCount: 4, palmCountFromLookup: true });
+    expect(ruleFor(treeShrub({ palmCount: 4, palmCountFromLookup: true }))).toBe(true);
+    // A palm count on a row that is not tree and shrub is not this mark.
+    expect(estimateIsRemoteMeasured({ result: { ...plan('pest_control'), lineItems: [{ service: 'pest_control', monthly: 40, palmCount: 4, palmCountSource: 'service_line' }] } }, {})).toBe(true);
   });
 
   test('a saved amount is not a service row: the saved estimate must store one', () => {

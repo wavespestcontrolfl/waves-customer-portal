@@ -24223,8 +24223,12 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // "Estimator engine authority": a fallback footprint, a low pricing confidence, a turf basis fallback), and a row the
 // engine says needs a measurement in the field or a custom quote. The engine has one predicate for a priced row whose
 // price is not exact yet (draft-builder lineNeedsReviewBeforeExactPrice); this rule asks it.
-// One mark is left out on purpose: `requiresManualReview` with its reasons. That is the office's review of a price (a
-// large lot, a large pool cage), and a sent estimate has had it. A reviewed price from measured sizes is still measured.
+// The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by its reasons. A reason that
+// says a measured size is large (a large lot, a large pool cage) keeps the answer: a sent estimate has had that review,
+// and a reviewed price from measured sizes is still measured. Every other reason, known or new, takes the answer away:
+// most of them say a size is unsure (stories estimated, a mosquito area nobody verified, an office-entered measurement).
+// The rule is about sizes and counts the price is built from. A fact the customer states that is neither (a roach
+// type, a grass type) is not read: it needs no visit, and the sentence does not speak of it.
 // Three reads, and each one fails closed (estimateIsRemoteMeasured):
 // 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
 //    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service
@@ -24272,11 +24276,29 @@ function storedRowIsNotAService(row) {
 
 // The size marks, on any stored object (a priced row, a pricer's result, the unit-scope audit):
 // - a unit priced from the bedroom count a caller gave;
-// - a home priced from a fallback footprint (`footprintWasDefaulted`, a *fallback `footprintSource` or `fpSource`).
+// - a home priced from a fallback footprint (`footprintWasDefaulted`, a *fallback `footprintSource` or `fpSource`);
+// - a mosquito area from a lot-category proxy, not from a lot size (`missingAreaData`).
 const storedRowHasANotMeasuredSize = (row) => row.pricingBasis === UNIT_BAND_PRICING_BASIS
   || row.footprintSource === UNIT_BAND_SIZE_BASIS || row.sizeBasis === UNIT_BAND_SIZE_BASIS
   || row.footprintWasDefaulted === true
-  || [row.footprintSource, row.fpSource].some((source) => typeof source === 'string' && /fallback/i.test(source));
+  || [row.footprintSource, row.fpSource].some((source) => typeof source === 'string' && /fallback/i.test(source))
+  || row.missingAreaData === true;
+
+// Review reasons that say a measured size is large, not that a size is unsure.
+const MEASURED_SIZE_IS_LARGE_REASONS = new Set(['large_lot', 'pest_large_lot_manual_review', 'large_pool_cage', 'pest_large_or_oversized_pool_cage']);
+// A review the rule cannot read as "the measured size is large": a reason off that list, a reason that is not text, or
+// a review mark with no reason at all.
+function storedRowHasAnUnsureReview(row) {
+  const stated = row.manualReviewReasons;
+  const reasons = stated == null ? [] : (Array.isArray(stated) ? stated : [stated]);
+  if (!reasons.every((reason) => typeof reason === 'string' && MEASURED_SIZE_IS_LARGE_REASONS.has(reason))) return true;
+  return Boolean(row.requiresManualReview) && reasons.length === 0;
+}
+
+// Tree and shrub priced from a palm count the caller gave: the engine tells it from a count read off the image
+// (`palmCountFromLookup`). It cannot tell the two apart for a tree count, so that one is not read.
+const storedRowHasACallerStatedPalmCount = (row) => row.service === 'tree_shrub' && Number(row.palmCount) > 0
+  && row.palmCountSource === 'service_line' && row.palmCountFromLookup !== true;
 
 // The engine's predicate for a priced row whose price is not exact yet, loaded when first asked.
 let engineDraftBuilder;
@@ -24285,8 +24307,11 @@ const engineSaysPriceIsNotExact = (row) => {
   return engineDraftBuilder.lineNeedsReviewBeforeExactPrice(row);
 };
 
-// A priced row: the size marks, and the engine's predicate with the office's own review marks left out.
+// A priced row: the size marks, the review reasons, a caller-stated palm count, and the engine's predicate (asked with
+// the review marks taken off, because the reasons are read above).
 const storedRowIsNotMeasured = (row) => storedRowHasANotMeasuredSize(row)
+  || storedRowHasAnUnsureReview(row)
+  || storedRowHasACallerStatedPalmCount(row)
   || engineSaysPriceIsNotExact({ ...row, requiresManualReview: false, manualReviewReasons: null });
 
 // A stored row passes when it is not a service, or when its stored `service` is on one of the given lists. A commercial
