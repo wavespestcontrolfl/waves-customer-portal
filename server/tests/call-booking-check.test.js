@@ -80,6 +80,17 @@ const pricedReading = (over = {}, top = {}) => {
 // A one-time visit with no price whose call holds a price.
 const unpriced = (over = {}) => visit({ estimated_price: null, ai_extraction_enriched: pricedReading(), ...over });
 const pricedAs = (over, top) => unpriced({ ai_extraction_enriched: pricedReading(over, top) });
+// One-time catalog rows a call booking never prices, each named by the call that booked it.
+const namedVisit = (name, key) => unpriced({
+  service_type: name, row_name: name, row_service_key: key, ai_extraction_enriched: pricedReading({ specific_service_name: name }),
+});
+const ASSESSMENT_AND_RE_SERVICE = [
+  namedVisit('Waves Assessment', 'lawn_inspection'),
+  namedVisit('Waves Assessment', 'some_other_key'),
+  namedVisit('Renamed Look-Before-Quote Visit', 'lawn_inspection'),
+  namedVisit('Pest Control Re-Service', 'pest_re_service'),
+  namedVisit('Lawn Re-Service', 'lawn_re_service'),
+];
 
 describe('what a visit and the reading of its call say about the price', () => {
   const verdict = (row) => judgePrice(row).verdict;
@@ -94,16 +105,33 @@ describe('what a visit and the reading of its call say about the price', () => {
     expect(verdict(pricedAs({ specific_service_name: ' one-time  pest control SERVICE ' }))).toBe('problem');
   });
 
+  test('a total reads as agreed only when the reading does not mark it as changed after it was accepted', () => {
+    const proofs = { price_offered_by_staff: true, price_accepted_by_caller: true };
+    expect(judgePrice(pricedAs({ quoted_price_usd: 350, ...proofs, price_is_final: true }))).toEqual({ verdict: 'problem', amount: 350, agreed: true });
+    // An older reading carries no proof fields.
+    expect(judgePrice(pricedAs({ quoted_price_usd: 350 })).agreed).toBe(true);
+    // A later correction or an added charge: the number is shown, never as the agreed total.
+    expect(judgePrice(pricedAs({ quoted_price_usd: 350, ...proofs, price_is_final: false }))).toEqual({ verdict: 'problem', amount: 350, agreed: false });
+    // The 2026-11-21 reading: no total, the proof fields speak of a total that is not there. The stated price stands.
+    expect(judgePrice(pricedAs({ price_offered_by_staff: false, price_accepted_by_caller: null, price_is_final: false })))
+      .toEqual({ verdict: 'problem', amount: 250, agreed: false });
+  });
+
   test('agrees: the visit needs no price from the call', () => {
-    // It has a price, a stamped $0 too (a free visit is a decision), or a price decision completion honors.
-    for (const over of [{ estimated_price: 250 }, { estimated_price: '250.00' }, { estimated_price: 0 }, { discount_id: 'd1' }]) {
+    // It has a stored amount, on the visit or on its primary line; a stored $0 too (a free visit is a decision).
+    for (const over of [{ estimated_price: 250 }, { estimated_price: '250.00' }, { estimated_price: 0 }, { primary_line_price: '250.00' }, { primary_line_price: 0 }]) {
       expect(verdict(unpriced(over))).toBe('agrees');
     }
+    // A discount alone is no price: completion still has no amount to bill.
+    expect(verdict(unpriced({ discount_id: 'd1', discount_type: 'percent' }))).toBe('problem');
     // It is not a one-time visit: a plan visit bills through the plan, a free visit bills nothing.
     expect(verdict(planVisit({ estimated_price: null, ai_extraction_enriched: pricedReading() }))).toBe('agrees');
     expect(verdict(unpriced({ row_billing_type: 'free' }))).toBe('agrees');
     // A free callback never takes a price.
     expect(verdict(unpriced({ is_callback: true }))).toBe('agrees');
+    // A call booking never prices a Waves Assessment (by its key or its name) or a free re-service, even when
+    // the call names that visit and speaks of a treatment price: that price is the quote, not this visit's charge.
+    for (const row of ASSESSMENT_AND_RE_SERVICE) expect(verdict(row)).toBe('agrees');
     // A visit with a price agrees whatever became of the reading.
     expect(verdict(unpriced({ estimated_price: 250, v2_extraction_status: 'schema_failed', ai_extraction_enriched: null }))).toBe('agrees');
   });
@@ -116,6 +144,9 @@ describe('what a visit and the reading of its call say about the price', () => {
       // No price on the call.
       unpriced({ ai_extraction_enriched: reading() }),
       pricedAs({ prices: [] , price: null }),
+      // The reading disputes its own total: staff did not offer it, or the caller did not accept it.
+      pricedAs({ quoted_price_usd: 350, price_offered_by_staff: false }),
+      pricedAs({ quoted_price_usd: 350, price_accepted_by_caller: false }),
       // A $0 total is a free booking; an amount outside the booking's bounds is not a price.
       pricedAs({ quoted_price_usd: 0 }),
       pricedAs({ quoted_price_usd: 3 }),
@@ -175,12 +206,16 @@ describe('when an open bell closes', () => {
     // The call is being processed again, or its reading holds no price now: the visit still has no price.
     expect(closeKeyFor('price', unpriced({ v2_extraction_status: 'schema_failed' }), BILLING)).toBeNull();
     expect(closeKeyFor('price', unpriced({ ai_extraction_enriched: reading() }), BILLING)).toBeNull();
+    // A discount with no amount: completion still has nothing to bill.
+    expect(closeKeyFor('price', unpriced({ discount_id: 'd1', discount_type: 'percent' }), BILLING)).toBeNull();
     expect(closeKeyFor('price', unpriced({ row_name: null, row_service_key: null, row_billing_type: null }), BILLING)).toBeNull();
   });
 
   test('a price bell closes when the visit has a price, when it is no longer a one-time visit, and when it is done, cancelled or gone', () => {
     expect(closeKeyFor('price', unpriced({ estimated_price: 275 }), BILLING)).toBe('price');
     expect(closeKeyFor('price', unpriced({ estimated_price: 0 }), BILLING)).toBe('price');
+    expect(closeKeyFor('price', unpriced({ primary_line_price: 275 }), BILLING)).toBe('price');
+    for (const row of ASSESSMENT_AND_RE_SERVICE) expect(closeKeyFor('price', row, BILLING)).toBe('noPriceNeeded');
     expect(closeKeyFor('price', planVisit({ estimated_price: null, ai_extraction_enriched: pricedReading() }), BILLING)).toBe('noPriceNeeded');
     expect(closeKeyFor('price', unpriced({ is_callback: true }), BILLING)).toBe('noPriceNeeded');
     expect(closeKeyFor('price', unpriced({ status: 'completed' }), BILLING)).toBe('visitClosed');

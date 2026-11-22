@@ -9,8 +9,9 @@
 // Every 15 minutes in office hours this job reads each open visit the call agent booked in the last 7 days and
 // the stored reading of its call. Two problems, one Schedule bell each, raised once for a visit:
 //   service  the call named a one-time service and the visit is a plan visit.
-//   price    the visit is the one-time service the call named, it has no price, and the reading holds a price
-//            for that job: the total the call agreed, or the one-time price staff stated and the caller accepted
+//   price    the visit is the one-time service the call named (never a free re-service or a Waves Assessment),
+//            it has no price, and the reading holds a price for that job: the total the call agreed, or the
+//            one-time price staff stated and the caller accepted
 //            ("One-time service is $250, but it varies"). The booking never takes the stated price: the reading
 //            marks a hedge and an added charge the same way. So the bell shows the number to the office, and a
 //            person sets the price.
@@ -59,7 +60,7 @@ const CLOSED_VISIT_STATUSES = new Set([...VISIT_NEVER_RAN_STATUSES, 'completed']
 const CLOSED = Object.freeze({
   service: { reason: 'service_agrees', text: 'The visit and the call now agree on the service' },
   price: { reason: 'price_set', text: 'The visit has a price now' },
-  noPriceNeeded: { reason: 'price_not_needed', text: 'The visit is no longer a one-time visit that needs a price' },
+  noPriceNeeded: { reason: 'price_not_needed', text: 'The visit is no longer a visit that takes a price from the call' },
   visitClosed: { reason: 'visit_closed', text: 'The visit is done or cancelled' },
   gone: { reason: 'visit_gone', text: 'The visit is gone' },
 });
@@ -101,40 +102,60 @@ function judgeService(visit, billingByName) {
   return { verdict: 'problem', heard };
 }
 
-// The visit's own price: a stamped price (a stamped $0 too: a free visit is a decision), or a price decision
-// completion pricing honors over it (a primary-line price, a recorded discount).
+// The visit's own price: a stored amount on the visit or on its primary line, a stored $0 too (a free visit is
+// a decision). A discount alone is no price: completion still has no amount to bill.
 function visitHasPrice(visit) {
-  return visit.estimated_price != null || require('./completion-pricing').visitPriceDecisionRecorded(visit);
+  return visit.estimated_price != null || visit.primary_line_price != null;
 }
 
-// The price the reading holds for the job it names, inside the bounds a call booking accepts: the total the
-// call agreed ({ amount, agreed: true }), else the one-time price staff stated and the caller accepted
-// ({ amount, agreed: false }). null when it holds neither. A $0 total is a free booking, not a missing price.
-function readingPrice(reading) {
-  const { sanitizeQuotedCallPrice } = require('./call-booking-catalog');
-  const strict = reading.service_request.quoted_price_usd;
-  const amount = sanitizeQuotedCallPrice(strict != null ? strict : resolveStatedOneTimeCallPrice(reading));
-  return amount == null ? null : { amount, agreed: strict != null };
+// The visit's catalog row, in the shape the booking's price rule reads.
+const catalogRowOf = (visit) => ({ name: visit.row_name, service_key: visit.row_service_key, billing_type: visit.row_billing_type });
+
+// A visit a call booking never prices, whatever the call said (resolveCallBookingPrice refuses each): a service
+// that is not one-time, a free re-service, and a Waves Assessment, the free look-before-quote visit (a treatment
+// price said on the same call is the quote, not this visit's charge). Also a free callback.
+function takesNoCallPrice(visit) {
+  const row = catalogRowOf(visit);
+  return row.billing_type !== 'one_time' || Boolean(visit.is_callback)
+    || require('./call-booking-catalog').isReServiceCatalogRow(row)
+    || require('./assessment-booking').isAssessmentServiceRow(row);
+}
+
+// The price the reading holds for the job it names, as the booking's own price rule would put it on this
+// service (resolveCallBookingPrice: its bounds and its refusals): the total the call agreed, else the one-time
+// price staff stated and the caller accepted. null when it holds neither. A $0 total is a free booking, not a
+// missing price. `agreed` is true only for a total the reading does not mark as changed after it was accepted
+// (price_is_final false); a total the reading itself disputes (staff did not offer it, or the caller did not
+// accept it) is no price to show.
+function readingPrice(reading, catalogRow) {
+  const request = reading.service_request;
+  const strict = request.quoted_price_usd;
+  if (strict != null && (request.price_offered_by_staff === false || request.price_accepted_by_caller === false)) return null;
+  const { price, source } = require('./call-booking-catalog').resolveCallBookingPrice({
+    quotedPrice: strict != null ? strict : resolveStatedOneTimeCallPrice(reading), catalogRow,
+  });
+  return source === 'transcript' ? { amount: price, agreed: strict != null && request.price_is_final !== false } : null;
 }
 
 // What the visit and the reading of its call say about the price, as they stand now:
 //   problem  a one-time visit with no price, and the reading holds a price for that same job
 //            ({ verdict, amount, agreed });
-//   agrees   the visit needs no price from the call: it has one, it is not a one-time visit, or it is a free
-//            callback;
-//   unknown  the visit has no catalog row, the reading cannot be read or holds no price, or the price cannot
-//            be tied to this visit: the reading names another service than the visit's, or the call spoke of
-//            more than one property (the reading's price block does not say which job a price covers).
+//   agrees   the visit needs no price from the call: it has one, or a call booking never prices it (not a
+//            one-time service, a free re-service, a Waves Assessment, a free callback);
+//   unknown  the visit has no catalog row, the reading cannot be read, holds no price or disputes its own
+//            total, or the price cannot be tied to this visit: the reading names another service than the
+//            visit's, or the call spoke of more than one property (the reading's price block does not say
+//            which job a price covers).
 function judgePrice(visit) {
   if (!visit.row_billing_type) return { verdict: 'unknown' };
-  if (visit.row_billing_type !== 'one_time' || visit.is_callback || visitHasPrice(visit)) return { verdict: 'agrees' };
+  if (takesNoCallPrice(visit) || visitHasPrice(visit)) return { verdict: 'agrees' };
   const reading = visit.v2_extraction_status === 'valid' ? readingOf(visit) : null;
   const request = reading && reading.service_request;
   if (!request || typeof request !== 'object') return { verdict: 'unknown' };
   if (!nameKey(visit.row_name) || nameKey(request.specific_service_name) !== nameKey(visit.row_name)) return { verdict: 'unknown' };
   const others = reading.property && reading.property.additional_properties;
   if (Array.isArray(others) && others.length) return { verdict: 'unknown' };
-  const price = readingPrice(reading);
+  const price = readingPrice(reading, catalogRowOf(visit));
   return price ? { verdict: 'problem', ...price } : { verdict: 'unknown' };
 }
 

@@ -232,7 +232,7 @@ maybeDescribe('call booking check (live Postgres)', () => {
     await run(new Date('2026-11-21T22:30:00Z'));
     const [row] = await priceRowsFor(b.visitId);
     expect(row.done_at).not.toBeNull();
-    expect(row.resolution).toBe('The visit is no longer a one-time visit that needs a price');
+    expect(row.resolution).toBe('The visit is no longer a visit that takes a price from the call');
   });
 
   test('the office corrects a plan visit\'s service and sets no price: the service bell closes and the price bell rings', async () => {
@@ -251,6 +251,8 @@ maybeDescribe('call booking check (live Postgres)', () => {
 
   test.each([
     ['the visit has a price', { visitOver: { estimated_price: 250 } }, pricedCall()],
+    ['the visit has a price on its primary line', { visitOver: { primary_line_price: 250 } }, pricedCall()],
+    ['the reading disputes its own total', {}, pricedCall({ quoted_price_usd: 350, price_accepted_by_caller: false })],
     ['the visit is a free callback', { visitOver: { is_callback: true } }, pricedCall()],
     ['the call holds no price', {}, {}],
     ['the call spoke of a second property', {}, pricedCall({}, { property: { additional_properties: [{ city: 'Venice' }] } })],
