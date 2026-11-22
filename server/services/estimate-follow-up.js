@@ -236,13 +236,15 @@ async function hasInboundEmailSince(est, cutoff) {
 // handle it live. An inbound EMAIL in the same window pauses it too (SMS arm
 // checked first). Soft-fails if the tables aren't
 // present (e.g. fresh env) so we don't break the whole follow-up loop.
-async function hasRepliedRecently(est, days = 14, opts = {}) {
+async function hasRepliedRecently(est, days = 14, { sinceEstimate = false, ...opts } = {}) {
   const now = Date.now();
   const windowStart = new Date(now - days * 86400000);
-  // GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE (owner 2026-11-21), read at CALL time and defensively: many suites mock the
-  // whole feature-gates module with a bare object. Off = exactly the window above.
-  const sinceEstimate = require("../config/feature-gates").estimateReplyPauseSinceEstimateLive?.() === true;
-  const cutoff = sinceEstimate ? await replyPauseWindowStart(est, windowStart, now) : windowStart;
+  // GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE (owner 2026-11-21) applies to the engagement engine's follow-up EMAILS only
+  // (it passes { sinceEstimate: true }). safetyGate (the text stages, the deferred text replay, the payment-step follow-up)
+  // never passes it and keeps the full window, gate on or off. The gate is read at CALL time and defensively: many suites
+  // mock the whole feature-gates module with a bare object.
+  const clamp = sinceEstimate === true && require("../config/feature-gates").estimateReplyPauseSinceEstimateLive?.() === true;
+  const cutoff = clamp ? await replyPauseWindowStart(est, windowStart, now) : windowStart;
   return hasRepliedSince(est, cutoff, opts);
 }
 
@@ -255,11 +257,16 @@ function estimateCreatedMs(est, now) {
 }
 
 // Is there another estimate that went out to the same person before this one was made? Same person = the same
-// customer_id, a phone in one of the stored forms, or the same trimmed lower-cased email. A person with no identifier at
-// all matches nothing (the reply arms cannot match them either), so no read is made for them.
+// customer_id, a phone in one of the stored forms or with the same last ten digits in any format, or the same trimmed
+// lower-cased email. A missed match shortens the pause, so the phone match is generous: a false match only keeps today's
+// window, the safe side. A person with no identifier at all matches nothing (the reply arms cannot match them either),
+// so no read is made for them.
+// Why creation order is enough: any reply the clamp drops is older than this estimate's creation, and an estimate that
+// reply could be about went out before the reply, so it was made earlier still and this lookup finds it.
 async function hasEarlierSentEstimate(est, createdMs) {
   const customerId = est.customer_id || null;
   const phones = replyPhoneForms(est.customer_phone);
+  const digits = String(est.customer_phone || "").replace(/\D/g, "");
   const email = String(est.customer_email || "").trim().toLowerCase();
   if (!customerId && !phones.length && !email) return false;
   const row = await db("estimates")
@@ -269,6 +276,9 @@ async function hasEarlierSentEstimate(est, createdMs) {
     .andWhere(function () {
       if (customerId) this.where("customer_id", customerId);
       for (const phone of phones) this.orWhere("customer_phone", phone);
+      if (digits.length >= 10) {
+        this.orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits.slice(-10)]);
+      }
       if (email) this.orWhereRaw("LOWER(TRIM(customer_email)) = ?", [email]);
     })
     .first("id");
