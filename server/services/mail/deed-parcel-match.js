@@ -52,6 +52,13 @@ const namesPlatPart = (words) => words.split(/[^A-Z0-9]+/).some(isPlatPartWord);
 // A lot or block number has one letter at most ("12A", "B"). The map writes a letter in either case, and the list
 // of forms (mapForms) covers both cases of one letter, not every mix of two ("12Ab"): such a deed is not handled.
 const ONE_NUMBER = /^(?=.)[0-9]*[A-Z]?[0-9]*$/;
+// The capitals and digits of a name ("O'NEIL ESTATES" = ONEILESTATES). Two names are the same name up to this key:
+// spacing and punctuation differ on the map ("RYE  RANCH", "ST. JOHNS", "ST JOHN'S"). The query and the local
+// comparison both use it, on the name as written (no change of case).
+const lettersOf = (text) => text.replace(/[^A-Z0-9]/g, '');
+// A deed's name must leave a key of three characters at least, and the key may not end with SUBDIVISION: the map
+// adds that word to some plat names and leaves it out of others, so parseLegal drops it from the end of the name.
+const usableKey = (name) => lettersOf(name).length >= 3 && !lettersOf(name).endsWith('SUBDIVISION');
 
 /**
  * Lot, block and subdivision words from a deed description, or null when it is not one plain lot (a condo unit,
@@ -65,9 +72,10 @@ function parseLegal(description) {
   if (!m || SEVERAL_LOTS.test(m[3]) || namesPlatPart(m[3])) return null;
   if (!ONE_NUMBER.test(m[1]) || (m[2] && !ONE_NUMBER.test(m[2]))) return null;
   // "SAMPLE GROVE SUBDIVISION" is the plat "SAMPLE GROVE": the map adds that word to some names and leaves it out of
-  // others, and the plat-name grammar reads it as an optional part after the name.
-  const subdivision = m[3].replace(/( SUBDIVISION)+$/, '');
-  if (subdivision.length < 3) return null;
+  // others, and the plat-name grammar reads it as an optional part after the name. A mark around the word
+  // ("... SUBDIVISION.") changes nothing. A name whose key still ends with it ("... RESUBDIVISION") is not handled.
+  const subdivision = m[3].replace(/(?:[^A-Z0-9]+SUBDIVISION)+[^A-Z0-9]*$/, '');
+  if (subdivision.length < 3 || !usableKey(subdivision)) return null;
   return { lot: m[1], block: m[2] || null, subdivision };
 }
 
@@ -84,10 +92,6 @@ function mapForms(value) {
 }
 const sameNumber = (mapValue, deedValue) => typeof mapValue === 'string' && mapForms(deedValue).includes(mapValue);
 
-// The letters and digits of the deed's subdivision words ("O'NEIL ESTATES" = ONEILESTATES). Two names are the same
-// name up to this key: spacing and punctuation differ on the map ("RYE  RANCH", "ST. JOHNS", "ST JOHN'S").
-const lettersOf = (text) => text.replace(/[^A-Z0-9]/g, '');
-
 // The query is wider than the decision, and covers everything the decision reads as the same:
 //   lot, block   field IN (every form of the number, mapForms).
 //   subdivision  the deed's letters and digits in order, with anything between and after them:
@@ -97,14 +101,17 @@ const lettersOf = (text) => text.replace(/[^A-Z0-9]/g, '');
 // Shapes: field IN ('..', ...) and one LIKE, joined by AND. No OR, no function. The county's firewall answers these
 // shapes (measured 2026-11-22 on the lots of 69 real deeds: no rejection, about 0.5 s each, the same parcels as an
 // exact prefix) and rejects others with an HTML "Request Rejected" page (two UPPER(...) calls joined by AND or OR;
-// see also the 10-02 notes in county-parcel-gis.js). The map stores the names in capitals (no parcel's name has a
-// lower-case letter, counted 2026-11-22), so no function is needed. A rejected request is not JSON: it throws below,
+// see also the 10-02 notes in county-parcel-gis.js). A function on the name is not possible: the firewall also
+// rejects one UPPER(PAR_SUBDIV_NAME) LIKE next to the IN lists (69 of 69 lots, measured 2026-11-22). So the pattern
+// is in capitals, and the local comparison reads the name as the map sent it, as the query does: a lower-case
+// letter is not one of the deed's letters. The map stores the names in capitals (no parcel's name has a lower-case
+// letter, counted 2026-11-22). A rejected request is not JSON: it throws below,
 // an outage, never "no parcel". Only capitals and digits of the deed's text reach the where string.
 function parcelWhere(legal) {
   // The values parseLegal gives, and no other: capitals and digits for the numbers, LEGAL_PATTERN's signs in the name.
   const plain = (value, max) => typeof value === 'string' && value.length <= max && ONE_NUMBER.test(value);
   const named = typeof legal.subdivision === 'string' && /^[A-Z0-9][A-Z0-9 &'.-]{2,}$/.test(legal.subdivision)
-    && !namesPlatPart(legal.subdivision) && !/ SUBDIVISION$/.test(legal.subdivision);
+    && !namesPlatPart(legal.subdivision) && usableKey(legal.subdivision);
   if (!plain(legal.lot, 6) || !named || (legal.block && !plain(legal.block, 4))) throw new TypeError('parcelWhere needs the lot, block and subdivision of a parsed deed');
   const letters = lettersOf(legal.subdivision);
   const inList = (value) => mapForms(value).map((form) => `'${form}'`).join(', ');
@@ -193,7 +200,7 @@ function platRestKnown(rest) {
 //   'unknown'  the deed's words and then something else ("... ESTATES", "RYE RANCHES"): maybe the same land.
 //   'other'    other words: another name.
 function platRelation(mapName, deedWords) {
-  const rest = restAfterDeedWords(String(mapName || '').toUpperCase(), deedWords);
+  const rest = restAfterDeedWords(String(mapName || ''), deedWords);
   if (rest === null) return 'other';
   if (/^[A-Z0-9]/.test(rest)) return 'unknown'; // the deed's words end inside a word of the map's name
   const tail = rest.replace(/ +/g, ' ').trim();
@@ -246,7 +253,7 @@ function toParcel(attrs, legal) {
   // parcel has such a name, counted 2026-11-22).
   const sent = (key) => (typeof attrs[key] === 'string' ? attrs[key] : null);
   const asked = sameNumber(sent('PAR_SUBDIV_LOT'), legal.lot)
-    && hasDeedLetters((sent('PAR_SUBDIV_NAME') || '').toUpperCase(), lettersOf(legal.subdivision))
+    && hasDeedLetters(sent('PAR_SUBDIV_NAME') || '', lettersOf(legal.subdivision))
     && (!legal.block || sameNumber(sent('PAR_SUBDIV_BLOCK'), legal.block));
   if (!asked) throw new Error('parcel map sent a parcel that is not the lot asked for');
   const relation = platRelation(parcel.subdivision, legal.subdivision);

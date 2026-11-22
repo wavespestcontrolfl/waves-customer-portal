@@ -18,6 +18,9 @@ describe('parseLegal', () => {
     ['LOT 9 PHILLIPS UNITED SECOND ADD', { lot: '9', block: null, subdivision: 'PHILLIPS UNITED SECOND ADD' }],
     ['LOT 9 PHEASANT SECRET PHOENIX PBX', { lot: '9', block: null, subdivision: 'PHEASANT SECRET PHOENIX PBX' }],
     ['LOT 9 SAMPLE GROVE SUBDIVISION', { lot: '9', block: null, subdivision: 'SAMPLE GROVE' }],
+    ['LOT 9 SAMPLE GROVE SUBDIVISION.', { lot: '9', block: null, subdivision: 'SAMPLE GROVE' }],
+    ['LOT 9 SAMPLE GROVE-SUBDIVISION', { lot: '9', block: null, subdivision: 'SAMPLE GROVE' }],
+    ['LOT 9 SAMPLE GROVE. SUBDIVISION SUBDIVISION -', { lot: '9', block: null, subdivision: 'SAMPLE GROVE' }],
     ['LOT 9 SAMPLE SUBDIVISION GROVE', { lot: '9', block: null, subdivision: 'SAMPLE SUBDIVISION GROVE' }],
     ['  LOT   9   BLK  2   SAMPLE   GROVE ', { lot: '9', block: '2', subdivision: 'SAMPLE GROVE' }],
   ])('%s', (text, expected) => {
@@ -59,6 +62,11 @@ describe('parseLegal', () => {
     'LOT 12 PHIL ESTATES',
     'LOT 12 UNITY GROVE',
     'LOT 12 AB SUBDIVISION',
+    'LOT 12 SUBDIVISION',
+    'LOT 12 SAMPLE RESUBDIVISION',
+    'LOT 12 SAMPLE GROVESUBDIVISION.',
+    'LOT 12 A.-',
+    "LOT 12 A B'-",
     'LOT 12 SAMPLE GROVE UNIT3',
     'LOT 12 SAMPLE GROVE SEC12',
     'LOT 12AB SAMPLE GROVE',
@@ -112,6 +120,7 @@ describe('parcelWhere', () => {
       { lot: '171', block: null, subdivision: 'RYE RANCH PH2' }, { lot: '171', block: null, subdivision: 'RYE RANCH UNIT3' }, { lot: '171', block: null, subdivision: 'RYE RANCH PHIIA' },
       { lot: '171', block: null, subdivision: 'RYE RANCH PHN1A' }, { lot: '171', block: null, subdivision: 'RYE RANCH SECB' },
       { lot: '171', block: null, subdivision: 'RYE RANCH SUBDIVISION' }, { lot: '171', block: null, subdivision: 'RY' },
+      { lot: '171', block: null, subdivision: 'RYE RANCH SUBDIVISION.' }, { lot: '171', block: null, subdivision: 'RYE RANCH RESUBDIVISION' }, { lot: '171', block: null, subdivision: 'A.-' },
       // Two letters in a number: the forms would not cover every mix of capitals and lower case.
       { lot: '12AB', block: null, subdivision: 'RYE RANCH' }, { lot: '171', block: 'AB', subdivision: 'RYE RANCH' }];
     for (const legal of bad) expect(() => parcelWhere(legal)).toThrow(TypeError);
@@ -268,9 +277,15 @@ describe('queryParcels', () => {
         'RYE RANCH PH IIA IIB & IIC PB81/1', 'RYE RANCH PH IIB-1, IIB-2 AND IIB-3 PB81/1', 'RYE RANCH PH IV-C1 PB81/1', 'RYE RANCH PH IVC, IVD AND IVE PB81/1',
         'RYE RANCH PH I SUBPH IA AND IB-1 PB81/1', 'RYE RANCH PH II SUBPH II-B-1, II-B-2, II-B-3 & II-B-4 PB81/1', 'RYE RANCH PH VIB AND VB SUBPH V1B-2 AND VB-1 PB81/1',
         'RYE RANCH PH II SUBPHASE B-D PB81/1', 'RYE RANCH PH II-A-1A PB81/1', 'RYE RANCH PH IA-I PB81/1', 'RYE RANCH PH IV-B', 'RYE RANCH PH V-A, V-B AND V-C',
-        'RYE RANCH PHASE IIIC PB81/1', 'RYE RANCH PH 2 PB81/1', 'RYE RANCH PH 2A PB81/1', 'RYE RANCH PH I & II PB81/1', 'RYE RANCH  PH IV SUBPH IV-B-1, IV-B-2 AND  IV-B-3 PB81/1',
-        'Rye Ranch Ph I PB81/1'];
+        'RYE RANCH PHASE IIIC PB81/1', 'RYE RANCH PH 2 PB81/1', 'RYE RANCH PH 2A PB81/1', 'RYE RANCH PH I & II PB81/1', 'RYE RANCH  PH IV SUBPH IV-B-1, IV-B-2 AND  IV-B-3 PB81/1'];
       expect(await flags(legal, names)).toEqual(names.map(() => true));
+    });
+    test('the name is read as the map sent it, as the query reads it: lower case is not the capitals asked for', async () => {
+      // The pattern sent is in capitals. A name in lower case is not an answer to it.
+      await expect(flags(legal, ['Rye Ranch Ph I PB81/1'])).rejects.toThrow(/not the lot asked for/);
+      await expect(flags(legal, ['rye ranch'])).rejects.toThrow(/not the lot asked for/);
+      // Lower case after the deed's words is a form the grammar does not know: the parcel stays, the plat is unknown.
+      expect(await flags(legal, ['RYE RANCH Ph I PB81/1', 'RYE RANCH ph ii', 'RYE RANCHo'])).toEqual([false, false, false]);
     });
     test('another subdivision, another piece of land, or a form that was never seen', async () => {
       const names = ['RYE RANCH ESTATES', 'RYE RANCH ESTATES PH I PB81/1', 'RYE RANCH WEST PB81/1', 'RYE RANCH VILLAS PH VA-1 PB81/1', 'RYE RANCH IA PB81/1',
@@ -289,6 +304,7 @@ describe('queryParcels', () => {
     test('a deed that ends with SUBDIVISION asks for the base name, so the plat with and without that word are both in the answer', async () => {
       const named = parseLegal('LOT 171 RYE RANCH SUBDIVISION');
       expect(named.subdivision).toBe('RYE RANCH');
+      expect(parseLegal('LOT 171 RYE RANCH SUBDIVISION.')).toEqual(named);
       const fetchImpl = jest.fn(answer({ features: [
         feature({ PAR_SUBDIV_NAME: 'RYE RANCH SUBDIVISION PB81/1' }),
         feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'RYE RANCH PB81/2' }),
@@ -298,6 +314,7 @@ describe('queryParcels', () => {
       expect(parcels.map((p) => p.platKnown)).toEqual([true, true]);
       expect(chooseParcel({ sellerNames: [], parcels, permitsByParid: { 513309059: { permit_no: 'A' } } })).toEqual({ status: 'ambiguous' });
       await expect(queryParcels({ lot: '171', block: null, subdivision: 'RYE RANCH SUBDIVISION' }, { fetchImpl })).rejects.toThrow(TypeError);
+      await expect(queryParcels({ lot: '171', block: null, subdivision: 'RYE RANCH SUBDIVISION.' }, { fetchImpl })).rejects.toThrow(TypeError);
       expect(fetchImpl).toHaveBeenCalledTimes(1);
     });
     // No clock in this test: a pattern that backtracks over these lists does not return before Jest's time limit.
