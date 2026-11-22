@@ -361,6 +361,25 @@ const DETECTORS = Object.freeze([
       return { count: ids.length, ids, detail: { windowDays: WELCOME_AUDIT_WINDOW_DAYS, graceHours: WELCOME_AUDIT_GRACE_HOURS } };
     },
   },
+  {
+    // It reads the next 90 days of visits, so a finding can leave with nothing fixed: a record. The finding is the
+    // estimate's line, not each of its visits: one record per line, however many of its visits are in the window.
+    key: 'tier_saving_left_off_invoice',
+    moving: true,
+    label: 'Upcoming visits whose invoice would leave out the WaveGuard tier saving their estimate priced',
+    href: '/admin/invoices',
+    provenance: 'owner 2026-11-22 — 0 of 163 upcoming tier visits printed the WaveGuard line after GATE_INVOICE_ESTIMATE_DISCOUNT_LINES went on (#8329, #8343; fixed in #8355)',
+    async run({ now }) {
+      const { tierSavingsLeftOffInvoices } = require('./invoice-tier-line-check');
+      const { checked, findings } = await tierSavingsLeftOffInvoices(db, { today: etDateString(now) });
+      return {
+        count: findings.length,
+        ids: findings.map((f) => `${f.visitId} (${f.serviceKey}, ${f.tier})`),
+        itemKeys: findings.map((f) => `${f.estimateId}:${f.serviceKey}`),
+        detail: { checked },
+      };
+    },
+  },
   // History-wide completion ↔ report record invariants (integrity audit
   // 2026-09-02). closeout_failed_facts above reads yesterday only and skips
   // `pending` facts, so a missing record / token / tracker stamp / customer

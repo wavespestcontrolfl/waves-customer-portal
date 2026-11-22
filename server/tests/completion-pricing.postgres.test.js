@@ -287,9 +287,9 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       const { lineItems } = await Invoice.buildLineItemsForScheduledService(jobId, { database: trx, fallbackAmount: 85 });
       expect(lineItems.map((row) => [row.description, Number(row.amount)])).toEqual([['Pest Control', 100], ['WaveGuard Gold', -15]]);
     } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
-    // ops/agents/estimate-discount-lines-report.js reads this visit on the migrated schema.
+    // ops/agents/estimate-discount-lines-report.js and the nightly check read this visit on the migrated schema.
     await trx('customers').where({ id: customerId }).update({ pipeline_stage: 'active_customer' });
-    const { upcomingEstimateVisits } = require('../../ops/agents/estimate-discount-lines-report');
+    const { upcomingEstimateVisits } = require('../services/invoice-tier-line-check');
     const today = require('../utils/date-only').dateOnlyString(job.scheduled_date);
     expect((await upcomingEstimateVisits(trx, { today, days: 1 })).map((row) => row.id)).toContain(jobId);
   }));
@@ -311,6 +311,35 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     // An empty tier column reads the saved recurring block, as the accept does.
     await trx('estimates').where({ id: estimateId }).update({ waveguard_tier: null });
     expect((await pricing.acceptedVisitBreakdown(job, { database: trx })).breakdown.discounts).toEqual([{ name: 'WaveGuard Gold', dollars: 15 }]);
+  }));
+  // The nightly check (lead-to-cash sweep, tier_saving_left_off_invoice) reads the engine's own line record: a saving
+  // that record priced at the tier rate and the invoice cannot name is a finding; one the invoice names is not.
+  test('the nightly check flags a tier saving the invoice leaves unnamed, and passes one it names', () => rollbackTest(async (trx) => {
+    const { jobId, customerId, estimateId } = await fixture(trx, { jobPrice: 85 });
+    await trx('scheduled_services').where({ id: jobId }).update({ primary_line_price: null });
+    await trx('customers').where({ id: customerId }).update({ pipeline_stage: 'active_customer' });
+    const engineResult = { lineItems: [{ service: 'pest_control', perApp: 100, visitsPerYear: 4, annualBeforeDiscount: 400,
+      annualAfterDiscount: 340, discount: { appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.15 }] } }] };
+    const row = { service: 'pest_control', name: 'Pest Control', mo: 33.33, monthly: 33.33, basePrice: 100, perTreatment: 100,
+      visitsPerYear: 4, annualAfterDiscount: 340 };
+    const { tierSavingsLeftOffInvoices } = require('../services/invoice-tier-line-check');
+    const job = await trx('scheduled_services').where({ id: jobId }).first();
+    const today = require('../utils/date-only').dateOnlyString(job.scheduled_date);
+    const findingsFor = async () => (await tierSavingsLeftOffInvoices(trx, { today, days: 1 })).findings.filter((f) => f.visitId === jobId);
+    process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+    try {
+      // The recurring block saved the tier with its rate: the invoice names it.
+      await trx('estimates').where({ id: estimateId }).update({ estimate_data: { engineResult,
+        result: { recurring: { tier: 'Gold', waveGuardTier: 'Gold', discount: 0.15, services: [row] } } } });
+      expect(await findingsFor()).toEqual([]);
+      // The block saved no rate, so the invoice cannot name the saving the engine priced at the Gold rate.
+      await trx('estimates').where({ id: estimateId }).update({ estimate_data: { engineResult,
+        result: { recurring: { tier: 'Gold', waveGuardTier: 'Gold', services: [row] } } } });
+      expect((await pricing.acceptedVisitBreakdown(job, { database: trx })).reason).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', tier: 'gold' }]);
+    } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
+    // Gate off: every invoice keeps one line by design, so the check reads nothing.
+    expect(await tierSavingsLeftOffInvoices(trx, { today, days: 1 })).toEqual({ checked: 0, findings: [] });
   }));
 
 });
