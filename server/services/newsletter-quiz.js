@@ -32,7 +32,7 @@
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
-const { etDateString } = require('../utils/datetime-et');
+const { etCalendarDaysUntil } = require('../utils/datetime-et');
 
 // Body substitution tokens. Hyphenated like {{greeting-name}} / {{grass-type}}
 // so a model-written _italic_ marker can't split them mid-render. {{quiz}} is
@@ -667,9 +667,6 @@ async function newsletterIssuePolls({ newsletterType, knex = require('../models/
 
 /** A poll issue older than this many days (by ET calendar date) leaves its result out of the next issue. */
 const POLL_RESULT_MAX_AGE_DAYS = 45;
-const DAY_MS = 24 * 60 * 60 * 1000;
-// Whole days from one ET calendar date to another (both 'YYYY-MM-DD').
-const daysBetweenETDates = (from, to) => Math.round((Date.parse(`${to}T12:00:00Z`) - Date.parse(`${from}T12:00:00Z`)) / DAY_MS);
 
 /**
  * The vote counts of a Waves Pest Insider's last poll, for the issue sent on
@@ -691,7 +688,8 @@ async function newsletterLastPoll({ newsletterType, sendDate, knex = require('..
   });
   const quizId = issue ? pollInIssue(issue, pollIdsFor(newsletterType)) : null;
   if (!quizId) return null;
-  if (daysBetweenETDates(etDateString(new Date(issue.issue_time)), sendDate) > POLL_RESULT_MAX_AGE_DAYS) return null;
+  // Whole ET calendar days from the issue's day to the new issue's day.
+  if (etCalendarDaysUntil(sendDate, new Date(issue.issue_time)) > POLL_RESULT_MAX_AGE_DAYS) return null;
   const rows = await knex('newsletter_send_deliveries')
     .where({ send_id: issue.id, quiz_id: quizId })
     .whereNotNull('quiz_answered_at')
