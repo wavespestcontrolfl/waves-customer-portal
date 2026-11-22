@@ -354,6 +354,9 @@ function weekendStayReason({ weekendMove, weekend, customerId, isWeekend }) {
  * (new date + technician; its date is null in the first read, before the decisions).
  */
 function visitKind({ weekendMove, weekend, v, outcome }) {
+  // A visit of a line this run does not move never changes date or technician (the day-60 resolver gives it no date:
+  // second-tech-handover-weekend.js stayStillReason).
+  if (outcome === 'visit_other_line') return 'skip';
   if (weekend && weekend.newDates.has(v.id)) return 'date';
   if (outcome === 'off_day') return weekendMove && !weekend ? 'date' : 'stay_off';
   return outcome === 'move' ? 'tech' : 'skip';
@@ -367,10 +370,10 @@ function noteCandidate(byCustomer, p, isCandidate) {
   byCustomer.set(p.customer_id, entry);
 }
 
-/** One visit the run changes: counted by weekday and line, listed in the moves (a date move also names the new day). */
 /** The dry run's per-line counter: series under their template line, visits under their OWN line. */
 const lineCount = (plan, line) => plan.would_change.by_line[line] || (plan.would_change.by_line[line] = { series: 0, visits: 0 });
 
+/** One visit the run changes: counted by weekday and line, listed in the moves (a date move also names the new day). */
 function recordMove(plan, p, v, kind, { weekend, dateMoveCustomers }) {
   plan.would_change.visits += 1;
   bump(plan.would_change.by_weekday, WEEKDAYS[dayOfWeekOfDate(v.scheduled_date)]);

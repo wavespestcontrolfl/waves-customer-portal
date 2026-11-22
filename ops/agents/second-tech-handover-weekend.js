@@ -253,6 +253,9 @@ function stayStillReason(v, from, facts) {
   if (!v.recurring_parent_id) return 'first_visit';
   if (v.is_recurring !== true) return 'booster_visit';
   if (v.technician_id !== from) return v.technician_id ? 'other_technician' : 'unassigned';
+  // One appointment changed to a service this run does not move (lawn, rodent exclusion): it stays with --from on its
+  // date, so a projection that needs it re-dated keeps the customer whole. `facts.lines` = the run's --lines.
+  if (facts.lines && v.line !== undefined && !facts.lines.includes(v.line)) return 'visit_other_line';
   return facts.stayStill.get(v.id) || null;
 }
 
@@ -512,7 +515,7 @@ async function decideWeekend(db, { plan, parents, visits, from, to, workDays, st
     }),
   }));
   if (!candidates.length) return { kept: new Map(), newDates: new Map(), anchors: [] };
-  const facts = await loadWeekendFacts(db, { to, from, start, today, now, candidates, lockNeighbors });
+  const facts = { ...(await loadWeekendFacts(db, { to, from, start, today, now, candidates, lockNeighbors })), lines: plan.lines };
   // The hours the run's technician-only moves give --to: other customers' always; a weekend customer's own only while that
   // customer moves and the visit keeps its date (resolveWeekendMoves gives the rest back).
   const weekendIds = new Set(candidates.map((c) => c.customer_id));

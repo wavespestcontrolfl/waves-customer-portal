@@ -1115,6 +1115,13 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     }
     const other = series(SAT, { count: 1, visitExtra: { technician_id: OTHER } });
     expect((await run([other])).kept.get(other.customer_id)).toBe('other_technician');
+    // One appointment changed to a service the run does not move (its own line): it is never re-dated, so a Saturday
+    // one keeps the customer whole. The same visit in a run that moves its line is re-dated as usual.
+    const lawnVisit = series(SAT, { count: 1, visitExtra: { line: 'lawn' } });
+    const withLines = (c, lines) => ({ ...clearFacts([c]), lines });
+    expect((await run([lawnVisit], { facts: withLines(lawnVisit, ['general', 'termite']) })).kept.get(lawnVisit.customer_id)).toBe('visit_other_line');
+    const pestVisit = series(SAT, { count: 1, visitExtra: { line: 'general' } });
+    expect((await run([pestVisit], { facts: withLines(pestVisit, ['general', 'termite']) })).kept.has(pestVisit.customer_id)).toBe(false);
     const first = series(SAT, { count: 1 });
     first.series[0].live[0].recurring_parent_id = null;
     expect((await run([first])).kept.get(first.customer_id)).toBe('first_visit');
