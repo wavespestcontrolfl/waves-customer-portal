@@ -554,8 +554,8 @@ async function loadSittings(dbi, runs) {
 /**
  * { candidateSittings, baselineSittings } for a decision (newest sitting first, each run's own baseline beside
  * it), or { skipped } / { failed } / { rejected } (attempts used up). Sits until the candidate has examSittings()
- * finished runs and no unfinished one, one sitting a pass. A pass that does not finish its sitting ends the
- * tick, and the next tick goes on from the rows it left.
+ * finished runs, one sitting a pass. A pass that does not finish its sitting ends the tick, and the next tick
+ * goes on from the rows it left.
  */
 async function runCandidateExam({ dbi, patch, runner, lock, now }) {
   const wanted = examSittings();
@@ -566,11 +566,16 @@ async function runCandidateExam({ dbi, patch, runner, lock, now }) {
     const rows = await candidateRunRows(dbi, patch.id);
     const complete = rows.filter((r) => r.status === 'complete');
     const open = rows[0] && rows[0].status !== 'complete' ? rows[0] : null;
-    if (!open && complete.length) {
+    // A run a crash left 'running' is always finished first, as the nightly sweep does: it holds the one-running
+    // index, and its cohort is already paid for.
+    const stranded = Boolean(open && open.status === 'running');
+    if (complete.length && !stranded) {
+      // Before any further paid sitting, a failed one that would be resumed included: enough finished sittings
+      // for the count as it is set NOW (it may have been lowered since a sitting failed), or sittings the bar
+      // already refuses for good, are decided on what there is.
       const done = complete.length >= wanted;
       const sittings = await loadSittings(dbi, complete.slice(0, wanted));
       if (!sittings) return { failed: 'baseline_missing' };
-      // Before the next paid pair: sittings the bar already refuses for good are decided on what there is.
       if (done || decidePromotion(sittings).final) return sittings;
     }
     const current = pass ? await dbi(PATCHES).where({ id: patch.id }).first() : patch;
@@ -656,21 +661,27 @@ async function raiseRuleAlert({ notify, patchNo, patchId, kind, reason }) {
 
 // The exam that earned the decision must still describe the live setup: same model and same
 // effective voice profile (a profile approval or a model swap between an observe-mode decision and
-// its activation, or a resumed run, leaves the base identity unchanged). null = still valid.
+// its activation, or a resumed run, leaves the base identity unchanged). The bar it met must also be at
+// least the bar as it is set now: a decision recorded on fewer sittings a side, or with an unsafe rise the
+// allowance no longer admits, is not acted on. null = still valid.
 async function staleEvidenceReason(dbi, cand) {
   const { EXAM_LEG_ROUTES } = require('./sms-sealed-eval');
   const run = cand.exam_run_id ? await dbi('sms_sealed_eval_runs').where({ id: cand.exam_run_id }).first('status', 'model', 'voice_profile_version') : null;
   if (!run || run.status !== 'complete') return 'exam_missing';
   if (run.model !== EXAM_LEG_ROUTES[EXAM_LEG].model) return 'exam_model_changed';
   const profile = await require('./sms-shadow-drafter').resolveEffectiveVoiceProfile({ dbi });
-  return (run.voice_profile_version ?? null) === (profile?.version ?? null) ? null : 'exam_profile_changed';
+  if ((run.voice_profile_version ?? null) !== (profile?.version ?? null)) return 'exam_profile_changed';
+  // A decision from before the sittings settings has neither key: it was one sitting a side with no net rise.
+  const detail = cand.decision_detail || {};
+  const sat = detail.sittings ? Math.min(Number(detail.sittings.candidate) || 0, Number(detail.sittings.baseline) || 0) : 1;
+  return sat < examSittings() || (Number(detail.unsafeRise) || 0) > unsafeAllowance() ? 'bar_changed' : null;
 }
 
 /**
  * Mark a decided candidate active and retire the previous active patch, in one transaction. The
  * partial unique index keeps it to one active row. Refuses a candidate whose parent is no longer
  * the active patch or whose base version, model or voice profile moved since it was examined (the exam no longer
- * describes the live prompt). Needs mode 'true'.
+ * describes the live prompt), or whose decision met a weaker bar than the one set now. Needs mode 'true'.
  */
 async function promoteCandidate({ dbi = db, patchId, now = new Date(), notify } = {}) {
   if (patchLib.promptAutopromoteMode() !== 'true') return { skipped: 'not_live_mode' };

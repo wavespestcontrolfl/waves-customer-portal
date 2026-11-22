@@ -959,6 +959,74 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         expect(calls).toHaveLength(4);
       });
 
+      test('a sitting count lowered after a sitting failed: the finished sittings decide, and the failed run is not resumed', async () => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '2';
+        setMode('observe');
+        const items = await seedItems();
+        const patch = await insertPatch({ over: { mode_at_creation: 'observe' } });
+        const { runner, calls } = sittingRunner({ items, failCandidate: 1 });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ failed: 'exam_not_complete' });
+        expect(calls).toHaveLength(4);
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '1';
+        expect(await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + DAY), runner, lock: lockThrough })).toEqual({ decided: 'would_promote', patchId: patch.id });
+        expect(calls).toHaveLength(4);
+        const [first, failed] = await candidateRuns(patch.id);
+        expect(failed.status).toBe('failed');
+        expect(await rowOf(patch.id)).toMatchObject({ exam_run_id: first.id, baseline_run_id: first.baseline_run_id });
+        expect((await rowOf(patch.id)).decision_detail).toMatchObject({ sittings: { candidate: 1, baseline: 1 } });
+      });
+
+      test('a sitting a crash left running is still finished first (it holds the one-running index), then the newest sittings decide', async () => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '1';
+        setMode('observe');
+        const items = await seedItems();
+        const patch = await insertPatch({ over: { mode_at_creation: 'observe' } });
+        const version = patchLib.stampPatchVersion(baseVersion(), patch.version_tag);
+        const live = drafter.currentPromptVersion();
+        const firstBase = await insertRun({ items, version: live, over: { started_at: new Date(NOW.getTime() - 5 * 3600_000) } });
+        await insertRun({ items, version, patchId: patch.id, baselineId: firstBase.id, overall: 7, actions: 6.5, over: { started_at: new Date(NOW.getTime() - 4 * 3600_000) } });
+        const secondBase = await insertRun({ items, version: live, over: { started_at: new Date(NOW.getTime() - 3 * 3600_000) } });
+        const stranded = await insertRun({ items, version, patchId: patch.id, baselineId: secondBase.id, overall: 7, actions: 6.5, status: 'running', over: { started_at: new Date(NOW.getTime() - 2 * 3600_000) } });
+        const { runner, calls } = sittingRunner({ items });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ decided: 'would_promote', patchId: patch.id });
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({ runId: stranded.id });
+        expect(await rowOf(patch.id)).toMatchObject({ exam_run_id: stranded.id, baseline_run_id: secondBase.id });
+        expect(await trx('sms_sealed_eval_runs').where({ status: 'running' })).toHaveLength(0);
+      });
+
+      // A decision recorded in observe mode is activated only when it meets the bar as it is set at activation.
+      // Each case: the settings when the decision is recorded, then the settings when the loop goes live.
+      test.each([
+        ['on one sitting, and the count is 2 at activation', { sittings: '1' }, { sittings: '2' }, 'bar_changed'],
+        ['with a rise of 1.5, and the allowance is 1 at activation', { sittings: '2', allowance: '1.5' }, { sittings: '2', allowance: '1' }, 'bar_changed'],
+        ['on three sittings, and the count is 2 at activation', { sittings: '3', allowance: '1.5' }, { sittings: '2', allowance: '1.5' }, null],
+        ['with the settings unchanged', { sittings: '2', allowance: '1.5' }, { sittings: '2', allowance: '1.5' }, null],
+      ])('a decision recorded in observe mode %s', async (_name, recorded, live, refused) => {
+        const set = ({ sittings, allowance = '0' }) => {
+          process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = sittings;
+          process.env.PROMPT_AUTOPROMOTE_UNSAFE_ALLOWANCE = allowance;
+        };
+        set(recorded);
+        setMode('observe');
+        const items = await seedItems();
+        const patch = await insertPatch({ over: { mode_at_creation: 'observe' } });
+        // With an allowance: 2 and 1 unsafe against 0, an average rise of 1.5 on two sittings (1 on three).
+        const { runner } = sittingRunner({ items, candidates: recorded.allowance ? [{ unsafe: 2 }, { unsafe: 1 }] : [] });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ decided: 'would_promote', patchId: patch.id });
+        runner.mockClear();
+        set(live);
+        setMode('true');
+        const out = await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 2 * DAY), runner, lock: lockThrough, notify: jest.fn() });
+        expect(runner).not.toHaveBeenCalled();
+        if (refused) {
+          expect(out).toEqual({ rejected: patch.id, reason: refused });
+          expect((await rowOf(patch.id)).status).toBe('rejected');
+        } else {
+          expect(out).toMatchObject({ promoted: patch.id });
+        }
+      });
+
       test('the sitting count is capped at 3 a side, whatever the setting says', async () => {
         process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '9';
         const items = await seedItems();
