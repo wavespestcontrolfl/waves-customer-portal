@@ -3570,12 +3570,12 @@ Owner 2026-11-13: "Use your approved texting voice for the portal AI" (asked in 
 
 **Revisit if:** Hunter or Rain Bird opens API access to contractors, or the step 1 count shows many Orbit B-hyve or Rachio timers (their developer terms were not checked).
 
-## 2026-11-21 — Estimate tool shows Tree density only when a picked service reads it
+## 2026-11-21 — Estimate tool shows Tree density only when a picked service can read it
 
-**Decision:** The Tree density box in the staff estimate tool (`EstimateToolViewV2.jsx`) renders only when a picked service has a price or a review reason that reads tree density with the inputs the form has now: Tree & Shrub while it has no tree count (typed or from the lookup), recurring mosquito, a turf-priced service while the lawn area is not measured, and the flea exterior spray. The one rule is `treeDensityAffectsPrice(form)` in `client/src/lib/estimateEngine.js`. The box is hidden, never cleared: the lookup still fills the value, the estimate still saves it, and the engine request is the same.
+**Decision:** The Tree density box in the staff estimate tool (`EstimateToolViewV2.jsx`) renders only when a picked service can read tree density: Tree & Shrub, recurring mosquito, the lawn family priced from lawn area (lawn care, one-time lawn, dethatching, top dressing) and the flea exterior spray. The one rule is `pickedServiceCanReadTreeDensity(form)` in `client/src/lib/estimateEngine.js`. The box is hidden, never cleared: the lookup still fills the value, the estimate still saves it, and the engine request is the same.
 
 **Context:** An audit of 106 estimates (2026-09-08 to 2026-11-21) found the owner lowered tree density by hand on 28 homes and never raised it. On 27 of the 28, no picked service was Tree & Shrub, palm or mosquito. Tree density has not moved a pest price since 2026-07-30 (entry above).
 
-**Reasoning:** A box that cannot change the price on screen invites a correction that does nothing. The owner approved the change on 2026-11-21 (reply "1, 2" to the audit page). Lawn and flea exterior stay in the rule because their prices or reviews can read tree density; hiding the box there would hide a control that matters.
+**Reasoning:** A box that cannot change the price on screen invites a correction that does nothing. The owner approved the change on 2026-11-21 (reply "1, 2" to the audit page). The rule is service-level on purpose. Whether a picked service reads the density for one estimate also depends on other inputs (a tree count, a measured lawn area, the exterior flea area, a commercial property), and three tries at mirroring those engine rules in the form each missed a case, one of which hid the box where it changed a price. So the box may still show where it changes nothing, as it did on every estimate before; it hides only when no picked service has any read of it.
 
 **Revisit if:** a new service starts to read tree density (add its form flag to the rule), or pest pricing reads tree density again.

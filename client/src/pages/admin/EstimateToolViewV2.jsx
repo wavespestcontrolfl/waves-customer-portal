@@ -29,7 +29,7 @@ import {
   normalizePreSlabProductKey,
   normalizeTrenchingProductKey,
   normalizeTrenchingRate,
-  treeDensityAffectsPrice,
+  pickedServiceCanReadTreeDensity,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
@@ -7028,10 +7028,7 @@ export default function EstimateToolViewV2({
                     ]}
                   />
                 </Field>{" "}
-                {treeDensityAffectsPrice(form, {
-                  lookupTreeCount: enrichedProfile?.treeCount || enrichedProfile?.estimatedTreeCount,
-                  turfPricedUnconfirmed: hasTurfPricedSelection && confirmedTurfSqFt === null,
-                }) && (
+                {pickedServiceCanReadTreeDensity(form) && (
                   <Field label="Tree Density" id="estimate-treeDensity" className="mb-4">
                     <SelectV2
                       k="treeDensity"

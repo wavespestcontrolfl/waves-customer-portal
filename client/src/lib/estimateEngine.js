@@ -733,29 +733,34 @@ export function rodentBaitWaveguardFlags() {
   return { tierQualifier: RODENT_BAIT.tierQualifier, excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount };
 }
 
-// True when a service picked on the estimate form has a price (or a review
-// reason) that reads Tree density with the inputs the form has now. The
+// True when a service picked on the estimate form CAN read Tree density. The
 // estimate tool shows the Tree density box only then; the form value itself
-// always flows unchanged (hidden, never cleared). Tree density does NOT move a
-// pest price (owner directive 2026-07-30), nor mosquito one-time, misting,
-// palm injection, termite or rodent. What does read it (server
-// pricing-engine/service-pricing.js, and the form's own turf review):
-//   Tree & Shrub (svcTs): the tree estimate it falls back to when it has no
-//     tree count. The request sends a typed count (zero included), else the
-//     lookup's positive count, so the density is read only with neither.
-//   Recurring mosquito (svcMosquito): the tree pressure factor and the
-//     heavy-trees monthly recommendation.
-//   Turf-priced services with no measured lawn area (turfPricedUnconfirmed,
-//     the form's own hasTurfPricedSelection && no Measured Turf): the "heavy
-//     tree canopy" turf review, and the fallback lawn estimate's complexity
-//     score. A measured lawn area replaces both.
-//   Flea exterior spray (svcFleaExterior): its tree-density adjustment.
-export function treeDensityAffectsPrice(form = {}, { lookupTreeCount, turfPricedUnconfirmed = false } = {}) {
-  const treeCountKnown = String(form.treeCount ?? "").trim() !== "" || parseInt(lookupTreeCount, 10) > 0;
+// always flows unchanged (hidden, never cleared).
+//
+// Service-level on purpose. Whether a picked service reads the density for
+// THIS estimate also depends on other inputs (a tree count, a measured lawn
+// area, the exterior flea area, a commercial property). The form does not
+// mirror those engine rules: one missed case would hide a control that
+// changes a price. So the box may show where it changes nothing, as it did on
+// every estimate before, and it hides only when no picked service has any
+// read of it. Add a service's flag here when its pricer starts to read
+// tree density.
+//
+// Readers (server pricing-engine): Tree & Shrub (the no-count tree estimate),
+// recurring mosquito (tree pressure, monthly recommendation), the lawn family
+// priced from lawn area (the fallback lawn estimate's complexity score and
+// the "heavy tree canopy" turf review; commercial lawn too), and the flea
+// exterior spray (its tree-density adjustment). Non-readers: recurring and
+// one-time pest (owner directive 2026-07-30), one-time mosquito, misting,
+// palm injection, plugging, termite, rodent and the other specialty services.
+export function pickedServiceCanReadTreeDensity(form = {}) {
   return !!(
-    (form.svcTs && !treeCountKnown) ||
+    form.svcTs ||
     form.svcMosquito ||
-    turfPricedUnconfirmed ||
+    form.svcLawn ||
+    form.svcOnetimeLawn ||
+    form.svcDethatch ||
+    form.svcTopdress ||
     form.svcFleaExterior
   );
 }
