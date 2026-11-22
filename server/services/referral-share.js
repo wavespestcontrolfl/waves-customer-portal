@@ -27,10 +27,19 @@ const REFERRAL_CARD_COPY = Object.freeze({
 // The render-side card: static copy, shown only while the live program is
 // active. Suppressed (null) on any settings failure — an unconfigured or
 // broken environment must not advertise rewards it cannot honor.
-async function composeReferralCard({ referralEngine = require('./referral-engine') } = {}) {
-  const settings = await referralEngine.getLiveSettings();
+// GATE_REFERRAL_STEP2 on (owner 2026-11-21): adds `offer`, the one line with the
+// friend's credit and the member's reward, amounts from the live settings through
+// referralOfferDecision (the one place that reads the gate, the amounts and the
+// yearly limit). `headline` stays as it is: cached client builds print it in an h2.
+// A read: nothing here enrolls a promoter or writes. Gate off, or no customer id,
+// or no promise to make: the static copy exactly.
+async function composeReferralCard({ referralEngine = require('./referral-engine'), customerId = null, conn = null } = {}) {
+  const settings = conn ? await referralEngine.getLiveSettings(conn) : await referralEngine.getLiveSettings();
   if (!settings?.program_active) return null;
-  return { ...REFERRAL_CARD_COPY };
+  if (!customerId || !isEnabled('referralStep2')) return { ...REFERRAL_CARD_COPY };
+  const decision = await referralEngine.referralOfferDecision(conn || require('../models/db'), customerId);
+  const offer = decision.skip ? '' : step2.shareCardOffer(decision);
+  return offer ? { ...REFERRAL_CARD_COPY, offer } : { ...REFERRAL_CARD_COPY };
 }
 
 function formatRefereeAmount(cents) {
