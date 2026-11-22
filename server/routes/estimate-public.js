@@ -10933,6 +10933,17 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
     const pricingBundle = await buildPricingBundle(estimateForPricing);
+    // Frozen-restart cadence rule (GH r22 P1, relaxing the r21 guard): the
+    // estimate page ALWAYS serializes selectedFrequency — it falls back to
+    // the first offered frequency — so the submitted key is allowed only
+    // when it IS the stored offer's deterministic default; any other key
+    // would accept a cadence/price the mint never offered.
+    // A plan offer's quote too: the waived setup fee belongs to the quarterly plan it opens on, never to a
+    // bi-monthly or monthly pick. Asked as soon as the price list exists, before every check below: a pick the
+    // offer cannot take answers this 409, never "save a card" (402) or "not available" (400) first.
+    const frozenFrequency = frozenOfferFrequencyRefusal(estimate, selectedFrequencyKey,
+      Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : []);
+    if (frozenFrequency) return res.status(409).json(frozenFrequency);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
     if (quoteRequirement.quoteRequired) {
       const needsManagerApproval = quoteRequirement.reason === 'st_augustine_dethatching';
@@ -11487,15 +11498,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
     }
-    // Frozen-restart cadence rule (GH r22 P1, relaxing the r21 guard): the
-    // estimate page ALWAYS serializes selectedFrequency — it falls back to
-    // the first offered frequency — so the submitted key is allowed only
-    // when it IS the stored offer's deterministic default; any other key
-    // would accept a cadence/price the mint never offered.
-    // A plan offer's quote too: the waived setup fee belongs to the quarterly plan it opens on, never to a
-    // bi-monthly or monthly pick. Before any billing or booking.
-    const frozenFrequency = frozenOfferFrequencyRefusal(estimate, selectedFrequencyKey, pricingFrequencies);
-    if (frozenFrequency) return res.status(409).json(frozenFrequency);
+    // (A frozen offer's cadence was judged above, where the price list is built.)
     // Tier-aware annual-prepay eligibility (codex r10 P1). Mosquito ladder
     // entries carry their own annualPrepayEligible (finalizePricingBundle);
     // that flag decides for the SELECTED tier — the stored-mix rule remains

@@ -5220,6 +5220,27 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
     expect(plain.data?.code).not.toBe('plan_offer_frozen');
   });
 
+  // The cadence is judged before the card check: a pick the offer cannot take is never asked to save a card first.
+  test.each(['monthly', 'no-such-cadence'])('an offer quote refuses the cadence %s (409 plan_offer_frozen) before the card check, and stays open', async (key) => {
+    const RecurringCards = require('../services/recurring-card-on-file');
+    const spies = [
+      jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue({ enforced: true, required: true, exemptReason: null }),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({ ok: false }),
+    ];
+    try {
+      resetStore(offerQuote({ id: 'est-plan-offer-3', token: 'tok-plan-offer-3-x012345' }));
+      db.__state.tables.customers = [leadCustomer()];
+      const res = await putAccept('tok-plan-offer-3-x012345', { ...heldSlot('est-plan-offer-3'), selectedFrequency: key });
+      expect(res.status).toBe(409);
+      expect(res.data).toEqual({ error: 'This offer is for the plan as shown. For a different plan, call or text us.', code: 'plan_offer_frozen' });
+      expect(RecurringCards.verifyRecurringCardIntent).not.toHaveBeenCalled();
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    } finally {
+      while (spies.length) spies.pop().mockRestore();
+    }
+  });
+
   test('an offer quote with the selection the page sends by default passes and the accept commits', async () => {
     resetStore(offerQuote({ id: 'est-plan-offer-2', token: 'tok-plan-offer-2-x012345' }));
     db.__state.tables.customers = [leadCustomer()];

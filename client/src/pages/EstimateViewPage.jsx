@@ -11234,8 +11234,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {/* Pest visit-preference toggles ("Skip parts you don't need")
               live BELOW the schedule card (owner directive). Glass removes
               the customize section entirely — zero lifetime toggle clicks
-              (owner directive); pre-checked defaults still apply. */}
-          {serviceMode === 'recurring' && !glassContent && renderFlags.showPestRecurringAddOns === true
+              (owner directive); pre-checked defaults still apply. A fixed quote
+              (a restart, a plan offer) shows none: PUT /preferences refuses it. */}
+          {serviceMode === 'recurring' && !glassContent && !restartQuote && renderFlags.showPestRecurringAddOns === true
             ? services
               .filter((section) => section.isPest && section.isRecurring)
               .map((section) => {

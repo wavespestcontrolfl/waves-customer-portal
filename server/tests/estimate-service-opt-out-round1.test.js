@@ -404,8 +404,11 @@ describe('refuseFrozenRestartMutation (PR #3671 GH r21 P1 — restart quotes are
       const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
       const accept = src.slice(src.indexOf("router.put('/:token/accept'"), src.indexOf("router.put('/:token/select-tier'"));
       const oneTime = accept.indexOf('if (frozenOffer && requestedOneTime) return res.status(409).json(frozenOffer);');
-      const frequency = accept.indexOf('const frozenFrequency = frozenOfferFrequencyRefusal(estimate, selectedFrequencyKey, pricingFrequencies);');
+      const frequency = accept.indexOf('const frozenFrequency = frozenOfferFrequencyRefusal(estimate, selectedFrequencyKey,');
       const combo = accept.indexOf('if (frozenOffer) {');
+      // The cadence answers before the card check (402) and before the unknown-cadence answer (400).
+      expect(accept.indexOf('RecurringCards.verifyRecurringCardIntent({')).toBeGreaterThan(frequency);
+      expect(accept.indexOf("'selectedFrequency is not available for this estimate'")).toBeGreaterThan(frequency);
       const lockedWrite = accept.indexOf('db.transaction(');
       expect(oneTime).toBeGreaterThan(-1);
       expect(frequency).toBeGreaterThan(oneTime);
@@ -424,6 +427,8 @@ describe('refuseFrozenRestartMutation (PR #3671 GH r21 P1 — restart quotes are
       expect(page).toContain('data?.estimate?.planRestart === true || data?.estimate?.planOffer === true');
       // The picker's date box starts on the offer's first day, and its "sooner visit" line stays off.
       expect(page).toContain('firstVisitFrom={data?.estimate?.planOffer === true ? data.estimate.planOfferFirstVisitFrom || null : null}');
+      // The visit-preference toggles (PUT /preferences, refused on a fixed quote) are not drawn either.
+      expect(page).toContain("serviceMode === 'recurring' && !glassContent && !restartQuote && renderFlags.showPestRecurringAddOns === true");
       // The website view (?website=1) draws its own cadence step: a fixed quote gets none.
       expect(page).toContain('lockedSection={(section) => restartQuote || isLockedMirrorSection(section)}');
     });

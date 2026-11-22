@@ -8454,10 +8454,15 @@ so the offer sells the quarterly plan it opens on and nothing else. `PUT
 /:token/select-tier`, `/bond`, `/service-opt-out` and `/preferences` answer 409
 `{ error: 'This offer is for the plan as shown. For a different plan, call or
 text us.', code: 'plan_offer_frozen' }` and write nothing; `PUT /:token/accept`
-answers the same 409 for the one-time mode, for a `selectedFrequency` other
-than the stored offer's default key (`frozenOfferFrequencyRefusal`; the page
-always sends that default) and for a combo that is not the default one at the
-stored totals, each before any billing or booking; and `/data` carries
+answers the same 409 for the one-time mode (first, before anything is read),
+for a `selectedFrequency` other than the stored offer's default key, known or
+unknown (`frozenOfferFrequencyRefusal`; the page always sends that default),
+as soon as the price list is built and so before the quote-required, deposit
+and recurring-card checks (never a 402 "save a card" or a 400 "not available"
+for a cadence the offer cannot take), and, on a restart quote of several
+services, for a combo that is not the default one at the stored totals, before
+any billing or booking (an offer quote has one service and no combo); and
+`/data` carries
 `estimate.planOffer: true` (present only on an offer row) so the page draws the
 cadence as fixed text and omits the repricing controls, the add-a-service
 offer, the opt-out and the one-time toggle, as for `planRestart`, with
