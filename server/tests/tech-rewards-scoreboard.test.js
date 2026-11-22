@@ -422,6 +422,12 @@ describe('composeScoreboard', () => {
     for (const stay of [undefined, { settledKeys: [], payableKeys: [] }, { settledKeys: ['1'], payableKeys: ['1'] }]) {
       expect(composeScoreboard(inputs({ ...hired, stay })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3, estimateCents: null });
     }
+    // the anniversary day is payroll's to answer too: the bonus for a technician payroll pays, the next one for anyone else
+    const onTheDay = { ...hired, today: '2026-12-01' };
+    expect(composeScoreboard(inputs({ ...onTheDay, stay: { payableKeys: ['1'] } })).stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1, estimateCents: 4600 });
+    expect(composeScoreboard(inputs({ ...onTheDay, stay: { payableKeys: [] } })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3, estimateCents: null });
+    // the day before it, the milestone is ahead and shows for everyone
+    expect(composeScoreboard(inputs({ ...hired, today: '2026-11-30', stay: { payableKeys: [] } })).stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1 });
     // past the 5 year anniversary: the bonus while it is payable, then none left
     const five = { ...hired, technician: { ...hired.technician, hireDate: '2021-12-01' } };
     expect(composeScoreboard(inputs({ ...five, stay: { payableKeys: ['5'] } })).stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 5, rateBps: 800 });
