@@ -207,6 +207,9 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     ['is for another unit of the building', () => ({ address: '12 Sample St Apt 4, Parrish, FL 34219' })],
     // The shared street key drops the fraction; the typed house numbers differ.
     ['is for a house number with a fraction', () => ({ address: '12½ Sample St, Parrish, FL 34219' })],
+    ['is for a house number with a fraction written as its own word', () => ({ address: '12 ½ Sample St, Parrish, FL 34219' })],
+    ['is for a house number with a fraction written with small digits', () => ({ address: '12 ¹⁄₂ Sample St, Parrish, FL 34219' })],
+    ['is for a house number with a fraction written with a slash', () => ({ address: '12 1/2 Sample St, Parrish, FL 34219' })],
     // No city or ZIP = no proof that it is the same home.
     ['has an address with no city or ZIP', () => ({ address: '12 Sample St' })],
     ['has no address', () => ({ address: '' })],
@@ -220,6 +223,68 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     await estimate({ address: '12 sample street, parrish, fl 34219' });
 
     expect(await shellsOnly()).toBe(true);
+  });
+
+  // Found live 2026-11-21: the web form and the wizard wrote one name word
+  // inside the street name in two ways, and the draft kept blocking. While
+  // the rule's gate is on, the shared street key reads six such words as
+  // one street (lead-address-unverified.js). In production this rule runs
+  // only with the gate on.
+  describe('a name word inside the street name, short on the draft and in full on the run', () => {
+    const GATE = 'GATE_WIZARD_SUPERSEDES_FORM_DRAFT';
+    const SHORT = '12 Sample Pt Dr, Parrish, FL 34219';
+    const FULL = '12 Sample Point Dr, Parrish, FL 34219';
+    let gateBefore;
+
+    beforeEach(() => {
+      gateBefore = process.env[GATE];
+      process.env[GATE] = 'true';
+    });
+
+    afterEach(() => {
+      if (gateBefore === undefined) delete process.env[GATE];
+      else process.env[GATE] = gateBefore;
+    });
+
+    test.each([
+      ['Point', SHORT, FULL],
+      ['Glen', '12 Sample Gln Ct, Parrish, FL 34219', '12 Sample Glen Ct, Parrish, FL 34219'],
+    ])('%s: the same property, in both directions', async (_word, onDraft, onRun) => {
+      await estimate({ address: onDraft });
+
+      expect(await shellsOnly({ address: onRun })).toBe(true);
+      expect(await shellsOnly({ address: onDraft })).toBe(true);
+    });
+
+    test('with the gate off the shared key does not fold: the two spellings are two streets', async () => {
+      delete process.env[GATE];
+      await estimate({ address: SHORT });
+
+      expect(await shellsOnly({ address: FULL })).toBe(false);
+    });
+
+    test.each([
+      ['another word in the street name', '12 Sample Port Dr, Parrish, FL 34219'],
+      ['another house number', '14 Sample Point Dr, Parrish, FL 34219'],
+      ['another town', '12 Sample Point Dr, Bradenton, FL 34205'],
+      ['another unit', '12 Sample Point Dr Apt 4, Parrish, FL 34219'],
+    ])('the fold does not hide %s: the draft still blocks', async (_label, onRun) => {
+      await estimate({ address: SHORT });
+
+      expect(await shellsOnly({ address: onRun })).toBe(false);
+    });
+
+    // "St" is also Saint, "Dr" is also Doctor, and Island shortens to the
+    // word "Is": none of them is on the list.
+    test.each([
+      ['St', '12 St Sample Dr, Parrish, FL 34219', '12 Street Sample Dr, Parrish, FL 34219'],
+      ['Dr', '12 Dr Sample Blvd, Parrish, FL 34219', '12 Drive Sample Blvd, Parrish, FL 34219'],
+      ['Is', '12 This Is Sample Dr, Parrish, FL 34219', '12 This Island Sample Dr, Parrish, FL 34219'],
+    ])('"%s" inside the street name is not folded: the draft still blocks', async (_word, onDraft, onRun) => {
+      await estimate({ address: onDraft });
+
+      expect(await shellsOnly({ address: onRun })).toBe(false);
+    });
   });
 
   test.each([
@@ -237,6 +302,16 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     await estimate({ address: door });
 
     expect(await shellsOnly({ address: door })).toBe(true);
+    // The typed house number is the first word only: how the street name
+    // after it is written stays with the matcher.
+    expect(await shellsOnly({ address: '12 49th-St, Parrish, FL 34219' })).toBe(true);
+  });
+
+  test('a number that starts the street name is not read into the house number', async () => {
+    await estimate({ address: '12 7 Mile Rd, Parrish, FL 34219' });
+
+    expect(await shellsOnly({ address: '12 7-Mile Rd, Parrish, FL 34219' })).toBe(true);
+    expect(await shellsOnly({ address: '12 7 Mile Rd, Parrish, FL 34219' })).toBe(true);
   });
 
   // The run side of the same checks.

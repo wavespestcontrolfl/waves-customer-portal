@@ -326,9 +326,15 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *     resolved for itself (findExistingCustomerByContact) and the same
  *     email. Two people can share a phone and a home;
  *   - it is for the wizard run's own property: one phone can ask for quotes
- *     on two homes. Same door by the test the draft-retire sweep uses
- *     (estimate-draft-retire.js sameProperty): the shared premise matcher
- *     with street, city and ZIP on both sides, plus the same unit. A missing
+ *     on two homes. Same door by the shared premise matcher
+ *     (samePremiseDisplay) with street, city and ZIP on both sides, plus the
+ *     same house number as typed and the same unit. That is the draft-retire
+ *     sweep's street test too. While this rule's gate is on, the shared
+ *     street key reads one of six name words inside the street name short
+ *     or in full as one street ("Sample Pt Dr", "Sample Point Dr": the web
+ *     form and the wizard write it so; lead-address-unverified.js
+ *     streetKeyNoUnit). The fold is in that key, not here, so the
+ *     county-roll address hold reads the same street as this rule. A missing
  *     or incomplete address, or a street with no house number, fails closed:
  *     the draft is not a shell.
  *
@@ -401,6 +407,12 @@ function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
     });
 }
 
+// A fraction as a word of its own, in any spelling: "½", "1/2", "¹⁄₂". A
+// fraction sign, or a slash between two number signs, and no letter. After
+// the house number it is a part of that number. A plain number is not one:
+// it can be the street name ("12 7 Mile Rd").
+const FRACTION_WORD = /^[^\p{L}]*(?:[\u00BC-\u00BE\u2150-\u215E\u2189]|\p{N}[/\u2044\u2215]\p{N})[^\p{L}]*$/u;
+
 function sameDoor(addressA, addressB) {
   if (!samePremiseDisplay(addressA, addressB, { requireLocality: true })) return false;
   const a = parseDisplayAddress(addressA);
@@ -410,9 +422,17 @@ function sameDoor(addressA, addressB) {
   // numbered street ("49th st"). The street keys are equal here, so one
   // side answers for both.
   if (!/^\d+[a-z]?\s/.test(a.street)) return false;
-  // The key drops what is not a letter or a digit, so "12½" reads as "12".
-  // The house numbers as typed must be the same too.
-  const house = (parsed) => String(parsed.streetLine || '').trim().split(/\s+/)[0].toLowerCase();
+  // The key drops what is not a letter or a digit, so "12½" and "12 ½"
+  // read as "12". The house numbers as typed must be the same too: the
+  // first word, and a fraction that follows it as a word of its own. The
+  // street name stays with the matcher ("12 49th-St" = "12 49th St", "12 7
+  // Mile Rd" = "12 7-Mile Rd").
+  const house = (parsed) => {
+    const words = String(parsed.streetLine || '').trim().toLowerCase().split(/\s+/);
+    let end = 1;
+    while (end < words.length && FRACTION_WORD.test(words[end])) end += 1;
+    return words.slice(0, end).join(' ');
+  };
   if (house(a) !== house(b)) return false;
   const unit = (parsed) => unitLineValueKey(normalizeUnitLine(parsed.unit));
   return unit(a) === unit(b);

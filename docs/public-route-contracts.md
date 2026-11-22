@@ -6215,7 +6215,8 @@ when every open estimate of the phone is an untouched web-form shell of the
 run's own contact and for the run's own property, the block is dropped.
 A shell is a `lead_webhook` draft with the customer row the run resolved
 for itself and the same email, for the same property as the run (same
-street, city, ZIP and unit; an address with no city or ZIP never matches),
+street, house number as typed, city, ZIP and unit; an address with no city
+or ZIP never matches),
 that is older than 30 minutes, was never written since it was made, has no
 office Sold-by action and no logged follow-up, has no monthly, one-time or
 annual total, was never sent, viewed or scheduled, has no auto-send claim
@@ -6233,6 +6234,18 @@ wizard's own draft, and a later same-phone run refreshes it under the
 wizard's existing refresh rule (2026-06-12), which this gate does not
 change. No new request field, no new response field, no new auth surface,
 no migration.
+
+Street key under the same gate: while `GATE_WIZARD_SUPERSEDES_FORM_DRAFT`
+is on, every public route that compares street lines with the shared key
+(`streetKeyNoUnit`, `server/services/lead-address-unverified.js`) reads six
+name words inside a street name as one word, short or in full: Point/Pt,
+Glen/Gln, Grove/Grv, Beach/Bch, Vista/Vis, Shores/Shrs ("Sample Pt Dr" =
+"Sample Point Dr"). That covers the address-unverified hold of the public
+property lookup, `/api/public/quote/calculate` and the booking confirm (a
+county-roll warning or a clean verdict stored under one spelling covers a
+request in the other), the county-record vouch of the lookup, the
+website-quote withdrawal, and the web-form shell test above. Off, every
+comparison is as before. No request or response shape changes.
 
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
