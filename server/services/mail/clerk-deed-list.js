@@ -70,6 +70,11 @@ function dayListUrl(isoDate) {
   return `${BASE_URL}/${isoDate}`;
 }
 
+// Every text that is read must be plain printable ASCII. All 2,833 rows of six studied days are (names use A-Z,
+// 0-9, space and &). So a replacement character (a damaged byte in the source, or a character reference such as
+// &#0;) or any other sign is a page we do not know.
+const PLAIN_TEXT = /^[\x20-\x7E]*$/;
+
 const isElement = (node) => typeof node.tagName === 'string';
 const attrOf = (node, name) => node.attrs.find((a) => a.name === name)?.value;
 const collapse = (text) => text.replace(/\s+/g, ' ').trim();
@@ -91,7 +96,9 @@ function ownParts(node, reason) {
     else if (child.nodeName === '#text') text += child.value;
     else throw new ClerkPageError(reason, 'Clerk page holds a comment inside the part that is read');
   }
-  return { text: collapse(text), elements };
+  const own = collapse(text);
+  if (!PLAIN_TEXT.test(own)) throw new ClerkPageError('encoding', 'Clerk page holds a character that is not plain text in a part that is read');
+  return { text: own, elements };
 }
 
 // The elements directly under a node that may hold elements and nothing else.
@@ -283,7 +290,10 @@ function readRows(table, isoDate) {
 
 function parseDayList(html, isoDate) {
   if (typeof isoDate !== 'string' || !ISO_DAY.test(isoDate)) throw new ClerkPageError('bad_day', 'parseDayList needs a date as YYYY-MM-DD');
-  const found = collect(parse(String(html || '')), { tables: [], pagers: [], listings: [] });
+  const page = String(html || '');
+  // An HTML parser drops a NUL in some places, which would join the text on both sides of it.
+  if (page.includes('\u0000')) throw new ClerkPageError('encoding', 'Clerk page holds a NUL character');
+  const found = collect(parse(page), { tables: [], pagers: [], listings: [] });
   const panel = dayPanel(found);
   if (!panel) throw new ClerkPageError('not_clerk_page', 'Page is not the Clerk day list');
   if (found.tables.length === 0) {

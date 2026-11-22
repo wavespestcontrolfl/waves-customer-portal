@@ -204,6 +204,14 @@ describe('parseDayList: pages that must throw', () => {
       [`a malformed consideration: ${amount}`, page({ rows: [row({ consideration: amount })] }), 'consideration']
     )),
 
+    ['a replacement character in a name', page({ rows: [row({ to: ['TEST\uFFFDR ALEX J'] })] }), 'encoding'],
+    ['a NUL character reference in a name', page({ rows: [row({ to: ['TEST&#0;ER ALEX J'] })] }), 'encoding'],
+    ['a raw NUL in a name', page({ rows: [row({ to: ['TEST\u0000ER ALEX J'] })] }), 'encoding'],
+    ['a raw NUL anywhere on the page', page().replace('<title>', '<title>\u0000'), 'encoding'],
+    ['a letter outside plain text in a name', page({ rows: [row({ to: ['TEST\u00C9R ALEX J'] })] }), 'encoding'],
+    ['a replacement character in a description', page({ rows: [row({ description: 'LOT 12 SAMPLE GR\uFFFDVE' })] }), 'encoding'],
+    ['a zero-width space in an instrument number', page({ rows: [row({ instrument: '2026990\u200B00001' })] }), 'encoding'],
+
     ['a buyer in a span next to the listed buyer', page({ rows: [withToCell(`${ol(['TESTER ALEX J'])}<span>TESTER JORDAN M</span>`)] }), 'party_cell'],
     ['a buyer in a span and no list', page({ rows: [withToCell('<span>TESTER ALEX J</span>')] }), 'party_cell'],
     ['a buyer as bare text', page({ rows: [withToCell('TESTER ALEX J')] }), 'party_cell'],
@@ -311,11 +319,12 @@ describe('fetchDayList', () => {
     expect(err.reason).toBe('encoding');
   });
 
-  test('a name with an accent, split across two pieces of the stream, reads whole', async () => {
-    const bytes = Buffer.from(page({ rows: [row({ to: ['TESTÉR ALEX J'] })] }));
-    const at = bytes.indexOf(Buffer.from('É')) + 1; // between the two bytes of the letter
+  test('a two-byte letter split across two pieces of the stream is not a decoding error', async () => {
+    // In the View cell, which is not read: in a part that is read, the same letter is refused as not plain text.
+    const bytes = Buffer.from(page({ rows: [withViewCell('<span>Caf\u00E9</span>')] }));
+    const at = bytes.indexOf(Buffer.from('\u00E9')) + 1; // between the two bytes of the letter
     const { res } = streamed([bytes.subarray(0, at), bytes.subarray(at)]);
-    expect((await fetchDayList(DAY, { fetchImpl: async () => res })).rows[0].to).toEqual(['TESTÉR ALEX J']);
+    expect((await fetchDayList(DAY, { fetchImpl: async () => res })).rows).toHaveLength(1);
   });
 
   test('a streamed answer is read in pieces and parsed', async () => {
