@@ -42,7 +42,9 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/communications/messages/read` | admin-communications |
 | POST | `/api/admin/communications/name-check` | admin-communications |
 | POST | `/api/admin/communications/rewrite-sms` | admin-communications |
+| POST | `/api/admin/communications/send-howto` | admin-communications |
 | POST | `/api/admin/communications/send-prep` | admin-communications |
+| POST | `/api/admin/communications/send-welcome` | admin-communications |
 | GET | `/api/admin/communications/sender` | admin-communications |
 | POST | `/api/admin/communications/sms` | admin-communications |
 | GET | `/api/admin/communications/unread-count` | admin-communications |
