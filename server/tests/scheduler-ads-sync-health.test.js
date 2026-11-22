@@ -46,6 +46,10 @@ jest.mock('../services/ads/meta-ads', () => ({
   syncCampaigns: jest.fn(),
   syncDailyPerformance: jest.fn(),
 }));
+jest.mock('../services/ads/google-lsa', () => ({
+  isConfigured: jest.fn(() => true),
+  runDailySync: jest.fn(),
+}));
 
 const cron = require('../utils/scheduled-cron');
 const logger = require('../services/logger');
@@ -54,6 +58,7 @@ const googleAds = require('../services/ads/google-ads');
 const gates = require('../config/feature-gates');
 const negativeActions = require('../services/ads/negative-keyword-actions');
 const metaAds = require('../services/ads/meta-ads');
+const googleLsa = require('../services/ads/google-lsa');
 const { initScheduledJobs } = require('../services/scheduler');
 
 function tick(expr, marker) {
@@ -68,6 +73,8 @@ beforeEach(() => {
   for (const k of Object.keys(mockJobOutcomes)) delete mockJobOutcomes[k];
   googleAds.isConfigured.mockReturnValue(true);
   metaAds.isConfigured.mockReturnValue(true);
+  googleLsa.isConfigured.mockReturnValue(true);
+  googleLsa.runDailySync.mockResolvedValue({ configured: true, synced: {} });
   for (const fn of [googleAds.syncCampaigns, googleAds.syncDailyPerformance, googleAds.syncSearchTerms,
     metaAds.syncCampaigns, metaAds.syncDailyPerformance]) fn.mockResolvedValue([]);
 });
@@ -159,5 +166,31 @@ describe('Meta Ads 6:15 cron', () => {
     metaAds.isConfigured.mockReturnValue(false);
     await metaTick()();
     expect(metaAds.syncCampaigns).not.toHaveBeenCalled();
+  });
+});
+
+describe('Local Services Ads 6:10 cron', () => {
+  const lsaTick = () => tick('10 6 * * *', 'google-lsa');
+
+  test('runs the sync under runExclusive("google-lsa-sync")', async () => {
+    await lsaTick()();
+    expect(runExclusive).toHaveBeenCalledWith('google-lsa-sync', expect.any(Function));
+    expect(googleLsa.runDailySync).toHaveBeenCalledTimes(1);
+    expect(mockJobOutcomes['google-lsa-sync']).toBe('success');
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  test('a failed sync fails the job (job_health failed) and the tick does not throw', async () => {
+    googleLsa.runDailySync.mockRejectedValue(new Error('invalid_grant'));
+    await lsaTick()();
+    expect(mockJobOutcomes['google-lsa-sync']).toBe('failed: invalid_grant');
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Google Local Services sync failed: invalid_grant'));
+  });
+
+  test('not configured is a silent no-op: no lock, no job_health row', async () => {
+    googleLsa.isConfigured.mockReturnValue(false);
+    await lsaTick()();
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(googleLsa.runDailySync).not.toHaveBeenCalled();
   });
 });

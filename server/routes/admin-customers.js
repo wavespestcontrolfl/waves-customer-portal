@@ -3108,19 +3108,17 @@ router.delete('/:id/multi-home-family', requireAdmin, async (req, res, next) => 
 
 router.get('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
-    const canChangeAppointmentAddress = require('../config/feature-gates').isEnabled('editApptAddress');
-    if (req.query?.context === 'appointment_address' && !canChangeAppointmentAddress) {
-      return res.json({ properties: [], canChangeAppointmentAddress: false });
-    }
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
     res.json({
-      properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
+      // canChangeAppointmentAddress stays true for Schedule tabs opened before the gate came out (they hide the picker without it).
+      properties, canChangeAppointmentAddress: true, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
       // Read once here so the panel mounts per-row area editors only when on.
       propertyServiceAreas: require('../services/property-service-areas').propertyServiceAreasEnabled(),
-      // GATE_LAWN_RECLAIMED_HALF_N: the panel mounts the reclaimed-water control only while it is on; off, the key is not sent at all.
-      ...((require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true) ? { reclaimedWater: true } : {}),
+      // Always true. A staff tab opened before the reclaimed-water gate left the code still reads this key to show the
+      // reclaimed-water control and to send the picker's coordinates. The current panel does not read it.
+      reclaimedWater: true,
     });
   } catch (err) { next(err); }
 });
@@ -3140,12 +3138,11 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
   } catch (err) { next(err); }
 });
 
-// GATE_LAWN_RECLAIMED_HALF_N: the office says a property's water is reclaimed (true), not (false), or hands it back to the automatic
+// The office says a property's water is reclaimed (true), not (false), or hands it back to the automatic
 // county meter match (null). The office value always wins over the county's. It changes a nitrogen dose, so it goes through the same
 // audited, locked domain writer as the other property edits (editManualProperty: customer comms lock, row locks, a critical audit event
 // with the actor, a verified read-back); answers with the list, like the PATCH above.
 router.put('/:id/properties/:propertyId/reclaimed-water', requireAdmin, async (req, res, next) => {
-  if (!(require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true)) return res.status(404).json({ error: 'Not found' });
   try {
     const value = req.body?.reclaimed;
     if (value !== null && typeof value !== 'boolean') return res.status(400).json({ error: 'reclaimed must be true, false or null' });

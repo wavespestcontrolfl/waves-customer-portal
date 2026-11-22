@@ -19236,13 +19236,14 @@ const EXTENSION_REQUEST_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 // Referral card eligibility on the estimate screens (GATE_ESTIMATE_SUCCESS_
 // REFERRAL): an ACCEPTED estimate with a linked customer. The render payload
 // (/data, the accept response, the already-accepted retry) carries only the
-// static headline + CTA; the customer's code is fetched on the tap. Null on
+// static headline + CTA (plus the offer line while GATE_REFERRAL_STEP2 is on);
+// the customer's code is fetched on the tap. Null on
 // any settings failure — never advertise a reward the program cannot honor.
 async function estimateReferralCardFor(estimate) {
   if (!featureGates.isEnabled('estimateSuccessReferral')) return null;
   if (!estimate || estimate.status !== 'accepted' || !estimate.customer_id) return null;
   try {
-    return await require('../services/referral-share').composeReferralCard();
+    return await require('../services/referral-share').composeReferralCard({ customerId: estimate.customer_id });
   } catch (err) {
     logger.warn(`[estimate-public] referral card suppressed for estimate ${estimate.id}: ${err.message}`);
     return null;
@@ -31996,7 +31997,7 @@ async function composeEstimateDataPayload(estimate, {
       // estimate was sent, shown on the county roof photo in the Waves AI card. The key is absent with no frozen copy,
       // when staff hid the points, and when the estimate has moved to another address, so those responses stay
       // byte-identical. The page prints it; the emailed document does not (EstimateProposalDocument ignores the key).
-      ...(await roofPointsDocBlock(estimate)),
+      ...(await roofPointsDocBlock(estimate, { staffPreview: verifiedStaffPreview })),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.

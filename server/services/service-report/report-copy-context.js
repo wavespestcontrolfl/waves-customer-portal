@@ -270,7 +270,7 @@ function lawnAssessmentEntries(row) {
   ];
 }
 
-// `colorGuard` (GATE_LAWN_LIGHTING, owner 2026-10-04): { comparable } says whether
+// `colorGuard` (owner 2026-10-04): { comparable } says whether
 // the two visits' photos were taken in known, compatible light. The color health
 // delta is given to the writer only then, and only when it is a real move
 // (COLOR_NO_CHANGE_POINTS or more); otherwise the writer gets today's color
@@ -705,10 +705,10 @@ async function buildReportCopyContext({
   // assessment exists, present it as history — never as today's reading.
   if (lawnAssessments?.today) {
     const isBaseline = !!lawnAssessments.today.is_baseline;
-    // GATE_LAWN_LIGHTING, read at call time: the color delta needs both visits'
+    // Lawn lighting-aware color (needs the visit assessment, GATE_LAWN_VISIT_ASSESSMENT): the color delta needs both visits'
     // stored light to be known and compatible. A failed read is unknown light.
     let colorGuard = null;
-    if (!isBaseline && lawnAssessments.prior && require('../../config/feature-gates').lawnLightingLive()) {
+    if (!isBaseline && lawnAssessments.prior && require('../../config/feature-gates').gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT')) {
       let comparable = false;
       try {
         const lights = await loadVisitLights(knex, [lawnAssessments.today.id, lawnAssessments.prior.id], { customerId });

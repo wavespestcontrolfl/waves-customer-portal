@@ -1034,6 +1034,36 @@ describe('BOTH GATES ON — request_booking behavior', () => {
       expect(lineTech.liveServiceLine).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ serviceType: PEST_ROW.name }));
     });
 
+    // The call's own lead decides a Waves Assessment's line, and the booking is saved with one lead: the lead read
+    // at the slot re-check. A lead that arrives after it (capture_lead lands mid-request) is read again before the
+    // save; another line means the slot was checked for another technician.
+    test('live: the re-check reads the call\'s own lead; a lead that arrives after it with another line books nothing', async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'live';
+      lineTech.liveServiceLine.mockResolvedValueOnce('general');
+      expect(await executeTool('request_booking', GOOD_INPUT, slotCtx({ leadId: () => 'lead-42' }))).toMatch(/Booking REQUEST submitted/);
+      expect(lineTech.liveServiceLine).toHaveBeenCalledTimes(1);
+      expect(lineTech.liveServiceLine).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ leadId: 'lead-42' }));
+
+      const late = (lineAtCommit) => {
+        let sessionLeadId = null;
+        lineTech.liveServiceLine.mockReset();
+        // Read with no lead at the re-check; the lead lands while that read runs.
+        lineTech.liveServiceLine
+          .mockImplementationOnce(async () => { sessionLeadId = 'lead-late'; return 'lawn'; })
+          .mockResolvedValueOnce(lineAtCommit);
+        trxBuilders.triage_items.insert.mockClear();
+        return executeTool('request_booking', GOOD_INPUT, slotCtx({ leadId: () => sessionLeadId }));
+      };
+      expect(await late('general')).toMatch(/no longer open/);
+      expect(lineTech.liveServiceLine).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({ leadId: null }));
+      expect(lineTech.liveServiceLine).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({ leadId: 'lead-late' }));
+      expect(trxBuilders.triage_items.insert).not.toHaveBeenCalled();
+      // The late lead asks for the same line: the checked slot stands and the booking is saved.
+      expect(await late('lawn')).toMatch(/Booking REQUEST submitted/);
+      lineTech.liveServiceLine.mockReset();
+      lineTech.liveServiceLine.mockImplementation(jest.requireActual('../services/scheduling/line-technician').liveServiceLine);
+    });
+
     test('live but the service has no line (or is a Waves Assessment): nothing passed', async () => {
       process.env.GATE_SERVICE_LINE_MAP = 'live';
       lineTech.liveServiceLine.mockResolvedValueOnce(null);

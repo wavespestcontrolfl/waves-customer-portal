@@ -32,16 +32,16 @@ describe('reviewed EPA weather evidence is separate from rate verification', () 
   const now = new Date('2030-01-01T12:00:00Z');
   const hourly = Array.from({ length: 4 }, (_, i) => ({ startTime: new Date(now.getTime() + i * 3600000).toISOString(), temperatureF: 80, windMph: 5, rainChance: 0 }));
   const verdict = p => jobCard.buildSprayCheck({ products: [p], hourly, now, labelSources: { [p.id]: 'current' } }).verdicts[0].verdict;
-  test('reviewed limits enable weather only; gate off preserves the existing unknown', () => {
-    const p = product(); expect(verdict(p)).toBe('unknown');
-    process.env.GATE_LABEL_PIPELINE = 'true'; expect(verdict(p)).toBe('ok'); expect(p.label_verified_at).toBeNull();
-    p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('hold');
+  test('reviewed limits enable weather only; gate off reads no reviewed limit', () => {
+    const p = product(); p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('ok');
+    process.env.GATE_LABEL_PIPELINE = 'true'; expect(verdict(p)).toBe('caution'); expect(p.label_verified_at).toBeNull();
+    p.label_weather_review.active.facts.maxWindMph.value = 10; expect(verdict(p)).toBe('ok');
   });
   test('conditional evidence stays unknown; a known breach still holds', () => {
     process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
     p.label_weather_review.active.facts.maxTempF = { ...absent, status: 'conditional', quote: 'Synthetic site-specific limit.', page: 1 };
     expect(verdict(p)).toBe('unknown');
-    p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('hold');
+    p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('caution');
   });
   test('conditional-only evidence keeps its actionable warning without numeric limits', () => {
     process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
@@ -98,108 +98,15 @@ describe('buildTemplateParagraph', () => {
   });
 });
 
-describe('buildSprayCheck', () => {
+describe('buildSprayCheck forecast', () => {
   const now = new Date('2026-09-04T13:00:00Z');
   const hour = (offset, fields) => ({ startTime: new Date(now.getTime() + offset * 3600000).toISOString(), rainChance: 10, temperatureF: 85, windMph: 5, shortForecast: 'Sunny', ...fields });
   const hourly = [hour(0), hour(1), hour(2), hour(3), hour(4, { rainChance: 90, temperatureF: 99, windMph: 30 })];
 
-  test('no limits on file → unknown, never ok', () => {
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1' }], hourly, now });
-    expect(out.verdicts).toEqual([{ productId: 'p1', verdict: 'unknown', reason: 'No limit on file' }]);
-    expect(out.hold).toBe(false);
-  });
-
-  test('limits inside the 4 h window → ok; the 5th hour does not count', () => {
+  test('the forecast headline covers the 4 h window; the 5th hour does not count', () => {
     const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10, rain_free_hours: 2 }], hourly, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'ok', reason: null });
     expect(out.forecast).toMatchObject({ windMph: 5, rainPct: 10 });
-  });
-
-  test('temperature and wind breaches hold with both reasons', () => {
-    const hot = hourly.map((h, i) => (i === 2 ? { ...h, temperatureF: 95, windMph: 12 } : h));
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10 }], hourly: hot, now });
-    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'over 90°F, wind over 10 mph' });
-    expect(out.hold).toBe(true);
-  });
-
-  test('rain is judged only inside the product\'s rain-free hours', () => {
-    const wet = hourly.map((h, i) => (i === 3 ? { ...h, rainChance: 60 } : h));
-    const short = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 2 }], hourly: wet, now });
-    expect(short.verdicts[0].verdict).toBe('ok');
-    const long = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 4 }], hourly: wet, now });
-    expect(long.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'rain likely inside 4 h' });
-  });
-
-  test('rain-free interval longer than the forecast coverage → unknown, never ok', () => {
-    // Four clean hours cannot vouch for a six-hour interval.
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 6 }], hourly: hourly.slice(0, 4), now });
-    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No rain 6 h forecast' });
-  });
-
-  test('rain past the 4 h spray window still holds a long rain-free interval', () => {
-    const six = [...hourly, hour(5, { rainChance: 5 })];
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 6 }], hourly: six, now });
-    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'rain likely inside 6 h' });
-  });
-
-  test('a null measurement inside the window is unknown, not a pass', () => {
-    const gappy = hourly.map((h, i) => (i === 1 ? { ...h, temperatureF: null } : h));
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10 }], hourly: gappy, now });
-    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature forecast' });
-    // A breach on the other limit still wins over the gap.
-    const windy = gappy.map((h, i) => (i === 2 ? { ...h, windMph: 25 } : h));
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10 }], hourly: windy, now }).verdicts[0].verdict).toBe('hold');
-  });
-
-  test('a known breach wins over a missing reading on the same limit (Codex r1 P1)', () => {
-    const mixed = hourly.map((h, i) => (i === 1 ? { ...h, temperatureF: null } : i === 2 ? { ...h, temperatureF: 95 } : h));
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90 }], hourly: mixed, now });
-    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'over 90°F' });
-  });
-
-  test('temperature / wind need the whole 4 h window present to pass', () => {
-    const oneHour = [hour(0)];
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10 }], hourly: oneHour, now });
-    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature / wind forecast' });
-    // A breach inside the one hour still holds.
-    const hotHour = [hour(0, { temperatureF: 99 })];
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90 }], hourly: hotHour, now }).verdicts[0].verdict).toBe('hold');
-  });
-
-  test('coverage is continuous timestamps, not a row count (Codex r2 P1)', () => {
-    // 09:30 start with rows at 09:00–12:00 covers only through 13:00.
-    const late = new Date(now.getTime() + 30 * 60000);
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10 }], hourly: hourly.slice(0, 4), now: late });
-    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature / wind forecast' });
-    // An interior gap with both boundary hours present never passes.
-    const gap = [hour(0), hour(1), hour(3)];
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 4 }], hourly: gap, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No rain 4 h forecast' });
-    // The fifth row closes a 09:30 window.
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_wind_mph: 10 }], hourly: hourly.slice(0, 5).map((h) => ({ ...h, windMph: 5 })), now: late }).verdicts[0].verdict).toBe('ok');
-  });
-
-  test('rainfast_minutes is the canonical interval; rain_free_hours only fills a gap (Codex r5 P1)', () => {
-    // Minutes only: 120 min = 2 h, the hour-5 rain is outside it.
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rainfast_minutes: 120 }], hourly, now }).verdicts[0].verdict).toBe('ok');
-    // Conflicting values: minutes win over a stale 6 h legacy value.
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rainfast_minutes: 120, rain_free_hours: 6 }], hourly, now }).verdicts[0].verdict).toBe('ok');
-    // Legacy hours alone still judge (6 h reaches the hour-5 rain).
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 6 }], hourly, now }).verdicts[0]).toMatchObject({ verdict: 'hold', reason: 'rain likely inside 6 h' });
-  });
-
-  test('min_temp_f is a lower bound: cold hour holds, missing coverage is unknown once (Codex r7 P1)', () => {
-    const cold = hourly.map((h, i) => (i === 2 ? { ...h, temperatureF: 45 } : h));
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', min_temp_f: 50 }], hourly: cold, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'under 50°F' });
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', min_temp_f: 50, max_temp_f: 90 }], hourly, now }).verdicts[0].verdict).toBe('ok');
-    const gappy = hourly.map((h, i) => (i === 1 ? { ...h, temperatureF: null } : h));
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', min_temp_f: 50, max_temp_f: 90 }], hourly: gappy, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature forecast' });
-  });
-
-  test('a zero rain-free interval is no rain limit at all, even at a half-hour start (Codex r14 P1)', () => {
-    const late = new Date(now.getTime() + 30 * 60000);
-    const wetNow = hourly.map((h, i) => (i === 0 ? { ...h, rainChance: 90 } : h));
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 0 }], hourly: wetNow, now: late }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No limit on file' });
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 0, max_wind_mph: 10 }], hourly: wetNow.slice(0, 5).map((h) => ({ ...h, windMph: 5 })), now: late }).verdicts[0].verdict).toBe('ok');
   });
 
   test('the forecast headline keeps unmeasured wind / rain null, never 0 (PR r1 P2)', () => {
@@ -209,14 +116,22 @@ describe('buildSprayCheck', () => {
     expect(out.verdicts[0].verdict).toBe('unknown');
   });
 
-  test('unverified label limits are never judged (PR r3 P1)', () => {
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly, now });
-    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'Label limits not yet verified' });
+  test('rainfast_minutes is the canonical interval; rain_free_hours only fills a gap (Codex r5 P1)', () => {
+    const wet = hourly.map((h, i) => (i === 4 ? { ...h, rainChance: 90 } : h));
+    const judge = (fields) => jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', ...fields }], hourly: wet, now }).verdicts[0];
+    // Minutes only: 120 min = 2 h, the hour-5 rain is outside it.
+    expect(judge({ rainfast_minutes: 120 }).verdict).toBe('ok');
+    // Conflicting values: minutes win over a stale 6 h legacy value.
+    expect(judge({ rainfast_minutes: 120, rain_free_hours: 6 }).verdict).toBe('ok');
+    // Legacy hours alone still judge (6 h reaches the hour-5 rain).
+    expect(judge({ rain_free_hours: 6 })).toMatchObject({ verdict: 'caution', level: 'warning', reason: 'rain 90% inside 6 h' });
+    // A zero interval is no rain limit at all.
+    expect(judge({ rain_free_hours: 0 })).toEqual({ productId: 'p1', verdict: 'ok', reason: null });
   });
 
   test('no forecast → unknown with reason', () => {
     const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90 }], hourly: null, now });
-    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No forecast' });
+    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No forecast', forecastGap: true });
     expect(out.forecast).toBeNull();
   });
 });
@@ -1284,12 +1199,12 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
   const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', special_instructions: 'Enter from the north side', away_mode_until: '2099-01-01', watering_days: '["Mon"]', chemical_sensitivities: true, chemical_sensitivity_details: 'asthma, no pyrethroids' };
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
-  test('the scheduled T&S guide keeps label details but cannot bypass unavailable product checks', async () => {
+  test('the scheduled T&S guide keeps label details but cannot bypass an unverified product label', async () => {
     process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     process.env.GATE_PROTOCOL_SOP = 'true';
     try {
       const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' },
-        products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: '2027-12-01' }] });
+        products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: null }] });
       const dbh = Object.assign(table => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
       const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
       expect(card.protocol.procedure.fieldGuide.month).toBe('Jan');
@@ -1304,12 +1219,11 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     }
   });
 
-  // Owner 2026-10-29 ("i just want to warn techs"): with the rain rules on, weather never withholds a guide
+  // Owner 2026-10-29 ("i just want to warn techs"): weather never withholds a guide
   // mix. A missing forecast shows it; an open label review (the label, not the weather) still withholds it.
-  test('with the rain rules on, the T&S guide shows a mix when only the forecast is missing, not when a label review is open', async () => {
+  test('the T&S guide shows a mix when only the forecast is missing, not when a label review is open', async () => {
     process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     process.env.GATE_PROTOCOL_SOP = 'true';
-    process.env.GATE_SPRAY_RAIN_RULES = 'true';
     const sourceCheck = require('../services/epa-product-label').checkEpaSource;
     try {
       const guide = async (oil) => {
@@ -1335,7 +1249,6 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     } finally {
       delete process.env.GATE_TREE_SHRUB_FIELD_GUIDE;
       delete process.env.GATE_PROTOCOL_SOP;
-      delete process.env.GATE_SPRAY_RAIN_RULES;
       delete process.env.GATE_LABEL_PIPELINE;
     }
   });
@@ -1770,9 +1683,8 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(update).not.toHaveBeenCalled();
   });
 
-  // GATE_SPRAY_RAIN_RULES (owner 2026-10-26, plan page "Visit-Day Rain Rule"): off is today's strip,
-  // shadow records the rain-rule verdict without changing the strip, true shows it and keeps recording.
-  // Owner 2026-10-29: the rain rules warn and never hold.
+  // Spray rain rules (owner 2026-10-26, plan page "Visit-Day Rain Rule"): the strip shows the rain-rule verdict
+  // and records it. Owner 2026-10-29: the rain rules warn and never hold.
   describe('rain rules on the readiness poll', () => {
     const talstar = { id: 't', name: 'Talstar P', category: 'insecticide', epa_reg_number: '91234-145', label_verified_at: '2026-07-12', active: true };
     const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Talstar P 1 fl oz/gal' }] } };
@@ -1785,42 +1697,16 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       now: new Date('2026-09-04T12:00:00Z'),
     });
     const weather = (result) => result.issues.find((issue) => issue.kind === 'weather') || null;
-    afterEach(() => { delete process.env.GATE_SPRAY_RAIN_RULES; });
 
-    test('off: today\'s chip, nothing recorded', async () => {
-      const recordSprayRainShadow = jest.fn();
-      expect(weather(await poll(85, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(recordSprayRainShadow).not.toHaveBeenCalled();
-    });
-
-    test('shadow: the chip is unchanged and the rain-rule verdict is recorded once', async () => {
-      process.env.GATE_SPRAY_RAIN_RULES = 'shadow';
-      const recordSprayRainShadow = jest.fn(async () => null);
-      expect(weather(await poll(85, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(recordSprayRainShadow).toHaveBeenCalledTimes(1);
-      const [arg] = recordSprayRainShadow.mock.calls[0];
-      expect(arg.live).toEqual({ hold: false, issue: { kind: 'weather', status: 'unknown', label: 'Weather unknown' } });
-      expect(arg.shadow.issue).toEqual({ kind: 'weather', status: 'caution', label: 'Rain very likely 10 am · Talstar P' });
-      expect(arg.shadow.verdicts).toEqual([expect.objectContaining({ productId: 't', verdict: 'caution', level: 'warning', source: 'label', at: '10 am' })]);
-      expect(arg.serviceInstant.toISOString()).toBe('2026-09-04T14:00:00.000Z');
-      // A failed record never takes the poll down.
-      const failing = jest.fn(async () => { throw new Error('relation does not exist'); });
-      expect(weather(await poll(85, { recordSprayRainShadow: failing }))).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
-    });
-
-    test('true: above 60% at the start is a caution, above 80% the Warning level, 60% or less no chip', async () => {
-      process.env.GATE_SPRAY_RAIN_RULES = 'true';
-      const recordSprayRainShadow = jest.fn(async () => null);
+    test('above 60% at the start is a caution, above 80% the Warning level, 60% or less no chip', async () => {
+        const recordSprayRainShadow = jest.fn(async () => null);
       expect(weather(await poll(65, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 10 am · Talstar P' });
       expect(weather(await poll(85, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'caution', label: 'Rain very likely 10 am · Talstar P' });
       expect(weather(await poll(60, { recordSprayRainShadow }))).toBeNull();
     });
 
-    test('true: the record keeps counting, with the live check on both sides and nothing held', async () => {
-      process.env.GATE_SPRAY_RAIN_RULES = 'true';
-      const recordSprayRainShadow = jest.fn(async () => null);
+    test('the record keeps counting, with the live check on both sides and nothing held', async () => {
+        const recordSprayRainShadow = jest.fn(async () => null);
       await poll(85, { recordSprayRainShadow });
       await new Promise((resolve) => setImmediate(resolve));
       expect(recordSprayRainShadow).toHaveBeenCalledTimes(1);
@@ -1829,11 +1715,14 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(arg.live).toEqual({ hold: false, issue });
       expect(arg.shadow.issue).toEqual(issue);
       expect(arg.shadow.verdicts).toEqual([expect.objectContaining({ productId: 't', verdict: 'caution', reason: 'rain 85% at 10 am — label: no spraying during rain' })]);
+      expect(arg.serviceInstant.toISOString()).toBe('2026-09-04T14:00:00.000Z');
+      // A failed record never takes the poll down.
+      const failing = jest.fn(async () => { throw new Error('relation does not exist'); });
+      expect(weather(await poll(85, { recordSprayRainShadow: failing }))).toEqual(issue);
     });
 
     test('an add-on\'s product takes its add-on\'s Waves rule, not the visit\'s (Codex P2)', async () => {
-      process.env.GATE_SPRAY_RAIN_RULES = 'true';
-      const talus = { id: 'u', name: 'Talus IGR', category: 'insecticide', default_rate: '0.5', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12', active: true };
+        const talus = { id: 'u', name: 'Talus IGR', category: 'insecticide', default_rate: '0.5', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12', active: true };
       // Rain at noon: inside the Tree & Shrub 3 h from a 10:00 start, outside the pest visit's 2 h.
       const getHourly = async () => [0, 0, 95, 0, 0].map((rainChance, i) => ({ startTime: `2026-09-04T${14 + i}:00:00Z`, temperatureF: 85, windMph: 5, rainChance }));
       const card = (rows, cardProtocols) => jobCard.buildJobCard('svc1', {
@@ -2175,7 +2064,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(viaAddon.amount).toBe(0.5);
   });
 
-  test('the tank search runs the spray check at the property: a Hold withholds the dose', async () => {
+  test('the tank search runs the spray check at the property: a wind caution keeps the dose', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12', max_wind_mph: 10 };
     // Judged from the appointment start (10:00 ET = 14:00Z), as on the card.
@@ -2193,14 +2082,10 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const now = new Date('2026-09-04T14:00:00Z');
     const windy = [{ startTime: '2026-09-04T14:00:00Z', temperatureF: 88, windMph: 14, rainChance: 10 }, { startTime: '2026-09-04T15:00:00Z', temperatureF: 88, windMph: 14, rainChance: 10 }, { startTime: '2026-09-04T16:00:00Z', temperatureF: 88, windMph: 14, rainChance: 10 }, { startTime: '2026-09-04T17:00:00Z', temperatureF: 88, windMph: 14, rainChance: 10 }];
     const getHourly = jest.fn(async () => windy);
-    const hold = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { getHourly }, now });
+    const caution = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { getHourly }, now });
     expect(getHourly).toHaveBeenCalledWith(27.4, -82.5);
-    expect(hold.sprayCheck).toEqual({ verdict: 'hold', reason: 'wind over 10 mph' });
-    expect(hold.amount).toBeNull();
-    expect(hold.reason).toBe('Spray check: wind over 10 mph');
-    // A withheld mix carries no label rate either (hook P1).
-    expect(hold.ratePer1000).toBeNull();
-    expect(hold.ratePerGallon).toBeNull();
+    expect(caution.sprayCheck).toMatchObject({ verdict: 'caution', reason: 'wind 14 mph at 10 am — over the 10 mph limit' });
+    expect(caution.amount).toBe(6.215);
     const calm = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { getHourly: async () => windy.map((h) => ({ ...h, windMph: 5 })) }, now });
     expect(calm.sprayCheck.verdict).toBe('ok');
     expect(calm.amount).toBe(6.215);

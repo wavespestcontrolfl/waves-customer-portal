@@ -1,7 +1,7 @@
 /**
  * Rain ranking on the customer booking surfaces (owner 2026-10-08,
  * GATE_CUSTOMER_RAIN_RANK, dark): the same rule the New Appointment picker
- * runs under GATE_BOOKING_RAIN_RANK (rain-fit.js), applied to the offers
+ * runs (rain-fit.js), applied to the offers
  * buildBookingAvailability curates for /book, the inspection link and the
  * public reschedule page, and to the estimate page's slot list
  * (estimate-slot-availability.js).

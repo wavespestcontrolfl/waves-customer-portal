@@ -9134,6 +9134,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           letter-spacing: -0.02em !important;
           text-align: center;
         }
+        .service-report-v1 .referral-card > .referral-offer {
+          margin: 0 0 12px;
+          text-align: center;
+        }
         .cross-sell-price {
           display: flex;
           align-items: baseline;

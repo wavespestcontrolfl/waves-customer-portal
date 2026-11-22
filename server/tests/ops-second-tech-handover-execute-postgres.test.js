@@ -86,7 +86,7 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     created.groups.push(groupId);
     w.grouped = await child(ownerId, w.pest, '2099-07-20', { visit_id: groupId });
 
-    // A termite-bait customer: the pest series and its visits all stay.
+    // A termite-bait customer: owner 2026-11-21, a default run moves the bait series, the pest series and their visits.
     const baitCustomer = await customer();
     w.bait = await series(ownerId, baitCustomer, { service_type: 'Quarterly Termite Active Bait Station Service' });
     w.baitVisit = await child(ownerId, w.bait, '2099-07-07', { service_type: w.bait.service_type });
@@ -108,6 +108,8 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     return w;
   }
 
+  // A run that leaves termite out keeps a bait customer whole with the owner (the 2026-10-25 rule).
+  const NO_TERMITE = ['general', 'rodent', 'mosquito'];
   const dryRun = async (w, o = {}) => handover.planHandover(knex, { from: w.ownerId, to: w.hireId, start: START, today: TODAY, ...o });
   const go = async (w, o = {}) => {
     const plan = await dryRun(w);
@@ -147,10 +149,10 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     await knex.destroy();
   });
 
-  test('moves the series templates and the Mon-Thu open visits, leaves everything else, sends ONE card, and rolls back', async () => {
+  test('moves the series templates and the Mon-Thu open visits (bait customer included), leaves everything else, sends ONE card, and rolls back', async () => {
     const w = await world();
     const before = await notices([w.ownerId, w.hireId, w.otherId]);
-    const stable = [w.fri, w.done, w.early, w.theirs, w.unassigned, w.enRoute, w.grouped, w.baitVisit, w.baitPestVisit, w.lawnVisit, w.fridayVisit,
+    const stable = [w.fri, w.done, w.early, w.theirs, w.unassigned, w.enRoute, w.grouped, w.lawnVisit, w.fridayVisit,
       w.weekendMon, w.weekendSat];
     const snapshot = async (ids) => Object.fromEntries(await Promise.all(ids.map(async (r) => [r.id, await get(r.id)])));
     const stableBefore = await snapshot(stable);
@@ -159,16 +161,16 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
 
     const result = await go(w, { refresh });
 
-    expect(result).toMatchObject({ series: 2, visits: 4, customers: 1, cardSent: true, flush: { status: 'refreshed' } });
-    // Series templates: the hire, override on; the bait and lawn series are untouched.
-    for (const s of [w.pest, w.fridayOnly]) {
+    expect(result).toMatchObject({ series: 4, visits: 6, customers: 2, cardSent: true, flush: { status: 'refreshed' } });
+    // Series templates: the hire, override on, bait customer's two series included; the lawn and weekend series are untouched.
+    for (const s of [w.pest, w.fridayOnly, w.bait, w.baitPest]) {
       expect(await get(s.id)).toMatchObject({ recurring_technician_id: w.hireId, recurring_technician_override: true });
     }
-    for (const s of [w.bait, w.baitPest, w.lawn, w.weekend]) {
+    for (const s of [w.lawn, w.weekend]) {
       expect(await get(s.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
     }
     // Mon-Thu open visits moved; route number cleared; date and window untouched.
-    for (const v of [w.mon, w.tue, w.wed, w.thu]) {
+    for (const v of [w.mon, w.tue, w.wed, w.thu, w.baitVisit, w.baitPestVisit]) {
       expect(await get(v.id)).toMatchObject({ technician_id: w.hireId, route_order: null });
     }
     const monAfter = await get(w.mon.id);
@@ -186,8 +188,8 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     expect(added[0]).toMatchObject({
       technician_id: w.hireId,
       type: 'series_handover',
-      message: 'You now have 4 visits across 1 customer. They are on your schedule.',
-      payload: { headline: 'Visits moved to your schedule', visits: 4, customers: 1, series: 2 },
+      message: 'You now have 6 visits across 2 customers. They are on your schedule.',
+      payload: { headline: 'Visits moved to your schedule', visits: 6, customers: 2, series: 4 },
     });
     expect(await knex('tech_notifications').whereIn('technician_id', [w.ownerId, w.hireId, w.otherId]).whereIn('type', ['visit_assigned', 'visit_unassigned']).count('* as c').first()).toMatchObject({ c: '0' });
 
@@ -198,23 +200,23 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     // The rollback file and the audit row.
     const file = JSON.parse(fs.readFileSync(result.rollbackFile, 'utf8'));
     expect(file).toMatchObject({ version: 1, plan_id: result.planId, from: w.ownerId, to: w.hireId });
-    expect(file.series.map((s) => s.id).sort()).toEqual([w.pest.id, w.fridayOnly.id].sort());
-    expect(file.visits.map((v) => v.id).sort()).toEqual([w.mon.id, w.tue.id, w.wed.id, w.thu.id].sort());
+    expect(file.series.map((s) => s.id).sort()).toEqual([w.pest.id, w.fridayOnly.id, w.bait.id, w.baitPest.id].sort());
+    expect(file.visits.map((v) => v.id).sort()).toEqual([w.mon.id, w.tue.id, w.wed.id, w.thu.id, w.baitVisit.id, w.baitPestVisit.id].sort());
     expect(JSON.stringify(file)).not.toMatch(/Synthetic|example\.invalid/);
     const audit = await knex('audit_log').where({ action: 'schedule.handover.execute' }).whereRaw("metadata->>'plan_id' = ?", [result.planId]);
     expect(audit).toHaveLength(1);
-    expect(audit[0].metadata).toMatchObject({ visits: 4, series: 2, customers: 1, from: w.ownerId, to: w.hireId, run_id: file.run_id });
+    expect(audit[0].metadata).toMatchObject({ visits: 6, series: 4, customers: 2, from: w.ownerId, to: w.hireId, run_id: file.run_id });
 
     // Rollback: one visit changed since (the hire handed it to the third technician): skipped and listed.
     await knex('scheduled_services').where({ id: w.wed.id }).update({ technician_id: w.otherId });
     const cardsBefore = (await notices([w.ownerId, w.hireId, w.otherId])).length;
     const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
-    expect(undo).toMatchObject({ seriesRestored: 2, visitsRestored: 3, skipped: { series: [], visits: [w.wed.id] } });
-    for (const v of [w.mon, w.tue, w.thu]) expect(await get(v.id)).toMatchObject({ technician_id: w.ownerId });
+    expect(undo).toMatchObject({ seriesRestored: 4, visitsRestored: 5, skipped: { series: [], visits: [w.wed.id] } });
+    for (const v of [w.mon, w.tue, w.thu, w.baitVisit, w.baitPestVisit]) expect(await get(v.id)).toMatchObject({ technician_id: w.ownerId });
     // The undo returns the route number the run cleared.
     expect((await get(w.mon.id)).route_order).toBe(5);
     expect((await get(w.wed.id)).technician_id).toBe(w.otherId);
-    for (const s of [w.pest, w.fridayOnly]) {
+    for (const s of [w.pest, w.fridayOnly, w.bait, w.baitPest]) {
       expect(await get(s.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
     }
     expect((await notices([w.ownerId, w.hireId, w.otherId])).length).toBe(cardsBefore); // rollback sends nothing
@@ -224,9 +226,9 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     expect(await knex('audit_log').where({ action: 'schedule.handover.rollback' }).whereRaw("metadata->>'plan_id' = ?", [result.planId])).toHaveLength(1);
   });
 
-  // Owner 2026-10-30: termite and WDO follow the territory. A --zips run hands them over with the territory ZIP;
-  // the bait customer stays; --to set to Off for termite refuses before any write; termite needs --zips.
-  test('a territory run moves termite and WDO series with the ZIP, skips bait, refuses an Off line, and rolls back', async () => {
+  // Owner 2026-11-21: termite and WDO go to the second technician in every ZIP, bait customers too. A --zips run also
+  // hands the territory ZIP over; --to set to Off for termite refuses before any write.
+  test('a territory run moves termite, WDO and bait-customer series with the ZIP, leaves lawn, refuses an Off line, and rolls back', async () => {
     const ownerId = await makeTech();
     const hireId = await makeTech({ work_days: [1, 2, 3, 4] });
     // A territory run needs a cover on every territory line (#7606, NO_COVER_TECH): the owner is the gap technician.
@@ -245,40 +247,40 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
       const baitCustomer = await customer();
       const bait = await series(ownerId, baitCustomer, on({ service_type: 'Quarterly Termite Active Bait Station Service' }));
       const baitVisit = await child(ownerId, bait, '2099-07-07', on({ service_type: bait.service_type }));
+      const baitPest = await series(ownerId, baitCustomer, on());
+      const baitPestVisit = await child(ownerId, baitPest, '2099-07-08', on());
       const lawn = await series(ownerId, await customer(), on({ service_type: 'Lawn Care Program' }));
       const lawnVisit = await child(ownerId, lawn, '2099-07-07', on({ service_type: 'Lawn Care Program' }));
       const base = { from: ownerId, to: hireId, start: START, today: TODAY, now: NOW, outDir, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) };
-      const zipArgs = { zips: ['99902'], lines: handover.TERRITORY_MOVABLE_LINES };
-      const plan = await handover.planHandover(knex, { from: ownerId, to: hireId, start: START, today: TODAY, ...zipArgs });
+      const plan = await handover.planHandover(knex, { from: ownerId, to: hireId, start: START, today: TODAY, zips: ['99902'] });
       created.plans.push(plan.planId);
-      expect(new Set(plan.ids.visits)).toEqual(new Set([wdoVisit.id, pestVisit.id]));
+      expect(new Set(plan.ids.visits)).toEqual(new Set([wdoVisit.id, pestVisit.id, baitVisit.id, baitPestVisit.id]));
+      expect(plan.bait_customers_moving).toBe(1);
 
-      // Termite without --zips is refused before any write.
-      await expect(exec.executeHandover(knex, { ...base, planId: plan.planId, lines: handover.TERRITORY_MOVABLE_LINES })).rejects.toMatchObject({ code: 'LINES_NEED_ZIPS' });
       // --to Off for termite: refused with its own code, nothing written, no file.
       await knex('technician_capabilities').insert({ technician_id: hireId, service_category: 'termite', capability_level: 'review_required', active: false });
       const filesBefore = fs.readdirSync(outDir).length;
-      await expect(exec.executeHandover(knex, { ...base, planId: plan.planId, ...zipArgs })).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
+      await expect(exec.executeHandover(knex, { ...base, planId: plan.planId, zips: ['99902'] })).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
       expect((await get(wdoVisit.id)).technician_id).toBe(ownerId);
       expect((await get(wdo.id)).recurring_technician_override).toBe(false);
       expect((await knex('territory_zips').where({ zip: '99902' }).first()).technician_id).toBeNull();
       expect(fs.readdirSync(outDir).length).toBe(filesBefore);
       await knex('technician_capabilities').where({ technician_id: hireId }).del();
 
-      // The run: the executor's own default for --zips is the four lines.
+      // The run: the executor's own default is the four lines.
       const result = await exec.executeHandover(knex, { ...base, planId: plan.planId, zips: ['99902'] });
-      expect(result).toMatchObject({ series: 2, visits: 2, customers: 2, territory: 1, cardSent: true });
-      for (const s of [wdo, pest]) expect(await get(s.id)).toMatchObject({ recurring_technician_id: hireId, recurring_technician_override: true });
+      expect(result).toMatchObject({ series: 4, visits: 4, customers: 3, territory: 1, cardSent: true });
+      for (const s of [wdo, pest, bait, baitPest]) expect(await get(s.id)).toMatchObject({ recurring_technician_id: hireId, recurring_technician_override: true });
       expect(await get(wdoVisit.id)).toMatchObject({ technician_id: hireId, route_order: null });
-      expect((await get(pestVisit.id)).technician_id).toBe(hireId);
-      for (const v of [baitVisit, lawnVisit]) expect((await get(v.id)).technician_id).toBe(ownerId);
-      for (const s of [bait, lawn]) expect(await get(s.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
+      for (const v of [pestVisit, baitVisit, baitPestVisit]) expect((await get(v.id)).technician_id).toBe(hireId);
+      expect((await get(lawnVisit.id)).technician_id).toBe(ownerId);
+      expect(await get(lawn.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
       expect((await knex('territory_zips').where({ zip: '99902' }).first()).technician_id).toBe(hireId);
       const file = JSON.parse(fs.readFileSync(result.rollbackFile, 'utf8'));
       expect(file.lines).toEqual(['general', 'rodent', 'mosquito', 'termite']);
 
       const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
-      expect(undo).toMatchObject({ seriesRestored: 2, visitsRestored: 2, territoryRestored: 1 });
+      expect(undo).toMatchObject({ seriesRestored: 4, visitsRestored: 4, territoryRestored: 1 });
       expect(await get(wdoVisit.id)).toMatchObject({ technician_id: ownerId, route_order: 3 });
       expect(await get(wdo.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
       expect((await knex('territory_zips').where({ zip: '99902' }).first()).technician_id).toBeNull();
@@ -286,6 +288,59 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
       await knex('service_line_techs').del();
       if (priorCard.length) await knex('service_line_techs').insert(priorCard);
     }
+  });
+
+  // Owner 2026-11-21: a run with no --zips moves termite too, and a bait customer moves with it.
+  test('a plain run (no --zips) moves a bait customer: bait series, pest series and their Mon-Thu visits change technician, then roll back', async () => {
+    const ownerId = await makeTech();
+    const hireId = await makeTech({ work_days: [1, 2, 3, 4] });
+    const baitCustomer = await customer();
+    const bait = await series(ownerId, baitCustomer, { service_type: 'Quarterly Termite Active Bait Station Service' });
+    const baitVisit = await child(ownerId, bait, '2099-07-07', { service_type: bait.service_type });
+    const baitPest = await series(ownerId, baitCustomer);
+    const baitPestVisit = await child(ownerId, baitPest, '2099-07-08');
+    const w = { ownerId, hireId };
+
+    const plan = await dryRun(w);
+    created.plans.push(plan.planId);
+    expect(plan.skipped.termite_bait_customer).toBeUndefined();
+    expect(plan.bait_customers_moving).toBe(1);
+    expect(new Set(plan.ids.visits)).toEqual(new Set([baitVisit.id, baitPestVisit.id]));
+    const result = await exec.executeHandover(knex, {
+      from: ownerId, to: hireId, start: START, today: TODAY, now: NOW, planId: plan.planId, outDir, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }),
+    });
+    expect(result).toMatchObject({ series: 2, visits: 2, customers: 1, cardSent: true });
+    for (const sr of [bait, baitPest]) expect(await get(sr.id)).toMatchObject({ recurring_technician_id: hireId, recurring_technician_override: true });
+    for (const v of [baitVisit, baitPestVisit]) expect((await get(v.id)).technician_id).toBe(hireId);
+
+    const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
+    expect(undo).toMatchObject({ seriesRestored: 2, visitsRestored: 2 });
+    for (const v of [baitVisit, baitPestVisit]) expect((await get(v.id)).technician_id).toBe(ownerId);
+  });
+
+  // The 2026-10-25 rule survives for a run that leaves termite out: it plans and writes nothing for a bait customer.
+  test('a run with --lines general,rodent,mosquito keeps a bait customer whole with the owner', async () => {
+    const ownerId = await makeTech();
+    const hireId = await makeTech({ work_days: [1, 2, 3, 4] });
+    const baitCustomer = await customer();
+    const bait = await series(ownerId, baitCustomer, { service_type: 'Quarterly Termite Active Bait Station Service' });
+    const baitVisit = await child(ownerId, bait, '2099-07-07', { service_type: bait.service_type });
+    const baitPest = await series(ownerId, baitCustomer);
+    const baitPestVisit = await child(ownerId, baitPest, '2099-07-08');
+    const plain = await series(ownerId, await customer());
+    const plainVisit = await child(ownerId, plain, '2099-07-07');
+
+    const plan = await dryRun({ ownerId, hireId }, { lines: NO_TERMITE });
+    created.plans.push(plan.planId);
+    expect(plan.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+    expect(plan.bait_customers_moving).toBe(0);
+    const result = await exec.executeHandover(knex, {
+      from: ownerId, to: hireId, start: START, today: TODAY, now: NOW, planId: plan.planId, lines: NO_TERMITE, outDir, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }),
+    });
+    expect(result).toMatchObject({ series: 1, visits: 1, customers: 1 });
+    expect((await get(plainVisit.id)).technician_id).toBe(hireId);
+    for (const v of [baitVisit, baitPestVisit]) expect((await get(v.id)).technician_id).toBe(ownerId);
+    for (const sr of [bait, baitPest]) expect(await get(sr.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
   });
 
   test('a stale or wrong PLAN ID writes nothing and leaves no rollback file', async () => {
@@ -370,7 +425,7 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
       await holder.query({ text: 'SELECT pg_advisory_unlock(hashtext($1))', values: [exec.AUTO_DISPATCH_LOCK] });
       await knex.client.releaseConnection(holder);
     }
-    await expect(go(w)).resolves.toMatchObject({ visits: 4 });
+    await expect(go(w)).resolves.toMatchObject({ visits: 6 });
     // The lock is free again once the run is over.
     const probe = await knex.client.acquireConnection();
     try {
@@ -396,17 +451,18 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
   test('rollback leaves a visit moved to another day, and a day the original technician cannot take, with the hire', async () => {
     const w = await world();
     const result = await go(w, { refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
-    expect(result).toMatchObject({ visits: 4 });
+    expect(result).toMatchObject({ visits: 6 });
     // Since the run: Tuesday's visit was moved to another day, and the owner is marked out on Wednesday.
     await knex('scheduled_services').where({ id: w.tue.id }).update({ scheduled_date: '2099-07-14' });
     await knex('technician_absences').insert({ technician_id: w.ownerId, absence_date: '2099-07-08', reason: 'synthetic' });
 
     const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
 
-    expect(undo).toMatchObject({ seriesRestored: 2, visitsRestored: 2 });
-    expect(undo.skipped.visits.sort()).toEqual([w.tue.id, w.wed.id].sort());
-    for (const v of [w.mon, w.thu]) expect((await get(v.id)).technician_id).toBe(w.ownerId);
-    for (const v of [w.tue, w.wed]) expect((await get(v.id)).technician_id).toBe(w.hireId);
+    // The bait customer's pest visit is also on Wednesday, so it stays with the hire too.
+    expect(undo).toMatchObject({ seriesRestored: 4, visitsRestored: 3 });
+    expect(undo.skipped.visits.sort()).toEqual([w.tue.id, w.wed.id, w.baitPestVisit.id].sort());
+    for (const v of [w.mon, w.thu, w.baitVisit]) expect((await get(v.id)).technician_id).toBe(w.ownerId);
+    for (const v of [w.tue, w.wed, w.baitPestVisit]) expect((await get(v.id)).technician_id).toBe(w.hireId);
   });
 
   test('rollback leaves a visit that joined a group since the run with the hire, listed', async () => {

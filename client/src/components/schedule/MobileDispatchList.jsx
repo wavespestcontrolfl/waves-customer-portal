@@ -70,7 +70,7 @@ function formatOpenRow(hour) {
   return formatTimeWindow(hourToHHMM(hour), hourToHHMM(hour + 1));
 }
 
-// Tie-proximity display order (server, GATE_SCHEDULE_TIE_PROXIMITY):
+// Tie-proximity display order (server):
 // `displayOrder` is a 0-based index within ONE technician's day. This list
 // can mix techs, so a pairwise "use displayOrder if same tech" comparator
 // would be non-transitive. Instead each stop gets one fixed key: walking a

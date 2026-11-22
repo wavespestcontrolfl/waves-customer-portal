@@ -1906,7 +1906,7 @@ async function spelledEmailTrusted({ extracted, dictationEmailPayload, corrected
   return !ownedByAnyone;
 }
 
-// GATE_CALL_SPELLED_EMAIL_SETTLES: an active do-not-email row on EITHER spelling
+// An active do-not-email row on EITHER spelling
 // keeps the 2026-09-25 hold (a Google address matches a row under any dot
 // spelling of its mailbox). Fails closed: a failed lookup keeps the hold.
 async function eitherSpellingSuppressed({ email, otherSpelling }) {
@@ -13888,16 +13888,14 @@ const CallRecordingProcessor = {
     // candidates into dictationEmailPayload so the standard decoder-only
     // forced-card path below files ONE card with both spellings for the
     // office to read back, instead of either extractor's guess winning.
-    // GATE_CALL_SPELLED_EMAIL_SETTLES (owner 2026-11-04, "A"): when the letters
+    // Owner 2026-11-04, "A": when the letters
     // the caller spelled settle which pass was right, and neither spelling is on
     // the do-not-email list, the decoder's adopt stands. The spelled-email trust
     // below then drops the read-back card and the first-touch hold, as it does
     // when the passes agree. The extraction keeps both spellings, so a hard
     // bounce of the saved one can be traced to the other.
     if (Array.isArray(extracted.email_candidates) && extracted.email_candidates.length >= 2) {
-      const settled = isEnabled('callSpelledEmailSettles')
-        ? spelledLettersSettleEmailDisagreement(extracted, dictationEmailPayload)
-        : null;
+      const settled = spelledLettersSettleEmailDisagreement(extracted, dictationEmailPayload);
       if (settled && !(await eitherSpellingSuppressed(settled))) {
         const next = { ...extracted, email_spelling_settled: { email: settled.email, other_spelling: settled.otherSpelling } };
         delete next.email_candidates;
@@ -21297,6 +21295,8 @@ const CallRecordingProcessor = {
                       lat: existing.lat ?? null,
                       lng: existing.lng ?? null,
                       customerId: existing.customer_id || null,
+                      // This call's own lead: a Waves Assessment goes by the inquiry that booked it.
+                      leadId,
                     });
                     if (reuseLineTech) {
                       reuseCandidateTechId = reuseLineTech.id;
@@ -21325,6 +21325,7 @@ const CallRecordingProcessor = {
                         serviceId: existing.service_id || null,
                         serviceKey: existing.service_key_snapshot || null,
                         customerId,
+                        leadId,
                         excludeServiceIds: [existing.id],
                         excludeCustomerId: null,
                       }));
@@ -21353,12 +21354,34 @@ const CallRecordingProcessor = {
                         { techId: reuseCandidateTechId, date: dayRow.day },
                       ]);
                     }
+                    // GATE_TECH_SHIFT_HOURS: the row as it stands NOW, under the day locks and its
+                    // own row lock (lockVisitAsRead). `existing` was read before them with no lock,
+                    // and the technician above was picked for that read: its day, its window, its
+                    // length, its service and its place. While this transaction waited, dispatch
+                    // may have moved the visit, changed any of those, or assigned it. The second
+                    // read decides one thing: whether this block assigns the technician. A row that
+                    // differs from the first read on a field an assignment is judged on, or that
+                    // is not on the fenced day, takes this block's own refusal: no technician is
+                    // written, as when the technician is no longer assignable. An unchanged row is
+                    // the one the pick and the checks below read, so they hold.
+                    // Gate off: no second read, and this block is as it was.
+                    const reuseLock = require('../config/feature-gates').techShiftHoursLive?.()
+                      ? await require('./scheduling/visit-row-lock').lockVisitAsRead(trx, existing, dayRow?.day)
+                      : null;
                     // Re-checked FOR SHARE on the writing trx: the default tech was
                     // resolved before this transaction opened. If eligibility
                     // changed, leave the reused row unassigned rather than assign.
                     let reuseTechId = reuseCandidateTechId;
+                    if (reuseLock?.changed.length) {
+                      logger.info(`[call-proc] reused booking for ${maskSid(callSid)} changed while this booking waited (${reuseLock.changed.join(', ')}); leaving it as it is`);
+                      reuseTechId = null;
+                    }
                     try {
-                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true });
+                      // `hours` (GATE_TECH_SHIFT_HOURS): the locked row's own block. A shift that
+                      // does not hold it leaves the row unassigned (a windowless row has no block).
+                      // No technician: both checks below return with no read.
+                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true,
+                        hours: require('./scheduling/window-rules').rowBlockMinutes(reuseLock?.row) });
                       // A PICKED technician passed the capability filter on a
                       // plain read; re-read it under the technician share lock
                       // so an Off saved since cannot receive this visit. The line map's
@@ -21842,6 +21865,8 @@ const CallRecordingProcessor = {
                   lat: propertyLinkage.lat ?? null,
                   lng: propertyLinkage.lng ?? null,
                   customerId,
+                  // This call's own lead: a Waves Assessment goes by the inquiry that booked it.
+                  leadId,
                 });
                 if (bookingLineTech) {
                   bookingTechnicianId = bookingLineTech.id;
@@ -21861,6 +21886,7 @@ const CallRecordingProcessor = {
                   serviceType,
                   serviceId: callBookingCatalogRow?.id || null,
                   customerId,
+                  leadId,
                 }));
                 try {
                   const pick = await pickBookingTechnician();
@@ -22547,6 +22573,7 @@ const CallRecordingProcessor = {
                   source: 'after_call', scheduledServiceId: svc.id, customerId: svc.customer_id, date: svc.scheduled_date,
                   windowStart: svc.window_start, windowEnd: svc.window_end, serviceId: svc.service_id,
                   serviceType: svc.service_type, durationMinutes: svc.estimated_duration_minutes, actualTechnicianId: svc.technician_id,
+                  leadId,
                 });
               }
               if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {

@@ -288,3 +288,93 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(calls.filter((c) => /\bfallbackCity\b/.test(c))).toHaveLength(2);
   });
 });
+
+// A Waves Assessment offer list names the line its lead asked for, only while the line map is live (owner
+// 2026-11-21, choice 4 = A): the builder then ranks that line's home and gap technician, and no lead is read
+// otherwise.
+describe('buildAvailabilityForLead — the assessment line (GATE_SERVICE_LINE_MAP)', () => {
+  const lineTech = require('../services/scheduling/line-technician');
+  const buildFor = (customer, leadId) => require('../routes/inspection-public')._test.buildAvailabilityForLead(
+    { lat: 27.12, lng: -82.44 },
+    { rangeFrom: D, rangeTo: D, config: CONFIG, duration: 60, offer: true, ...(customer ? { customer } : {}), ...(leadId ? { leadId } : {}) },
+  );
+  let ranking;
+  let lead;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    wireDb();
+    listOccupiedWindows.mockResolvedValue([]);
+    findAvailableSlots.mockResolvedValue({ slots: [], total_feasible: 0 });
+    ranking = jest.spyOn(lineTech, 'lineOfferRanking').mockResolvedValue(null);
+    lead = jest.spyOn(lineTech, 'assessmentLineFor').mockResolvedValue({ line: 'general', lineFrom: 'lead' });
+  });
+  afterEach(() => {
+    ranking.mockRestore();
+    lead.mockRestore();
+    delete process.env.GATE_SERVICE_LINE_MAP;
+  });
+
+  test.each([[undefined], ['shadow'], ['off']])('GATE_SERVICE_LINE_MAP=%s: no lead read, no line named', async (mode) => {
+    if (mode) process.env.GATE_SERVICE_LINE_MAP = mode;
+    await buildFor({ id: 'cust-1' }, 'lead-1');
+    expect(lead).not.toHaveBeenCalled();
+    expect(ranking).not.toHaveBeenCalled();
+  });
+
+  test('live: the assessment line of the page\'s lead and customer is the one line the ranking is asked for', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    await buildFor({ id: 'cust-1' }, 'lead-1');
+    expect(lead).toHaveBeenCalledWith(expect.anything(), { customerId: 'cust-1', leadId: 'lead-1', strict: false });
+    expect(ranking).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lines: ['general'] }));
+  });
+
+  test('live, a commit passes the line scope it read: the build uses it and reads no lead again', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    await require('../routes/inspection-public')._test.buildAvailabilityForLead(
+      { lat: 27.12, lng: -82.44 },
+      { rangeFrom: D, rangeTo: D, config: CONFIG, duration: 60, customer: { id: 'cust-1' }, leadId: 'lead-1', lineScope: { serviceLines: ['lawn'] } },
+    );
+    expect(lead).not.toHaveBeenCalled();
+    expect(ranking).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lines: ['lawn'] }));
+  });
+
+  // The booking transaction's own re-check (pre-push P0): staff can change the lead's service interest between the
+  // commit's build and its save.
+  describe('assessmentLineUnchanged', () => {
+    const trx = { the: 'booking transaction' };
+    const unchanged = (lineScope) => require('../routes/inspection-public')._internals
+      .assessmentLineUnchanged(trx, { lineScope, customer: { id: 'cust-1' }, leadId: 'lead-1' });
+
+    test('live: the line is read again on the transaction, strictly; the same line passes, another one refuses', async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'live';
+      expect(await unchanged({ serviceLines: ['general'] })).toBe(true);
+      expect(lead).toHaveBeenCalledWith(trx, { customerId: 'cust-1', leadId: 'lead-1', strict: true });
+      lead.mockResolvedValue({ line: 'lawn', lineFrom: 'lead' });
+      expect(await unchanged({ serviceLines: ['general'] })).toBe(false);
+    });
+
+    test('not live: the scope is empty on both sides and nothing is read', async () => {
+      expect(await unchanged({})).toBe(true);
+      expect(lead).not.toHaveBeenCalled();
+    });
+
+    test('live, a failed read rejects: the save must not go on with a default line', async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'live';
+      lead.mockRejectedValue(new Error('read failed'));
+      await expect(unchanged({ serviceLines: ['general'] })).rejects.toThrow('read failed');
+    });
+  });
+
+  test('live, a new lead with no customer yet: the lead itself is still read', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    await buildFor(null, 'lead-1');
+    expect(lead).toHaveBeenCalledWith(expect.anything(), { customerId: null, leadId: 'lead-1', strict: false });
+  });
+
+  test('live, no lead and no customer passed: the no-lead default is asked for', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    await buildFor(null);
+    expect(lead).toHaveBeenCalledWith(expect.anything(), { customerId: null, leadId: null, strict: false });
+  });
+});

@@ -28,14 +28,13 @@
 // (and not rejected for this expense) stays on the list, worded as waiting for review.
 // Amount and date alone are no proof of payment, so nothing is ever hidden on them.
 //
-// GATE_INVOICE_NOT_ON_SPARK (strict 'true', read at call time) and
 // INVOICE_OK_ACCOUNT_LABELS (comma list of bank_transactions.account_label values that
-// count as paid the right way). Gate off or the list unset = the daily cron does
-// nothing: the accounts are never guessed in code.
+// count as paid the right way). List unset = the daily cron does nothing: the accounts
+// are never guessed in code.
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { invoiceNotOnSparkLive, alertEpisodesLive } = require('../config/feature-gates');
+const { alertEpisodesLive } = require('../config/feature-gates');
 const { MAX_WHY_CHARS, breaksAlertRules, composeAdminAlert, raiseAdminAlert } = require('./admin-alert-compose');
 const { shortDateET } = require('./admin-alert-names');
 const { etDateString, addETDays } = require('../utils/datetime-et');
@@ -251,14 +250,13 @@ function loadRows(database, { from, to, okLabels }) {
 }
 
 /**
- * Daily cron entry point. Returns { skipped } when the gate is off or no account list
+ * Daily cron entry point. Returns { skipped } when no account list
  * is set (nothing is read), otherwise { count, invoices, total, outcome }: raised |
  * refreshed | unchanged | suppressed | closed | clear. A read failure throws
  * (runExclusive records it in job_health) and never closes the row. `rows` replaces
  * the read and `dedupeKey` is the row's key (tests set both).
  */
-async function runInvoiceNotOnSpark({ database = db, gateEnabled, now = new Date(), okLabels = parseOkLabels(), rows, dedupeKey = DEDUPE_KEY } = {}) {
-  if (!(gateEnabled ?? invoiceNotOnSparkLive())) return { skipped: 'disabled' };
+async function runInvoiceNotOnSpark({ database = db, now = new Date(), okLabels = parseOkLabels(), rows, dedupeKey = DEDUPE_KEY } = {}) {
   if (!okLabels.size) {
     logger.info('[invoice-not-on-spark] INVOICE_OK_ACCOUNT_LABELS is not set: nothing checked');
     return { skipped: 'no_ok_accounts' };

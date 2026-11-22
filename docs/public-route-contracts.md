@@ -1043,8 +1043,21 @@ code. Each route's 409 body, unchanged:
 
 A self-booked plan's first visit is lengthened to the program's length only
 when the longer block fits the shift too; otherwise it keeps its signed end,
-as when the next time is taken. Not yet checked at a commit: public
-reschedule moves, and the day as the route would run it (capacity mode). Gate
+as when the next time is taken.
+A public reschedule that moves one visit is checked too (D4 part 3b-2a;
+`POST /api/public/reschedule/:token`, `SmartRebooker.reschedule`): the visit as
+the move leaves it (the picked start, and the later of the picked end and the
+start plus the visit's stored length) against the picked technician's shift. A
+shift that does not hold it answers the 409 this route already gives when the
+mover finds the time taken or the technician off that day:
+`{ error, code: 'SLOT_TAKEN' }` (the mover's body: no `availability`; the page
+clears the picked time and reloads its list). The move's write also pins the
+technician and the length it judged, so a dispatch edit that lands between the
+move's read and its write answers this route's existing concurrent-change 409
+(`{ error, code: null }`) instead of being written over. No new status, field
+or code. Not yet checked at a commit: a public reschedule that moves a visit
+group as one unit or shifts a recurring series with it (the grouped moves, the
+next D4 part), and the day as the route would run it (capacity mode). Gate
 off: byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
 browse horizon answers `400 { error: 'date is beyond the booking horizon',
@@ -1310,7 +1323,7 @@ appointment changed concurrently", code: 'SLOT_TAKEN' }` (the rebooker's own
 concurrent-change answer) and writes nothing. A visit with no technician, or whose
 technician can no longer take work, passes the visit's service line instead
 (`serviceLines`, `line-technician liveServiceLine`: catalog row first; a Waves
-Assessment has none), which ranks only while `GATE_SERVICE_LINE_MAP=live`
+Assessment takes the line its lead asked for), which ranks only while `GATE_SERVICE_LINE_MAP=live`
 (home technician first, then the gap technician, territory included). With one
 assignable technician every response is unchanged.
 
@@ -1512,9 +1525,17 @@ other's probe.
 these routes byte-identical, with no extra query).** `/api/booking/availability`,
 `/find-slots` and the `/capture-intent` revalidation (all through
 `buildFunnelAvailability`) pass the funnel service's lines (`pest_control` →
-general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent`,
-`termite` / `bora_care` → termite) to `buildBookingAvailability` as
-`serviceLines`. When at least one of those lines has a home or gap technician set
+general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent` →
+exclusion, `termite` / `bora_care` → termite) to `buildBookingAvailability` as
+`serviceLines`. The `rodent` choice saves a general "Rodent Control" visit, the
+first look at a rodent problem (the booking-link text sends a rodent inspection
+here too); since 2026-11-21 that visit is on the `exclusion` line with the
+rodent inspection (`BOOKING_FUNNEL_SERVICE_LINES` in `routes/booking.js`; the
+saved visit's name reads the same line, alone or as one part of a two-service
+name such as "Mosquito Control + Rodent Control"), and the `rodent` line is
+only trapping and bait-station work. So `/availability`, `/find-slots` and the
+`/capture-intent` revalidation offer the rodent choice on the exclusion line's
+home or gap technician. When at least one of those lines has a home or gap technician set
 in `service_line_techs` (the Team tab "Service lines" card), the offer keeps only
 slots on a technician who is the home or gap technician of EVERY mapped line (a
 two-service key such as `pest_control+lawn_care` therefore needs one technician
@@ -1529,9 +1550,55 @@ signed offer named, with no second line check at confirm: an offer minted before
 a map edit stays redeemable for its 45-minute lifetime, as for any other offer
 input. The capture-intent revalidation passes the same lines as the offer, so
 offer and recheck agree. Fail-open: an unreadable map, or a map with no
-technician set for the asked lines, offers what today's code offers. Public
-inspection booking, public reschedule and re-service offers do not pass lines
-and are unchanged.
+technician set for the asked lines, offers what today's code offers. Re-service
+offers do not pass lines and are unchanged. Public reschedule passes the
+visit's line only for a visit with no technician, or one whose technician can
+no longer take work (above). Every Waves Assessment offer list and commit
+rebuild passes one line while `GATE_SERVICE_LINE_MAP=live`:
+`GET /:token`, `POST /:token/availability`, `POST /:token/find-slots` and
+`POST /:token` of `/api/public/inspection/:token`; `GET /:token`,
+`POST /:token/find-slots` and `POST /:token` of
+`/api/public/estimate-assessment/:token` (it has no `/availability`). Owner
+2026-11-21: the line the page's own lead asked for, where the estimate page's
+own lead is the one lead linked to the estimate; that lead decides alone, and
+its blank interest is the owner's line. With no such lead, the customer's
+newest lead with a service interest is read (`line-technician
+assessmentLineFor`). Lawn, tree & shrub, rodent and wildlife go to the owner's
+line, pest-only, termite and mosquito to that line, no lead to the owner. So
+offers come from that line's home or gap technician; not live, no line is
+read and any active field technician is offered. Each commit reads its line
+once, finds its slot in a build for that line, and reads the line again inside
+the booking transaction with the lead row held (`FOR UPDATE`); the estimate
+page first resolves the estimate's linked lead again on that transaction. A
+lead whose service interest changed in between, or an estimate linked to
+another lead with another line, answers the existing `409 SLOT_TAKEN` with
+fresh times for the line as it is now (the estimate page resolves the
+estimate and its link again for that list). While the map is in shadow no
+request reads a lead: the shadow recorder reads the estimate's linked lead
+after the booking, best-effort. No response shape changes.
+
+**Recorded exceptions to the commit re-check for the assessment line.** The
+line ranks technicians (who does the visit); it is not eligibility (whether
+the customer may book), and the office can reassign a visit. So outside the
+two booking pages' own re-check above, the line is an offer input, as the map
+is (the sentence on `/confirm` above):
+- *A lead linked to the estimate for the first time while its booking
+  transaction runs.* The re-check holds the lead rows that point at the
+  estimate when it reads them. The staff link writers take no per-estimate
+  lock, so a first link written after that read is not seen, as a link written
+  just after the save is not.
+- *Public reschedule of an assessment with no technician (or one who can no
+  longer take work).* It reads the customer's newest lead with a service
+  interest when it builds its offers; the mover's guard re-reads the visit's
+  technician on the locked row, not the lead.
+- *The phone agent's booking request.* It reads the line at its slot re-check
+  for the call's own lead, and again when the call's lead id arrived in
+  between; it does not read the lead inside the save.
+- *A booking with no lead in hand (an estimate with no one linked lead).* The
+  line comes from the customer's newest lead with a service interest, and the
+  re-check holds that row. The lead writers take no per-customer lock, so a
+  lead created, or a blank newer lead filled in, after that read is not seen,
+  as one written just after the save is not.
 
 **Territory routing (`GATE_TERRITORY_ROUTING=true`, owner 2026-10-30; ships dark:
 unset, and every value other than exactly `true`, leaves these routes as described
@@ -1972,7 +2039,13 @@ value leave these routes byte-identical, with no extra query).**
 slots on the home or gap technician of the line(s) the held visit carries: the
 estimate's primary program's line (the program the hold stamps), or every
 program's line for a combined capacity hold, so only a technician on every one of
-those lines is offered. A line with no technician set in `service_line_techs`
+those lines is offered. Rodent exclusion work is its own line since 2026-11-21
+(`exclusion`: the sealing, wire mesh, roof-entry cover, sanitation and rodent
+inspection service keys, `CATALOG_KEY_LINES`, and the general rodent visit: a
+visit named only "Rodent Control", which is also what `/book`'s rodent choice
+saves and offers by); trapping and bait stations stay on
+`rodent`, so an exclusion estimate and a trapping estimate can list different
+technicians. A line with no technician set in `service_line_techs`
 adds no rule. At a date and start both have, the home technician's slot is the
 one listed; the gap technician's slots fill the starts the home technician has
 none for. Each listed slot stays a complete slot with its own `techId`,
@@ -3469,7 +3542,31 @@ report identity for any family in `GUARDED_OWNERSHIP_FAMILIES`
 though termite left the ladder itself) fails the WHOLE report card closed
 — the unseeded-next-visit gap and a just-cancelled plan are
 indistinguishable, so offering the family and advancing past it are each
-wrong in one of those worlds.
+wrong in one of those worlds. The same live render (`mode === 'live'`,
+under `GATE_REPORT_CROSS_SELL`) carries the `referral` card from
+`composeReferralCard` (`services/referral-share.js`); a callback report
+carries neither card while `GATE_RESERVICE_REPORT_COPY` is on, and with
+that gate off a callback report carries them like any other report:
+the static headline + CTA, and with `GATE_REFERRAL_STEP2` on an `offer`
+string whose amounts come from the live referral settings (the member
+sentence is dropped at the yearly limit; no card at all when the
+program is paused or its settings are unreadable). Read-only: a render
+enrolls no promoter, writes nothing and carries no personal data.
+Pest price photo facts (`GATE_PEST_PRICE_PHOTO_FACTS`, owner 2026-11-21, "1, 2";
+dark by default): the gate adds no field and removes none. On, the pest
+offer's per-application price (`crossSell.option.perVisit`, and the same
+price on the portal offer card, the portal pricing card, the plan start and
+the one-tap purchase) is computed with the photo's shrubs, complexity and
+near-water facts when the property lookup's only doubt is the lawn area,
+in place of the neutral defaults (a fact the vision providers disputed
+keeps its default). An estimate minted from that offer keeps the facts in
+`engineInputs`, so the estimate page (`GET /api/estimates/:token/data`)
+prices the same plan rate; when staff turn on its one-time choice, that
+amount is computed from the quarterly rate as before and so follows it.
+It can also add the engine's hand-check
+mark to a pest line (heavy shrubs with a complex landscape), and such an
+offer degrades to the quote CTA as any held price does. Off or unset: the
+price of today.
 
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
@@ -4248,18 +4345,16 @@ existed is never served after it, and a visit with none keeps its key. Every par
 at most six one-sentence parts. No token, eligibility, privacy, rate-limit or header
 change; no new route.
 
-`GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
-sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color
+Lawn lighting-aware color (owner 2026-10-04) is ONE rule, "no color
 claim between visits shot in different or unknown light", with six independent
-effects. Each reads the gate at call time on its own; only effect 3 needs
-`GATE_LAWN_SINCE_LAST`. The gate reader `lawnLightingLive()` is true only when
-`GATE_LAWN_LIGHTING` AND `GATE_LAWN_VISIT_ASSESSMENT` are both on: the light read
+effects. Only effect 3 needs `GATE_LAWN_SINCE_LAST`. Every effect runs only while
+`GATE_LAWN_VISIT_ASSESSMENT` is on: the light read
 comes only from the one-call visit assessment (`/assess` stays on the legacy
 per-photo path without it), so without that gate no run would ever store a light,
-and no effect below can run without the reader that feeds it. It adds NO payload
+and no effect below can run without the read that feeds it. It adds NO payload
 key to `GET /api/reports/:token/data`; it only removes or never writes color
 wording (the one added key is `initialScores.colorHidden` on the portal route,
-effect 6). A visit assessed before the gate
+effect 6). A visit assessed before the rule
 has no light read, so its light is `unknown` and its color is never compared.
 Compatible light: full sun and sun with shadows (`mixed_sun_shade`) with each other
 (owner 2026-10-22, option B: under the lighting prompt the model reads sunlit and
@@ -4271,11 +4366,11 @@ comes from its usable photos whose shot has positive color weight in
 shade and hot-edge shots; detail shots do not count) when the visit was read under
 the shot-list prompt, and from EVERY usable photo when it was read under the legacy
 prompt (one whole-visit color score from all photos); which prompt is decided from
-the run's own stored prompt version, never from today's gate. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
+the run's own stored prompt version, never from today's setting. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
 light read makes the visit's light unknown.
 
-Every code path that reads the gate (`lawnLightingLive()` in
-`server/config/feature-gates.js`; nothing else reads `GATE_LAWN_LIGHTING`):
+Every code path that reads the visit assessment gate for this rule
+(`server/config/feature-gates.js` `gateEnvValue`; nothing else decides lighting):
 1. `server/services/lawn-visit-assessment.js` `analyzeVisit`: the visit assessment
    reads each photo's light under `lawn-visit-v1-lighting` /
    `lawn-visit-v1-shot-list-lighting` and the run stores it in
@@ -4359,10 +4454,8 @@ Every code path that reads the gate (`lawnLightingLive()` in
    `beforeAfter.improvement.colorHealth: null`, and `PortalPage.jsx` then shows
    today's color alone, with no "from" and no change. Every other number in that
    payload is a raw reading and is unchanged.
-7. `server/config/feature-gates.js` `logGateStatus` entry (`lawnLighting`): logging
-   only.
 
-What the gate does NOT cover (raw readings, unchanged; each is a score the visit
+What the rule does NOT cover (raw readings, unchanged; each is a score the visit
 earned, shown with its own date, not a sentence about color changing). Color is part
 of these overall numbers, so they can still move when only the light did:
 - the overall trend `reportV2.trends.overall` and the overall points on the
@@ -4381,7 +4474,7 @@ of these overall numbers, so they can still move when only the light did:
 time by `tsLightingLive()` in `server/config/feature-gates.js`, through
 `lightingLive()` in `server/services/tree-shrub-lighting.js`; off leaves every
 prompt, preview response, stored row and payload key unchanged, key for key) is the
-`GATE_LAWN_LIGHTING` rule for tree/shrub photos, with the same light words and the
+lawn lighting rule for tree/shrub photos, with the same light words and the
 same compatibility table (`lawn-lighting.js`, reused as is): full sun with sun and
 shadows, overcast with open shade; sun never with overcast or open shade; low
 light, mixed light and unknown never compatible. Every photo counts toward the
@@ -6112,6 +6205,48 @@ shortly." and the office notice reads "needs the area to plug (sq ft)". A
 positive area prices exactly as before. The site's plugging forms require the
 area. No new field, no new auth surface, no migration, no gate.
 
+Web-form shell drafts (owner 2026-11-21, "build"; DARK behind
+`GATE_WIZARD_SUPERSEDES_FORM_DRAFT`, read at call time, off unless exactly
+`true` — off, every run is blocked exactly as before): a `/calculate` run
+whose phone already has an open estimate (`draft`, `scheduled`, `sent` or
+`viewed`, not archived) other than the wizard's own draft mirrors no
+estimate, so it returns no booking handoff and sends no booking text. On,
+when every open estimate of the phone is an untouched web-form shell of the
+run's own contact and for the run's own property, the block is dropped.
+A shell is a `lead_webhook` draft with the customer row the run resolved
+for itself and the same email, for the same property as the run (same
+street, house number as typed, city, ZIP and unit; an address with no city
+or ZIP never matches),
+that is older than 30 minutes, was never written since it was made, has no
+office Sold-by action and no logged follow-up, has no monthly, one-time or
+annual total, was never sent, viewed or scheduled, has no auto-send claim
+and no lead pointing at it, on a phone with no clarify ask that is open or
+was sent in the last 7 days without an answer. The run then mirrors its
+estimate as for a new visitor, and the usual booking handoff, email link and
+`quote_wizard_booking_invite` text follow. The run only reads the shell: it
+never writes, archives or locks an estimate it did not make, because the
+caller's phone, email and address are typed, not proven. Any other open
+estimate of the phone still blocks (a draft with a price, a touched draft, a
+web-form draft of another contact or for another property, an office or
+estimator estimate, a sent estimate). The contact and property tests are a
+same-request test, not proof of identity. After the run the phone holds the
+wizard's own draft, and a later same-phone run refreshes it under the
+wizard's existing refresh rule (2026-06-12), which this gate does not
+change. No new request field, no new response field, no new auth surface,
+no migration.
+
+Street key under the same gate: while `GATE_WIZARD_SUPERSEDES_FORM_DRAFT`
+is on, every public route that compares street lines with the shared key
+(`streetKeyNoUnit`, `server/services/lead-address-unverified.js`) reads six
+name words inside a street name as one word, short or in full: Point/Pt,
+Glen/Gln, Grove/Grv, Beach/Bch, Vista/Vis, Shores/Shrs ("Sample Pt Dr" =
+"Sample Point Dr"). That covers the address-unverified hold of the public
+property lookup, `/api/public/quote/calculate` and the booking confirm (a
+county-roll warning or a clean verdict stored under one spelling covers a
+request in the other), the county-record vouch of the lookup, the
+website-quote withdrawal, and the web-form shell test above. Off, every
+comparison is as before. No request or response shape changes.
+
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
 files as `new` exactly as before): a tokenless `/calculate` whose typed
@@ -6425,7 +6560,10 @@ business credentials).
 automation step's HTML body with SAMPLE merge values only — no real customer
 data — for operator preview/share. Token in path, `noindex`. Every status
 sends `Content-Security-Policy: sandbox` (no allow-* tokens), so stored HTML
-cannot run script on the portal origin).
+cannot run script on the portal origin). With `GATE_REFERRAL_STEP2` on, the
+`referral_nudge` step shows the approved Step 2 words and the live
+referral-setting amounts in place of its seeded sentence and summary line
+(no customer data; nothing stored is changed).
 `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
 target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
@@ -7136,6 +7274,16 @@ a ZIP on one side only; two different ZIP codes are two homes. Every other respo
 (`EstimateViewPage`, Waves AI card) shows it in the place of the satellite photo (a misting layout wins when both are
 present) and puts the satellite photo back when the picture fails to load. `EstimateProposalDocument` (the emailed PDF)
 ignores it, and the emailed-PDF fingerprint does not read it.
+Staff preview variant: on a VERIFIED staff preview only (`?adminPreview=1` AND a valid staff Bearer token, the route's
+`verifiedStaffPreview`; the query parameter alone never counts), when the customer block above is absent, the key carries what
+the next send would freeze, marked `preview: true` (`{ imageUrl, imageYear|null, pins: [...], preview: true }`), so staff can
+check the points in the estimate tool's customer preview before the first send. It comes from the same function the freeze
+uses (`nextSendPoints`: the newest finished read of the estimate's own context whose points the technician set, saved for the
+estimate's current address, through `customerPointsFromRow`), and every pin label is screened again, as on the customer block.
+It is absent (the key is not sent) when staff hid the points, when any roof read of the estimate is hidden, when the read names
+another customer, when the points were saved for another address, and when no point is confirmed. When the customer block
+exists, a staff preview gets that same block with no `preview` key. A request that is not a verified staff preview, the emailed
+document and the intelligence bar never get the `preview` key, and their responses are byte-identical to before.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that
@@ -7350,8 +7498,17 @@ Staff authentication (`server/routes/admin-auth.js`, mounted at
 15 min) and answers every failure with a generic 401 `Invalid credentials`;
 `/forgot-password` (5 per 15 min) and `/reset-password` (10 per 15 min) key
 on `unauthenticatedAuthLimitKey` with production-only limiters;
+`POST /login` issues a password session only for a row with its own stored
+password hash (the timing comparison against the fixed stand-in hash still
+runs for a row with none, and a match there is refused);
+`/forgot-password` sends nothing and stores no token for a Google-only
+account (`technicians.google_only_login_at`, set by the Team tab's Hired
+press on a row with a linked company Google address; same generic answer),
+and a table CHECK refuses a password or a reset token on such a row;
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
-bearer. Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
+bearer; `/register` (like every Team tab writer of a staff email) refuses an
+address that is another staff row's email or linked Google address (409).
+Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
 `/login` returns `{ mfaRequired, challengeToken }` (a 5-minute signed JWT of
 type `staff_mfa_challenge`, never an access token) instead of a session, and
 the public `POST /login/mfa` (a generic 404 while the gate is dark, answered in
@@ -9346,8 +9503,11 @@ Same composer as the service report's tap — `services/referral-share.js`
 `enrollPromoter` with the household 23505 fallback scoped to account_id,
 owner-voice share copy, exact-cents referee amount). The RENDER payloads
 (/data, the accept response, the already-accepted retry) carry only the
-static headline + CTA via `composeReferralCard`; enrollment happens on the
-tap only, never on a read. Guards: gate with a gate-aware limiter skip
+static headline + CTA via `composeReferralCard`, plus an `offer` string
+while `GATE_REFERRAL_STEP2` is on (amounts from the live referral
+settings; the member sentence is dropped at the yearly limit; no card
+when the program is paused or its settings are unreadable; read-only,
+no personal data); enrollment happens on the tap only, never on a read. Guards: gate with a gate-aware limiter skip
 (dark = generic 404), token format gate, 5/min shared IPv6-safe key, the
 durable call-side linkage verdict, full customer-viewability +
 accepted-only + linked-customer, inactive program = 404, `err.code`-only

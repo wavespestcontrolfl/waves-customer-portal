@@ -126,7 +126,7 @@ describe('stateOf / normalizeCapabilityEntries', () => {
 });
 
 describe('GET /technicians/:id/capabilities', () => {
-  test('returns all five categories, missing rows as unset, with the verifier name', async () => {
+  test('returns every category, missing rows as unset, with the verifier name', async () => {
     installDb(fakeConn({
       capRows: [
         { service_category: 'lawn', capability_level: 'qualified', active: true, source: 'admin', notes: null, verified_by: 'adam', verified_by_name: 'Adam', verified_at: 'T1', updated_at: 'T1' },
@@ -199,7 +199,7 @@ describe('PUT /technicians/:id/capabilities', () => {
     expect(res.body.futureAssignedVisits).toEqual([
       { id: 'v1', scheduledDate: '2026-09-10', serviceType: 'Lawn Fertilization', customerName: 'Pat Lee' },
     ]);
-    expect(res.body.capabilities).toHaveLength(5);
+    expect(res.body.capabilities).toHaveLength(CAPABILITY_CATEGORIES.length);
   });
 
   test('no future-visit read when nothing is turned off; 404 for an unknown tech', async () => {
@@ -339,8 +339,8 @@ describe('roster summary + new-hire seed', () => {
     const res = await invoke(listTechnicians, { technician: { role: 'admin' } });
     expect(res.statusCode).toBe(200);
     const [t1, t2] = res.body.technicians;
-    expect(t1.capability_summary).toEqual({ qualified: 1, review_required: 1, off: 1, unset: 2 });
-    expect(t2.capability_summary).toEqual({ qualified: 0, review_required: 0, off: 0, unset: 5 });
+    expect(t1.capability_summary).toEqual({ qualified: 1, review_required: 1, off: 1, unset: CAPABILITY_CATEGORIES.length - 3 });
+    expect(t2.capability_summary).toEqual({ qualified: 0, review_required: 0, off: 0, unset: CAPABILITY_CATEGORIES.length });
     // Non-admin roster readers get the summary too (not PII), never payroll.
     const asTech = await invoke(listTechnicians, { technician: { role: 'technician' } });
     expect(asTech.body.technicians[0]).toHaveProperty('capability_summary');
@@ -419,7 +419,7 @@ describe('roster summary + new-hire seed', () => {
     }
   });
 
-  test('creating a technician seeds all five categories at review_required on the same transaction', async () => {
+  test('creating a technician seeds every category at review_required on the same transaction', async () => {
     const conn = fakeConn();
     // createTechnician: email probe (first → none), then the insert.
     const probe = makeChain({ first: undefined });

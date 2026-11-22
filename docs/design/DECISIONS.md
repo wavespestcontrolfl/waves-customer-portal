@@ -2938,13 +2938,10 @@ nothing. The words land in `scheduled_services.customer_request` /
 primary inserted row only, never on recurring children or boosters;
 `customer_request_pests` is untouched.
 
-`GATE_RESERVICE_OFFICE_REQUEST` (registry key `reserviceOfficeRequest`, off
-unless exactly `true`, dark in every environment). Gate off: the suggestion
-route answers `{ enabled: false, suggestion: null }`, the modal shows nothing
-new, and `POST /api/admin/schedule` ignores `customerRequest` — byte-identical
-to before. The modal learns the gate from that route's `enabled` answer, the
-same probe pattern as the annual-prepay and card-link controls, and only asks
-once a re-service line is on the form. Kill switch: unset the gate.
+The box is always on. The modal only asks the suggestion route once a
+re-service line is on the form, and `POST /api/admin/schedule` saves
+`customerRequest` on a pest/lawn re-service. (It shipped behind a gate that
+was removed 2026-11-21.)
 
 Source rule (owner ruling 2026-09-26: exact words may be quoted, a call
 paraphrase is shown without quotes), decided on the SERVER and never taken
@@ -3572,3 +3569,13 @@ Owner 2026-11-13: "Use your approved texting voice for the portal AI" (asked in 
 **Reasoning:** Hunter's API terms forbid sharing a homeowner's key with a third party without Hunter's written permission, and Hunter declined. With no sanctioned route for a Hunter or a Rain Bird timer, there is nothing to build. The owner did not choose the hand pilot through a Hydrawise contractor account (2026-11-19).
 
 **Revisit if:** Hunter or Rain Bird opens API access to contractors, or the step 1 count shows many Orbit B-hyve or Rachio timers (their developer terms were not checked).
+
+## 2026-11-21 — Estimate tool shows Tree density only when a picked service can read it
+
+**Decision:** The Tree density box in the staff estimate tool (`EstimateToolViewV2.jsx`) renders only when a picked service can read tree density: Tree & Shrub, recurring mosquito, the lawn family priced from lawn area (lawn care, one-time lawn, dethatching, top dressing) and the flea exterior spray. The one rule is `pickedServiceCanReadTreeDensity(form)` in `client/src/lib/estimateEngine.js`. The box is hidden, never cleared: the lookup still fills the value, the estimate still saves it, and the engine request is the same.
+
+**Context:** An audit of 106 estimates (2026-09-08 to 2026-11-21) found the owner lowered tree density by hand on 28 homes and never raised it. On 27 of the 28, no picked service was Tree & Shrub, palm or mosquito. Tree density has not moved a pest price since 2026-07-30 (entry above).
+
+**Reasoning:** A box that cannot change the price on screen invites a correction that does nothing. The owner approved the change on 2026-11-21 (reply "1, 2" to the audit page). The rule is service-level on purpose. Whether a picked service reads the density for one estimate also depends on other inputs (a tree count, a measured lawn area, the exterior flea area, a commercial property), and three tries at mirroring those engine rules in the form each missed a case, one of which hid the box where it changed a price. So the box may still show where it changes nothing, as it did on every estimate before; it hides only when no picked service has any read of it.
+
+**Revisit if:** a new service starts to read tree density (add its form flag to the rule), or pest pricing reads tree density again.

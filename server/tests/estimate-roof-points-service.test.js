@@ -251,6 +251,116 @@ describe('roofPointsDocBlock', () => {
   });
 });
 
+// Staff preview: what the NEXT send would freeze, before there is a copy the customer can see. The copy and the next-send
+// points come from one function, so the freeze and the preview cannot disagree.
+describe('roofPointsDocBlock: staff preview', () => {
+  // A read whose points the technician set (a real list, a crop centre and a photo year), saved for ADDRESS, no copy yet.
+  const draftRead = (over = {}) => frozenRead({
+    tech_pins: [
+      { x: 0.25, y: 0.4, type: 'roof_returns_and_valleys', note: 'front left' },
+      { x: 0.7, y: 0.55, type: 'trees_touching_roof', note: 'gate code 1234' },
+    ],
+    crop_lat: '27.46000', crop_lng: '-82.50000', crop_zoom: 20, image_source: 'manatee_2025_rgb', image_year: 2025,
+    points_address: ADDRESS, ...over,
+  });
+  const noCopy = (reads) => fakeKnex({ point: undefined, reads });
+  const preview = (reads, row = estimate) => roofPointsDocBlock(row, { knex: noCopy(reads), staffPreview: true });
+
+  test('no copy yet, staff preview, a confirmed list: the block the next send would freeze, marked preview, labels screened', async () => {
+    const out = await preview([draftRead()]);
+    expect(Object.keys(out)).toEqual(['roofPoints']);
+    const block = out.roofPoints;
+    expect(block.preview).toBe(true);
+    expect(Object.keys(block).sort()).toEqual(['imageUrl', 'imageYear', 'pins', 'preview']);
+    expect(block.imageYear).toBe(2025);
+    expect(block.imageUrl).toEqual(expect.any(String));
+    expect(block.pins.map((p) => p.n)).toEqual([1, 2]);
+    expect(block.pins[0].label).toBe('Roof return, front left');
+    expect(block.pins[0].action).toBe('seal');
+    // The note that fails the customer-copy screen never shows: the standard label of the point stays.
+    expect(block.pins[1].label).not.toMatch(/1234|gate/i);
+    expect(block.pins[1].label).toBe('Branch touching the roof');
+    expect(Object.keys(block.pins[0]).sort()).toEqual(['action', 'label', 'n', 'type', 'x', 'y']);
+  });
+
+  test('the preview block is the block the freeze would store (one function): same photo, year and pins', async () => {
+    const knex = noCopy([draftRead()]);
+    const insert = jest.fn(() => ({ onConflict: () => ({ merge: async () => {} }) }));
+    const writer = (table) => (table === 'estimate_roof_points' ? { insert } : knex(table));
+    writer.fn = knex.fn;
+    expect(await freezeRoofPointsForEstimate(estimate, { knex: writer, deliveredAt: SENT })).toBe('frozen');
+    const stored = JSON.parse(insert.mock.calls[0][0].snapshot);
+    const { preview: _marker, ...shown } = (await preview([draftRead()])).roofPoints;
+    expect(shown.imageUrl).toBe(stored.imageUrl);
+    expect(shown.imageYear).toBe(stored.imageYear);
+    expect(shown.pins.map(({ n, x, y, type, action }) => ({ n, x, y, type, action }))).toEqual(stored.pins.map(({ n, x, y, type, action }) => ({ n, x, y, type, action })));
+  });
+
+  test.each([undefined, false, 'true', 1, null])('a customer (staffPreview %p) with no copy gets {} even with confirmed points', async (staffPreview) => {
+    const out = await roofPointsDocBlock(estimate, { knex: noCopy([draftRead()]), ...(staffPreview === undefined ? {} : { staffPreview }) });
+    expect(out).toEqual({});
+  });
+
+  test('omitting the options keeps today\'s answers: no preview key on the customer block, {} with no copy', async () => {
+    expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads: [frozenRead()] }) })).toEqual({ roofPoints: SNAPSHOT });
+    expect(await roofPointsDocBlock(estimate, { knex: fakeKnex({ point: point(), reads: [frozenRead()] }), staffPreview: false })).toEqual({ roofPoints: SNAPSHOT });
+    expect(await roofPointsDocBlock(estimate, { knex: noCopy([draftRead()]) })).toEqual({});
+  });
+
+  test('hidden points: {} in the preview, whether the points read or any other read of the estimate is hidden', async () => {
+    expect(await preview([draftRead({ hide_on_estimate: true })])).toEqual({});
+    const other = frozenRead({ id: 'read-2', tech_pins: null, hide_on_estimate: true, created_at: new Date('2026-11-20T18:00:00Z') });
+    expect(await preview([draftRead(), other])).toEqual({});
+    // An OLDER hidden read: the newest points read is the visible one, so only the any-read rule hides the preview.
+    const older = frozenRead({ id: 'read-0', tech_pins: null, hide_on_estimate: true, created_at: new Date('2026-11-19T15:00:00Z') });
+    expect(await preview([draftRead(), older])).toEqual({});
+    // A hidden read of another estimate changes nothing.
+    const elsewhere = frozenRead({ id: 'read-x', estimate_id: 'est-2', context_key: 'e:est-2', hide_on_estimate: true, created_at: new Date('2026-11-19T15:00:00Z') });
+    expect((await preview([draftRead(), elsewhere])).roofPoints.preview).toBe(true);
+  });
+
+  test('points saved for another address, or with no address: {} in the preview', async () => {
+    expect(await preview([draftRead({ points_address: '99 Other Road, Sarasota, FL 34232' })])).toEqual({});
+    expect(await preview([draftRead({ points_address: null })])).toEqual({});
+    expect(await preview([draftRead()], est({ address: '99 Other Road, Sarasota, FL 34232' }))).toEqual({});
+    expect(await preview([draftRead({ points_address: '12 Synthetic Way, Bradenton, FL 34208' })])).toEqual({});
+  });
+
+  test('a read that names another customer, or no customer once the estimate has one: {} in the preview', async () => {
+    expect(await preview([draftRead({ customer_id: 'cust-b', context_key: 'e:est-1|c:cust-b' })])).toEqual({});
+    expect(await preview([draftRead({ customer_id: null })])).toEqual({});
+    expect(await preview([draftRead({ context_key: 'e:est-2' })])).toEqual({});
+    // A lead (no customer on either side) previews its own read.
+    expect((await preview([draftRead({ customer_id: null })], est({ customer_id: null }))).roofPoints.preview).toBe(true);
+  });
+
+  test('an empty or cleared list, an unfinished read and no read at all: {} in the preview', async () => {
+    expect(await preview([draftRead({ tech_pins: [] })])).toEqual({});
+    expect(await preview([draftRead({ tech_pins: null })])).toEqual({});
+    expect(await preview([draftRead({ status: 'pending' })])).toEqual({});
+    expect(await preview([])).toEqual({});
+  });
+
+  test('the customer copy is shown to staff as it is, with no preview key (staff see what the customer sees)', async () => {
+    const knex = fakeKnex({ point: point(), reads: [frozenRead(), draftRead({ id: 'read-3', created_at: new Date('2026-11-20T20:00:00Z') })] });
+    const out = await roofPointsDocBlock(estimate, { knex, staffPreview: true });
+    expect(out).toEqual({ roofPoints: SNAPSHOT });
+    expect(out.roofPoints).not.toHaveProperty('preview');
+  });
+
+  test('a stale copy the customer cannot see gives the staff preview of the next send, not the stale copy', async () => {
+    const knex = fakeKnex({ point: point({ delivered_at: new Date('2026-11-19T16:00:00Z') }), reads: [draftRead({ id: 'read-3' })] });
+    const out = await roofPointsDocBlock(estimate, { knex, staffPreview: true });
+    expect(out.roofPoints.preview).toBe(true);
+    expect(out.roofPoints.imageUrl).not.toBe(SNAPSHOT.imageUrl);
+  });
+
+  test.each(['estimate_roof_points', 'roof_entry_reads'])('a storage failure on %s in the preview omits the section and never throws', async (table) => {
+    const knex = fakeKnex({ point: undefined, reads: [draftRead()], throwOn: table });
+    expect(await roofPointsDocBlock(estimate, { knex, staffPreview: true })).toEqual({});
+  });
+});
+
 describe('freeze helpers never throw', () => {
   test('a failing read reports skipped and logs only the code; a row with no id is skipped', async () => {
     const knex = fakeKnex({ reads: [], throwOn: 'roof_entry_reads' });
