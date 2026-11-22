@@ -21,6 +21,10 @@ const DAY_MS = 24 * HOUR_MS;
 
 const PRICE_STATUSES = ['priced', 'missing_fact', 'not_clean', 'failed'];
 const RETRY_STATUSES = ['failed', 'missing_fact'];
+// A row's version: its last check time to the microsecond, as text ('' = never checked). dueForPrice hands it to the
+// pass, and savePriceResult writes only while the row still has it. So a run that read a row before another run wrote
+// it cannot replace the newer result or restart its 20-hour wait.
+const PRICE_VERSION_SQL = "COALESCE(to_char(price_checked_at AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISSUS'), '')";
 
 function asDate(value, name) {
   const date = value === undefined ? new Date() : new Date(value);
@@ -34,7 +38,7 @@ function asDate(value, name) {
  *   2. failed or missing_fact rows last checked more than 20 hours ago (a row with no check time counts as old),
  *      oldest recorded_date first, and only while the deed was recorded in the last 21 Eastern days.
  * Only `eligible` rows of the new-home list. A priced or not_clean row is settled and never returned. Returns only what
- * the pass needs; recorded_date is YYYY-MM-DD text.
+ * the pass needs; recorded_date is YYYY-MM-DD text, and price_version is the row's version for savePriceResult.
  */
 async function dueForPrice(options, conn = db) {
   // The connection is the last argument, as in the other store functions: a handle in the options' place would be
@@ -61,6 +65,7 @@ async function dueForPrice(options, conn = db) {
     .select(
       'id', 'parcel_pin', 'permit_no', 'address_line1', 'city', 'state', 'zip', 'price_status',
       conn.raw("to_char(recorded_date, 'YYYY-MM-DD') AS recorded_date"),
+      conn.raw(`${PRICE_VERSION_SQL} AS price_version`),
     );
 }
 
@@ -88,18 +93,23 @@ async function permitFacts(permitNo, conn = db) {
 const orNull = (v) => (v === undefined ? null : v);
 
 /**
- * Write one row's facts and result. `result`:
+ * Write one row's facts and result. `row` is a row of dueForPrice: its id and the version this run read. `result`:
  *   { status, reason, homeSqft, homeSqftSource, stories, lotSqft, priceAnnual, priceSetupFee, priceDigest }
  * status is priced | missing_fact | not_clean | failed; the facts are the ones the pass knew (a missing one is stored
  * as NULL, so an older read never leaves a stale fact). A priced row gets its price columns and priced_at; any other
  * row gets none, and price_checked_at is always set. The table's CHECKs refuse a half-written price (code 23514).
  *
- * A row that is already priced or not_clean, or is no longer an eligible row of the list, is left as it is. The test
- * and the write are one statement, so two runs cannot both write. Returns `{ written: true, price_status }`, or
- * `{ written: false, why, price_status }` with why = settled | not_eligible | not_found.
+ * A row that is already priced or not_clean, that is no longer an eligible row of the list, or that another run wrote
+ * after this run read it (its version changed) is left as it is. The test and the write are one statement, so two runs
+ * cannot both write one read. Returns `{ written: true, price_status }`, or `{ written: false, why, price_status }`
+ * with why = settled | changed | not_eligible | not_found.
  */
-async function savePriceResult(id, result, conn = db) {
+async function savePriceResult(row, result, conn = db) {
   if (typeof result === 'function') throw new TypeError('savePriceResult: the connection is the third argument');
+  if (!row || typeof row !== 'object' || !row.id || typeof row.price_version !== 'string') {
+    throw new TypeError('savePriceResult: the first argument is a row of dueForPrice (its id and price_version)');
+  }
+  const { id } = row;
   if (!result || !PRICE_STATUSES.includes(result.status)) throw new TypeError('savePriceResult: unknown status');
   const priced = result.status === 'priced';
   const now = conn.fn.now();
@@ -120,15 +130,21 @@ async function savePriceResult(id, result, conn = db) {
   const updated = await conn('mail_prospects')
     .where({ id, list_key: LIST_KEY, status: 'eligible' })
     .where((b) => b.whereNull('price_status').orWhereIn('price_status', RETRY_STATUSES))
+    .whereRaw(`${PRICE_VERSION_SQL} = ?`, [row.price_version])
     .update(changes)
     .returning('price_status');
   if (updated.length) return { written: true, price_status: updated[0].price_status };
   const stored = await conn('mail_prospects').where({ id }).first('status', 'price_status', 'list_key');
   if (!stored) return { written: false, why: 'not_found', price_status: null };
-  const live = stored.list_key === LIST_KEY && stored.status === 'eligible';
-  return { written: false, why: live ? 'settled' : 'not_eligible', price_status: stored.price_status };
+  if (stored.list_key !== LIST_KEY || stored.status !== 'eligible') {
+    return { written: false, why: 'not_eligible', price_status: stored.price_status };
+  }
+  // Still a retry row (or untried): then only the version stopped the write.
+  const open = stored.price_status === null || RETRY_STATUSES.includes(stored.price_status);
+  return { written: false, why: open ? 'changed' : 'settled', price_status: stored.price_status };
 }
 
 module.exports = {
   dueForPrice, permitFacts, savePriceResult, LIST_KEY, DEFAULT_LIMIT, RETRY_AFTER_HOURS, RETRY_WINDOW_DAYS,
+  PRICE_VERSION_SQL,
 };

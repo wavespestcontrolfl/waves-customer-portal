@@ -25,7 +25,7 @@ const constructionMigration = require('../models/migrations/20260813000031_const
 const detailMigration = require('../models/migrations/20261002220000_construction_permit_detail');
 const mailMigration = require('../models/migrations/20261122160000_mail_prospects');
 const priceMigration = require('../models/migrations/20261122200000_mail_prospects_home_price');
-const { dueForPrice, permitFacts, savePriceResult } = require('../services/mail/home-price-store');
+const { dueForPrice, permitFacts, savePriceResult, PRICE_VERSION_SQL } = require('../services/mail/home-price-store');
 
 jest.setTimeout(60000);
 
@@ -90,10 +90,15 @@ postgres('home price store on PostgreSQL', () => {
     }).returning('id').then(([r]) => r.id);
   };
   const stored = (id) => conn('mail_prospects').where({ id }).first();
+  // The row as a run reads it: its id and its version (the store's own version text).
+  const due = async (id) => {
+    const found = await conn('mail_prospects').where({ id }).first(conn.raw(`${PRICE_VERSION_SQL} AS price_version`));
+    return { id, price_version: found ? found.price_version : '' };
+  };
   const dueIds = async (options = {}) => (await dueForPrice({ now: NOW, ...options })).map((r) => r.id);
   const PRICED = {
     status: 'priced', homeSqft: 1800, homeSqftSource: 'parcel_map', stories: 1, lotSqft: 8000,
-    priceAnnual: 480, priceSetupFee: 0, priceDigest: 'digest-1',
+    priceAnnual: 500, priceSetupFee: 0, priceDigest: 'digest-1',
   };
 
   test('migration: the columns are nullable without a default, the checks exist, and down leaves the list table as it was', async () => {
@@ -158,9 +163,12 @@ postgres('home price store on PostgreSQL', () => {
     expect(await dueIds({ limit: 3 })).toEqual([newA, newB, retryOld]);
     const first = (await dueForPrice({ now: NOW, limit: 1 }))[0];
     expect(Object.keys(first).sort()).toEqual(
-      ['address_line1', 'city', 'id', 'parcel_pin', 'permit_no', 'price_status', 'recorded_date', 'state', 'zip'],
+      ['address_line1', 'city', 'id', 'parcel_pin', 'permit_no', 'price_status', 'price_version', 'recorded_date', 'state', 'zip'],
     );
     expect(first.recorded_date).toBe('2026-11-16');
+    // The version: '' for a row never checked, the check time to the microsecond for a checked one.
+    expect(first.price_version).toBe('');
+    expect((await dueForPrice({ now: NOW })).find((r) => r.id === retryOld).price_version).toMatch(/^\d{20}$/);
   });
 
   test('the cap defaults to 40 rows and a bad limit or a handle in the options place is refused', async () => {
@@ -210,12 +218,12 @@ postgres('home price store on PostgreSQL', () => {
 
   test('savePriceResult: a priced row keeps the facts, the price and the digest, and is then settled', async () => {
     const id = await row();
-    expect(await savePriceResult(id, PRICED)).toEqual({ written: true, price_status: 'priced' });
+    expect(await savePriceResult(await due(id), PRICED)).toEqual({ written: true, price_status: 'priced' });
     const r = await stored(id);
     expect(r).toMatchObject({
       price_status: 'priced', price_reason: null, home_sqft: 1800, home_sqft_source: 'parcel_map', lot_sqft: 8000, price_digest: 'digest-1',
     });
-    expect([Number(r.home_stories), Number(r.price_annual), Number(r.price_setup_fee)]).toEqual([1, 480, 0]);
+    expect([Number(r.home_stories), Number(r.price_annual), Number(r.price_setup_fee)]).toEqual([1, 500, 0]);
     expect(r.priced_at).toBeInstanceOf(Date);
     expect(r.price_checked_at).toBeInstanceOf(Date);
     expect(r.stories).toBeNull(); // the list's own column is not touched
@@ -224,11 +232,11 @@ postgres('home price store on PostgreSQL', () => {
 
   test('savePriceResult: not_clean, missing_fact and failed write their reason and no price', async () => {
     const [a, b, c] = [await row(), await row(), await row()];
-    expect(await savePriceResult(a, { status: 'not_clean', reason: 'engine_review', homeSqft: 2000, homeSqftSource: 'permit_plan', stories: 2, lotSqft: 7000 }))
+    expect(await savePriceResult(await due(a), { status: 'not_clean', reason: 'engine_review', homeSqft: 2000, homeSqftSource: 'permit_plan', stories: 2, lotSqft: 7000 }))
       .toEqual({ written: true, price_status: 'not_clean' });
-    expect(await savePriceResult(b, { status: 'missing_fact', reason: 'no_lot_size', homeSqft: 1500, homeSqftSource: 'parcel_map', stories: 1.5 }))
+    expect(await savePriceResult(await due(b), { status: 'missing_fact', reason: 'no_lot_size', homeSqft: 1500, homeSqftSource: 'parcel_map', stories: 1.5 }))
       .toEqual({ written: true, price_status: 'missing_fact' });
-    expect(await savePriceResult(c, { status: 'failed', reason: 'parcel_map' })).toEqual({ written: true, price_status: 'failed' });
+    expect(await savePriceResult(await due(c), { status: 'failed', reason: 'parcel_map' })).toEqual({ written: true, price_status: 'failed' });
     const [ra, rb, rc] = await Promise.all([stored(a), stored(b), stored(c)]);
     expect(ra).toMatchObject({ price_status: 'not_clean', price_reason: 'engine_review', home_sqft: 2000, home_sqft_source: 'permit_plan', lot_sqft: 7000 });
     expect(rb).toMatchObject({ price_status: 'missing_fact', price_reason: 'no_lot_size', home_sqft: 1500, lot_sqft: null });
@@ -242,22 +250,22 @@ postgres('home price store on PostgreSQL', () => {
 
   test('a retry row can be written again, and a later priced result clears the earlier reason and stale facts', async () => {
     const id = await row();
-    await savePriceResult(id, { status: 'missing_fact', reason: 'no_stories', homeSqft: 1500, homeSqftSource: 'parcel_map', lotSqft: 6000 });
-    await savePriceResult(id, { status: 'failed', reason: 'permit_page' });
+    await savePriceResult(await due(id), { status: 'missing_fact', reason: 'no_stories', homeSqft: 1500, homeSqftSource: 'parcel_map', lotSqft: 6000 });
+    await savePriceResult(await due(id), { status: 'failed', reason: 'permit_page' });
     expect(await stored(id)).toMatchObject({ price_status: 'failed', home_sqft: null, lot_sqft: null });
-    expect((await savePriceResult(id, PRICED)).written).toBe(true);
+    expect((await savePriceResult(await due(id), PRICED)).written).toBe(true);
     expect(await stored(id)).toMatchObject({ price_status: 'priced', price_reason: null, home_sqft: 1800 });
   });
 
   test('a priced or not_clean row is left as it is, and the answer says so', async () => {
     const priced = await row();
     const notClean = await row();
-    await savePriceResult(priced, PRICED);
-    await savePriceResult(notClean, { status: 'not_clean', reason: 'not_one_line', homeSqft: 1900, homeSqftSource: 'parcel_map', stories: 1, lotSqft: 5000 });
+    await savePriceResult(await due(priced), PRICED);
+    await savePriceResult(await due(notClean), { status: 'not_clean', reason: 'not_one_line', homeSqft: 1900, homeSqftSource: 'parcel_map', stories: 1, lotSqft: 5000 });
     const before = await Promise.all([stored(priced), stored(notClean)]);
-    expect(await savePriceResult(priced, { status: 'failed', reason: 'engine' })).toEqual({ written: false, why: 'settled', price_status: 'priced' });
-    expect(await savePriceResult(priced, { ...PRICED, priceAnnual: 999 })).toEqual({ written: false, why: 'settled', price_status: 'priced' });
-    expect(await savePriceResult(notClean, PRICED)).toEqual({ written: false, why: 'settled', price_status: 'not_clean' });
+    expect(await savePriceResult(await due(priced), { status: 'failed', reason: 'engine' })).toEqual({ written: false, why: 'settled', price_status: 'priced' });
+    expect(await savePriceResult(await due(priced), { ...PRICED, priceAnnual: 999 })).toEqual({ written: false, why: 'settled', price_status: 'priced' });
+    expect(await savePriceResult(await due(notClean), PRICED)).toEqual({ written: false, why: 'settled', price_status: 'not_clean' });
     expect(await Promise.all([stored(priced), stored(notClean)])).toEqual(before);
   });
 
@@ -265,36 +273,58 @@ postgres('home price store on PostgreSQL', () => {
     const held = await row({ status: 'held_back' });
     const gone = await row({ status: 'not_eligible', reason: 'known_address', parcel_pin: null, permit_no: null });
     const other = await row({ list_key: 'other_list' });
-    expect(await savePriceResult(held, PRICED)).toEqual({ written: false, why: 'not_eligible', price_status: null });
-    expect(await savePriceResult(gone, PRICED)).toEqual({ written: false, why: 'not_eligible', price_status: null });
-    expect(await savePriceResult(other, PRICED)).toEqual({ written: false, why: 'not_eligible', price_status: null });
-    expect(await savePriceResult(randomUUID(), PRICED)).toEqual({ written: false, why: 'not_found', price_status: null });
+    expect(await savePriceResult(await due(held), PRICED)).toEqual({ written: false, why: 'not_eligible', price_status: null });
+    expect(await savePriceResult(await due(gone), PRICED)).toEqual({ written: false, why: 'not_eligible', price_status: null });
+    expect(await savePriceResult(await due(other), PRICED)).toEqual({ written: false, why: 'not_eligible', price_status: null });
+    expect(await savePriceResult(await due(randomUUID()), PRICED)).toEqual({ written: false, why: 'not_found', price_status: null });
     for (const id of [held, gone, other]) expect((await stored(id)).price_status).toBeNull();
   });
 
   test('a half-written price is refused by the table through the store, and the row is unchanged', async () => {
     const id = await row();
-    await expect(savePriceResult(id, { ...PRICED, priceDigest: null })).rejects.toMatchObject({ code: '23514' });
-    await expect(savePriceResult(id, { ...PRICED, homeSqft: 0 })).rejects.toMatchObject({ code: '23514' });
+    await expect(savePriceResult(await due(id), { ...PRICED, priceDigest: null })).rejects.toMatchObject({ code: '23514' });
+    await expect(savePriceResult(await due(id), { ...PRICED, homeSqft: 0 })).rejects.toMatchObject({ code: '23514' });
     expect((await stored(id)).price_status).toBeNull();
-    await expect(savePriceResult(id, { status: 'maybe' })).rejects.toThrow(TypeError);
-    await expect(savePriceResult(id, conn)).rejects.toThrow(TypeError);
+    await expect(savePriceResult(await due(id), { status: 'maybe' })).rejects.toThrow(TypeError);
+    await expect(savePriceResult(await due(id), conn)).rejects.toThrow(TypeError);
+    // A bare id carries no version: refused, so no caller can write without the version it read.
+    await expect(savePriceResult(id, PRICED)).rejects.toThrow(TypeError);
+    await expect(savePriceResult({ id }, PRICED)).rejects.toThrow(TypeError);
+    expect((await stored(id)).price_status).toBeNull();
   });
 
   test('two saves at the same time write once', async () => {
     const id = await row();
+    const read = await due(id); // both runs read the row before either wrote
     const results = await Promise.all([
-      savePriceResult(id, PRICED),
-      savePriceResult(id, { status: 'not_clean', reason: 'engine_review' }),
+      savePriceResult(read, PRICED),
+      savePriceResult(read, { status: 'not_clean', reason: 'engine_review' }),
     ]);
     expect(results.filter((r) => r.written)).toHaveLength(1);
     expect(results.filter((r) => !r.written)[0]).toMatchObject({ why: 'settled' });
   });
 
+  test('a stale run cannot replace a retry result another run wrote', async () => {
+    const id = await row();
+    const runA = await due(id);
+    const runB = await due(id); // two runs read the row before either wrote
+    expect(runB.price_version).toBe('');
+    expect(await savePriceResult(runA, { status: 'missing_fact', reason: 'no_stories', homeSqft: 1500, homeSqftSource: 'parcel_map', lotSqft: 6000 }))
+      .toEqual({ written: true, price_status: 'missing_fact' });
+    const after = await stored(id);
+    expect(await savePriceResult(runB, { status: 'failed', reason: 'parcel_map' })).toEqual({ written: false, why: 'changed', price_status: 'missing_fact' });
+    expect(await savePriceResult(runB, PRICED)).toEqual({ written: false, why: 'changed', price_status: 'missing_fact' });
+    expect(await stored(id)).toEqual(after); // the first result's facts and its 20-hour wait stand
+    // A later run reads the new version and may write.
+    const next = await due(id);
+    expect(next.price_version).toMatch(/^\d{20}$/);
+    expect((await savePriceResult(next, PRICED)).written).toBe(true);
+  });
+
   test('a save inside a caller\'s transaction uses that transaction', async () => {
     const id = await row();
     await expect(conn.transaction(async (trx) => {
-      await savePriceResult(id, PRICED, trx);
+      await savePriceResult(await due(id), PRICED, trx);
       expect((await trx('mail_prospects').where({ id }).first()).price_status).toBe('priced');
       throw new Error('roll back');
     })).rejects.toThrow('roll back');
