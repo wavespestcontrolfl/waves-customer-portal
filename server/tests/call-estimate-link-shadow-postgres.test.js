@@ -134,11 +134,63 @@ postgres('call-estimate-link-shadow against PostgreSQL', () => {
     await insertEstimate(mockPg, customerId, { status: 'draft', sent_at: null });
     await insertEstimate(mockPg, customerId, { sent_at: new Date('2027-01-15T16:30:00.000Z') }); // sent after the call began
     await insertEstimate(mockPg, customerId, { expires_at: new Date('2027-01-15T12:00:00.000Z') }); // expired before the call
-    await insertEstimate(mockPg, customerId, { status: 'declined' });
+    await insertEstimate(mockPg, customerId, { status: 'declined', declined_at: new Date('2027-01-14T18:00:00.000Z') });
     await insertEstimate(mockPg, other);
     const callId = await insertCall(mockPg, { customer_id: customerId });
     await shadow.stage(mockPg, { now: NOW });
     expect((await metadataOf(callId))[KEY]).toMatchObject({ status: 'pending', estimate_id: wanted });
+  });
+
+  test('updated_at with microseconds: the claim still matches (a Date would have dropped them) and the call is staged', async () => {
+    const customerId = await insertCustomer(mockPg);
+    await insertEstimate(mockPg, customerId);
+    const callId = await insertCall(mockPg, { customer_id: customerId, updated_at: '2027-01-15 15:55:00.123456+00' });
+    const stored = await mockPg('call_log').where({ id: callId }).first(mockPg.raw('updated_at::text AS key'));
+    expect(stored.key).toMatch(/\.123456/);
+    expect(await shadow.stage(mockPg, { now: NOW })).toEqual({ staged: 1, ineligible: 0 });
+    expect((await metadataOf(callId))[KEY].status).toBe('pending');
+  });
+
+  test('"open at the call" is historical: an estimate accepted AFTER the call began (before staging) still makes the call several', async () => {
+    const customerId = await insertCustomer(mockPg);
+    await insertEstimate(mockPg, customerId, { status: 'viewed' });
+    await insertEstimate(mockPg, customerId, { status: 'accepted', accepted_at: new Date('2027-01-15T16:30:00.000Z') });
+    const callId = await insertCall(mockPg, { customer_id: customerId });
+    await shadow.stage(mockPg, { now: NOW });
+    expect((await metadataOf(callId))[KEY].reason).toBe('several_open_estimates');
+  });
+
+  test('an estimate archived after the call began counts too; one closed BEFORE the call does not', async () => {
+    const laterClosed = await insertCustomer(mockPg);
+    await insertEstimate(mockPg, laterClosed);
+    await insertEstimate(mockPg, laterClosed, { archived_at: new Date('2027-01-15T16:40:00.000Z') });
+    const earlierClosed = await insertCustomer(mockPg);
+    const kept = await insertEstimate(mockPg, earlierClosed);
+    await insertEstimate(mockPg, earlierClosed, { status: 'accepted', accepted_at: new Date('2027-01-14T20:00:00.000Z') });
+    const laterCall = await insertCall(mockPg, { customer_id: laterClosed });
+    const earlierCall = await insertCall(mockPg, { customer_id: earlierClosed });
+    await shadow.stage(mockPg, { now: NOW });
+    expect((await metadataOf(laterCall))[KEY].reason).toBe('several_open_estimates');
+    expect((await metadataOf(earlierCall))[KEY]).toMatchObject({ status: 'pending', estimate_id: kept });
+  });
+
+  test('"sent before the call" is the FIRST delivery: a resend after the call does not unpin it, and a held send is no delivery', async () => {
+    const resent = await insertCustomer(mockPg);
+    const resentEstimate = await insertEstimate(mockPg, resent, {
+      sent_at: new Date('2027-01-15T16:30:00.000Z'),
+      estimate_data: { deliveryState: { firstDeliveredAt: '2027-01-14T15:00:00.000Z', lastDeliveredAt: '2027-01-15T16:30:00.000Z' } },
+    });
+    const held = await insertCustomer(mockPg);
+    await insertEstimate(mockPg, held, { sent_at: new Date('2027-01-14T15:00:00.000Z'), estimate_data: { deliveryState: {} } });
+    const legacy = await insertCustomer(mockPg);
+    const legacyEstimate = await insertEstimate(mockPg, legacy, { estimate_data: {} });
+    const resentCall = await insertCall(mockPg, { customer_id: resent });
+    const heldCall = await insertCall(mockPg, { customer_id: held });
+    const legacyCall = await insertCall(mockPg, { customer_id: legacy });
+    await shadow.stage(mockPg, { now: NOW });
+    expect((await metadataOf(resentCall))[KEY]).toMatchObject({ status: 'pending', estimate_id: resentEstimate });
+    expect((await metadataOf(heldCall))[KEY].reason).toBe('no_open_estimate');
+    expect((await metadataOf(legacyCall))[KEY]).toMatchObject({ status: 'pending', estimate_id: legacyEstimate });
   });
 
   test('two open estimates, none, and no customer are recorded as skips with their reasons', async () => {
@@ -197,6 +249,24 @@ postgres('call-estimate-link-shadow against PostgreSQL', () => {
       const staleCopy = pendingEntry(estimateId, new Date(NOW.getTime() - 2 * 60 * 60 * 1000).toISOString());
       expect(await shadow.decideOne(mockPg, callId, staleCopy, NOW)).toBeNull();
       expect((await metadataOf(callId))[KEY].status).toBe('pending');
+    });
+
+    test('a call read again while it waited: answer_changed (a no, or a read no longer valid) and customer_changed, written for real', async () => {
+      const customerId = await insertCustomer(mockPg);
+      const estimateId = await insertEstimate(mockPg, customerId);
+      const sendAt = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+      const metadata = { [KEY]: pendingEntry(estimateId, sendAt) };
+      const declined = await insertCall(mockPg, { customer_id: customerId, metadata, ai_extraction_enriched: extraction({ estimate_response: 'declined' }) });
+      const invalid = await insertCall(mockPg, { customer_id: customerId, metadata, v2_extraction_status: 'pending' });
+      const moved = await insertCall(mockPg, { customer_id: await insertCustomer(mockPg), metadata });
+      const reprocessing = await insertCall(mockPg, { customer_id: customerId, metadata, processing_token: randomUUID() });
+
+      expect(await shadow.decide(mockPg, { now: NOW })).toEqual({ decided: 3, wouldSend: 0 });
+
+      expect((await metadataOf(declined))[KEY]).toMatchObject({ reason: 'answer_changed', answer_now: 'declined' });
+      expect((await metadataOf(invalid))[KEY]).toMatchObject({ reason: 'answer_changed', answer_now: 'accepted' });
+      expect((await metadataOf(moved))[KEY]).toMatchObject({ reason: 'customer_changed' });
+      expect((await metadataOf(reprocessing))[KEY].status).toBe('pending');
     });
 
     test('a row whose send time is still ahead is not read or decided', async () => {

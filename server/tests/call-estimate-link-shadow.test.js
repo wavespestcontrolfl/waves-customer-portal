@@ -26,7 +26,9 @@ jest.mock('../services/call-booking-link-text', () => ({
   visitStampedWithCall: jest.fn(),
 }));
 jest.mock('../services/estimate-follow-up', () => ({ hasRepliedSince: jest.fn() }));
-jest.mock('../routes/estimate-public', () => ({ isEstimateCustomerViewable: jest.fn() }));
+jest.mock('../routes/estimate-public', () => ({ isEstimateCustomerViewable: jest.fn(), ESTIMATE_TOKEN_RE: /^[A-Za-z0-9_-]{15,64}$/ }));
+jest.mock('../services/call-phone-yes-accept', () => ({ openEstimatesOf: jest.fn(), otherEstimateOpenAt: jest.fn() }));
+jest.mock('../services/disclaimed-number-holds', () => ({ disclaimedNumberHeld: jest.fn() }));
 jest.mock('../utils/estimate-claim-sql', () => ({ callSideBlockForEstimateData: jest.fn() }));
 jest.mock('../services/pricing-authority-gate', () => ({ estimateDeliverableUnderGate: jest.fn() }));
 jest.mock('../services/messaging/policy', () => ({ resolvePolicy: jest.fn(() => ({ requireConsent: 'transactional' })) }));
@@ -38,6 +40,8 @@ const path = require('path');
 const logger = require('../services/logger');
 const { bookedSinceCall, visitStampedWithCall } = require('../services/call-booking-link-text');
 const { hasRepliedSince } = require('../services/estimate-follow-up');
+const { openEstimatesOf, otherEstimateOpenAt } = require('../services/call-phone-yes-accept');
+const { disclaimedNumberHeld } = require('../services/disclaimed-number-holds');
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 const { estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
@@ -89,21 +93,26 @@ const has = (calls, method, ...args) => calls.some((c) => c[0] === method && arg
 
 const baseCall = (over = {}) => ({
   id: 'call-1', customer_id: 'cust-1', direction: 'inbound', source: null, bridged_at: null, duration_seconds: 120,
-  recording_duration_seconds: 0, created_at: CALL_START, updated_at: new Date('2026-11-20T15:05:00.000Z'),
+  recording_duration_seconds: 0, created_at: CALL_START, updated_at_key: '2026-11-20 15:05:00.123456+00',
   processing_token: null, v2_extraction_status: 'valid', metadata: {}, estimate_answer: 'accepted', ...over,
 });
 const baseEstimate = (over = {}) => ({
   id: 'est-1', customer_id: 'cust-1', status: 'sent', archived_at: null, sent_at: new Date('2026-11-19T15:00:00.000Z'),
-  expires_at: null, last_follow_up_at: null, customer_phone: '(941) 555-0123', estimate_data: {}, ...over,
+  expires_at: null, last_follow_up_at: null, customer_phone: '(941) 555-0123', estimate_data: {}, token: 'tok_AbCdEfGhIjKlMnOp1', ...over,
 });
 
 // ---- staging ---------------------------------------------------------------------------------------
 
-function stageWorld({ call = baseCall(), pin = [{ id: 'est-1' }], update } = {}) {
-  return fakeConn({
-    rows: { call_log: () => [call], estimates: () => pin },
-    update,
-  });
+// The first real handoff of the pinned estimate: before the call began.
+const BEFORE_CALL = '2026-11-19T15:00:00.000Z';
+const candidate = (id = 'est-1', handoffAt = BEFORE_CALL) => ({ id, handoff_at: handoffAt });
+
+// `pin` = what the phone-yes card's openEstimatesOf answers (with each row's first-handoff time);
+// `otherOpen` = what its otherEstimateOpenAt answers (another estimate open AT the call).
+function stageWorld({ call = baseCall(), pin = [candidate()], otherOpen = false, update } = {}) {
+  openEstimatesOf.mockResolvedValue(pin);
+  otherEstimateOpenAt.mockResolvedValue(otherOpen);
+  return fakeConn({ rows: { call_log: () => [call] }, update });
 }
 
 describe('stage: one record per yes-family call', () => {
@@ -118,6 +127,15 @@ describe('stage: one record per yes-family call', () => {
     expect(scan.some((c) => c[0] === 'select' && c.includes('ai_extraction_enriched'))).toBe(false);
   });
 
+  test('updated_at is read as text, so a microsecond value the Date type would drop still matches at claim time', async () => {
+    const conn = stageWorld();
+    await shadow.stage(conn, { now: NOW });
+    expect(conn.raw).toHaveBeenCalledWith('updated_at::text AS updated_at_key');
+    const claim = conn.queried('call_log').find((q) => q.calls.some((c) => c[0] === 'update')).calls;
+    expect(has(claim, 'whereRaw', 'updated_at::text = ?', ['2026-11-20 15:05:00.123456+00'])).toBe(true);
+    expect(claim.some((c) => c[0] === 'where' && c[1] === 'updated_at')).toBe(false);
+  });
+
   test('one open sent estimate: pending, pinned, with the answer, the send time and the staging time', async () => {
     const conn = stageWorld({ call: baseCall({ estimate_answer: 'accepted_with_condition' }) });
     expect(await shadow.stage(conn, { now: NOW })).toEqual({ staged: 1, ineligible: 0 });
@@ -126,23 +144,22 @@ describe('stage: one record per yes-family call', () => {
     }]);
   });
 
-  test('the estimate rule: this customer, sent or viewed, not archived, sent before the call, not expired at the call', async () => {
+  test('the estimate rule is read through the phone-yes helpers: open today with a first handoff, and nothing else open AT the call', async () => {
     const conn = stageWorld();
     await shadow.stage(conn, { now: NOW });
-    const pin = conn.queried('estimates')[0].calls;
-    expect(has(pin, 'where', { customer_id: 'cust-1' })).toBe(true);
-    expect(has(pin, 'whereIn', 'status', ['sent', 'viewed'])).toBe(true);
-    expect(has(pin, 'whereNull', 'archived_at')).toBe(true);
-    expect(has(pin, 'whereNotNull', 'sent_at')).toBe(true);
-    expect(has(pin, 'where', 'sent_at', '<=', CALL_START)).toBe(true);
+    expect(openEstimatesOf).toHaveBeenCalledWith(conn, 'cust-1', NOW);
+    expect(otherEstimateOpenAt).toHaveBeenCalledWith(conn, { customerId: 'cust-1', cardIds: ['est-1'], callLogId: 'call-1' });
   });
 
   test.each([
     ['no customer row on the call', { call: baseCall({ customer_id: null }) }, 'no_customer'],
     ['no open estimate', { pin: [] }, 'no_open_estimate'],
-    ['two open estimates', { pin: [{ id: 'est-1' }, { id: 'est-2' }] }, 'several_open_estimates'],
+    ['two open estimates', { pin: [candidate('est-1'), candidate('est-2')] }, 'several_open_estimates'],
+    ['another estimate was open at the call (accepted or archived since)', { otherOpen: true }, 'several_open_estimates'],
+    ['the first handoff came after the call began (a resend moved sent_at, the first delivery did not)', { pin: [candidate('est-1', '2026-11-20T16:00:00.000Z')] }, 'no_open_estimate'],
+    ['an estimate never delivered (every send held back or failed, never opened)', { pin: [candidate('est-1', null)] }, 'no_open_estimate'],
     ['a send time already over an hour past', { call: baseCall({ created_at: new Date(NOW.getTime() - 5 * HOUR) }) }, 'stale_at_staging'],
-    ['no readable call time', { call: baseCall({ created_at: null }) }, 'no_call_end_time'],
+    ['no readable call time', { call: baseCall({ created_at: null }), pin: [candidate('est-1', '1960-01-01T00:00:00.000Z')] }, 'no_call_end_time'],
   ])('%s: skipped, terminal, with its reason', async (_label, world, reason) => {
     const conn = stageWorld(world);
     const out = await shadow.stage(conn, { now: NOW });
@@ -150,10 +167,22 @@ describe('stage: one record per yes-family call', () => {
     expect(conn.written).toEqual([{ status: 'skipped', reason, answer: 'accepted', staged_at: NOW.toISOString() }]);
   });
 
-  test('no customer: the estimates table is never read', async () => {
+  test('no customer: no estimate is read', async () => {
     const conn = stageWorld({ call: baseCall({ customer_id: null }) });
     await shadow.stage(conn, { now: NOW });
-    expect(conn.queried('estimates')).toHaveLength(0);
+    expect(openEstimatesOf).not.toHaveBeenCalled();
+    expect(otherEstimateOpenAt).not.toHaveBeenCalled();
+  });
+
+  test('a never-delivered estimate beside a delivered one does not make the call "several"', async () => {
+    const conn = stageWorld({ pin: [candidate('est-1'), candidate('est-2', null)] });
+    expect(await shadow.stage(conn, { now: NOW })).toEqual({ staged: 1, ineligible: 0 });
+    expect(conn.written[0].estimate_id).toBe('est-1');
+  });
+
+  test('a delivered estimate with a first handoff exactly at the call start counts, a legacy row too (handoff = sent_at)', async () => {
+    const conn = stageWorld({ pin: [candidate('est-1', CALL_START.toISOString())] });
+    expect(await shadow.stage(conn, { now: NOW })).toEqual({ staged: 1, ineligible: 0 });
   });
 
   test('the write is a claim: it re-checks what the scan filtered on, and a lost claim counts nothing', async () => {
@@ -163,20 +192,15 @@ describe('stage: one record per yes-family call', () => {
     expect(has(claim, 'where', { id: 'call-1' })).toBe(true);
     expect(has(claim, 'whereNull', 'processing_token')).toBe(true);
     expect(has(claim, 'where', 'v2_extraction_status', 'valid')).toBe(true);
-    expect(has(claim, 'where', 'updated_at', baseCall().updated_at)).toBe(true);
     expect(has(claim, 'whereRaw', 'metadata->:key IS NULL', { key: KEY })).toBe(true);
     // The write leaves updated_at alone.
     expect(JSON.stringify(claim.find((c) => c[0] === 'update'))).not.toContain('updated_at');
   });
 
   test('one call that fails to stage does not stop the next one, and the log carries the call id and code only', async () => {
-    let estimateReads = 0;
-    const conn = fakeConn({
-      rows: {
-        call_log: () => [baseCall({ id: 'call-bad' }), baseCall({ id: 'call-ok' })],
-        estimates: () => { estimateReads += 1; if (estimateReads === 1) throw Object.assign(new Error('secret row text'), { code: '57014' }); return [{ id: 'est-1' }]; },
-      },
-    });
+    const conn = fakeConn({ rows: { call_log: () => [baseCall({ id: 'call-bad' }), baseCall({ id: 'call-ok' })] } });
+    otherEstimateOpenAt.mockResolvedValue(false);
+    openEstimatesOf.mockRejectedValueOnce(Object.assign(new Error('secret row text'), { code: '57014' })).mockResolvedValue([candidate()]);
     expect(await shadow.stage(conn, { now: NOW })).toEqual({ staged: 1, ineligible: 0 });
     const warned = logger.warn.mock.calls.map((c) => c[0]).join('\n');
     expect(warned).toContain('call-bad');
@@ -200,7 +224,7 @@ function decideWorld(over = {}) {
     call: baseCall({ metadata: { [KEY]: PENDING } }),
     estimate: baseEstimate(),
     customer: { id: 'cust-1', phone: '+19415550123', deleted_at: null },
-    openRows: [{ id: 'est-1' }],
+    openRows: [candidate()],
     sms: null,
     answeredCall: null,
     due: [{ id: 'call-1', metadata: { [KEY]: PENDING } }],
@@ -210,7 +234,6 @@ function decideWorld(over = {}) {
   world.conn = fakeConn({
     rows: {
       call_log: (calls) => (calls.some((c) => c[0] === 'orderByRaw') ? world.due : []),
-      estimates: () => world.openRows,
     },
     first: {
       call_log: (calls) => (calls.some((c) => c[0] === 'whereRaw' && c[1] === CUSTOMER_ANSWERED_SQL) ? world.answeredCall : world.call),
@@ -220,6 +243,7 @@ function decideWorld(over = {}) {
     },
     update: () => world.updateCount,
   });
+  openEstimatesOf.mockImplementation(async () => world.openRows);
   return world;
 }
 
@@ -231,6 +255,8 @@ function clearMocks() {
   isEstimateCustomerViewable.mockReturnValue(true);
   callSideBlockForEstimateData.mockResolvedValue(null);
   estimateDeliverableUnderGate.mockResolvedValue(true);
+  disclaimedNumberHeld.mockResolvedValue(false);
+  otherEstimateOpenAt.mockResolvedValue(false);
   loadContactState.mockResolvedValue({ prefs: {} });
   loadSuppressionState.mockImplementation(async (_input, state) => ({ ...state, suppressionLoaded: true }));
   checkSuppression.mockResolvedValue({ ok: true });
@@ -240,14 +266,17 @@ beforeEach(clearMocks);
 
 // Each stop: how to make it apply. The order of this table is the order the module must answer in.
 const STOPS = [
+  ['answer_changed', (w) => { w.call = { ...w.call, estimate_answer: 'declined' }; }],
+  ['customer_changed', (w) => { w.call = { ...w.call, customer_id: 'cust-2' }; }],
   ['estimate_accepted', (w) => { w.estimate = { ...w.estimate, status: 'accepted' }; }],
   ['estimate_closed', (w) => { w.estimate = { ...w.estimate, archived_at: new Date('2026-11-20T16:00:00.000Z') }; }],
   ['estimate_expired', (w) => { w.estimate = { ...w.estimate, expires_at: new Date('2026-11-20T17:00:00.000Z') }; }],
-  ['several_open_estimates', (w) => { w.openRows = [{ id: 'est-1' }, { id: 'est-9' }]; }],
+  ['several_open_estimates', (w) => { w.openRows = [candidate('est-1'), candidate('est-9', '2026-11-20T16:30:00.000Z')]; }],
   ['booked', () => { bookedSinceCall.mockResolvedValue(true); }],
   ['contact_since_call', (w) => { w.sms = { id: 'sms-1' }; }],
   ['customer_replied_since_call', () => { hasRepliedSince.mockResolvedValue(true); }],
   ['no_textable_phone', (w) => { w.customer = { id: 'cust-1', phone: null, deleted_at: null }; }],
+  ['number_on_hold', () => { disclaimedNumberHeld.mockResolvedValue(true); }],
   ['sms_opted_out', () => { checkSuppression.mockResolvedValue({ ok: false, code: 'SUPPRESSED_OPT_OUT' }); }],
   ['link_not_viewable', () => { isEstimateCustomerViewable.mockReturnValue(false); }],
   ['pricing_not_verified', () => { estimateDeliverableUnderGate.mockResolvedValue(false); }],
@@ -286,20 +315,18 @@ describe('decide: the first stop that applies is recorded', () => {
     }
   });
 
-  test('the several-estimates count passes the staging tests but not the sent-before-the-call one', async () => {
-    const world = decideWorld();
+  test('the several-estimates count reads open estimates today, counts one sent after the call, and ignores one never delivered', async () => {
+    const world = decideWorld({ openRows: [candidate(), candidate('est-9', null)] });
     await shadow.decide(world.conn, { now: NOW });
-    const count = world.conn.queried('estimates').find((q) => q.calls.some((c) => c[0] === 'limit')).calls;
-    expect(has(count, 'whereIn', 'status', ['sent', 'viewed'])).toBe(true);
-    expect(has(count, 'whereNull', 'archived_at')).toBe(true);
-    expect(count.some((c) => c[0] === 'where' && c[1] === 'sent_at')).toBe(false);
+    expect(openEstimatesOf).toHaveBeenCalledWith(world.conn, 'cust-1', NOW);
+    expect(decided(world).status).toBe('would_send');
   });
 
   test.each([
     ['text', (w) => { w.sms = { id: 'sms-1' }; }],
     ['call', (w) => { w.answeredCall = { id: 'call-9' }; }],
     ['follow_up', (w) => { w.estimate = baseEstimate({ last_follow_up_at: new Date('2026-11-20T16:00:00.000Z') }); }],
-    ['resent', (w) => { w.estimate = baseEstimate({ sent_at: new Date('2026-11-20T16:00:00.000Z') }); }],
+    ['resent', (w) => { w.estimate = baseEstimate({ estimate_data: { deliveryState: { firstDeliveredAt: BEFORE_CALL, lastDeliveredAt: '2026-11-20T16:00:00.000Z' } } }); }],
   ])('contact since the call (%s) is recorded with its kind', async (contact, apply) => {
     const world = decideWorld();
     apply(world);
@@ -315,6 +342,21 @@ describe('decide: the first stop that applies is recorded', () => {
     expect(has(texts, 'whereNotIn', 'sms_log.status', ['failed', 'undelivered', 'blocked'])).toBe(true);
     expect(hasRepliedSince.mock.calls[0][1]).toEqual(new Date('2026-11-20T15:02:00.000Z'));
     expect(hasRepliedSince.mock.calls[0][2]).toEqual({ throwOnError: true });
+  });
+
+  test.each([
+    ['a stamped row whose sent_at moved after the call but whose last real handoff did not (a held or failed send)',
+      baseEstimate({ sent_at: new Date('2026-11-20T16:00:00.000Z'), estimate_data: { deliveryState: { firstDeliveredAt: BEFORE_CALL, lastDeliveredAt: BEFORE_CALL } } }), 'would_send'],
+    ['a stamped row with no real handoff at all, opened before the call', baseEstimate({ sent_at: new Date('2026-11-20T16:00:00.000Z'), estimate_data: { deliveryState: {} } }), 'would_send'],
+    ['a legacy row (no delivery stamp) sent before the call', baseEstimate({ estimate_data: {} }), 'would_send'],
+    ['a legacy row (no delivery stamp) whose sent_at moved after the call ended: a resend, the only evidence there is',
+      baseEstimate({ sent_at: new Date('2026-11-20T16:00:00.000Z'), estimate_data: {} }), 'resent'],
+    ['a stamp stored as a JSON string', baseEstimate({ estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: BEFORE_CALL, lastDeliveredAt: '2026-11-20T16:00:00.000Z' } }) }), 'resent'],
+  ])('resent is read from the delivery stamp: %s', async (_label, estimate, expected) => {
+    const world = decideWorld({ estimate });
+    await shadow.decide(world.conn, { now: NOW });
+    const out = decided(world);
+    expect(out.status === 'would_send' ? 'would_send' : out.contact).toBe(expected);
   });
 
   test('an estimate sent BEFORE the call end is not "sent again"', async () => {
@@ -338,6 +380,87 @@ describe('decide: the first stop that applies is recorded', () => {
       await shadow.decide(world.conn, { now: NOW });
       expect(decided(world).reason).toBe('no_textable_phone');
     }
+  });
+
+  test('answer_changed carries the answer now: the call was read again and is no longer a yes (or no longer valid)', async () => {
+    for (const [change, answerNow] of [
+      [{ estimate_answer: 'declined' }, 'declined'], [{ estimate_answer: null }, null], [{ estimate_answer: 'undecided' }, 'undecided'],
+      [{ v2_extraction_status: 'pending' }, 'accepted'],
+    ]) {
+      const world = decideWorld();
+      world.call = { ...world.call, ...change };
+      await shadow.decide(world.conn, { now: NOW });
+      expect(decided(world)).toMatchObject({ status: 'skipped', reason: 'answer_changed', answer: 'accepted', answer_now: answerNow });
+    }
+  });
+
+  test('a yes that became the other yes is still a yes', async () => {
+    const world = decideWorld();
+    world.call = { ...world.call, estimate_answer: 'accepted_with_condition' };
+    await shadow.decide(world.conn, { now: NOW });
+    expect(decided(world).status).toBe('would_send');
+  });
+
+  test('customer_changed: the call has no customer now, or another one than the pinned estimate belongs to', async () => {
+    for (const customerId of [null, 'cust-2']) {
+      const world = decideWorld();
+      world.call = { ...world.call, customer_id: customerId };
+      await shadow.decide(world.conn, { now: NOW });
+      expect(decided(world).reason).toBe('customer_changed');
+    }
+  });
+
+  test('a call mid-reprocess is left pending: nothing written, the retry policy applies', async () => {
+    const world = decideWorld();
+    world.call = { ...world.call, processing_token: 'tok-1' };
+    expect(await shadow.decide(world.conn, { now: NOW })).toEqual({ decided: 0, wouldSend: 0 });
+    expect(world.conn.written).toHaveLength(0);
+    expect(logger.warn.mock.calls.map((c) => c[0]).join('\n')).toContain('call_reprocessing');
+    const late = new Date(new Date(SEND_AT).getTime() + shadow.UNDECIDED_GIVE_UP_MS + 60 * 1000);
+    await shadow.decide(world.conn, { now: late });
+    expect(decided(world)).toMatchObject({ reason: 'undecided_after_24h' });
+  });
+
+  test('the fresh call read asks for the extraction status, the reprocess token and the stored answer', async () => {
+    const world = decideWorld();
+    await shadow.decide(world.conn, { now: NOW });
+    const read = world.conn.queried('call_log').find((q) => q.calls.some((c) => c[0] === 'first')).calls.find((c) => c[0] === 'first');
+    expect(read).toEqual(expect.arrayContaining(['v2_extraction_status', 'processing_token']));
+    expect(world.conn.raw).toHaveBeenCalledWith("ai_extraction_enriched->'service_request'->>'estimate_response' AS estimate_answer");
+  });
+
+  test('number_on_hold reads the destination-number hold for the saved phone, and is not an opt-out', async () => {
+    disclaimedNumberHeld.mockResolvedValue(true);
+    const world = decideWorld();
+    await shadow.decide(world.conn, { now: NOW });
+    expect(decided(world).reason).toBe('number_on_hold');
+    expect(disclaimedNumberHeld).toHaveBeenCalledWith('+19415550123', world.conn);
+    expect(checkSuppression).not.toHaveBeenCalled();
+  });
+
+  test('a failed hold lookup leaves the row pending', async () => {
+    disclaimedNumberHeld.mockRejectedValue(Object.assign(new Error('x'), { code: '57014' }));
+    const world = decideWorld();
+    await shadow.decide(world.conn, { now: NOW });
+    expect(world.conn.written).toHaveLength(0);
+  });
+
+  test.each([[undefined], [null], [''], ['short'], ['has space in token 1234'], ['x'.repeat(65)]])('a missing or malformed token (%p) is link_not_viewable', async (token) => {
+    const world = decideWorld({ estimate: baseEstimate({ token }) });
+    await shadow.decide(world.conn, { now: NOW });
+    expect(decided(world).reason).toBe('link_not_viewable');
+    expect(callSideBlockForEstimateData).not.toHaveBeenCalled();
+  });
+
+  test('call_verdict_unavailable is not an answer: the row stays pending, then gives up after 24 hours', async () => {
+    callSideBlockForEstimateData.mockResolvedValue('call_verdict_unavailable');
+    const world = decideWorld();
+    expect(await shadow.decide(world.conn, { now: NOW })).toEqual({ decided: 0, wouldSend: 0 });
+    expect(world.conn.written).toHaveLength(0);
+    expect(logger.warn.mock.calls.map((c) => c[0]).join('\n')).toContain('call_verdict_unavailable');
+    const late = new Date(new Date(SEND_AT).getTime() + shadow.UNDECIDED_GIVE_UP_MS + 60 * 1000);
+    await shadow.decide(world.conn, { now: late });
+    expect(decided(world)).toMatchObject({ reason: 'undecided_after_24h' });
   });
 
   test('the consent read uses the send pipeline validators with no send: a refusal by consent counts as opted out', async () => {

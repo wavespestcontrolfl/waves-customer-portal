@@ -17,17 +17,32 @@
  *   { status: 'skipped', reason, answer, staged_at }                     never eligible (staging)
  *   { status: 'pending', estimate_id, answer, send_at, staged_at }       waiting out the delay
  *   { status: 'would_send', estimate_id, answer, send_at, staged_at, decided_at }
- *   { status: 'skipped', reason, estimate_id, answer, send_at, staged_at, decided_at[, contact] }
+ *   { status: 'skipped', reason, estimate_id, answer, send_at, staged_at, decided_at[, contact][, answer_now] }
  * `would_send` and every `skipped` are terminal. A sweep is `stage` then `decide`.
+ * Reasons at staging: no_customer, no_open_estimate, several_open_estimates, stale_at_staging, no_call_end_time.
+ * Stops at decide, first one that applies wins, in this order: answer_changed (the call was read again: no longer
+ * valid or no longer a yes; `answer_now` holds the new answer), customer_changed, estimate_accepted, estimate_closed,
+ * estimate_expired, several_open_estimates, booked, contact_since_call (`contact` = text | call | follow_up | resent),
+ * customer_replied_since_call, no_textable_phone, number_on_hold (the disclaimed-number hold the send pipeline reads),
+ * sms_opted_out, link_not_viewable, pricing_not_verified; undecided_after_24h when a read keeps failing.
  *
  * Known limits (each on purpose, each the safe side for a recorder):
  *  - "The estimate" is matched by `call_log.customer_id` only, never by phone. A caller the call
  *    reader did not link to a customer row is `no_customer`, and is never guessed at.
- *  - The estimate is pinned at staging and never re-picked.
+ *  - The estimate is pinned at staging and never re-picked. "Open at the call" is historical: an estimate counts
+ *    when its FIRST real handoff (call-phone-yes-accept's handoffSql: deliveryState.firstDeliveredAt, else the first
+ *    view, else sent_at for a row with no delivery stamp) came before the call began and it was not accepted, declined,
+ *    archived or expired by then. A resend never moves that anchor, and an estimate never delivered is no candidate.
+ *    When another estimate of the customer was open at the call (even one closed since), the call is
+ *    `several_open_estimates`: the caller may have meant the other one.
+ *  - A call that was read again while it waited (the answer is no longer a yes, the customer changed, or the call is
+ *    mid-reprocess) is never decided on its old read: `answer_changed` / `customer_changed`, or it stays pending.
  *  - `sms_opted_out` reads the send pipeline's own validators (suppression list and consent
  *    settings) with no send and no write. A read that cannot be answered leaves the row pending.
  *  - The reply check (`customer_replied_since_call`) uses the engagement engine's reply reader on
  *    the shared connection, and it also counts an authenticated email reply, as that reader does.
+ *  - `pricing_not_verified`: pricing-authority-gate swallows a failed link-visible sibling read into `false`, and no
+ *    variant surfaces the failure, so a read failure there is recorded as this reason, not retried.
  *  - A call whose stored extraction is a JSON string rather than an object is not seen by the
  *    staging scan (the jsonb path read returns nothing for it).
  *  - The write does not touch `call_log.updated_at`, so no other job sees this record as a change.
@@ -44,6 +59,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { nanpPhoneProblem } = require('../utils/phone');
 const { CUSTOMER_ANSWERED_SQL, callLogPhoneFor } = require('./estimate-call-list');
+const { openEstimatesOf, otherEstimateOpenAt } = require('./call-phone-yes-accept');
 const {
   STAGING_LOOKBACK_DAYS, STAGING_GRACE_MINUTES, STAGING_STALE_MS, QUEUE_SCAN_LOOKBACK_MS, computeSendAt, callEndFor,
   bookedSinceCall, visitStampedWithCall,
@@ -64,6 +80,7 @@ const TRANSIENT_CONSENT_CODES = new Set(['CONSENT_LOOKUP_FAILED', 'SUPPRESSION_L
 
 const CALL_COLUMNS = ['id', 'customer_id', 'direction', 'source', 'bridged_at', 'duration_seconds',
   'recording_duration_seconds', 'created_at', 'metadata'];
+const ANSWER_PATH_SQL = "ai_extraction_enriched->'service_request'->>'estimate_response'";
 
 function parseMetadata(row) {
   const raw = row?.metadata;
@@ -107,10 +124,9 @@ function stagingScan(conn, now) {
     .whereRaw("(ai_extraction_enriched->'service_request'->>'estimate_response') = ANY(?)", [YES_FAMILY])
     .orderBy('created_at', 'asc')
     .limit(STAGING_BATCH)
-    // processing_token / updated_at / v2_extraction_status: carried so claim() can re-check at UPDATE
-    // time what this SELECT filtered on.
-    .select(...CALL_COLUMNS, 'processing_token', 'updated_at', 'v2_extraction_status',
-      conn.raw("ai_extraction_enriched->'service_request'->>'estimate_response' AS estimate_answer"));
+    // updated_at is carried as TEXT: a JS Date drops its microseconds, so a Date would never match the stored value
+    // in claim(), and the call would never be staged. The text form is stable within one session.
+    .select(...CALL_COLUMNS, conn.raw('updated_at::text AS updated_at_key'), conn.raw(`${ANSWER_PATH_SQL} AS estimate_answer`));
 }
 
 // Only the first writer may set the key, and only while the call is still the row the scan read.
@@ -118,31 +134,34 @@ async function claim(conn, call, value) {
   const changed = await conn('call_log').where({ id: call.id })
     .whereNull('processing_token')
     .where('v2_extraction_status', 'valid')
-    .where('updated_at', call.updated_at)
+    .whereRaw('updated_at::text = ?', [call.updated_at_key])
     .whereRaw('metadata->:key IS NULL', { key: METADATA_KEY })
     .update({ metadata: metadataPatch(conn, value) });
   return changed > 0;
 }
 
-// The customer's open sent estimates as of the call's start. Two rows are enough to tell one from several.
-function openEstimatesAtCall(conn, customerId, callStart) {
-  return conn('estimates').where({ customer_id: customerId })
-    .whereIn('status', OPEN_STATUSES)
-    .whereNull('archived_at')
-    .whereNotNull('sent_at')
-    .where('sent_at', '<=', callStart)
-    .where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', callStart))
-    .limit(2)
-    .select('id');
-}
+// The estimates the customer can still be sent that were first handed over before the call began. Read through the
+// phone-yes card's own helpers: openEstimatesOf (sent or viewed, not archived, not expired, with `handoff_at` = the
+// first real handoff, else the first view, else sent_at for a row with no delivery stamp). An estimate with no
+// handoff (every send held back or failed, never opened) is not a candidate.
+const handoffMs = (estimate) => {
+  const ms = estimate.handoff_at ? new Date(estimate.handoff_at).getTime() : NaN;
+  return Number.isFinite(ms) ? ms : null;
+};
 
 // The reason a staged call is skipped at once, or the pinned estimate id.
-async function pinEstimate(conn, call, callStart) {
+async function pinEstimate(conn, call, callStart, now) {
   if (!call.customer_id) return { reason: 'no_customer' };
-  const rows = await openEstimatesAtCall(conn, call.customer_id, callStart);
-  if (rows.length === 0) return { reason: 'no_open_estimate' };
-  if (rows.length > 1) return { reason: 'several_open_estimates' };
-  return { estimateId: rows[0].id };
+  const open = await openEstimatesOf(conn, call.customer_id, now);
+  const candidates = open.filter((estimate) => handoffMs(estimate) !== null && handoffMs(estimate) <= callStart.getTime());
+  if (candidates.length === 0) return { reason: 'no_open_estimate' };
+  if (candidates.length > 1) return { reason: 'several_open_estimates' };
+  // Open AT the call, not today: another estimate that was open then (accepted or archived since) may be the one
+  // the caller meant.
+  if (await otherEstimateOpenAt(conn, { customerId: call.customer_id, cardIds: [candidates[0].id], callLogId: call.id })) {
+    return { reason: 'several_open_estimates' };
+  }
+  return { estimateId: candidates[0].id };
 }
 
 // The first moment the later text could go: 2 hours after the call, moved into the send window.
@@ -160,7 +179,7 @@ async function stageOne(conn, call, now) {
   const answer = call.estimate_answer;
   const skip = (reason) => ({ status: 'skipped', reason, answer, staged_at });
   const callStart = callStartedAt(call) || new Date(call.created_at);
-  const pinned = await pinEstimate(conn, call, callStart);
+  const pinned = await pinEstimate(conn, call, callStart, now);
   if (pinned.reason) return { value: skip(pinned.reason), pending: false };
   const sendAt = sendAtFor(call, now);
   if (!sendAt) return { value: skip('no_call_end_time'), pending: false };
@@ -198,17 +217,20 @@ async function stage(conn = db, { now = new Date() } = {}) {
 // decide: the stops, in order
 // ---------------------------------------------------------------------------------------------
 
-// The open-estimate test of the staging rule, without the "sent before the call" part: an estimate
-// sent after the call counts here. `now` is the expiry reference.
+// The customer's estimates open today (sent or viewed, not archived, not expired) that were really handed over, at
+// any time: one sent after the call counts here.
 async function countOpenEstimates(conn, customerId, now) {
-  const rows = await conn('estimates').where({ customer_id: customerId })
-    .whereIn('status', OPEN_STATUSES)
-    .whereNull('archived_at')
-    .whereNotNull('sent_at')
-    .where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', now))
-    .limit(2)
-    .select('id');
-  return rows.length;
+  const open = await openEstimatesOf(conn, customerId, now);
+  return open.filter((estimate) => handoffMs(estimate) !== null).length;
+}
+
+// Was the estimate delivered again after the call ended? A row the send path stamped (deliveryState): its last real
+// handoff, never sent_at (a held or failed send stamps sent_at without reaching the customer). A row with no stamp
+// (an older send): sent_at is all there is.
+function resentAfter(estimate, callEnd) {
+  const delivery = parseObject(estimate.estimate_data)?.deliveryState;
+  if (delivery && typeof delivery === 'object') return isAfter(delivery.lastDeliveredAt || delivery.firstDeliveredAt, callEnd);
+  return isAfter(estimate.sent_at, callEnd);
 }
 
 const isAfter = (value, instant) => {
@@ -256,7 +278,7 @@ async function contactAfterCall(ctx) {
   if (await textedSince(conn, target, callEnd)) return 'text';
   if (await calledSince(conn, target.phones, callEnd)) return 'call';
   if (isAfter(estimate.last_follow_up_at, callEnd)) return 'follow_up';
-  if (isAfter(estimate.sent_at, callEnd)) return 'resent';
+  if (resentAfter(estimate, callEnd)) return 'resent';
   return null;
 }
 
@@ -287,12 +309,19 @@ async function consentBlock(ctx) {
 
 const textablePhone = (phone) => !!phone && !nanpPhoneProblem(phone) && !!callLogPhoneFor({ customer_phone: phone });
 
+const coded = (code) => Object.assign(new Error(code), { code });
+
 async function linkNotViewable(ctx) {
-  const { isEstimateCustomerViewable } = require('../routes/estimate-public');
+  const { isEstimateCustomerViewable, ESTIMATE_TOKEN_RE } = require('../routes/estimate-public');
   const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+  // The public route refuses a token of any other shape, so the link would not open.
+  if (!ESTIMATE_TOKEN_RE.test(String(ctx.estimate.token ?? ''))) return true;
   if (!isEstimateCustomerViewable(ctx.estimate)) return true;
   const data = parseObject(ctx.estimate.estimate_data);
-  return !!(await callSideBlockForEstimateData(ctx.conn, data, { estimateStatus: ctx.estimate.status }));
+  const block = await callSideBlockForEstimateData(ctx.conn, data, { estimateStatus: ctx.estimate.status });
+  // Its read failed: not an answer about the link. The row stays pending and is retried.
+  if (block === 'call_verdict_unavailable') throw coded('call_verdict_unavailable');
+  return !!block;
 }
 
 /**
@@ -300,6 +329,11 @@ async function linkNotViewable(ctx) {
  * `{ reason, ...extra }`; a check that throws leaves the row pending (see decideOne).
  */
 const DECIDE_CHECKS = [
+  // The call was read again while it waited: judge nothing on the old read.
+  async ({ call }) => (call.v2_extraction_status !== 'valid' || !YES_FAMILY.includes(call.estimate_answer)
+    ? { reason: 'answer_changed', answer_now: call.estimate_answer ?? null } : null),
+  async ({ call, estimate }) => (!call.customer_id || (estimate && String(call.customer_id) !== String(estimate.customer_id))
+    ? { reason: 'customer_changed' } : null),
   async ({ estimate }) => (estimate?.status === 'accepted' ? { reason: 'estimate_accepted' } : null),
   async ({ estimate }) => (!estimate || estimate.archived_at || !OPEN_STATUSES.includes(estimate.status)
     ? { reason: 'estimate_closed' } : null),
@@ -322,6 +356,10 @@ const DECIDE_CHECKS = [
   },
   // The customer's SAVED phone only, never the caller ID.
   async ({ customer }) => (customer && !customer.deleted_at && textablePhone(customer.phone) ? null : { reason: 'no_textable_phone' }),
+  // The send pipeline's own destination-number hold (the caller disclaimed this number). Read-only; the helper throws
+  // on a failed read, so the row stays pending.
+  async ({ conn, customer }) => ((await require('./disclaimed-number-holds').disclaimedNumberHeld(customer.phone, conn))
+    ? { reason: 'number_on_hold' } : null),
   async (ctx) => ((await consentBlock(ctx)) ? { reason: 'sms_opted_out' } : null),
   async (ctx) => ((await linkNotViewable(ctx)) ? { reason: 'link_not_viewable' } : null),
   async ({ conn, estimate }) => {
@@ -340,8 +378,11 @@ async function firstStop(ctx) {
 
 // Everything the checks read, read FRESH.
 async function loadContext(conn, callId, entry, now) {
-  const call = await conn('call_log').where({ id: callId }).first(...CALL_COLUMNS);
-  if (!call) throw Object.assign(new Error('call_missing'), { code: 'call_missing' });
+  const call = await conn('call_log').where({ id: callId })
+    .first(...CALL_COLUMNS, 'v2_extraction_status', 'processing_token', conn.raw(`${ANSWER_PATH_SQL} AS estimate_answer`));
+  if (!call) throw coded('call_missing');
+  // Mid-reprocess: the row is being rewritten, so its answer and customer are not settled. Retry next tick.
+  if (call.processing_token) throw coded('call_reprocessing');
   const estimate = await conn('estimates').where({ id: entry.estimate_id }).first();
   const customer = call.customer_id
     ? await conn('customers').where({ id: call.customer_id }).first('id', 'phone', 'deleted_at') : null;
