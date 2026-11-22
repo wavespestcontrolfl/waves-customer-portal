@@ -412,7 +412,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(call).toContain('agreedOneTimeJob: agreedJobCardEvidence,');
     // The card writer: the evidence is ONE key, written on every pass (null for another skip), so an older
     // pass's evidence never stays on a card a later pass refreshed.
-    const writer = source.slice(source.indexOf('async function fileSkippedBookingCard('), source.indexOf('async function noteAgreedJobCardVisit('));
+    const writer = source.slice(source.indexOf('async function fileSkippedBookingCard('), source.indexOf('function agreedOneTimeJobCardPrice('));
     expect(writer).toContain('extraPayload: {\n            skipped_reason: skippedReason,\n            agreed_one_time_job: agreedOneTimeJob,');
     expect(writer).toContain('agreedOneTimeJob = null }) {');
     // An agreed-job write clears a house-number recovery task's own follow-up and on-file address.
@@ -462,44 +462,10 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(source.lastIndexOf('const insertData = {', at)).toBeGreaterThan(source.lastIndexOf('const svc = await db.transaction(async (trx) => {', at));
   });
 
-  // A held pass that found a visit (to reconcile, or cancelled) names it on an open agreed-job card as a candidate,
-  // never re-binding the card's customer.
-  test('a held pass with a found visit notes it on the open agreed-job card as a candidate', () => {
-    const at = source.indexOf("if (svc.__held.existingId && svc.__held.reason !== 'agreed_one_time_job_office_books') {");
-    expect(at).toBeGreaterThan(-1);
-    const call = source.slice(at, source.indexOf('});', at));
-    expect(call).toContain('call, procToken, customerId: null, visitId: svc.__held.existingId, visitService: svc.__held.existingService || null,');
-    expect(call).toContain('visitStatus: svc.__held.existingStatus || null, candidate: true, callSid,');
-    const helper = source.slice(source.indexOf('async function noteAgreedJobCardVisit('), source.indexOf('function agreedOneTimeJobCardPrice('));
-    expect(helper).toContain('visit_candidate: candidate === true,');
-    expect(helper).toContain('visit_status: visitStatus || null,');
-  });
-
-  // A later pass that finds or books the visit (staff booked it by hand, or the gate is off now) tells the open
-  // card, so staff check the visit's price and never book a second one.
-  test('a later booking names its visit on the open agreed-job card, under the call lock and the claim', () => {
-    const helper = source.slice(source.indexOf('async function noteAgreedJobCardVisit('), source.indexOf('function agreedOneTimeJobCardPrice('));
-    expect(helper).toContain('await lockTriageCall(ttrx, call.id);');
-    expect(helper).toContain("const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');");
-    expect(helper).toContain(".where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })");
-    // One unlocked read first: on every other call nothing more runs.
-    expect(helper).toContain("if (!(await agreedJobCard(db).first('id'))) return;");
-    // Each card gets the visit, its service, whether that is the priced service, and the visit's customer.
-    expect(helper).toContain("const cards = await agreedJobCard(ttrx).select('id', ttrx.raw(\"payload->>'service' AS card_service\"));");
-    expect(helper).toContain('visit_is_priced_service: !!visitService && !!card.card_service && serviceNameKey(visitService) === serviceNameKey(card.card_service),');
-    expect(helper).toContain("[JSON.stringify(customerId ? { dispute_customer_id: String(customerId) } : {}), JSON.stringify(visit)],");
-    expect(helper).toContain(".whereIn('status', ['open', 'in_progress'])");
-    expect(helper).toContain(".whereRaw(\"payload->>'skipped_reason' = 'agreed_one_time_job_office_books'\")");
-    // Inside the evidence key, so a pass that refiles the card clears an old visit id.
-    expect(helper).toContain(`"jsonb_set(COALESCE(payload, '{}'::jsonb) || ?::jsonb, '{agreed_one_time_job}', "`);
-    // Best-effort: a failure never blocks the booking.
-    expect(helper).toContain('} catch (err) {');
-    // Called once, on the booked path, whatever the gate reads now.
-    const site = 'scheduledServiceId = svc.id;';
-    expect(count('await noteAgreedJobCardVisit({ call, procToken, customerId: svc.customer_id || customerId, visitId: svc.id, visitService: svc.service_type || serviceType, callSid });')).toBe(1);
-    const at = source.indexOf('await noteAgreedJobCardVisit({ call, procToken, customerId: svc.customer_id');
-    expect(source.lastIndexOf(site, at)).toBeGreaterThan(source.lastIndexOf('if (svc && svc.__held) {', at));
-    expect(source.slice(source.lastIndexOf(site, at), at)).not.toContain('agreedJobAtAdoption');
+  // The card holds what the call said; no later pass rewrites it (the card tells staff to check the schedule).
+  test('no later pass writes visit details onto the agreed-job card', () => {
+    expect(source).not.toContain('noteAgreedJobCardVisit');
+    expect(source).not.toContain('visit_candidate');
   });
 
   // The card's price belongs to the service the call priced, with what kind of price it is.

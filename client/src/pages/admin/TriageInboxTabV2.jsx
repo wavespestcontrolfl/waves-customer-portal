@@ -131,29 +131,16 @@ function textNumberRows(p, livePhone) {
 
 // GATE_CALL_AGREED_ONE_TIME_JOB: the rows of an approved-but-unbooked card the AI held for a one-time job staff
 // priced on the call. Its evidence is one key (agreed_one_time_job), written on every pass, so old details never stay.
+// It says what the call agreed; the schedule, not the card, says whether the visit exists yet.
 function agreedOneTimeJobRows(p) {
   if (p.skipped_reason !== "agreed_one_time_job_office_books") return [];
   const j = p.agreed_one_time_job && typeof p.agreed_one_time_job === "object" ? p.agreed_one_time_job : {};
   const slot = (date, time) => `${String(date).slice(0, 10)}${time ? ` at ${String(time).slice(0, 5)}` : ""}`;
   const price = typeof j.stated_price === "number" ? fmtMoney(j.stated_price) : null;
-  // A later pass found or booked the call's visit: staff check it, and book nothing from this card.
-  if (j.visit_id) {
-    const about = [j.visit_service, j.visit_status].filter(Boolean).join(", ");
-    return [
-      j.visit_candidate === true
-        ? { label: "Possible visit", value: `A later pass found visit ${j.visit_id}${about ? ` (${about})` : ""}, which may be this job. Check it before you book: do not book a second one.` }
-        : { label: "Visit on file", value: `The call now has visit ${j.visit_id}${about ? ` (${about})` : ""}. Do not book another one: check the visit, then resolve this card.` },
-      price && (j.visit_is_priced_service !== true
-        ? { label: "Price on the call", value: `${price} was for ${p.service || "the job priced on the call"}. The visit is for another service, so this price does not apply to it.` }
-        : j.price_basis === "agreed_total"
-          ? { label: "Price on the call", value: `${price} one-time, the total the caller accepted. Check that the visit carries it.` }
-          // A stated price can carry a hedge or an added fee: a found visit does not settle it.
-          : { label: "Price on the call", value: `${price} one-time, as staff said it. Check the terms on the call before you set the visit's price.` }),
-      j.follow_up && j.follow_up.scheduled_date && { label: "Follow-up", value: "Visit 2 may already be booked. Check the schedule before you book one." },
-    ];
-  }
   return [
     { label: "Why", value: "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price." },
+    // The card holds what the call said. Nothing later rewrites it, as on every approved-but-unbooked card.
+    { label: "Before you book", value: "Check the customer's schedule. Staff or a later pass may have booked, moved or cancelled a visit for this call: never book a second one." },
     p.service && { label: "Book", value: p.service },
     j.booking_date && { label: "Agreed time", value: `${slot(j.booking_date, j.booking_window_start)} ET` },
     typeof j.street_level_address === "string" && { label: "Address", value: `Google matched only the street of ${j.street_level_address || "the address on file"}. Confirm the house number with the customer before you book.` },

@@ -2028,54 +2028,6 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
   }
 }
 
-// GATE_CALL_AGREED_ONE_TIME_JOB: the call has a visit now, so an open office
-// card for the agreed one-time job (an earlier pass held the booking) names it
-// (agreed_one_time_job.visit_id: a pass that refiles the card rewrites the key,
-// so an old visit id never stays), with the visit's service and whether that is
-// the service the call priced (the card's price applies only then). The card is
-// re-bound to the visit's customer, as a refile would, so a relinked call's
-// verdict is not refused. Staff check the visit instead of booking another. Matches nothing on any other call: one unlocked read finds
-// no such card, and nothing more runs. Best-effort.
-// `candidate`: a held pass found the visit (it may be this job, or the office
-// cancelled it), so staff reconcile it; only a booked or attached visit
-// re-binds the card's customer.
-async function noteAgreedJobCardVisit({ call, procToken, customerId, visitId, visitService, visitStatus = null, candidate = false, callSid }) {
-  const agreedJobCard = (conn) => conn('triage_items')
-    .where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })
-    .whereIn('status', ['open', 'in_progress'])
-    .whereRaw("payload->>'skipped_reason' = 'agreed_one_time_job_office_books'");
-  try {
-    if (!(await agreedJobCard(db).first('id'))) return;
-    await db.transaction(async (ttrx) => {
-      await lockTriageCall(ttrx, call.id);
-      const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
-      if (!stillOwner) return;
-      const { serviceNameKey } = require('./call-one-time-job');
-      const cards = await agreedJobCard(ttrx).select('id', ttrx.raw("payload->>'service' AS card_service"));
-      for (const card of cards) {
-        const visit = {
-          visit_id: String(visitId),
-          visit_service: visitService || null,
-          visit_is_priced_service: !!visitService && !!card.card_service && serviceNameKey(visitService) === serviceNameKey(card.card_service),
-          visit_status: visitStatus || null,
-          visit_candidate: candidate === true,
-        };
-        await ttrx('triage_items').where({ id: card.id }).update({
-          payload: ttrx.raw(
-            "jsonb_set(COALESCE(payload, '{}'::jsonb) || ?::jsonb, '{agreed_one_time_job}', "
-            + "(CASE WHEN jsonb_typeof(payload->'agreed_one_time_job') = 'object' THEN payload->'agreed_one_time_job' ELSE '{}'::jsonb END) "
-            + '|| ?::jsonb)',
-            [JSON.stringify(customerId ? { dispute_customer_id: String(customerId) } : {}), JSON.stringify(visit)],
-          ),
-          updated_at: new Date(),
-        });
-      }
-    });
-  } catch (err) {
-    logger.warn(`[call-proc] agreed one-time job card visit note failed for ${maskSid(callSid)}: ${err.code || err.name || 'db_error'}`);
-  }
-}
-
 // The price the office card (auto_booking_skipped_after_approval, skipped_reason
 // agreed_one_time_job_office_books) shows for an agreed one-time job the AI did
 // not book: { amount, basis } or null. Only for the service the call priced: when
@@ -22807,17 +22759,6 @@ const CallRecordingProcessor = {
                 // fired (deduped, so on_file_house_number_conflict's own
                 // dedicated push elsewhere is never doubled).
                 if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);
-                // GATE_CALL_AGREED_ONE_TIME_JOB: this pass held on a visit it
-                // found (one to reconcile, or one the office cancelled), so an
-                // open agreed-job card from an earlier pass names it and stops
-                // saying "book it". Not re-bound: the visit may be another
-                // customer's. Whatever the gate reads now.
-                if (svc.__held.existingId && svc.__held.reason !== 'agreed_one_time_job_office_books') {
-                  await noteAgreedJobCardVisit({
-                    call, procToken, customerId: null, visitId: svc.__held.existingId, visitService: svc.__held.existingService || null,
-                    visitStatus: svc.__held.existingStatus || null, candidate: true, callSid,
-                  });
-                }
               } else if (svc && svc.__makeup) {
                 // The booking transaction found a missed recurring visit and
                 // inserted nothing: move it now, or hold (never a new visit).
@@ -22834,12 +22775,6 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
-              // GATE_CALL_AGREED_ONE_TIME_JOB: an earlier pass held this call for
-              // the office. Now the call has a visit (one staff booked and this
-              // pass attached, or one this pass booked), so the open card names
-              // it: staff check its price and book no second one. Whatever the
-              // gate reads now; best-effort, under the call lock and the claim.
-              await noteAgreedJobCardVisit({ call, procToken, customerId: svc.customer_id || customerId, visitId: svc.id, visitService: svc.service_type || serviceType, callSid });
               // Street-level address holds only (reused legacy / voice-agent rows keep their
               // prior behavior): the visit is pending with its review card. The review reason is
               // raised now that the booking really became the hold; one live-checked bell.
