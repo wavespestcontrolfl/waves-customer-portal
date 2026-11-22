@@ -104,6 +104,8 @@ describe('POST /api/public/quote/calculate: the new-lead bell marks only the wiz
     expect(res.status).toBeLessThan(300);
     const bells = notifyAdmin.mock.calls.filter(([key]) => key === 'new_lead');
     expect(bells).toHaveLength(1);
+    // Every wizard new-lead bell names the phone-banner kind (bell-banners.js new_lead_quote); the option is not metadata.
+    expect(bells[0][bells[0].length - 1].bannerKind).toBe('new_lead_quote');
     return bells[0][bells[0].length - 1].metadata;
   };
   const leadRow = (leadType) => ({

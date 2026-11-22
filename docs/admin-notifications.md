@@ -599,6 +599,15 @@ existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id
 `notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
 second banner, and no second bell row is written.
 
+Website quote banner (owner 2026-11-19, "do phase 1 first": the lead plan's "missing push for website quotes"): the public
+quote wizard's new-lead bell ("Calculator quote: ...", "Manual quote needed: ...", "Estimate requested: ...") reached
+only the portal bell, with no phone banner until the 15-minute re-alert. Each such bell
+row that rings now also puts ONE phone banner on admin-role phones at any hour, like a web form lead (kind
+`new_lead_quote`, the New lead sound, its own row in Push Settings). The writer (`routes/public-quote.js`) names the kind
+with `notifyAdmin`'s `bannerKind` option, so the bell row is written exactly as before: one row per wizard run, a repeat
+run included, and one banner per row. A row the bell policy withholds sends none. The 15-minute new-lead re-alert
+(`new-lead-reminder.js`) is separate and unchanged: it reads only the bell row.
+
 Lead call-back reminder banner (owner 2026-11-05, "remind"): two kinds of lead
 bell reach only the portal bell. A "Missed call request" bell (`lead-call-reply-missed:<callLogId>`, a press-1 ring nobody
 answered) and a night call-back bell (`lead-call-text-followup:<requestId>`, raised by `lead-call-text-followup.js`

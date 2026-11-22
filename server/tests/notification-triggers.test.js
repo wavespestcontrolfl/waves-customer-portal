@@ -1521,6 +1521,18 @@ describe('bell banner triggers', () => {
     expect(sent).toMatchObject({ title: bannerPayload.alertTitle, tag: 'waves-new_lead_email-n-42', sound: 'waves-lead.caf' });
   });
 
+  test('new_lead_quote builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
+    const quote = TRIGGER_REGISTRY.new_lead_quote;
+    expect(quote).toEqual(expect.objectContaining({ label: 'New website quote banner', category: 'new_lead', priority: 'high', group: 'Leads & Sales', adminRoleOnly: true }));
+    expect(quote.rule).toEqual({ area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 });
+    expect(quote.build(bannerPayload)).toEqual({ title: bannerPayload.alertTitle, body: bannerPayload.alertBody, link: bannerPayload.alertLink });
+    expect(quote.build({})).toEqual({ title: 'New website quote', body: 'Open the lead to see the quote and call.', link: '/admin/leads' });
+    await triggerNotification('new_lead_quote', bannerPayload, { pushOnly: true, adminOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    const sent = PushService.sendToAdminUsers.mock.calls.at(-1)[1]('admin-1');
+    expect(sent).toMatchObject({ title: bannerPayload.alertTitle, tag: 'waves-new_lead_quote-n-42', sound: 'waves-lead.caf' });
+  });
+
   test('the banner is tagged by its row, so a refresh ring replaces it, and a second row never does', () => {
     expect(__private.pushTagFor('messenger_reply', { alertRowId: 'n-42' })).toBe('waves-messenger_reply-n-42');
     expect(__private.pushTagFor('call_commitment_overdue', { alertRowId: 'n-43' })).toBe('waves-call_commitment_overdue-n-43');
