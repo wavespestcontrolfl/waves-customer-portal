@@ -20,7 +20,9 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
   recurringSeriesTopUpLive: jest.fn(() => false),
 }));
-jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []), recordMissedTick: jest.fn(async () => {}),
+}));
 jest.mock('../utils/deploy-kill-retry', () => ({ registerDeployKillRetry: jest.fn(), retryDeployKilledJobs: jest.fn() }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({ flagUnplacedVisits: jest.fn() }));
@@ -34,7 +36,7 @@ jest.mock('../services/recurring-series-topup', () => ({ runRecurringSeriesTopUp
 jest.mock('../services/mail/home-price', () => ({ runHomePrices: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
-const { runExclusive } = require('../utils/cron-lock');
+const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { registerDeployKillRetry } = require('../utils/deploy-kill-retry');
 const { isEnabled } = require('../config/feature-gates');
 const { runHomePrices } = require('../services/mail/home-price');
@@ -83,7 +85,7 @@ test('a mail-home-price lease another instance holds runs nothing and is not a f
     .mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
   await expect(registered('51 21 * * *')()).resolves.toBeUndefined();
   expect(runHomePrices).not.toHaveBeenCalled();
-  expect(logger.info).toHaveBeenCalledWith('Mail home prices: not run, a lease is held (lease_held)');
+  expect(logger.info).toHaveBeenCalledWith('Mail home prices: not run, the permit sync or another instance holds a lease');
   expect(logger.error).not.toHaveBeenCalled();
 });
 
@@ -93,7 +95,7 @@ test('the permit sync holds its lease: the mail-home-price lease is never taken,
   // Only the outer permit-sync call: the health-recording mail-home-price lease never starts, so no good run is recorded.
   expect(leases()).toEqual([['permit-sync', { recordHealth: false }]]);
   expect(runHomePrices).not.toHaveBeenCalled();
-  expect(logger.info).toHaveBeenCalledWith('Mail home prices: not run, a lease is held (lease_held)');
+  expect(logger.info).toHaveBeenCalledWith('Mail home prices: not run, the permit sync or another instance holds a lease');
   expect(logger.error).not.toHaveBeenCalled();
 });
 
@@ -118,4 +120,29 @@ test('a run a deploy killed is retried under the same two leases', async () => {
   await call[1]();
   expect(leases()).toEqual([['permit-sync', { recordHealth: false }], ['mail-home-price', undefined]]);
   expect(runHomePrices).toHaveBeenCalledTimes(1);
+});
+
+test('no connection at the outer lease: the tick records a missed run on mail-home-price and logs it', async () => {
+  runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'no_connection' }));
+  await expect(registered('51 21 * * *')()).resolves.toBeUndefined();
+  expect(runHomePrices).not.toHaveBeenCalled();
+  expect(recordMissedTick).toHaveBeenCalledTimes(1);
+  expect(recordMissedTick).toHaveBeenCalledWith('mail-home-price', expect.any(Number), 'tick skipped: no_connection');
+  expect(logger.error).toHaveBeenCalledWith('Mail home prices failed: tick skipped: no_connection');
+});
+
+test('a held lease is not a missed run', async () => {
+  runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
+  await registered('51 21 * * *')();
+  expect(recordMissedTick).not.toHaveBeenCalled();
+});
+
+test('a deploy-kill retry with no connection records nothing, so the dead-run mark stays for the next retry', async () => {
+  isEnabled.mockImplementation((name) => name === 'cronJobs');
+  initScheduledJobs();
+  const call = registerDeployKillRetry.mock.calls.find(([name]) => name === 'mail-home-price');
+  runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'no_connection' }));
+  await expect(call[1]()).resolves.toBeUndefined();
+  expect(recordMissedTick).not.toHaveBeenCalled();
+  expect(runHomePrices).not.toHaveBeenCalled();
 });
