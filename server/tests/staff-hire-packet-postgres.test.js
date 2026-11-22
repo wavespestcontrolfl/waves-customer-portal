@@ -640,6 +640,44 @@ postgres('Hired button on migrated PostgreSQL', () => {
       expect((await row(id)).google_only_login_at).toBeNull();
     });
 
+    test('GATE_HIRED_PACKET off: only the Google press exists, and it mails nothing', async () => {
+      delete process.env.GATE_HIRED_PACKET;
+      const OFF = { status: 404, body: { enabled: false } };
+      const { id, google } = await linkedTech();
+      const plain = await addTech();
+      // The list carries the Hired action where the press makes a Google-only login, and nothing else.
+      const linkedRow = await listed(id);
+      expect(linkedRow).toMatchObject({ hire_action: 'hire', hire_login: 'google' });
+      for (const field of ['hire_password_unset', 'hire_link_pending', 'hire_link_expires_at', 'hire_google_only']) {
+        expect(linkedRow).not.toHaveProperty(field);
+      }
+      const plainRow = await listed(plain);
+      for (const field of ['hire_action', 'hire_login', 'hire_google_only']) expect(plainRow).not.toHaveProperty(field);
+
+      // The emailed-link press does not exist: on a plain row, on the linked row, or with a Google address in its body.
+      expect(await call(`/technicians/${plain}/hire`, { body: hireBody() })).toEqual(OFF);
+      expect(await call(`/technicians/${id}/hire`, { body: hireBody() })).toEqual(OFF);
+      expect(await call(`/technicians/${id}/hire`, { body: { ...hireBody(), googleEmail: google } })).toEqual(OFF);
+      // A Google press that names an address the row does not hold as its sign-in writes nothing.
+      expect(await call(`/technicians/${plain}/hire/google`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
+      for (const techId of [id, plain]) expect((await row(techId)).employment_status).toBe('prospective');
+
+      const res = await call(`/technicians/${id}/hire/google`, { body: hireBody({ googleEmail: google }) });
+      expect(res.body).toMatchObject({ hired: true, emailed: null, login: 'google' });
+      expect(res.body.technician).toMatchObject({ hire_google_only: 'ready' });
+      expect(res.body.technician).not.toHaveProperty('hire_action');
+      expect(await row(id)).toMatchObject({ employment_status: 'active', must_change_password: false, ...NO_CREDENTIAL });
+      expect((await row(id)).google_only_login_at).not.toBeNull();
+      expect(await listed(id)).toMatchObject({ hire_google_only: 'ready' });
+      // Resend link stays behind the packet gate.
+      expect(await call(`/technicians/${id}/hire/resend`, { body: {} })).toEqual(OFF);
+      // With staff Google sign-in off as well, no press exists at all.
+      process.env.GATE_STAFF_GOOGLE_SIGNIN = 'false';
+      const { id: later, google: laterGoogle } = await linkedTech();
+      expect(await call(`/technicians/${later}/hire/google`, { body: hireBody({ googleEmail: laterGoogle }) })).toEqual(OFF);
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+
     test('the press names the Google address its form showed; a row that no longer holds it is refused', async () => {
       const { id: linked, google } = await linkedTech();
       const plain = await addTech();
@@ -658,10 +696,7 @@ postgres('Hired button on migrated PostgreSQL', () => {
       await mockDatabase('technicians').where({ id: linked }).update({ google_email: address() });
       expect(await call(`/technicians/${linked}/hire/google`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
       expect(await call(`/technicians/${linked}/hire/google`, { body: hireBody({ googleEmail: 'not-an-address' }) })).toEqual(NO_ADDRESS);
-      // With GATE_HIRED_PACKET off the Google press answers like the rest of the Hired button.
-      delete process.env.GATE_HIRED_PACKET;
-      expect(await call(`/technicians/${linked}/hire/google`, { body: hireBody({ googleEmail: google }) }))
-        .toEqual({ status: 404, body: { enabled: false } });
+
       for (const id of [linked, plain]) {
         expect(await row(id)).toMatchObject({ employment_status: 'prospective', active: false, google_only_login_at: null });
       }
