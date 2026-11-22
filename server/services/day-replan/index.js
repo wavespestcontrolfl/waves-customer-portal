@@ -25,19 +25,17 @@
  * visit with a parent series), person_placed (staff or the customer chose the date or time; the auto-dispatch rule,
  * and an unreadable history keeps the stop fixed) and time_told (the customer has a known time from a delivered
  * text, email, call or booking, by the no-show detector's promise reader).
- * With GATE_DAY_ONLY_PROMISE on, two things change (owner 2026-11-22), and only then, because only then does the app
- * record whether the customer asked for the time (`askRecorded`, set only then; the office form's tick,
- * time-promise.recordCustomerAskedTime): (1) customer_time is checked FIRST and fixes a stop whatever the customer was
- * told: the customer asked for the time, or picked it online, on the reschedule page, from a text offer or with the AI
- * call agent (time-promise.dayOnlyEligibility says the visit may not be promised as a day only). An answer that could
- * not be read (a failed read, a missing verdict) is customer_time_unread and fixes the stop too. It is not a preferred
- * time in the app (that is the stop's `pref`; a movable stop only takes hours inside it), "keep auto-dispatch off this
- * visit" (the staff_lock above) or a mowing day or preferred day (date rules; this job never changes a date). (2) A
- * confirmation stops fixing a stop only when a delivered day-only notice told the customer just the day (promise level
- * `day`, `dayTold`) AND no person placed the slot the visit holds now: the notice may be older than a person's re-time
- * that carried an hour given by phone, which leaves no record. customer_confirmed still fixes every other stop.
- * first_or_one_time and person_placed are unchanged from before 2026-11-22: they stop fixing a stop only with a
- * day-only notice, and fix it without one, because the office may have given the hour by phone. Gate off: unchanged.
+ * With GATE_DAY_ONLY_PROMISE on, one more kind of stop is fixed, and checked FIRST (owner 2026-11-22), because only then
+ * does the app record whether the customer asked for the time (`askRecorded`, set only then; the office form's tick,
+ * time-promise.recordCustomerAskedTime): customer_time, a time that is the customer's own, whatever the customer was
+ * told, so a day-only notice no longer frees a time the customer asked for. The customer asked for the time, or picked
+ * it online, on the reschedule page, from a text offer or with the AI call agent (time-promise.dayOnlyEligibility says
+ * the visit may not be promised as a day only). An answer that could not be read (a failed read, a missing verdict) is
+ * customer_time_unread and fixes the stop too. It is not a preferred time in the app (that is the stop's `pref`; a
+ * movable stop only takes hours inside it), "keep auto-dispatch off this visit" (the staff_lock above) or a mowing day
+ * or preferred day (date rules; this job never changes a date). Everything else is unchanged: customer_confirmed,
+ * first_or_one_time, person_placed (a delivered day-only notice, `dayTold`, frees those two) and time_told. Gate off:
+ * unchanged.
  * Also enforced for movable stops: the technician's tech_schedule_blocks (own and global, every type but
  * 'available') may not overlap a stop's service interval; hours held by unassigned (and, while occupancy is
  * tech-blind, other technicians') visits are taken; the day closes at the night pass's DAY_CLOSE (after_hours);
@@ -319,24 +317,21 @@ function officeReviewPending(row) {
  * Told-lock reasons, checked after the existing ones: a time the customer was told or chose does not change. A
  * told-lock fact the day load did not provide counts as not yet known, so the stop stays fixed. With
  * GATE_DAY_ONLY_PROMISE on (`askRecorded`) a time that is the customer's own (customer_time, or customer_time_unread
- * when the answer could not be read; the `customerTime` map) fixes the stop first, whatever the customer was told; a
- * context without `askRecorded` ignores `customerTime` (the gate off: unchanged).
+ * when the answer could not be read; the `customerTime` map) fixes the stop first, whatever the customer was told, so a
+ * day-only notice does not free it; a context without `askRecorded` ignores `customerTime` (the gate off: unchanged).
  */
 function toldLockReason(row, { told, personPlaced, dayTold, askRecorded, customerTime }) {
   if (askRecorded === true) {
     const own = customerTime ? customerTime.get(row.id) : 'customer_time_unread';
     if (own) return own;
   }
+  if (row.customer_confirmed === true) return 'customer_confirmed';
+  // GATE_DAY_ONLY_PROMISE: a stop the customer was told only the DAY for (dayTold) may change its hour inside that
+  // day, so being a first or one-time visit, or being placed by a person, does not fix it (the re-plan only changes
+  // the hour). A confirmed stop above stays fixed, which is the conservative side.
   const dayOnly = !!dayTold && dayTold.has(row.id);
-  const placed = !personPlaced || personPlaced.has(row.id);
-  // A confirmation (owner 2026-11-22: it does not fix a visit by itself) stops fixing a stop only when a delivered
-  // notice told the customer just the DAY and no person placed the slot it holds now. A person's placement after that
-  // notice can carry an hour given by phone (an office move sent with no notice leaves no record), so it keeps the lock.
-  // First or one-time visits and placements by a person are main's rules: a day-only notice frees them, no notice does
-  // not (the office may have given the hour by phone and nothing records it).
-  if (row.customer_confirmed === true && (!dayOnly || placed)) return 'customer_confirmed';
   if (!dayOnly && (row.is_recurring !== true || row.recurring_parent_id == null)) return 'first_or_one_time';
-  if (!dayOnly && placed) return 'person_placed';
+  if (!dayOnly && (!personPlaced || personPlaced.has(row.id))) return 'person_placed';
   if (!told || told.has(row.id)) return 'time_told';
   return null;
 }

@@ -1,13 +1,13 @@
 /**
  * GATE_DAY_ONLY_PROMISE on the nightly day re-plan (services/day-replan, owner 2026-11-05 "D2 a", 2026-11-22): with
- * this gate on, a stop the customer was told only the DAY for (a delivered day-only notice) may change its hour inside
- * that day: a confirmed, a first or one-time and a person-placed visit told only the day are movable. A stop told an
- * hour (a known slot, or an unknown window) and every other existing reason stay fixed. With no day-only notice a
- * confirmation, a first or one-time visit and a placement by a person still fix the stop, because the office may have
- * given the hour by phone and nothing records it. Only with the gate on does the app record whether the customer asked
- * for the time (`askRecorded`): then customer_time (time-promise.dayOnlyEligibility, mocked here) fixes a stop FIRST,
- * whatever it was told. A failed read fails CLOSED. Gate off: the known-slot told lock alone, and `customerTime` is
- * never read or used. Same harness as night-told-lock-day-replan
+ * this gate on, a stop the customer was told only the DAY for may change its hour inside that day: a first or
+ * one-time visit and a person-placed visit told only the day are movable. A customer-confirmed stop, a stop told an
+ * hour (a known slot, or an unknown window) and every other existing reason stay fixed. A failed level read fails
+ * CLOSED. Gate off: the known-slot told lock alone. The one change of 2026-11-22: only with the gate on does the app
+ * record whether the customer asked for the time (`askRecorded`), and then customer_time (time-promise.dayOnlyEligibility,
+ * mocked here; customer_time_unread when the answer cannot be read) fixes a stop FIRST, whatever it was told, so a
+ * day-only notice no longer frees a time the customer asked for. Gate off, or a context without `askRecorded`:
+ * `customerTime` is never read or used. Same harness as night-told-lock-day-replan
  * and day-replan-apply; the promise reader (told-visits) is mocked. Synthetic ids only.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -79,20 +79,12 @@ describe('fixedReason with the day-told context', () => {
     expect(_internals.fixedReason(stop(), base({ personPlaced: new Set(['s1']) }))).toBe('person_placed');
   });
 
-  test('a confirmed stop the customer was told only the day for, that nobody placed, may move (owner 2026-11-22: a confirmation does not matter)', () => {
-    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ dayTold: day }))).toBeNull();
+  test('a customer-confirmed day-told visit stays fixed (conservative)', () => {
+    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ dayTold: day }))).toBe('customer_confirmed');
   });
 
-  test('audit case: a confirmed day-told stop a person re-timed after the notice stays fixed (customer_confirmed): the hour may have been given by phone', () => {
-    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ dayTold: day, personPlaced: day }))).toBe('customer_confirmed');
-  });
-
-  test('audit case: a confirmed day-told stop with no person-placed fact stays fixed (customer_confirmed, fail closed)', () => {
-    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ dayTold: day, personPlaced: undefined }))).toBe('customer_confirmed');
-  });
-
-  // The rule before 2026-11-22 (main), written out as the oracle: a day-only notice frees first_or_one_time and
-  // person_placed; this change touches only the confirmed line.
+  // The rule before 2026-11-22 (main), written out as the oracle. This change adds only the customer-time lock, checked
+  // first and only with askRecorded, so for a stop that is not in customerTime nothing else may change.
   const mainRule = (row, { told, personPlaced, dayTold }) => {
     const dayOnly = !!dayTold && dayTold.has(row.id);
     if (row.customer_confirmed === true) return 'customer_confirmed';
@@ -102,36 +94,25 @@ describe('fixedReason with the day-told context', () => {
     return null;
   };
 
-  test('table: for a stop that is not confirmed, every combination of day-only notice, first-or-one-time, person-placed (yes / no / missing) and told (yes / no / missing) gives main\'s answer, with and without askRecorded', () => {
+  test('table: for a stop not in customerTime, every combination of confirmed, day-only notice, first-or-one-time, person-placed (yes / no / missing) and told (yes / no / missing) gives main\'s answer, with and without askRecorded', () => {
     let cases = 0;
-    for (const dayTold of [day, new Set(), undefined]) {
-      for (const firstOrOneTime of [true, false]) {
-        for (const personPlaced of [day, new Set(), undefined]) {
-          for (const told of [day, new Set(), undefined]) {
-            for (const ask of [{}, { askRecorded: true, customerTime: new Map() }]) {
-              const ctx = base({ dayTold, personPlaced, told, ...ask });
-              const row = stop(firstOrOneTime ? { is_recurring: false, recurring_parent_id: null } : {});
-              expect(_internals.fixedReason(row, ctx)).toBe(mainRule(row, ctx));
-              cases += 1;
+    for (const confirmed of [true, false]) {
+      for (const dayTold of [day, new Set(), undefined]) {
+        for (const firstOrOneTime of [true, false]) {
+          for (const personPlaced of [day, new Set(), undefined]) {
+            for (const told of [day, new Set(), undefined]) {
+              for (const ask of [{}, { askRecorded: true, customerTime: new Map() }]) {
+                const ctx = base({ dayTold, personPlaced, told, ...ask });
+                const row = stop({ customer_confirmed: confirmed, ...(firstOrOneTime ? { is_recurring: false, recurring_parent_id: null } : {}) });
+                expect(_internals.fixedReason(row, ctx)).toBe(mainRule(row, ctx));
+                cases += 1;
+              }
             }
           }
         }
       }
     }
-    expect(cases).toBe(3 * 2 * 3 * 3 * 2);
-  });
-
-  test('audit case: a confirmed stop with no day-only notice stays fixed (customer_confirmed)', () => {
-    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base())).toBe('customer_confirmed');
-    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ askRecorded: true, customerTime: new Map() }))).toBe('customer_confirmed');
-  });
-
-  test('audit case: a staff-placed stop with no day-only notice stays fixed (person_placed), also with the ask recorded', () => {
-    expect(_internals.fixedReason(stop(), base({ askRecorded: true, customerTime: new Map(), personPlaced: new Set(['s1']) }))).toBe('person_placed');
-  });
-
-  test('audit case: a first or one-time stop with no day-only notice stays fixed (first_or_one_time), also with the ask recorded', () => {
-    expect(_internals.fixedReason(stop({ is_recurring: false, recurring_parent_id: null }), base({ askRecorded: true, customerTime: new Map() }))).toBe('first_or_one_time');
+    expect(cases).toBe(2 * 3 * 2 * 3 * 3 * 2);
   });
 
   test('an hour-told visit stays fixed time_told; the day mark does not outrank an hour', () => {
@@ -145,7 +126,7 @@ describe('fixedReason with the day-told context', () => {
     expect(_internals.fixedReason(stop({ auto_dispatch_locked: true }), base({ dayTold: day }))).toBe('staff_lock');
   });
 
-  test('askRecorded: customer_time fixes a stop FIRST, also a day-told stop, and before every other told-lock reason', () => {
+  test('the PR\'s one behavior change: with askRecorded, customer_time fixes a stop FIRST, also one told only the day, and before every other told-lock reason', () => {
     const ask = (extra = {}) => base({ askRecorded: true, customerTime: new Map([['s1', 'customer_time']]), ...extra });
     expect(_internals.fixedReason(stop(), ask())).toBe('customer_time');
     expect(_internals.fixedReason(stop(), ask({ dayTold: day }))).toBe('customer_time');
@@ -350,17 +331,11 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(w.rowWrites()).toEqual([]);
   });
 
-  test('audit case: this gate on, a confirmed stop with no day-only notice stops the write (customer_confirmed)', async () => {
-    const over = deps({ levels: {} });
+  test('this gate on: a confirmed stop stays fixed also when told only the day (customer_confirmed)', async () => {
+    const over = deps({ levels: { a: 'day', b: 'day' } });
     const w = world({ rowExtra: { ...recurring, b: { ...recurring.b, customer_confirmed: true } }, over });
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:customer_confirmed', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
-  });
-
-  test('this gate on: a confirmed stop told only the day is written', async () => {
-    const over = deps({ levels: { a: 'day', b: 'day' } });
-    const w = world({ rowExtra: { ...recurring, b: { ...recurring.b, customer_confirmed: true } }, over });
-    expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
   });
 
   test('this gate on: a visit told an hour meanwhile stops the write (time_told)', async () => {
