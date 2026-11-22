@@ -90,8 +90,15 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     await database?.destroy();
   });
 
+  // The card rail's two switches, on as production has them. The offer is only for a customer whose plan visits
+  // are billed after the visit (the email says so), in shadow as in live: with either one off, every job is held.
+  const RAIL_ENV = ['RECURRING_CARD_ON_FILE', 'GATE_PAY_AFTER_FIRST_VISIT'];
+  let savedRailEnv;
+
   beforeEach(async () => {
     process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+    savedRailEnv = Object.fromEntries(RAIL_ENV.map((name) => [name, process.env[name]]));
+    for (const name of RAIL_ENV) process.env[name] = 'true';
     jest.clearAllMocks();
     Lookup.performPropertyLookup.mockResolvedValue(null);
     trx = await database.transaction();
@@ -99,6 +106,10 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
   });
 
   afterEach(async () => {
+    for (const name of RAIL_ENV) {
+      if (savedRailEnv[name] === undefined) delete process.env[name];
+      else process.env[name] = savedRailEnv[name];
+    }
     await trx.rollback();
   });
 
@@ -1182,15 +1193,14 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
   // template library, on the rows below. Only the provider send (Sendgrid.sendOne) and the property lookup are stubs.
   describe('live', () => {
     // The real send's unsubscribe is the SendGrid ASM group of the marketing stream (the ledger passes no link).
-    const cardEnv = ['RECURRING_CARD_ON_FILE', 'GATE_PAY_AFTER_FIRST_VISIT', 'SENDGRID_ASM_GROUP_NEWSLETTER'];
+    const cardEnv = ['SENDGRID_ASM_GROUP_NEWSLETTER'];
     let savedCardEnv;
     const readPlan = (value) => (typeof value === 'string' ? JSON.parse(value) : value);
 
     beforeEach(() => {
       process.env.GATE_ONETIME_PLAN_OFFER = 'live';
-      // The estimate page prints "nothing is charged today" only on the card rail, and production has both on.
       savedCardEnv = Object.fromEntries(cardEnv.map((name) => [name, process.env[name]]));
-      for (const name of cardEnv) process.env[name] = name === 'SENDGRID_ASM_GROUP_NEWSLETTER' ? '101' : 'true';
+      for (const name of cardEnv) process.env[name] = '101';
       Lookup.performPropertyLookup.mockResolvedValue({ enriched: { homeSqFt: 2400, lotSqFt: 8000, stories: 1 }, propertyRecord: {} });
     });
     afterEach(() => {
@@ -1427,32 +1437,177 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     });
 
     describe('the email says "you pay after each visit": only a customer on the card rail gets it', () => {
-      test('the estimate page\'s gate or the card lane off: a quote is made, no email', async () => {
+      test('the estimate page\'s gate or the card lane off: the job is held before the home is priced, so no quote and no email', async () => {
         await publishOffer();
         process.env.GATE_PAY_AFTER_FIRST_VISIT = 'false';
         const { customer, job } = await seedJob();
         const summary = await run({});
         expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
         expect(summary.reasons).toEqual({ not_pay_after_visit: 1 });
-        expect(await estimatesOf(customer)).toHaveLength(1);
+        expect(await estimatesOf(customer)).toEqual([]);
         expect(await offerMail(job.id)).toBeUndefined();
         expect(Sendgrid.sendOne).not.toHaveBeenCalled();
-        // The gate is back on: the next morning sends with the same quote.
+        // The gate is back on: the next morning makes the quote and sends.
         process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
         expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0 });
         expect(await estimatesOf(customer)).toHaveLength(1);
       });
 
-      test('a customer whose Auto Pay is paused is invoiced before service: a quote is made, no email', async () => {
+      test('a customer whose Auto Pay is paused is invoiced before service: no quote, no email', async () => {
         await publishOffer();
         const customer = await seedCustomer({ autopay_paused_until: day(30) });
         const { job } = await seedJob({ customer });
         const summary = await run({});
         expect(summary.reasons).toEqual({ not_pay_after_visit: 1 });
         expect(summary).toMatchObject({ sent: 0, held: 1 });
-        expect(await estimatesOf(customer)).toHaveLength(1);
+        expect(await estimatesOf(customer)).toEqual([]);
         expect(await offerMail(job.id)).toBeUndefined();
       });
+
+      // A sample tells the office "this customer would get the offer today", so shadow holds the same customers.
+      test.each([
+        ['Auto Pay paused', async () => seedCustomer({ autopay_paused_until: day(30) })],
+        ['the card lane off', async () => { process.env.RECURRING_CARD_ON_FILE = 'false'; return seedCustomer(); }],
+      ])('shadow, %s: the job is held and the office gets no sample', async (_name, arrange) => {
+        process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+        const customer = await arrange();
+        const { job } = await seedJob({ customer });
+        const summary = await run({});
+        expect(summary).toMatchObject({ mode: 'shadow', jobs: 1, sample: 0, held: 1, failed: 0 });
+        expect(summary.reasons).toEqual({ not_pay_after_visit: 1 });
+        expect(await sampleRows(job.id)).toEqual([]);
+        expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      });
+    });
+
+    // The job's opt-out check runs before the home is priced and the estimate is made, and the division's own
+    // checks for this stream do not read "offers off" or "marketing by text only". The customer turns offers off
+    // after the reservation, right before the email would leave: the ledger's handoff asks the job's guard.
+    test('offers turned off right before the email leaves: the provider is never called, and the key is dropped for good', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const realSend = require('../services/email-division/ledger').sendWithLedger;
+      // The real transport runs the ledger's last check right before it builds the provider request
+      // (sendgrid-mail.js sendOne). This suite replaces the transport, so the replacement does the same.
+      const providerRequest = jest.fn();
+      Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+        await providerBoundaryCheck({ database });
+        providerRequest();
+        return { messageId: 'sg-sample' };
+      });
+      const first = await run({
+        sendWithLedger: (args) => realSend({
+          ...args,
+          boundaryGuard: async (handoff) => {
+            await handoff('notification_prefs').insert({ customer_id: customer.id, marketing_offers: false });
+            return args.boundaryGuard(handoff);
+          },
+        }),
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ offers_off: 1 });
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(providerRequest).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toMatchObject({ status: 'skipped', reason: 'OFFERS_OFF' });
+      expect((await offerMail(job.id))?.sent_at ?? null).toBeNull();
+      // Still off the next morning: the job's own rule holds it.
+      expect((await runAt(tomorrow)).reasons).toEqual({ offers_off: 1 });
+      // Back on: the ledger never sends a skipped key again, and the job says so. No email, ever.
+      await trx('notification_prefs').where({ customer_id: customer.id }).update({ marketing_offers: true });
+      const later = await runAt(new Date(tomorrow.getTime() + 24 * HOUR));
+      expect(later).toMatchObject({ sent: 0, held: 1, done: 0, failed: 0 });
+      expect(later.reasons).toEqual({ send_dropped: 1 });
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(providerRequest).not.toHaveBeenCalled();
+    });
+
+    test('offers turned off after the estimate was made: the reservation is denied and leaves no row; back on, the next morning sends', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const first = await run({
+        mintPlanStartEstimate: async (args) => {
+          const minted = await real(args);
+          await trx('notification_prefs').insert({ customer_id: customer.id, marketing_offers: false });
+          return minted;
+        },
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ offers_off: 1 });
+      expect(await ledgerRow(job.id)).toBeUndefined();
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      await trx('notification_prefs').where({ customer_id: customer.id }).update({ marketing_offers: true });
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
+      expect(await estimatesOf(customer)).toHaveLength(1);
+    });
+
+    // The job's "no other open estimate" check runs before the mint takes the customer's locks. The customer taps
+    // "See my price and book" on the portal card in between: that quote is a link the customer holds.
+    test('a quote the customer opened after the job\'s own check is never retired: the mint refuses, the job is held, no email', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const realOffer = require('../services/service-report/cross-sell').buildStartOffer;
+      let cardFee;
+      let tapped;
+      const summary = await run({
+        buildStartOffer: async (...args) => {
+          const out = await realOffer(...args);
+          cardFee = out.option?.setupFee;
+          return out;
+        },
+        mintPlanStartEstimate: async (args) => {
+          // The portal tap: the same option at the card's amounts, with the standard setup fee and no offer.
+          tapped = await real({
+            customer: args.customer, serviceKey: args.serviceKey, optionId: args.optionId, shown: { ...args.shown, setupFee: cardFee }, now: args.now,
+          });
+          return real(args);
+        },
+      });
+      expect(cardFee).toBeGreaterThan(0);
+      expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(summary.reasons).toEqual({ open_estimate: 1 });
+      const rows = await estimatesOf(customer);
+      expect(rows.map((row) => row.id)).toEqual([tapped.estimateId]);
+      expect(rows[0]).toMatchObject({ archived_at: null, status: 'sent' });
+      expect(readPlan(rows[0].estimate_data).planStart.offer).toBeUndefined();
+      expect(Number(rows[0].onetime_total)).toBe(cardFee);
+      expect(await ledgerRow(job.id)).toBeUndefined();
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      // The next morning the job's own rule reads that quote: held, and still nothing is retired.
+      expect((await runAt(tomorrow)).reasons).toEqual({ open_estimate: 1 });
+      expect((await estimatesOf(customer)).map((row) => row.archived_at)).toEqual([null]);
+    });
+
+    // The run lists the job with its offer day, and the email's dates count from that day. The mint reads the day
+    // again under the customer's locks. Staff correct the day the service was performed in between.
+    test('the performed day changed between the list and the mint: no email with dates that are not the estimate\'s; the next morning sends the right ones', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const first = await run({
+        mintPlanStartEstimate: async (args) => {
+          await trx('service_records').where({ scheduled_service_id: job.id }).update({ service_date: day(-6) });
+          return real(args);
+        },
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ offer_day_moved: 1 });
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toBeUndefined();
+      // The estimate carries the dates of the corrected day (6 days ago), not of the day the run listed (5 days ago).
+      const [quote, ...rest] = await estimatesOf(customer);
+      expect(rest).toEqual([]);
+      expect(readPlan(quote.estimate_data).planStart.offer).toEqual({ jobId: String(job.id), endsAt: endsOf(6).toISOString(), firstVisitFrom: day(71) });
+
+      // The next morning lists the job with the corrected day: the same quote, and an email with its dates.
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
+      expect((await estimatesOf(customer)).map((row) => row.id)).toEqual([quote.id]);
+      const mail = await offerMail(job.id);
+      expect(mail.html_snapshot).toContain(`/estimate/${quote.token}`);
+      const { formatDateOnly } = require('../utils/date-only');
+      expect(mail.text_snapshot).toContain(formatDateOnly(day(24), { year: undefined }));
+      expect(mail.text_snapshot).not.toContain(formatDateOnly(day(25), { year: undefined }));
     });
 
     test('a business account: the pricer stops it before the mint, so no quote and no email', async () => {
