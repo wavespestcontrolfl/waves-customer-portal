@@ -7028,7 +7028,10 @@ export default function EstimateToolViewV2({
                     ]}
                   />
                 </Field>{" "}
-                {treeDensityAffectsPrice(form) && (
+                {treeDensityAffectsPrice(form, {
+                  lookupTreeCount: enrichedProfile?.treeCount || enrichedProfile?.estimatedTreeCount,
+                  turfPricedUnconfirmed: hasTurfPricedSelection && confirmedTurfSqFt === null,
+                }) && (
                   <Field label="Tree Density" id="estimate-treeDensity" className="mb-4">
                     <SelectV2
                       k="treeDensity"

@@ -734,27 +734,28 @@ export function rodentBaitWaveguardFlags() {
 }
 
 // True when a service picked on the estimate form has a price (or a review
-// reason) that reads Tree density. The estimate tool shows the Tree density
-// box only then; the form value itself always flows unchanged (hidden, never
-// cleared). Tree density does NOT move a pest price (owner directive
-// 2026-07-30), nor mosquito one-time, misting, palm injection, termite or
-// rodent. What does read it (server pricing-engine/service-pricing.js):
-//   Tree & Shrub: the tree estimate it falls back to while the Tree Count
-//     box is blank (svcTs). A typed count, zero included, is the count, and
-//     the density is not read.
-//   Mosquito: tree pressure factor and the heavy-trees monthly recommendation (svcMosquito).
-//   Lawn family: the turf estimate's complexity score when no measured or
-//     lookup turf exists, plus the "heavy tree canopy" turf-review reason
-//     (svcLawn, svcOnetimeLawn, svcDethatch, and top dressing priced from turf).
-//   Flea: the exterior-spray tree adjustment (svcFleaExterior).
-export function treeDensityAffectsPrice(form = {}) {
+// reason) that reads Tree density with the inputs the form has now. The
+// estimate tool shows the Tree density box only then; the form value itself
+// always flows unchanged (hidden, never cleared). Tree density does NOT move a
+// pest price (owner directive 2026-07-30), nor mosquito one-time, misting,
+// palm injection, termite or rodent. What does read it (server
+// pricing-engine/service-pricing.js, and the form's own turf review):
+//   Tree & Shrub (svcTs): the tree estimate it falls back to when it has no
+//     tree count. The request sends a typed count (zero included), else the
+//     lookup's positive count, so the density is read only with neither.
+//   Recurring mosquito (svcMosquito): the tree pressure factor and the
+//     heavy-trees monthly recommendation.
+//   Turf-priced services with no measured lawn area (turfPricedUnconfirmed,
+//     the form's own hasTurfPricedSelection && no Measured Turf): the "heavy
+//     tree canopy" turf review, and the fallback lawn estimate's complexity
+//     score. A measured lawn area replaces both.
+//   Flea exterior spray (svcFleaExterior): its tree-density adjustment.
+export function treeDensityAffectsPrice(form = {}, { lookupTreeCount, turfPricedUnconfirmed = false } = {}) {
+  const treeCountKnown = String(form.treeCount ?? "").trim() !== "" || parseInt(lookupTreeCount, 10) > 0;
   return !!(
-    (form.svcTs && String(form.treeCount ?? "").trim() === "") ||
+    (form.svcTs && !treeCountKnown) ||
     form.svcMosquito ||
-    form.svcLawn ||
-    form.svcOnetimeLawn ||
-    form.svcDethatch ||
-    (form.svcTopdress && !(parseInt(form.topDressArea, 10) > 0)) ||
+    turfPricedUnconfirmed ||
     form.svcFleaExterior
   );
 }
