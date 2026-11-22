@@ -26,11 +26,11 @@ test('is GET-only, admin-only (not technician) and sits behind the router-level 
   expect(routerGuards).toEqual([adminAuthenticate, requireTechOrAdmin]);
 });
 
-test('passes the customer, cursor and limit through and answers the feed', async () => {
+test('passes the customer, cursor and limit through and answers the feed, still marked enabled for older open tabs', async () => {
   mockGet.mockResolvedValue({ events: [{ id: 'a' }], hasMore: false, nextCursor: null, summary: null, unavailableSources: [] });
   const { res } = await call({ query: { before: '2026-09-01T00:00:00Z', limit: '25' } });
   expect(mockGet).toHaveBeenCalledWith('cust-1', { before: '2026-09-01T00:00:00Z', limit: '25' });
-  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ events: [{ id: 'a' }] }));
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ enabled: true, events: [{ id: 'a' }] }));
 });
 
 test('unknown customer is 404, a bad cursor is 400, anything else goes to next()', async () => {

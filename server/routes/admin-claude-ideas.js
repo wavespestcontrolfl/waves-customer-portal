@@ -13,10 +13,11 @@ router.use(adminAuthenticate, requireAdmin);
 
 // GET /api/admin/claude-ideas/status — does the Intelligence Bar box show "Send to Claude"? enabled only for the owner
 // login; never 404, so the palette can ask.
+// `answerButton: true` rides with it for the owner: a palette tab opened before this deploy needs it to show the stuck-answer line.
 router.get('/status', (req, res) => {
   res.set('Cache-Control', 'no-store');
   const enabled = ibFullAccess(req);
-  res.json({ enabled });
+  res.json({ enabled, ...(enabled ? { answerButton: true } : {}) });
 });
 
 // POST /api/admin/claude-ideas — the box's free "Send to Claude" button (owner 2026-11-03). Body:

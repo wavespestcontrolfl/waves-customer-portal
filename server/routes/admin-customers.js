@@ -3198,7 +3198,8 @@ router.get('/:id/activity', requireAdmin, async (req, res, next) => {
       limit,
     });
     if (!result) return res.status(404).json({ error: 'Customer not found' });
-    res.json(result);
+    // `enabled: true` stays for admin tabs opened before this deploy: their old bundle drops the feed without it.
+    res.json({ enabled: true, ...result });
   } catch (err) {
     if (err?.status === 400) return res.status(400).json({ error: err.message });
     next(err);

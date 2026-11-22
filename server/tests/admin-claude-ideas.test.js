@@ -80,10 +80,10 @@ describe('dedupe key', () => {
   });
 });
 
-describe('status for the owner and another admin login', () => {
+describe('status for the owner and another admin login (answerButton keeps older open tabs working)', () => {
   test('the owner is enabled and another admin login is not', async () => {
     await withServer(async (base) => {
-      expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: true });
+      expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: true, answerButton: true });
       expect((await call(base, '/status', { method: 'GET', who: 'office' })).body).toEqual({ enabled: false });
     });
   });
@@ -92,7 +92,7 @@ describe('status for the owner and another admin login', () => {
 describe('routes', () => {
   test('status answers enabled:true for an admin; a technician is refused; no login is refused', async () => {
     await withServer(async (base) => {
-      expect(await call(base, '/status', { method: 'GET' })).toEqual({ status: 200, body: { enabled: true } });
+      expect(await call(base, '/status', { method: 'GET' })).toEqual({ status: 200, body: { enabled: true, answerButton: true } });
       expect((await call(base, '/status', { method: 'GET', who: 'tech' })).status).toBe(403);
       expect((await call(base, '/', { who: 'tech', body: { text: 'x' } })).status).toBe(403);
       expect((await call(base, '/status', { method: 'GET', who: 'nobody' })).status).toBe(401);
