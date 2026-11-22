@@ -11,7 +11,7 @@
  * enforcer).
  */
 
-const { bookingRainFit, rainTierOf, rankingNeedsForecast, boundedHourlyRain } = require('./rain-fit');
+const { rainFitFor, rainTierOf, rankingNeedsForecast, boundedHourlyRain } = require('./rain-fit');
 const logger = require('../logger');
 const { loadOccupancy, conflictsForTarget } = require('../rain-out');
 const { checkArrivalPlacement } = require('./arrival-route');
@@ -535,7 +535,7 @@ function byBest(a, b) {
     || a.start_time.localeCompare(b.start_time);
 }
 
-// `tierOf` (GATE_BOOKING_RAIN_RANK) ranks by rain fit BEFORE drive: an
+// `tierOf` ranks by rain fit BEFORE drive: an
 // outdoor booking's wet hours sort after its dry ones, a rain-OK booking's
 // wet hours before. Absent = the drive-only order, unchanged.
 function pickBestRows(days, { pickedDate, today, tierOf = null }) {
@@ -597,9 +597,8 @@ async function buildBestRows(days, {
   paidRoads, roadSpender, deps = {},
 }) {
   const rainLookup = deps.hourlyRain || boundedHourlyRain;
-  // One forecast read serves the labels and, with GATE_BOOKING_RAIN_RANK on,
-  // the ranking. No hour on screen: no lookup (Codex #6045 r1).
-  const fit = bookingRainFit(serviceTypes);
+  // One forecast read serves the labels and the ranking. No hour on screen: no lookup (Codex #6045 r1).
+  const fit = rainFitFor(serviceTypes);
   const ranking = rankingNeedsForecast(fit, days, today, pickedDate);
   const forecast = days.some((day) => day.hours.length) || picked?.fits === true
     ? rainLookup(lat, lng, ranking).catch(() => null) : Promise.resolve(null);
@@ -713,13 +712,13 @@ function withChipValues(days, rows, hourly) {
 }
 
 // The open-times box's day rows: every hour that fits, each with its
-// technician. For a booking the rain ranking reads (GATE_BOOKING_RAIN_RANK),
+// technician. For a booking the rain ranking reads,
 // each hour also carries its rain tier (rain-fit.js rainTier: 0 sorts
 // first), so the box's Best order puts an outdoor job's wet hours after its
 // dry ones, as the best-times rows do. The forecast lookup fails open: no
 // tiers, drive order only.
 async function buildOpenTimes(days, { today, lat, lng, serviceTypes = [], rainSpan = null, deps = {} }) {
-  const fit = bookingRainFit(serviceTypes);
+  const fit = rainFitFor(serviceTypes);
   const hourly = rankingNeedsForecast(fit, days, today, null)
     ? await (deps.hourlyRain || boundedHourlyRain)(lat, lng, true).catch(() => null) : null;
   const tierOf = rainTierOf(fit, hourly, today, rainSpan);

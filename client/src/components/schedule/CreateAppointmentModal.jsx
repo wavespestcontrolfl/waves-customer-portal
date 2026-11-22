@@ -1102,9 +1102,9 @@ export function firstGroupSendFlags({ resultsCount, createdCount, sendSms, cardL
   };
 }
 
-// "Customer's words" (GATE_RESERVICE_OFFICE_REQUEST): the pest/lawn re-service
+// "Customer's words": the pest/lawn re-service
 // catalog rows an office booking may attach the customer's own words to. The
-// server re-checks the catalog key and the gate; this only decides whether the
+// server re-checks the catalog key; this only decides whether the
 // section renders and the field rides the POST.
 export const OFFICE_REQUEST_SERVICE_KEYS = ['pest_re_service', 'lawn_re_service'];
 export const CUSTOMER_WORDS_MAX = 400;
@@ -1713,9 +1713,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const dateSectionRef = useRef(null);
   // Service-address picker for a multi-property customer. `bookingProperties`
   // is the customer's active customer_properties list; the picker renders
-  // only when the address lane is enabled server-side
-  // (canChangeAppointmentAddress — GATE_EDIT_APPT_ADDRESS) AND there is a
-  // real choice (2+ properties). Otherwise the server's sole-property anchor
+  // only when there is a real choice (2+ properties). Otherwise the server's sole-property anchor
   // applies exactly as before. `propertyRefresh` re-reads the list after a
   // quick-add "Attach as additional property" on the same customer.
   const [bookingProperties, setBookingProperties] = useState([]);
@@ -1968,7 +1966,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // complete, else the first complete row (an incomplete legacy primary
         // must not hide a bookable secondary — the server's sole-property
         // anchor sees both rows and would fall back to the profile address).
-        if (data?.canChangeAppointmentAddress === true && all.length > 1 && complete.length > 0) {
+        if (all.length > 1 && complete.length > 0) {
           // Same invalidation as applyBookingProperty: a suggestion applied
           // before this list arrived was scored at the primary, and the
           // default here may be a complete SECONDARY.
@@ -2272,13 +2270,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
-  // "Customer's words" on a pest/lawn re-service (GATE_RESERVICE_OFFICE_REQUEST).
-  // The probe doubles as the gate read: the route answers {enabled:false} while
-  // the lane is dark, and a failed fetch hides the section too, so a dark lane
-  // renders byte-identical. Probed only once a re-service line is on the form.
+  // "Customer's words" on a pest/lawn re-service.
+  // A failed fetch hides the section. Probed only once a re-service line is on the form.
   const [customerWords, setCustomerWords] = useState('');
   const [usedSuggestion, setUsedSuggestion] = useState(null);
-  const [reserviceRequestProbe, setReserviceRequestProbe] = useState({ customerId: '', enabled: false, suggestion: null });
+  const [reserviceRequestProbe, setReserviceRequestProbe] = useState({ customerId: '', loaded: false, suggestion: null });
   const hasReServiceLine = services.some(isOfficeRequestLine);
   const reserviceProbeCustomerId = hasReServiceLine && selectedCustomer?.id != null ? String(selectedCustomer.id) : '';
   useEffect(() => {
@@ -2287,18 +2283,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     adminFetch(`/admin/schedule/reservice-request-suggestion?customerId=${encodeURIComponent(reserviceProbeCustomerId)}`)
       .then((r) => {
         if (cancelled) return;
-        setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, enabled: !!r?.enabled, suggestion: r?.suggestion || null });
+        setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, loaded: true, suggestion: r?.suggestion || null });
       })
       .catch(() => {
-        if (!cancelled) setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, enabled: false, suggestion: null });
+        if (!cancelled) setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, loaded: false, suggestion: null });
       });
     return () => { cancelled = true; };
   }, [reserviceProbeCustomerId]);
   // A different customer's suggestion or words never carry over.
   useEffect(() => { setCustomerWords(''); setUsedSuggestion(null); }, [reserviceProbeCustomerId]);
-  // "Canceled on a call" (GATE_CALL_CANCEL_GUARD): the chosen customer's latest call, when it was a cancellation.
-  // A warning only. The probe doubles as the gate read: the route answers {enabled:false} while the lane is dark,
-  // and a failed fetch shows nothing, so a dark lane renders as before. It runs for every chosen customer, so a fetch
+  // "Canceled on a call": the chosen customer's latest call, when it was a cancellation.
+  // A warning only. A failed fetch shows nothing. It runs for every chosen customer, so a fetch
   // that throws synchronously is turned into that same quiet failure.
   const cancelProbeCustomerId = selectedCustomer?.id != null ? String(selectedCustomer.id) : '';
   const [cancelCallProbe, setCancelCallProbe] = useState({ customerId: '', call: null });
@@ -2308,7 +2303,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     Promise.resolve()
       .then(() => adminFetch(`/admin/schedule/cancel-call-notice?customerId=${encodeURIComponent(cancelProbeCustomerId)}`))
       .then((r) => {
-        if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: r?.enabled ? (r.call || null) : null });
+        if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: r?.call || null });
       })
       .catch(() => {
         if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: null });
@@ -2318,7 +2313,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const cancelCallNotice = cancelCallProbe.customerId === cancelProbeCustomerId ? cancelCallProbe.call : null;
   const reserviceRequestActive = !!reserviceProbeCustomerId
     && reserviceRequestProbe.customerId === reserviceProbeCustomerId
-    && reserviceRequestProbe.enabled;
+    && reserviceRequestProbe.loaded;
   const [saving, setSaving] = useState(false);
   // State updates are async — two clicks in one tick both saw saving=false
   // during the awaited re-quote and booked twice; the ref is synchronous.

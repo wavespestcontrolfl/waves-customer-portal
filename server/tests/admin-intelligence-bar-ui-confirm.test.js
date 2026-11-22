@@ -37,7 +37,7 @@ const mockIbBookingProposal = jest.fn(async () => ({ price: null, source: null, 
 const mockIbBookingOverlapProposal = jest.fn(async () => null);
 // Who the overlapping visit is (card text only): nobody named by default.
 const mockIbBookingOverlapWho = jest.fn(async () => []);
-// Default: no property choice needed (one property, or the address switch off).
+// Default: no property choice needed (one property).
 const mockIbBookingPropertyProposal = jest.fn(async () => ({ stamp: null }));
 const mockRateChangeProposal = jest.fn(async () => null);
 const mockTierEmailProposal = jest.fn(async () => null);

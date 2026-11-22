@@ -102,15 +102,10 @@
  *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
  *   GATE_IB_INVOICE_EMAIL=true (owner ruling 2026-10-31, gap #20: send_invoice may also EMAIL the invoice (PDF + pay link) with at most one CC, on the same confirm card. Needs GATE_IB_INVOICE_ACTIONS. Read at call time via ibInvoiceEmailLive(), strict 'true', dark by default; off = send_invoice is text-only, exactly as before.)
  *   GATE_TRUCK_CLOCK_IN=shadow (owner 2026-10-25, "this works": the rule is that a technician's shift starts by itself from the truck's GPS; THIS RELEASE ONLY RECORDS what that rule would do. The first of two triggers each Eastern work day wins: the truck's first GPS arrival at one of that technician's visits, or the start of the truck's first trip of the day (no earlier trip-start of a different trip for that truck in bouncie_webhook_log that Eastern day) within 200 m of the office. It notes whether the technician has no active shift and has a completed Vehicle Use & Commuting Agreement. Training days stay by hand (a trainee rides in the trainer's truck). Read at call time via truckClockInMode(): exactly 'shadow' (trimmed, any case) = decide and record one truck_clock_in_shadow row a day, never write time_entries; anything else, including 'true', = off, no code path runs. 'true' is not a value yet: live clock-in is a separate later change. Clock-out, the 9 PM reminder and the 11 PM close are unchanged. Sends nothing to a customer or staff member.)
- *   GATE_SPRAY_RAIN_RULES=shadow|true (owner 2026-10-26, plan page "Visit-Day Rain Rule", D1 = A and D2 = A: the visit-day spray check judges each product's label rain rule (server/config/label-rain-rules.js: "Do not make applications during rain" on the start hour, a label's dry-before-rain advice (a caution above 60%, the Warning level above 80%), water-in products not judged) and, for a tank spray whose label has no rain rule, the Waves rule for its service (reschedule-rules.js serviceSensitivity). One odds table for every rain number: caution above reschedule-rules caution_if_rain_prob_above (60%). Owner 2026-10-29 ("i just want to warn techs"): at `true` no weather reading withholds a dose anywhere (tech card, tank search, Tree & Shrub guide); a reading past reschedule_if_rain_prob_above (80%) or a wind or temperature limit is a caution that names it, the guide shows its mix when only the forecast is missing (an open label review still withholds it), and the Dispatch chip names the caution and the product ("Rain warning · Celsius WG", "Wind caution · Celsius WG") ahead of "Weather unknown" and is never red. Step 2: rain past 80% is the Warning level; wind and temperature are judged at the start hour and the next one; a tank spray whose label gives no dry time gets the Waves hours; a label heat line (Celsius: no adjuvant above 90°F) is a caution; each caution carries one action. Owner 2026-10-30: a label wind line is a caution at each label's own number (Cyper TC's on-grade line on termite visits only), and a fertilizer's "Do not apply if heavy rain is expected" is a caution when the start hour's forecast words say heavy rain or thunderstorms, on the same odds tiers. `shadow` = the live check is unchanged and the new verdict of each visit-day readiness / card build is upserted to spray_rain_rule_shadow (peak per visit per day); `true` keeps upserting the same row, which then counts the real rain odds. Off = byte-identical to today. Canonical CALL-TIME reader sprayRainRulesMode(). Kill switch: unset.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
  *   GATE_CALL_APPLICANT_HANDLING=true (a phone call whose caller is a JOB APPLICANT or a vendor/partner is handled as that third party, not as a customer call: the call is labeled vendor_logged even when the model recommended no_action_needed; no customer-only review card is raised on it (service address, email, name, consent capture); a promise the office made on it is stored as kind other, so the customer follow-up watchdog does not page on it; and a job applicant call with a valid extraction files ONE Careers application (role technician, status new, source phone_call) unless an open application with the same phone already exists. Sends nothing to the applicant: no text, no email, no invite, no AI screen. Read at call time via callApplicantHandlingLive(), strict 'true', dark by default; off = every call is handled exactly as before.)
  *   GATE_CALL_PREPAY_CHOICE=true (a caller who chose annual prepay on a call, when the call extraction carries service_request.billing_choice = annual_prepay: (1) the scheduling payload of a not-booked call and its held-visit row on Dispatch say "Caller chose annual prepay", and Book it opens the New appointment form with Annual prepay preselected when the customer's linked estimate is prepay-eligible; (2) for a call the pipeline DID book, one admin-only Needs Review card (reason call_prepay_choice) per call, filed every 10 minutes while the customer's newest open estimate is prepay-eligible, whose one tap "Accept as annual prepay" runs the same accept the New appointment form runs (a DRAFT annual prepay invoice that is NOT sent, plus a payment-pending term). The office decides every accept; nothing is accepted, invoiced or texted by the sweep. Read at call time via callPrepayChoiceLive(), strict 'true', dark by default; off = no field is carried, no card is filed, the card's route answers 404, and the form opens as before.)
  *   GATE_CALL_PHONE_YES_ACCEPT=true (a call that booked a pest visit while the customer had an open estimate: every 10 minutes the call-phone-yes sweep files ONE admin card for it, "Caller said yes to pay per application on the call" with the caller's words, or "No yes heard" (a later annual prepay choice, cancellation or one-time ask is no yes, named on the card; an annual choice on the booking call itself is the prepay card's). The card records a shadow verdict (would an automatic accept go ahead, and why not) and stays open while a visit the call booked is on the calendar, also after the estimate expires. Filing accepts nothing and sends nothing; the booking text keeps the accept link. The card's tap, Accept as pay per application (admin only), runs the office's own accept and books the plan from the visit the call booked; the customer gets what Mark accepted sends (the membership email). Owner 2026-11-18 "ok go" (step 1: the office taps); the owner flips it. Kill: unset it; off = no card and no tap. Read at call time: callPhoneYesAcceptLive())
- *   GATE_CALL_CANCEL_GUARD=true (the New Appointment form shows "Canceled on a call" with the call's summary under the
- *     chosen customer when that customer's latest real conversation in the last 14 days filed a cancellation card that
- *     still stands. A warning only: the save goes through. Never texts, emails, changes a visit or closes a card. Read at
- *     call time via callCancelGuardLive(), strict 'true', dark by default.)
  *   GATE_AI_CHANGE_CHECK=true (owner 2026-10-30, "all": before-and-after AI check for every content change. The daily impact tracker compares how often AI answers cited a changed page in the 14 days before its deploy with the 14 days after, adjusted for site-wide Waves citations, and stores gained / lost / moved / flat / no_data on the content_optimization_impact row ("moved" = a loss whose questions still cite Waves through another page; no alert). A "lost" verdict adds one FIX leg to the impact digest (also needs GATE_IMPACT_DIGEST), at most one email a day. Reads seo_llm_mentions that the daily prober already stored; fires no probes, costs $0, sends nothing to a customer. Read at call time via aiChangeCheckLive(), strict 'true', dark by default; off = no check runs and the digest has no such leg.)
  *   GATE_SAME_QUESTION_CHECK=true (content engine, owner 2026-10-30 "all": before a NEW supporting blog is drafted, topic-targeting-gate looks for a live post whose title, slug or primary keyword already holds every topic word of the brief's keyword (geo and framing words dropped, singular/plural folded; a one-word topic blocks only when at most 3 live posts hold it and it is not a broad pest or service word like termite or lawn). Off = the rule runs in shadow: it records run.topic_targeting_result.same_question and logs, and never blocks. On = the row is skipped by design (topic_targeting:TOPIC_SAME_QUESTION_LIVE) and one same_question_refresh row is queued against the owner page, which adds the candidate question as an answer block (ANSWER-GAP MODE) through the normal refresh chain: protected pages, in-flight page edit and the 28-day page cooldown still apply. Strict opt-in: exactly 'true', read at call time via sameQuestionCheckLive(). Ships DARK. Off also stops same_question_refresh rows already queued from being claimed (opportunity-queue lane fence); they wait and expire unclaimed after 60 days.)
  *   GATE_DATAFORSEO_RESOLVE_POISONED=true (owner 2026-11-19, "yes": every Google organic search sent through dataforseo.serpOrganic() (rank tracker, AI Overview tracker, blog-brief SERP profiler, serp-analyzer, competitor discovery, local prospector, listing size) carries DataForSEO's resolve_poisoned_results flag. Since 2026-09-26 Google has served automated searches "poisoned" pages (normal layout, most organic results swapped for unrelated sites); with the flag DataForSEO checks page one against Google's Web view and replaces poisoned organic results (marked checks: ["from_web"]); every other item comes back as collected. Paid: one more SERP page per task, clean or not. serpMaps, AI Mode, the AI Overview captures and checkIndexed are unchanged. Strict === 'true', read at call time via dataforseoResolvePoisonedLive(); dark by default. Kill: unset.)
@@ -268,7 +263,6 @@
  *   GATE_RESERVICE_DETAILS_REQUIRED=true (re-service picker's "What are you seeing?" box becomes required: any text counts, a pest chip alone does not replace it; GET /api/public/reservice/:token carries detailsRequired:true, the picker keeps Book disabled until the box has text, and POST answers 400 DETAILS_REQUIRED for a blank box. Read at call time via reserviceDetailsRequiredLive(), exact 'true'. Off = optional box, GET payload byte-identical. Sends nothing to a customer. Kill switch: unset.)
  *   GATE_RESERVICE_PHOTOS=true (re-service photos, optional: after a /reservice/:token booking the success card offers the visit-prep photo form for the visit just booked — the commit response carries prepPhotos {visitId, photosRemaining} and POST /api/public/reservice/:token/visits/:visitId/photos stores through services/visit-prep.js (entry 'reservice_page'), so the Visit Brief, office feed item, tech alert and photo reads apply unchanged. Needs GATE_VISIT_PREP_PHOTOS too; read at call time via reservicePhotosLive(), exact 'true'. Off = commit response byte-identical and the upload route 404s. Sends nothing to a customer. Kill switch: unset.)
  *   GATE_REVIEW_ALERT=true (bad-review bell: keeps one needs-you admin item open for every Google review of 1 to 4 stars that has no published reply, is not dismissed and is still on Google, written at or after this gate's activation boundary (stored once in system_settings at the start of the first gated review sync, two hours back, so turning it on never rings older reviews); checked after every review sync, closed when answered, rings again if a reply is removed; rules only, internal only, no customer send. Off unless exactly 'true'.)
- *   GATE_RESERVICE_OFFICE_REQUEST=true (New Appointment modal "Customer's words" box on a pest/lawn re-service: suggests the customer's latest inbound text or call note from the last 72 hours with a "Use this" button, saved to scheduled_services.customer_request/_source; the server decides the source — unchanged text/call = quotable text/call, edited or typed = office. Off unless exactly 'true' (isEnabled('reserviceOfficeRequest')); off = the modal shows nothing new, GET /api/admin/schedule/reservice-request-suggestion answers {enabled:false, suggestion:null}, and POST ignores customerRequest. Sends nothing to a customer.)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (far-south zones are funneled onto days with an existing zone stop, seeding one day when none exists: the estimate picker, the lead assessment link's offered lists, and the 4:10 AM night run, which never moves a visit outside those zones onto a date that holds a far-south stop; owner 2026-11-12; per truck with GATE_MULTI_TECH_CONFIRM on, owner 2026-11-19: single visits in the night run, and the estimate picker and the assessment link offer a far-south zone day only on its own truck, rule B)
  *   GATE_ZONE_ROUTE_DAYS=true (customer-facing booking + estimate picker lift the self-serve detour cap on a far zone's route day — default Friday for Venice / North Port — so an EMPTY route day can be offered and seeded; config in system_settings key schedule_zone_route_days; phone/office/IB/auto-dispatch untouched; read at call time via zoneRouteDaysLive(); unset = today's cap everywhere)
  *   GATE_BOOKING_MAKE_ROOM=shadow|true (owner 2026-11-06, "build this first": a new customer on the estimate page may take the best hour on a route even when a regular stop holds it. That stop, and each later stop it would then overlap, moves later by the new visit's length in whole hours (1 hour for a visit up to 60 minutes, the owner's 2026-11-03 rule) until a free hour takes the last one. A stop may move only under the 4:40 day re-plan's own rules (services/day-replan fixedReason with the day's full facts, including the told, confirmed, first or one-time and person-placed locks), when its customer gets the 72-hour and 24-hour reminder texts, and when its time preference allows the new hour. The route must keep every arrival window (arrival-route.js evaluateArrivalPlacement), and the hour must add at least 10 fewer drive minutes than the best free time (the re-plan's free straight-line drive model: no Google, no AI, no paid call). shadow = PR 1: after an estimate page offer list (offer: true callers only, on a cache miss) is built, services/scheduling/booking-make-room.js runs the check without the list waiting for it and writes one booking_make_room_checks row (ids, dates, hours and minutes only). The list, holds and visits never change, and nothing is sent. true = (owner 2026-11-09 "YES") offer and hold ONE make-room hour: the estimate page awaits the sooner pass (1.5 s) and adds the earliest passing hour, reserveSlot re-proves it and stores the chain on the hold; accepting such a hold moves the regular stops later the same day inside the accept transaction (all or nothing, re-proved under the locks, logged as booking_make_room, no text, email or call; the reminders follow silently); the flip follows PR 4's merge and a test on the owner's test records. Hour mode only (capacity mode offers nothing). Unset or anything else = off: the module is never loaded. Read at call time via bookingMakeRoomMode(), so a flip needs no redeploy; dark by default.)
@@ -1026,6 +1020,9 @@ const gates = {
   // every mint still goes through the Customer 360 route and its guards.
   onsitePrepaySwitch: process.env.GATE_ONSITE_PREPAY_SWITCH === 'true',
 
+  // Admin-only, reasoned second-program creation; reviewed IDs are checked
+  // under the existing series-create lock. Unset hides and refuses the flow.
+  separateRecurringProgram: process.env.GATE_SEPARATE_RECURRING_PROGRAM === 'true',
   // Setting a recurring plan's LENGTH from Edit appointment. The count is not
   // a stored field — a fixed plan is recurring_ongoing=false plus exactly N
   // live rows — so lowering it CANCELS real future visits, which is why it
@@ -1035,16 +1032,6 @@ const gates = {
   // silently ignoring one (an ignored count reads to the office as a plan they
   // capped). Kill switch: unset or any non-'true' value; visits already added
   // or cancelled are not reversed when it flips.
-  // GATE_EDIT_APPT_ADDRESS also admits the New Appointment "Service address"
-  // picker (POST / with propertyId) — one flag for "the office chooses which
-  // of a multi-property customer's addresses a visit lands on". Off: the
-  // properties read answers canChangeAppointmentAddress:false, the modal
-  // hides the picker, and a propertyId on create is refused (409), so a
-  // stale tab cannot book to a secondary address while the lane is dark.
-  editApptAddress: process.env.GATE_EDIT_APPT_ADDRESS === 'true',
-  // Admin-only, reasoned second-program creation; reviewed IDs are checked
-  // under the existing series-create lock. Unset hides and refuses the flow.
-  separateRecurringProgram: process.env.GATE_SEPARATE_RECURRING_PROGRAM === 'true',
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 
   // Applying a PRICE or primary-SERVICE change from Edit appointment to "this
@@ -1835,22 +1822,6 @@ const gates = {
   // drops prepPhotos and the upload route 404s.
   reservicePhotos: process.env.GATE_RESERVICE_PHOTOS === 'true',
 
-  // Office-booked re-service "Customer's words" (2026-10-01):
-  // the New Appointment modal, on a pest/lawn re-service, offers the
-  // customer's latest inbound text or call note from the last 72 hours with
-  // a "Use this" button plus an editable box, saved to
-  // scheduled_services.customer_request/_source (migration 20260927100000).
-  // The SERVER decides the source: unchanged text/call keeps 'text'/'call',
-  // anything typed or edited by staff is 'office'. Staff-facing only and
-  // nothing is sent, but it ships DARK in EVERY environment (fail-closed
-  // ==='true'). Read via isEnabled('reserviceOfficeRequest') by the
-  // suggestion route and the POST intake in routes/admin-schedule.js; the
-  // modal learns the gate from the route's {enabled} answer. Kill switch:
-  // unset GATE_RESERVICE_OFFICE_REQUEST — the suggestion route answers
-  // {enabled:false, suggestion:null}, POST /api/admin/schedule ignores
-  // `customerRequest`, and the modal renders byte-identical to before.
-  reserviceOfficeRequest: process.env.GATE_RESERVICE_OFFICE_REQUEST === 'true',
-
   // Re-service ranking demotion (owner ruling 2026-09-24: "prefer new
   // customers over existing — new-customer bookings get first pick of open
   // time; re-service/callback pickers rank after"). Nested inside
@@ -2505,8 +2476,6 @@ const gates = {
   callPrepayChoice: process.env.GATE_CALL_PREPAY_CHOICE === 'true',
   // GATE_CALL_PHONE_YES_ACCEPT (a call that booked a pest visit on an open estimate files one admin card for the office's accept, dark). Boot-log entry only; the call-time reader is callPhoneYesAcceptLive().
   callPhoneYesAccept: process.env.GATE_CALL_PHONE_YES_ACCEPT === 'true',
-  // GATE_CALL_CANCEL_GUARD (a "Canceled on a call" notice on New Appointment, dark). Boot-log entry only; the call-time reader is callCancelGuardLive().
-  callCancelGuard: process.env.GATE_CALL_CANCEL_GUARD === 'true',
   // GATE_AI_CHANGE_CHECK (before-and-after AI citation check per content change + one lost-citations digest leg, dark). Boot-log entry only; the call-time reader is aiChangeCheckLive().
   aiChangeCheck: process.env.GATE_AI_CHANGE_CHECK === 'true',
   // GATE_SAME_QUESTION_CHECK (new-blog same-question check: owner page rewrite instead of a sibling post, dark). Boot-log entry only; the call-time reader is sameQuestionCheckLive().
@@ -3499,19 +3468,6 @@ const gates = {
   // GATE_ROUTE_SCORECARD.
   routeScorecard: gateEnvValue('GATE_ROUTE_SCORECARD'),
 
-  // Schedule tie-proximity display order (owner ruling 2026-09-26) — when two
-  // stops on a tech's day start within 30 minutes of each other, the one
-  // closer to the previous stop shows first, instead of falling back to
-  // whichever was booked first. DISPLAY ONLY: server/services/schedule-tie-
-  // proximity.js returns a `displayOrder` per stop; nothing writes
-  // route_order or any other column, and no customer communication is sent.
-  // Uses the existing shared drive-time estimator — no new Google API calls.
-  // Off (default in every environment) → the mobile day/week list and the desktop day board's route-
-  // order badge sort by window start alone, exactly as before this gate
-  // existed. Consumers read gateEnvValue() at CALL time, so a flip needs no
-  // redeploy. Kill switch: unset GATE_SCHEDULE_TIE_PROXIMITY.
-  scheduleTieProximity: gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY'),
-
   // Slot Travel Gap — the customer-facing pickers (estimate, one-tap, /book,
   // reschedule, re-service, voice, rain-out, AI assistant) and every commit
   // gate behind them require modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES
@@ -4002,16 +3958,6 @@ const gates = {
   // environment; the admin schedule day view carries it to Dispatch as
   // newCallerBooking. Kill switch: unset — Book needs a customer, as before.
   newCallerBooking: gateEnvValue('GATE_NEW_CALLER_BOOKING'),
-
-  // Booking rain rank (owner 2026-10-06): the New Appointment best-times rows
-  // rank by rain fit before drive. Outdoor bookings (pest, lawn, T&S,
-  // mosquito, termite treatment) sort hours with a 60%+ NWS chance in the
-  // visit or the 2 hours after it below dry hours; rain-OK bookings
-  // (assessments, estimates, WDO/termite inspections, rodent/trapping,
-  // interior-only) sort them first. Next 3 days only. OFF in every
-  // environment; scheduling/find-time-hints.js reads it through
-  // gateEnvValue() at call time. Kill switch: unset — drive-only order.
-  bookingRainRank: gateEnvValue('GATE_BOOKING_RAIN_RANK'),
 
   // Technician start points (owner 2026-10-22): a tech with a start address
   // (Team tab, technicians.start_lat/lng) starts and ends the day there, not
@@ -6346,12 +6292,6 @@ function lawnJevTimingCheckMode() {
 // covered visit's price when a term is created and only logs a visit the
 // check would hold; 'true' also holds it. Any other value is off: nothing is
 // recorded or read. Unset is the kill, no redeploy.
-// GATE_SPRAY_RAIN_RULES read at CALL time: 'shadow' or 'true', anything else is off.
-function sprayRainRulesMode() {
-  const value = String(process.env.GATE_SPRAY_RAIN_RULES || '').trim().toLowerCase();
-  return value === 'shadow' || value === 'true' ? value : 'off';
-}
-
 function prepayMintPriceHoldMode() {
   const value = String(process.env.GATE_PREPAY_MINT_PRICE_HOLD || '').trim().toLowerCase();
   return value === 'shadow' || value === 'true' ? value : 'off';
@@ -8783,7 +8723,6 @@ module.exports.lawnWaterInRainLive = lawnWaterInRainLive;
 module.exports.onSiteCallerDemoteLive = onSiteCallerDemoteLive;
 // GATE_PREPAY_MINT_PRICE_HOLD reader, on its own line so gate PRs never conflict.
 module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
-module.exports.sprayRainRulesMode = sprayRainRulesMode;
 // GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_ESTIMATE_DUE_FIRST_VISIT reader, on its own line so gate PRs never conflict.
@@ -9120,11 +9059,6 @@ function callPrepayChoiceLive() {
 function callPhoneYesAcceptLive() {
   return process.env.GATE_CALL_PHONE_YES_ACCEPT === 'true';
 }
-// GATE_CALL_CANCEL_GUARD read at CALL time, strict `=== 'true'`, dark in every environment. Off = byte-identical: the
-// cancel-notice route answers {enabled:false}, so New Appointment renders as before.
-function callCancelGuardLive() {
-  return process.env.GATE_CALL_CANCEL_GUARD === 'true';
-}
 // GATE_AI_CHANGE_CHECK read at CALL time, strict `=== 'true'`, dark in every environment. Off = checkAiChange is a no-op and the impact
 // digest has no lost-citations leg. Read-only over stored seo_llm_mentions; no probes, no customer message.
 function aiChangeCheckLive() {
@@ -9322,8 +9256,6 @@ module.exports.callApplicantHandlingLive = callApplicantHandlingLive;
 module.exports.callPrepayChoiceLive = callPrepayChoiceLive;
 // GATE_CALL_PHONE_YES_ACCEPT reader, on its own line so gate PRs never conflict.
 module.exports.callPhoneYesAcceptLive = callPhoneYesAcceptLive;
-// GATE_CALL_CANCEL_GUARD reader, on its own line so gate PRs never conflict.
-module.exports.callCancelGuardLive = callCancelGuardLive;
 // GATE_AI_CHANGE_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.aiChangeCheckLive = aiChangeCheckLive;
 // GATE_SAME_QUESTION_CHECK reader, on its own line so gate PRs never conflict.

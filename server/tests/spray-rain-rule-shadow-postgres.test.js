@@ -1,4 +1,4 @@
-// Real migrated PostgreSQL, synthetic records, rolled back after every test: the GATE_SPRAY_RAIN_RULES=shadow
+// Real migrated PostgreSQL, synthetic records, rolled back after every test: the spray rain
 // record keeps the worst read of a visit day, with that read's start time and service (Codex P2 on #6797).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
