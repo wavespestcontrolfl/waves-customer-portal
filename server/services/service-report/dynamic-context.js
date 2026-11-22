@@ -18,6 +18,7 @@ const { roundStepForPlan } = require('../lawn-program');
 const roundsCatchUp = require('../lawn-rounds-catchup');
 const { sqlZip5 } = require('../stamped-address');
 const { dateOnlyStamp } = require('./time-format');
+const { etDateString } = require('../../utils/datetime-et');
 const octoberStonewall = require('../../models/migrations/20261122120000_lawn_v13_october_stonewall');
 
 async function safeBuild(label, fn) {
@@ -305,40 +306,65 @@ async function buildLawnProtocolReportContext(record, knex, now) {
   }
 
   const summary = await withCatchUpIfApplied(summarizeProtocolContext(context), { record, knex, catchUp });
-  const listed = await withBagAsRecorded(await withoutUnappliedSwapRows(summary, { record, knex }), { record, knex });
+  const listed = await withBagAsOfVisit(await withoutUnappliedSwapRows(summary, { record, knex }), { record, completion, knex });
   return attachProtocolOperationalContext(listed, { completion, assignment });
 }
 
 // The October v13 bag changed IN PLACE on the staged row (migration 20261122120000: the Dimension granular became Stonewall 0.37%), and a
-// report opened later reads that row. A visit that recorded the earlier bag, and not the current one, keeps the earlier bag on its card:
-// the row's product and the window goal read as they did when the visit was made. A visit that recorded the current bag or neither bag,
-// another window, or a failed read: the summary as it is (the same object).
-async function withBagAsRecorded(summary, { record, knex }) {
-  const { OCTOBER_WINDOW, OLD_NAME, NEW_NAME, OLD_GOAL, NEW_GOAL, OLD_COUNTER_KEY } = octoberStonewall;
-  const row = summary?.window?.key === OCTOBER_WINDOW && Array.isArray(summary.products)
-    ? summary.products.find((product) => product.protocolProductName === NEW_NAME)
+// report opened later reads that row. A visit made BEFORE the swap keeps the window as it was then, whatever the visit applied, skipped or
+// substituted: the swap's own audit record holds the row's earlier product, the earlier goal and the moment of the swap. A visit after
+// the swap, a protocol never swapped (or rolled back: the record is gone), a row changed since, or another window: the summary as it is
+// (the same object). The reads are not caught: a failed read omits the card for that render (safeBuild) and never names the wrong bag.
+async function withBagAsOfVisit(summary, { record, completion, knex }) {
+  if (summary?.window?.key !== octoberStonewall.OCTOBER_WINDOW || !summary.id || !Array.isArray(summary.products)) return summary;
+  const swap = await knex('lawn_protocol_audit_log').where({ lawn_protocol_id: summary.id, action: octoberStonewall.ACTION })
+    .orderBy('created_at', 'desc').first('created_at', 'after_snapshot');
+  if (!swap || !visitWasBefore(swap.created_at, { record, completion })) return summary;
+  const snapshot = parseJson(swap.after_snapshot, {});
+  const was = swappedRowRecord(snapshot);
+  const row = was && summary.products.find((product) => String(product.id) === String(was.rowId) && product.protocolProductName === was.name.after);
+  if (!row) return summary;
+  const catalog = was.productId.before
+    ? await knex('products_catalog').where({ id: was.productId.before }).first('name', 'frac_group', 'irac_group', 'hrac_group', 'moa_group', 'analysis_n', 'analysis_p', 'analysis_k')
     : null;
-  if (!row || !record?.id) return summary;
-  const applied = await knex('service_products as sp').leftJoin('products_catalog as pc', 'sp.product_id', 'pc.id')
-    .where('sp.service_record_id', record.id)
-    .select('sp.product_id', 'sp.product_name', 'pc.name as catalog_name', 'pc.frac_group', 'pc.irac_group', 'pc.hrac_group', 'pc.moa_group')
-    .catch(() => []);
-  const isBag = (name) => (line) => line.catalog_name === name || line.product_name === name;
-  const earlier = applied.find(isBag(OLD_NAME));
-  if (!earlier || applied.some(isBag(NEW_NAME))) return summary;
+  const goalMoved = Boolean(snapshot.goalWindowId) && summary.window.goal === snapshot.newGoal;
   return {
     ...summary,
-    window: { ...summary.window, goal: summary.window.goal === NEW_GOAL ? OLD_GOAL : summary.window.goal },
-    products: summary.products.map((product) => (product !== row ? product : {
-      ...product,
-      productId: earlier.product_id || null,
-      productName: earlier.catalog_name || earlier.product_name,
-      protocolProductName: OLD_NAME,
-      gates: { ...parseJson(product.gates, {}), annualCounter: OLD_COUNTER_KEY },
-      annualCounter: { ...parseJson(product.annualCounter, {}), counter: OLD_COUNTER_KEY },
-      groups: { frac: earlier.frac_group || null, irac: earlier.irac_group || null, hrac: earlier.hrac_group || null, moa: earlier.moa_group || null },
-    })),
+    window: goalMoved ? { ...summary.window, goal: snapshot.oldGoal } : summary.window,
+    products: summary.products.map((product) => (product === row ? rowBeforeSwap(row, was, catalog || {}) : product)),
   };
+}
+
+// The swap record's one staged row in a flat shape ({ before, after } pairs), or null when the record does not hold what this needs.
+function swappedRowRecord(snapshot) {
+  const recorded = Array.isArray(snapshot.rows) ? snapshot.rows[0] : null;
+  const columns = recorded && recorded.columns;
+  if (!columns || !columns.product_name || !columns.product_id) return null;
+  return { rowId: recorded.rowId, name: columns.product_name, productId: columns.product_id, counter: columns.annual_counter, gateCounter: (recorded.gates || {}).annualCounter };
+}
+
+// The summary's product row as the staged row read before the swap: the recorded product and counter, and that product's catalog facts.
+function rowBeforeSwap(row, was, catalog) {
+  return {
+    ...row,
+    productId: was.productId.before,
+    productName: catalog.name || was.name.before,
+    protocolProductName: was.name.before,
+    gates: was.gateCounter ? { ...parseJson(row.gates, {}), annualCounter: was.gateCounter.before } : row.gates,
+    annualCounter: was.counter ? was.counter.before : row.annualCounter,
+    groups: { frac: catalog.frac_group || null, irac: catalog.irac_group || null, hrac: catalog.hrac_group || null, moa: catalog.moa_group || null },
+    analysis: { n: catalog.analysis_n ?? null, p: catalog.analysis_p ?? null, k: catalog.analysis_k ?? null },
+  };
+}
+
+// Was the visit made before `swappedAt`? Its service day against the swap's day (Eastern); on the swap's own day, only a completion that
+// was recorded before the swap. A visit with no readable service day is not before.
+function visitWasBefore(swappedAt, { record, completion }) {
+  const serviceDay = dateOnlyStamp(record?.service_date);
+  if (!serviceDay) return false;
+  const swapDay = etDateString(new Date(swappedAt));
+  if (serviceDay !== swapDay) return serviceDay < swapDay;
+  return !!completion?.created_at && new Date(completion.created_at) < new Date(swappedAt);
 }
 
 // The catch-up's product (the March Dimension 2EW row the window read added for an eligible visit) is listed on the CUSTOMER report only when

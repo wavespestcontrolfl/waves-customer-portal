@@ -999,7 +999,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       const [row] = await knex('products_catalog').insert({
         name: STW_037, category: 'herbicide', label_verified_at: new Date(), inventory_on_hand: 100000, inventory_unit: 'lb', active: true,
         active_ingredient: 'Prodiamine 0.37% + 18-0-10', epa_reg_number: '10404-114', formulation: 'granular', default_rate_per_1000: 4.04, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10,
-        min_label_rate_per_1000: 3.1, max_label_rate_per_1000: 9.3, best_price: 33.46, best_vendor: 'Fixture vendor',
+        slow_release_n_pct: 56, min_label_rate_per_1000: 3.1, max_label_rate_per_1000: 9.3, best_price: 33.46, best_vendor: 'Fixture vendor',
         post_application_watering: stonewallMigration.CATALOG_ROW.post_application_watering,
       }).returning('*');
       catalog[STW_037] = row;
@@ -1396,7 +1396,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
           await awayFromCatalog();
           await stonewallMigration.up(knex);
           const made = await insertedRow();
-          expect([Number(made.analysis_n), Number(made.analysis_p), Number(made.analysis_k)]).toEqual([18, 0, 10]);
+          expect([Number(made.analysis_n), Number(made.analysis_p), Number(made.analysis_k), Number(made.slow_release_n_pct)]).toEqual([18, 0, 10, 56]);
           await knex('products_catalog').where({ id: made.id }).update({ best_price: 35.98, best_vendor: 'Set by the office', approved_for_service_report: true });
           await stonewallMigration.down(knex);
           expect(await octoberRow()).toMatchObject({ product_name: DIMENSION, product_id: dimensionId() });
@@ -1426,20 +1426,30 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       const setAnalysis = (values) => knex('products_catalog').where({ id: stonewallId() }).update(values);
       const analysisOf = async () => { const row = await catalogRow(); return [row.analysis_n, row.analysis_p, row.analysis_k].map((value) => (value == null ? null : Number(value))); };
 
-      test('a catalog row with no analysis (the production row) gets 18-0-10 and nothing else; the fill is audited and down leaves it', async () => {
+      test('a catalog row with no analysis and no slow-release share (the production row) gets 18-0-10 and 56%, and nothing else; the fill is audited and down leaves it', async () => {
         await withReset(async () => {
-          await setAnalysis({ analysis_n: null, analysis_p: null, analysis_k: null });
+          await setAnalysis({ analysis_n: null, analysis_p: null, analysis_k: null, slow_release_n_pct: null });
           try {
-            const strip = ({ analysis_n: _n, analysis_p: _p, analysis_k: _k, updated_at: _u, ...rest }) => JSON.stringify(rest);
+            const strip = ({ analysis_n: _n, analysis_p: _p, analysis_k: _k, slow_release_n_pct: _s, updated_at: _u, ...rest }) => JSON.stringify(rest);
             const before = strip(await catalogRow());
             await stonewallMigration.up(knex);
             expect(await analysisOf()).toEqual([18, 0, 10]);
+            expect(Number((await catalogRow()).slow_release_n_pct)).toBe(56);
             expect(strip(await catalogRow())).toBe(before);
             expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot)
-              .toMatchObject({ insertedProductId: null, analysisFilled: { analysis_n: 18, analysis_p: 0, analysis_k: 10 } });
+              .toMatchObject({ insertedProductId: null, analysisFilled: { analysis_n: 18, analysis_p: 0, analysis_k: 10, slow_release_n_pct: 56 } });
             await stonewallMigration.down(knex);
             expect(await analysisOf()).toEqual([18, 0, 10]);
-          } finally { await setAnalysis({ analysis_n: 18, analysis_p: 0, analysis_k: 10 }); }
+            expect(Number((await catalogRow()).slow_release_n_pct)).toBe(56);
+          } finally { await setAnalysis({ analysis_n: 18, analysis_p: 0, analysis_k: 10, slow_release_n_pct: 56 }); }
+        });
+      });
+
+      // The nutrient ledger books the share for every application; the county rules need at least 50%.
+      test('a catalog row that holds another slow-release share: up throws and writes nothing', async () => {
+        await withReset(async () => {
+          await setAnalysis({ slow_release_n_pct: 30 });
+          try { await refuses('holds a slow-release nitrogen share of 30%, not 56% (SiteOne item 702562: 56%CRN)'); } finally { await setAnalysis({ slow_release_n_pct: 56 }); }
         });
       });
 
@@ -1574,43 +1584,75 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       });
     });
 
-    // The staged row is live data: a report opened after the swap reads it. A visit completed with the earlier bag keeps that bag.
-    describe('the report card of a completed October visit, opened after the swap', () => {
-      beforeAll(async () => { await resetToDimension(); await stonewallMigration.up(knex); });
+    // The staged row is live data: a report opened after the swap reads it. A visit made before the swap keeps the window as it was.
+    describe('the report card of an October visit, opened after the swap', () => {
+      const SWAP_AT = '2026-11-22T15:00:00Z'; // 10:00 AM Eastern on 2026-11-22
+      const stampSwap = () => knex('lawn_protocol_audit_log').where({ action: stonewallMigration.ACTION }).update({ created_at: SWAP_AT });
+      beforeAll(async () => { await resetToDimension(); await stonewallMigration.up(knex); await stampSwap(); });
       afterAll(async () => { await resetToDimension(); await stonewallMigration.up(knex); });
 
-      const card = async (recorded) => {
-        const { scheduled, customerId } = await visit('2026-10-12');
-        const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: scheduled.id, service_date: '2026-10-12', service_type: 'Lawn fixture' }).returning('*');
+      const completedVisit = async ({ serviceDate, completedAt = null, recorded = [] }) => {
+        const { scheduled, customerId } = await visit(serviceDate);
+        const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: scheduled.id, service_date: serviceDate, service_type: 'Lawn fixture' }).returning('*');
         const protocol = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();
         const window = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id, window_key: stonewallMigration.OCTOBER_WINDOW }).first();
         await knex('lawn_protocol_service_completions').insert({
           service_record_id: record.id, scheduled_service_id: scheduled.id, customer_id: customerId, lawn_protocol_id: protocol.id,
           lawn_protocol_window_id: window.id, protocol_key: KEY, protocol_version: LAWN_V13_VERSION, window_key: stonewallMigration.OCTOBER_WINDOW,
+          ...(completedAt ? { created_at: completedAt } : {}),
         });
-        for (const line of recorded) await knex('service_products').insert({ service_record_id: record.id, ...line });
-        const context = await buildLawnProtocolReportContext({ id: record.id, customer_id: customerId, service_date: '2026-10-12', scheduled_service_id: scheduled.id }, knex, new Date('2026-12-01T16:00:00Z'));
-        const bag = context.products.find((product) => product.role === 'fall_pre_emergent_nutrition');
-        return { goal: context.window.goal, name: bag.productName, protocolName: bag.protocolProductName, productId: bag.productId, counter: bag.gates.annualCounter, rate: bag.ratePer1000 };
+        for (const name of recorded) await knex('service_products').insert({ service_record_id: record.id, product_id: catalog[name].id, product_name: name });
+        return { id: record.id, customer_id: customerId, service_date: serviceDate, scheduled_service_id: scheduled.id };
       };
-      const DIMENSION_CARD = { goal: stonewallMigration.OLD_GOAL, name: DIMENSION, protocolName: DIMENSION, counter: 'dithiopyr_lb_per_1000', rate: 4.04 };
-      const STONEWALL_CARD = { goal: stonewallMigration.NEW_GOAL, name: STW_037, protocolName: STW_037, counter: 'prodiamine_lb_per_1000', rate: 4.04 };
-
-      test('a visit that recorded the Dimension bag keeps it: the Dimension name, its counter and the goal the visit followed', async () => {
-        expect(await card([{ product_id: dimensionId(), product_name: DIMENSION }])).toEqual({ ...DIMENSION_CARD, productId: dimensionId() });
+      const card = async (options, db = knex) => {
+        const context = await buildLawnProtocolReportContext(await completedVisit(options), db, new Date('2026-12-01T16:00:00Z'));
+        const bag = context.products.find((product) => product.role === 'fall_pre_emergent_nutrition');
+        return { goal: context.window.goal, name: bag.productName, protocolName: bag.protocolProductName, productId: bag.productId, counter: bag.gates.annualCounter, annual: bag.annualCounter, rate: bag.ratePer1000 };
+      };
+      const dimensionCard = () => ({
+        goal: stonewallMigration.OLD_GOAL, name: DIMENSION, protocolName: DIMENSION, productId: dimensionId(),
+        counter: 'dithiopyr_lb_per_1000', annual: { counter: 'dithiopyr_lb_per_1000' }, rate: 4.04,
+      });
+      const stonewallCard = () => ({
+        goal: stonewallMigration.NEW_GOAL, name: STW_037, protocolName: STW_037, productId: stonewallId(),
+        counter: 'prodiamine_lb_per_1000', annual: { counter: 'prodiamine_lb_per_1000' }, rate: 4.04,
       });
 
-      test('a record that froze the Dimension name with no product id reads the same way', async () => {
-        expect(await card([{ product_id: null, product_name: DIMENSION }])).toEqual({ ...DIMENSION_CARD, productId: null });
-      });
-
+      // Whatever the visit applied, skipped or substituted: the window it followed held the Dimension bag.
       test.each([
-        ['the Stonewall bag', () => [{ product_id: stonewallId(), product_name: STW_037 }]],
-        ['both bags (the current bag was applied)', () => [{ product_id: dimensionId(), product_name: DIMENSION }, { product_id: stonewallId(), product_name: STW_037 }]],
-        ['neither bag', () => [{ product_id: catalog[STW_4FL].id, product_name: STW_4FL }]],
-        ['no product at all', () => []],
-      ])('a visit that recorded %s shows the window as it is now: Stonewall 0.37% and its goal', async (_label, recorded) => {
-        expect(await card(recorded())).toEqual({ ...STONEWALL_CARD, productId: stonewallId() });
+        ['recorded the Dimension bag', [DIMENSION]],
+        ['skipped the bag (no product recorded)', []],
+        ['recorded a substitute in its place', [STW_4FL]],
+      ])('a visit made before the swap that %s shows the window as it was: the Dimension bag, its counter and the earlier goal', async (_label, recorded) => {
+        expect(await card({ serviceDate: '2026-10-12', recorded })).toEqual(dimensionCard());
+      });
+
+      test('a visit made before the swap but closed out after it still shows the Dimension bag (its service day decides)', async () => {
+        expect(await card({ serviceDate: '2026-11-09', completedAt: '2026-11-24T15:00:00Z', recorded: [DIMENSION] })).toEqual(dimensionCard());
+      });
+
+      test('a visit made after the swap shows the window as it is now, even when it recorded the Dimension bag', async () => {
+        expect(await card({ serviceDate: '2027-10-12', recorded: [DIMENSION] })).toEqual(stonewallCard());
+        expect(await card({ serviceDate: '2026-11-23', recorded: [STW_037] })).toEqual(stonewallCard());
+      });
+
+      test('on the day of the swap, the moment of the closeout decides: before it the Dimension bag, after it Stonewall', async () => {
+        expect(await card({ serviceDate: '2026-11-22', completedAt: '2026-11-22T14:00:00Z' })).toEqual(dimensionCard());
+        expect(await card({ serviceDate: '2026-11-22', completedAt: '2026-11-22T16:00:00Z' })).toEqual(stonewallCard());
+      });
+
+      test('a staged row the office changed after the swap is shown as it is, for an earlier visit too', async () => {
+        const row = await octoberRow();
+        await knex('lawn_protocol_products').where({ id: row.id }).update({ product_name: 'Renamed by the office' });
+        try {
+          const context = await buildLawnProtocolReportContext(await completedVisit({ serviceDate: '2026-10-12' }), knex, new Date('2026-12-01T16:00:00Z'));
+          expect(context.products.find((product) => product.role === 'fall_pre_emergent_nutrition').protocolProductName).toBe('Renamed by the office');
+        } finally { await knex('lawn_protocol_products').where({ id: row.id }).update({ product_name: STW_037 }); }
+      });
+
+      test('a failed read of the swap record omits the card for that render: the error is not turned into "no swap"', async () => {
+        const failing = Object.assign((table) => { if (table === 'lawn_protocol_audit_log') throw new Error('db down'); return knex(table); }, { schema: knex.schema, raw: knex.raw.bind(knex), fn: knex.fn });
+        await expect(card({ serviceDate: '2026-10-12', recorded: [DIMENSION] }, failing)).rejects.toThrow('db down');
       });
     });
   });

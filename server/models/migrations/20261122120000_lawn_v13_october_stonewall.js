@@ -58,7 +58,8 @@
  *   - The Stonewall catalog row is the production row (exactly ONE row with this exact name, no
  *     alias that spells the name on another product, active, an active ingredient that BEGINS
  *     with prodiamine as the yearly cap check reads it (ILIKE 'prodiamine%', so a leading space
- *     fails here too), EPA 10404-114, rates in pounds, a fertilizer analysis that is empty or
+ *     fails here too), EPA 10404-114, rates in pounds, a slow-release nitrogen share that is
+ *     empty or 56, a fertilizer analysis that is empty or
  *     18-0-10, a watering rule that is empty or exactly the label rule below; the name is
  *     compared again, exactly, on the locked row), or the database has NO row and no alias for the name (CI, a dev copy) and the
  *     row is inserted. Two rows, a row known only through an alias, another ingredient,
@@ -92,7 +93,11 @@
  *      (18-0-10, in its name) is filled column by column, each only where it is NULL (a row
  *      that holds P but no N is still no fertilizer to those readers). The gate has already
  *      stopped a row that holds another figure: the recipe would plan 18-0-10 while the
- *      nutrient ledger booked that figure.
+ *      nutrient ledger booked that figure. The same fill and the same stop hold for
+ *      slow_release_n_pct = 56: SiteOne sells the bag (item 702562) as "56%CRN 44%AS", 56% of
+ *      its nitrogen controlled release. Sarasota County, Manatee County, North Port and
+ *      Charlotte County need at least 50% (municipality_ordinances); the Dimension bag it
+ *      replaces is 50%. The production row holds no figure.
  *   5. The standard rate. AGENTS.md, lawn protocol data fan-out: the catalog's
  *      default_rate_per_1000 matches the program rate. The yearly cap check counts an
  *      application whose ledger row holds no rate and no quantity at this figure. The production
@@ -205,6 +210,9 @@ const CATALOG_ROW = {
   analysis_n: 18,
   analysis_p: 0,
   analysis_k: 10,
+  // SiteOne item 702562, its title read signed in on 2026-11-21: "LESCO Stonewall 0.37% 18-0-10 56%CRN 44%AS Micros
+  // Pre-Emergent Plus Fertilizer". 56% of the nitrogen is controlled release; the county rules need at least 50%.
+  slow_release_n_pct: 56,
   service_lines: JSON.stringify(['lawn']),
   post_application_watering: JSON.stringify({
     mode: 'water_in',
@@ -220,6 +228,8 @@ const CATALOG_ROW = {
 
 const ANALYSIS_COLUMNS = ['analysis_n', 'analysis_p', 'analysis_k'];
 const ANALYSIS = Object.fromEntries(ANALYSIS_COLUMNS.map((column) => [column, CATALOG_ROW[column]])); // 18-0-10
+// The fertilizer facts filled where the row holds none: the analysis and the controlled-release share of its nitrogen.
+const FERTILIZER_FACTS = { ...ANALYSIS, slow_release_n_pct: CATALOG_ROW.slow_release_n_pct };
 const LABEL_WATERING = JSON.parse(CATALOG_ROW.post_application_watering); // water in 0.5 inch within 336 hours
 
 const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -265,6 +275,9 @@ const BAG_CHECKS = [
   // Empty (it is filled) or the bag's own figures: another analysis would plan 18-0-10 and book something else in the nutrient ledger.
   [(bag) => ANALYSIS_COLUMNS.every((column) => bag[column] == null || Number(bag[column]) === ANALYSIS[column]),
     (bag) => `holds the fertilizer analysis ${ANALYSIS_COLUMNS.map((column) => (bag[column] == null ? '?' : Number(bag[column]))).join('-')}, not 18-0-10`],
+  // Empty (it is filled) or the bag's own share: the nutrient ledger books this figure for every application.
+  [(bag) => bag.slow_release_n_pct == null || Number(bag.slow_release_n_pct) === CATALOG_ROW.slow_release_n_pct,
+    (bag) => `holds a slow-release nitrogen share of ${Number(bag.slow_release_n_pct)}%, not ${CATALOG_ROW.slow_release_n_pct}% (SiteOne item 702562: 56%CRN)`],
   // Empty (it is filled) or exactly the label rule 20261022120000 stores. Any other rule stops here: the report's reader
   // falls back to 0.25 inch for a rule it cannot validate, and this migration cannot run that reader.
   [(bag) => bag.post_application_watering == null || isDeepStrictEqual(asObject(bag.post_application_watering), LABEL_WATERING),
@@ -281,7 +294,7 @@ async function readBag(knex) {
   if (rows.length !== 1) stop(`${rows.length} catalog rows are named ${NEW_NAME}${aliasIds.length ? ', and an alias spells that name' : ''}; the migration needs exactly one row with the name`);
   if (aliasIds.some((id) => id !== String(rows[0].id))) stop(`an alias spells ${NEW_NAME} on another product than the catalog row with that name`);
   const bag = await knex('products_catalog').where({ id: rows[0].id }).forUpdate()
-    .first('id', 'name', 'active', 'active_ingredient', 'epa_reg_number', 'default_rate_per_1000', 'rate_unit', ...ANALYSIS_COLUMNS, 'post_application_watering');
+    .first('id', 'name', 'active', 'active_ingredient', 'epa_reg_number', 'default_rate_per_1000', 'rate_unit', ...Object.keys(FERTILIZER_FACTS), 'post_application_watering');
   if (!bag) stop(`the catalog row of ${NEW_NAME} was removed while the migration read it`);
   const wrong = BAG_CHECKS.filter(([holds]) => !holds(bag)).map(([, why]) => why(bag));
   if (wrong.length) stop(`the catalog row of ${NEW_NAME} ${wrong.join('; ')}`);
@@ -421,15 +434,13 @@ async function insertCatalogRow(knex) {
   return made && typeof made === 'object' ? made.id : made;
 }
 
-// The bag's guaranteed analysis, column by column, each only where the row holds none. Returns the columns it
-// filled ({ analysis_n: 18, ... }), or null when it wrote nothing.
+// The bag's guaranteed analysis and the controlled-release share of its nitrogen, column by column, each only where
+// the row holds none. Returns the columns it filled ({ analysis_n: 18, ... }), or null when it wrote nothing.
 async function fillAnalysis(knex, productId) {
-  const columns = await knex('products_catalog').columnInfo();
   const filled = {};
-  for (const column of ANALYSIS_COLUMNS) {
-    if (!(column in columns)) continue;
-    const changed = await knex('products_catalog').where({ id: productId }).whereNull(column).update({ [column]: ANALYSIS[column], updated_at: knex.fn.now() });
-    if (changed === 1) filled[column] = ANALYSIS[column];
+  for (const [column, value] of Object.entries(FERTILIZER_FACTS)) {
+    const changed = await knex('products_catalog').where({ id: productId }).whereNull(column).update({ [column]: value, updated_at: knex.fn.now() });
+    if (changed === 1) filled[column] = value;
   }
   return Object.keys(filled).length ? filled : null;
 }
