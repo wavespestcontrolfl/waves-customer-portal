@@ -235,6 +235,12 @@ describe('redundancy penalty for prior brief versions', () => {
     expect(r.human_review_required).toBe(true);
     expect(r.human_review_reason).toBe('3 prior brief versions — likely loop');
   });
+  test('the loop review does not need the total count: a failed total read (0) with three tries still flags', () => {
+    const r = route(opp(), { existing_brief_versions: 0, loop_brief_versions: 3 });
+    expect(r.human_review_required).toBe(true);
+    expect(r.human_review_reason).toMatch(/likely loop/);
+    expect(r.score_breakdown.redundancy).toBeUndefined();
+  });
 });
 
 // ── bucket-specific always-human-review ─────────────────────────────

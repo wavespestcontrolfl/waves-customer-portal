@@ -282,10 +282,11 @@ function route(opportunity, signals = {}) {
   if (existing_brief_versions > 0 && action !== 'do_not_publish') {
     breakdown.redundancy = -Math.round(WEIGHTS.redundancy * Math.min(1, existing_brief_versions / 3));
     notes.push(`redundancy penalty: ${existing_brief_versions} prior brief version(s)`);
-    if (loopBriefVersions >= 3) {
-      humanReview = true;
-      humanReason = humanReason || `${loopBriefVersions} prior brief versions — likely loop`;
-    }
+  }
+  // Its own check: the loop count is read apart from the total, and the total reads 0 when its query fails.
+  if (loopBriefVersions >= 3 && action !== 'do_not_publish') {
+    humanReview = true;
+    humanReason = humanReason || `${loopBriefVersions} prior brief versions — likely loop`;
   }
 
   // ── bucket-specific always-human-review rules ─────────────────────
