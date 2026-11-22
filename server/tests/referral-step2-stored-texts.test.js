@@ -52,7 +52,7 @@ describe('inviteSmsWithOffer (the invite text, column and referral_invite row)',
   test('gate on with no friend credit to state: the seeded "You\'ll both save" becomes the neutral words, never a reward', () => {
     for (const refereeCents of [0, undefined, null, -5, NaN]) {
       expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents, link: LINK })).toBe(
-        `Hi Jo! Your neighbor Sam recommended Waves. Get a free quote: ${LINK}`,
+        `Hi Jo! Your neighbor Sam recommended Waves. Get a free quote: ${LINK}\n\nReply STOP to opt out.`,
       );
       // The referral_invite row already names no reward: unchanged.
       expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), { step2On: true, refereeCents, link: LINK })).toBe(fillRow(ROW_SEED));
@@ -61,7 +61,7 @@ describe('inviteSmsWithOffer (the invite text, column and referral_invite row)',
 
   test('the column text gets the approved words with the live amount', () => {
     expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents: 5000, link: LINK })).toBe(
-      `Hi Jo! Your neighbor Sam recommended Waves. Start a plan and get a $50 credit after your first plan service: ${LINK}`,
+      `Hi Jo! Your neighbor Sam recommended Waves. Start a plan and get a $50 credit after your first plan service: ${LINK}\n\nReply STOP to opt out.`,
     );
   });
 
@@ -69,6 +69,16 @@ describe('inviteSmsWithOffer (the invite text, column and referral_invite row)',
     expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), { step2On: true, refereeCents: 5000, link: LINK })).toBe(
       `Hi Jo, Sam recommended Waves to you. Start a plan and get a $50 credit after your first plan service: ${LINK}\n\nReply STOP to opt out.`,
     );
+  });
+
+  test('a swapped invite ends in the STOP line exactly once, whether the seed had it (the row) or not (the column)', () => {
+    for (const body of [fillColumn(COLUMN_SEED), fillRow(ROW_SEED)]) {
+      for (const refereeCents of [5000, 0]) {
+        const swapped = step2.inviteSmsWithOffer(body, { step2On: true, refereeCents, link: LINK });
+        expect(swapped.endsWith(`${LINK}\n\nReply STOP to opt out.`)).toBe(true);
+        expect(swapped.split('Reply STOP to opt out.').length).toBe(2);
+      }
+    }
   });
 
   test('cents are shown to the cent', () => {
@@ -92,7 +102,7 @@ describe('inviteSmsWithOffer (the invite text, column and referral_invite row)',
     // The settings column keeps the link as given.
     const column = fillColumn(COLUMN_SEED).replace(LINK, full);
     expect(step2.inviteSmsWithOffer(column, { step2On: true, refereeCents: 5000, link: full })).toBe(
-      `Hi Jo! Your neighbor Sam recommended Waves. Start a plan and get a $50 credit after your first plan service: ${full}`,
+      `Hi Jo! Your neighbor Sam recommended Waves. Start a plan and get a $50 credit after your first plan service: ${full}\n\nReply STOP to opt out.`,
     );
   });
 
@@ -110,7 +120,7 @@ describe('inviteSmsWithOffer (the invite text, column and referral_invite row)',
     expect(step2.inviteSmsWithOffer(rewritten, { step2On: true, refereeCents: 5000, link: LINK })).toBe(rewritten);
     const seeded = fillColumn(COLUMN_SEED, { referee: 'Jo', referrer: name });
     expect(step2.inviteSmsWithOffer(seeded, { step2On: true, refereeCents: 5000, link: LINK })).toBe(
-      `Hi Jo! Your neighbor ${name} recommended Waves. Start a plan and get a $50 credit after your first plan service: ${LINK}`,
+      `Hi Jo! Your neighbor ${name} recommended Waves. Start a plan and get a $50 credit after your first plan service: ${LINK}\n\nReply STOP to opt out.`,
     );
   });
 });
@@ -278,20 +288,20 @@ describe('submitReferral sends the stored invite (column), swapped only while th
   test('gate on: the approved words with the live friend credit', async () => {
     gates.referralStep2 = true;
     await send();
-    expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Start a plan and get a \$50 credit after your first plan service: \S+$/);
+    expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Start a plan and get a \$50 credit after your first plan service: \S+\n\nReply STOP to opt out\.$/);
   });
 
   test('gate on, the friend credit is $0 or the program is paused: neutral words, never "You\'ll both save"', async () => {
     gates.referralStep2 = true;
     settingsRow.referee_discount_cents = 0;
     await send();
-    expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Get a free quote: \S+$/);
+    expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Get a free quote: \S+\n\nReply STOP to opt out\.$/);
     sendCustomerMessage.mockClear();
     installDb();
     settingsRow.referee_discount_cents = 5000;
     settingsRow.program_active = false;
     await send();
-    expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Get a free quote: \S+$/);
+    expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Get a free quote: \S+\n\nReply STOP to opt out\.$/);
   });
 
   test('gate on, a hand-edited stored text: sent exactly as stored', async () => {

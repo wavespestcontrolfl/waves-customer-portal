@@ -126,15 +126,18 @@ const NEUTRAL_INVITE_OFFER = 'Get a free quote';
 // `body` is the RENDERED text (names and link filled in); `link` is the referral link the caller rendered it with.
 // The settings column is filled with the link as given; the saved-text renderer shows it without https://
 // (stripSmsUrlScheme), so both forms match. step2On false (the gate is off), or no link to match: exactly as rendered.
+// The swapped text always ends in the STOP line, once (docs/sms-stop-line-policy.md: the first text to someone who is
+// not a customer, and copy that offers a referral reward, both keep it). The seeded settings-column text has none.
 function inviteSmsWithOffer(body, { step2On = false, refereeCents = 0, link = '' } = {}) {
   const text = String(body ?? '');
   if (!step2On || !link) return text;
   const offer = Number(refereeCents) > 0 ? friendInviteSmsOffer(refereeCents) : NEUTRAL_INVITE_OFFER;
-  const tails = [...new Set([link, stripSmsUrlScheme(link)])].flatMap((shown) => [shown, `${shown}${INVITE_STOP_LINE}`]);
   for (const { head, legacy } of SEEDED_INVITE_OFFERS) {
-    for (const tail of tails) {
-      const seeded = `${head}${legacy}: ${tail}`;
-      if (text.endsWith(seeded)) return `${text.slice(0, text.length - seeded.length)}${head}${offer}: ${tail}`;
+    for (const shown of new Set([link, stripSmsUrlScheme(link)])) {
+      for (const stop of ['', INVITE_STOP_LINE]) {
+        const seeded = `${head}${legacy}: ${shown}${stop}`;
+        if (text.endsWith(seeded)) return `${text.slice(0, text.length - seeded.length)}${head}${offer}: ${shown}${INVITE_STOP_LINE}`;
+      }
     }
   }
   return text;
