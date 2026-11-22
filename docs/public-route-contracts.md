@@ -7360,6 +7360,9 @@ Staff authentication (`server/routes/admin-auth.js`, mounted at
 15 min) and answers every failure with a generic 401 `Invalid credentials`;
 `/forgot-password` (5 per 15 min) and `/reset-password` (10 per 15 min) key
 on `unauthenticatedAuthLimitKey` with production-only limiters;
+`POST /login` issues a password session only for a row with its own stored
+password hash (the timing comparison against the fixed stand-in hash still
+runs for a row with none, and a match there is refused);
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
 bearer. Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
 `/login` returns `{ mfaRequired, challengeToken }` (a 5-minute signed JWT of
