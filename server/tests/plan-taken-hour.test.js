@@ -9,7 +9,14 @@ jest.mock('../services/scheduling/occupancy', () => ({
   techScopedConfirmActive: jest.fn(() => false),
 }));
 
+// The technician's shift for the call follow-up's hour search: none by default (the gate off).
+jest.mock('../services/technician-eligibility', () => ({
+  ...jest.requireActual('../services/technician-eligibility'),
+  loadTechShifts: jest.fn(async () => () => null),
+}));
+
 const { findConflictingVisits, techScopedConfirmActive } = require('../services/scheduling/occupancy');
+const { loadTechShifts } = require('../services/technician-eligibility');
 const { occupancyBlockFor, rowBlockMinutes, seriesCandidateDateClashRows, ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('../services/scheduling/window-rules');
 const planTakenHour = require('../services/scheduling/plan-taken-hour');
 const { etDateString, addETDays } = require('../utils/datetime-et');
@@ -247,6 +254,58 @@ describe('callFollowUpWindow', () => {
     expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toBe(planned);
     const probed = findConflictingVisits.mock.calls.slice(-all.length).map(([a]) => a.windowStart);
     expect(probed.sort()).toEqual(all);
+  });
+
+  // GATE_TECH_SHIFT_HOURS: a moved hour stays inside the technician's own shift hours that day.
+  describe('the technician\'s shift hours', () => {
+    const shiftOf = (startMin, endMin) => loadTechShifts.mockResolvedValueOnce((id, date) => (
+      id === 't1' && date === day(7) ? { startMin, endMin, source: 'roster' } : null));
+
+    test('a whole hour that ends after the shift end is passed over; the shift is read once, on the savepoint', async () => {
+      holdHours(['11:00']);
+      const at11 = { window_start: '11:00', window_end: '12:00', window_display: '11:00 AM' };
+      // No set hours: noon, the later of the two nearest free hours.
+      expect(await startOf(conn, args, at11)).toBe('12:00');
+      // 8 AM to noon: a noon start would end at 1 PM, so 10 AM.
+      shiftOf(480, 720);
+      expect(await startOf(conn, args, at11)).toBe('10:00');
+      expect(loadTechShifts).toHaveBeenLastCalledWith('sp', { technicianIds: ['t1'] });
+      // 8 AM to 1 PM holds the noon hour to its end.
+      shiftOf(480, 780);
+      expect(await startOf(conn, args, at11)).toBe('12:00');
+    });
+
+    test('a whole hour before the shift start is passed over', async () => {
+      holdHours(['10:00', '11:00']);
+      expect(await startOf(conn, args, planned)).toBe('09:00');
+      shiftOf(600, 1080);
+      expect(await startOf(conn, args, planned)).toBe('12:00');
+    });
+
+    test('the whole job must end by the shift end, not its first hour', async () => {
+      const holdSpans = (spans) => findConflictingVisits.mockImplementation(async ({ windowStart, windowEnd }) => spans
+        .filter(([s, e]) => windowStart < e && s < windowEnd)
+        .map(([s]) => ({ id: `other-${s}`, customer_id: 'c2' })));
+      holdSpans([['12:00', '13:00']]);
+      const threeHours = { ...args, durationMinutes: 180 };
+      const atNoon = { window_start: '12:00', window_end: '13:00', window_display: '12:00 PM' };
+      // 8 AM to 3:30 PM: a 1 PM start would end at 4 PM. 11 and 10 overlap the stop; 9 AM is free and ends at noon.
+      shiftOf(480, 930);
+      expect(await planTakenHour.callFollowUpWindow(conn, threeHours, atNoon))
+        .toEqual({ window_start: '09:00', window_end: '12:00', window_display: '9:00 AM' });
+    });
+
+    test('no hour free inside the shift keeps the planned window; a free planned hour or no technician reads no shift', async () => {
+      holdHours(['10:00']);
+      // 10 to 11 AM only: every other hour is outside it.
+      shiftOf(600, 660);
+      expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toBe(planned);
+      loadTechShifts.mockClear();
+      expect(await startOf(conn, { ...args, technicianId: null }, planned)).toBe('11:00');
+      holdHours([]);
+      expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toBe(planned);
+      expect(loadTechShifts).not.toHaveBeenCalled();
+    });
   });
 
   test('a moved visit 2 keeps its job length: the whole job must fit the shift and be free, and is written that long', async () => {

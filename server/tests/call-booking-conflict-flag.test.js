@@ -464,14 +464,19 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     // A new visit and a reused one: `hours` on the technician check each already makes.
     const reused = new RegExp(`assertAssignableTechnician\\(reuseTechId, \\{ conn: trx, date: dayRow\\?\\.day, workDays: true,\\s*hours: ${block}\\(existing\\) \\}\\);`);
     const created = new RegExp(`assertAssignableTechnician\\(insertData\\.technician_id, \\{ conn: trx, date: String\\(scheduledDate\\)\\.slice\\(0, 10\\), workDays: true,\\s*hours: ${block}\\(insertData\\) \\}\\);`);
-    // A follow-up child (a package visit 2 or a follow-up asked for on the call): its FINAL
-    // window, after callFollowUpWindow may have moved a copied hour, with the job's length.
-    const child = new RegExp(`if \\(await require\\('\\./technician-eligibility'\\)\\.shiftExcluding\\(sp, followUpTechId, fuPlan\\.scheduledDate,\\s*${block}\\(\\{ \\.\\.\\.fuWindow, estimated_duration_minutes: fuDurationMin \\}\\)\\)\\) \\{`);
+    // A follow-up child (a package visit 2 or a follow-up asked for on the call): its planned
+    // block with the job's length, before its fence and its hour search, so both run for the
+    // technician it keeps (the hour search then stays inside the shift: plan-taken-hour.test.js).
+    const child = new RegExp(`if \\(await require\\('\\./technician-eligibility'\\)\\.shiftExcluding\\(sp, followUpTechId, fuPlan\\.scheduledDate,\\s*${block}\\(\\{ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin \\}\\)\\)\\) \\{`);
     for (const site of [reused, created, child]) expect(src).toMatch(site);
-    expect(src.search(/const fuWindow = await require\('\.\/scheduling\/plan-taken-hour'\)\.callFollowUpWindow\(sp,/)).toBeLessThan(src.search(child));
-    expect(src.search(child)).toBeLessThan(src.search(/\.\.\.fuWindow,\n/));
+    const at = (text) => src.indexOf(text, src.search(child));
+    expect(src.indexOf('if (followUpTechId && packageFollowUp) {')).toBeLessThan(src.search(child));
+    expect(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })')).toBeGreaterThan(src.search(child));
+    expect(at("callFollowUpWindow(sp, {")).toBeGreaterThan(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })'));
+    // Nothing clears the technician between the hour search and the insert.
+    expect(src.slice(at("callFollowUpWindow(sp, {"), at("const [fuRow] = await sp('scheduled_services')"))).not.toContain('followUpTechId = null');
     // The one technician check left without `hours` is the package visit 2's day check: the
-    // child's block is read right after it, once its window is final.
+    // child's block is read right after it.
     expect(src.match(/assertAssignableTechnician\([^)]*workDays: true \}\)/g)).toEqual([expect.stringContaining('followUpTechId')]);
     // Each refusal there is recovered as unassigned.
     const after = (site, text) => src.slice(src.search(site)).slice(0, 2200).includes(text);

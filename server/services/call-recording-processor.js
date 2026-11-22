@@ -21021,6 +21021,19 @@ const CallRecordingProcessor = {
                           followUpTechId = null;
                         }
                       }
+                      // GATE_TECH_SHIFT_HOURS: the child's planned block (rowBlockMinutes: the later
+                      // of its window's end and the job's length) against its technician's shift,
+                      // BEFORE its fence and its hour search, so both run for the technician the
+                      // child keeps. A shift that does not hold it seeds the child unassigned, as
+                      // a day off does for a package visit 2; a copied hour that moves below stays
+                      // inside the shift (callFollowUpWindow). No technician, or the gate off:
+                      // shiftExcluding answers null with no read.
+                      const fuDurationMin = callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES;
+                      if (await require('./technician-eligibility').shiftExcluding(sp, followUpTechId, fuPlan.scheduledDate,
+                        require('./scheduling/window-rules').rowBlockMinutes({ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin }))) {
+                        logger.warn(`[call-proc] follow-up technician ${followUpTechId} is outside the shift on ${fuPlan.scheduledDate}; seeding unassigned`);
+                        followUpTechId = null;
+                      }
                       // Same bounded fence for the child's own date + tech
                       // (the child usually lands on a different date than the
                       // primary, so the primary's fence does not cover it).
@@ -21047,7 +21060,6 @@ const CallRecordingProcessor = {
                       // a package visit 2 keep theirs; the idempotency key
                       // below stays on the planned hour. A moved visit 2
                       // keeps its job length (Codex #6495 r1 P1).
-                      const fuDurationMin = callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES;
                       const fuWindow = await require('./scheduling/plan-taken-hour').callFollowUpWindow(sp, {
                         visit1: primaryRow,
                         customerId,
@@ -21059,16 +21071,6 @@ const CallRecordingProcessor = {
                         window_end: fuWindowEnd,
                         window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
                       }, { hourStated: fuPlan.hourStated, packageVisit: packageFollowUp });
-                      // GATE_TECH_SHIFT_HOURS: the child's FINAL block (a copied hour may just
-                      // have moved; rowBlockMinutes takes the later of the window's end and the
-                      // job's length) against its technician's shift. A shift that does not hold
-                      // it seeds the child unassigned, as a day off does for a package visit 2.
-                      // (No technician, or the gate off: shiftExcluding answers null with no read.)
-                      if (await require('./technician-eligibility').shiftExcluding(sp, followUpTechId, fuPlan.scheduledDate,
-                        require('./scheduling/window-rules').rowBlockMinutes({ ...fuWindow, estimated_duration_minutes: fuDurationMin }))) {
-                        logger.warn(`[call-proc] follow-up technician ${followUpTechId} is outside the shift on ${fuPlan.scheduledDate}; seeding unassigned`);
-                        followUpTechId = null;
-                      }
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,

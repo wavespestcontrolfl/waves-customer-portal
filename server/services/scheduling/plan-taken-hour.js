@@ -145,6 +145,11 @@ function freeHourCandidates(plannedMin, spanMin) {
 // reads it after its booking fence; the reads run in their own savepoint of
 // its transaction, so a failed read keeps `planned` and never aborts the
 // booking. Never throws.
+// GATE_TECH_SHIFT_HOURS: a moved hour also stays inside the technician's own
+// shift hours that day (technician-eligibility.js loadTechShifts and
+// shiftBounds), so the caller's shift check of the planned block still holds
+// for the window it writes. No technician, no set hours or the gate off: only
+// the company day above narrows, and nothing is read.
 async function callFollowUpWindow(conn, { visit1 = {}, customerId, technicianId = null, date, durationMinutes = null }, planned, { hourStated = false, packageVisit = false } = {}) {
   const day = toDateStr(date);
   const plannedMin = parseHHMM(planned?.window_start);
@@ -165,7 +170,11 @@ async function callFollowUpWindow(conn, { visit1 = {}, customerId, technicianId 
   try {
     return await conn.transaction(async (sp) => {
       if (!await hourTaken(sp, { ...visit2, ...span(plannedMin) }, day)) return planned;
+      const { loadTechShifts, shiftBounds } = require('../technician-eligibility');
+      const shift = technicianId ? (await loadTechShifts(sp, { technicianIds: [technicianId] }))(technicianId, day) : null;
       for (const startMin of freeHourCandidates(plannedMin, spanMin)) {
+        const held = shiftBounds(shift, startMin, startMin + spanMin);
+        if (held.openMin > startMin || held.closeMin < startMin + spanMin) continue;
         const moved = { ...span(startMin), window_display: formatSmsTime(minutesToHHMM(startMin)) };
         if (!await hourTaken(sp, { ...visit2, ...moved }, day)) {
           logger.info(`[plan-taken-hour] call follow-up on ${day}: ${planned.window_start} is taken — ${moved.window_start} instead`);
