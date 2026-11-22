@@ -7,13 +7,14 @@
  * The parcel map still shows the builder as owner for weeks after the deed, and one lot number exists in several
  * phases of a subdivision, so a lot query often returns 2 to 6 parcels. The new-home permit is the proof that a
  * parcel is a new home (a parcel with no such permit is never matched). The owner on the map says which phase the
- * seller conveyed: when it points at a parcel other than the one with the permit, nothing is matched.
+ * seller conveyed: when it points at a parcel other than the one with the permit, nothing is matched. When the map
+ * cannot say who owns a competing parcel, nothing is matched either.
  */
 
 // Same layer as COUNTY_LAYERS.Manatee.url in server/services/property-lookup/county-parcel-gis.js (that constant is
 // not exported, so the address is repeated here; change both together).
 const PARCEL_LAYER_URL = 'https://gis.manateepao.gov/arcgis/rest/services/Website/WebLayers/MapServer/0/query';
-const OUT_FIELDS = 'PARID,SITUS_ADDRESS,SITUS_POSTAL_CITY,SITUS_POSTAL_ZIP,PAR_SUBDIV_NAME,PAR_SUBDIV_LOT,PAR_SUBDIV_BLOCK,PAR_OWNER_NAME1,BLDGS_SQFT_LIVING,BLDG_R1_STORIES,BLDG_R1_YRBUILT';
+const OUT_FIELDS = 'PARID,SITUS_ADDRESS,SITUS_POSTAL_CITY,SITUS_POSTAL_ZIP,PAR_SUBDIV_NAME,PAR_SUBDIV_LOT,PAR_SUBDIV_BLOCK,PAR_OWNER_NAME1,PAR_OWNER_NAME2,BLDGS_SQFT_LIVING,BLDG_R1_STORIES,BLDG_R1_YRBUILT';
 const USER_AGENT = 'Mozilla/5.0 (WavesPortal mail-new-home-list)';
 const DEFAULT_TIMEOUT_MS = 15000;
 const RESULT_LIMIT = 25;
@@ -40,11 +41,19 @@ function parseLegal(description) {
 
 const quote = (value) => value.replaceAll("'", "''");
 
+// The map's subdivision name is the deed's words, or those words and then more after a space ("... PH I" on the deed,
+// "... PH I PB 70/12" on the map). A name that only starts with the same letters ("... PH II") is another plat.
 function parcelWhere(legal) {
-  let where = `PAR_SUBDIV_LOT = '${quote(legal.lot)}' AND PAR_SUBDIV_NAME LIKE '${quote(legal.subdivision)}%'`;
+  const name = quote(legal.subdivision);
+  let where = `PAR_SUBDIV_LOT = '${quote(legal.lot)}' AND (PAR_SUBDIV_NAME = '${name}' OR PAR_SUBDIV_NAME LIKE '${name} %')`;
   if (legal.block) where += ` AND PAR_SUBDIV_BLOCK = '${quote(legal.block)}'`;
   return where;
 }
+
+const namesSubdivision = (mapName, deedWords) => {
+  const name = String(mapName || '').toUpperCase();
+  return name === deedWords || name.startsWith(`${deedWords} `);
+};
 
 const positiveOrNull = (value) => {
   const n = Number(value);
@@ -77,12 +86,13 @@ function toParcel(attrs, legal) {
     lot: textAttr(attrs, 'PAR_SUBDIV_LOT'),
     block: textAttr(attrs, 'PAR_SUBDIV_BLOCK'),
     ownerName: textAttr(attrs, 'PAR_OWNER_NAME1'),
+    ownerName2: textAttr(attrs, 'PAR_OWNER_NAME2'),
     livingSqft: livingSqft === null ? null : Math.round(livingSqft),
     stories: positiveOrNull(attrs.BLDG_R1_STORIES),
     yearBuilt: yearBuilt === null ? null : Math.round(yearBuilt),
   };
   // The answer must be the answer to this question: the lot, the subdivision and (when asked) the block.
-  const asked = parcel.lot === legal.lot && (parcel.subdivision || '').toUpperCase().startsWith(legal.subdivision)
+  const asked = parcel.lot === legal.lot && namesSubdivision(parcel.subdivision, legal.subdivision)
     && (!legal.block || parcel.block === legal.block);
   if (!asked) throw new Error('parcel map sent a parcel that is not the lot asked for');
   return parcel;
@@ -170,11 +180,17 @@ function ownerMatchesSeller(ownerName, sellerNames) {
   });
 }
 
+// The map has two owner fields; the seller may be in either.
+const sellerOwns = (parcel, sellerNames) => ownerMatchesSeller(parcel.ownerName, sellerNames)
+  || ownerMatchesSeller(parcel.ownerName2, sellerNames);
+const ownerKnown = (parcel) => Boolean(alnum(parcel.ownerName) || alnum(parcel.ownerName2));
+
 /**
  * The one new home among the parcels a lot query returned, or why there is none.
  *   owner_permit  exactly one parcel has a new-home permit AND is still under the seller's name on the map.
  *   permit        exactly one parcel has a permit and no parcel at all is under the seller's name (the map already
- *                 shows the next owner).
+ *                 shows the next owner). With more than one parcel this needs proof that no other parcel is the
+ *                 seller's: a seller name to compare, and an owner on the map for every other parcel.
  * A parcel under the seller's name without a permit, next to a permit on another owner's parcel, is two pieces of
  * evidence that point at different parcels: ambiguous, like every other mix.
  */
@@ -183,11 +199,14 @@ function chooseParcel({ sellerNames, parcels, permitsByParid }) {
   const hasPermit = (p) => Boolean(permitsByParid && permitsByParid[p.parid]);
   const withPermit = parcels.filter(hasPermit);
   if (withPermit.length === 0) return { status: 'no_permit' };
-  const sellerOwned = parcels.filter((p) => ownerMatchesSeller(p.ownerName, sellerNames));
+  const sellerOwned = parcels.filter((p) => sellerOwns(p, sellerNames));
   const sellerOwnedWithPermit = sellerOwned.filter(hasPermit);
   const pick = (parcel, basis) => ({ status: 'matched', basis, parcel, permit: permitsByParid[parcel.parid] });
   if (sellerOwnedWithPermit.length === 1) return pick(sellerOwnedWithPermit[0], 'owner_permit');
-  if (withPermit.length === 1 && sellerOwned.length === 0) return pick(withPermit[0], 'permit');
+  if (withPermit.length !== 1 || sellerOwned.length !== 0) return { status: 'ambiguous' };
+  const others = parcels.filter((p) => p !== withPermit[0]);
+  const othersAreNotTheSellers = (sellerNames || []).some((name) => alnum(name)) && others.every(ownerKnown);
+  if (others.length === 0 || othersAreNotTheSellers) return pick(withPermit[0], 'permit');
   return { status: 'ambiguous' };
 }
 

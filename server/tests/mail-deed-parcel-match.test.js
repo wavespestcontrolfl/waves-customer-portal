@@ -37,12 +37,13 @@ describe('parseLegal', () => {
 describe('parcelWhere', () => {
   test('lot and subdivision prefix, block when there is one', () => {
     expect(parcelWhere({ lot: '171', block: null, subdivision: 'RYE RANCH' }))
-      .toBe("PAR_SUBDIV_LOT = '171' AND PAR_SUBDIV_NAME LIKE 'RYE RANCH%'");
+      .toBe("PAR_SUBDIV_LOT = '171' AND (PAR_SUBDIV_NAME = 'RYE RANCH' OR PAR_SUBDIV_NAME LIKE 'RYE RANCH %')");
     expect(parcelWhere({ lot: '171', block: '48', subdivision: 'RYE RANCH' }))
-      .toBe("PAR_SUBDIV_LOT = '171' AND PAR_SUBDIV_NAME LIKE 'RYE RANCH%' AND PAR_SUBDIV_BLOCK = '48'");
+      .toBe("PAR_SUBDIV_LOT = '171' AND (PAR_SUBDIV_NAME = 'RYE RANCH' OR PAR_SUBDIV_NAME LIKE 'RYE RANCH %') AND PAR_SUBDIV_BLOCK = '48'");
   });
   test('an apostrophe is doubled so it cannot end the string', () => {
-    expect(parcelWhere(parseLegal("LOT 5 O'NEIL ESTATES"))).toBe("PAR_SUBDIV_LOT = '5' AND PAR_SUBDIV_NAME LIKE 'O''NEIL ESTATES%'");
+    expect(parcelWhere(parseLegal("LOT 5 O'NEIL ESTATES")))
+      .toBe("PAR_SUBDIV_LOT = '5' AND (PAR_SUBDIV_NAME = 'O''NEIL ESTATES' OR PAR_SUBDIV_NAME LIKE 'O''NEIL ESTATES %')");
   });
 });
 
@@ -63,7 +64,7 @@ describe('ownerMatchesSeller', () => {
 
 describe('chooseParcel', () => {
   const sellerNames = ['EXAMPLE BUILDERS LLC'];
-  const parcel = (parid, ownerName) => ({ parid, ownerName, addressLine1: `${parid.slice(-3)} EXAMPLE TRL` });
+  const parcel = (parid, ownerName, ownerName2 = null) => ({ parid, ownerName, ownerName2, addressLine1: `${parid.slice(-3)} EXAMPLE TRL` });
   const permit = (no) => ({ permit_no: no });
 
   test('no parcels', () => {
@@ -113,6 +114,36 @@ describe('chooseParcel', () => {
     expect(chooseParcel({ sellerNames, parcels, permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } }))
       .toEqual({ status: 'ambiguous' });
   });
+  test('the seller in the second owner field counts as the seller\'s parcel', () => {
+    const owned = parcel('100000001', 'EXAMPLE LAND TRUST', 'EXAMPLE BUILDERS LLC');
+    expect(chooseParcel({ sellerNames, parcels: [owned, parcel('100000002', 'X PERSON')], permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } }))
+      .toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: owned });
+    // The permit is on another owner's parcel; the seller still holds this lot in another phase, in field 2.
+    const permitted = parcel('100000003', 'TESTER ALEX J');
+    expect(chooseParcel({ sellerNames, parcels: [permitted, parcel('100000004', 'EXAMPLE LAND TRUST', 'EXAMPLE BUILDERS LLC')], permitsByParid: { 100000003: permit('A') } }))
+      .toEqual({ status: 'ambiguous' });
+  });
+  test('permit basis needs an owner on the map for every other parcel', () => {
+    const permitted = parcel('100000001', 'TESTER ALEX J');
+    const permitsByParid = { 100000001: permit('A') };
+    for (const unknown of [parcel('100000002', null), parcel('100000002', ''), parcel('100000002', '  '), parcel('100000002', '-')]) {
+      expect(chooseParcel({ sellerNames, parcels: [permitted, unknown], permitsByParid })).toEqual({ status: 'ambiguous' });
+    }
+    // The second field alone is an owner.
+    expect(chooseParcel({ sellerNames, parcels: [permitted, parcel('100000002', null, 'SOMEONE ELSE LLC')], permitsByParid }))
+      .toMatchObject({ status: 'matched', basis: 'permit', parcel: permitted });
+  });
+  test('permit basis needs a seller name to compare when there is another parcel', () => {
+    const permitted = parcel('100000001', 'TESTER ALEX J');
+    const other = parcel('100000002', 'SOMEONE ELSE LLC');
+    const permitsByParid = { 100000001: permit('A') };
+    for (const noSeller of [[], [''], ['-'], undefined]) {
+      expect(chooseParcel({ sellerNames: noSeller, parcels: [permitted, other], permitsByParid })).toEqual({ status: 'ambiguous' });
+    }
+    // One parcel alone is the lot the deed names: its permit is enough.
+    expect(chooseParcel({ sellerNames: [], parcels: [permitted], permitsByParid })).toMatchObject({ status: 'matched', basis: 'permit', parcel: permitted });
+    expect(chooseParcel({ sellerNames, parcels: [parcel('100000001', null)], permitsByParid })).toMatchObject({ status: 'matched', basis: 'permit' });
+  });
   test('one owned with a permit and one not owned with a permit never falls through to the permit basis', () => {
     const owned = parcel('100000001', 'EXAMPLE BUILDERS LLC');
     const res = chooseParcel({ sellerNames, parcels: [owned, parcel('100000002', 'X PERSON')], permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } });
@@ -142,7 +173,7 @@ describe('queryParcels', () => {
   const feature = (extra = {}) => ({
     attributes: {
       PARID: '513309059', SITUS_ADDRESS: '101 EXAMPLE TRL', SITUS_POSTAL_CITY: 'SAMPLETON', SITUS_POSTAL_ZIP: '34212-1234',
-      PAR_SUBDIV_NAME: 'RYE RANCH PH IIA PB81/1', PAR_SUBDIV_LOT: '171', PAR_SUBDIV_BLOCK: null, PAR_OWNER_NAME1: 'EXAMPLE BUILDERS LLC',
+      PAR_SUBDIV_NAME: 'RYE RANCH PH IIA PB81/1', PAR_SUBDIV_LOT: '171', PAR_SUBDIV_BLOCK: null, PAR_OWNER_NAME1: 'EXAMPLE BUILDERS LLC', PAR_OWNER_NAME2: null,
       BLDGS_SQFT_LIVING: 2210, BLDG_R1_STORIES: 1.5, BLDG_R1_YRBUILT: 2026, ...extra,
     },
   });
@@ -152,15 +183,28 @@ describe('queryParcels', () => {
     const parcels = await queryParcels(legal, { fetchImpl });
     expect(parcels).toEqual([{
       parid: '513309059', addressLine1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212', subdivision: 'RYE RANCH PH IIA PB81/1',
-      lot: '171', block: null, ownerName: 'EXAMPLE BUILDERS LLC', livingSqft: 2210, stories: 1.5, yearBuilt: 2026,
+      lot: '171', block: null, ownerName: 'EXAMPLE BUILDERS LLC', ownerName2: null, livingSqft: 2210, stories: 1.5, yearBuilt: 2026,
     }]);
     const url = new URL(fetchImpl.mock.calls[0][0]);
-    expect(url.searchParams.get('where')).toBe("PAR_SUBDIV_LOT = '171' AND PAR_SUBDIV_NAME LIKE 'RYE RANCH%'");
+    expect(url.searchParams.get('where')).toBe("PAR_SUBDIV_LOT = '171' AND (PAR_SUBDIV_NAME = 'RYE RANCH' OR PAR_SUBDIV_NAME LIKE 'RYE RANCH %')");
+    expect(url.searchParams.get('outFields')).toContain('PAR_OWNER_NAME2');
     expect(url.searchParams.get('returnGeometry')).toBe('false');
     expect(url.searchParams.get('resultRecordCount')).toBe('25');
     expect(url.searchParams.get('f')).toBe('json');
     expect(url.searchParams.get('outFields')).toContain('PARID');
     expect(fetchImpl.mock.calls[0][1].redirect).toBe('manual');
+  });
+  test('a phase on the deed is not the phase that only starts with it', async () => {
+    const phaseOne = { lot: '171', block: null, subdivision: 'RYE RANCH PH I' };
+    const same = [feature({ PAR_SUBDIV_NAME: 'RYE RANCH PH I' }), feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'Rye Ranch Ph I PB81/1' })];
+    expect(await queryParcels(phaseOne, { fetchImpl: answer({ features: same }) })).toHaveLength(2);
+    for (const other of ['RYE RANCH PH II', 'RYE RANCH PH IA PB81/1', 'RYE RANCH PH I-A', 'RYE RANCH PH IV']) {
+      await expect(queryParcels(phaseOne, { fetchImpl: answer({ features: [feature({ PAR_SUBDIV_NAME: other })] }) })).rejects.toThrow(/not the lot asked for/);
+    }
+  });
+  test('the second owner field is read', async () => {
+    const [p] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_OWNER_NAME1: 'EXAMPLE LAND TRUST', PAR_OWNER_NAME2: ' EXAMPLE BUILDERS LLC ' })] }) });
+    expect(p).toMatchObject({ ownerName: 'EXAMPLE LAND TRUST', ownerName2: 'EXAMPLE BUILDERS LLC' });
   });
   test('a block in the question must be the block of every parcel', async () => {
     const withBlock = { lot: '171', block: '48', subdivision: 'RYE RANCH' };
@@ -205,6 +249,8 @@ describe('queryParcels', () => {
     ['a full list of 25 parcels with no cut-off mark', answer({ features: Array.from({ length: 25 }, (_, i) => feature({ PARID: String(513309000 + i) })) })],
     ['a parcel of another lot', answer({ features: [feature({ PAR_SUBDIV_LOT: '172' })] })],
     ['a parcel of another subdivision', answer({ features: [feature({ PAR_SUBDIV_NAME: 'OTHER RANCH PH I' })] })],
+    ['a subdivision that only starts with the same letters', answer({ features: [feature({ PAR_SUBDIV_NAME: 'RYE RANCHES PH I' })] })],
+    ['a second owner name with a replacement character', answer({ features: [feature({ PAR_OWNER_NAME2: 'EXAMPLE BUILD\uFFFDRS LLC' })] })],
     ['a parcel with no subdivision', answer({ features: [feature({ PAR_SUBDIV_NAME: null })] })],
     ['an owner name with a replacement character', answer({ features: [feature({ PAR_OWNER_NAME1: 'EXAMPLE BUILD\uFFFDRS LLC' })] })],
     ['an address with a no-break space', answer({ features: [feature({ SITUS_ADDRESS: '101\u00A0EXAMPLE TRL' })] })],
