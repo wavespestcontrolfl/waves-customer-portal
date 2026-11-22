@@ -111,7 +111,6 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   // Hired button state (GATE_HIRED_PACKET); present only while the gate is on.
   // Derived flags only: the token, its hash and the password hash never ship.
   'hire_action', 'hire_password_unset', 'hire_link_pending', 'hire_link_expires_at', 'hire_login', 'hire_google_only',
-  'hire_clears_google',
   // Team tab "Work days" (GATE_TECH_WORK_DAYS); dropped from the response while the gate is off.
   'work_days',
   // Team tab "Shift hours" (GATE_TECH_SHIFT_HOURS); dropped from the response while the gate is off.
@@ -821,17 +820,21 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════
 
 // The company Google address a Hired press would turn on as this row's only
-// sign-in, or null. It needs staff Google sign-in ready (gate and Google
-// client) and a linked address the Team tab's link writer takes today. With
-// one, Hired makes a Google-only account: no password, no link, no email.
-// With none, Hired emails the set-password link.
-// An office (admin) row always gets the emailed link: two-step sign-in setup
-// asks for the account password, and GATE_ADMIN_MFA_ENFORCE holds an admin
-// with no authenticator on that setup page, so a Google-only admin could
-// never get past it. The table refuses the mark on an admin row as well.
+// sign-in, or null. With one, Hired makes a Google-only account: no password,
+// no link, no email. It needs:
+// - staff Google sign-in ready (gate and Google client) and a linked address
+//   the Team tab's link writer takes today;
+// - a row that never held a sign-in: no password, no Google account id an
+//   earlier sign-in pinned, no two-step enrollment. So this press only adds a
+//   sign-in. It has nothing of an earlier account to carry over or to remove;
+//   a person who had an account before is turned on again from the edit form;
+// - a row that is not an office (admin) login: two-step sign-in setup asks
+//   for the account password, and GATE_ADMIN_MFA_ENFORCE holds an admin with
+//   no authenticator on that setup page, so a Google-only admin could never
+//   get past it. The table refuses the mark on an admin row as well.
 function hireGoogleAddress(tech) {
   if (!tech.google_email || !googleSignin.googleSigninReady()) return null;
-  if (tech.role === 'admin') return null;
+  if (tech.role === 'admin' || tech.password_hash || tech.google_sub || tech.mfa_enabled_at) return null;
   return googleSignin.normalizeLinkedGoogleEmail(tech.google_email).value || null;
 }
 
@@ -867,11 +870,6 @@ function hireLinkState(tech, now = new Date()) {
     // Hired form sends back the address it showed, and the press is refused
     // when the row no longer holds that address.
     hire_login: status === 'prospective' ? (hireGoogle ? 'google' : 'password') : null,
-    // The emailed-link press leaves one sign-in on the row, the link. A Google
-    // address linked on the row that cannot be this hire's sign-in (staff
-    // Google sign-in off or not set up, an address outside the domains, an
-    // admin row) is removed by that press, and the form says so.
-    hire_clears_google: status === 'prospective' && Boolean(tech.google_email) && !hireGoogle,
     // null, or how a Google-only account stands today: 'ready', 'unlinked'
     // (no address), 'bad_address' (outside the sign-in domains) or 'off'
     // (staff Google sign-in off or not set up).
@@ -1495,19 +1493,22 @@ const HIRE_GOOGLE_ADDRESS_IN_USE = {
   error: "The linked Google address is another staff member's email. Change the Google sign-in first.",
   code: 'HIRE_GOOGLE_ADDRESS_IN_USE',
 };
+const HIRE_GOOGLE_ONLY_ROW = {
+  error: 'This person signs in with Google. Clear the Google sign-in on the row first, or turn the account on again from the edit form.',
+  code: 'HIRE_GOOGLE_ONLY_ROW',
+};
 const GOOGLE_ONLY_NO_LINK = { error: 'This person signs in with Google. No password link is sent.' };
 
-function parseHireBody(body) {
+function parseHireBody(body, variant) {
   if (typeof body.name !== 'string' || !body.name.trim()) return { error: 'Name is required' };
   const normalizedEmail = normalizeTechnicianEmail(body.email);
   if (normalizedEmail.error) return { error: normalizedEmail.error };
   if (!normalizedEmail.value) return { error: 'Email is required' };
   if (!validDateOnly(body.hireDate)) return { error: 'First day must be a valid YYYY-MM-DD date' };
   if (body.phone != null && typeof body.phone !== 'string') return { error: 'Phone must be a string' };
-  const shownGoogle = body.googleEmail == null || body.googleEmail === '' ? null : canonicalStaffEmail(body.googleEmail);
-  if (shownGoogle === null && body.googleEmail != null && body.googleEmail !== '') {
-    return { error: 'Google address must be a valid email' };
-  }
+  // The Google press names the address its form showed. The emailed-link press reads none.
+  const shownGoogle = variant === 'google' ? canonicalStaffEmail(body.googleEmail) : null;
+  if (variant === 'google' && !shownGoogle) return { error: 'Google address must be a valid email' };
   const invalid = HIRE_OPTIONAL_FIELD_CHECKS
     .find(([key, valid]) => body[key] != null && body[key] !== '' && !valid(body[key]));
   if (invalid) return { error: invalid[2] };
@@ -1522,8 +1523,6 @@ function parseHireBody(body) {
     name: body.name.trim(),
     email: normalizedEmail.value,
     hireDate: body.hireDate,
-    // The Google address the form showed as the hire's sign-in. A form that sends none (the emailed-link form,
-    // or a tab loaded before this field) showed the emailed link.
     googleEmail: shownGoogle,
     patch,
   };
@@ -1531,14 +1530,20 @@ function parseHireBody(body) {
 
 // The sign-in a Hired press turns on, decided under the row lock: { google }
 // (the address, or null for the emailed set-password link) or { refusal }.
-// The press names the Google address its form showed (none = the emailed
-// link). A row that no longer holds exactly that (an address linked, cleared,
-// moved to another address or made unusable since the form opened) is
-// refused: no press mails a link the form did not show, and none gives a
-// staff login to a Google account the form did not show.
+// Each press has its own endpoint, and the Google press names the address
+// its form showed (shownGoogle; null for the emailed-link press). A row that
+// no longer holds exactly that (an address linked, cleared, moved to another
+// address or made unusable since the form opened) is refused: no press mails
+// a link the form did not show, and none gives a staff login to a Google
+// account the form did not show.
 async function hireLoginFor(trx, target, shownGoogle) {
   const google = hireGoogleAddress(target);
   if (google !== shownGoogle) return { refusal: HIRE_LOGIN_CHANGED };
+  // A row that was made Google-only and still has a Google address on it
+  // gets no emailed link (after its first sign-in the Google press no longer
+  // applies to it, and its email can be one nobody proved). An admin clears
+  // the Google sign-in first, on purpose.
+  if (!google && target.google_only_login_at && target.google_email) return { refusal: HIRE_GOOGLE_ONLY_ROW };
   // One mailbox, one staff row (the link writer and every email writer hold
   // the same rule); a row linked before that rule is caught here.
   if (google && await findTechnicianByMailbox(trx, google, target.id)) {
@@ -1547,36 +1552,26 @@ async function hireLoginFor(trx, target, shownGoogle) {
   return { google };
 }
 
-// The credential columns of a Hired press: after it the row has the one
-// sign-in the form showed and nothing else. Any older credential on a reused
-// placeholder is dropped so it cannot sign in: the password, an earlier
-// holder's two-step enrollment (the caller removes its factor rows), and the
-// Google account id an earlier sign-in pinned (google_sub).
-// staff-google-signin.js takes a pinned id before the address, so a row hired
-// again would let the earlier Google account in even when the address now
-// belongs to another one. With no id, the next sign-in must prove the linked
-// address and pins the account that holds it today.
+// The credential columns of a Hired press.
 function hireCredentialColumns({ google, tokenHash, now }) {
   if (google) {
-    // Google-only: no password and no link. must_change_password stays false,
-    // because the staff middleware refuses every route while it is true and
-    // this account has no password to change.
+    // Google-only. The row held no sign-in (hireGoogleAddress, read again
+    // under the row lock), so the press only adds one: no password and no
+    // link. must_change_password stays false, because the staff middleware
+    // refuses every route while it is true and this account has no password
+    // to change. The token columns are cleared for the table's CHECK.
     return {
       must_change_password: false,
-      password_hash: null,
-      password_changed_at: null,
       password_reset_token_hash: null,
       password_reset_expires_at: null,
       password_reset_requested_at: null,
-      google_sub: null,
       google_only_login_at: now,
-      mfa_enabled_at: null,
     };
   }
-  // The hire sets the first password from the emailed link. A Google address
-  // still linked on the row is one the form did not show as a sign-in (it
-  // cannot sign in today): kept, its holder could sign in to this account on
-  // the day it becomes usable. It goes; the owner links one again on purpose.
+  // The emailed link, as before the Google variant existed: the hire sets the
+  // first password from it, and any older credential on a reused placeholder
+  // is dropped so it cannot sign in. A row that was Google-only loses the mark
+  // in the UPDATE that stores its token (the table's CHECK).
   return {
     must_change_password: true,
     password_hash: null,
@@ -1584,10 +1579,7 @@ function hireCredentialColumns({ google, tokenHash, now }) {
     password_reset_token_hash: tokenHash,
     password_reset_expires_at: new Date(now.getTime() + HIRE_LINK_TTL_MS),
     password_reset_requested_at: now,
-    google_email: null,
-    google_sub: null,
     google_only_login_at: null,
-    mfa_enabled_at: null,
   };
 }
 
@@ -1644,13 +1636,18 @@ async function sendHireLink({ tech, token, tokenHash, firstDay }) {
   }
 }
 
-async function hireTechnician(req, res, next) {
+// `variant` is fixed by the route: 'google' for POST /technicians/:id/hire/google,
+// the emailed link for POST /technicians/:id/hire. Two endpoints, so a build that
+// does not know the Google press answers it 404 and never reads it as the
+// emailed-link press (a rollback, or two versions live during a deploy).
+async function hireTechnician(req, res, next, variant) {
   try {
     if (!featureGates.hiredPacketLive()) return hiredPacketOff(res);
-    const parsed = parseHireBody(req.body || {});
+    const parsed = parseHireBody(req.body || {}, variant);
     if (parsed.error) return res.status(400).json({ error: parsed.error });
 
-    const { token, tokenHash } = mintResetToken();
+    // The Google press has no token: it stores none and mails none.
+    const { token, tokenHash } = variant === 'google' ? {} : mintResetToken();
     const now = new Date();
     const outcome = await db.transaction(async (trx) => {
       // Same global order as every staff identity writer: table lock, then row.
@@ -1676,9 +1673,6 @@ async function hireTechnician(req, res, next) {
       }
       const login = await hireLoginFor(trx, target, parsed.googleEmail);
       if (login.refusal) return { loginRefusal: login.refusal };
-      // An authenticator an earlier holder of a reused row set up would ask the hire for a code only that person
-      // has, and a Google-only account has no password to replace it with.
-      await require('../services/staff-mfa').forgetEnrollment(trx, target.id);
 
       await trx('technicians').where({ id: target.id }).update({
         name: parsed.name,
@@ -1792,7 +1786,8 @@ async function resendHireLink(req, res, next) {
   }
 }
 
-router.post('/technicians/:id/hire', requireAdmin, hireTechnician);
+router.post('/technicians/:id/hire', requireAdmin, (req, res, next) => hireTechnician(req, res, next, 'password'));
+router.post('/technicians/:id/hire/google', requireAdmin, (req, res, next) => hireTechnician(req, res, next, 'google'));
 router.post('/technicians/:id/hire/resend', requireAdmin, resendHireLink);
 
 // GET /technicians/:id/capabilities — the dispatch categories for one

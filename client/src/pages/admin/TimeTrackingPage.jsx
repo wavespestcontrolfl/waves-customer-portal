@@ -3583,7 +3583,9 @@ export function TeamTab({ showToast }) {
     setHiring(true);
     setHireError("");
     try {
-      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire`, {
+      // The Google press has its own endpoint: a server that does not know it answers 404, and never reads it as
+      // the emailed-link press.
+      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire${fields.googleEmail ? "/google" : ""}`, {
         method: "POST",
         body: JSON.stringify(fields),
       });
@@ -4876,7 +4878,7 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
       employmentType: form.employmentType,
       // The Google address this form showed as the sign-in (none = the emailed link). The server refuses the
       // press when the row no longer holds exactly that.
-      googleEmail: googleLogin ? tech.google_email : "",
+      ...(googleLogin ? { googleEmail: tech.google_email } : {}),
     });
   };
   const field = (id, label, input, required) => (
@@ -4933,9 +4935,6 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
           {googleLogin
             ? `This makes them an active staff member. They sign in with Google as ${tech.google_email}. They get no password and no email is sent.`
             : "This makes them an active staff member and emails them a link to set their password. The link works for 7 days."}
-          {!googleLogin && tech.hire_clears_google
-            ? " The Google sign-in linked on this row cannot be used for this hire, so it is removed."
-            : ""}
         </p>
         {field("name", "Name", <input id={`${titleId}-name`} value={form.name} onChange={set("name")} style={sInput} />, true)}
         {field("email", "Email", <input id={`${titleId}-email`} type="email" value={form.email} onChange={set("email")} placeholder="name@example.com" style={sInput} />, true)}

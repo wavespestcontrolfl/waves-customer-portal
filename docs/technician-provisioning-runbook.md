@@ -72,10 +72,10 @@ Resend link, and "Forgot password?" sends that hire nothing. This is the way to
 turn on the login of a job offer hire, because the email on a job application
 is one nobody proved. To give such a person a password later, set the row back
 to prospective, clear the Google sign-in and press Hired with the emailed link.
-The emailed-link press leaves the link as the row's only sign-in: a Google
-address on the row that cannot sign in that day is removed, and the form says
-so. An office (admin) row always gets the emailed link, because two-step
-sign-in setup asks for the account password.
+The Google press is for a row that never held a
+sign-in (no password, no earlier Google sign-in, no two-step enrollment) and
+is not an office (admin) row. For a person who had an account before, turn
+the account on again from the edit form.
 
 ## Before you start
 

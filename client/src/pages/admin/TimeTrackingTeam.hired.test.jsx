@@ -137,7 +137,6 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
       payRate: '20.00',
       jobTitle: 'Technician',
       employmentType: 'w2',
-      googleEmail: '',
     });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await waitFor(() => expect(fetchMock.mock.calls.filter(([, o = {}]) => !o.method).length).toBeGreaterThan(listCallsBefore));
@@ -164,18 +163,9 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
 
     await waitFor(() => expect(showToast)
       .toHaveBeenCalledWith('Hired. Placeholder One signs in with Google. No email was sent.'));
-    expect(JSON.parse(posts(fetchMock)[0][1].body))
-      .toMatchObject({ email: 'applicant@example.test', googleEmail: 'new.hire@company.test' });
-  });
-
-  it('the emailed-link dialog says when it removes a Google sign-in that cannot be used', async () => {
-    stubApi({ technicians: [{ ...PROSPECTIVE, email: 'applicant@example.test', hire_login: 'password', hire_clears_google: true }] });
-    render(<TeamTab showToast={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Hired' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Hire Placeholder One' });
-    expect(dialog).toHaveTextContent('emails them a link to set their password');
-    expect(dialog).toHaveTextContent('The Google sign-in linked on this row cannot be used for this hire, so it is removed.');
-    expect(within(dialog).getByRole('button', { name: 'Hire and send link' })).toBeInTheDocument();
+    const [[url, options]] = posts(fetchMock);
+    expect(url).toBe('/api/admin/timetracking/technicians/tech-p/hire/google');
+    expect(JSON.parse(options.body)).toMatchObject({ email: 'applicant@example.test', googleEmail: 'new.hire@company.test' });
   });
 
   it('a Google-only account shows how the person stands today and offers no Resend link', async () => {

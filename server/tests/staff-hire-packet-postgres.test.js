@@ -565,7 +565,7 @@ postgres('Hired button on migrated PostgreSQL', () => {
     const googleHire = async (overrides = {}) => {
       const { id, google } = await linkedTech(overrides);
       const body = hireBody({ googleEmail: google });
-      const res = await call(`/technicians/${id}/hire`, { body });
+      const res = await call(`/technicians/${id}/hire/google`, { body });
       expect(res.body).toMatchObject({ hired: true, login: 'google' });
       return { id, email: body.email, google };
     };
@@ -581,28 +581,17 @@ postgres('Hired button on migrated PostgreSQL', () => {
     });
 
     test('the press makes an active account with no password, no link and no email', async () => {
-      // A reused placeholder with an old password, the Google account id an earlier sign-in pinned and an earlier
-      // holder's authenticator: the press drops all three, so the next Google sign-in must prove the address the
-      // form showed and is asked for no code only that person has.
-      const { id, google } = await linkedTech({
-        auth_token_version: 1, password_hash: 'fixture-old-hash', google_sub: `fixture-sub-${randomUUID()}`,
-        mfa_enabled_at: new Date('2026-06-01T12:00:00Z'),
-      });
-      await mockDatabase('staff_mfa_totp').insert({ technician_id: id, secret_enc: 'fixture-not-a-real-secret' });
-      await mockDatabase('staff_mfa_recovery_codes').insert({ technician_id: id, code_hash: 'c'.repeat(64) });
+      const { id, google } = await linkedTech();
       const plain = await addTech();
-      expect(await listed(id)).toMatchObject({
-        hire_action: 'hire', hire_login: 'google', hire_clears_google: false, hire_google_only: null,
-      });
-      expect(await listed(plain)).toMatchObject({
-        hire_action: 'hire', hire_login: 'password', hire_clears_google: false, hire_google_only: null,
-      });
+      expect(await listed(id)).toMatchObject({ hire_action: 'hire', hire_login: 'google', hire_google_only: null });
+      expect(await listed(plain)).toMatchObject({ hire_action: 'hire', hire_login: 'password', hire_google_only: null });
 
       const auditBefore = await auditCount();
+      const versionBefore = Number((await row(id)).auth_token_version);
       const before = Date.now();
       // The address is compared in its canonical form.
       const body = hireBody({ googleEmail: ` ${google.toUpperCase()} ` });
-      const res = await call(`/technicians/${id}/hire`, { body });
+      const res = await call(`/technicians/${id}/hire/google`, { body });
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({ hired: true, emailed: null, login: 'google' });
       expect(res.body.technician).toMatchObject({
@@ -619,35 +608,57 @@ postgres('Hired button on migrated PostgreSQL', () => {
         field_dispatchable: false,
         // No password to change: the staff middleware refuses every route while this is true.
         must_change_password: false,
-        auth_token_version: 2,
+        // Entering active rotates sessions, as for every press.
+        auth_token_version: versionBefore + 1,
         google_email: google,
         google_sub: null,
-        mfa_enabled_at: null,
         ...NO_CREDENTIAL,
       });
       expect(new Date(after.google_only_login_at).getTime()).toBeGreaterThanOrEqual(before - 1000);
-      for (const table of ['staff_mfa_totp', 'staff_mfa_recovery_codes']) {
-        expect(await mockDatabase(table).where({ technician_id: id })).toEqual([]);
-      }
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
       expect(await auditCount()).toBe(auditBefore + 1);
       expect(await listed(id)).toMatchObject({ hire_action: null, hire_google_only: 'ready', hire_password_unset: false });
     });
 
+    test.each([
+      ['an old password', { password_hash: 'fixture-old-hash' }],
+      ['a Google account id an earlier sign-in pinned', { google_sub: `fixture-sub-${randomUUID()}` }],
+      ['a two-step enrollment', { mfa_enabled_at: new Date('2026-06-01T12:00:00Z') }],
+    ])('a row that held a sign-in before is not offered the Google press: %s', async (_name, held) => {
+      // The Google press only adds a sign-in to a row that has none. A row that was an account keeps the press it
+      // had before this variant (the emailed link) and the press changes nothing else about it.
+      const { id, google } = await linkedTech({ auth_token_version: 3, ...held });
+      expect(await listed(id)).toMatchObject({ hire_action: 'hire', hire_login: 'password', hire_google_only: null });
+      expect(await call(`/technicians/${id}/hire/google`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
+      expect(await row(id)).toMatchObject({ employment_status: 'prospective', google_only_login_at: null, ...held });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      const res = await call(`/technicians/${id}/hire`, { body: hireBody() });
+      expect(res.body).toMatchObject({ hired: true, emailed: true, login: 'password' });
+      expect((await row(id)).google_only_login_at).toBeNull();
+    });
+
     test('the press names the Google address its form showed; a row that no longer holds it is refused', async () => {
       const { id: linked, google } = await linkedTech();
       const plain = await addTech();
-      // A form that showed the emailed link (or a tab loaded before the field existed) on a row that now has a link.
+      // The emailed-link press (its form, or a tab loaded before the Google press existed) on a row that now has a
+      // usable link. It reads no Google address, whatever the body says.
       expect(await call(`/technicians/${linked}/hire`, { body: hireBody() })).toEqual(CHANGED);
-      expect(await call(`/technicians/${linked}/hire`, { body: hireBody({ googleEmail: '' }) })).toEqual(CHANGED);
+      expect(await call(`/technicians/${linked}/hire`, { body: { ...hireBody(), googleEmail: google } })).toEqual(CHANGED);
+      // The Google press names its address.
+      const NO_ADDRESS = { status: 400, body: { error: 'Google address must be a valid email' } };
+      expect(await call(`/technicians/${linked}/hire/google`, { body: hireBody() })).toEqual(NO_ADDRESS);
+      expect(await call(`/technicians/${linked}/hire/google`, { body: hireBody({ googleEmail: '' }) })).toEqual(NO_ADDRESS);
       // A form that showed a Google address on a row whose link was cleared since.
-      expect(await call(`/technicians/${plain}/hire`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
+      expect(await call(`/technicians/${plain}/hire/google`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
       // The link was moved to another company address while the form was open: both are usable, and the press
       // would give the staff login to a mailbox the form never showed.
       await mockDatabase('technicians').where({ id: linked }).update({ google_email: address() });
-      expect(await call(`/technicians/${linked}/hire`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
-      expect((await call(`/technicians/${linked}/hire`, { body: hireBody({ googleEmail: 'not-an-address' }) })))
-        .toEqual({ status: 400, body: { error: 'Google address must be a valid email' } });
+      expect(await call(`/technicians/${linked}/hire/google`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
+      expect(await call(`/technicians/${linked}/hire/google`, { body: hireBody({ googleEmail: 'not-an-address' }) })).toEqual(NO_ADDRESS);
+      // With GATE_HIRED_PACKET off the Google press answers like the rest of the Hired button.
+      delete process.env.GATE_HIRED_PACKET;
+      expect(await call(`/technicians/${linked}/hire/google`, { body: hireBody({ googleEmail: google }) }))
+        .toEqual({ status: 404, body: { enabled: false } });
       for (const id of [linked, plain]) {
         expect(await row(id)).toMatchObject({ employment_status: 'prospective', active: false, google_only_login_at: null });
       }
@@ -660,37 +671,31 @@ postgres('Hired button on migrated PostgreSQL', () => {
       ['the linked address is outside the sign-in domains', { GOOGLE_STAFF_SIGNIN_DOMAINS: 'other.test' }, 'bad_address'],
     ])('a linked address that cannot sign in is no Google login: %s', async (_name, env, state) => {
       const earlier = await googleHire();
-      const { id, google } = await linkedTech({ google_sub: `fixture-sub-${randomUUID()}` });
+      const { id, google } = await linkedTech();
       Object.assign(process.env, env);
       // (The list hides google_email with the gate off; the hire state is read from the stored row.)
-      expect(timetracking._test.hireLinkState(await row(id)))
-        .toMatchObject({ hire_action: 'hire', hire_login: 'password', hire_clears_google: true });
+      expect(timetracking._test.hireLinkState(await row(id))).toMatchObject({ hire_action: 'hire', hire_login: 'password' });
       // An account made Google-only earlier says why it cannot sign in today.
       expect(timetracking._test.hireLinkState(await row(earlier.id))).toMatchObject({ hire_action: null, hire_google_only: state });
-      expect(await call(`/technicians/${id}/hire`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
+      expect(await call(`/technicians/${id}/hire/google`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
       expect((await row(id)).employment_status).toBe('prospective');
-      // The emailed link, as for any row with no usable Google address. The link is then the row's only sign-in:
-      // the Google address the form could not show goes (kept, its holder could sign in to this account on the
-      // day the address becomes usable), and the pinned Google account id with it.
+      // The emailed link, as for any row with no usable Google address.
       const res = await call(`/technicians/${id}/hire`, { body: hireBody() });
       expect(res.body).toMatchObject({ hired: true, emailed: true, login: 'password' });
-      expect(await row(id)).toMatchObject({
-        must_change_password: true, google_only_login_at: null, google_email: null, google_sub: null,
-      });
+      expect(await row(id)).toMatchObject({ must_change_password: true, google_only_login_at: null });
       expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     });
 
     test('an office (admin) row is never Google-only: the press emails the link and the table holds the rule', async () => {
       // Two-step sign-in setup asks for the account password, so a Google-only admin could never set it up.
       const { id, google } = await linkedTech({ role: 'admin' });
-      expect(await listed(id)).toMatchObject({ hire_action: 'hire', hire_login: 'password', hire_clears_google: true });
-      expect(await call(`/technicians/${id}/hire`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
+      expect(await listed(id)).toMatchObject({ hire_action: 'hire', hire_login: 'password' });
+      expect(await call(`/technicians/${id}/hire/google`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
       const res = await call(`/technicians/${id}/hire`, { body: hireBody() });
       expect(res.body).toMatchObject({ hired: true, emailed: true, login: 'password' });
       expect(res.body.technician).toMatchObject({ hire_action: 'resend', hire_google_only: null });
       expect(await row(id)).toMatchObject({
-        role: 'admin', employment_status: 'active', must_change_password: true,
-        google_only_login_at: null, google_email: null, google_sub: null,
+        role: 'admin', employment_status: 'active', must_change_password: true, google_only_login_at: null,
       });
       // Whatever code writes the mark (the token is cleared here so that only this rule can refuse it).
       await expect(mockDatabase('technicians').where({ id })
@@ -703,7 +708,7 @@ postgres('Hired button on migrated PostgreSQL', () => {
       const shared = address();
       await addTech({ employment_status: 'active', active: true, email: shared });
       const id = await addTech({ google_email: shared });
-      expect(await call(`/technicians/${id}/hire`, { body: hireBody({ googleEmail: shared }) })).toEqual({
+      expect(await call(`/technicians/${id}/hire/google`, { body: hireBody({ googleEmail: shared }) })).toEqual({
         status: 409,
         body: {
           error: "The linked Google address is another staff member's email. Change the Google sign-in first.",
@@ -713,7 +718,7 @@ postgres('Hired button on migrated PostgreSQL', () => {
       expect(await row(id)).toMatchObject({ employment_status: 'prospective', active: false, google_only_login_at: null });
 
       const { id: self, google: own } = await linkedTech();
-      expect((await call(`/technicians/${self}/hire`, { body: hireBody({ googleEmail: own, email: own }) })).body)
+      expect((await call(`/technicians/${self}/hire/google`, { body: hireBody({ googleEmail: own, email: own }) })).body)
         .toMatchObject({ hired: true, login: 'google' });
     });
 
@@ -749,11 +754,27 @@ postgres('Hired button on migrated PostgreSQL', () => {
       expect(await row(id)).toMatchObject(NO_CREDENTIAL);
     });
 
-    test('hired again with the emailed link, the row is an ordinary account', async () => {
-      const { id } = await googleHire();
-      // The owner sets the row back to prospective and clears the Google sign-in, then presses Hired.
-      await mockDatabase('technicians').where({ id }).update({ employment_status: 'prospective', active: false, google_email: null });
+    test('a Google-only row gets the emailed link only after an admin clears its Google sign-in', async () => {
+      const { id, google } = await googleHire();
+      // The hire signed in (Google pinned their account id), then the owner set the row back to prospective. The
+      // Google press no longer applies to a row that held a sign-in, and the address is still linked and usable.
+      await mockDatabase('technicians').where({ id })
+        .update({ employment_status: 'prospective', active: false, google_sub: `fixture-sub-${randomUUID()}` });
       expect(await listed(id)).toMatchObject({ hire_action: 'hire', hire_login: 'password', hire_google_only: null });
+      const before = await row(id);
+      expect(await call(`/technicians/${id}/hire`, { body: hireBody() })).toEqual({
+        status: 409,
+        body: {
+          error: 'This person signs in with Google. Clear the Google sign-in on the row first, or turn the account on again from the edit form.',
+          code: 'HIRE_GOOGLE_ONLY_ROW',
+        },
+      });
+      expect(await call(`/technicians/${id}/hire/google`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
+      expect(await row(id)).toEqual(before);
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+
+      // The owner clears the Google sign-in on purpose, then presses Hired: an ordinary account.
+      await mockDatabase('technicians').where({ id }).update({ google_email: null, google_sub: null });
       const res = await call(`/technicians/${id}/hire`, { body: hireBody() });
       expect(res.body).toMatchObject({ hired: true, emailed: true, login: 'password' });
       const after = await row(id);
