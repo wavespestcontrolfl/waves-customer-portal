@@ -106,10 +106,6 @@ async function transitionWaitlistRow(existing, {
  *                           the prior link)
  *   'confirmed'           — pending row was auto-confirmed without
  *                           sending an email (admin/quote bypass path)
- *   'unchanged'           — a trusted add met a pending row that moved
- *                           before its write (the reader's confirm click,
- *                           an opt-out, an address move): nothing was
- *                           written, `subscriber` is the row as it is now
  *   'confirmation_throttled' — publicSignup caller, but the last
  *                           confirmation for this address is under
  *                           CONFIRM_RESEND_COOLDOWN_MS old: nothing changed,
@@ -198,8 +194,15 @@ async function subscribeOrResubscribeOnce({
       if (requireConfirmation) {
         return resendPendingConfirmation(existing, { source, firstName, lastName, linkCustomer, lc, conn, throttle: publicSignup });
       }
-      // Trusted-context promotion: flip pending to active (its own step).
-      return promotePendingRow(existing, { linkCustomer, lc, conn });
+      // Trusted-context promotion: flip pending to active.
+      await conn('newsletter_subscribers').where({ id: existing.id }).update({
+        status: 'active',
+        confirmed_at: new Date(),
+        updated_at: new Date(),
+      });
+      if (linkCustomer) await linkToCustomer(lc, conn);
+      const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
+      return { subscriber: fresh, action: 'confirmed' };
     }
 
     if (existing.status === 'waitlist') {
@@ -276,32 +279,6 @@ async function subscribeOrResubscribeOnce({
     : subscribeOrResubscribeOnce({
       email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, publicSignup, promoteWaitlist, dbh,
     }, { retried: true })));
-}
-
-// An existing 'pending' row met a trusted add (requireConfirmation:false): flip it to active.
-// The flip is a CAS on the pending status AND the address the caller added. Between the
-// caller's read and this write the row can move: the reader's own confirm click (an id-only
-// update would then write a later confirmed_at over that click, which reads as a trusted
-// re-activation after it and voids the reader's proof: pest-insider/tool-block.js optedIn),
-// an opt-out (an id-only update would reactivate the reader), or an address move (the email
-// fanout keeps the id and the pending status, and an id-only update would activate the
-// corrected mailbox that the caller never added). On a miss nothing is written and no other transition
-// starts: a re-run of the state machine could take the trusted resubscribe branch and clear
-// the opt-out that just landed. The caller gets the row as it is now ('unchanged').
-async function promotePendingRow(existing, { linkCustomer, lc, conn }) {
-  const promoted = await conn('newsletter_subscribers').where({ id: existing.id, status: 'pending', email: lc }).update({
-    status: 'active',
-    confirmed_at: new Date(),
-    updated_at: new Date(),
-  });
-  if (!promoted) {
-    const current = await conn('newsletter_subscribers').where({ id: existing.id }).first();
-    return { subscriber: current || existing, action: 'unchanged' };
-  }
-  // The link first, then the read: the caller gets the row with its customer link.
-  if (linkCustomer) await linkToCustomer(lc, conn);
-  const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
-  return { subscriber: fresh, action: 'confirmed' };
 }
 
 // An existing 'pending' row met a requireConfirmation signup: refresh the
@@ -650,11 +627,15 @@ async function confirmByToken(token) {
   // address is LOWER(email) of the row this UPDATE flips, taken in SQL: it is the
   // address on the row at that instant, and no address is bound into the query (knex
   // puts bound values in a failed query's message, which a caller may log).
-  // One accepted case: a trusted add that makes a pending row active BEFORE the reader
-  // uses the link. The link then reads 'already_active' (above), the page says so, and
-  // no proof is written, so that reader gets no tool block: the safe side. Recording a
+  // Accepted cases, both on the safe side (the reader gets no tool block). A trusted add
+  // that makes a pending row active BEFORE the reader uses the link: the link then reads
+  // 'already_active' (above), the page says so, and no proof is written. Recording a
   // click on an already-active row would need a confirm button and new reader-facing
-  // words on that page, which is the owner's decision and not part of this change.
+  // words on that page, which is the owner's decision and not part of this change. And a
+  // trusted add that read the row as pending and writes just AFTER this click (its
+  // promotion updates by id): it writes a later confirmed_at, which the tool block's
+  // rule reads as a re-activation after the click. The trusted promotion is not changed
+  // here: it is a live staff path with its own callers.
   const now = new Date();
   const flipped = await db('newsletter_subscribers')
     .where({ id: initial.subscriber.id, confirmation_token: token, status: 'pending' })

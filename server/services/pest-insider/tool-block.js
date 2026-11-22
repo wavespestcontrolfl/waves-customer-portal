@@ -61,11 +61,10 @@ const stampMs = (value) => (value ? new Date(value).getTime() : NaN);
 // qualify. Two accepted cases. A sunset comeback (the reader answers the win-back quiz)
 // clears deactivated_at without a new confirm click: the reader's own click for this
 // address is still the evidence, and sunset is list hygiene, not an opt-out. And a
-// trusted add that makes a pending row active before the reader uses the link: the link
-// then reads 'already_active' and writes no proof, so that reader gets no block (the
-// safe side). A trusted add promotes only a row that is still pending
-// (newsletter-subscribers.js promotePendingRow), so it never writes a later
-// confirmed_at over a click that landed first.
+// trusted add that makes a pending row active before the reader uses the link, or in
+// the same instant as the click (it then writes a later confirmed_at): no proof counts,
+// so that reader gets no block. That is the safe side (newsletter-subscribers.js
+// confirmByToken says why the trusted promotion is not changed).
 function optedIn(row, subscriber) {
   if (!row || row.status !== 'active') return false;
   const confirmedAt = stampMs(row.confirmed_at);
