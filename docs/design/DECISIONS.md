@@ -2938,13 +2938,10 @@ nothing. The words land in `scheduled_services.customer_request` /
 primary inserted row only, never on recurring children or boosters;
 `customer_request_pests` is untouched.
 
-`GATE_RESERVICE_OFFICE_REQUEST` (registry key `reserviceOfficeRequest`, off
-unless exactly `true`, dark in every environment). Gate off: the suggestion
-route answers `{ enabled: false, suggestion: null }`, the modal shows nothing
-new, and `POST /api/admin/schedule` ignores `customerRequest` — byte-identical
-to before. The modal learns the gate from that route's `enabled` answer, the
-same probe pattern as the annual-prepay and card-link controls, and only asks
-once a re-service line is on the form. Kill switch: unset the gate.
+The box is always on. The modal only asks the suggestion route once a
+re-service line is on the form, and `POST /api/admin/schedule` saves
+`customerRequest` on a pest/lawn re-service. (It shipped behind a gate that
+was removed 2026-11-21.)
 
 Source rule (owner ruling 2026-09-26: exact words may be quoted, a call
 paraphrase is shown without quotes), decided on the SERVER and never taken

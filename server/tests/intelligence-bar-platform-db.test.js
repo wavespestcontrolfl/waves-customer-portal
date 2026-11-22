@@ -42,7 +42,6 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     process.env.GATE_IB_PLATFORM = 'true';
     process.env.GATE_IB_THREADS = 'false';
     process.env.GATE_IB_WRITES_DISABLED = 'false';
-    process.env.GATE_EDIT_APPT_ADDRESS = 'true';
     db = require('../models/db');
     suiteStartedAt = (await db.raw('SELECT now() AS t')).rows[0].t;
     if (!(await db.schema.hasTable('ib_tasks'))) throw new Error('Apply the IB task migration to the isolated database first');

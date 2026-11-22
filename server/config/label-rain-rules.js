@@ -1,6 +1,6 @@
 'use strict';
 
-// Label rain rules for the visit-day spray check (GATE_SPRAY_RAIN_RULES, owner 2026-10-26: plan page
+// Label rain rules for the visit-day spray check (owner 2026-10-26: plan page
 // "Visit-Day Rain Rule", decisions D1 = A and D2 = A). Hand-read on 2026-10-26 from each product's
 // EPA label (EPA PPLS) for the products used in the last 12 months; the label file and page ride with
 // every rule so a reader can check the words.

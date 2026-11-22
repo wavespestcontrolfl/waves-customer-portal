@@ -326,7 +326,6 @@ async function initHarness({ databaseUrl, mockModel, providers = {} }, held) {
     GATE_IB_PLATFORM: 'true',
     GATE_IB_THREADS: 'false',
     GATE_IB_WRITES_DISABLED: 'false',
-    GATE_EDIT_APPT_ADDRESS: 'true',
     IB_FULL_ACCESS_EMAILS: ownerEmail,
     STRIPE_API_BASE: STRIPE_STUB_BASE,
     STRIPE_SECRET_KEY: 'sk_test_scripted_only',
