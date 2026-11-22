@@ -21,7 +21,7 @@ const SENT = '2026-11-20T16:00:00.000Z';
 const LATER = '2026-11-20T19:30:00.000Z';
 
 // The reads table answers by its where clauses, newest first: one row (first) or every row (select, no limit).
-function fakeKnex({ point, reads = [], throwOn = null }) {
+function fakeKnex({ point, reads = [], throwOn = null, onLock = null }) {
   const knex = (table) => {
     const q = {};
     let where = {};
@@ -47,9 +47,25 @@ function fakeKnex({ point, reads = [], throwOn = null }) {
       if (throwOn === table) throw Object.assign(new Error(`${table} down: 12 Synthetic Way, note "front left"`), { code: '57014' });
       return point;
     };
+    // Writes to the copy table are recorded, not applied. An update answers 1 when its where clauses name the copy.
+    let unnamedOnly = false;
+    q.whereNull = (column) => { unnamedOnly = column === 'customer_id'; return q; };
+    q.del = async () => { knex.writes.push({ del: where }); return point ? 1 : 0; };
+    q.update = async (patch) => {
+      knex.writes.push({ update: patch, where });
+      return point && Object.entries(where).every(([k, v]) => point[k] === v) && (!unnamedOnly || point.customer_id == null) ? 1 : 0;
+    };
+    q.insert = (record) => ({ onConflict: () => ({ merge: async () => { knex.writes.push({ insert: record }); } }) });
+    // A row lock is recorded. `onLock` stands for what a transaction that held the row committed meanwhile.
+    q.forShare = () => { knex.locks.push({ table, where }); if (onLock) onLock(reads); return q; };
     return q;
   };
   knex.fn = { now: () => 'NOW' };
+  knex.writes = [];
+  knex.locks = [];
+  knex.raws = [];
+  knex.raw = async (sql) => { knex.raws.push(sql); };
+  knex.transaction = async (work) => work(knex);
   return knex;
 }
 // The copy names the customer it was frozen for (the estimate's holder at that send).
@@ -374,5 +390,210 @@ describe('freeze helpers never throw', () => {
     const knex = jest.fn();
     expect(await freezeRoofPointsForEstimate({ id: 'est-1', address: ADDRESS }, { knex, deliveredAt })).toBe('skipped');
     expect(knex).not.toHaveBeenCalled();
+  });
+});
+
+// Owner follow-up "keep" (2026-11-21): the copy a lead already holds stays for the first customer the estimate takes.
+// The copy carries the estimate's count of customer changes at its send (lead_changes); the estimate row carries the
+// count now (customer_changes, kept by a database trigger: estimate-roof-points-keep-postgres.test.js).
+describe('a lead\'s copy and the first customer of the estimate', () => {
+  const leadRead = (over = {}) => frozenRead({
+    customer_id: null,
+    tech_pins: [{ x: 0.25, y: 0.4, type: 'roof_returns_and_valleys', note: 'front left' }],
+    crop_lat: '27.46000', crop_lng: '-82.50000', crop_zoom: 20, image_source: 'manatee_2025_rgb', image_year: 2025,
+    points_address: ADDRESS, ...over,
+  });
+  const leadCopy = (over = {}) => point({ customer_id: null, lead_changes: 3, ...over });
+  const shows = async (estimateRow, copy = leadCopy(), reads = [leadRead()]) => Boolean(
+    (await roofPointsDocBlock(estimateRow, { knex: fakeKnex({ point: copy, reads }) })).roofPoints);
+  const lead = (changes) => est({ customer_id: null, customer_changes: changes });
+  const customer = (changes, id = 'cust-a') => est({ customer_id: id, customer_changes: changes });
+
+  test('it shows to the same lead, and to the first customer the estimate takes after that send', async () => {
+    expect(await shows(lead(3))).toBe(true);
+    expect(await shows(customer(4))).toBe(true);
+    expect((await roofPointsDocBlock(customer(4), { knex: fakeKnex({ point: leadCopy(), reads: [leadRead()] }) })).roofPoints).toEqual(SNAPSHOT);
+  });
+
+  test('it shows to no one after any other change of the estimate\'s customer', async () => {
+    // A second customer, or a duplicate merge of the first: two changes.
+    expect(await shows(customer(5, 'cust-b'))).toBe(false);
+    expect(await shows(customer(5))).toBe(false);
+    // The estimate lost its customer again: the next lead is not the lead that copy was sent to.
+    expect(await shows(lead(5))).toBe(false);
+    expect(await shows(lead(4))).toBe(false);
+    // And the customer after that.
+    expect(await shows(customer(6, 'cust-b'))).toBe(false);
+    // Counts that the trigger never produces together prove nothing: a customer with no change, a count that went back.
+    expect(await shows(customer(3))).toBe(false);
+    expect(await shows(customer(2))).toBe(false);
+    expect(await shows(lead(2))).toBe(false);
+  });
+
+  test.each([undefined, null, '4', 4.5, NaN])('an estimate row that carries no whole count (%p) shows no counted copy, to a customer or to a lead', async (changes) => {
+    expect(await shows(est({ customer_id: 'cust-a', customer_changes: changes }))).toBe(false);
+    expect(await shows(est({ customer_id: null, customer_changes: changes }))).toBe(false);
+  });
+
+  test('a lead\'s copy from before the count keeps its rule: the lead only, never a customer', async () => {
+    for (const none of [null, undefined]) {
+      expect(await shows(lead(0), leadCopy({ lead_changes: none }))).toBe(true);
+      expect(await shows(est({ customer_id: null }), leadCopy({ lead_changes: none }))).toBe(true);
+      expect(await shows(lead(7), leadCopy({ lead_changes: none }))).toBe(true);
+      expect(await shows(customer(1), leadCopy({ lead_changes: none }))).toBe(false);
+    }
+    // A count that is not a whole number is no count for the first customer, and is not the lead's own either.
+    expect(await shows(customer(4), leadCopy({ lead_changes: '3' }))).toBe(false);
+    expect(await shows(lead(3), leadCopy({ lead_changes: '3' }))).toBe(false);
+  });
+
+  test('a customer\'s copy is judged by its customer alone, whatever the counts say', async () => {
+    const own = [frozenRead()];
+    expect(await shows(customer(4), point({ lead_changes: 3 }), own)).toBe(true);
+    expect(await shows(customer(9), point({ lead_changes: null }), own)).toBe(true);
+    expect(await shows(customer(4, 'cust-b'), point({ lead_changes: 3 }), [frozenRead({ customer_id: 'cust-b' })])).toBe(false);
+    expect(await shows(lead(3), point({ lead_changes: 3 }), [leadRead()])).toBe(false);
+    // Nor does a count on it let a read that names no customer stand in for the customer's own read.
+    expect(await shows(customer(4), point({ lead_changes: 3 }), [leadRead()])).toBe(false);
+  });
+
+  test('the first customer keeps the copy only while its read is still the lead\'s, or theirs by now', async () => {
+    const first = customer(4);
+    // Staff pressed Save points since: the read names this customer. The lead's copy stays until the next send.
+    expect(await shows(first, leadCopy(), [leadRead({ customer_id: 'cust-a' })])).toBe(true);
+    // A read that names another customer, a read made for a named customer (the two-part key), another estimate's
+    // read, a read that is gone, and a copy with no read: not shown.
+    expect(await shows(first, leadCopy(), [leadRead({ customer_id: 'cust-b' })])).toBe(false);
+    expect(await shows(first, leadCopy(), [leadRead({ context_key: 'e:est-1|c:cust-b' })])).toBe(false);
+    expect(await shows(first, leadCopy(), [leadRead({ context_key: 'e:est-2' })])).toBe(false);
+    expect(await shows(first, leadCopy(), [])).toBe(false);
+    expect(await shows(first, leadCopy({ read_id: null }))).toBe(false);
+    // The same lead, with a read that was given a customer: not the lead's.
+    expect(await shows(lead(3), leadCopy(), [leadRead({ customer_id: 'cust-a' })])).toBe(false);
+  });
+
+  test('every other page rule still applies to the first customer: hidden, another address, an older handoff', async () => {
+    const first = customer(4);
+    expect(await shows(first, leadCopy(), [leadRead({ hide_on_estimate: true })])).toBe(false);
+    expect(await shows(first, leadCopy(), [leadRead(), frozenRead({ id: 'read-2', customer_id: 'cust-a', hide_on_estimate: true })])).toBe(false);
+    expect(await shows({ ...first, address: '99 Other Road, Bradenton, FL 34203' })).toBe(false);
+    expect(await shows({ ...first, estimate_data: { deliveryState: { lastDeliveredAt: LATER } } })).toBe(false);
+  });
+
+  describe('a send', () => {
+    const freeze = async (estimateRow, { copy, reads = [leadRead()], at = LATER, onLock } = {}) => {
+      const knex = fakeKnex({ point: copy, reads, onLock });
+      const out = await freezeRoofPointsForEstimate(estimateRow, { knex, deliveredAt: at });
+      locks = knex.locks;
+      raws = knex.raws;
+      return { out, writes: knex.writes };
+    };
+    // The row locks and the raw statements of the last freeze.
+    let locks;
+    let raws;
+    const ESTIMATE_LOCK = [{ table: 'estimates', where: { id: 'est-1' } }];
+    const KEPT = [{ update: { delivered_at: LATER }, where: { estimate_id: 'est-1', read_id: 'read-1', lead_changes: 3 } }];
+    const CLEARED = [{ del: { estimate_id: 'est-1' } }];
+
+    test('to a lead writes the estimate\'s count on the copy; to a customer, or from a row with no count, it writes none', async () => {
+      const stamp = async (estimateRow, reads) => (await freeze(estimateRow, { reads })).writes.map((w) => [w.insert.customer_id, w.insert.lead_changes]);
+      expect(await stamp(lead(3))).toEqual([[null, 3]]);
+      expect(await stamp(lead(0))).toEqual([[null, 0]]);
+      expect(await stamp(customer(4), [leadRead({ customer_id: 'cust-a' })])).toEqual([['cust-a', null]]);
+      for (const changes of [undefined, null, '3', 2.5]) {
+        expect(await stamp(est({ customer_id: null, customer_changes: changes }))).toEqual([[null, null]]);
+      }
+    });
+
+    test('to the first customer, with no points saved for them, keeps the lead\'s copy and gives it this handoff\'s time', async () => {
+      expect(await freeze(customer(4), { copy: leadCopy() })).toEqual({ out: 'kept', writes: KEPT });
+    });
+
+    test('decides to keep, freeze or clear under a lock on the estimate row, with a 5 second wait; no other send takes that lock', async () => {
+      await freeze(customer(4), { copy: leadCopy() });
+      expect([locks, raws]).toEqual([ESTIMATE_LOCK, ["SET LOCAL lock_timeout = '5s'"]]);
+      // The first customer's lead copy that will be cleared is judged under the lock too.
+      await freeze(customer(4), { copy: leadCopy(), reads: [leadRead({ tech_pins: null })] });
+      expect(locks).toEqual(ESTIMATE_LOCK);
+      // A send to a lead, to a second customer, to a customer with no lead copy, and one that freezes points: no lock.
+      const unlocked = [
+        [lead(3), { copy: leadCopy() }],
+        [lead(3), { copy: leadCopy(), reads: [] }],
+        [customer(5, 'cust-b'), { copy: leadCopy() }],
+        [customer(4), { copy: undefined }],
+        [customer(4), { copy: leadCopy({ lead_changes: null }) }],
+        [customer(4), { copy: leadCopy(), reads: [leadRead({ customer_id: 'cust-a' })] }],
+      ];
+      for (const [estimateRow, options] of unlocked) {
+        await freeze(estimateRow, options);
+        expect([locks, raws]).toEqual([[], []]);
+      }
+    });
+
+    test('a points save for the first customer that lands while the send waits for the lock is seen: their points are frozen, or their clear clears', async () => {
+      // The save named the customer on the lead's read. Before the lock that read was the lead's; after it, the customer's.
+      const named = (reads) => { reads[0].customer_id = 'cust-a'; };
+      const frozen = await freeze(customer(4), { copy: leadCopy(), onLock: named });
+      expect(frozen.out).toBe('frozen');
+      expect(frozen.writes.map((w) => [w.insert.read_id, w.insert.customer_id, w.insert.lead_changes])).toEqual([['read-1', 'cust-a', null]]);
+      // The save cleared the points for the customer: the read is theirs and holds none.
+      const clearedForThem = (reads) => { Object.assign(reads[0], { customer_id: 'cust-a', tech_pins: null }); };
+      expect(await freeze(customer(4), { copy: leadCopy(), onLock: clearedForThem })).toEqual({ out: 'cleared', writes: CLEARED });
+      // A newer read of their own with cleared points, beside the lead's untouched read: their read decides.
+      const ownCleared = (reads) => { reads.push(leadRead({ id: 'read-2', customer_id: 'cust-a', tech_pins: null, created_at: new Date('2026-11-20T15:30:00Z') })); };
+      expect(await freeze(customer(4), { copy: leadCopy(), onLock: ownCleared })).toEqual({ out: 'cleared', writes: CLEARED });
+    });
+
+    test('a lock that cannot be had in time skips the freeze: nothing is written and only the code is logged', async () => {
+      const busy = () => { throw Object.assign(new Error('canceling statement due to lock timeout: 12 Synthetic Way'), { code: '55P03' }); };
+      expect(await freeze(customer(4), { copy: leadCopy(), onLock: busy })).toEqual({ out: 'skipped', writes: [] });
+      expect(logger.warn).toHaveBeenLastCalledWith('[estimate-roof-points] freeze skipped for estimate est-1: 55P03');
+    });
+
+    test('to the first customer clears the copy, as before, when the page does not show it', async () => {
+      const cleared = async (estimateRow, options) => expect(await freeze(estimateRow, options)).toEqual({ out: 'cleared', writes: CLEARED });
+      // No copy, a copy from before the count, a second customer, an older handoff, another address, hidden points.
+      await cleared(customer(4), { copy: undefined });
+      await cleared(customer(4), { copy: leadCopy({ lead_changes: null }) });
+      await cleared(customer(5, 'cust-b'), { copy: leadCopy() });
+      await cleared(customer(4), { copy: leadCopy({ delivered_at: new Date('2026-11-20T10:00:00.000Z') }) });
+      await cleared({ ...customer(4), address: '99 Other Road, Bradenton, FL 34203' }, { copy: leadCopy() });
+      await cleared(customer(4), { copy: leadCopy(), reads: [leadRead({ hide_on_estimate: true })] });
+    });
+
+    test('to the first customer clears the copy when the lead\'s read would no longer be sent to a lead', async () => {
+      const cleared = async (reads) => expect(await freeze(customer(4), { copy: leadCopy(), reads })).toEqual({ out: 'cleared', writes: CLEARED });
+      // The lead's points were cleared, or confirmed as none, after that send.
+      await cleared([leadRead({ tech_pins: null })]);
+      await cleared([leadRead({ tech_pins: [] })]);
+      // They were saved for another address.
+      await cleared([leadRead({ points_address: '99 Other Road, Bradenton, FL 34203' })]);
+      // A newer points read of the lead exists: the copy is not from the newest one.
+      await cleared([leadRead(), leadRead({ id: 'read-2', created_at: new Date('2026-11-20T15:30:00Z') })]);
+    });
+
+    test('to the first customer with a points read of their own follows that read: frozen for them, or cleared', async () => {
+      const own = leadRead({ id: 'read-2', customer_id: 'cust-a', created_at: new Date('2026-11-20T15:30:00Z') });
+      const frozen = await freeze(customer(4), { copy: leadCopy(), reads: [leadRead(), own] });
+      expect(frozen.out).toBe('frozen');
+      expect(frozen.writes.map((w) => [w.insert.read_id, w.insert.customer_id, w.insert.lead_changes])).toEqual([['read-2', 'cust-a', null]]);
+      // Their own read with the points cleared: the lead's copy goes.
+      expect(await freeze(customer(4), { copy: leadCopy(), reads: [leadRead(), { ...own, tech_pins: null }] })).toEqual({ out: 'cleared', writes: CLEARED });
+    });
+
+    test('to a lead with no points clears the copy; a copy another send replaced meanwhile is not kept', async () => {
+      expect(await freeze(lead(3), { copy: leadCopy(), reads: [] })).toEqual({ out: 'cleared', writes: CLEARED });
+      // The update names the copy it judged (read and count, no customer). A copy that is another one by then
+      // answers 0 rows: this send clears, as a send with no points does.
+      const knex = fakeKnex({ point: leadCopy(), reads: [leadRead()] });
+      const table = (name) => {
+        const q = knex(name);
+        if (name === 'estimate_roof_points') q.update = async () => 0;
+        return q;
+      };
+      Object.assign(table, { fn: knex.fn, raw: knex.raw, transaction: async (work) => work(table) });
+      expect(await freezeRoofPointsForEstimate(customer(4), { knex: table, deliveredAt: LATER })).toBe('cleared');
+      expect(knex.writes).toEqual(CLEARED);
+    });
   });
 });

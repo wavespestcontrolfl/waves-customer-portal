@@ -564,7 +564,7 @@ describe("confirmed points", () => {
 
   it("a list saved before the address was recorded: the panel says so, and Save points sends it unchanged with the crop, the address and the list it loaded", async () => {
     await opened({}, READ({ tech_pins: SAVED, points_address: null }));
-    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/The customer estimate does not show these points yet.*press Save points to confirm them/);
+    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/These points are not confirmed for this address and this customer yet.*press Save points to confirm them.*shows the confirmed points from the next send/);
     fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED }) }));
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     await screen.findByText("Points saved.");
@@ -584,9 +584,11 @@ describe("confirmed points", () => {
   });
 
   it("a list saved before the estimate had this customer: the panel says so, and Save points sends it unchanged", async () => {
-    // The read names no customer and the estimate has one now: the customer estimate does not show the list.
+    // The read names no customer and the estimate has one now: no send freezes the list for that customer. The
+    // estimate may still show the copy the customer received as a lead, so the note does not say it shows nothing.
     await opened({}, READ({ tech_pins: SAVED, estimate_customer_id: CUST }));
-    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/The customer estimate does not show these points yet/);
+    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/These points are not confirmed for this address and this customer yet/);
+    expect(screen.getByTestId("roof-read-points-unconfirmed")).not.toHaveTextContent(/does not show/);
     // The server's answer names the customer the save recorded.
     fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED, customer_id: CUST, estimate_customer_id: CUST }) }));
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
