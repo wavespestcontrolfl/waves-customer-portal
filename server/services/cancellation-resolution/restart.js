@@ -819,6 +819,9 @@ const HAND_CHECK_MESSAGE = 'This one needs a quick hand-check before we can pric
 //                     the recompute (a waiveSetupFee:true one zeroes the setup fee there). Plan offer only.
 //   expiresAt         optional Date for the new row's expires_at, in place of the standard send expiry.
 //                     Plan offer only. Both omitted = the mint as before.
+//   reuseOnly         optional true: a plain tap that re-opens a live offer quote. When reuseLiveQuote
+//                     answers null the core retires nothing and mints nothing: it throws
+//                     pricing_unavailable, and the live quote stays as it was. Plan offer only.
 //   logTag / logDetail / handMessage   wording that stays per-source
 // Returns { estimateId, token, url, reused }.
 async function mintPricedEstimate(args) {
@@ -885,6 +888,7 @@ async function mintPricedEstimate(args) {
 
   const reused = await reuseLiveQuote(mint, { priorRows, offer, estimateData, primaryStreet, premisesStamp });
   if (reused) return reused;
+  if (mint.reuseOnly) throw new RestartUnavailableError('pricing_unavailable', handMessage);
 
   await retireLineage({ trx, fresh, source, nowDate, releaseEstimateHolds: mintDeps.releaseEstimateHolds });
   return publishMintedEstimate(mint, { offer, estimateData });
@@ -1557,21 +1561,24 @@ function assertPlanOfferArgs({ offer, serviceKey, shown, nowDate }) {
 // A plain portal tap never retires a live offer quote of the same option. The emailed offer is a
 // delivered price promise until its end date, and the standard flow would archive it and mint the same
 // plan WITH the setup fee, so the customer would lose the offer by tapping the card. Under the
-// customer's locks, the live plan-start quote (the same liveness the core applies) is handed back when
-// it carries an offer, staff did not change it, and it is the tapped service and option; the accept
-// re-check still runs on it. A tap for another service or option takes the standard flow, which
-// retires the whole lineage, the offer quote included: that limit stands.
-async function liveOfferQuoteTapped(trx, fresh, { serviceKey, optionId, now }) {
+// customer's locks, the live plan-start quote (the same liveness the core applies) is read; when it
+// carries an offer, staff did not change it, and it is the tapped service and option, this answers
+// that quote's own offer, and the tap re-opens it through the core (reuseOnly): the core re-proves the
+// home, today's price against the card, the frozen page and the accept's checks, and hands the quote
+// back only if all hold. Else it answers null and the standard flow runs, which retires the whole
+// lineage, the offer quote included: that limit stands for a tap of another service or option.
+async function liveOfferOfTappedQuote(trx, fresh, { serviceKey, optionId, now }) {
   const rows = await trx('estimates')
     .where({ customer_id: fresh.id, source: PLAN_START_SOURCE })
     .whereNull('archived_at')
     .orderBy('created_at', 'desc')
     .forUpdate();
   const live = liveRestartEstimate(rows, now());
-  if (!live || staffChangedDeliveryOptions(live) || !planOfferOf(live.estimate_data)) return null;
+  const stamp = live && !staffChangedDeliveryOptions(live) ? planOfferOf(live.estimate_data) : null;
+  if (!stamp) return null;
   const planStart = parseJson(live.estimate_data, {})?.planStart;
   if (planStart?.serviceKey !== serviceKey || planStart?.optionId !== optionId) return null;
-  return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
+  return { jobId: stamp.jobId, endsAt: new Date(stamp.endsAt), firstVisitFrom: stamp.firstVisitFrom };
 }
 
 // Plan start (GATE_PORTAL_PLAN_START, owner 2026-11-19) — a signed-in customer
@@ -1592,13 +1599,13 @@ async function liveOfferQuoteTapped(trx, fresh, { serviceKey, optionId, now }) {
 // customer books the next one on or after firstVisitFrom. A caller that breaks the offer's own bounds
 // has a bug: a plain Error, never a customer answer.
 async function mintPlanStartEstimate({
-  customer, serviceKey, optionId, shown, offer = null, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {},
+  customer, serviceKey, optionId, shown: cardShown, offer: callerOffer = null, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {},
 }) {
   if (!customer || !customer.id) throw new Error('mintPlanStartEstimate requires a customer row');
-  if (offer) assertPlanOfferArgs({ offer, serviceKey, shown, nowDate: now() });
+  if (callerOffer) assertPlanOfferArgs({ offer: callerOffer, serviceKey, shown: cardShown, nowDate: now() });
   const notEligible = () => new RestartUnavailableError('not_eligible', 'This plan cannot be priced online right now.');
   // `shown` = the amounts the card displayed (PLAN_START_SHOWN_KEYS); a plan has a monthly price.
-  const shownMonthly = Number(shown?.monthly);
+  const shownMonthly = Number(cardShown?.monthly);
   if (!PLAN_START_SERVICE_KEYS.includes(serviceKey) || !Number.isFinite(shownMonthly) || !(shownMonthly > 0)) throw notEligible();
   const mintDeps = resolveMintDeps(deps);
   // The exact option the card showed: only a member of today's offered ladder
@@ -1632,10 +1639,14 @@ async function mintPlanStartEstimate({
     }
     if (ownsPlan) throw notEligible();
 
-    if (!offer) {
-      const held = await liveOfferQuoteTapped(trx, fresh, { serviceKey, optionId, now });
-      if (held) return held;
-    }
+    // A plain tap that finds the live offer quote of this service and option re-opens that offer through the
+    // core, never an early hand-back (liveOfferOfTappedQuote). Its stamp was checked when it was minted
+    // (assertPlanOfferArgs), and a live one is unexpired, so the caller's bounds are not run again. The card
+    // shows the standard setup fee, the offer waives it: every amount the closures compare is the card's, with
+    // the fee at 0, as an offer mint's own shown.
+    const reopened = callerOffer ? null : await liveOfferOfTappedQuote(trx, fresh, { serviceKey, optionId, now });
+    const offer = callerOffer || reopened;
+    const shown = reopened ? { ...cardShown, setupFee: 0 } : cardShown;
 
     return mintPricedEstimate({
       trx,
@@ -1659,6 +1670,7 @@ async function mintPlanStartEstimate({
         operatorPriceAdjustment: require('../customer-moves').withMoveSetupWaiver({ internalReason: PLAN_OFFER_WAIVER_REASON }),
         expiresAt: offer.endsAt,
       } : {}),
+      ...(reopened ? { reuseOnly: true } : {}),
       // Reuse only the quote for THIS option (the core adds today's-offer equality). An offer mint also
       // reuses only its own job's quote: a plain quote, or the offer of another job, is retired and re-minted.
       matchesLive: (liveData) => liveData?.planStart?.serviceKey === serviceKey

@@ -35,15 +35,23 @@ test('the converter checks the move before it schedules anything', () => {
   expect(src.indexOf('pickFirstServiceDate(customer, estimateId, { serviceKey: firstVisitServiceKey })')).toBeGreaterThan(checkAt);
 });
 
-test('the public accept refuses an adopted visit before a plan offer\'s first visit date, under the estimate row lock, before any branch (owner 2026-11-19)', () => {
+test('the public accept refuses an adopted visit before a plan offer\'s first visit date on the LOCKED adoption row, before the adoption update (owner 2026-11-19)', () => {
   const src = read('routes/estimate-public.js');
   const lockAt = src.indexOf("const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first(");
-  const offerAt = src.indexOf("err.code = 'BEFORE_PLAN_VISIT_WINDOW';", lockAt);
+  // The stamp is read from the estimate data this accept holds under the estimate row lock ...
+  const stampAt = src.indexOf('planOfferFrom = require(', lockAt);
+  // ... and compared with the date of the visit row locked FOR UPDATE, ahead of the conditional adoption UPDATE.
+  const lockedRowAt = src.indexOf('const lockedAdoptRow = await trx(', stampAt);
+  const floorAt = src.indexOf("err.code = 'BEFORE_PLAN_VISIT_WINDOW';", lockedRowAt);
+  const updateAt = src.indexOf(".where('scheduled_date', '>=', etDateString())", lockedRowAt);
   const convertAt = src.indexOf('EstimateConverter.convertEstimate(estimate.id, {', lockAt);
   expect(lockAt).toBeGreaterThan(-1);
-  expect(offerAt).toBeGreaterThan(lockAt);
-  expect(convertAt).toBeGreaterThan(offerAt);
-  // It reads the stamp from the estimate data the accept holds under that lock, and only an adopted (non-hold) visit is compared.
-  const window = src.slice(src.lastIndexOf('planOfferOf(freshLinkData)', offerAt), offerAt);
-  expect(window).toContain('!isReservationHeldAppointment(existingAppointmentRow)');
+  expect(stampAt).toBeGreaterThan(lockAt);
+  expect(lockedRowAt).toBeGreaterThan(stampAt);
+  expect(floorAt).toBeGreaterThan(lockedRowAt);
+  expect(updateAt).toBeGreaterThan(floorAt);
+  expect(convertAt).toBeGreaterThan(lockAt);
+  expect(src.slice(lockedRowAt, floorAt)).toContain('lockedAdoptRow.scheduled_date) < planOfferFrom');
+  // No read of the visit's date outside the lock remains for this rule.
+  expect(src.indexOf("err.code = 'BEFORE_PLAN_VISIT_WINDOW';")).toBe(floorAt);
 });

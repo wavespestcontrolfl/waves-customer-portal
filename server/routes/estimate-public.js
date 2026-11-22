@@ -12351,6 +12351,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       if (treatAsOneTime && effectiveOneTimeTotal > 0 && Number(estimate.onetime_total || 0) !== effectiveOneTimeTotal) {
         acceptedUpdates.onetime_total = effectiveOneTimeTotal;
       }
+      let planOfferFrom = null;
       // LIVE call-linkage + marker revalidation INSIDE the money-bearing
       // transaction (codex P0, PR #3304 r26): the call processor can have
       // committed a corrected lead linkage while its detached estimator
@@ -12439,19 +12440,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             }
           }
         }
-        // A plan offer's quote (owner 2026-11-19: the one-time job is the first plan visit): an adopted
-        // (non-hold) visit skips commitReservation's date check, so it is compared with firstVisitFrom, read
-        // from the estimate data this accept holds under its lock, as the move check above does.
-        const offerFrom = require('../services/plan-offer-estimate').planOfferOf(freshLinkData)?.firstVisitFrom;
-        if (offerFrom && existingAppointmentRow && !isReservationHeldAppointment(existingAppointmentRow)) {
-          const visitNow = await trx('scheduled_services').where({ id: existingAppointmentRow.id }).first('scheduled_date');
-          if (!visitNow || dateOnly(visitNow.scheduled_date) < offerFrom) {
-            const err = new Error('That visit is before your next plan visit window. Please pick a time on or after it.');
-            err.status = 409;
-            err.code = 'BEFORE_PLAN_VISIT_WINDOW';
-            throw err;
-          }
-        }
+        // A plan offer's quote (owner 2026-11-19): the stamp as the estimate row reads under this lock. An adopted
+        // (non-hold) visit skips commitReservation's date check, so the floor is judged on the locked visit row below.
+        planOfferFrom = require('../services/plan-offer-estimate').planOfferOf(freshLinkData)?.firstVisitFrom || null;
         // The call row is locked FOR UPDATE and HELD through the
         // acceptance write (codex P1, PR #3304 GH r6): an ordinary
         // SELECT would not serialize against the processor's concurrent
@@ -13429,6 +13420,15 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             .where('scheduled_services.id', existingAppointmentRow.id)
             .forUpdate('scheduled_services')
             .first();
+          // A plan offer's quote adopts no visit before its firstVisitFrom, judged on THIS locked row: a reschedule
+          // that landed after the preflight read cannot move the visit under the floor, and the update below only
+          // asks for today. A missing row is the update's own refusal below.
+          if (planOfferFrom && lockedAdoptRow && dateOnly(lockedAdoptRow.scheduled_date) < planOfferFrom) {
+            const err = new Error('That visit is before your next plan visit window. Please pick a time on or after it.');
+            err.status = 409;
+            err.code = 'BEFORE_PLAN_VISIT_WINDOW';
+            throw err;
+          }
           const lockedAnyModeKeys = new Set([
             ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'recurring' }),
             ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'one_time' }),

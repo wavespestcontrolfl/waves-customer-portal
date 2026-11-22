@@ -186,12 +186,34 @@ postgres('plan offer quote (live Postgres)', () => {
       return { customer, option, offerQuote, plainTap: () => mintFor({ customer, option, shown: shownOf(option, option.setupFee) }) };
     }
 
-    test('hands back the live offer quote of the same option and archives nothing', async () => {
+    // The tap re-opens the offer through the core: the home, today's price against the card (the card's fee taken as 0),
+    // the frozen page and the accept's checks run on the real recompute and snapshot, and the quote is handed back only
+    // when they all hold. A refusal leaves the emailed quote as it was.
+    const intact = async (customer, offerQuote) => {
+      expect((await rowOf(offerQuote.estimateId)).archived_at).toBeNull();
+      expect(await trx('estimates').where({ customer_id: customer.id, source: 'plan_start' })).toHaveLength(1);
+    };
+
+    test('of the same option at the same price hands back the live offer quote and archives nothing', async () => {
       const { customer, offerQuote, plainTap } = await withLiveOffer();
       expect(await plainTap()).toEqual({ estimateId: offerQuote.estimateId, token: offerQuote.token, url: offerQuote.url, reused: true });
-      expect((await rowOf(offerQuote.estimateId)).archived_at).toBeNull();
-      // Still the customer's one plan quote: nothing was minted beside it.
-      expect(await trx('estimates').where({ customer_id: customer.id, source: 'plan_start' })).toHaveLength(1);
+      await intact(customer, offerQuote);
+    });
+
+    test.each([
+      // The plan's price moved since the offer was minted: today's recompute no longer lands on the quote's frozen dollars.
+      ['the price changed since the offer was minted', (offerQuote) => trx('estimates').where({ id: offerQuote.estimateId }).update({ monthly_total: 41 })],
+      ['the page snapshot was cleared', async (offerQuote) => {
+        const data = parse((await rowOf(offerQuote.estimateId)).estimate_data);
+        delete data.sendSnapshot.pricingBundle;
+        await trx('estimates').where({ id: offerQuote.estimateId }).update({ estimate_data: JSON.stringify(data) });
+      }],
+      ['the account\'s home changed', (offerQuote, customer) => trx('customers').where({ id: customer.id }).update({ address_line1: '9 Other Example Ct' })],
+    ])('is refused pricing_unavailable, the offer quote untouched, when %s', async (_label, change) => {
+      const { customer, offerQuote, plainTap } = await withLiveOffer();
+      await change(offerQuote, customer);
+      await expect(plainTap()).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+      await intact(customer, offerQuote);
     });
 
     test.each([

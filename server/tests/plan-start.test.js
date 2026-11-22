@@ -1006,20 +1006,66 @@ describe('mintPlanStartEstimate', () => {
     // The emailed offer is a delivered price promise until its end date. The standard flow would archive it and mint
     // the same plan with the setup fee, so a plain tap of the same option hands the offer quote back.
     describe('a plain portal tap', () => {
-      test('of the same option hands back the live offer quote: nothing archived, nothing priced, nothing minted', async () => {
-        const offered = await mintOffer();
-        recompute.mockClear();
-        const tap = await mint();
-        expect(tap).toEqual({ estimateId: offered.estimateId, token: offered.token, url: offered.url, reused: true });
-        expect(recompute).not.toHaveBeenCalled();
+      // The tap re-opens the offer through the core: the home, today's price against the card (the setup fee at 0, as
+      // the offer waives it), the frozen page and the accept's checks all run, and the live quote is handed back only
+      // when they hold. A refusal leaves the emailed quote as it was.
+      const untouched = (offered) => {
         expect(tables.estimates).toHaveLength(1);
         expect(tables.estimates[0].archived_at).toBeFalsy();
+        expect(tables.estimates[0].id).toBe(offered.estimateId);
         expect(releaseHolds).not.toHaveBeenCalled();
         expect(tables.customer_interactions).toHaveLength(1);
+      };
+
+      test('of the same option at the same price hands back the live offer quote: nothing archived, nothing minted', async () => {
+        const offered = await mintOffer();
+        recompute.mockClear();
+        // The card shows the standard setup fee; the offer's re-open compares everything else and takes the fee as 0.
+        const tap = await mint({ shown: { ...shownOf(PEST_LINE), setupFee: 99 } });
+        expect(tap).toEqual({ estimateId: offered.estimateId, token: offered.token, url: offered.url, reused: true });
+        // Today's price was re-computed, with the waiver on the data.
+        expect(recompute).toHaveBeenCalledTimes(1);
+        expect(recompute.mock.calls[0][0].operatorPriceAdjustment.waiveSetupFee).toBe(true);
+        untouched(offered);
       });
 
-      test('reads the lineage under FOR UPDATE, after the ownership check, before any price work', async () => {
+      test('after the plan price changed since the offer mint is refused pricing_unavailable, the offer quote untouched', async () => {
+        const offered = await mintOffer();
+        const dearer = engineLine('pest_control', 35);
+        recompute.mockResolvedValue(pricedAs(dearer));
+        await expect(mint({ shown: shownOf(dearer) })).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+        untouched(offered);
+      });
+
+      test('with the page snapshot cleared is refused pricing_unavailable, the offer quote untouched', async () => {
+        const offered = await mintOffer();
+        const stored = JSON.parse(tables.estimates[0].estimate_data);
+        delete stored.sendSnapshot.pricingBundle;
+        tables.estimates[0].estimate_data = JSON.stringify(stored);
+        await expect(mint()).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+        untouched(offered);
+      });
+
+      test('after the account\'s home changed is refused pricing_unavailable, never the old home\'s quote, the offer quote untouched', async () => {
+        const offered = await mintOffer();
+        // The home the offer was priced for is no longer the account's: the quote's address and its priced-home key name another street.
+        tables.estimates[0].address = '9 Oak Ave, Parrish, FL 34219';
+        const stored = JSON.parse(tables.estimates[0].estimate_data);
+        stored.planStart.premisesKey = require('../services/estimate-property-linkage').normalizedStampedStreet('9 Oak Ave', null, 'Parrish', '34219');
+        tables.estimates[0].estimate_data = JSON.stringify(stored);
+        await expect(mint()).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+        untouched(offered);
+      });
+
+      test('runs the strict home proof before anything is handed back: a home that cannot be proven refuses, the offer quote untouched', async () => {
+        const offered = await mintOffer();
+        await expect(mint({}, { customerHasOnlyPrimaryPremises: async () => false })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+        untouched(offered);
+      });
+
+      test('reads the lineage under FOR UPDATE, after the ownership check, before the price work', async () => {
         await mintOffer();
+        recompute.mockClear();
         const ops = [];
         const trx = fakeTrx(ops);
         await mint({}, { db: { transaction: async (fn) => fn(trx) } });
