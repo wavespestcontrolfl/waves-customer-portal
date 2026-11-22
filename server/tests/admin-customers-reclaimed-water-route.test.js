@@ -82,6 +82,6 @@ test('the list answer carries the gate for the panel while it is on; off, the ke
     mockGate.on = false;
     const off = await (await fetch(`${baseUrl}/admin/customers/cust-1/properties`)).json();
     expect(off).not.toHaveProperty('reclaimedWater');
-    expect(Object.keys(off).sort()).toEqual(['canChangePrimary', 'properties', 'propertyServiceAreas']);
+    expect(Object.keys(off).sort()).toEqual(['canChangeAppointmentAddress', 'canChangePrimary', 'properties', 'propertyServiceAreas']);
   });
 });

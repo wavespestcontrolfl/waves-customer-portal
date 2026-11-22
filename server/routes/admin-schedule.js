@@ -25227,7 +25227,8 @@ router.get('/reservice-request-suggestion', requireAdmin, async (req, res, next)
       return res.status(400).json({ error: 'customerId required' });
     }
     const suggestion = await reserviceOfficeRequest.pickSuggestion(db, customerId);
-    res.json({ suggestion });
+    // enabled stays true for Schedule tabs opened before the gate came out (they hide the box without it).
+    res.json({ enabled: true, suggestion });
   } catch (err) { next(err); }
 });
 
@@ -25243,7 +25244,8 @@ router.get('/cancel-call-notice', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'customerId required' });
     }
     const call = await require('../services/call-cancel-guard').latestCancelCall(customerId);
-    res.json({ call });
+    // enabled stays true for Schedule tabs opened before the gate came out (they hide the notice without it).
+    res.json({ enabled: true, call });
   } catch (err) { next(err); }
 });
 

@@ -3112,7 +3112,8 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
     res.json({
-      properties, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
+      // canChangeAppointmentAddress stays true for Schedule tabs opened before the gate came out (they hide the picker without it).
+      properties, canChangeAppointmentAddress: true, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
       // Read once here so the panel mounts per-row area editors only when on.
       propertyServiceAreas: require('../services/property-service-areas').propertyServiceAreasEnabled(),
       // GATE_LAWN_RECLAIMED_HALF_N: the panel mounts the reclaimed-water control only while it is on; off, the key is not sent at all.
