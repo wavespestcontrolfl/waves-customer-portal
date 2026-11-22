@@ -347,6 +347,10 @@ async function priceGift(trx, cand, tech, run) {
  *                       pay of that week is not in the base yet: the run of a later week writes the bonus (week = that last week)
  *   (spanWaitOf)        later_check_final, week_not_paid, week_needs_review, as for the gift: every week from the start of
  *                       the 12 months to the day before the run's week that holds work has a finalized check
+ *   base_needs_review   an older check of the 12 months paid a Tech Rewards line and other line pay for an overtime week and
+ *                       kept no proven split of that overtime (tech-rewards-scoreboard.js ordinaryPremium, unsplitWeeks;
+ *                       week = the oldest such week). The base is not known to the cent, so the bonus is never paid from
+ *                       it: the office works it out by hand
  *   no_pay_on_file      no finalized check holds pay of theirs for the 12 months (pay made outside the pay runs): no bonus on
  *                       a base of nothing, and a note so the office sees it
  *   no_paycheck         as for the gift, asked with the bonus's own amount
@@ -360,7 +364,8 @@ async function priceStay(trx, cand, tech, run) {
   if (run.week_start <= lastWeek) return { wait: { reason: 'pay_week_too_early', week: lastWeek } };
   const wait = await spanWaitOf(trx, run, tech.id, span, 1);
   if (wait) return { wait };
-  const { cents: baseCents, checkIds } = await scoreboard().readStayPay(trx, tech.id, span.coversFrom, span.coversTo);
+  const { cents: baseCents, checkIds, unsplitWeeks } = await scoreboard().readStayPay(trx, tech.id, span.coversFrom, span.coversTo);
+  if (unsplitWeeks.length) return { wait: { reason: 'base_needs_review', week: unsplitWeeks[0] } };
   const amountCents = baseCents > 0
     ? calc.stayBonus({ hireDate: tech.hire_date, asOf: milestone.dueDate, priorTwelveMonthsPayCents: baseCents }).cents
     : 0;
@@ -395,6 +400,7 @@ const WAIT_WORDS = {
   other_gift_line: () => 'a December gift line that the pay run did not write is already on file for them, so check that line first',
   other_stay_line: () => 'a stay bonus line that the pay run did not write is already on file for them, so check that line first',
   no_pay_on_file: () => 'no finalized paycheck holds pay of theirs for the 12 months it is worked out from',
+  base_needs_review: (w) => `an older paycheck paid a bonus line and other line pay for the week of ${dayLabel(w.week)} and kept no split of that week's overtime between them, so work this bonus out by hand`,
 };
 
 /** What waits as of this sync, kept on the draft run's row and replaced by every sync with the gate on. */
@@ -643,7 +649,8 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {
  */
 async function waitNotes(conn, runId) {
   if (!payLinesOn() || !Object.keys(KIND_GATES).some(kindOn)) return [];
-  const row = await conn('payroll_runs').where({ id: runId }).first('status', 'tech_rewards_waits');
+  const row = await conn('payroll_runs').where({ id: runId })
+    .first('status', 'tech_rewards_waits', conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"));
   // a stored wait is read only when its kind's gate is on and its whole source key is the sync's own (ownKeyOf)
   const keyOf = (w) => ownKeyOf({ technician_id: w.technician_id, kind: w.kind, source_type: SOURCE_TYPE, source_id: w.source_id });
   const waits = (row && Array.isArray(row.tech_rewards_waits) ? row.tech_rewards_waits : [])
@@ -659,15 +666,18 @@ async function waitNotes(conn, runId) {
     .select('technicians.id', 'technicians.name', conn.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date")))
     .map((tech) => [tech.id, tech]));
   // { what, limit }: the words for the line and the last pay date that can carry it, or null when no run pays it now (a hire
-  // date on file after the gift date; a hire date taken off, so no anniversary is known)
+  // date on file after the gift date; a hire date taken off, so no anniversary is known). A stay bonus also only while THIS
+  // run is still dated for the milestone by the hire date on file (stayDueInRun): the reason was saved at the run's latest
+  // sync, and a hire date corrected since can move the anniversary out of this run's pay dates. The saved reason is then no
+  // reason of this run any more, so it is not shown beside a deadline of the new date.
   const told = (w, tech) => {
     const { key } = keyOf(w);
     if (w.kind === GIFT) {
       const year = Number(key);
       return tech.hire_date && tech.hire_date > decemberGiftDate(year) ? null : { what: KIND_WORDS[GIFT], limit: lastPayDate(year) };
     }
-    const milestone = stayMilestone(key, tech.hire_date);
-    return milestone && milestone.dueDate >= FIRST_STAY_DATE
+    const milestone = stayDueInRun(row.pay_date, tech.hire_date).some((due) => due.key === key) && stayMilestone(key, tech.hire_date);
+    return milestone
       ? { what: `${KIND_WORDS[STAY]} (${key} ${key === '1' ? 'year' : 'years'})`, limit: addStaffWorkDays(milestone.dueDate, LOOKBACK_DAYS) }
       : null;
   };

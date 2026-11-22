@@ -1507,6 +1507,60 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await notesOf(run.id)).toEqual([stayWaits('Sample Alpha', 'no finalized paycheck holds pay of theirs for the 12 months it is worked out from')]);
     });
 
+    it('never pays from an overtime split it cannot prove: an older paycheck with a bonus line, other line pay and earlier pay for the week makes the bonus wait for review, and one with no earlier pay is read from its own row', async () => {
+      const WEEK = '2026-11-09';
+      // An older check, for the week of Nov 16, with no stored split: it paid a 6.00 commission and a 6.00 gift line for WEEK
+      // (45 h worked, 5 of them overtime) and 67 of premium for the two. `earlier`: what its week row says earlier checks paid.
+      const mixedCheck = async (technicianId, earlier) => {
+        const { runId } = await paidLine(technicianId, '2026-11-16', 600, WEEK, 67, {
+          gross_cents: 88000 + 600 + 600 + 67,
+          tech_rewards_cents: 600,
+          calc_snapshot: JSON.stringify({ lineOvertimeWeeks: [{ weekStart: WEEK, workedMinutes: 2700, overtimeMinutes: 300, allocatedCents: 1200, premiumCents: 67, ...earlier }] }),
+        });
+        const check = await trx('payroll_checks').where({ run_id: runId, technician_id: technicianId }).first('id');
+        await trx('payroll_pay_lines').insert({
+          technician_id: technicianId, kind: 'december_gift', amount_cents: 600, earned_week_start: '2026-11-16', covers_from: WEEK, covers_to: '2026-11-15', status: 'paid', check_id: check.id,
+        });
+      };
+      const alpha = await stayTech('Sample Alpha');
+      const bravo = await stayTech('Sample Bravo');
+      for (const id of [alpha, bravo]) {
+        for (const week of ['2026-11-02', WEEK]) await paidWeek(id, week);
+        await approvedWeek(id, EARLY_WEEK);
+      }
+      // Alpha's row shows earlier pay for the week (6.00 of line pay, 33 of premium): the commission's part of the 67 depends on
+      // the exact earlier pay, which the row holds rounded. Not proven.
+      await mixedCheck(alpha, { earlierAllocatedCents: 600, earlierPremiumCents: 33 });
+      // Bravo's row shows none: the check priced its lines for the week alone, so the commission alone earned 33.33 -> 33
+      await mixedCheck(bravo, {});
+      const run = await draft(EARLY_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(run.id)).toEqual([stayWaits('Sample Alpha',
+        'an older paycheck paid a bonus line and other line pay for the week of Nov 9, 2026 and kept no split of that week\'s overtime between them, so work this bonus out by hand')]);
+      // Bravo: three weeks of wages, the 6.00 commission and its 33; not the gift line and not its 34. 2% of 2,646.33 = 52.93
+      expect(await lineOf(bravo)).toMatchObject({ status: 'open', amount_cents: 5293, note: `2% of $2,646.33, ${PERIOD}` });
+      // the bonus that waits never holds the run
+      await finalize(run.id);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(await lineOf(bravo)).toMatchObject({ status: 'paid', amount_cents: 5293 });
+    });
+
+    it('shows no stale wait: a hire date corrected since the run\'s last sync, to one this run is not dated for, takes the note off', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      await approvedWeek(alpha, EARLY_WEEK);
+      const run = await draft(EARLY_WEEK); // dated Dec 11, 2026
+      const note = stayWaits('Sample Alpha', 'no finalized paycheck holds pay of theirs for the 12 months it is worked out from');
+      expect(await notesOf(run.id)).toEqual([note]);
+      // Corrected to a date whose 1 year anniversary (Dec 20, 2026) is after this run's pay date. A run dated Dec 11 does not
+      // write that bonus, so the reason saved at its sync is not shown beside the new date's deadline.
+      await trx('technicians').where({ id: alpha }).update({ hire_date: '2025-12-20' });
+      expect(await notesOf(run.id)).toEqual([]);
+      // a date this run is still dated for (anniversary Dec 1) keeps the note, with that date's deadline
+      await trx('technicians').where({ id: alpha }).update({ hire_date: '2025-12-01' });
+      expect(await notesOf(run.id)).toEqual([note.replace('Jan 23, 2027', 'Jan 30, 2027')]);
+    });
+
     it('waits when no paycheck can be worked out for the technician, so a bonus alone never blocks the run', async () => {
       const alpha = await stayTech('Sample Alpha', { pay_rate: null });
       const bravo = await stayTech('Sample Bravo');
