@@ -68,6 +68,32 @@ describe('completion estimate evidence', () => {
     expect(names(acceptedPricing(listPriceRow, { manualName: 'Military Discount' }))).toEqual([['Military Discount', 15.95, true]]);
   });
 
+  // Saved engine rows keep the list price on the row and the tier on the estimate's recurring block. Before, such a
+  // line's saving had no name, so a Platinum plan's invoice printed one net line (production estimate, 2026-11-22).
+  test('a list-price row with no tier record takes the estimate\'s tier when its rate is the whole saving', () => {
+    const row = (perApplicationPrice, sourceLine = {}) => ({ ...line, perApplicationPrice, parentRecurringDiscounted: true,
+      sourceLine: { perTreatment: 120, annualAfterDiscount: perApplicationPrice * 4, ...sourceLine } });
+    const names = (quote) => quote.discounts.map(({ name, dollars, percent, named }) => [name, dollars, percent, named]);
+    const platinum = { tierDiscounted: true, estimateTier: { tier: 'platinum', amount: 0.2 } };
+    expect(names(acceptedPricing(row(96), platinum))).toEqual([['WaveGuard Platinum', 24, 20, true]]);
+    // The engine discounts the annual: a few cents either way are still the tier's.
+    expect(names(acceptedPricing(row(96.03), platinum))).toEqual([['WaveGuard Platinum', 23.97, 20, true]]);
+    expect(names(acceptedPricing(row(95.96), platinum))).toEqual([['WaveGuard Platinum', 24.04, 20, true]]);
+    // A saving that is not the tier's rate, a service credit, or an estimate with no tier rate stays unnamed.
+    const unnamed = (dollars) => [['Accepted estimate discount', dollars, undefined, false]];
+    expect(names(acceptedPricing(row(108), platinum))).toEqual(unnamed(12));
+    expect(names(acceptedPricing(row(90), platinum))).toEqual(unnamed(30));
+    expect(names(acceptedPricing(row(96, { serviceSpecificDiscounts: [{ amount: 24 }] }), platinum))).toEqual(unnamed(24));
+    expect(names(acceptedPricing(row(96), { tierDiscounted: true, estimateTier: null }))).toEqual(unnamed(24));
+    expect(names(acceptedPricing(row(96), { tierDiscounted: true, estimateTier: { tier: 'platinum', amount: 0 } }))).toEqual(unnamed(24));
+    // The line's own record still wins over the estimate's.
+    expect(names(acceptedPricing(row(102, { discount: { appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.15 }] } }), platinum)))
+      .toEqual([['WaveGuard Gold', 18, 15, true]]);
+    // One-time work never takes the recurring tier.
+    expect(acceptedPricing({ source: 'one_time', price: 96, sourceLine: { priceBeforeDiscount: 120, priceAfterDiscount: 96 } }, platinum).discounts)
+      .toEqual([{ name: 'Accepted estimate discount', dollars: 24, named: false }]);
+  });
+
   describe('acceptedVisitBreakdown', () => {
     const estimate = { id: 'e1', customer_id: 'c1', property_id: 'p1', status: 'accepted', waveguard_tier: 'Silver',
       estimate_data: { summary: { manualDiscount: { amount: 19.8, recurringAmount: 19.8, label: 'Military Discount' } } } };
@@ -98,6 +124,22 @@ describe('completion estimate evidence', () => {
       expect(await reason(visit, fakeDb({ addons: [{ id: 'a1' }] }))).toBe('add_ons');
       expect(await reason(visit, fakeDb({ estimateRow: { ...estimate, status: 'sent' } }))).toBe('estimate_not_accepted');
       expect(await reason(visit, fakeDb({ estimateRow: { ...estimate, estimate_data: {} } }))).toBe('discount_unnamed');
+    });
+
+    // The saved engine shape: the list price on the row, the tier and the rate the accept used on the recurring block.
+    test('a list-price row prints the estimate\'s tier at its saved rate; any other saving on it keeps one line', async () => {
+      adminCustomers.scheduleLinesFromEstimate.mockReturnValue([{ ...estimateLine, perApplicationPrice: 88,
+        sourceLine: { perTreatment: 110, annualAfterDiscount: 352 } }]);
+      const billed = { ...visit, estimated_price: 88 };
+      const platinum = (recurring, extra = {}) => ({ ...estimate, waveguard_tier: 'Platinum', estimate_data: { result: { recurring }, ...extra } });
+      const read = (estimateRow) => acceptedVisitBreakdown(billed, { database: fakeDb({ estimateRow }) });
+      expect(await read(platinum({ tier: 'Platinum', discount: 0.2 }))).toEqual({ breakdown: {
+        base: 110, amount: 88, discounts: [{ name: 'WaveGuard Platinum', dollars: 22 }] } });
+      // The rate saved at accept decides, not today's tier table.
+      expect((await read(platinum({ tier: 'Platinum', discount: 0.1 }))).reason).toBe('discount_unnamed');
+      // A staff discount on recurring work shares the saving; Bronze has no tier saving.
+      expect((await read(platinum({ tier: 'Platinum', discount: 0.2 }, { summary: estimate.estimate_data.summary }))).reason).toBe('discount_unnamed');
+      expect((await read({ ...platinum({ tier: 'Platinum', discount: 0.2 }), waveguard_tier: 'Bronze' })).reason).toBe('discount_unnamed');
     });
 
     // A multi-program accept leaves each first visit unpriced; the first bill covers it at the accepted price.

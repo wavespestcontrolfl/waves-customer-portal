@@ -105,29 +105,51 @@ function waveGuardTierName(tier) {
 }
 
 // What names an accepted estimate's savings: its own staff discount (applied after the tier) when that reaches
-// recurring work, and whether the estimate carries a WaveGuard tier saving at all.
+// recurring work, whether the estimate carries a WaveGuard tier saving at all, and that tier with the rate the accept
+// priced it at (estimate-public.js tierDiscountForEstimate, read as the accept reads it). `estimateTier` is null when a
+// staff discount reaches recurring work: that discount shares each line's saving, so the tier alone cannot name it.
 function estimateDiscountContext(estimate) {
   if (!estimate) return {};
-  const { normalizeManualDiscountSummary } = require('../routes/estimate-public');
-  const manual = normalizeManualDiscountSummary(object(estimate.estimate_data));
+  const { normalizeManualDiscountSummary, tierDiscountForEstimate } = require('../routes/estimate-public');
+  const data = object(estimate.estimate_data);
+  const manual = normalizeManualDiscountSummary(data);
   const reachesRecurring = !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
+  const tier = String(estimate.waveguard_tier || '').trim().toLowerCase();
+  const tierDiscounted = ['silver', 'gold', 'platinum'].includes(tier);
+  const savedRate = Number(object(object(data.result || data).recurring).discount);
   return {
     manualName: reachesRecurring ? String(manual.label || '').trim() || null : null,
-    tierDiscounted: ['silver', 'gold', 'platinum'].includes(String(estimate.waveguard_tier || '').trim().toLowerCase()),
+    tierDiscounted,
+    estimateTier: tierDiscounted && !reachesRecurring ? { tier,
+      amount: tierDiscountForEstimate(data, estimate.waveguard_tier, Number.isFinite(savedRate) ? savedRate : null) } : null,
   };
 }
 
-// One line's accepted saving split into the discounts that made it: the WaveGuard tier recorded on the line, then the
-// estimate's staff discount. `named` is false for a part the estimate does not name (a service credit, a tier saving on
-// a list-price row with no per-line record, anything else unexplained): the card shows it, an invoice never prints it.
-function acceptedDiscountRows(raw, base, savings, { manualName = null, tierDiscounted = false } = {}) {
+function tierSavingsOn(base, rate) {
+  return rate > 0 && rate <= 1 ? money(base - applyDiscount(base, 'percentage', rate * 100)) : null;
+}
+
+// The tier record that names a line's saving. The one on the line wins. Saved engine rows keep the tier on the
+// estimate's recurring block instead, with the list price on the row: such a line takes the estimate's tier only when
+// that tier's rate on the list price is the whole saving (to the engine's rounding) and no service credit shares it.
+function namingTier(raw, base, savings, estimateTier, credited) {
+  const lineTier = (object(raw.discount).appliedDiscounts || []).find((item) => item.type === 'waveguard');
+  if (lineTier || credited || !estimateTier) return lineTier || null;
+  const tierSavings = tierSavingsOn(base, Number(estimateTier.amount));
+  return tierSavings !== null && Math.abs(Math.round((savings - tierSavings) * 100)) <= TIER_ROUNDING_CENTS ? estimateTier : null;
+}
+
+// One line's accepted saving split into the discounts that made it: the WaveGuard tier (namingTier), then the
+// estimate's staff discount. `named` is false for a part the estimate does not name (a service credit, a list-price
+// row's saving that is not the estimate's tier rate, anything else unexplained): the card shows it, an invoice never
+// prints it.
+function acceptedDiscountRows(raw, base, savings, { manualName = null, tierDiscounted = false, estimateTier = null } = {}) {
   if (!(savings > 0)) return [];
-  const tier = (object(raw.discount).appliedDiscounts || []).find((item) => item.type === 'waveguard');
-  const tierRate = Number(tier?.amount);
-  const tierSavings = tierRate > 0 && tierRate <= 1
-    ? money(base - applyDiscount(base, 'percentage', tierRate * 100)) : null;
   const credited = (Array.isArray(raw.serviceSpecificDiscounts) ? raw.serviceSpecificDiscounts : [])
     .some((credit) => Number(credit?.amount) > 0);
+  const tier = namingTier(raw, base, savings, estimateTier, credited);
+  const tierRate = Number(tier?.amount);
+  const tierSavings = tierSavingsOn(base, tierRate);
   const rows = [];
   let rest = savings;
   if (tierSavings !== null) {
