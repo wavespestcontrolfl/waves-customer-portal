@@ -184,6 +184,19 @@ describe('nudgeEmailWithOffer (the referral_nudge email)', () => {
     }
   });
 
+  test('a body that holds the seeded sentence twice has every copy swapped: no copy of the old promise is left', () => {
+    const twiceHtml = `${HTML_SEED}\n${HTML_SEED}`;
+    const twiceText = `${TEXT_SEED} ${TEXT_SEED}`;
+    for (const o of [offer, { refereeCents: 0, memberCents: 0, atLimit: false }, { ...offer, refereeCents: 0 }]) {
+      for (const [body, html] of [[twiceHtml, true], [twiceText, false]]) {
+        const swapped = step2.nudgeEmailWithOffer(body, { html, ...o });
+        expect(swapped).not.toMatch(/you each get/);
+        expect(swapped).not.toContain(html ? step2.NUDGE_SEEDED.html : step2.NUDGE_SEEDED.text);
+      }
+    }
+    expect(step2.nudgeEmailWithOffer(twiceHtml, { html: true, ...offer }).split(APPROVED_HTML).length).toBe(3);
+  });
+
   test('a body an admin rewrote is returned as stored', () => {
     const edited = '<p>Know a neighbor? Send them your link and we\'ll thank you both.</p>';
     expect(step2.nudgeEmailWithOffer(edited, { html: true, ...offer })).toBe(edited);

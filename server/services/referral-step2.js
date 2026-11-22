@@ -171,18 +171,18 @@ const nudgeEmailOffer = (offer, html) => {
 };
 
 // `body` is the stored step body (html or text); `offer` = { refereeCents, memberCents, atLimit } from a decision made
-// with the gate on. A body without the seeded sentence is returned as stored.
+// with the gate on. A body without the seeded sentence is returned as stored. EVERY occurrence is swapped (a body
+// with the seeded paragraph pasted twice must not keep one copy of the old promise); split/join, never a replacement
+// string, because the words hold "$".
 function nudgeEmailWithOffer(body, { html = false, ...offer }) {
   const text = String(body ?? '');
   const seeded = html ? NUDGE_SEEDED.html : NUDGE_SEEDED.text;
-  const at = text.indexOf(seeded);
-  if (at < 0) return text;
+  if (!text.includes(seeded)) return text;
   const words = nudgeEmailOffer(offer, html);
-  const rest = text.slice(at + seeded.length);
   // The text body's seeded stretch starts at a dash: it becomes the end of the sentence before it.
-  if (!html) return `${text.slice(0, at)}.${words ? ` ${words}` : ''}${rest}`;
+  if (!html) return text.split(seeded).join(`.${words ? ` ${words}` : ''}`);
   // No sentence left: the space before the seeded sentence goes too.
-  return words ? `${text.slice(0, at)}${words}${rest}` : `${text.slice(0, at).replace(/ $/, '')}${rest}`;
+  return words ? text.split(seeded).join(words) : text.split(` ${seeded}`).join('').split(seeded).join('');
 }
 
 // The Automations preview page's one-line summary (never sent), from the same credits as the body.
