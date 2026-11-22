@@ -340,10 +340,24 @@ async function buildReferralLink(customerId) {
   if (!promoter?.referral_link) {
     return { url: null, line: '', reason: 'Could not build a referral link for this customer' };
   }
-  // GATE_REFERRAL_STEP2: the friend's credit from the live row read above (0 = today's line: gate off, or no amount).
+  // GATE_REFERRAL_STEP2: the friend's credit from the live row read above (0 = today's line: gate off, paused, or no
+  // amount). The line states it only for a code with an owner the Referrals queue can name (referral-inbound
+  // customerForCode, the same rule as the friend page in routes/referral-links.js): a household promoter can belong
+  // to an archived sibling profile, and the office could then confirm no referrer for the friend. A failed lookup
+  // is a no. Gate off: no lookup.
+  let friendCents = step2FriendCreditCentsOf(liveSettings);
+  if (friendCents > 0) {
+    try {
+      const { customerForCode } = require('./referral-inbound');
+      if (!promoter.referral_code || !(await customerForCode(promoter.referral_code))) friendCents = 0;
+    } catch (err) {
+      logger.warn(`[composer-links] referral code owner lookup failed (customerId=${customerId}, code=${err?.code || 'none'})`);
+      friendCents = 0;
+    }
+  }
   return {
     url: promoter.referral_link,
-    line: composerReferralLine(promoter.referral_link, step2FriendCreditCentsOf(liveSettings)),
+    line: composerReferralLine(promoter.referral_link, friendCents),
   };
 }
 

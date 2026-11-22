@@ -25,6 +25,7 @@ jest.mock('../services/referral-engine', () => ({
   getLiveSettings: jest.fn(async () => ({ program_active: true })),
   step2FriendCreditCentsOf: jest.fn(() => 0),
 }));
+jest.mock('../services/referral-inbound', () => ({ customerForCode: jest.fn(async () => ({ id: 'c1' })) }));
 // buildConsultationLink's own lead-resolution logic (customerId vs a
 // caller-supplied leadId override) is what this file tests; the SMS-
 // template render + fallback contract is lead-consultation-link.test.js's.
@@ -148,6 +149,7 @@ jest.mock('../models/db', () => mockDb);
 const { openBalanceSummary } = require('../services/open-balance');
 const { combinedEligibleSiblings } = require('../services/pay-combined');
 const { resolvePromoter, getLiveSettings, step2FriendCreditCentsOf } = require('../services/referral-engine');
+const { customerForCode } = require('../services/referral-inbound');
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { requestAutopaySetupLink, setupLinkIneligibility } = require('../services/autopay-setup-link');
 const { isEnabled } = require('../config/feature-gates');
@@ -493,27 +495,47 @@ describe('buildReferralLink', () => {
 
   test('GATE_REFERRAL_STEP2 off (no amount): the insert is today\'s line exactly', async () => {
     const link = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
-    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_link: link }, alreadyEnrolled: true });
+    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_code: 'WAVES-ABC12345', referral_link: link }, alreadyEnrolled: true });
     step2FriendCreditCentsOf.mockClear();
     getLiveSettings.mockClear();
+    customerForCode.mockClear();
     const r = await buildReferralLink('c1');
     expect(r.line).toBe(`Know someone who needs pest control? Share Waves here: ${link}\n\n`);
-    // One settings read: the amount comes from the row the program check already read.
+    // One settings read: the amount comes from the row the program check already read. No owner lookup.
     expect(getLiveSettings).toHaveBeenCalledTimes(1);
     expect(step2FriendCreditCentsOf).toHaveBeenCalledWith({ program_active: true });
+    expect(customerForCode).not.toHaveBeenCalled();
   });
 
   test('GATE_REFERRAL_STEP2 on: the insert names the friend\'s credit from the live amount, on one line, with no STOP line', async () => {
     const link = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
-    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_link: link }, alreadyEnrolled: true });
+    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_code: 'WAVES-ABC12345', referral_link: link }, alreadyEnrolled: true });
     step2FriendCreditCentsOf.mockReturnValueOnce(5000);
+    customerForCode.mockClear();
     const r = await buildReferralLink('c1');
+    expect(customerForCode).toHaveBeenCalledWith('WAVES-ABC12345');
     expect(r.url).toBe(link);
     expect(r.line).toBe(`Know someone who needs pest or lawn care? They get a $50 credit after their first plan service with your link: ${link}\n\n`);
     // Owner 2026-11-22 "no line" (docs/sms-stop-line-policy.md, deliberate exceptions). One line, so the composer
     // removes the whole insert by its link.
     expect(r.line).not.toMatch(/STOP/i);
     expect(r.line.trimEnd().split('\n')).toHaveLength(1);
+  });
+
+  // A household promoter can belong to an archived sibling profile (resolvePromoter's household fallback reads
+  // archived profiles too). The Referrals queue names no referrer for such a code, so nothing would pay the credit.
+  test.each([
+    ['the code has no owner the Referrals queue can name', 'WAVES-ABC12345', () => customerForCode.mockResolvedValueOnce(null)],
+    ['the owner lookup fails', 'WAVES-ABC12345', () => customerForCode.mockRejectedValueOnce(new Error('db down'))],
+    ['the promoter row has no code', null, () => {}],
+  ])('GATE_REFERRAL_STEP2 on, %s: the link with today\'s line, which promises nothing', async (_name, code, arrange) => {
+    const link = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
+    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_code: code, referral_link: link }, alreadyEnrolled: true, household: true });
+    step2FriendCreditCentsOf.mockReturnValueOnce(5000);
+    arrange();
+    const r = await buildReferralLink('c2');
+    expect(r.url).toBe(link);
+    expect(r.line).toBe(`Know someone who needs pest control? Share Waves here: ${link}\n\n`);
   });
 
   test('a non-conflict enroll failure answers the plain reason', async () => {
