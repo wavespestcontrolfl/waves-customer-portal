@@ -248,14 +248,22 @@ function dateProblem(v, date, ctx) {
   return null;
 }
 
+/**
+ * A visit carries work a run does not move: the line of its own service, or of one of its add-ons, is not in the
+ * run's lines (null = unknown service). A row with no `line` field goes with its series.
+ */
+const carriesOtherLine = (v, lines) => (v.line !== undefined && !lines.includes(v.line))
+  || (v.addon_lines || []).some((line) => !lines.includes(line));
+
 /** Why a visit that must change date cannot (the app keeps it still), or null. */
 function stayStillReason(v, from, facts) {
   if (!v.recurring_parent_id) return 'first_visit';
   if (v.is_recurring !== true) return 'booster_visit';
   if (v.technician_id !== from) return v.technician_id ? 'other_technician' : 'unassigned';
-  // One appointment changed to a service this run does not move (lawn, rodent exclusion): it stays with --from on its
-  // date, so a projection that needs it re-dated keeps the customer whole. `facts.lines` = the run's --lines.
-  if (facts.lines && v.line !== undefined && !facts.lines.includes(v.line)) return 'visit_other_line';
+  // One appointment changed to a service this run does not move (lawn, rodent exclusion), or carrying such an add-on:
+  // it stays with --from on its date, so a projection that needs it re-dated keeps the customer whole.
+  // `facts.lines` = the run's --lines.
+  if (facts.lines && carriesOtherLine(v, facts.lines)) return 'visit_other_line';
   return facts.stayStill.get(v.id) || null;
 }
 
@@ -537,5 +545,5 @@ async function decideWeekend(db, { plan, parents, visits, from, to, workDays, st
 }
 
 module.exports = {
-  decideWeekend, MIN_DAYS_OUT, effectiveWindowEnd, isMonthBased, candidateDates, projectChain, changeLabel, spanOf, resolveWeekendMoves, loadWeekendFacts, anchorChange,
+  decideWeekend, carriesOtherLine, MIN_DAYS_OUT, effectiveWindowEnd, isMonthBased, candidateDates, projectChain, changeLabel, spanOf, resolveWeekendMoves, loadWeekendFacts, anchorChange,
 };

@@ -237,13 +237,30 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     const moving = await handover.planHandover(knex, args);
     expect(moving.ids.series).toContain(pest.id);
     expect(moving.retemplate_by_line.termite).toBeUndefined();
-    expect(moving.capability_lines).toEqual(['general', 'termite']);
+    // The other customer's pest visit carries a rodent bait add-on: rodent work the hire must be able to take.
+    expect(moving.capability_lines).toEqual(['general', 'rodent', 'termite']);
     await knex('technician_capabilities').insert({ technician_id: hireD, service_category: 'termite', capability_level: 'review_required', active: false });
     await expect(handover.planHandover(knex, args)).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
     // Leaving termite out keeps the bait customer whole, so nothing of the Off line moves: allowed.
     const without = await handover.planHandover(knex, { ...args, lines: NO_TERMITE });
-    expect(without.capability_lines).toEqual(['general']);
+    expect(without.capability_lines).toEqual(['general', 'rodent']);
     expect(without.ids.series).not.toContain(pest.id);
+    // An add-on of a line the run does not move keeps its visit with the owner: a sealing add-on in every run, the
+    // rodent bait add-on in a run that leaves rodent out. A sealing add-on on a parent row keeps that series whole.
+    const sealedVisit = await child(rodentPest, '2099-07-08', on());
+    await knex('scheduled_service_addons').insert({ scheduled_service_id: sealedVisit.id, service_name: 'Rodent Exclusion', service_key_snapshot: 'rodent_exclusion' });
+    const sealedSeries = await series(await customer(), on());
+    await child(sealedSeries, '2099-07-09', on());
+    await knex('scheduled_service_addons').insert({ scheduled_service_id: sealedSeries.id, service_name: 'Rodent Exclusion', service_key_snapshot: 'rodent_exclusion' });
+    const withAddons = await handover.planHandover(knex, { ...args, lines: NO_TERMITE });
+    expect(withAddons.ids.visits).toContain(visitWithRodentBait.id);
+    expect(withAddons.ids.visits).not.toContain(sealedVisit.id);
+    expect(withAddons.skipped.visit_other_line).toEqual({ series: 1, visits: 1 });
+    expect(withAddons.skipped.addon_other_line).toEqual({ series: 1, visits: 1 });
+    expect(withAddons.ids.retemplate).not.toContain(sealedSeries.id);
+    const noRodent = await handover.planHandover(knex, { ...args, lines: ['general', 'mosquito'] });
+    expect(noRodent.ids.visits).not.toContain(visitWithRodentBait.id);
+    expect(noRodent.capability_lines).toEqual(['general']);
 
     // The customer mark decides, for both rules. Another owner's customer whose only bait add-on sits on a COMPLETED
     // visit of last month is a bait customer: a run without termite keeps them whole, and a run with termite needs

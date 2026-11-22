@@ -103,6 +103,11 @@
 //            line is not in --lines (a pest series visit changed to lawn or to rodent
 //            exclusion) stays with --from (visit_other_line). A visit whose own line
 //            moves under another movable line adds that line to the capability check.
+//            An ADD-ON is work of its own line too (scheduled_service_addons, read by
+//            its own service): a visit with an add-on of a line not in --lines stays
+//            with --from (visit_other_line); a series whose PARENT row has one stays
+//            whole (addon_other_line: the scheduler copies the parent row's add-ons
+//            onto each new visit); the add-on lines that move join the capability check.
 //   VISITS   the parent row (when still ahead) plus its children
 //            (recurring_parent_id = parent). OPEN = status pending | confirmed |
 //            rescheduled (the app's "not started" set) and track_state not
@@ -370,6 +375,9 @@ function noteCandidate(byCustomer, p, isCandidate) {
   byCustomer.set(p.customer_id, entry);
 }
 
+/** The lines of the work one moved row carries: its add-ons', and for a visit its own. */
+const workLines = (row, own) => [...(own ? [row.line] : []), ...(row.addon_lines || [])];
+
 /** The dry run's per-line counter: series under their template line, visits under their OWN line. */
 const lineCount = (plan, line) => plan.would_change.by_line[line] || (plan.would_change.by_line[line] = { series: 0, visits: 0 });
 
@@ -406,6 +414,7 @@ function recordWeekendDecisions(plan, weekend) {
  *   today     YYYY-MM-DD (ET)
  *   liveSeriesIds  series ids with a LIVE row (the reader's whereVisitRowLive query)
  *   baitAddonSeriesIds  series ids with a termite bait add-on on a visit (the reader's add-on query)
+ *   parents and visits may carry `addon_lines`: the lines of their add-ons (the same query; null = unknown service)
  *   lines     lines to move (subset of MOVABLE_LINES)
  *   parents   [{ id, status, customer_id, line, catalog_key, service_key_snapshot, service_type, technician_id,
  *               recurring_technician_id, recurring_technician_override, recurring_ongoing }]
@@ -514,6 +523,9 @@ function buildPlan({
     ['outside_zips', outsideZips(zips)],
     // Owner 2026-11-21: bait customers move with termite. Only a run that leaves termite out keeps them whole (2026-10-25 rule).
     ['termite_bait_customer', (p) => termiteOut && baitCustomers.has(p.customer_id)],
+    // An add-on on the parent row is copied onto each new visit: one of a line this run does not move keeps the
+    // series. After the bait rule, so a bait customer is still counted as one.
+    ['addon_other_line', (p) => (p.addon_lines || []).some((line) => !lines.includes(line))],
   ];
   // Why an in-scope visit stays where it is: the first rule it meets. None = it moves
   // (or stays with --from on a target day off).
@@ -524,9 +536,9 @@ function buildPlan({
     ['unassigned_left', (v) => !v.technician_id],
     ['other_technician', (v) => v.technician_id !== from],
     ['bad_date', (v) => dayOfWeekOfDate(v.scheduled_date) === null],
-    // Last: only a visit that would otherwise move. Its own line (the reader sets it; null = unknown) is not a line
-    // this run moves. A row with no `line` field goes with its series.
-    ['visit_other_line', (v) => v.line !== undefined && !lines.includes(v.line)],
+    // Last: only a visit that would otherwise move. Its own line, or an add-on's (the reader sets both; null =
+    // unknown), is not a line this run moves. A row with no `line` field goes with its series.
+    ['visit_other_line', (v) => weekendMoves.carriesOtherLine(v, lines)],
   ];
   // What happens to one visit of an in-scope series: the first rule it stays for, 'off_day' (it stays with --from on a
   // target day off) or 'move'. The weekend-customer test and the moves read the same answer.
@@ -572,6 +584,8 @@ function buildPlan({
     plan.series.retemplate += 1;
     bump(plan.retemplate_by_line, p.line);
     plan.ids.retemplate.push(p.id);
+    // The parent row's add-ons seed onto the visits --to gets: their lines are work --to must be able to take.
+    workLines(p, false).forEach((line) => movedVisitLines.add(line));
 
     let moved = 0;
     for (const { v, outcome } of outcomes) {
@@ -583,7 +597,7 @@ function buildPlan({
         skip(outcome, p.id);
       } else {
         moved += 1;
-        movedVisitLines.add(v.line);
+        workLines(v, true).forEach((line) => movedVisitLines.add(line));
         recordMove(plan, p, v, kind, { weekend, dateMoveCustomers });
       }
     }
@@ -678,21 +692,37 @@ async function loadLiveSeriesIds(db, parentIds, today) {
   return [...live];
 }
 
-// The series with a termite bait ADD-ON on any of their non-cancelled visits, or on their PARENT row in any
-// status: the scheduler copies the parent row's due add-ons onto each new visit (admin-schedule.js auto-extend),
-// and a series whose parent row was cancelled can still be live through its children.
-async function loadBaitAddonSeriesIds(db, parentIds) {
-  const out = new Set();
+// Every ADD-ON on the series' non-cancelled visits, or on their PARENT row in any status: the scheduler copies the
+// parent row's due add-ons onto each new visit (admin-schedule.js auto-extend), and a series whose parent row was
+// cancelled can still be live through its children. `id` = the visit (or parent) row the add-on is on.
+async function loadAddons(db, parentIds) {
+  const out = [];
   for (const ids of chunks(parentIds, 1000)) {
-    const rows = await db('scheduled_service_addons as a')
+    out.push(...await db('scheduled_service_addons as a')
       .join('scheduled_services as s', 's.id', 'a.scheduled_service_id')
       .leftJoin('services as cat', 'cat.id', 'a.service_id')
       .where(function inSeries() { this.whereIn('s.recurring_parent_id', ids).orWhereIn('s.id', ids); })
       .where(function countedRow() { this.whereNot('s.status', 'cancelled').orWhereIn('s.id', ids); })
-      .select('s.id', 's.recurring_parent_id', 'a.service_key_snapshot', 'a.service_name', 'cat.service_key as catalog_key');
-    for (const r of rows) if (isTermiteBaitAddon(r)) out.add(r.recurring_parent_id || r.id);
+      .select('s.id', 's.recurring_parent_id', 'a.service_id', 'a.service_key_snapshot', 'a.service_name', 'cat.service_key as catalog_key'));
   }
-  return [...out];
+  return out;
+}
+
+/**
+ * What the planner needs from the add-ons: the series with a termite bait add-on (the customer mark), and each row's
+ * add-on lines (an add-on is read by its own service, like a visit; null = unknown service).
+ */
+async function loadAddonFacts(db, parentIds, lineOf) {
+  const addons = await loadAddons(db, parentIds);
+  const lines = new Map();
+  for (const a of addons) {
+    const line = await lineOf({ service_id: a.service_id, service_key_snapshot: a.service_key_snapshot, service_type: a.service_name });
+    lines.set(a.id, (lines.get(a.id) || new Set()).add(line));
+  }
+  return {
+    baitAddonSeriesIds: [...new Set(addons.filter(isTermiteBaitAddon).map((a) => a.recurring_parent_id || a.id))],
+    addonLinesOf: (rowId) => [...(lines.get(rowId) || [])],
+  };
 }
 
 /** Read everything the planner needs and plan. `db` is a knex handle (or transaction). Reads only. */
@@ -799,7 +829,8 @@ async function planHandover(db, {
     v.line = await lineOf(v);
   }
   const liveSeriesIds = await loadLiveSeriesIds(db, parentIds, today);
-  const baitAddonSeriesIds = await loadBaitAddonSeriesIds(db, parentIds);
+  const { baitAddonSeriesIds, addonLinesOf } = await loadAddonFacts(db, parentIds, lineOf);
+  [...parents, ...visits].forEach((row) => { row.addon_lines = addonLinesOf(row.id); });
   const plan = await planWithWeekend(db, {
     from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits,
     liveSeriesIds, baitAddonSeriesIds, zips, territory,
@@ -880,7 +911,7 @@ function printPlan(plan, { list }) {
   out.push('  (the second handover run, --weekend-move, moves these customers and their dates)');
   out.push('');
   out.push('Skipped, by reason (series / visits):');
-  const reasons = ['other_line', 'no_line', 'outside_zips', 'termite_bait_customer', 'off_day_customer', ...Object.keys(plan.skipped).filter((r) => r.startsWith('weekend_kept_')), 'visit_other_line', 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
+  const reasons = ['other_line', 'no_line', 'outside_zips', 'addon_other_line', 'termite_bait_customer', 'off_day_customer', ...Object.keys(plan.skipped).filter((r) => r.startsWith('weekend_kept_')), 'visit_other_line', 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
   let any = false;
   for (const r of reasons) {
     const s = plan.skipped[r];

@@ -117,6 +117,34 @@ describe('second-tech-handover planner', () => {
     expect(plan([termite], [visit(termite, MON)]).ids.visits).toHaveLength(1);
   });
 
+  test('an add-on is work of its own line: it keeps a visit or a series with the owner, or joins the capability check', () => {
+    // A pest series. One visit carries a sealing add-on (the owner's work), one a rodent bait add-on (the hire's).
+    const pest = parent({ customer_id: 'C-addon' });
+    const sealing = visit(pest, MON, { line: 'general', addon_lines: ['exclusion'] });
+    const baitStations = visit(pest, TUE, { line: 'general', addon_lines: ['rodent'] });
+    const unknown = visit(pest, WED, { line: 'general', addon_lines: [null] });
+    const plain = visit(pest, THU, { line: 'general', addon_lines: [] });
+    const p = plan([pest], [sealing, baitStations, unknown, plain]);
+    expect(new Set(p.ids.visits)).toEqual(new Set([baitStations.id, plain.id]));
+    expect(p.skipped.visit_other_line).toEqual({ series: 1, visits: 2 });
+    expect(p.capability_lines).toEqual(['general', 'rodent']);
+    // A run that leaves rodent out keeps the bait-station visit with the owner too.
+    const noRodent = plan([pest], [sealing, baitStations, unknown, plain], { lines: ['general', 'mosquito', 'termite'] });
+    expect(noRodent.ids.visits).toEqual([plain.id]);
+    expect(noRodent.capability_lines).toEqual(['general']);
+
+    // An add-on on the PARENT row is copied onto each new visit. A lawn one keeps the series whole with the owner;
+    // a rodent one moves, and the hire must take rodent work also when no visit moves now.
+    const lawnTemplate = parent({ customer_id: 'C-addon-lawn', addon_lines: ['lawn'] });
+    const kept = plan([lawnTemplate], [visit(lawnTemplate, MON, { line: 'general' })]);
+    expect(kept.ids.retemplate).toEqual([]);
+    expect(kept.skipped.addon_other_line).toEqual({ series: 1, visits: 1 });
+    const rodentTemplate = parent({ customer_id: 'C-addon-rodent', addon_lines: ['rodent'] });
+    const moved = plan([rodentTemplate], []);
+    expect(moved.ids.retemplate).toEqual([rodentTemplate.id]);
+    expect(moved.capability_lines).toEqual(['general', 'rodent']);
+  });
+
   test('an off-day visit of another line still marks its customer a weekend customer: the series keeps that weekday', () => {
     // A termite series on Fridays (a day off for the hire); staff changed the one appointment ahead to lawn. The visit
     // stays with the owner either way, but a moved template would seed the next Friday visits to the hire.
@@ -1143,6 +1171,9 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     expect((await run([lawnVisit], { facts: withLines(lawnVisit, ['general', 'termite']) })).kept.get(lawnVisit.customer_id)).toBe('visit_other_line');
     const pestVisit = series(SAT, { count: 1, visitExtra: { line: 'general' } });
     expect((await run([pestVisit], { facts: withLines(pestVisit, ['general', 'termite']) })).kept.has(pestVisit.customer_id)).toBe(false);
+    // The same for a pest visit with a sealing add-on.
+    const sealingAddon = series(SAT, { count: 1, visitExtra: { line: 'general', addon_lines: ['exclusion'] } });
+    expect((await run([sealingAddon], { facts: withLines(sealingAddon, ['general', 'termite']) })).kept.get(sealingAddon.customer_id)).toBe('visit_other_line');
     const first = series(SAT, { count: 1 });
     first.series[0].live[0].recurring_parent_id = null;
     expect((await run([first])).kept.get(first.customer_id)).toBe('first_visit');
