@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Banking → Cash forecast tab (GATE_CASH_FORECAST): what the owner reads and what each editor sends.
+// Banking → Cash forecast tab: what the owner reads and what each editor sends.
 // Synthetic numbers only.
 import React from "react";
 import "@testing-library/jest-dom/vitest";

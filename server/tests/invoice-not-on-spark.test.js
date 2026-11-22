@@ -5,7 +5,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
-  invoiceNotOnSparkLive: jest.fn(() => true),
   alertEpisodesLive: jest.fn(() => true),
 }));
 jest.mock('../services/admin-alert-episodes', () => ({
@@ -36,7 +35,6 @@ const list = (rows, win = WIN) => buildVendorList(rows, { okLabels: OK, ...win }
 
 beforeEach(() => {
   jest.clearAllMocks();
-  gates.invoiceNotOnSparkLive.mockReturnValue(true);
   gates.alertEpisodesLive.mockReturnValue(true);
 });
 
@@ -203,14 +201,6 @@ describe('runInvoiceNotOnSpark', () => {
   const database = jest.fn();
   const now = new Date('2026-11-05T15:00:00Z');
   const base = { database, now, okLabels: OK };
-
-  test('gate off: no read, no bell', async () => {
-    gates.invoiceNotOnSparkLive.mockReturnValue(false);
-    await expect(Spark.runInvoiceNotOnSpark({ ...base })).resolves.toEqual({ skipped: 'disabled' });
-    expect(database).not.toHaveBeenCalled();
-    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
-    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
-  });
 
   test('no account list: one log line, no read, no bell, no close', async () => {
     await expect(Spark.runInvoiceNotOnSpark({ ...base, okLabels: new Set() })).resolves.toEqual({ skipped: 'no_ok_accounts' });
