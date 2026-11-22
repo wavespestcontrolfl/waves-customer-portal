@@ -1592,6 +1592,21 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
     expect(screen.getByText('Promised follow-up:')).toBeInTheDocument();
   });
 
+  it('asks staff to check the service and billing terms when the card carries no price', () => {
+    show(payload({}, { stated_price: null }));
+    expect(screen.getByText(/Check the service and its billing terms on the call, then book it/)).toBeInTheDocument();
+    expect(screen.queryByText(/Book it with its price/)).not.toBeInTheDocument();
+  });
+
+  it('flags an off-hour time for an on-hour start, on the visit and on a promised follow-up', () => {
+    show(payload({}, { booking_window_start: '10:30', booking_off_hour: true, follow_up: { scheduled_date: '2026-12-05', window_start: '14:30', suggested: false, off_hour: true } }));
+    expect(screen.getByText(/2026-11-21 at 10:30 ET\. Visits start on the hour: confirm an on-hour start/)).toBeInTheDocument();
+    expect(screen.getByText(/Visit 2 was promised for 2026-12-05 at 14:30\. Visits start on the hour/)).toBeInTheDocument();
+    cleanup();
+    show(payload());
+    expect(screen.queryByText(/Visits start on the hour/)).not.toBeInTheDocument();
+  });
+
   it('always tells staff to check the schedule before they book, so a visit booked since is never doubled', () => {
     show(payload());
     expect(screen.getByText('Before you book:')).toBeInTheDocument();

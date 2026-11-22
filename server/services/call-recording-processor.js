@@ -1956,6 +1956,12 @@ function callEmailCheckCardPayload(callEmailCheck) {
 // review-state marker so review_status opens. The two copies differed ONLY
 // in their skippedReason string. One helper, called from both sites — never
 // awaited from inside the caller's own db.transaction (this opens its own).
+// True for an 'HH:MM' start that is not on the hour (visits start on the hour).
+function offTheHour(windowStart) {
+  const minutes = /^\d{1,2}:(\d{2})/.exec(String(windowStart || ''));
+  return !!minutes && minutes[1] !== '00';
+}
+
 // A house-number recovery task (the admin-triage settlement) on the same card
 // carries a follow-up and an on-file address of its own. The agreed job's card
 // is a new ask, so both of its writes clear them (its follow-up rides in
@@ -13211,12 +13217,23 @@ const CallRecordingProcessor = {
     // promoted can still carry another job's label), so the lead, the call
     // record and the office card name one job. agreedJobRewriteHeld records it:
     // the booking is then held for the office.
+    // The labels it replaced are recorded with adoption's (pre_adoption_service_fields),
+    // so the offline audits rebuild the V1 view: the pass inside adoption adds them to
+    // serviceFieldsAdopted; a later pass adds them to the record already written
+    // (recorded V1 values are kept).
     let agreedJobRewriteHeld = false;
+    const agreedJobRewriteFields = new Set();
     const recurringRulePass = (view) => {
       if (agreedJobAtAdoption && agreedJobHoldChangesService(view, transcription, bookableServiceNames)) {
         agreedJobRewriteHeld = true;
         const service = v2Result.extraction.service_request.specific_service_name;
+        const replaced = ['matched_service', 'specific_service_name'].filter((key) => view[key] !== service);
+        replaced.forEach((key) => agreedJobRewriteFields.add(key));
         view = { ...view, matched_service: service, specific_service_name: service };
+        const recorded = view.pre_adoption_service_fields;
+        if (replaced.length && recorded && typeof recorded === 'object' && !Array.isArray(recorded)) {
+          view = { ...view, pre_adoption_service_fields: { ...preAdoptionServiceFields(preAdoptionExtracted, replaced), ...recorded } };
+        }
       }
       return applyRecurringIntentDefault(view, transcription, bookableServiceNames, agreedJobAtAdoption);
     };
@@ -13241,7 +13258,7 @@ const CallRecordingProcessor = {
         // like the enforce path's approved-booking re-assert (codex P2).
         if (!isOutboundCall(call)) extracted = recurringRulePass(extracted);
       }
-      serviceFieldsAdopted = [...new Set([...adoption.adoptedFields, ...agreedServiceFields])];
+      serviceFieldsAdopted = [...new Set([...adoption.adoptedFields, ...agreedServiceFields, ...agreedJobRewriteFields])];
       adoptedV2Extraction = v2Result.extraction;
     }
     // The V1 values of the service fields adoption replaced ride on the canonical
@@ -22704,13 +22721,16 @@ const CallRecordingProcessor = {
                     // The slot the booker resolved (Eastern date and hour), not the raw timestamp.
                     booking_date: scheduledDate || null,
                     booking_window_start: windowStart || null,
+                    // Visits start on the hour: a time the call set at :30 is for staff to confirm.
+                    booking_off_hour: offTheHour(windowStart),
                     stated_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,
                     price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,
                     // A follow-up the call did not set (the catalog interval, visit 1's
                     // hour, or a two-treatment package nobody discussed) is a suggestion.
                     follow_up: callFollowUpPlan
                       ? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,
-                        suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true }
+                        suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true,
+                        off_hour: offTheHour(callFollowUpPlan.windowStart) }
                       : null,
                   };
                   agreedJobCardFiled = await fileSkippedBookingCard({
@@ -24521,7 +24541,17 @@ const CallRecordingProcessor = {
           || appointmentResult?.scheduleError
           || appointmentResult?.error
           || (!customerId ? 'booked_call_without_customer' : 'auto_booking_not_created');
-        try {
+        if (skipReason === 'agreed_one_time_job_office_books') {
+          // The agreed job's first write failed: retry through its own writer,
+          // which holds the claim (FOR UPDATE) through the write, with the same
+          // evidence, so a superseded worker never publishes an older pass's.
+          await fileSkippedBookingCard({
+            call, procToken, customerId, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
+            skippedReason: skipReason, preferredDateTime: extracted.preferred_date_time,
+            serviceType: appointmentResult?.service || extracted.matched_service || extracted.requested_service || null,
+            bridgeNeedsConfirmation, callSid, agreedOneTimeJob: agreedJobCardEvidence,
+          });
+        } else try {
           // A standing task (open OR claimed) is REFRESHED with the current
           // service / window under the triage-call lock, as the shadow-mode
           // fallback does: a claimed conflict card that cannot record a newly
@@ -24539,8 +24569,6 @@ const CallRecordingProcessor = {
                 extraction: v2ApprovedExtraction,
                 extraPayload: {
                   skipped_reason: String(skipReason).slice(0, 300),
-                  agreed_one_time_job: skipReason === 'agreed_one_time_job_office_books' ? agreedJobCardEvidence : null,
-                  ...(skipReason === 'agreed_one_time_job_office_books' ? AGREED_JOB_CARD_CLEARS : {}),
                   missing_fields: appointmentResult?.missingFields || null,
                   existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,
                   preferred_date_time: extracted.preferred_date_time || null,
@@ -27035,6 +27063,7 @@ CallRecordingProcessor._test = {
   agreedJobHoldChangesService,
   adoptAgreedOneTimeService,
   agreedOneTimeJobCardPrice,
+  offTheHour,
   callBookingTimeSanityFlags,
 };
 

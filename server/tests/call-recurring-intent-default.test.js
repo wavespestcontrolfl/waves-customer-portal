@@ -752,7 +752,15 @@ describe('an agreed one-time job keeps its one-time service (owner 2026-11-22, G
       const helper = src.slice(src.indexOf('const recurringRulePass = (view) => {'), src.indexOf('let serviceFieldsAdopted = [];'));
       expect(helper).toContain('if (agreedJobAtAdoption && agreedJobHoldChangesService(view, transcription, bookableServiceNames)) {');
       expect(helper).toContain('agreedJobRewriteHeld = true;');
-      expect(helper).toContain("const service = v2Result.extraction.service_request.specific_service_name;\n        view = { ...view, matched_service: service, specific_service_name: service };");
+      // The labels it replaced are recorded, so the offline audits rebuild the V1 view: inside adoption with
+      // serviceFieldsAdopted, at a later pass on the record already written (recorded V1 values kept).
+      expect(helper).toContain("const replaced = ['matched_service', 'specific_service_name'].filter((key) => view[key] !== service);");
+      expect(helper).toContain('view = { ...view, pre_adoption_service_fields: { ...preAdoptionServiceFields(preAdoptionExtracted, replaced), ...recorded } };');
+      expect(src).toContain('serviceFieldsAdopted = [...new Set([...adoption.adoptedFields, ...agreedServiceFields, ...agreedJobRewriteFields])];');
+      // preAdoptionExtracted exists before the helper is defined.
+      expect(src.indexOf('const preAdoptionExtracted = { ...extracted };')).toBeLessThan(src.indexOf('const recurringRulePass = (view) => {'));
+      expect(helper).toContain('const service = v2Result.extraction.service_request.specific_service_name;');
+      expect(helper).toContain('view = { ...view, matched_service: service, specific_service_name: service };');
       expect(src).toContain('&& (agreedServiceFields.length > 0 || agreedJobRewriteHeld || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));');
       // The commercial judges read as before: they run before the customer is resolved.
       expect(count('views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every(')).toBe(2);
@@ -790,7 +798,7 @@ describe('an agreed one-time job keeps its one-time service (owner 2026-11-22, G
       // The labels replaced here are recorded with the fields adoption replaces, for the offline audits.
       expect(src.slice(src.indexOf(put), adoption))
         .toContain("agreedServiceFields = ['matched_service', 'specific_service_name'].filter((key) => agreedService[key] !== extracted[key]);");
-      expect(count('serviceFieldsAdopted = [...new Set([...adoption.adoptedFields, ...agreedServiceFields])];')).toBe(1);
+      expect(count('serviceFieldsAdopted = [...new Set([...adoption.adoptedFields, ...agreedServiceFields, ...agreedJobRewriteFields])];')).toBe(1);
       // Nothing stores the V1 view between the first pass and adoption.
       expect(src.slice(firstPass, adoption)).not.toContain('ai_extraction: JSON.stringify(extracted)');
     });

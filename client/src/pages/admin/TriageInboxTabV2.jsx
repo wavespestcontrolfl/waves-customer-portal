@@ -138,18 +138,23 @@ function agreedOneTimeJobRows(p) {
   const slot = (date, time) => `${String(date).slice(0, 10)}${time ? ` at ${String(time).slice(0, 5)}` : ""}`;
   const price = typeof j.stated_price === "number" ? fmtMoney(j.stated_price) : null;
   return [
-    { label: "Why", value: "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price." },
+    // No price: the booking resolved to another service (a covered re-service, say), or none was clear.
+    { label: "Why", value: price
+      ? "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price."
+      : "Staff priced a one-time job on the call, so the AI did not book it. Check the service and its billing terms on the call, then book it." },
     // The card holds what the call said. Nothing later rewrites it, as on every approved-but-unbooked card.
     { label: "Before you book", value: "Check the customer's schedule. Staff or a later pass may have booked, moved or cancelled a visit for this call: never book a second one." },
     p.service && { label: "Book", value: p.service },
-    j.booking_date && { label: "Agreed time", value: `${slot(j.booking_date, j.booking_window_start)} ET` },
+    j.booking_date && { label: "Agreed time", value: `${slot(j.booking_date, j.booking_window_start)} ET${j.booking_off_hour === true ? ". Visits start on the hour: confirm an on-hour start with the customer." : ""}` },
     typeof j.street_level_address === "string" && { label: "Address", value: `Google matched only the street of ${j.street_level_address || "the address on file"}. Confirm the house number with the customer before you book.` },
     price && (j.price_basis === "agreed_total"
       ? { label: "Agreed price", value: `${price} one-time, the total the caller accepted on the call.` }
       : { label: "Staff said", value: `${price} one-time. Check the terms on the call before you set the visit's price.` }),
     j.follow_up && j.follow_up.scheduled_date && (j.follow_up.suggested === true
       ? { label: "Suggested follow-up", value: `Visit 2 around ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. The call did not set this time: confirm it with the customer before you book it.` }
-      : { label: "Promised follow-up", value: `Visit 2 was promised for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. Book it with the first visit.` }),
+      : j.follow_up.off_hour === true
+        ? { label: "Promised follow-up", value: `Visit 2 was promised for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. Visits start on the hour: confirm an on-hour start with the customer, then book it with the first visit.` }
+        : { label: "Promised follow-up", value: `Visit 2 was promised for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. Book it with the first visit.` }),
   ];
 }
 

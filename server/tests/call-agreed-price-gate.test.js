@@ -403,11 +403,14 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(call).toContain("street_level_address: typeof svc.__held.streetLevelAddress === 'string' ? svc.__held.streetLevelAddress : null,");
     expect(source).toContain("return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };");
     expect(call).toContain('booking_window_start: windowStart || null,');
+    // Visits start on the hour: an off-hour time the call set is flagged for staff to confirm.
+    expect(call).toContain('booking_off_hour: offTheHour(windowStart),');
+    expect(call).toContain('off_hour: offTheHour(callFollowUpPlan.windowStart) }');
     expect(call).toContain('stated_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,');
     expect(call).toContain('price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,');
     expect(call).toContain('? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,');
     // A follow-up time the call did not set is a suggestion on the card, not a promise.
-    expect(call).toContain('suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true }');
+    expect(call).toContain('suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true,');
     expect(call).toContain('agreedJobCardFiled = await fileSkippedBookingCard({');
     expect(call).toContain('agreedOneTimeJob: agreedJobCardEvidence,');
     // The card writer: the evidence is ONE key, written on every pass (null for another skip), so an older
@@ -442,7 +445,14 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(count("if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');")).toBe(1);
     expect(count('agreedJobCardFiled = ')).toBe(2); // false at the start, the writer's answer
     const fallback = source.slice(source.indexOf('const heldReasons = new Set('));
-    expect(fallback).toContain("skipped_reason: String(skipReason).slice(0, 300),\n                  agreed_one_time_job: skipReason === 'agreed_one_time_job_office_books' ? agreedJobCardEvidence : null,\n                  ...(skipReason === 'agreed_one_time_job_office_books' ? AGREED_JOB_CARD_CLEARS : {}),");
+    // The retry goes through the card's own writer (the claim locked through the write), with the same evidence;
+    // the inline fallback writer carries none of the agreed job's keys.
+    expect(fallback).toContain("if (skipReason === 'agreed_one_time_job_office_books') {\n          // The agreed job's first write failed");
+    expect(fallback).toContain('bridgeNeedsConfirmation, callSid, agreedOneTimeJob: agreedJobCardEvidence,\n          });\n        } else try {');
+    expect(fallback).not.toContain('agreed_one_time_job: skipReason');
+    const writerAt = source.indexOf('async function fileSkippedBookingCard(');
+    expect(source.slice(writerAt, source.indexOf('function agreedOneTimeJobCardPrice(', writerAt)))
+      .toContain("const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');");
     const { buildTriageItem } = require('../services/call-routing-gates');
     // No card reason of its own.
     expect(buildTriageItem({ callLogId: 1, flag: 'agreed_one_time_job_office_books', extraction: {} }).category).toBe('service_unknown');
@@ -466,6 +476,16 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
   test('no later pass writes visit details onto the agreed-job card', () => {
     expect(source).not.toContain('noteAgreedJobCardVisit');
     expect(source).not.toContain('visit_candidate');
+  });
+
+  test('offTheHour: true only for a start that is not on the hour', () => {
+    const { offTheHour } = require('../services/call-recording-processor')._test;
+    expect(offTheHour('10:30')).toBe(true);
+    expect(offTheHour('09:15:00')).toBe(true);
+    expect(offTheHour('10:00')).toBe(false);
+    expect(offTheHour('17:00:00')).toBe(false);
+    expect(offTheHour(null)).toBe(false);
+    expect(offTheHour('')).toBe(false);
   });
 
   // The card's price belongs to the service the call priced, with what kind of price it is.
