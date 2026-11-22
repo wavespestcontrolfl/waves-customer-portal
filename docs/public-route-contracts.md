@@ -6676,7 +6676,12 @@ row on every hit and redirects with `?ref=`; a legacy
 an unknown code redirects home. On a promoter hit, a crawler, link-preview,
 scanner or empty user agent (`utils/bot-ua.js` plus the empty check) still
 redirects and gets a row with `device_type` 'bot', but is never a unique
-click and never raises `total_clicks`).
+click and never raises `total_clicks`. The `?ref=` redirect goes to the
+website homepage. With `GATE_REFERRAL_FRIEND_PAGE` on it goes to the
+website's friend page `/referrer/` instead, and only while the live Step 2
+friend credit equals the amount that page states and the code has a live
+owner (`referral-inbound.js` `customerForCode`); the code, the click row
+and every other answer are the same).
 The estimate `/data` response includes `verifiedStaffPreview: true` only
 when `adminPreview=1` is accompanied by a valid staff bearer token. The
 customer SPA uses that verified field (or the existing verified
