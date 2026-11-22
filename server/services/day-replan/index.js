@@ -634,6 +634,24 @@ async function replayPrefs(conn, plan) {
 }
 
 /**
+ * S1, the replay of the day's recent bookings, or null when it fails. It only measures, so its failure must not take
+ * the rest of the record with it: on a packed day the record's figures are the plan the night wrote, and the morning
+ * notification reads the day from them.
+ */
+async function replayOrNull(conn, env, plan, { techId, bounds }) {
+  try {
+    return replayRecentBookings({
+      groups: plan.rowGroups, prefById: await replayPrefs(conn, plan), now: plan.dayContext.now, origin: plan.origin,
+      marginMin: DEFAULT_OPTIONS.marginMin, bounds, rowHours,
+      blockedHours: blockedHoursFor(plan.dayContext.allRows, techId, env.techBlind), blocks: plan.blocks,
+    });
+  } catch (err) {
+    logger.warn(`[day-replan] close-gaps: the booking replay failed (${err.message}); the record is written without it`);
+    return null;
+  }
+}
+
+/**
  * The close-gaps record for one planned tech-day (./close-gaps.js; owner 2026-11-18). P1 is the plan the night writes
  * since 2026-11-22; the rest only measures. It never throws: a failure leaves the row's close_gaps null, and the
  * night's plan row is written either way.
@@ -651,11 +669,7 @@ async function measureCloseGaps(conn, env, plan, { techId }) {
       now: nowFig,
       packed,
       p1: measurePack(plan, { nowFig, packed, sims }),
-      s1: replayRecentBookings({
-        groups: plan.rowGroups, prefById: await replayPrefs(conn, plan), now: plan.dayContext.now, origin: plan.origin,
-        marginMin: DEFAULT_OPTIONS.marginMin, bounds, rowHours,
-        blockedHours: blockedHoursFor(plan.dayContext.allRows, techId, env.techBlind), blocks: plan.blocks,
-      }),
+      s1: await replayOrNull(conn, env, plan, { techId, bounds }),
       gaps: lockedGaps(nowFig, new Map(plan.entries.map((e) => [String(e.row.id), e.why]))),
     };
   } catch (err) {

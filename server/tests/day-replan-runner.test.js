@@ -12,7 +12,10 @@ jest.mock('../services/day-replan/planner', () => {
 // The close-gaps measurement runs for real; one test makes it throw, one forces the pack verdict.
 jest.mock('../services/day-replan/close-gaps', () => {
   const actual = jest.requireActual('../services/day-replan/close-gaps');
-  return { ...actual, openTime: jest.fn(actual.openTime), planSims: jest.fn(actual.planSims), packVerdict: jest.fn(actual.packVerdict) };
+  return {
+    ...actual, openTime: jest.fn(actual.openTime), planSims: jest.fn(actual.planSims), packVerdict: jest.fn(actual.packVerdict),
+    replayRecentBookings: jest.fn(actual.replayRecentBookings),
+  };
 });
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
@@ -562,6 +565,22 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('packed=1'));
     // Shadow: the run never wrote a visit.
     expect(calls.filter(([table, op]) => table === 'scheduled_services' && ['update', 'insert', 'del'].includes(op))).toEqual([]);
+  });
+
+  test('a booking replay that fails does not take the packed day\'s record with it: the plan, its P1 and its figures stay, s1 is null', async () => {
+    require('../services/day-replan/close-gaps').replayRecentBookings.mockImplementationOnce(() => { throw new Error('replay boom'); });
+    const rows = [row('a', 0.020, 8), row('b', 0.021, 11), row('c', 0.022, 15)];
+    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
+    const out = await runDayReplanIfEnabled({ now: NOW, conn });
+    expect(out).toMatchObject({ status: 'completed', accepted: 1, packed: 1 });
+    expect(inserts[0].row).toMatchObject({ accepted: true, reason: 'packed' });
+    const rec = record(inserts[0]);
+    expect(rec.p1).toMatchObject({ plan: 'pack', wouldAccept: true });
+    // The morning notification reads the written day from these figures.
+    expect(rec.now).toBeTruthy();
+    expect(rec.packed).toEqual(rec.p1.packed);
+    expect(rec.s1).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('the booking replay failed (replay boom)'));
   });
 
   test('the pack plan is simulated with the day\'s schedule blocks, as the drive-best plan is (Codex #7935)', async () => {
