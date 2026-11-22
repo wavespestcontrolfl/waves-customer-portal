@@ -1164,11 +1164,22 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   // GATE_DOC_CROSS_SELL_EMAIL (owner 2026-11-21): one closing line pointing
   // at the receipt page's add-a-service / referral cards — only the cards that
   // page will show this customer (services/receipt-cards.js), never a price.
+  // The line is a pitch inside an operational email, so it follows the
+  // customer's marketing choices (email-division's embedded-pitch rule): a
+  // customer who turned offers off, takes marketing by text only, or
+  // unsubscribed from marketing email gets the receipt without it.
   // Best-effort: no line on any failure.
   let offerLine = null;
   if (require('../config/feature-gates').isEnabled('docCrossSellEmail')) {
-    const cards = await require('./receipt-cards').receiptCardsForInvoiceId(invoice.id);
-    offerLine = require('./doc-offer-email-line').docOfferEmailLine({ ...cards, url: receiptUrl, place: 'receipt' });
+    try {
+      const { embeddedPitchAllowed } = require('./email-division/eligibility');
+      if (await embeddedPitchAllowed({ customerId: invoice.customer_id, email: recipient.email })) {
+        const cards = await require('./receipt-cards').receiptCardsForInvoiceId(invoice.id);
+        offerLine = require('./doc-offer-email-line').docOfferEmailLine({ ...cards, url: receiptUrl, place: 'receipt' });
+      }
+    } catch (err) {
+      logger.warn(`[invoice-email] offer line skipped (code=${err?.code || 'none'})`);
+    }
   }
 
   if (sendgrid.isConfigured()) {

@@ -177,6 +177,40 @@ describe('writeOrRefreshCtaRequest', () => {
     expect(onWrite).toHaveBeenCalledTimes(1);
   });
 
+  // A public link's tap reads its own eligibility again here (receipt and
+  // tracker cards, #8262): inside the transaction, with the customer row
+  // locked, before the writer reads or writes anything.
+  describe('afterLock hook (a caller\'s second eligibility read)', () => {
+    test('runs on the transaction after the customer lock and before the open-row read', async () => {
+      const { db, ops } = fakeDb();
+      const seen = [];
+      const afterLock = jest.fn(async (trx) => {
+        seen.push({ isTrx: typeof trx === 'function', lookups: ops.lookups.map((l) => l.table), inserts: ops.inserts.length });
+      });
+      await writeOrRefreshCtaRequest(db, { ...ARGS, afterLock });
+      expect(afterLock).toHaveBeenCalledTimes(1);
+      expect(seen).toEqual([{ isTrx: true, lookups: ['customers'], inserts: 0 }]);
+      expect(ops.inserts).toHaveLength(1);
+    });
+
+    test.each([
+      ['no open row', null],
+      ['an open row to refresh', { id: 'req-1', source: 'service_report', subject: 'old', pricing_revision: '{}' }],
+    ])('a throw writes nothing and reaches the caller (%s)', async (_label, existing) => {
+      const { db, ops } = fakeDb({ existing });
+      const onWrite = jest.fn();
+      const withRow = jest.fn();
+      const refused = Object.assign(new Error('tap no longer eligible'), { tapIneligible: true });
+      await expect(writeOrRefreshCtaRequest(db, {
+        ...ARGS, onWrite, withRow, afterLock: async () => { throw refused; },
+      })).rejects.toBe(refused);
+      expect(ops.inserts).toHaveLength(0);
+      expect(ops.updates).toHaveLength(0);
+      expect(onWrite).not.toHaveBeenCalled();
+      expect(withRow).not.toHaveBeenCalled();
+    });
+  });
+
   describe('withRow hook (click-to-estimate seam)', () => {
     test('fires on an insert with the written row and no prior revision', async () => {
       const { db } = fakeDb();

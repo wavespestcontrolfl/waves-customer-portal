@@ -3527,11 +3527,17 @@ payload is unchanged. The payer check reads every place a payer can sit: the
 receipt reads its invoice, the account, and the job by both links an invoice
 carries (`invoices.scheduled_service_id` and the service record's); the
 tracker reads the job, the account, and any invoice of the visit (by
-`scheduled_service_id` or by the visit's service record). A receipt with no
+`scheduled_service_id` or by ANY service record of the visit, not only the
+newest). A receipt with no
 `service_record_id`, or (receipt and tracker alike) a visit whose report is
 not customer-deliverable (`structured_notes.typedReportDelivery` other than
-`auto_send`; `reportSuppressedForCustomer`), carries `referral` alone and its
-cross-sell tap is 404. A priced card for a customer with no recurring plan
+`auto_send`; `reportSuppressedForCustomer`), or whose service record belongs
+to another customer id than the link's own (the tap files its request for
+the record's customer), carries `referral` alone and its
+cross-sell tap is 404. The `referral` key is built for the link's own
+customer (`composeReferralCard({ customerId })`), so with
+`GATE_REFERRAL_STEP2` on it carries that customer's offer line and follows
+their yearly limit, as on the report. A priced card for a customer with no recurring plan
 (`relationship: 'start'`) is headed "Start {service}", never "Add {service}
 to your plan"; the email line says the same. The taps
 (`POST /api/receipt/:token/cross-sell` | `/referral-link`, `POST
@@ -3550,7 +3556,10 @@ slash (Express's own route matching), so a dark route never answers 429 and
 a malformed token never reaches a limiter; the same guard puts the privacy
 headers on every answer to a tap, a limiter 429 included; 5 a minute per token; a
 complaint-driven (callback) visit carries neither card and its taps 404 while
-`GATE_RESERVICE_REPORT_COPY` is on (the report's rule);
+`GATE_RESERVICE_REPORT_COPY` is on (the report's rule); the flag is read on
+the service record AND on the job (`scheduled_services.is_callback`: the
+receipt by both job links, the tracker on its own visit row), so a callback
+with no service record is covered;
 a receipt tap never records a receipt view. The receipt page shows the
 per-application price; the report card stays price-free (owner 2026-10-05).
 
@@ -3572,6 +3581,32 @@ shared office request for the offer shown and, with
 tap returns the account's own share link. Production, read-only,
 2026-11-22: 0 of 556 paid invoices have no `paid_at`; 0 of 839 completed
 visits with a tracker link have no expiry.
+
+Commit path of a receipt or tracker card tap (the AGENTS.md rule "the commit
+path re-checks the preflight read"): each of the four taps reads its
+eligibility twice. The route reads it before the tap. The write then opens
+one transaction, locks the customer row (`customers ... FOR UPDATE`), and
+reads the same eligibility again ON THAT TRANSACTION before any row is
+written: the live gate (`isEnabled('docCrossSell')` at call time), the
+token's own row, the 7 days or the link expiry, the payer and service
+contact checks, the callback rule, and (cross-sell) that the offer's visit
+record is still the one the route read. A second read that says no answers
+the route's own generic 404 and writes nothing: no `service_requests` row,
+no estimate, no office bell, no promoter row. The seams are
+`writeOrRefreshCtaRequest`'s `afterLock(trx)`, `handleCrossSellTap`'s
+`stillEligible(trx)` with `surface.notFoundBody`, and
+`referralShareIfStillEligible` (the customer lock, the second read, then
+`buildReferralShareForCustomer(customerId, { conn: trx })`). The service
+report's own tap passes no second read and is unchanged.
+Recorded exception, deliberate: the second read takes NO row lock on the
+invoice or the visit. Invoice settlement holds the invoice and takes the
+visit `FOR UPDATE NOWAIT` (`invoice-helpers.js#lockVisitForSettlement`), so
+a share lock held by a card tap would fail a payment with `visit_busy`, and
+both lock orders already exist in the repo. The customer row, which carries
+the service contact and account payer checks, is the locked row; the
+invoice and visit facts are read fresh on the transaction right before the
+write. Do not ask for `forShare()` / `forUpdate()` on `invoices` or
+`scheduled_services` here; the card suites fail a tap that takes one.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the

@@ -194,6 +194,8 @@ describe('service report email recipient delivery', () => {
       .mockResolvedValue({ serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', option: { perVisit: 62 } });
     const referralSpy = jest.spyOn(require('../services/referral-share'), 'composeReferralCard')
       .mockResolvedValue({ headline: 'Know someone?', cta: 'Send My Referral Link' });
+    const pitchSpy = jest.spyOn(require('../services/email-division/eligibility'), 'embeddedPitchAllowed')
+      .mockResolvedValue(true);
     try {
       const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
       EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
@@ -204,10 +206,53 @@ describe('service report email recipient delivery', () => {
       expect(byEmail['tenant@example.com'].text).not.toMatch(/lawn care|refer a friend/i);
       expect(byEmail['tenant@example.com'].text).toContain('Follow Waves on social:');
       for (const append of Object.values(byEmail)) expect(append.text).not.toContain('$');
+      // The line is a pitch: it asks the account holder's marketing email
+      // choice, for the holder's own address.
+      expect(pitchSpy).toHaveBeenCalledWith({ customerId: 'customer-1', email: 'owner@example.com' });
+      // The customer's own referral card (GATE_REFERRAL_STEP2 offer line).
+      expect(referralSpy).toHaveBeenCalledWith({ customerId: 'customer-1' });
     } finally {
       gateSpy.mockRestore();
       offerSpy.mockRestore();
       referralSpy.mockRestore();
+      pitchSpy.mockRestore();
+    }
+  });
+
+  // Pre-push audit P1 (2026-11-22): a customer who turned offers off, takes
+  // marketing by text only, or unsubscribed from marketing email still gets
+  // the report email, without the add-a-service line.
+  test.each([
+    ['says no', (spy) => spy.mockResolvedValue(false)],
+    ['cannot be read', (spy) => spy.mockRejectedValue(new Error('db blip'))],
+  ])('the marketing email choice %s: the report still sends, with no offer line', async (_label, arrange) => {
+    const gates = require('../config/feature-gates');
+    const gateSpy = jest.spyOn(gates, 'isEnabled')
+      .mockImplementation((key) => ['docCrossSellEmail', 'reportCrossSell'].includes(key));
+    const tap = require('../services/service-report/cross-sell-tap');
+    const offerSpy = jest.spyOn(tap, 'buildCrossSellForServiceRecord')
+      .mockResolvedValue({ serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', option: { perVisit: 62 } });
+    const referralSpy = jest.spyOn(require('../services/referral-share'), 'composeReferralCard')
+      .mockResolvedValue({ headline: 'Know someone?', cta: 'Send My Referral Link' });
+    const pitchSpy = jest.spyOn(require('../services/email-division/eligibility'), 'embeddedPitchAllowed');
+    arrange(pitchSpy);
+    try {
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+      const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      expect(result.ok).toBe(true);
+      expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+      for (const [args] of EmailTemplateLibrary.sendTemplate.mock.calls) {
+        expect(args.bodyAppend.text).not.toMatch(/lawn care|refer a friend/i);
+        expect(args.bodyAppend.text).toContain('Follow Waves on social:');
+      }
+      expect(offerSpy).not.toHaveBeenCalled();
+      expect(referralSpy).not.toHaveBeenCalled();
+    } finally {
+      gateSpy.mockRestore();
+      offerSpy.mockRestore();
+      referralSpy.mockRestore();
+      pitchSpy.mockRestore();
     }
   });
 

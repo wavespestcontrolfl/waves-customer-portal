@@ -53,11 +53,14 @@ function loadReceiptCardRow(where, database = db) {
       'i.id', 'i.customer_id', 'i.status', 'i.paid_at', 'i.payer_id', 'i.service_record_id',
       'c.payer_id as customer_payer_id',
       'ij.payer_id as invoice_job_payer_id', 'rj.payer_id as record_job_payer_id',
-      'sr.structured_notes as visit_structured_notes',
+      'sr.structured_notes as visit_structured_notes', 'sr.customer_id as record_customer_id',
       'c.email as customer_email', 'c.phone as customer_phone',
       'c.first_name as customer_first_name', 'c.company_name as customer_company_name',
       'np.billing_email', 'np.billing_contact_name',
+      // A callback is flagged on the service record and on the job; a
+      // receipt can reach its job with no service record at all.
       'sr.is_callback as visit_is_callback',
+      'ij.is_callback as invoice_job_is_callback', 'rj.is_callback as record_job_is_callback',
       ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
     );
 }
@@ -71,7 +74,9 @@ function receiptCardsEligible(row) {
   if (!isEnabled('docCrossSell') || !row?.customer_id || row.status !== 'paid') return false;
   if (!withinReceiptCardWindow(row.paid_at)) return false;
   const { reserviceReportCopyGateOn } = require('./service-report/reservice-report');
-  if (reserviceReportCopyGateOn() && row.visit_is_callback === true) return false;
+  const callback = row.visit_is_callback === true
+    || row.invoice_job_is_callback === true || row.record_job_is_callback === true;
+  if (reserviceReportCopyGateOn() && callback) return false;
   // The receipt goes where the receipt email goes: the account holder, or a
   // distinct billing contact (who must not start the plan or enroll as the
   // homeowner's promoter). Same resolver as resolveReceiptEmailRecipient.
@@ -90,10 +95,13 @@ function receiptCardsEligible(row) {
 
 // The visit the receipt's OFFER is built from and tapped against, or null:
 // an eligible receipt, for a visit, whose report reaches the customer (an
-// office-only report gives no offer; the referral card still shows). One
-// answer for the page, the email line and the tap.
+// office-only report gives no offer; the referral card still shows). The
+// visit must be this invoice's own customer's: the tap files its request
+// for the visit's customer. One answer for the page, the email line and the
+// tap.
 function receiptOfferRecordId(row) {
   if (!receiptCardsEligible(row) || !row.service_record_id) return null;
+  if (row.record_customer_id !== row.customer_id) return null;
   const { reportSuppressedForCustomer } = require('./service-report/cross-sell-tap');
   return reportSuppressedForCustomer(row.visit_structured_notes) ? null : row.service_record_id;
 }
@@ -109,7 +117,9 @@ async function cardsForReceiptRow(row, database = db) {
       const crossSell = await buildCrossSellForServiceRecord(database, offerRecordId);
       if (crossSell) cards.crossSell = crossSell;
     }
-    const referral = await require('./referral-share').composeReferralCard();
+    // The customer's own card: with GATE_REFERRAL_STEP2 on, the report's
+    // per-customer reward decision.
+    const referral = await require('./referral-share').composeReferralCard({ customerId: row.customer_id });
     if (referral) cards.referral = referral;
     return cards;
   } catch (err) {

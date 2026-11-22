@@ -14,7 +14,9 @@
 jest.mock('../models/db', () => jest.fn());
 
 const db = require('../models/db');
-const { eligibleForEmail, resolveMarketingClass, REASONS } = require('../services/email-division/eligibility');
+const {
+  eligibleForEmail, resolveMarketingClass, REASONS, embeddedPitchAllowed,
+} = require('../services/email-division/eligibility');
 
 const NOW = new Date('2026-09-28T15:00:00Z'); // Mon Sep 28, 11:00 ET
 
@@ -397,6 +399,56 @@ describe('email-division eligibility', () => {
     const r = await evalWith({ tables: { customers: chain({ firstError: new Error('connection reset') }) } });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe(REASONS.LOOKUP_FAILED);
+  });
+
+  // The receipt and service-report emails (#8262) are sent outside this
+  // pipeline and carry one add-a-service line. They ask the same question
+  // the pipeline answers as checks.allowPitch.
+  describe('embeddedPitchAllowed: a pitch line inside an operational email', () => {
+    const MARKETING_UNSUBSCRIBE = {
+      email: 'sandy@example.test', group_key: 'marketing_newsletter', suppression_type: 'unsubscribe', status: 'active',
+    };
+    const allowed = ({
+      prefs = { marketing_offers: true }, suppressions = [], email = 'sandy@example.test', customerId = 'cust-1',
+    } = {}) => {
+      db.mockImplementation((table) => {
+        const map = {
+          notification_prefs: chain({ first: prefs }),
+          email_suppressions: chain({ result: suppressions }),
+        };
+        if (!map[table]) throw new Error(`Unexpected db table ${table}`);
+        return map[table];
+      });
+      return embeddedPitchAllowed({ customerId, email });
+    };
+
+    test('offers on, a marketing channel that includes email, no marketing unsubscribe: yes', async () => {
+      expect(await allowed()).toBe(true);
+      expect(await allowed({ prefs: { marketing_offers: true, marketing_channel: 'both' } })).toBe(true);
+    });
+
+    test.each([
+      ['offers turned off', { prefs: { marketing_offers: false } }],
+      ['offers never chosen', { prefs: { marketing_offers: null } }],
+      ['no prefs row', { prefs: null }],
+      ['marketing by text only', { prefs: { marketing_offers: true, marketing_channel: 'sms' } }],
+      ['a marketing unsubscribe on the address', { suppressions: [MARKETING_UNSUBSCRIBE] }],
+      ['no address', { email: '' }],
+      ['no customer', { customerId: null }],
+    ])('%s: no', async (_label, world) => {
+      expect(await allowed(world)).toBe(false);
+    });
+
+    test.each([
+      ['offers on', {}],
+      ['offers off', { prefs: { email_enabled: true, marketing_offers: false } }],
+      ['text only', { prefs: { email_enabled: true, marketing_offers: true, marketing_channel: 'sms' } }],
+      ['unsubscribed', { suppressions: [MARKETING_UNSUBSCRIBE] }],
+    ])('it is the pipeline\'s own answer (%s)', async (_label, world) => {
+      const pipeline = await evalWith(world, { emailKey: 'lc.welcome' });
+      const prefs = world.prefs || { email_enabled: true, marketing_offers: true };
+      expect(await allowed({ ...world, prefs })).toBe(pipeline.checks.allowPitch);
+    });
   });
 
   test('LOOKUP_FAILED on an unrecognized stream (never falls through to an allow)', async () => {

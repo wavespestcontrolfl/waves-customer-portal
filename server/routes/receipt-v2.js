@@ -27,7 +27,10 @@ const { CARD_TAP_SURFACES } = require('../middleware/doc-card-tap-dark-guard');
 // in services/receipt-cards.js (shared with the receipt email's line). The
 // referral card is static copy — enrollment happens only on the explicit
 // tap (POST /:token/referral-link), never on a GET.
-const RECEIPT_SURFACE = Object.freeze({ source: 'invoice_receipt', noun: 'receipt', title: 'invoice receipt' });
+const RECEIPT_SURFACE = Object.freeze({
+  source: 'invoice_receipt', noun: 'receipt', title: 'invoice receipt',
+  notFoundBody: CARD_TAP_SURFACES.receipt.notFoundBody,
+});
 
 // Ahead of the limiter on both taps: a dark gate or a malformed token is the
 // generic 404 before any limiter count or DB read, so a probe can never tell
@@ -254,6 +257,11 @@ router.post('/:token/cross-sell', receiptCardRouteOpen, receiptCardActionLimiter
       serviceRecordId: offerRecordId,
       metadata,
       surface: RECEIPT_SURFACE,
+      // Read again inside the write: the gate, this token's invoice, the
+      // 7 days and who the receipt reaches, on current rows.
+      stillEligible: async (trx) => (
+        receiptOfferRecordId(await loadReceiptCardInvoice(req.params.token, trx)) === offerRecordId
+      ),
     });
     return res.status(status).json(body);
   } catch (err) {
@@ -269,7 +277,13 @@ router.post('/:token/referral-link', receiptCardRouteOpen, receiptCardActionLimi
   try {
     const data = await loadReceiptCardInvoice(req.params.token);
     if (!receiptCardsEligible(data)) return res.status(404).json({ error: 'Receipt not found' });
-    const share = await require('../services/referral-share').buildReferralShareForCustomer(data.customer_id);
+    // The enrollment is written under the customer lock, after the same
+    // eligibility is read again on current rows.
+    const { referralShareIfStillEligible } = require('../services/service-report/cross-sell-tap');
+    const share = await referralShareIfStillEligible(db, data.customer_id, async (trx) => {
+      const current = await loadReceiptCardInvoice(req.params.token, trx);
+      return receiptCardsEligible(current) && current.customer_id === data.customer_id;
+    });
     if (!share) return res.status(404).json({ error: 'Receipt not found' });
     if (share.unavailable) return res.status(503).json({ error: 'Referral link unavailable — please try again' });
     return res.json(share);

@@ -15,6 +15,14 @@
  * page named in the customer-facing "please refresh the …" error) and
  * `title` (the page named in the staff-facing subject and description).
  * Returns { status, body } for the route to send.
+ *
+ * A link surface (receipt, tracker) also passes `stillEligible(trx)` and
+ * `surface.notFoundBody`. The route reads the link's eligibility before the
+ * tap; `stillEligible` reads it again inside the write, with the customer
+ * row locked (AGENTS.md, public routes: the commit path re-checks the
+ * preflight read): the live gate, the token's own row, the time window and
+ * who the link reaches, all on current rows. False = the route's own 404
+ * and nothing written. The report passes neither and behaves as before.
  */
 const logger = require('../logger');
 const { stampedLine2Sql } = require('../stamped-address');
@@ -91,7 +99,9 @@ async function buildCrossSellForServiceRecord(db, serviceRecordId) {
   }
 }
 
-async function handleCrossSellTap({ db, serviceRecordId, metadata = {}, surface, recordEvent = null }) {
+async function handleCrossSellTap({
+  db, serviceRecordId, metadata = {}, surface, recordEvent = null, stillEligible = null,
+}) {
   try {
     const joined = await loadCrossSellService(db, serviceRecordId);
     const { buildReportCrossSell } = require('./cross-sell');
@@ -197,6 +207,13 @@ async function handleCrossSellTap({ db, serviceRecordId, metadata = {}, surface,
         subject: requestSubject,
         description: `Customer tapped "${crossSell.label}" on their ${surface.title} ${priceText}. Review and follow up — no customer message has been sent.`,
         revisionSnapshot,
+        ...(stillEligible ? {
+          afterLock: async (trx) => {
+            if (!(await stillEligible(trx))) {
+              throw Object.assign(new Error('tap no longer eligible'), { tapIneligible: true });
+            }
+          },
+        } : {}),
         ...(recordEvent ? {
           onWrite: async (trx) => {
             const recorded = await recordEvent(trx);
@@ -299,6 +316,11 @@ async function handleCrossSellTap({ db, serviceRecordId, metadata = {}, surface,
       return { status: 200, body: { ok: true, ...(mintedEstimate ? { estimateUrl: mintedEstimate.url } : {}) } };
     }
   } catch (err) {
+    // The link stopped being eligible between the route's read and the
+    // write: the route's own 404, nothing persisted.
+    if (err && err.tapIneligible === true) {
+      return { status: 404, body: surface.notFoundBody };
+    }
     // A mint whose recomputed price no longer matches the card is the
     // same situation as the offer-fingerprint drift above: nothing was
     // persisted (the transaction rolled back), the card refreshes.
@@ -314,7 +336,20 @@ async function handleCrossSellTap({ db, serviceRecordId, metadata = {}, surface,
 
 }
 
+// The referral tap of a link surface (receipt, tracker). The promoter row is
+// written under the customer row lock, after `stillEligible(trx)` reads the
+// link's eligibility again on that transaction (the estimate page's referral
+// tap does the same under its estimate row). → the share, { unavailable },
+// or null when the link is no longer eligible or the program is off.
+async function referralShareIfStillEligible(db, customerId, stillEligible) {
+  return db.transaction(async (trx) => {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    if (!(await stillEligible(trx))) return null;
+    return require('../referral-share').buildReferralShareForCustomer(customerId, { conn: trx });
+  });
+}
+
 module.exports = {
   handleCrossSellTap, loadCrossSellService, buildCrossSellForServiceRecord, linkReachesOnlyAccountHolder,
-  reportSuppressedForCustomer,
+  reportSuppressedForCustomer, referralShareIfStillEligible,
 };

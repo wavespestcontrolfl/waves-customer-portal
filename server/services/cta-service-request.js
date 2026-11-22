@@ -72,6 +72,10 @@ const CTA_REQUEST_SOURCES = ['service_report', 'portal_home', 'portal_chat', 'in
 // linkage the previous snapshot carried (mintedEstimate) would otherwise be
 // unreachable exactly when the hook needs it to supersede. A withRow throw
 // rolls back the whole outcome, row write included.
+// afterLock(trx) runs first inside the transaction, with the customer row
+// locked and before any read or write: the seam where a caller reads its own
+// authorization again on current rows (a public link's eligibility). A throw
+// rolls back with nothing written.
 // sameAskSubjects: the subjects one card files from its different places
 // (the portal offer card is on Home and on Billing; each subject names its
 // tab). An open row whose subject is in the list counts as the same subject,
@@ -80,10 +84,11 @@ const CTA_REQUEST_SOURCES = ['service_report', 'portal_home', 'portal_chat', 'in
 // still refreshes, whatever the subjects are.
 async function writeOrRefreshCtaRequest(db, {
   customerId, requestedService, source, subject, description, revisionSnapshot,
-  onWrite = null, withRow = null, sameAskSubjects = [],
+  onWrite = null, withRow = null, afterLock = null, sameAskSubjects = [],
 }) {
   return db.transaction(async (trx) => {
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    if (afterLock) await afterLock(trx);
     const existing = await trx('service_requests')
       .where({ customer_id: customerId, requested_service: requestedService })
       .whereIn('source', CTA_REQUEST_SOURCES)

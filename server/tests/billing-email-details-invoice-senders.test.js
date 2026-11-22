@@ -296,6 +296,66 @@ describe('invoice.receipt', () => {
   });
 });
 
+// GATE_DOC_CROSS_SELL_EMAIL (#8262): the receipt email's one add-a-service
+// line is a pitch inside an operational email, so it follows the customer's
+// marketing email choice (email-division's embedded-pitch rule; pre-push
+// audit P1 2026-11-22). The receipt itself always sends.
+describe('invoice.receipt: the add-a-service line follows the marketing email choice', () => {
+  const CARDS = {
+    crossSell: { serviceKey: 'lawn_care', label: 'Lawn Care', relationship: 'add' },
+    referral: { headline: 'Know someone?', cta: 'Send My Referral Link' },
+  };
+  let pitchSpy;
+  let cardsSpy;
+  const sendPaidReceipt = async () => {
+    mockTables({
+      ...baseTables(invoiceRow({ status: 'paid', paid_at: new Date('2026-09-29T14:00:00Z'), receipt_sent_at: null })),
+      payments: null,
+    });
+    const result = await sendReceiptEmail('inv-1');
+    return { result, args: EmailTemplates.sendTemplate.mock.calls.at(-1)?.[0] };
+  };
+
+  beforeEach(() => {
+    process.env.GATE_DOC_CROSS_SELL_EMAIL = 'true';
+    pitchSpy = jest.spyOn(require('../services/email-division/eligibility'), 'embeddedPitchAllowed');
+    cardsSpy = jest.spyOn(require('../services/receipt-cards'), 'receiptCardsForInvoiceId').mockResolvedValue(CARDS);
+  });
+  afterEach(() => {
+    delete process.env.GATE_DOC_CROSS_SELL_EMAIL;
+    pitchSpy.mockRestore();
+    cardsSpy.mockRestore();
+  });
+
+  test('a customer who takes marketing email gets the line, asked for the receipt\'s own address', async () => {
+    pitchSpy.mockResolvedValue(true);
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(pitchSpy).toHaveBeenCalledWith({ customerId: 'cust-1', email: 'customer@example.com' });
+    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan or refer a friend from your receipt: /);
+  });
+
+  test.each([
+    ['says no', () => pitchSpy.mockResolvedValue(false)],
+    ['cannot be read', () => pitchSpy.mockRejectedValue(new Error('db blip'))],
+  ])('the marketing email choice %s: the receipt still sends, with no line', async (_label, arrange) => {
+    arrange();
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.templateKey).toBe('invoice.receipt');
+    expect(args.bodyAppend?.text || '').not.toMatch(/lawn care|refer a friend/i);
+    expect(cardsSpy).not.toHaveBeenCalled();
+  });
+
+  test('gate off: the choice is never read', async () => {
+    delete process.env.GATE_DOC_CROSS_SELL_EMAIL;
+    const { result } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(pitchSpy).not.toHaveBeenCalled();
+    expect(cardsSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('detail lookups are additive', () => {
   test('gate on: a throwing lookup still sends invoice.sent and the receipt, without the extra variables', async () => {
     process.env.GATE_BILLING_EMAIL_DETAILS = 'true';

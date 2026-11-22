@@ -5,13 +5,31 @@
 // third-party payer, no service contact), for 7 days after its payment
 // (owner 2026-11-22, "week"), the offer needs the visit the invoice is for,
 // the gate hides the routes entirely, and a tap is not counted as a receipt
-// view.
-jest.mock('../models/db', () => jest.fn(() => {
-  const query = {};
-  for (const method of ['where', 'whereIn', 'orderBy', 'whereRaw', 'leftJoin']) query[method] = () => query;
-  query.first = (...args) => mockFirst(...args);
-  return query;
-}));
+// view. Each tap reads that decision twice: once before the tap, and again
+// inside the write with the customer row locked (AGENTS.md: the commit path
+// re-checks the preflight read).
+jest.mock('../models/db', () => {
+  // first: what a read of the invoice answers on this handle. Only the
+  // customers chain can be row-locked: a lock on an invoice or a visit row
+  // fails a payment (settlement takes the visit FOR UPDATE NOWAIT), so a
+  // route that asks for one throws here.
+  const handle = (first) => jest.fn((table) => {
+    const query = {};
+    for (const method of ['where', 'whereIn', 'orderBy', 'whereRaw', 'leftJoin']) query[method] = () => query;
+    if (String(table) === 'customers') {
+      query.forUpdate = () => query;
+      query.first = async () => ({ id: 'cust-1' });
+      return query;
+    }
+    query.first = (...args) => first(...args);
+    return query;
+  });
+  const db = handle((...args) => mockFirst(...args));
+  // The tap's transaction: its own handle, answering from mockLaterFirst.
+  db.mockTrx = handle((...args) => mockLaterFirst(...args));
+  db.transaction = jest.fn(async (work) => work(db.mockTrx));
+  return db;
+});
 jest.mock('../services/invoice', () => ({ getByToken: jest.fn() }));
 jest.mock('../services/payer', () => ({ attachToInvoice: jest.fn(async () => {}) }));
 jest.mock('../services/invoice-email', () => ({ inspectionCreditMemoForInvoice: jest.fn(async () => null) }));
@@ -23,6 +41,8 @@ jest.mock('../services/service-report/cross-sell-tap', () => ({
   // The real who-may-see-it rule; only the offer and the tap are stubbed.
   linkReachesOnlyAccountHolder: jest.requireActual('../services/service-report/cross-sell-tap').linkReachesOnlyAccountHolder,
   reportSuppressedForCustomer: jest.requireActual('../services/service-report/cross-sell-tap').reportSuppressedForCustomer,
+  // The real referral tap wrapper: the customer lock, then the second read.
+  referralShareIfStillEligible: jest.requireActual('../services/service-report/cross-sell-tap').referralShareIfStillEligible,
   buildCrossSellForServiceRecord: jest.fn(),
   handleCrossSellTap: jest.fn(),
 }));
@@ -32,6 +52,9 @@ jest.mock('../services/referral-share', () => ({
 }));
 
 const mockFirst = jest.fn();
+// What the same read answers INSIDE the tap's write. Default: the same row.
+const mockLaterFirst = jest.fn();
+const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const { isEnabled } = require('../config/feature-gates');
 const tap = require('../services/service-report/cross-sell-tap');
@@ -43,7 +66,7 @@ const REFERRAL = { headline: 'Know someone who could use Waves?', cta: 'Send My 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const paidAgo = (ms) => new Date(Date.now() - ms).toISOString();
 const INVOICE = {
-  id: 'inv-1', customer_id: 'cust-1', status: 'paid', paid_at: paidAgo(60 * 1000), payer_id: null, service_record_id: 'sr-1', total: 85, invoice_number: 'QA-1',
+  id: 'inv-1', customer_id: 'cust-1', status: 'paid', paid_at: paidAgo(60 * 1000), payer_id: null, service_record_id: 'sr-1', record_customer_id: 'cust-1', total: 85, invoice_number: 'QA-1',
 };
 
 function handlerFor(method, path) {
@@ -67,6 +90,8 @@ beforeEach(() => {
   isEnabled.mockImplementation((key) => key === 'docCrossSell');
   InvoiceService.getByToken.mockResolvedValue({ ...INVOICE });
   mockFirst.mockResolvedValue({ ...INVOICE });
+  mockLaterFirst.mockReset();
+  mockLaterFirst.mockImplementation((...args) => mockFirst(...args));
   tap.buildCrossSellForServiceRecord.mockResolvedValue(OFFER);
   referralShare.composeReferralCard.mockResolvedValue(REFERRAL);
 });
@@ -95,6 +120,16 @@ describe('GET /:token — the cards ride the receipt payload', () => {
       process.env.GATE_RESERVICE_REPORT_COPY = 'true';
       mockFirst.mockResolvedValue({ ...INVOICE, visit_is_callback: true });
     }],
+    // Pre-push audit P1 (2026-11-22): the flag also sits on the job, and an
+    // invoice can reach its job with no service record.
+    ['a callback flagged on the invoice\'s own job, with no service record', () => {
+      process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+      mockFirst.mockResolvedValue({ ...INVOICE, service_record_id: null, record_customer_id: null, invoice_job_is_callback: true });
+    }],
+    ['a callback flagged on the service record\'s job', () => {
+      process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+      mockFirst.mockResolvedValue({ ...INVOICE, record_job_is_callback: true });
+    }],
   ])('%s → no cards', async (_label, arrange) => {
     arrange();
     const { res } = await call('get', '/:token');
@@ -110,12 +145,24 @@ describe('GET /:token — the cards ride the receipt payload', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ crossSell: OFFER, referral: REFERRAL }));
   });
 
-  test('an invoice with no visit carries the referral card alone', async () => {
-    mockFirst.mockResolvedValue({ ...INVOICE, service_record_id: null });
+  test.each([
+    ['an invoice with no visit', { service_record_id: null, record_customer_id: null }],
+    // The tap files its request for the visit's customer.
+    ['a visit that belongs to another customer', { record_customer_id: 'cust-other' }],
+  ])('%s carries the referral card alone', async (_label, change) => {
+    mockFirst.mockResolvedValue({ ...INVOICE, ...change });
     const { res } = await call('get', '/:token');
     const payload = res.json.mock.calls[0][0];
     expect(payload).not.toHaveProperty('crossSell');
     expect(payload.referral).toEqual(REFERRAL);
+  });
+
+  // Pre-push audit P1 (2026-11-22): with GATE_REFERRAL_STEP2 on, the
+  // composer builds the customer's own offer line (and applies its yearly
+  // limit) only when it knows the customer.
+  test('the referral card is built for the receipt\'s own customer', async () => {
+    await call('get', '/:token');
+    expect(referralShare.composeReferralCard).toHaveBeenCalledWith({ customerId: 'cust-1' });
   });
 });
 
@@ -173,6 +220,7 @@ describe('POST /:token/cross-sell — the report tap, on the receipt', () => {
     ['the job bills a third party', () => mockFirst.mockResolvedValue({ ...INVOICE, record_job_payer_id: 4 })],
     ['paid more than 7 days ago', () => mockFirst.mockResolvedValue({ ...INVOICE, paid_at: paidAgo(8 * DAY_MS) })],
     ['no visit on the invoice', () => mockFirst.mockResolvedValue({ ...INVOICE, service_record_id: null })],
+    ['a visit that belongs to another customer', () => mockFirst.mockResolvedValue({ ...INVOICE, record_customer_id: 'cust-other' })],
     ['unknown token', () => mockFirst.mockResolvedValue(undefined)],
   ])('%s → 404, nothing recorded', async (_label, arrange) => {
     arrange();
@@ -187,7 +235,7 @@ describe('POST /:token/referral-link — enrolls on the tap only', () => {
     const share = { code: 'WAVES-1', link: 'l' };
     referralShare.buildReferralShareForCustomer.mockResolvedValue(share);
     const { res } = await call('post', '/:token/referral-link');
-    expect(referralShare.buildReferralShareForCustomer).toHaveBeenCalledWith('cust-1');
+    expect(referralShare.buildReferralShareForCustomer).toHaveBeenCalledWith('cust-1', { conn: db.mockTrx });
     expect(res.json).toHaveBeenCalledWith(share);
   });
 
@@ -199,6 +247,79 @@ describe('POST /:token/referral-link — enrolls on the tap only', () => {
     const { res } = await call('post', '/:token/referral-link');
     expect(res.statusCode).toBe(404);
     expect(referralShare.buildReferralShareForCustomer).not.toHaveBeenCalled();
+  });
+});
+
+// Pre-push audit P0 (2026-11-22): eligibility was read before the write
+// only. Each tap now reads it again inside its write, on the transaction.
+describe('the tap reads its eligibility again inside the write', () => {
+  const CHANGES = [
+    ['the invoice was refunded', { status: 'refunded' }],
+    ['day 7 passed', { paid_at: paidAgo(7 * DAY_MS + 60 * 1000) }],
+    ['the invoice now bills a third party', { payer_id: 'payer-1' }],
+    ['a service contact was added to the account', { service_contact_name: 'Tenant Tina', service_contact_email: 't@example.com' }],
+    ['a distinct billing email was added', { customer_email: 'pat@example.com', billing_email: 'books@example.com' }],
+  ];
+
+  async function stillEligibleOf() {
+    tap.handleCrossSellTap.mockResolvedValue({ status: 200, body: { ok: true } });
+    await call('post', '/:token/cross-sell', { body: { metadata: {} } });
+    return tap.handleCrossSellTap.mock.calls[0][0];
+  }
+
+  test('offer tap: nothing changed → still eligible, read on the tap\'s own transaction', async () => {
+    const { stillEligible, surface } = await stillEligibleOf();
+    const readsBefore = db.mock.calls.length;
+    expect(await stillEligible(db.mockTrx)).toBe(true);
+    expect(db.mockTrx).toHaveBeenCalledWith('invoices as i');
+    expect(db.mock.calls).toHaveLength(readsBefore);
+    // What the shared tap answers when the second read says no.
+    expect(surface.notFoundBody).toEqual({ error: 'Receipt not found' });
+  });
+
+  test.each([
+    ...CHANGES,
+    ['the invoice now points at another visit', { service_record_id: 'sr-2' }],
+    ['the report stopped reaching the customer', { visit_structured_notes: { typedReportDelivery: 'internal_only' } }],
+    ['the token no longer finds an invoice', null],
+  ])('offer tap: %s → no longer eligible', async (_label, change) => {
+    const { stillEligible } = await stillEligibleOf();
+    mockLaterFirst.mockResolvedValue(change ? { ...INVOICE, ...change } : undefined);
+    expect(await stillEligible(db.mockTrx)).toBe(false);
+  });
+
+  test('offer tap: the gate went off → no longer eligible', async () => {
+    const { stillEligible } = await stillEligibleOf();
+    isEnabled.mockReturnValue(false);
+    expect(await stillEligible(db.mockTrx)).toBe(false);
+  });
+
+  test('referral tap: the customer row is locked before the second read', async () => {
+    referralShare.buildReferralShareForCustomer.mockResolvedValue({ code: 'WAVES-1' });
+    await call('post', '/:token/referral-link');
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.mockTrx.mock.calls.map(([table]) => table)).toEqual(['customers', 'invoices as i']);
+  });
+
+  test.each([
+    ...CHANGES,
+    ['the invoice moved to another customer', { customer_id: 'cust-2' }],
+    ['the token no longer finds an invoice', null],
+  ])('referral tap: %s → 404, nobody enrolled', async (_label, change) => {
+    mockLaterFirst.mockResolvedValue(change ? { ...INVOICE, ...change } : undefined);
+    const { res } = await call('post', '/:token/referral-link');
+    expect(res.statusCode).toBe(404);
+    expect(res.json).toHaveBeenCalledWith({ error: 'Receipt not found' });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(referralShare.buildReferralShareForCustomer).not.toHaveBeenCalled();
+  });
+
+  // The report's office-only state closes the offer, never the referral.
+  test('referral tap: the report stopped reaching the customer → still enrolls', async () => {
+    referralShare.buildReferralShareForCustomer.mockResolvedValue({ code: 'WAVES-1' });
+    mockLaterFirst.mockResolvedValue({ ...INVOICE, visit_structured_notes: { typedReportDelivery: 'internal_only' } });
+    const { res } = await call('post', '/:token/referral-link');
+    expect(res.json).toHaveBeenCalledWith({ code: 'WAVES-1' });
   });
 });
 
