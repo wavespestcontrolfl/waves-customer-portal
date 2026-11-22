@@ -23,7 +23,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
-const { isAssessmentVisit, excludeAssessmentBookings } = require('../services/assessment-booking');
+const { isAssessmentVisit, excludeAssessmentBookings, hadCompletedAssessmentLook } = require('../services/assessment-booking');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -166,6 +166,7 @@ const {
 const { beforeYouBookBlock } = require('../services/estimate-before-you-book');
 const { mistingLayoutDocBlock } = require('../services/misting-layouts');
 const { roofPointsDocBlock } = require('../services/estimate-roof-points');
+const { noVisitLinePageBlock } = require('../services/estimate-no-visit-line');
 const { isMistingSystemIdentity, isMistingSelection, mistingCustomerFacts } = require('../utils/mosquito-misting-system');
 
 function lawnCalendarBlock(services) {
@@ -24201,6 +24202,327 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
   return rows ? serviceMixMakesNoGuaranteeClaim(rows.recurring, rows.oneTime) : true;
 }
 
+// The estimate page's "no visit needed" line (owner 2026-11-22) says Waves measured the home and yard from county records
+// and satellite images. That is true of an estimate only when EVERY service on it is priced that way. So the rule is two
+// exact lists of service identities, the programs priced from the measured property alone: the recurring pest, lawn,
+// barrier mosquito and termite bait plans, the general one-time pest, lawn and mosquito services, and the termite bait
+// plan's own install charge.
+// Tree and shrub is off the list on purpose. Its price is built from a tree count, a palm count and a bed area, and a
+// person often gives those numbers. The engine cannot always tell a number counted on the image from a number stated.
+// A row's identity is its own stored `service`, compared whole. Never its name, label or `key`, and never a part of a
+// key: a name is free text, and the display categories also hold work priced from facts a technician or the customer
+// gives (a palm injection sits under tree and shrub; bed bug rooms, a roach cleanout, a flea package and a stinging
+// insect job sit under pest control).
+// A row that is not a service is known the same way, by its stored `service` (storedRowIsNotAService): the WaveGuard
+// setup fee, a discount identity, or a one-time adjustment that adds no charge. An empty row is nothing. Every other
+// row must store a listed service, priced or not: a row with a name, a key, a price or a discount mark and no stored
+// `service` is a row nobody can identify.
+// Stored pricing data nobody can read is no ground for the sentence either (storedRowReader): a row container that is
+// there and is not a list, or an entry that is there and is not a row.
+// A listed identity is not enough when the row itself says its price did not come from a sure measurement
+// (storedRowIsNotMeasured). A dwelling unit priced from the bedroom count the caller gave (unit-band-pricing.js) stores
+// `pest_control` or `one_time_pest` too. So does a row with one of the engine's low-confidence markers (AGENTS.md,
+// "Estimator engine authority": a fallback footprint, a low pricing confidence, a turf basis fallback), and a row the
+// engine says needs a measurement in the field or a custom quote. The engine has one predicate for a priced row whose
+// price is not exact yet (draft-builder lineNeedsReviewBeforeExactPrice); this rule asks it.
+// The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by its reasons. A reason that
+// says a measured size is large (a large lot, a large pool cage) keeps the answer: a sent estimate has had that review,
+// and a reviewed price from measured sizes is still measured. Every other reason, known or new, takes the answer away:
+// most of them say a size is unsure (stories estimated, a mosquito area nobody verified, an office-entered measurement).
+// What the rule reads, and what it does not. The sentence makes two claims: Waves measured this home and yard from
+// records and images, and the quote needs no visit. So the rule reads (1) the marks that say a size of the home or yard
+// is not measured or not verified, and (2) the marks that say a price needs a visit, a field measurement or a custom
+// quote. It does not read a quantity of product or work the office picks (mosquito stations, dunks), nor a pricing
+// decision the office makes (a discount, a price it sets by hand: `priceOverridden`): neither is a measurement of the
+// home or yard, and neither needs a visit. It does not read a fact the customer states that is no size (a roach type,
+// a grass type). It does not read the admin estimator's form state either (`inputs._manualFields`, `_homeSqFtEdited`,
+// `_lotSqFtEdited`). Those name the boxes the office changed. Most are the office reading the same aerial image (pool
+// cage size, tree density, turf), the estimator treats a typed home size as the office confirming it
+// (`_homeSqFtManuallyEdited`), and none says that a visit took place. So outside a call draft, a home size or a lawn
+// size the office typed counts like a measured one: the engine prices it with no mark.
+// Three reads, and each one fails closed (estimateIsRemoteMeasured):
+// 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
+//    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service
+//    row, every one on its list, none commercial, and no failed replay. That reader also makes rows from saved amounts
+//    (a termite install amount, a membership fee), so read 2 must find a stored service row too.
+// 2. Every saved row, as it is stored, can take the answer away (savedRowsAreAllListed). The page's readers resolve a
+//    recurring row from its name, skip a raw engine line whose key they do not know, and drop work a plan includes at
+//    no charge. So the stored rows are read before any of that.
+// 3. The price the customer is served can take the answer away, and never grants it (servedPriceIsAllListed): a
+//    frozen send snapshot is served as it is, so a service it lists counts even when the saved result does not hold it.
+// Reads 2 and 3 each end with the same closed check: every row that stores a `service` or a not-measured mark, at any
+// depth of the saved estimate or of the served price, must pass (rowsThatMustPass). A row container nobody listed here
+// cannot carry a service past the rule.
+// The line is optional copy: a row the rule cannot read gives no line and a warning, never a failed page.
+const REMOTE_MEASURED_RECURRING_SERVICES = new Set(['pest_control', 'lawn_care', 'mosquito', 'termite_bait']);
+// `termite_bait_installation` is the install charge of the termite bait plan itself: the same station count, from the
+// same measured perimeter.
+const REMOTE_MEASURED_ONE_TIME_SERVICES = new Set(['one_time_pest', 'one_time_lawn', 'one_time_mosquito', 'termite_bait_installation']);
+// The marks of a dwelling unit priced from the bedroom count the caller gave, not from a measurement.
+const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS, SIZE_BASIS: UNIT_BAND_SIZE_BASIS } = require('../services/pricing-engine/unit-band-pricing');
+// The fee and discount identities the code writes. `rodent_bait_setup` and `trap_only_setup` are work, not fees.
+const NOT_A_SERVICE_IDENTITIES = new Set(['waveguard_setup', 'manual_discount', 'rodent_bundle_discount']);
+// A stored `service` that is not text is an identity nobody can read: it is on no list.
+const serviceIdentity = (value) => {
+  if (value == null) return '';
+  return typeof value === 'string' ? value.trim().toLowerCase() : '(not text)';
+};
+const isStoredRow = (row) => Boolean(row) && typeof row === 'object' && !Array.isArray(row);
+
+// The charge a row states (`amount`, `price`): at least one is there, each one is a readable number, none is above zero.
+const storedRowAddsNoCharge = (row) => {
+  const charges = [row.amount, row.price].filter((value) => value != null);
+  return charges.length > 0 && charges.every((value) => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
+    && Number.isFinite(Number(value)) && Number(value) <= 0);
+};
+
+function storedRowIsNotAService(row) {
+  const identity = serviceIdentity(row.service);
+  // The "other one-time services" remainder is work nothing classified when it adds a charge, or when nobody can
+  // read its amount.
+  if (identity === 'one_time_adjustment') return storedRowAddsNoCharge(row);
+  if (identity) return NOT_A_SERVICE_IDENTITIES.has(identity);
+  return Object.values(row).every((value) => value == null || value === '');
+}
+
+// The size marks, on any stored object (a priced row, a pricer's result, the unit-scope audit):
+// - a unit priced from the bedroom count a caller gave;
+// - a home priced from a fallback footprint (`footprintWasDefaulted`, a *fallback `footprintSource` or `fpSource`);
+// - a mosquito area from a lot-category proxy, not from a lot size (`missingAreaData`);
+// - an engine input flag that says a size is not measured, or not verified for this unit (NOT_MEASURED_INPUT_FLAGS: the
+//   saved engine inputs carry them, and not every pricer puts a mark on its row for them).
+const NOT_MEASURED_INPUT_FLAGS = ['lotSizeMeasured', 'buildingSizeMeasured', 'measuredTurfUnitVerified'];
+const storedRowHasANotMeasuredSize = (row) => row.pricingBasis === UNIT_BAND_PRICING_BASIS
+  || row.footprintSource === UNIT_BAND_SIZE_BASIS || row.sizeBasis === UNIT_BAND_SIZE_BASIS
+  || row.footprintWasDefaulted === true
+  || [row.footprintSource, row.fpSource].some((source) => typeof source === 'string' && /fallback/i.test(source))
+  || row.missingAreaData === true
+  || NOT_MEASURED_INPUT_FLAGS.some((flag) => row[flag] === false);
+
+// Review reasons that say a measured size is large, not that a size is unsure.
+const MEASURED_SIZE_IS_LARGE_REASONS = new Set(['large_lot', 'pest_large_lot_manual_review', 'large_pool_cage', 'pest_large_or_oversized_pool_cage']);
+// A review the rule cannot read as "the measured size is large": a reason off that list, a reason that is not text, or
+// a review mark with no reason at all.
+function storedRowHasAnUnsureReview(row) {
+  const stated = row.manualReviewReasons;
+  const reasons = stated == null ? [] : (Array.isArray(stated) ? stated : [stated]);
+  if (!reasons.every((reason) => typeof reason === 'string' && MEASURED_SIZE_IS_LARGE_REASONS.has(reason))) return true;
+  return Boolean(row.requiresManualReview) && reasons.length === 0;
+}
+
+// The engine's own predicates (estimator-engine/draft-builder), loaded when first asked.
+let engineDraftBuilder;
+const engineChecks = () => {
+  engineDraftBuilder = engineDraftBuilder || require('../services/estimator-engine/draft-builder');
+  return engineDraftBuilder;
+};
+// Its predicate for a priced row whose price is not exact yet.
+const engineSaysPriceIsNotExact = (row) => engineChecks().lineNeedsReviewBeforeExactPrice(row);
+
+// A priced row: the size marks, the review reasons, and the engine's predicate (asked with the review marks taken off,
+// because the reasons are read above).
+const storedRowIsNotMeasured = (row) => storedRowHasANotMeasuredSize(row)
+  || storedRowHasAnUnsureReview(row)
+  || engineSaysPriceIsNotExact({ ...row, requiresManualReview: false, manualReviewReasons: null });
+
+// A stored row passes when it is not a service, or when its stored `service` is on one of the given lists. A commercial
+// row never passes (the engine marks it, and the page's normalized one-time rows drop the mark), and neither does a
+// row with a not-measured mark.
+const storedRowsAreListed = (rows, ...lists) => rows.every((row) => row.isCommercial !== true
+  && !storedRowIsNotMeasured(row)
+  && (storedRowIsNotAService(row) || lists.some((listed) => listed.has(serviceIdentity(row.service)))));
+
+// Reads row containers and remembers when one cannot be read. A container that is absent holds no row, and so does an
+// absent entry. A container that is there and is not a list, or an entry that is there and is not a row (a bare key
+// in a list of rows), cannot be read.
+function storedRowReader() {
+  let readable = true;
+  const rows = (value) => {
+    if (value == null) return [];
+    const entries = (Array.isArray(value) ? value : [value]).filter((entry) => entry != null);
+    if (!Array.isArray(value) || !entries.every(isStoredRow)) readable = false;
+    return entries.filter(isStoredRow);
+  };
+  return {
+    rows,
+    // A field that holds one row, or nothing: a fee.
+    row: (value) => (value == null ? [] : rows([value])),
+    // A list of identities, not rows: a section's member keys.
+    identities: (value) => {
+      if (value == null) return [];
+      if (!Array.isArray(value)) readable = false;
+      return Array.isArray(value) ? value : [];
+    },
+    allReadable: () => readable,
+  };
+}
+
+// Every stored object, at any depth of a value.
+function storedObjects(value, found = [], seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return found;
+  seen.add(value);
+  if (isStoredRow(value)) found.push(value);
+  for (const inner of Object.values(value)) storedObjects(inner, found, seen);
+  return found;
+}
+// Every row that stores a `service` or a not-measured size mark, at any depth of a value.
+const rowsThatMustPass = (value) => storedObjects(value)
+  .filter((row) => serviceIdentity(row.service) || storedRowHasANotMeasuredSize(row));
+
+// Marks the engine keeps beside the service rows, read over every stored object of the saved data, the replay and the
+// served price (storedMarksBesideTheRowsSayNo):
+// - The office's review reasons for the whole estimate (`pricingMetadata.manualReviewReasons` and its copies), read
+//   like a row's reasons: only a large-size reason keeps the answer.
+// - A lawn price is built from the turf size, and the resolved turf basis is not always on the lawn row: a V1 save
+//   keeps it in `results.lawnMeta`, and the price card reads it from there. So when a lawn service is quoted, a
+//   heuristic turf mark on ANY stored object takes the answer away (the engine's lineHasHeuristicTurf). With no lawn
+//   service quoted the turf size prices nothing, and the mark is not read: the engine leaves it out the same way for
+//   an object that is not a priced row.
+// - A call draft keeps the source of the home size and the lot size it priced from
+//   (`estimatorEngine.propertyFacts`, source-arbitration). Only the county record counts as measured. Every other
+//   source takes the answer away: a size the caller stated, each fallback source, a saved profile value, and the
+//   `property_facts_v2` label (its evidence can be a technician's field correction; this rule does not read that
+//   evidence, so it does not trust the label), and a size with no source at all. Only the selected fact is read,
+//   never a rejected candidate.
+// - An estimate drafted from a visit (`scheduled_service_id`, the marker the consultation offer reads): a technician
+//   looked at this home, so the page must not say the quote needed no visit.
+const LAWN_SERVICES = new Set(['lawn_care', 'one_time_lawn']);
+function callDraftSizesAreNotMeasured(estData) {
+  const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
+  const facts = estData?.estimatorEngine?.propertyFacts;
+  return [facts?.home, facts?.lot].some((fact) => isStoredRow(fact) && (fact.value != null || fact.source != null)
+    && fact.source !== SQFT_SOURCES.COUNTY_ASSESSED);
+}
+const estimateWasDraftedFromAVisit = (estData) => Boolean(estData?.scheduled_service_id);
+function storedMarksBesideTheRowsSayNo(estData, pricingBundle) {
+  const { sendSnapshot: _sentPriceAndScope, ...savedData } = isStoredRow(estData) ? estData : {};
+  const replay = persistedGuaranteeRoots(estData).length ? null : guaranteeReplayForInputsOnly(estData).result;
+  const objects = storedObjects([savedData, replay, pricingBundle]);
+  const lawnIsQuoted = objects.some((stored) => LAWN_SERVICES.has(serviceIdentity(stored.service)));
+  return objects.some(storedRowHasAnUnsureReview)
+    || (lawnIsQuoted && objects.some((stored) => engineChecks().lineHasHeuristicTurf(stored)))
+    || callDraftSizesAreNotMeasured(estData)
+    || estimateWasDraftedFromAVisit(estData);
+}
+
+function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
+  const read = storedRowReader();
+  const serviceRows = (rows) => read.rows(rows).filter((row) => !storedRowIsNotAService(row));
+  const recurring = serviceRows(recurringServices);
+  const oneTime = serviceRows(oneTimeItems);
+  return read.allReadable()
+    && recurring.length + oneTime.length > 0
+    && storedRowsAreListed(recurring, REMOTE_MEASURED_RECURRING_SERVICES)
+    && storedRowsAreListed(oneTime, REMOTE_MEASURED_ONE_TIME_SERVICES);
+}
+
+// Every saved row as it is stored.
+// - The roots are the ones estimateHasCommercialRow reads: both saved result shapes, the bare save, and for an
+//   inputs-only save the replayed engine result (the same memoized replay the guarantee rows classify).
+// - Plan rows (`recurring.services[]`, the nested `results.recurring.services[]`): the recurring list.
+// - Raw engine lines (`lineItems[]`) hold plans and one-time work together: either list.
+// - One-time and specialty rows: the one-time list. The containers are the ones the stored-row readers of
+//   estimate-result-container.js read (`oneTime.items[]`, `oneTime.specItems[]`, the nested `results.oneTime` copies,
+//   `specItems[]`, `quoteRequiredItems[]`). A row a plan includes at no charge is still work on the estimate.
+// - Then every row that stores a `service` or a not-measured mark at any depth of the saved estimate data and of the
+//   replay (a line nested in a line, a margin warning, a field no reader lists): either list. The frozen send snapshot
+//   is not part of this scan: it holds the price and scope as sent, and the price the customer is served is read by
+//   its own rule below.
+// - And at least one stored row is a service row.
+function savedRowsAreAllListed(estData = {}) {
+  const read = storedRowReader();
+  const { sendSnapshot: _sentPriceAndScope, ...savedData } = isStoredRow(estData) ? estData : {};
+  const results = [estData?.result, estData?.engineResult].filter(isStoredRow);
+  if (!persistedGuaranteeRoots(estData).length) {
+    const replay = guaranteeReplayForInputsOnly(estData);
+    if (isStoredRow(replay.result)) results.push(replay.result);
+  }
+  const containers = [...results, estData].filter(isStoredRow).map((root) => ({
+    plans: [...read.rows(root.recurring?.services), ...read.rows(root.results?.recurring?.services)],
+    lines: read.rows(root.lineItems),
+    oneTime: [
+      ...read.rows(root.oneTime?.items), ...read.rows(root.oneTime?.specItems),
+      ...read.rows(root.results?.oneTime?.items), ...read.rows(root.results?.oneTime?.specItems),
+      ...read.rows(root.specItems), ...read.rows(root.quoteRequiredItems),
+    ],
+  }));
+  return read.allReadable()
+    && containers.every((rows) => (
+      storedRowsAreListed(rows.plans, REMOTE_MEASURED_RECURRING_SERVICES)
+      && storedRowsAreListed(rows.lines, REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES)
+      && storedRowsAreListed(rows.oneTime, REMOTE_MEASURED_ONE_TIME_SERVICES)
+    ))
+    && storedRowsAreListed(rowsThatMustPass([savedData, results]), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES)
+    // Every row passed, so a row that is a service is a listed one. One must be stored: an amount is not a service row.
+    && containers.some((rows) => [...rows.plans, ...rows.lines, ...rows.oneTime].some((row) => !storedRowIsNotAService(row)));
+}
+
+// The price the customer is served.
+// - Its sections (`services[]`): a recurring section names its services in `memberKeys` (a plan that does not split is
+//   one 'bundle' section), else in `key`. A one-time section's key is a display category: its rows are read below.
+// - Its per-service rows (`perServiceTreatments[]`), on the price and on each recurring section: every cadence
+//   (`frequencies[]`) and every cadence combination the customer can pick (`serviceCadenceCombos[]`). The recurring list.
+// - Its one-time and fee rows: `oneTimeBreakdown.items[]`, the quote-required rows, the first-visit fees
+//   (`firstVisitFees[]`, `setupFee`, `rodentBaitSetupFee`, `mistingInstallFee`) and each section's own copies
+//   (`oneTimeContribution.items[]`, `setupFee`). The one-time list.
+// - Then every row that stores a `service` at any depth of the price: either list.
+// A cadence's `included[]` and `addOns[]` rows are page copy with display keys and no stored `service`: the work they
+// describe is in the rows above.
+function servedPriceIsAllListed(pricingBundle = {}) {
+  const read = storedRowReader();
+  const sections = read.rows(pricingBundle?.services);
+  const plans = sections.filter((section) => section.isRecurring !== false);
+  const planIdentities = plans.flatMap((section) => {
+    const memberKeys = read.identities(section.memberKeys);
+    return memberKeys.length ? memberKeys : [section.key];
+  });
+  const planRows = [pricingBundle, ...plans]
+    .flatMap((holder) => [...read.rows(holder?.frequencies), ...read.rows(holder?.serviceCadenceCombos)])
+    .flatMap((cadence) => read.rows(cadence.perServiceTreatments));
+  const oneTimeRows = [
+    ...read.rows(pricingBundle?.oneTimeBreakdown?.items), ...read.rows(pricingBundle?.oneTimeBreakdown?.quoteRequiredItems),
+    ...read.rows(pricingBundle?.quoteRequiredItems), ...read.rows(pricingBundle?.firstVisitFees),
+    ...read.row(pricingBundle?.setupFee), ...read.row(pricingBundle?.rodentBaitSetupFee), ...read.row(pricingBundle?.mistingInstallFee),
+    ...sections.flatMap((section) => [...read.rows(section.oneTimeContribution?.items), ...read.row(section.setupFee)]),
+  ];
+  return read.allReadable()
+    && planIdentities.every((identity) => REMOTE_MEASURED_RECURRING_SERVICES.has(serviceIdentity(identity)))
+    && storedRowsAreListed(planRows, REMOTE_MEASURED_RECURRING_SERVICES)
+    && storedRowsAreListed(oneTimeRows, REMOTE_MEASURED_ONE_TIME_SERVICES)
+    && storedRowsAreListed(rowsThatMustPass(pricingBundle), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES);
+}
+
+function estimateIsRemoteMeasured(estData = {}, pricingBundle = {}) {
+  try {
+    const saved = guaranteeServiceRows(estData, {});
+    return Boolean(saved)
+      && serviceMixIsRemoteMeasured(saved.recurring, saved.oneTime)
+      && savedRowsAreAllListed(estData)
+      && servedPriceIsAllListed(pricingBundle)
+      && !storedMarksBesideTheRowsSayNo(estData, pricingBundle);
+  } catch (err) {
+    logger.warn(`[estimate-data] no-visit line rule could not read the estimate: ${err.message}`);
+    return false;
+  }
+}
+
+// The page block for the "no visit needed" line. One more reason to withhold it needs a read: a technician already
+// looked at this home (a completed Waves Assessment in the look window, with or without a link to this estimate).
+// hadCompletedAssessmentLook is the ONE rule the free-assessment offers use for that. Its contract: a failed read
+// warns and answers "no look". Here that leaves the line as the rule above decided it; the read never grants the line.
+// It runs last, and only for an estimate that would carry the line.
+async function noVisitLineDocBlock(estimate, estData, pricingBundle) {
+  if (!estimateIsRemoteMeasured(estData, pricingBundle)) return {};
+  try {
+    const block = noVisitLinePageBlock(estimate);
+    if (!block.noVisitLine) return {};
+    return (await hadCompletedAssessmentLook(db, estimate)) ? {} : block;
+  } catch (err) {
+    logger.warn(`[estimate-data] no-visit line block skipped: ${err.message}`);
+    return {};
+  }
+}
+
 // Whether a guarantee line may cover the whole estimate: every service
 // carries the recurring residential terms (callbacks, the money-back
 // guarantee). Each recurring and one-time row is residential pest, lawn,
@@ -31998,6 +32320,15 @@ async function composeEstimateDataPayload(estimate, {
       // when staff hid the points, and when the estimate has moved to another address, so those responses stay
       // byte-identical. The page prints it; the emailed document does not (EstimateProposalDocument ignores the key).
       ...(await roofPointsDocBlock(estimate, { staffPreview: verifiedStaffPreview })),
+      // "No visit needed" line (owner 2026-11-22, option B): the owner's sentence, printed under the satellite photo in
+      // the Waves AI card. Page load only. The key is absent on the document render pass, on an accepted, declined,
+      // expired or quote-required estimate, when any service on the estimate is not one Waves prices from the measured
+      // home and yard alone (estimateIsRemoteMeasured), for an estimate the estimate email's rule does not read as a
+      // home estimate (commercial, a proposal, a condo), and after a completed Waves Assessment (noVisitLineDocBlock),
+      // so those responses stay byte-identical. Copy only: no prices.
+      ...(!isPdfRenderPass && ctaTerminalState === null
+        ? await noVisitLineDocBlock(estimate, estimateDataForIntelligence, pricingBundle)
+        : {}),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.
@@ -33085,6 +33416,8 @@ module.exports.attachPublicPricingContract = attachPublicPricingContract;
 module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice;
 module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
 module.exports.serviceMixMakesNoGuaranteeClaim = serviceMixMakesNoGuaranteeClaim;
+module.exports.serviceMixIsRemoteMeasured = serviceMixIsRemoteMeasured;
+module.exports.estimateIsRemoteMeasured = estimateIsRemoteMeasured;
 module.exports.estimateMakesNoGuaranteeClaim = estimateMakesNoGuaranteeClaim;
 module.exports.estimateCarriesPlanTerms = estimateCarriesPlanTerms;
 module.exports.estimateHasCommercialScope = estimateHasCommercialScope;
