@@ -81,6 +81,20 @@ describe('company endings written with dots or with spaces', () => {
   });
 });
 
+describe('"REAL ESTATE" is a line of business, not the estate of a person', () => {
+  test('a real-estate company is a company and not a trust, as a seller and as a buyer', () => {
+    expect(isTrustName('SAMPLE REAL ESTATE DEVELOPMENT LLC')).toBe(false);
+    expect(candidateFromRow(deed({ from: ['SAMPLE REAL ESTATE DEVELOPMENT LLC'] })).candidate.sellerNames).toEqual(['SAMPLE REAL ESTATE DEVELOPMENT LLC']);
+    expect(buyerKind(['EXAMPLE REAL ESTATE'])).toBe('company');
+  });
+  test('the estate of a person and a trust are still trusts', () => {
+    expect(isTrustName('TESTER ESTATE')).toBe(true);
+    expect(isTrustName('ESTATE OF TESTER ALEX J')).toBe(true);
+    expect(isTrustName('SAMPLE REAL ESTATE TRUST')).toBe(true);
+    expect(candidateFromRow(deed({ from: ['SAMPLE REAL ESTATE TRUST'] }))).toEqual({ skip: 'trust_seller' });
+  });
+});
+
 describe('a seller that reads as a trust or a trustee is not a builder', () => {
   test.each([
     [['TESTER ALEX CO-TRUSTEE']], [['TESTER ALEX CO TRUSTEE']], [['TESTER HOME TRUST']], [['SAMPLE BANK NA TRUSTEE']],
@@ -109,7 +123,7 @@ describe('candidateFromRow', () => {
     ['not_filled', { from: [] }],
     ['not_filled', { to: [] }],
     ['not_filled', { description: '' }],
-    ['low_price', { consideration: null }],
+    ['not_filled', { consideration: null }],
     ['low_price', { consideration: MIN_PRICE - 1 }],
     ['person_seller', { from: ['SAMPLE HOMES LLC', 'TESTER ROBIN K'] }],
   ])('skip %s', (why, extra) => expect(candidateFromRow(deed(extra))).toEqual({ skip: why }));
@@ -334,6 +348,19 @@ describe('runNewHomeList', () => {
     expect(deps.saveProspect).toHaveBeenCalledTimes(1);
     expect(deps.saveProspect.mock.calls[0][0].source_ref).toBe('202699100002');
     expect(RETRY_AFTER_MS).toBe(20 * 3600 * 1000);
+  });
+
+  test('a deed on its last read goes first, also a retry, before newer deeds that can wait', async () => {
+    const newer = Array.from({ length: MAX_PARCEL_QUERIES }, (_, i) => person(i + 1)); // 2026-11-17, never judged
+    const deps = makeDeps({
+      rowsByDay: { '2026-11-17': newer, '2026-11-12': [person(700, { date: '2026-11-12' })] },
+      existing: [{ source_ref: '202699100700', status: 'unmatched', last_checked_at: new Date(NOW - 30 * 3600 * 1000) }],
+    });
+    const summary = await run(deps);
+    expect(deps.saveProspect.mock.calls[0][0].source_ref).toBe('202699100700');
+    expect(deps.saveProspect).toHaveBeenCalledTimes(MAX_PARCEL_QUERIES);
+    expect(summary.skipped.waits_for_next_run).toBe(1); // one newer deed, read again tomorrow
+    expect(summary.leftOnLastDay).toEqual({});
   });
 
   test('the 20-hour wait does not apply on the last day a run reads the deed', async () => {

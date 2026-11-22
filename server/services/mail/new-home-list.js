@@ -48,7 +48,7 @@ const COMPANY_WORDS = [
   'INC', 'INCORPORATED', 'CORP', 'CORPORATION', 'COMPANY', 'LTD',
   'LIMITED', 'HOMES', 'HOME', 'BUILDERS', 'CONSTRUCTION', 'DEVELOPMENT', 'COMMUNITIES', 'PROPERTIES',
   'HOLDINGS', 'INVESTMENTS', 'PARTNERS', 'PARTNERSHIP', 'GROUP', 'VENTURES', 'ENTERPRISES', 'FUND', 'BANK',
-  'REALTY', 'RENTALS', 'CAPITAL', 'ASSOCIATES', 'MANAGEMENT', 'SERVICES', 'HOUSING', 'MINISTRIES',
+  'REALTY', 'REAL ESTATE', 'RENTALS', 'CAPITAL', 'ASSOCIATES', 'MANAGEMENT', 'SERVICES', 'HOUSING', 'MINISTRIES',
   'ASSOCIATION', 'ASSN', 'CHURCH', 'FOUNDATION', 'COUNTY', 'CITY', 'STATE', 'DEPARTMENT', 'AUTHORITY',
 ];
 const TRUST_WORDS = ['TRUST', 'TRUSTEE', 'TRUSTEES', 'TR', 'TRS', 'REVOCABLE', 'IRREVOCABLE', 'ESTATE'];
@@ -65,7 +65,8 @@ const isCompanyName = (name) => {
   const words = spaced(name);
   return COMPANY_RE.test(words) || COMPANY_ENDING_RE.test(words);
 };
-const isTrustName = (name) => TRUST_RE.test(spaced(name));
+// "REAL ESTATE" is a line of business (a company word above), not the estate of a person.
+const isTrustName = (name) => TRUST_RE.test(spaced(name).replace(/\bREAL ESTATE\b/g, 'REALESTATE'));
 // A builder is a company that does not sell as a trust or a trustee. A person's capacity can hold a company word
 // ("TESTER ALEX CO-TRUSTEE" reads as "CO TRUSTEE"), and so can a trust's name ("TESTER HOME TRUST").
 const isBuilderName = (name) => isCompanyName(name) && !isTrustName(name);
@@ -79,8 +80,9 @@ function buyerKind(toNames) {
 /** A deed worth looking at, or the reason it is not (counted, never stored). */
 function candidateFromRow(row) {
   if (String(row.type || '').trim().toUpperCase() !== 'DEED') return { skip: 'other_type' };
-  if (!row.from.length || !row.to.length || !row.description) return { skip: 'not_filled' };
-  if (row.consideration === null || row.consideration < MIN_PRICE) return { skip: 'low_price' };
+  // A blank price is not a low price: the Clerk has not filled the deed in yet.
+  if (!row.from.length || !row.to.length || !row.description || row.consideration === null) return { skip: 'not_filled' };
+  if (row.consideration < MIN_PRICE) return { skip: 'low_price' };
   if (!row.from.every(isCompanyName)) return { skip: 'person_seller' };
   if (!row.from.every(isBuilderName)) return { skip: 'trust_seller' };
   return {
@@ -352,11 +354,11 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
     // The wait does not apply on the last day a run reads the deed: this is its last chance for an answer.
     const waits = why === 'settled' || (why === 'retry_wait' && readTomorrow.has(candidate.date));
     if (waits) bump(summary.skipped, why);
-    else due.push({ candidate, retry: existing ? 1 : 0 });
+    else due.push({ candidate, retry: existing ? 1 : 0, canWait: readTomorrow.has(candidate.date) ? 1 : 0 });
   }
-  // The map-query budget goes first to what cannot wait: a deed never judged before a retry, and an older day
-  // before a newer one (the oldest day is the first to leave the read). The page order stays inside a day.
-  due.sort((a, b) => (a.retry - b.retry) || a.candidate.date.localeCompare(b.candidate.date));
+  // The map-query budget goes first to what cannot wait: a deed on the last day a run reads it, then a deed never
+  // judged before a retry, then an older day before a newer one. The page order stays inside a day.
+  due.sort((a, b) => (a.canWait - b.canWait) || (a.retry - b.retry) || a.candidate.date.localeCompare(b.candidate.date));
   await evaluateAndSave(due.map((item) => item.candidate), d, summary, readTomorrow);
   logger.info(`Mail new-home list (${mode}): ${JSON.stringify(summary)}`);
   const problems = [];
