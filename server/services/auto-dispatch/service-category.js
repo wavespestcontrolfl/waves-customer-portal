@@ -40,6 +40,9 @@ const RODENT_WORD = '(?:rodent|\\brats?\\b|\\bmice\\b|\\bmouse\\b)';
 // A trapping or bait word, or the combined pest plan's own label ("Pest & Rodent Control", key
 // pest_rodent_quarterly: the pest plan with rodent bait stations, pest-led everywhere in this repo).
 const TRAP_OR_BAIT_WORD = '(?:trap|bait|monitor|retainer|pest\\s*(?:&|and)\\s*rodent)';
+const TRAP_OR_BAIT_NAME = new RegExp(TRAP_OR_BAIT_WORD, 'i');
+// Inside the rodent catalog category a name needs no rodent word: "Attic Sealing", "Sanitation".
+const RODENT_ROW_EXCLUSION_WORK = /exclusion|wire[\s_]*mesh|bird[\s_]*box|roof[-\s_]?entry|sanitation|plug|seal/i;
 const EXCLUSION_NAME = new RegExp([
   // Exclusion work, whatever else the name says ("Rodent Exclusion & Trapping" is the first visit).
   'exclusion', 'wire[\\s_]*mesh', 'bird[\\s_]*box', 'roof[-\\s_]?entry',
@@ -52,11 +55,12 @@ const EXCLUSION_NAME = new RegExp([
 
 // Ordered; the first regex match wins. General pest is the fallback. Exclusion is first, so a
 // two-service name with an exclusion part ("Rodent Control + Termite Inspection", what /book saves
-// for two choices) reads exclusion. 'rodent' is reached only by a name with a trapping or bait word.
+// for two choices) reads exclusion. 'rodent' is reached only by a name with a trapping or bait word
+// ("trap-only" is the retainer programs, whose names carry no rodent word).
 const CATEGORY_PATTERNS = [
   ['exclusion', EXCLUSION_NAME],
   ['termite', /termit|foam[_\s]*recurring|recurring[_\s]*foam|wdo|bora\s*care|wood[- ]?destroy|soil\s*(poison|treat)|pre[- ]?slab|preconstruction/i],
-  ['rodent', /rodent|\brat\b|\brats\b|mice|\bmouse\b|trapping/i],
+  ['rodent', /rodent|\brat\b|\brats\b|mice|\bmouse\b|trapping|trap[- ]?only/i],
   ['mosquito', /mosquito|no[- ]?see[- ]?um|midge/i],
   ['lawn', /lawn|turf|fertiliz|weed\s*control|fungus|grass|aeration|de[- ]?thatch|tree\s*&?\s*(and\s*)?shrub|\bt\s*&\s*s\b|ornamental|palm\s*(injection|treat)/i],
 ];
@@ -129,7 +133,9 @@ const CATALOG_KEY_LINES = Object.freeze({
  * none (the caller then reads the visit NAME). `row` = { service_key, category, name }, any
  * of them optional. The key first (CATALOG_KEY_LINES), then the category. A 'rodent' row whose
  * key is not listed (a service added to the library later) is the rodent line only when its own
- * catalog NAME says trapping or bait; otherwise it is exclusion, as an unknown rodent name is.
+ * catalog NAME says trapping or bait and names no exclusion work; otherwise it is exclusion, as an
+ * unknown rodent name is. The category already says "rodent", so the name needs no rodent word
+ * ("Bait Station Refill" is the rodent line).
  */
 function lineForCatalogRow(row) {
   if (!row) return null;
@@ -137,7 +143,8 @@ function lineForCatalogRow(row) {
   if (Object.prototype.hasOwnProperty.call(CATALOG_KEY_LINES, key)) return CATALOG_KEY_LINES[key];
   const line = categoryForCatalogCategory(row.category);
   if (line !== 'rodent') return line;
-  return row.name && classifyServiceCategory(row.name) === 'rodent' ? 'rodent' : 'exclusion';
+  const name = String(row.name || '');
+  return TRAP_OR_BAIT_NAME.test(name) && !RODENT_ROW_EXCLUSION_WORK.test(name) ? 'rodent' : 'exclusion';
 }
 
 function classifyServiceCategory(serviceType) {

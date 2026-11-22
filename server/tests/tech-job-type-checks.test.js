@@ -113,6 +113,12 @@ describe('the catalog category table (one table, shared with the service-line ma
     expect(lineForCatalogRow({ service_key: 'rodent_exclusion_whole_home', category: 'rodent', name: 'Whole-Home Rodent Exclusion Service' })).toBe('exclusion');
     expect(lineForCatalogRow({ service_key: 'rodent_visit', category: 'rodent', name: 'Rodent Control Service' })).toBe('exclusion');
     expect(lineForCatalogRow({ service_key: 'rodent_unnamed', category: 'rodent' })).toBe('exclusion');
+    // The category already says rodent, so the name needs no rodent word: a bait or trap label is the rodent line,
+    // and exclusion work beside it (a combined job is the first visit) is exclusion.
+    expect(lineForCatalogRow({ service_key: 'station_refill', category: 'rodent', name: 'Bait Station Refill' })).toBe('rodent');
+    expect(lineForCatalogRow({ service_key: 'retainer_new', category: 'rodent', name: 'Premium Trap-Only Retainer Service' })).toBe('rodent');
+    expect(lineForCatalogRow({ service_key: 'trap_clean', category: 'rodent', name: 'Trapping & Sanitation' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'attic_seal', category: 'rodent', name: 'Attic Sealing' })).toBe('exclusion');
     // The name check is for rodent rows only: another category keeps its line whatever the name says.
     expect(lineForCatalogRow({ service_key: 'k', category: 'lawn_care', name: 'Rodent Exclusion' })).toBe('lawn');
     expect(lineForCatalogRow({ service_key: 'k', category: 'other', name: 'Rodent Exclusion' })).toBeNull();

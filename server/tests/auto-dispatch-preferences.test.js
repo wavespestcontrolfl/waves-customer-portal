@@ -57,6 +57,9 @@ describe('service category classification', () => {
     ['Pest & Rodent Control Service', 'rodent'],
     ['Rodent Control and Trapping', 'rodent'],
     ['Quarterly Rodent Monitoring Service', 'rodent'],
+    // The trap-only retainer programs carry no rodent word in their names.
+    ['Monthly Trap-Only Retainer Service', 'rodent'],
+    ['Standard Trap-Only Retainer', 'rodent'],
     ['Wildlife Trapping Service', 'rodent'],
     ['Termite Bait Station Service', 'termite'],
     // A key-only slot search passes the service KEY as the name: an exclusion key reads exclusion,
