@@ -504,6 +504,30 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     }
   });
 
+  test('a home the engine priced from its fallback footprint is not measured', () => {
+    const saved = (extra) => ({ result: { ...plan('pest_control'), ...extra } });
+    // The real engine, given no home size: the pest control line says so itself.
+    const noHomeSize = { lotSqFt: 8000, services: { pest: { frequency: 'quarterly' } } };
+    const engineLine = generateEstimate(noHomeSize).lineItems.find((line) => line.service === 'pest_control');
+    expect(engineLine.footprintWasDefaulted).toBe(true);
+    expect(['fallback_2000', 'footprint_unknown_fallback', 'invalid_or_zero_footprint_fallback']).toContain(engineLine.footprintSource);
+    expect(estimateIsRemoteMeasured({ engineInputs: noHomeSize }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ engineInputs: { ...noHomeSize, homeSqFt: 2000 } }, {})).toBe(true);
+    // The same marks on a stored plan row, a raw line and a one-time row, together and each alone.
+    expect(estimateIsRemoteMeasured({ result: { recurring: { services: [{ ...recurringRow('pest_control'), footprintWasDefaulted: true, footprintSource: 'fallback_2000' }] } } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 40, footprintWasDefaulted: true }] }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ oneTime: { items: [{ service: 'one_time_pest', price: 199, footprintWasDefaulted: true }] } }), {})).toBe(false);
+    for (const footprintSource of ['fallback_2000', 'footprint_unknown_fallback', 'invalid_or_zero_footprint_fallback']) {
+      expect([footprintSource, estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 40, footprintSource }] }), {})]).toEqual([footprintSource, false]);
+    }
+    // On the served price too.
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', footprintWasDefaulted: true }] }] })).toBe(false);
+    // A measured footprint, and one the office entered, keep the answer.
+    for (const footprintSource of ['footprint', 'footprintSqFt', 'homeSqFt', 'manual_override', 'termite_measurement']) {
+      expect([footprintSource, estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 40, footprintWasDefaulted: false, footprintSource }] }), {})]).toEqual([footprintSource, true]);
+    }
+  });
+
   test('a saved amount is not a service row: the saved estimate must store one', () => {
     // The page's reader makes a termite bait install row from a saved amount. Alone, it grants nothing.
     expect(estimateIsRemoteMeasured({ result: { oneTime: { tmInstall: 1200 } } }, {})).toBe(false);
