@@ -726,15 +726,16 @@ function usePropertyScore() {
 // GATE_PROPERTY_RECOMMENDATIONS; gate-off answers available:false and the
 // card renders nothing). Best-effort: a failed load just hides the card.
 // =========================================================================
-function usePropertyRecommendations() {
+function usePropertyRecommendations(enabled = true) {
   const [data, setData] = useState(null);
   useEffect(() => {
+    if (!enabled) return undefined;
     let cancelled = false;
     api.getPropertyRecommendations()
       .then(d => { if (!cancelled && d?.available && d.cards?.length) setData(d); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, []);
+  }, [enabled]);
   return data;
 }
 
@@ -6459,13 +6460,21 @@ function BillingChannelSelect({ field, channels, usable, saving, onChange }) {
   );
 }
 
-function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) {
+function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, onSwitchTab = null }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
   // credits) and the tokenized Pay now hand-off; every management surface
   // whose writes the middleware now 401s (cards, Auto Pay, credit toggle,
   // recipients) is hidden rather than shown broken.
   const cancelledAccount = customer?.cancelled === true;
+  // Home's add-a-service offer, on Billing too (owner 2026-11-21): the same
+  // card, data and one-tap purchase as Home, offers only — the seasonal
+  // mosquito note stays on Home. Pest or lawn only (the shared offer ladder).
+  const homeRecommendations = usePropertyRecommendations(!cancelledAccount);
+  const billingOffers = useMemo(() => {
+    const cards = (homeRecommendations?.cards || []).filter((c) => c.kind === 'offer');
+    return cards.length ? { ...homeRecommendations, cards } : null;
+  }, [homeRecommendations]);
   const [payments, setPayments] = useState([]);
   // "Apply my credit automatically" slider (owner ruling 2026-08-28): the
   // balance stays on the account until the customer turns this on. Server-
@@ -8312,6 +8321,17 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         )}
         </>}
       </form>
+      )}
+
+      {!cancelledAccount && <RecommendationsCard data={billingOffers} />}
+      {!cancelledAccount && onSwitchTab && (
+        <section data-glass="card" data-section="billing-refer" style={{ ...card, padding: 20, marginTop: 16, textAlign: 'center' }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, margin: '0 0 6px' }}>Know someone who could use Waves?</h2>
+          <p style={{ fontSize: 14, color: muted, margin: '0 0 12px' }}>Share your referral link from the Refer tab.</p>
+          <button type="button" data-glass-accent="" onClick={() => onSwitchTab('refer')} style={primaryButton}>
+            Refer a friend
+          </button>
+        </section>
       )}
     </div>
   );
@@ -18927,7 +18947,7 @@ export default function PortalPage() {
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
         }} onRequestVisit={cancelledAccount || contactSession ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
-        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
+        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} onSwitchTab={switchTab} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && (savedSecondarySelection

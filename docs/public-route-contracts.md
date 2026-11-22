@@ -3443,15 +3443,19 @@ Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
 report payload's `crossSell` object offers the ONE next family the
 customer doesn't have, walking `OFFER_LADDER` =
-`pest_control → lawn_care → tree_shrub` (owner ruling 2026-09-28: report
-offers push the three pillars only — termite left the ladder). A customer
-owning pest, lawn, AND tree & shrub gets no card at all. The SAME owner
+`pest_control → lawn_care` (owner ruling 2026-09-28: termite left the
+ladder; owner ruling 2026-11-21, "let's leave tree and shrub off ... just
+do pest control and lawn care", every pushed surface: tree & shrub left it
+too). A customer owning pest AND lawn gets no card at all; a one-time T&S
+report with nothing recurring starts LAWN, and T&S stays only a family a
+customer may choose from the My Plan list (`PURCHASE_FAMILIES`) or the
+photo-triage lane may name. The SAME owner
 ruling applies to EVERY offer surface, not only the report ("three
 pillars is fine for now, yes applies there too"): the portal offer card
 and the photo-triage lane (`buildPortalOffer` / `buildPortalPurchaseBasis`
 / `resolvePortalOfferTarget`, and `buildOfferForFamily`) share the
-identical `OFFER_LADDER` and `pickOfferTarget` — a customer owning all
-three pillars gets no ladder-picked offer on any surface, and the
+identical `OFFER_LADDER` and `pickOfferTarget` — a customer owning pest
+and lawn gets no ladder-picked offer on any surface, and the
 portal's one-tap termite purchase path is gone with it. `termite`/
 `termite_bait` ownership still counts as "has a plan, not the anchor" via
 the ownership vocabulary's mapping — it is simply never the offered rung.
