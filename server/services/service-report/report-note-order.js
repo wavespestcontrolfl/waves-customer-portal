@@ -31,7 +31,7 @@
  *     rats by the gate");
  *   - the check does not ask how the rest reads without what went, past the
  *     words in NEVER_LEFT_OUT and the rule for a part that opens with a
- *     condition;
+ *     condition or holds a word of QUALIFIERS;
  *   - a clause of the note that names no one is read as the technician's
  *     work: the text may add "I" there. After a person the note names, in
  *     the same part, the text adds no "I" ("customer inspected and treated
@@ -76,6 +76,12 @@ const JOINERS = new Set([...CLAUSE_OPENERS, 'or']);
 // until dry").
 const CONDITIONS = new Set('if unless until except when whenever once while after before since because provided'.split(' '));
 const CONDITION_LEADS = new Set('but only or even not so'.split(' '));
+// A word that makes its part a condition wherever it stands ("will treat
+// outside, weather permitting tomorrow"). The screens refuse that part for
+// its word of time, and without it the plan reads as a promise. A list on
+// purpose: a part with a word of time is most often no condition ("sprayed
+// perimeter, back in 2 weeks").
+const QUALIFIERS = new Set('permitting depending assuming barring'.split(' '));
 // The parts tried out of sight one set at a time (64 walks at most).
 const MAX_HIDDEN_PARTS = 6;
 const NOTHING_GOES = () => false;
@@ -95,6 +101,10 @@ const PRONOUNS = new Set(['she', 'he', 'they', 'them', 'her', 'his', 'their']);
 // off" may be "You were advised to keep pets off".
 const TREATMENTS = new Set('sprayed treated baited dusted fogged misted trapped poisoned fumigated'.split(' '));
 const FORMS_OF_IS = new Set(['was', 'were', 'is', 'are']);
+// Words that name no one, between a person and what the person did:
+// "customer never personally sprayed outside".
+const DENIALS = new Set(['not', 'never', 'just', 'already', 'ever', 'even']);
+const namesNoOne = (word) => SMALL.has(word) || DENIALS.has(word) || word.endsWith('ly');
 const AND = new Set(['and']);
 // Words that end in "ed" and say no action done ("treated shed sealed gap").
 const NOT_DONE = new Set('shed bed weed seed feed need'.split(' '));
@@ -106,6 +116,7 @@ const ALSO_WRITTEN = new Map(Object.entries({
   cust: ['customer', 'you', 'your'], customer: ['you', 'your'], homeowner: ['you'], client: ['you'], tenant: ['you'],
   she: ['you'], he: ['you'], they: ['you'], them: ['you'], her: ['you', 'your'], his: ['your'], their: ['your'],
   has: ['have'], does: ['do'], wants: ['want'], needs: ['need'], thinks: ['think'], sees: ['see'], says: ['say', 'said'],
+  was: ['were'], is: ['are'],
   ext: ['exterior', 'outside'], int: ['interior', 'inside'], perim: ['perimeter'],
   roach: ['cockroach'], roaches: ['cockroaches'], cockroach: ['roach'], cockroaches: ['roaches'],
   bath: ['bathroom'], baths: ['bathrooms'], fridge: ['refrigerator'],
@@ -117,8 +128,8 @@ const NUMBER_TWINS = new Map(NUMBER_WORDS.flatMap((word, n) => [[word, String(n)
 // been" as "she has been", "I'd" as "I would" (never dropped: "I'd treat" is
 // not "I treated"), "1,200" as 1200, split on anything that is not a letter
 // or a digit. A mark on a number stays in the word: "1.5" is not 15, "1/2"
-// is not "1-2", "≤5" and "5%" are not 5, and 5' (feet) is not 5" (inches),
-// with a straight mark, a curly one or a prime. So does the 's of a word that
+// is not "1-2", "≤5", "5%" and "5 %" are not 5, "1½" is not "11/2", and 5'
+// (feet) is not 5" (inches), with a straight mark, a curly one or a prime. So does the 's of a word that
 // is no pronoun: "the customer's neighbor" is not "the customer and neighbor".
 const markWord = (mark) => `mark${mark.codePointAt(0)}mark`;
 const OWNER_FORM = `${markWord("'")}s`;
@@ -127,6 +138,12 @@ const ownerForm = (word) => `${word}${OWNER_FORM}`;
 const personOf = (word) => (word.endsWith(OWNER_FORM) ? word.slice(0, -OWNER_FORM.length) : word);
 CUSTOMER.forEach((word) => ALSO_WRITTEN.set(ownerForm(word), ['your', ownerForm('customer')]));
 const numberMark = (_, digit, mark) => `${digit}${mark === '.' ? 'point' : markWord(mark)}`;
+// A text with its letter forms made one, before anything is read: a
+// full-width "？" is a question mark, a prime is a foot mark, "½" is 1/2.
+// A fraction sign after a digit stays on it first: "1½" is not "11/2".
+const FRACTION_ON_DIGIT = /(\p{Nd})\s?([\u00BC-\u00BE\u2150-\u215E])/gu;
+const plain = (text) => String(text || '').replace(FRACTION_ON_DIGIT, (_, digit, mark) => `${digit}${markWord(mark)}`)
+  .replace(/[″“”]/g, '"').replace(/′/g, "'").normalize('NFKC').replace(/\u2044/g, '/').replace(/\u3002/g, '.');
 const SIGN_BEFORE_NUMBER = /([<>≤≥≈~±+=#$]+)\s*(-?)(?=\p{N})|(^|[^\p{L}\p{N}])(-)(?=\p{N})/gu;
 // Every sign of a run stays: "<=5" is not ">=5".
 const signWords = (_, run, runMinus, lead, minus) => (run ? [...run, ...runMinus].map(markWord).join('') : `${lead}${markWord(minus)}`);
@@ -134,12 +151,11 @@ const signWords = (_, run, runMinus, lead, minus) => (run ? [...run, ...runMinus
 // the figure as 5.
 const leadingZero = (text) => String(text || '').replace(/(^|[^\p{L}\p{N}.])\.(?=\p{N})/gu, '$10.');
 function noteWords(text) {
-  return leadingZero(text).replace(/[″“”]/g, '"').replace(/′/g, "'")
-    .normalize('NFKC').toLowerCase().replace(/[‘’]/g, "'").replace(/[\u2010-\u2015\u2212]/g, '-')
+  return leadingZero(plain(text)).toLowerCase().replace(/[‘’]/g, "'").replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/(\p{N}),(?=\p{N}{3}(?!\p{N}))/gu, '$1').replace(/(\p{N})\s*([/-])\s*(?=\p{N})/gu, '$1$2')
     .replace(/(\p{N})([^\p{L}\p{N}\s])(?=\p{N})/gu, numberMark)
     .replace(SIGN_BEFORE_NUMBER, signWords)
-    .replace(/(\p{N})([+%°'"])/gu, (_, digit, mark) => `${digit}${markWord(mark)}`)
+    .replace(/(\p{N})\s+(?=%)/gu, '$1').replace(/(\p{N})([+%°'"])/gu, (_, digit, mark) => `${digit}${markWord(mark)}`)
     .replace(/\bcan't\b|\bcannot\b/g, 'can not').replace(/\bwon't\b/g, 'will not').replace(/n't\b/g, ' not')
     .replace(/'ll\b/g, ' will').replace(/'d\b/g, ' would')
     .replace(/\b(she|he|it|that|there|what|who|where|here)'s (been|got)\b/g, '$1 has $2')
@@ -167,7 +183,7 @@ const showNumberMarks = (piece) => piece.replace(/\u0001/g, '.').replace(/\u0002
 
 // The sentences of a text, each with whether it asks ("?").
 function sentencesOf(text) {
-  const pieces = hideNumberMarks(text).split(/([.;!?\n]+)/);
+  const pieces = hideNumberMarks(plain(text)).split(/([.;!?\n]+)/);
   return pieces.filter((_, i) => i % 2 === 0)
     .map((piece, i) => ({ text: showNumberMarks(piece), asks: (pieces[2 * i + 1] || '').includes('?') }));
 }
@@ -197,7 +213,8 @@ const readText = (text) => sentencesOf(text).flatMap(({ text: sentence, asks }, 
 // What the text may leave out: `single[i]` for one word of the note, `leans`
 // for a word that goes only when the word it leans on goes, `groups` for
 // words that go together or not at all, `whole` for the parts that may go
-// whole, of which the `conditional` ones go only with their whole sentence.
+// whole, of which the `conditional` ones go only with their whole sentence
+// (a part that opens with a condition, or holds a word of QUALIFIERS).
 // The report's screens say which words, pairs and parts (`screen`).
 function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }) {
   const note = words.map((entry) => entry.word);
@@ -221,12 +238,24 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
     if (LEAD_INS.has(word) && samePart(i, next) && named[next]) leans.set(i, next);
     else if (word === 'of' && samePart(i, i - 1) && named[i - 1]) leans.set(i, i - 1);
   });
-  const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word)));
+  // A form of "is" between a person and a word of treatment says who was
+  // treated, so it stays: "customer was sprayed outside" is not "You sprayed
+  // outside".
+  // Whatever stands between it and the treatment ("was never sprayed"), and
+  // with a denial or an adverb before it ("customer already was sprayed").
+  const saysWhoWasTreated = (i) => {
+    if (!FORMS_OF_IS.has(note[i])) return false;
+    let before = i - 1;
+    while (samePart(i, before) && namesNoOne(note[before])) before -= 1;
+    return samePart(i, before) && isActor(note[before]) && note.some((word, j) => j > i && samePart(i, j) && TREATMENTS.has(word));
+  };
+  const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word) && !saysWhoWasTreated(i)));
   const [whole, conditional] = [new Set(), new Set()];
   parts.forEach((raw, id) => {
     const partWords = words.filter((entry) => entry.part === id).map((entry) => entry.word);
     if (partWords.length && partGoes(raw)) whole.add(id);
-    if (CONDITIONS.has(partWords.find((word) => !SMALL.has(word) && !CONDITION_LEADS.has(word)))) conditional.add(id);
+    const opensWith = partWords.find((word) => !SMALL.has(word) && !CONDITION_LEADS.has(word));
+    if (CONDITIONS.has(opensWith) || partWords.some((word) => QUALIFIERS.has(word))) conditional.add(id);
   });
   // The second word of each group by its first, and each later word by the
   // word before it: see placeInNote.
@@ -298,18 +327,28 @@ function addedActorRefused(added, place, read, sameSentence) {
 // The small word the text added between the word the walk found last
 // (`last`) and the note's word at `place`, and the note does not bear out:
 // its place in the text, or -1.
-//   - "and" between two words of the note that stand side by side and both
-//     say an action done. The second may be what the first was done to:
-//     "inspected damaged traps" is not "I inspected and damaged traps".
-//   - a form of "is" between a person and a word of treatment (TREATMENTS).
-function addedSmallRefused(textWords, k, place, last, read) {
+//   - "and" between two words of the note that stand side by side (a small
+//     word between them or none) and both say an action done. The second
+//     may be what the first was done to: "inspected damaged traps" is not
+//     "I inspected and damaged traps".
+//   - a form of "is" between a person and a word of treatment (TREATMENTS),
+//     also with a denial or an adverb between them ("customer never
+//     personally sprayed outside" is not "You were never personally sprayed
+//     outside").
+// `placedAt` is the text word that took each word of the note (-1 = none).
+function addedSmallRefused(textWords, k, place, last, read, placedAt) {
   if (!last) return -1;
-  const added = (words) => textWords.findIndex((entry, at) => at > last.k && at < k && words.has(entry.word));
+  const taken = new Set(placedAt);
+  const added = (words, after = last.k) => textWords.findIndex((entry, at) => at > after && at < k && !taken.has(at) && words.has(entry.word));
   const [before, here] = [read.words[last.place], read.words[place]];
   const done = (word) => word.endsWith('ed') && !NOT_DONE.has(word);
-  if (last.place === place - 1 && before.part === here.part && done(before.word) && done(here.word) && added(AND) >= 0) return added(AND);
-  const named = read.words.slice(0, place).filter((entry) => entry.part === here.part && !SMALL.has(entry.word)).pop();
-  return TREATMENTS.has(here.word) && named && isActor(named.word) ? added(FORMS_OF_IS) : -1;
+  const sideBySide = read.words.slice(last.place + 1, place).every((entry) => SMALL.has(entry.word));
+  if (sideBySide && before.part === here.part && done(before.word) && done(here.word) && added(AND) >= 0) return added(AND);
+  if (!TREATMENTS.has(here.word)) return -1;
+  let actor = place - 1;
+  while (actor >= 0 && read.words[actor].part === here.part && namesNoOne(read.words[actor].word)) actor -= 1;
+  if (actor < 0 || read.words[actor].part !== here.part || !isActor(read.words[actor].word)) return -1;
+  return added(FORMS_OF_IS, placedAt[actor] >= 0 ? placedAt[actor] : last.k);
 }
 
 // Why the commas of the text do not fit the note between the word the walk
@@ -355,6 +394,7 @@ function walkNote(textWords, read, rules, hidden) {
   const out = textWords.map((entry) => entry.word);
   const noteList = read.words.map((entry) => (hidden.has(entry.part) ? '' : entry.word));
   const usedIn = noteList.map(() => -1);
+  const placedAt = noteList.map(() => -1);
   const [noteSentenceOf, textSentenceOf, saysSomething] = [new Map(), new Map(), new Set()];
   const stop = (reason, k) => ({ rejection: { reason, words: [out[k]] } });
   const taken = (j) => usedIn[j] >= 0;
@@ -379,7 +419,7 @@ function walkNote(textWords, read, rules, hidden) {
     }
     if (place < 0) return { rejection: noPlaceRejection(out, k, noteList, from, rules, taken) };
     const actor = addedActorRefused(added, place, read, (at) => textWords[at].id === id);
-    const wrong = actor >= 0 ? actor : addedSmallRefused(textWords, k, place, last, read);
+    const wrong = actor >= 0 ? actor : addedSmallRefused(textWords, k, place, last, read, placedAt);
     if (wrong >= 0) return stop('not_in_note', wrong);
     // A small word of the note does not say whose work it is: the added
     // word waits for the next word.
@@ -392,6 +432,7 @@ function walkNote(textWords, read, rules, hidden) {
     textSentenceOf.set(sentence, id);
     if (!SMALL.has(noteList[place])) saysSomething.add(id);
     usedIn[place] = id;
+    placedAt[place] = k;
     from = place + 1;
   }
   // An added "I" or "you" with no word of the note after it ("Neighbor told

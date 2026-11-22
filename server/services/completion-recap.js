@@ -850,6 +850,7 @@ module.exports = {
   generateRecap,
   normalizeOutcome,
   promptAliasTest,
+  readCatalogScreenRows,
   sanitizeRecap,
   smsRecap,
   SMS_RECAP_MAX_CHARS,

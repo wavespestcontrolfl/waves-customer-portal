@@ -39,6 +39,9 @@ describe('the text may go out', () => {
     ['a decimal with no zero before the point', 'found .5 nests by the shed', 'I found 0.5 nests by the shed.'],
     ['a sign on a number stays', 'found <5 nests, 10% of the eaves', 'I found < 5 nests, 10% of the eaves.'],
     ['a foot mark and an inch mark stay, straight or not', 'found 5\' gap, 1/4" hole', 'I found a 5′ gap, 1/4″ hole.'],
+    ['a mixed fraction stays as written', 'applied 1½ oz', 'I applied 1½ oz.'],
+    ['a fraction sign is the fraction', 'applied ½ oz', 'I applied 1/2 oz.'],
+    ['a percent sign after a space', 'applied 5 % solution', 'I applied 5% solution.'],
     ['a list with commas', 'treated kitchen, garage, and lanai', 'I treated the kitchen, garage and lanai.'],
     ['the customer\'s own thing is "your"', 'customer\'s dog was in the yard, skipped the back', 'Your dog was in the yard, and I skipped the back.'],
     ['a pronoun for the customer, named a sentence before', 'talked to customer. she said ants are back', 'I talked to you. You said ants are back.'],
@@ -48,11 +51,15 @@ describe('the text may go out', () => {
     ['"you" after "said", when the customer spoke last', 'cust said seeing roaches in the kitchen', 'You said you are seeing roaches in the kitchen.'],
     ['"and" between a place that ends in "ed" and the next action', 'treated shed sealed gap', 'I treated the shed and sealed the gap.'],
     ['a form of "is" after a person, before a word that is no treatment', 'cust advised of the treatment', 'You were advised of the treatment.'],
+    ['the one never treated stays the one never treated', 'customer was never sprayed outside', 'You were never sprayed outside.'],
+    ['the one treated stays the one treated', 'customer was sprayed by a skunk. treated lanai', 'You were sprayed by a skunk. I treated the lanai.'],
+    ['a form of "is" after the customer, with other work later in the part', 'customer not home so sprayed outside only', 'You were not home so sprayed outside only.'],
     ['"I" after a joining word, where the note names no one', 'swept the eaves so treated the lanai', 'I swept the eaves so I treated the lanai.'],
     ['"I" in the part after the one that names a person', 'customer was not home, treated outside', 'You were not home, and I treated outside.'],
     ['a range stays a range, with any dash', 'set 2 - 3 traps in the attic', 'I set 2–3 traps in the attic.'],
     ['what phone dictation writes for a word of the trade', 'pimento bugs in the lanai. swept the eves', 'Palmetto bugs were in the lanai. I swept the eaves.'],
     ['a part that names only a place stays as said', 'cust not home. ext only', 'You were not home. Exterior only.'],
+    ['a full-width question mark is a question mark', 'treated shed？', 'I treated the shed?'],
     ['a question stays a question', 'treated the shed. is the dog inside?', 'I treated the shed. Is the dog inside?'],
     ['a condition stays with its work', 'if ants return, treat the shed', 'If ants return, treat the shed.'],
     ['an obligation stays an obligation', 'had to treat shed', 'I had to treat the shed.'],
@@ -87,6 +94,8 @@ describe('the text is refused', () => {
     ['a bound read as an exact amount', 'applied ≤5 oz', 'I applied 5 oz.', 'not_in_note', '5'],
     ['an upper bound made a lower bound', 'applied <=5 oz', 'I applied >=5 oz.', 'not_in_note', 'mark62markmark61mark5'],
     ['feet made inches', 'found 5′ gap', 'I found a 5″ gap.', 'not_in_note', '5mark34mark'],
+    ['a mixed fraction read as a fraction', 'applied 1½ oz', 'I applied 11⁄2 oz.', 'not_in_note', '11mark47mark2'],
+    ['a percent sign left out', 'applied 5 % solution', 'I applied 5 solution.', 'not_in_note', '5'],
     ['a bound in brackets read as an exact amount', 'applied (≤5 oz)', 'I applied 5 oz.', 'not_in_note', '5'],
     ['"I" added beside the person who did the work', 'the neighbor sprayed the fence line', 'I and the neighbor sprayed the fence line.', 'not_in_note', 'i'],
     ['"I" added before the customer', 'customer sprayed the fence line', 'I and you sprayed the fence line.', 'not_in_note', 'i'],
@@ -96,6 +105,12 @@ describe('the text is refused', () => {
     ['"you" added after the technician spoke', 'customer called. I said treated shed', 'You called. I said you treated the shed.', 'not_in_note', 'you'],
     ['"you" added beside the person the note names', 'customer said I treated the shed', 'You said you and I treated the shed.', 'not_in_note', 'you'],
     ['"and" added between an action and what it was done to', 'inspected damaged traps', 'I inspected and damaged traps.', 'not_in_note', 'and'],
+    ['the one never treated made the one who never treated', 'customer was never sprayed outside', 'You never sprayed outside.', 'left_out', 'was'],
+    ['a person made the thing treated, past a denial', 'customer never sprayed outside', 'You were never sprayed outside.', 'not_in_note', 'were'],
+    ['a person made the thing treated, past an adverb', 'customer never personally sprayed outside', 'You were never personally sprayed outside.', 'not_in_note', 'were'],
+    ['the one treated made the one who treated', 'customer was sprayed outside', 'You sprayed outside.', 'left_out', 'was'],
+    ['the one treated made the one who treated, past an adverb', 'customer already was sprayed outside', 'You already sprayed outside.', 'left_out', 'was'],
+    ['"and" added between an action and what it was done to, past an article', 'inspected the damaged traps', 'I inspected and damaged traps.', 'not_in_note', 'and'],
     ['a person made the thing treated', 'neighbor sprayed outside', 'The neighbor was sprayed outside.', 'not_in_note', 'was'],
     ['"you" added where the note names no customer', 'I said treated shed', 'I said you treated the shed.', 'not_in_note', 'you'],
     ['a possessive made a second person', 'the customer\'s neighbor treated the shed', 'The customer and neighbor treated the shed.', 'not_in_note', 'customer'],
@@ -148,6 +163,7 @@ describe('the text is refused', () => {
     ['a denial cut from what it denies', 'did not treat shed', 'I did not. I treat the shed.', 'split', 'treat'],
     ['a condition cut from the work it holds back', 'if ants return, treat the shed', 'If ants return. I treat the shed.', 'split', 'treat'],
     ['a question made a statement', 'treated the shed?', 'I treated the shed.', 'question', 'treated'],
+    ['a full-width question made a statement', 'treated shed？', 'I treated the shed.', 'question', 'treated'],
     ['a statement made a question', 'treated the shed', 'I treated the shed?', 'question', 'treated'],
   ])('%s', (_label, note, text, reason, word) => {
     expect(rejection(note, text)).toEqual({ reason, words: [word] });
@@ -165,6 +181,17 @@ describe('the text is refused', () => {
 
   test('a word the screens refuse inside a part stays missing: "not paid" must not leave "not" behind', () => {
     expect(rejection('customer not paid treated kitchen', 'You not treated the kitchen.')).toEqual({ reason: 'left_out', words: ['paid'] });
+  });
+
+  test('a part that qualifies the rest goes only with its whole sentence', () => {
+    const timed = { wordGoes: (word) => word === 'tomorrow', partGoes: (part) => /tomorrow/.test(part) };
+    const note = 'will treat outside, weather permitting tomorrow';
+    expect(orderRejection('I will treat outside.', note, timed)).toEqual({ reason: 'left_out', words: ['weather'] });
+    expect(orderRejection('I will treat outside, weather permitting.', note, timed)).toBeNull();
+    // Its sentence stays a plan: the text cannot drop it.
+    expect(orderRejection('I treated the shed.', `treated shed. ${note}`, timed)).toEqual({ reason: 'left_out', words: ['will'] });
+    // A part with a word of time that is no condition goes as before.
+    expect(orderRejection('I sprayed the perimeter.', 'sprayed perimeter, back tomorrow', timed)).toBeNull();
   });
 
   test('a denial, a condition or a person never goes as one word, whatever the screens say', () => {
