@@ -7260,9 +7260,17 @@ estimate belongs to now. A points save (a list or a clear) is checked under a lo
 It writes the estimate's customer on a read that names none and never rewrites a read that names another customer.
 The copy itself names the customer it was frozen for (`estimate_roof_points.customer_id`, null for none, deleted with
 a deleted customer) and is shown only while the estimate has that holder. So a read saved for customer A is never
-published once the estimate is B's, and points saved or frozen while the estimate had no customer (a lead) are not
-published once it has one, until staff save them again and a send freezes a copy for that customer: lead, then A,
-then B never reaches B. The staff panel says so and one press of Save points sends the list unchanged. `imageUrl` is the county aerial export URL of the read's own crop, rebuilt by the server from the read's image source
+published once the estimate is B's, and points saved while the estimate had no customer (a lead) are not frozen for a
+customer until staff save them again: the staff panel says so and one press of Save points sends the list unchanged.
+One copy outlives its holder (owner follow-up "keep", 2026-11-21; migration `20261121210000`): the copy a lead already
+holds stays for the FIRST customer the estimate takes after that send. `estimates.customer_changes` counts every
+change of the estimate's customer (a database trigger is its only writer), a send to a lead writes that count on the
+copy (`estimate_roof_points.lead_changes`), and the page shows a lead's copy while the count is the same and the
+estimate has no customer, or while it is one more and the estimate has a customer. After any other change (a second
+customer, a duplicate merge, no customer again) it is not shown: lead, then A, then B never reaches B. A lead's copy
+with no count (from before that migration) is shown only while the estimate has no customer. A send to that first
+customer keeps the lead's copy while no points are saved for them and the lead's read still carries those points;
+otherwise a send with no points deletes it as before. No read and no copy changes its customer. `imageUrl` is the county aerial export URL of the read's own crop, rebuilt by the server from the read's image source
 and its stored centre (never caller-supplied, no key); `imageYear` is that photo's year. `n` is the 1-based number the page
 prints on the pin and in the list; `x` and `y` are 0-1 fractions of the photo from its top-left corner; `type` is a roof
 entry type or `other`; `label` is the plain name, followed by the staff note when one was saved ("Roof return, front left"; the note passes
@@ -7276,8 +7284,11 @@ panel with the points and never read from the estimate row; checked at the freez
 latest handoff (`estimate_roof_points.delivered_at` is not older than `estimate_data.deliveryState.lastDeliveredAt`,
 so a copy that a later send could not replace or delete is not shown); the copy was frozen for the estimate's current
 address (the misting layout's address comparison, but an address missing on either side counts as no match); the
-copy was frozen for the customer who holds the estimate now (both none counts); the read the copy came from still
-exists and is still one of the estimate's own reads by that rule (both checked at request time, so an estimate handed
+copy was frozen for the customer who holds the estimate now (both none counts; a lead's copy that carries a count
+needs the same count), or it is a lead's copy and the estimate took its first customer since that send
+(`lead_changes` plus one equals `estimates.customer_changes`, and the estimate has a customer); the read the copy
+came from still exists and is still one of the estimate's own reads by that rule, or, for that first customer's copy
+only, it still names no customer and has the estimate's own key (all checked at request time, so an estimate handed
 to another customer since the send shows nothing); and staff have not hidden the points (checked at request time: hide or show is one choice for the estimate, written to
 every roof read of it and inherited by each new read, so the key is absent when the read the copy came from or any
 roof read of the estimate is hidden). "The same address" ignores case, spacing, punctuation and a trailing state, and
