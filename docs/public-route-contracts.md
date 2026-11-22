@@ -7208,9 +7208,10 @@ service is quoted (`lawn_care`, `one_time_lawn`), a heuristic turf mark on any s
 replay or the served price takes the key away too (a V1 save keeps the resolved turf basis in `results.lawnMeta`, not
 on the lawn row); with no lawn service quoted that mark is not read. The review reasons the engine keeps for the
 whole estimate (`pricingMetadata.manualReviewReasons` and its copies, on any stored object) are read like a row's
-reasons. A call draft's selected home or lot size whose `estimatorEngine.propertyFacts.{home,lot}.source` is
-`caller_stated` or a fallback source (`permit_plan`, `subdivision_median`, `property_lookup_estimate`, `unresolved`)
-takes the key away; a rejected candidate is not read. The rule reads marks about a size of the home or
+reasons. A call draft's selected home or lot size whose `estimatorEngine.propertyFacts.{home,lot}.source` is anything
+but `county_assessed` takes the key away (a caller-stated size, a fallback source, a saved profile value, the
+`property_facts_v2` label); a rejected candidate is not read. An estimate drafted from a visit
+(`estimate_data.scheduled_service_id`) carries no key. The rule reads marks about a size of the home or
 yard and marks that a price needs a visit. It does not read a quantity of product the office picks (mosquito stations,
 dunks) or a pricing decision the office makes (a discount, `priceOverridden`). Where the engine stores no mark (outside
 a call draft, a home size or a lawn size somebody typed is stored like a measured one), the rule cannot tell and does

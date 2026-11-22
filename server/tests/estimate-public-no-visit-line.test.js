@@ -664,17 +664,17 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(Array.isArray(engineResult.pricingMetadata.manualReviewReasons)).toBe(true);
   });
 
-  test('a call draft keeps the source of its home and lot size: a caller-stated or fallback size is no measurement', () => {
+  test('a call draft keeps the source of its home and lot size: only the county record is a measurement', () => {
     const pestPlan = { recurring: { services: [recurringRow('pest_control')] } };
     const draft = (propertyFacts) => ({ result: pestPlan, estimatorEngine: { callLogId: 1, propertyFacts } });
     const { SQFT_SOURCES, FALLBACK_SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
     const county = { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] };
     expect(estimateIsRemoteMeasured(draft({ home: county, lot: { ...county, value: 8000 } }), {})).toBe(true);
-    expect(estimateIsRemoteMeasured(draft({ home: county, lot: { ...county, source: SQFT_SOURCES.PROFILE } }), {})).toBe(true);
-    // The caller's own number, and every source the arbitration names a fallback (a permit plan, a subdivision
-    // median, a lookup estimate, no source at all).
+    // Every other source: the caller's own number, each source the arbitration names a fallback (a permit plan, a
+    // subdivision median, a lookup estimate, no source at all), a saved profile value, the V2 label (its evidence
+    // can be a technician's field correction), and a source added later.
     expect([...FALLBACK_SQFT_SOURCES].sort()).toEqual(['permit_plan', 'property_lookup_estimate', 'subdivision_median', 'unresolved']);
-    for (const source of [SQFT_SOURCES.CALLER_STATED, ...FALLBACK_SQFT_SOURCES]) {
+    for (const source of [SQFT_SOURCES.CALLER_STATED, ...FALLBACK_SQFT_SOURCES, SQFT_SOURCES.PROFILE, 'property_facts_v2', 'a_source_added_next_year', 7]) {
       expect([source, estimateIsRemoteMeasured(draft({ home: { ...county, source }, lot: county }), {})]).toEqual([source, false]);
       expect([source, estimateIsRemoteMeasured(draft({ home: county, lot: { ...county, source } }), {})]).toEqual([source, false]);
     }
@@ -684,6 +684,14 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     // A draft with no property facts, and an estimate that is no call draft.
     expect(estimateIsRemoteMeasured({ result: pestPlan, estimatorEngine: { callLogId: 1 } }, {})).toBe(true);
     expect(estimateIsRemoteMeasured({ result: pestPlan, estimatorEngine: true }, {})).toBe(true);
+  });
+
+  test('an estimate drafted from a visit never says the quote needed no visit', () => {
+    const pestPlan = { recurring: { services: [recurringRow('pest_control')] } };
+    expect(estimateIsRemoteMeasured({ result: pestPlan }, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ result: pestPlan, scheduled_service_id: null }, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ result: pestPlan, scheduled_service_id: 'a1b2c3d4-0000-4000-8000-000000000001' }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: pestPlan, scheduled_service_id: 4127 }, {})).toBe(false);
   });
 
   test('a pricing decision the office makes is not a measurement of the home: it is not read', () => {

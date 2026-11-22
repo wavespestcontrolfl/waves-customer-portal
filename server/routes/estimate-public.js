@@ -24376,15 +24376,20 @@ const rowsThatMustPass = (value) => storedObjects(value)
 //   service quoted the turf size prices nothing, and the mark is not read: the engine leaves it out the same way for
 //   an object that is not a priced row.
 // - A call draft keeps the source of the home size and the lot size it priced from
-//   (`estimatorEngine.propertyFacts`, source-arbitration). A size the caller stated, and each fallback source, is no
-//   measurement from records or images. Only the selected fact is read, never a rejected candidate.
+//   (`estimatorEngine.propertyFacts`, source-arbitration). Only the county record counts as measured. Every other
+//   source takes the answer away: a size the caller stated, each fallback source, a saved profile value, and the
+//   `property_facts_v2` label (its evidence can be a technician's field correction; this rule does not read that
+//   evidence, so it does not trust the label). Only the selected fact is read, never a rejected candidate.
+// - An estimate drafted from a visit (`scheduled_service_id`, the marker the consultation offer reads): a technician
+//   looked at this home, so the page must not say the quote needed no visit.
 const LAWN_SERVICES = new Set(['lawn_care', 'one_time_lawn']);
 function callDraftSizesAreNotMeasured(estData) {
-  const { SQFT_SOURCES, FALLBACK_SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
+  const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
   const facts = estData?.estimatorEngine?.propertyFacts;
   return [facts?.home, facts?.lot].some((fact) => isStoredRow(fact) && fact.source != null
-    && (fact.source === SQFT_SOURCES.CALLER_STATED || FALLBACK_SQFT_SOURCES.has(fact.source)));
+    && fact.source !== SQFT_SOURCES.COUNTY_ASSESSED);
 }
+const estimateWasDraftedFromAVisit = (estData) => Boolean(estData?.scheduled_service_id);
 function storedMarksBesideTheRowsSayNo(estData, pricingBundle) {
   const { sendSnapshot: _sentPriceAndScope, ...savedData } = isStoredRow(estData) ? estData : {};
   const replay = persistedGuaranteeRoots(estData).length ? null : guaranteeReplayForInputsOnly(estData).result;
@@ -24392,7 +24397,8 @@ function storedMarksBesideTheRowsSayNo(estData, pricingBundle) {
   const lawnIsQuoted = objects.some((stored) => LAWN_SERVICES.has(serviceIdentity(stored.service)));
   return objects.some(storedRowHasAnUnsureReview)
     || (lawnIsQuoted && objects.some((stored) => engineChecks().lineHasHeuristicTurf(stored)))
-    || callDraftSizesAreNotMeasured(estData);
+    || callDraftSizesAreNotMeasured(estData)
+    || estimateWasDraftedFromAVisit(estData);
 }
 
 function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
