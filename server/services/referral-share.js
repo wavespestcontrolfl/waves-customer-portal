@@ -16,6 +16,9 @@
 // getPromoterReferralLink, never a parallel code generator.
 
 
+const { isEnabled } = require('../config/feature-gates');
+const step2 = require('./referral-step2');
+
 const REFERRAL_CARD_COPY = Object.freeze({
   headline: 'Know someone who could use Waves?',
   cta: 'Send My Referral Link',
@@ -71,8 +74,10 @@ async function buildReferralShareForCustomer(customerId, {
 
   const refereeCents = Math.max(0, Math.trunc(Number(settings.referee_discount_cents) || 0));
   const refereeAmount = formatRefereeAmount(refereeCents);
+  // GATE_REFERRAL_STEP2: the friend gets an account credit after the first plan service (owner 2026-11-21), so no "off".
+  const step2On = isEnabled('referralStep2');
   const offerClause = refereeCents > 0
-    ? `they'll take ${refereeAmount} off your first service with my code ${code}`
+    ? (step2On ? step2.friendShareClause(refereeCents, code) : `they'll take ${refereeAmount} off your first service with my code ${code}`)
     : `mention my code ${code} when you book`;
   const bareLink = String(link).replace(/^https?:\/\//i, '');
   return {
@@ -80,7 +85,7 @@ async function buildReferralShareForCustomer(customerId, {
     link,
     // Texts say "Waves" (owner 2026-11-04); the email keeps the full name.
     smsBody: `We use Waves and ${offerClause}. ${bareLink}`,
-    emailSubject: refereeCents > 0 ? `${refereeAmount} off Waves Pest Control` : 'Waves Pest Control',
+    emailSubject: refereeCents > 0 && !step2On ? `${refereeAmount} off Waves Pest Control` : 'Waves Pest Control',
     emailBody: `We use Waves Pest Control and ${offerClause}.\n\n${link}`,
   };
 }

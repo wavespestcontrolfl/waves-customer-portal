@@ -7157,6 +7157,16 @@ a ZIP on one side only; two different ZIP codes are two homes. Every other respo
 (`EstimateViewPage`, Waves AI card) shows it in the place of the satellite photo (a misting layout wins when both are
 present) and puts the satellite photo back when the picture fails to load. `EstimateProposalDocument` (the emailed PDF)
 ignores it, and the emailed-PDF fingerprint does not read it.
+Staff preview variant: on a VERIFIED staff preview only (`?adminPreview=1` AND a valid staff Bearer token, the route's
+`verifiedStaffPreview`; the query parameter alone never counts), when the customer block above is absent, the key carries what
+the next send would freeze, marked `preview: true` (`{ imageUrl, imageYear|null, pins: [...], preview: true }`), so staff can
+check the points in the estimate tool's customer preview before the first send. It comes from the same function the freeze
+uses (`nextSendPoints`: the newest finished read of the estimate's own context whose points the technician set, saved for the
+estimate's current address, through `customerPointsFromRow`), and every pin label is screened again, as on the customer block.
+It is absent (the key is not sent) when staff hid the points, when any roof read of the estimate is hidden, when the read names
+another customer, when the points were saved for another address, and when no point is confirmed. When the customer block
+exists, a staff preview gets that same block with no `preview` key. A request that is not a verified staff preview, the emailed
+document and the intelligence bar never get the `preview` key, and their responses are byte-identical to before.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that

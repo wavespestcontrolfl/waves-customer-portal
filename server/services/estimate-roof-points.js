@@ -90,6 +90,20 @@ function sameHome(a, b) {
   return !zipA || !zipB || zipA === zipB;
 }
 
+/**
+ * What a send made now would freeze for this estimate: `{ row, points }` (the newest points read and what
+ * customerPointsFromRow gives for it), `points` null when there is nothing to show. The ONE place that decides this: the
+ * freeze copies it, and a verified staff preview (roofPointsDocBlock) shows it before the first send.
+ * The points were saved for the address the staff lookup ran for (the same lookup gave the photo centre). An estimate
+ * that has another address now is another roof: it gets no points until staff read and confirm that one.
+ * Hidden points and a read saved for another customer give null here too (customerPointsFromRow, ownRead).
+ */
+async function nextSendPoints(estimate, knex) {
+  const row = await newestPointsRead(estimate, knex);
+  const points = sameHome(row?.points_address, estimate.address) ? customerPointsFromRow(row) : null;
+  return { row, points };
+}
+
 const timeMs = (v) => (v ? new Date(v).getTime() : NaN);
 
 /**
@@ -100,10 +114,7 @@ const timeMs = (v) => (v ? new Date(v).getTime() : NaN);
 async function freezeRoofPointsForEstimate(estimate, { deliveredAt, knex = db } = {}) {
   if (!estimate?.id || !Number.isFinite(timeMs(deliveredAt))) return 'skipped';
   try {
-    const row = await newestPointsRead(estimate, knex);
-    // The points were saved for the address the staff lookup ran for (the same lookup gave the photo centre). An
-    // estimate that has another address now is another roof: it gets no points until staff read and confirm that one.
-    const points = sameHome(row?.points_address, estimate.address) ? customerPointsFromRow(row) : null;
+    const { row, points } = await nextSendPoints(estimate, knex);
     if (!points) {
       await knex(TABLE).where({ estimate_id: estimate.id }).del();
       return 'cleared';
@@ -140,6 +151,11 @@ function copyIsCurrent(row, estimate) {
   return Number.isFinite(latest) && Number.isFinite(copy) && copy >= latest;
 }
 
+// Is any read of this estimate hidden? (Hide or show is one choice for the estimate: see readsAllowCopy.)
+async function anyReadHidden(estimate, knex) {
+  return Boolean(await knex(READS).where({ estimate_id: estimate.id, hide_on_estimate: true }).first('id'));
+}
+
 /**
  * May the copy be shown NOW, by the read rows as they stand?
  *  - Staff did not hide the estimate's roof points. Hide or show is one choice for the estimate: saveTechCount writes it
@@ -152,7 +168,7 @@ function copyIsCurrent(row, estimate) {
 async function readsAllowCopy(estimate, readId, knex) {
   const [frozen, anyHidden] = await Promise.all([
     readId ? knex(READS).where({ id: readId }).first('hide_on_estimate', 'context_key', 'customer_id', 'estimate_id') : null,
-    knex(READS).where({ estimate_id: estimate.id, hide_on_estimate: true }).first('id'),
+    anyReadHidden(estimate, knex),
   ]);
   if (anyHidden || !frozen || frozen.hide_on_estimate) return false;
   return ownRead(frozen, estimate);
@@ -186,21 +202,37 @@ function cleanSnapshot(snapshot) {
   };
 }
 
-/** The /data key for the customer estimate: `{ roofPoints }`, or `{}`. Fail-soft: a storage hiccup omits the section. */
-async function roofPointsDocBlock(estimate, { knex = db } = {}) {
+/**
+ * The /data key for the customer estimate: `{ roofPoints }`, or `{}`. Fail-soft: a storage hiccup omits the section.
+ * `staffPreview` is true ONLY for a request the route verified as staff (a valid staff token, not just ?adminPreview=1).
+ * Then, and only when the customer block below is absent, the answer carries what the next send would freeze, marked
+ * `preview: true`, so staff can check the points before the first send. Any other caller gets exactly the customer block.
+ */
+async function roofPointsDocBlock(estimate, { knex = db, staffPreview = false } = {}) {
   if (!estimate?.id) return {};
   try {
-    const row = await knex(TABLE).where({ estimate_id: estimate.id }).first();
-    if (!row || !copyIsCurrent(row, estimate) || !copyForHolder(row, estimate)) return {};
-    if (!sameHome(row.address, estimate.address)) return {};
-    const snapshot = cleanSnapshot(row.snapshot);
-    if (!snapshot) return {};
-    if (!(await readsAllowCopy(estimate, row.read_id, knex))) return {};
-    return { roofPoints: snapshot };
+    const frozen = await frozenCopyBlock(estimate, knex);
+    if (frozen || staffPreview !== true) return frozen ? { roofPoints: frozen } : {};
+    const { points } = await nextSendPoints(estimate, knex);
+    // The customer page hides the points while ANY read of the estimate is hidden (readsAllowCopy), so the preview does
+    // too: it must show only what the customer would see after that send.
+    const snapshot = points && !(await anyReadHidden(estimate, knex)) ? cleanSnapshot(points) : null;
+    return snapshot ? { roofPoints: { ...snapshot, preview: true } } : {};
   } catch (err) {
     logger.warn(`[estimate-roof-points] section skipped for estimate ${estimate.id}: ${errCode(err)}`);
     return {};
   }
+}
+
+// The customer's block: the frozen copy when every rule lets it show, else null.
+async function frozenCopyBlock(estimate, knex) {
+  const row = await knex(TABLE).where({ estimate_id: estimate.id }).first();
+  if (!row || !copyIsCurrent(row, estimate) || !copyForHolder(row, estimate)) return null;
+  if (!sameHome(row.address, estimate.address)) return null;
+  const snapshot = cleanSnapshot(row.snapshot);
+  if (!snapshot) return null;
+  if (!(await readsAllowCopy(estimate, row.read_id, knex))) return null;
+  return snapshot;
 }
 
 module.exports = {

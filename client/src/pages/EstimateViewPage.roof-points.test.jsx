@@ -127,6 +127,20 @@ describe('estimate page: roof points card', () => {
     expect(screen.queryByAltText(/Satellite view of/)).toBeNull();
   });
 
+  it('shows one staff note at the end of the card when the block is a staff preview, and none for the customer block', async () => {
+    await renderPage(payload({ roofPoints: roofPoints({ preview: true }) }));
+    const card = await screen.findByTestId('roof-points-card');
+    const note = screen.getByTestId('roof-points-preview-note');
+    expect(note).toHaveTextContent('Staff preview: the customer sees these points after the next send.');
+    expect(screen.getAllByTestId('roof-points-preview-note')).toHaveLength(1);
+    expect(card.lastElementChild).toBe(note);
+    cleanup();
+    await renderPage(payload({ roofPoints: roofPoints() }));
+    expect(await screen.findByTestId('roof-points-card')).toBeInTheDocument();
+    expect(screen.queryByTestId('roof-points-preview-note')).toBeNull();
+    expect(document.body.textContent).not.toContain('Staff preview');
+  });
+
   it('keeps the satellite photo and shows no card without roofPoints', async () => {
     await renderPage(payload());
     expect(await screen.findByAltText('Satellite view of 77 Preview Lane')).toHaveAttribute('src', SAT);

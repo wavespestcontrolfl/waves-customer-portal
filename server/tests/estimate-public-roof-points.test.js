@@ -35,6 +35,12 @@ jest.mock('../services/estimate-deposits', () => ({
   consumeDepositCredit: jest.fn(),
   refundUnconsumedDeposits: jest.fn(),
 }));
+// A staff preview needs a staff Bearer the route verifies: the fake accepts one token and nothing else. The query
+// parameter alone must never be enough.
+jest.mock('../middleware/admin-auth', () => ({
+  ...jest.requireActual('../middleware/admin-auth'),
+  verifyStaffBearer: jest.fn(async (req) => (req.headers.authorization === 'Bearer staff-ok' ? { id: 'tech-1', role: 'admin' } : null)),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 jest.setTimeout(60000);
@@ -70,6 +76,10 @@ function readsChain(rows = []) {
   let where = {};
   const chain = {
     where: (w) => { where = { ...where, ...w }; return chain; },
+    // The staff preview reads the estimate's own reads whose points are set, newest first.
+    whereRaw: () => chain,
+    orderBy: () => chain,
+    select: async () => rows.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v)),
     first: async () => rows.find((r) => Object.entries(where).every(([k, v]) => r[k] === v)),
   };
   return chain;
@@ -112,7 +122,8 @@ async function withServer(fn) {
     server.close();
   }
 }
-const getText = (baseUrl, query = '') => fetch(`${baseUrl}/estimates/roofpointstoken/data${query}`).then((r) => r.text());
+const getText = (baseUrl, query = '', headers = {}) => fetch(`${baseUrl}/estimates/roofpointstoken/data${query}`, { headers }).then((r) => r.text());
+const STAFF = { Authorization: 'Bearer staff-ok' };
 
 // These fields differ between any two requests: the row's own expiry and the answer's time stamp are built from the
 // clock, and the ask token is signed per request with a one-second time stamp.
@@ -197,6 +208,72 @@ describe('GET /:token/data: roofPoints', () => {
       const body = JSON.parse(await getText(baseUrl));
       expect(Object.keys(body.roofPoints).sort()).toEqual(['imageUrl', 'imageYear', 'pins']);
       expect(Object.keys(body.roofPoints.pins[0]).sort()).toEqual(['action', 'label', 'n', 'type', 'x', 'y']);
+    });
+  });
+
+  // Staff preview (owner approved 2026-11-21): before the first send there is no frozen copy, so a VERIFIED staff
+  // preview carries the block the next send would freeze, marked preview. The query parameter alone is no proof.
+  describe('staff preview of the next send', () => {
+    const DRAFT_READ = {
+      ...READ, id: 'read-draft', tech_pins: [{ x: 0.25, y: 0.4, type: 'roof_returns_and_valleys', note: null }], crop_lat: '27.46000', crop_lng: '-82.50000',
+      image_source: 'manatee_2025_rgb', image_year: 2025, points_address: ADDRESS,
+    };
+    const draftOnly = () => base({ tables: { roof_entry_reads: [DRAFT_READ] } });
+
+    test('?adminPreview=1 with no staff token never returns a preview block (the query parameter is not authorization)', async () => {
+      let none;
+      dbRows = base();
+      await withServer(async (baseUrl) => { none = await getText(baseUrl); });
+      dbRows = draftOnly();
+      await withServer(async (baseUrl) => {
+        const answers = [
+          await getText(baseUrl),
+          await getText(baseUrl, '?adminPreview=1'),
+          await getText(baseUrl, '?adminPreview=1', { Authorization: 'Bearer not-a-staff-token' }),
+          await getText(baseUrl, '', STAFF),
+          await getText(baseUrl, '?adminPreview=true', STAFF),
+        ];
+        for (const text of answers) {
+          expect(text).not.toContain('roofPoints');
+          expect(text).not.toContain('"preview"');
+          expect(diffPaths(JSON.parse(text), JSON.parse(none))).toEqual([]);
+        }
+      });
+    });
+
+    test('a verified staff preview with no frozen copy carries the next-send block, marked preview', async () => {
+      dbRows = draftOnly();
+      await withServer(async (baseUrl) => {
+        const body = JSON.parse(await getText(baseUrl, '?adminPreview=1', STAFF));
+        expect(body.verifiedStaffPreview).toBe(true);
+        expect(body.roofPoints.preview).toBe(true);
+        expect(Object.keys(body.roofPoints).sort()).toEqual(['imageUrl', 'imageYear', 'pins', 'preview']);
+        expect(body.roofPoints.imageYear).toBe(2025);
+        expect(body.roofPoints.pins).toEqual([{ n: 1, x: 0.25, y: 0.4, type: 'roof_returns_and_valleys', label: 'Roof return', action: 'seal' }]);
+      });
+    });
+
+    test('a verified staff preview with nothing to preview (hidden points, another address) answers like a customer', async () => {
+      for (const read of [{ ...DRAFT_READ, hide_on_estimate: true }, { ...DRAFT_READ, points_address: '99 Other Road, Sarasota, FL 34232' }]) {
+        let none;
+        dbRows = base({ tables: { roof_entry_reads: [] } });
+        await withServer(async (baseUrl) => { none = await getText(baseUrl, '?adminPreview=1', STAFF); });
+        dbRows = base({ tables: { roof_entry_reads: [read] } });
+        await withServer(async (baseUrl) => {
+          const text = await getText(baseUrl, '?adminPreview=1', STAFF);
+          expect(text).not.toContain('roofPoints');
+          expect(diffPaths(JSON.parse(text), JSON.parse(none))).toEqual([]);
+        });
+      }
+    });
+
+    test('a verified staff preview of an estimate with a visible frozen copy gets the customer block, no preview key', async () => {
+      dbRows = base({ tables: { estimate_roof_points: POINT, roof_entry_reads: [READ, DRAFT_READ] } });
+      await withServer(async (baseUrl) => {
+        const body = JSON.parse(await getText(baseUrl, '?adminPreview=1', STAFF));
+        expect(body.roofPoints).toEqual(SNAPSHOT);
+        expect(body.roofPoints).not.toHaveProperty('preview');
+      });
     });
   });
 });
