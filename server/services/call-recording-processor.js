@@ -8095,7 +8095,7 @@ function commercialAssessmentBookableFor({ extracted = {}, preAdoptionExtracted 
       if (finalView) views.push(finalView);
       if (views.some((view) => hasCallReServiceIntent(view))) return false;
       const serviceNames = services.map((sv) => sv.name).filter(Boolean);
-      return views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every((view) => {
+      return views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames, v2Extraction)).every((view) => {
         const coarse = resolveSchedulableCallService(view, { transcription });
         const row = resolveCallBookingCatalogService({
           extracted: view,
@@ -8139,7 +8139,7 @@ function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = nul
       // each view as the booking will book it, so a one-time pick that becomes a
       // quarterly program (which drops the quote) holds here (codex #5377 local r1 P1).
       const serviceNames = services.map((s) => s.name).filter(Boolean);
-      return views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every((view) => {
+      return views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames, v2Extraction)).every((view) => {
         const coarse = resolveSchedulableCallService(view, { transcription });
         const row = resolveCallBookingCatalogService({
           extracted: view,
@@ -9863,6 +9863,7 @@ const NEGATED_CADENCE_BEFORE_RE = /(?:\b(?:not|no|never|without|rather than|inst
 // Billing cadence is not service cadence: "can I PAY MONTHLY for the one-time
 // treatment?" is a payment-terms question.
 const PAYMENT_CONTEXT_BEFORE_RE = /\b(?:pay(?:ing)?|billed?|billing|charged?|payments?|installments?|invoiced?)\b[^.?!]{0,15}$/i;
+
 // True when `re` (global) matches somewhere that reads as SERVICE cadence:
 // not negated, and not preceded by a pest-pressure verb in the same clause —
 // unless a request verb after the pressure verb turned the clause into an ask.
@@ -9880,78 +9881,6 @@ function serviceCadenceMatch(re, text) {
     if (scan.lastIndex === m.index) scan.lastIndex++;
   }
   return false;
-}
-
-// A plan the caller has WITH SOMEONE ELSE is that company's plan, not an ask of
-// Waves: "I just signed up for, like, a monthly service with them now that I
-// don't even need" booked a same-day one-time ant job as Monthly Pest Control
-// (2026-11-21). The plan words of such a clause are blanked before ANY scan of
-// this rule reads the transcript (recurringIntentEvidence): the program words,
-// the cadence words, the cadence ladder, the monthly veto and the agent offers
-// all read the same text, so no scan can count a word another scan set aside.
-// Only the plan words go, each replaced by filler of its own length. The
-// clause's other words stay, so a pressure verb or a negation in it still
-// guards what follows, at the distance it had.
-//
-// The other company: "with another / a different / my current … company", or
-// "with them" right after an enrollment word ("service with them", "signed up
-// with them", "was with them"). A bare "with them" is usually the pests ("a
-// problem with them", "help with them") and is not here; "with my current ant
-// problem" names no company.
-const OTHER_PROVIDER_RE = /\b(?:services?|plans?|contracts?|programs?|accounts?|treatments?|(?:bi[- ]?)?monthly|quarterly|semi[- ]?annual(?:ly)?|signed(?: up)?|sign(?:ing)? up|was|were|am|i'm|we're|been|went|going|gone|go|stay(?:ed|ing)?) with them\b|\bwith (?:another|a different|some other|the other|(?:my|our) (?:current|other|old|last|previous)) (?:pest (?:control )?|bug |lawn )?(?:company|companies|provider|service|guys?|people|exterminator|outfit|place)\b/i;
-// A clause ends at a sentence end, and at a turn to a new statement: "I was
-// with them, BUT I want monthly with you"; "…with them AND I want…"; "…with
-// them, CAN YOU come today?".
-const CLAUSE_PIVOT_RE = /(\bbut\b|\b(?:and|so|because) (?=(?:i|we|you|they)\b)|,\s*(?=(?:i|we|can|could|would|will|do)\b))/i;
-// Words that turn a clause toward Waves. Who speaks decides which words they
-// are. The CALLER asks ("I want", "I'd like", "can you": "you" is Waves). The
-// AGENT offers ("we can", "our plan", "I can": "you" there is the caller, so
-// an agent's "do you still have a plan with them?" is a question about the
-// other company and no offer).
-//   - Before the other company, they make the clause an ask or an offer about
-//     that plan ("can you do the quarterly service I get with my current
-//     company?"): the clause keeps its plan words.
-//   - After it, they start the Waves part of the clause ("after I cancel my
-//     service with them I'd like monthly with you"): the plan words from there
-//     on are kept.
-const TOWARD_WAVES_RE = Object.freeze({
-  caller: new RegExp(`${REQUEST_VERB_RE.source}|\\b(?:i|we)(?:'d| would) (?:like|love)\\b|\\b(?:can|could|would|will|do) (?:you|y'all)\\b`, 'i'),
-  other: /\b(?:we|our|ours|us|i can|i could|i'll|i will|i'd|let me)\b/i,
-});
-const PLAN_WORDS_RE = new RegExp(`${RECURRING_INTENT_STRONG_RE.source}|${RECURRING_CADENCE_RE.source}`, 'gi');
-
-// One clause with the other company's plan words blanked.
-function blankOtherProviderClause(clause, towardWaves) {
-  const provider = clause.match(OTHER_PROVIDER_RE);
-  if (!provider || towardWaves.test(clause.slice(0, provider.index))) return clause;
-  const providerEnd = provider.index + provider[0].length;
-  const turn = clause.slice(providerEnd).search(towardWaves);
-  const theirs = turn < 0 ? clause.length : providerEnd + turn;
-  return clause.slice(0, theirs).replace(PLAN_WORDS_RE, (word) => '~'.repeat(word.length)) + clause.slice(theirs);
-}
-
-// One speaker's text with the other company's plan words blanked. `wraps`: the
-// text is ONE labelled turn, so its line breaks are a wrapped sentence ("…for
-// monthly service" / "with another company"), read as spaces and then put back.
-function blankOtherProviderPlans(text, speaker, wraps) {
-  const towardWaves = TOWARD_WAVES_RE[speaker] || TOWARD_WAVES_RE.caller;
-  const blanked = (wraps ? text.replace(/\n/g, ' ') : text).replace(/[^.?!;\n]+/g, (sentence) => sentence
-    .split(CLAUSE_PIVOT_RE)
-    .map((clause) => blankOtherProviderClause(clause, towardWaves))
-    .join(''));
-  // The filler keeps every length, so each line break is back at its own place.
-  return wraps ? blanked.replace(/ /g, (space, at) => (text[at] === '\n' ? '\n' : space)) : blanked;
-}
-
-// The transcript with the plan words of another company's plan blanked, turn
-// by turn. An unlabelled transcript is read as the caller's, line by line (its
-// lines may be two speakers), as callerOnlyText reads it. Lines before the
-// first label belong to no turn; the rule never reads them.
-function withoutOtherProviderPlans(transcription) {
-  const text = String(transcription || '');
-  const turns = speakerTurns(text);
-  if (!turns.length) return blankOtherProviderPlans(text, 'caller', false);
-  return turns.map((turn) => blankOtherProviderPlans(turn.text, turn.speaker, true)).join('\n');
 }
 
 // Transcribers emit curly apostrophes; every guard regex here uses ASCII
@@ -10057,7 +9986,7 @@ function resolveProgramName(cadenceKey, fallback, catalogNames) {
 // forcedAssessmentBooking (to know a recurring program is the caller's, not the
 // model's guess).
 function recurringIntentEvidence(transcription) {
-  const normalized = withoutOtherProviderPlans(normalizeApostrophes(transcription));
+  const normalized = normalizeApostrophes(transcription);
   const turns = speakerTurns(normalized);
   const callerText = callerOnlyText(normalized);
   // A decline only vetoes when nothing recurring FOLLOWS it — a caller who
@@ -10086,7 +10015,43 @@ function recurringIntentEvidence(transcription) {
   return { callerText, acceptedOffer };
 }
 
-function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = []) {
+// Owner 2026-11-22 ("fix"): the rule keeps the AI's one-time service when the
+// call agreed a one-time price. On 2026-11-21 a caller booked a same-day
+// one-time ant job at the one-time price staff stated; her only cadence word
+// described the plan another company had sold her that morning ("I just signed
+// up for, like, a monthly service with them now that I don't even need"), and
+// the rule booked Monthly Pest Control. The words of a transcript cannot tell
+// whose plan a cadence word names. The validated extraction says what was
+// agreed, so the hold reads that and nothing in the transcript:
+//   - the V2 extraction names a singular service (one this rule rewrites);
+//   - the call agreed a price (resolveCallAgreedPrice, the one reading of "a
+//     price was agreed on this call") and every agreed term is one-time. A
+//     plan rate agreed on the same call ("$99 to start, then $31 a month")
+//     leaves the rule as it was.
+// No V2 extraction (the first pass runs before it exists, and a call whose V2
+// failed validation never has one): no hold.
+function callAgreedOneTimeJob(v2Extraction) {
+  if (!isV2Extraction(v2Extraction)) return false;
+  if (!RECURRING_OVERRIDE_SOURCES.has(normalizeServiceKey(v2Extraction.service_request?.specific_service_name))) return false;
+  const agreed = resolveCallAgreedPrice(v2Extraction);
+  return !!agreed && [agreed, ...(agreed.additionalTerms || [])].every((term) => term.unit === 'one_time');
+}
+
+// The rule's first pass runs before the V2 extraction exists, so it cannot know
+// an agreed one-time job. `serviceBefore` is the two service fields as that pass
+// found them. When the extraction then shows an agreed one-time job and the pass
+// rewrote a field, both go back. Returns `extracted` itself when there is
+// nothing to undo.
+function undoRecurringDefaultForAgreedOneTimeJob(extracted, serviceBefore, v2Extraction) {
+  if (!extracted || !serviceBefore || !callAgreedOneTimeJob(v2Extraction)) return extracted;
+  if (extracted.matched_service === serviceBefore.matched_service
+    && extracted.specific_service_name === serviceBefore.specific_service_name) return extracted;
+  return { ...extracted, matched_service: serviceBefore.matched_service, specific_service_name: serviceBefore.specific_service_name };
+}
+
+// The rule from the caller's words alone: `extracted` itself when nothing
+// changes, else a copy with the recurring program.
+function recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames) {
   if (!extracted || extracted.is_lead !== true) return extracted;
   // specific_service_name outranks matched_service in catalog booking
   // resolution (call-booking-catalog.js), so a singular value THERE would
@@ -10149,7 +10114,24 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
     out.matched_service = out.specific_service_name;
   }
   if (out.matched_service === extracted.matched_service && out.specific_service_name === extracted.specific_service_name) return extracted;
-  logger.info(`[call-proc] recurring-intent default: "${extracted.specific_service_name || extracted.matched_service}" -> "${out.specific_service_name || out.matched_service}"`);
+  return out;
+}
+
+// `v2Extraction`: the validated V2 extraction when the caller of this function
+// has one (every pass after V2-primary adoption), else null. An agreed one-time
+// job holds the rewrite of a singular service (callAgreedOneTimeJob); a view
+// that already names a program keeps the rule's cadence choice.
+function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = [], v2Extraction = null) {
+  const out = recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames);
+  if (out === extracted) return extracted;
+  const label = extracted.specific_service_name || extracted.matched_service;
+  const singular = [extracted.matched_service, extracted.specific_service_name]
+    .some((name) => RECURRING_OVERRIDE_SOURCES.has(normalizeServiceKey(name)));
+  if (singular && callAgreedOneTimeJob(v2Extraction)) {
+    logger.info(`[call-proc] recurring-intent default held: the call agreed a one-time price for "${label}"`);
+    return extracted;
+  }
+  logger.info(`[call-proc] recurring-intent default: "${label}" -> "${out.specific_service_name || out.matched_service}"`);
   return out;
 }
 
@@ -12948,6 +12930,10 @@ const CallRecordingProcessor = {
     // agent's own plan pitch as customer intent. The prompt-driven model,
     // which sees the whole conversation, still applies the rule on outbound
     // calls. Revisit when outbound speaker identity is deterministic.
+    // This first pass runs before the V2 extraction exists, so it cannot know an
+    // agreed one-time job (callAgreedOneTimeJob). V2-primary adoption puts these
+    // two fields back when the extraction shows one.
+    const serviceBeforeRecurringRule = { matched_service: extracted.matched_service, specific_service_name: extracted.specific_service_name };
     if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
@@ -13115,6 +13101,18 @@ const CallRecordingProcessor = {
     // The V1 extraction as it stood BEFORE V2-primary adoption: the whole-
     // structure unit waiver must agree with it too (a V1 pick V2 overwrites
     // is a service disagreement, not a WDO).
+    // The recurring-intent rule's first pass ran before this extraction existed.
+    // When the extraction shows an agreed one-time job, the service that pass
+    // rewrote goes back, before any write reads it (owner 2026-11-22). Same gate
+    // as the adoption below, so a shadow extraction changes nothing; the helper
+    // itself refuses anything that is not a V2 extraction.
+    if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid') {
+      const restored = undoRecurringDefaultForAgreedOneTimeJob(extracted, serviceBeforeRecurringRule, v2Result.extraction);
+      if (restored !== extracted) {
+        logger.info(`[call-proc] recurring-intent default undone for ${maskSid(callSid)}: the call agreed a one-time price`);
+        extracted = restored;
+      }
+    }
     const preAdoptionExtracted = { ...extracted };
     let serviceFieldsAdopted = [];
     // The V2 extraction when primary adoption ran for this pass, else null (stampCallerIdReachback).
@@ -13135,7 +13133,7 @@ const CallRecordingProcessor = {
         // fields (a stub call had nothing to upgrade). Re-assert it over the
         // adopted service labels BEFORE any lead write consumes them, exactly
         // like the enforce path's approved-booking re-assert (codex P2).
-        if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+        if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, v2Result.extraction);
       }
       serviceFieldsAdopted = adoption.adoptedFields;
       adoptedV2Extraction = v2Result.extraction;
@@ -13380,7 +13378,7 @@ const CallRecordingProcessor = {
       // promotion — a "wasp nest, and I'd like the quarterly package"
       // voicemail was still is_lead=false then. Re-run it now that the
       // deterministic signals made this a lead (idempotent, no-op otherwise).
-      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, adoptedV2Extraction);
     }
 
     // Skip spam and non-workable voicemail
@@ -19919,7 +19917,7 @@ const CallRecordingProcessor = {
       // the merged fields; no-op when nothing singular survived.
       const preReassertMatched = extracted.matched_service;
       const preReassertSpecific = extracted.specific_service_name;
-      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, v2ApprovedExtraction);
       if (extracted.matched_service !== preReassertMatched
         || extracted.specific_service_name !== preReassertSpecific) {
         // ai_extraction and the lead's service_interest were persisted BEFORE
@@ -26857,6 +26855,8 @@ CallRecordingProcessor._test = {
   isUsableContactPhone,
   labeledTranscriptPreservesWords,
   applyRecurringIntentDefault,
+  callAgreedOneTimeJob,
+  undoRecurringDefaultForAgreedOneTimeJob,
   callBookingTimeSanityFlags,
 };
 

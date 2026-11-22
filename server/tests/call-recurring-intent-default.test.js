@@ -15,8 +15,9 @@ jest.mock('../config/twilio-numbers', () => ({
   getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
 }));
 
+const fs = require('fs');
 const { _test } = require('../services/call-recording-processor');
-const { applyRecurringIntentDefault } = _test;
+const { applyRecurringIntentDefault, callAgreedOneTimeJob, undoRecurringDefaultForAgreedOneTimeJob } = _test;
 
 const lead = (over = {}) => ({ is_lead: true, matched_service: 'Bee / Wasp Nest Removal Service', ...over });
 
@@ -403,99 +404,6 @@ describe('applyRecurringIntentDefault', () => {
     ).matched_service).toBe('Bee / Wasp Nest Removal Service');
   });
 
-  // 2026-11-21: a same-day one-time ant job booked as Monthly Pest Control. The caller's only
-  // cadence word described the plan she had just bought from another company.
-  test('a plan the caller bought from ANOTHER company is not an ask, wherever the marker sits', () => {
-    const oneTime = lead({ matched_service: 'One-Time Pest Control Service', specific_service_name: 'One-Time Pest Control Service' });
-    const t = [
-      'Caller: Do you happen to have anyone that could come out and spray, like, today?',
-      'Agent: One-time service is $250, but it varies.',
-      "Caller: Meanwhile, I just signed up for, like, a monthly service with them now that I don't even need because they didn't have, like, a one-time thing.",
-    ].join('\n');
-    expect(applyRecurringIntentDefault(oneTime, t)).toBe(oneTime);
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I signed up with another company for quarterly service, I just need this nest gone.').matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-    expect(applyRecurringIntentDefault(lead(), 'Caller: we get monthly service with my current company, but they will not come out for wasps.').matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I signed up for monthly with them, can you guys come spray today?').matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-  });
-
-  test('another company\'s plan does not hide a real ask of Waves in the same call', () => {
-    // The ask carries its own cadence word, in its own sentence or after the clause turns.
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I have monthly service with them. Can you set me up on quarterly?').matched_service)
-      .toBe('Quarterly Pest Control Service');
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I was with them, but I want monthly with you.').matched_service)
-      .toBe('Monthly Pest Control Service');
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I signed up for monthly with them, I want monthly with you instead.').matched_service)
-      .toBe('Monthly Pest Control Service');
-    // "with you" is Waves, never the other company.
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I would like to start monthly service with you guys.').matched_service)
-      .toBe('Monthly Pest Control Service');
-    // An ask that comes before the other company is an ask of Waves about that plan.
-    expect(applyRecurringIntentDefault(lead(), 'Caller: Can you do the quarterly service I get with my current company?').matched_service)
-      .toBe('Quarterly Pest Control Service');
-    // An ask that comes after it, in the same clause, starts the Waves part of the clause.
-    expect(applyRecurringIntentDefault(lead(), "Caller: After I cancel my service with them I'd like monthly with you.").matched_service)
-      .toBe('Monthly Pest Control Service');
-    expect(applyRecurringIntentDefault(lead(), 'Caller: Once I am done with my current company I want monthly service.').matched_service)
-      .toBe('Monthly Pest Control Service');
-  });
-
-  // Who speaks decides what "you" means. An agent's "do you … with them?" asks the caller about
-  // the other company; only Waves words ("we", "our", "I can") make an agent's clause an offer.
-  test('an agent question about the other company\'s plan is no offer; an agent offer about it is', () => {
-    expect(applyRecurringIntentDefault(lead(), 'Agent: Do you still have a service plan with them?\nCaller: Yes.').matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-    expect(applyRecurringIntentDefault(lead(), 'Agent: Do you want to keep your monthly service with them?\nCaller: Yes.').matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-    expect(applyRecurringIntentDefault(lead(), 'Agent: We can match the quarterly plan you have with them.\nCaller: Yes, that works.').matched_service)
-      .toBe('Quarterly Pest Control Service');
-  });
-
-  // A labelled turn can wrap onto unlabelled lines (speakerTurns): the wrap is one sentence.
-  test('a turn wrapped over two lines is read as one sentence, and keeps its line break', () => {
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I just signed up for monthly service\nwith another company, I only need this nest gone.').matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I just signed up for a monthly\nservice with them that I do not even use.').matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I was with them last year\nand I want quarterly from you now.').matched_service)
-      .toBe('Quarterly Pest Control Service');
-    // An unlabelled transcript is read line by line, as the caller's.
-    expect(applyRecurringIntentDefault(lead(), "I just signed up for a monthly service with them that I don't need. Can someone spray today?").matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-  });
-
-  // Every scan of the rule reads the same text: program words, the cadence ladder and the
-  // monthly veto must not count a word of the other company's plan (pre-push audit, 4 cases).
-  test('another company\'s plan is out of every scan: program words, the cadence ladder and the monthly veto', () => {
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I signed up for a monthly service plan with them. Please remove this nest.').matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-    // Their cadence is not a cadence the caller refused: the default stays quarterly.
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I was quarterly with them. I want a package from you.').matched_service)
-      .toBe('Quarterly Pest Control Service');
-    // Their bi-monthly does not cancel the caller's own monthly.
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I was bi-monthly with them. I want monthly with you.').matched_service)
-      .toBe('Monthly Pest Control Service');
-    // An agent asking about the other company's plan made no offer; a real offer in the same turn still counts.
-    expect(applyRecurringIntentDefault(lead(), 'Agent: Are you still on quarterly with them?\nCaller: Yes.').matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-    expect(applyRecurringIntentDefault(lead(), 'Agent: I can set you up on our quarterly plan so you can stop service with them.\nCaller: Yes, sounds good.').matched_service)
-      .toBe('Quarterly Pest Control Service');
-  });
-
-  test('"with them" about the pests, or "my current" with no company, is not another company', () => {
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I need help with them, do you do monthly service?').matched_service)
-      .toBe('Monthly Pest Control Service');
-    expect(applyRecurringIntentDefault(lead(), 'Caller: We have ants and I am having a problem with them every month, I would like a plan.').matched_service)
-      .toBe('Quarterly Pest Control Service');
-    expect(applyRecurringIntentDefault(lead(), 'Caller: With my current ant problem I think I need a monthly service.').matched_service)
-      .toBe('Monthly Pest Control Service');
-    // Only the plan words are blanked: "have" still marks the later "monthly" as a description.
-    expect(applyRecurringIntentDefault(lead(), 'Caller: I have service with them, I think, monthly.').matched_service)
-      .toBe('Bee / Wasp Nest Removal Service');
-  });
-
   test('an agent NEGATIVE plan statement plus "yes" is not an accepted offer', () => {
     const t = [
       'Caller: I have a wasp nest.',
@@ -568,5 +476,122 @@ describe('applyRecurringIntentDefault', () => {
       .toBe('Quarterly Pest Control Service');
     const already = lead({ matched_service: 'Quarterly Pest Control Service' });
     expect(applyRecurringIntentDefault(already, 'Caller: quarterly package please')).toBe(already);
+  });
+});
+
+// Owner 2026-11-22 ("fix"): the rule keeps the AI's one-time service when the call agreed a
+// one-time price. 2026-11-21: a same-day one-time ant job booked as Monthly Pest Control,
+// because the caller's only cadence word named the plan another company had sold her.
+describe('an agreed one-time job holds the rule (owner 2026-11-22)', () => {
+  const TRANSCRIPT = [
+    'Caller: Do you have anyone that could come out and spray today?',
+    'Agent: One-time service is $250, but it varies.',
+    'Caller: Okay. I just signed up for a monthly service with another company that I do not even need.',
+  ].join('\n');
+  const price = (over = {}) => ({ amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent', ...over });
+  // The validated V2 extraction: the service it named and the prices of the call.
+  const v2 = (over = {}) => ({
+    meta: { schema_version: '1.13.0' },
+    service_request: { specific_service_name: 'One-Time Pest Control Service', quoted_price_usd: null, price: price(), prices: [price()], ...over },
+  });
+  const onePrice = (over) => ({ price: price(over), prices: [price(over)] });
+  const oneTime = () => lead({ matched_service: 'One-Time Pest Control Service', specific_service_name: 'One-Time Pest Control Service' });
+  const booked = (view, extraction) => applyRecurringIntentDefault(view, TRANSCRIPT, [], extraction).specific_service_name;
+
+  test('without the extraction the rule reads the cadence word, as before', () => {
+    expect(booked(oneTime())).toBe('Monthly Pest Control Service');
+    expect(booked(oneTime(), null)).toBe('Monthly Pest Control Service');
+  });
+
+  test('V2 named a one-time service and the call agreed a one-time price: the service stays', () => {
+    const view = oneTime();
+    expect(applyRecurringIntentDefault(view, TRANSCRIPT, [], v2())).toBe(view);
+    // Any singular service in the view is kept, not only the one V2 named.
+    const nest = lead({ specific_service_name: 'Bee / Wasp Nest Removal Service' });
+    expect(applyRecurringIntentDefault(nest, TRANSCRIPT, [], v2())).toBe(nest);
+    // The strict agreed total with its one-time entry reads the same.
+    expect(callAgreedOneTimeJob(v2({ quoted_price_usd: 250 }))).toBe(true);
+  });
+
+  test('each part of the hold is needed: without it the rule applies', () => {
+    const noHold = [
+      v2({ specific_service_name: 'Quarterly Pest Control Service' }), // V2 named a program
+      v2({ specific_service_name: null }),
+      v2({ price: null, prices: [] }), // no price on the call
+      v2(onePrice({ accepted: false })), // a price nobody accepted
+      v2(onePrice({ accepted: null })),
+      v2(onePrice({ unit: 'per_month' })), // an agreed plan rate
+      v2(onePrice({ unit: 'unknown' })), // an agreed price with no unit
+      v2({ prices: [price(), price({ amount_usd: 31, unit: 'per_month' })] }), // a one-time price and a plan rate
+      v2({ quoted_price_usd: 250, price: null, prices: [] }), // a strict total with no unit
+      { service_request: v2().service_request }, // not a validated V2 extraction
+    ];
+    for (const extraction of noHold) {
+      expect(callAgreedOneTimeJob(extraction)).toBe(false);
+      expect(booked(oneTime(), extraction)).toBe('Monthly Pest Control Service');
+    }
+  });
+
+  test('the hold never changes a view that already names a program', () => {
+    const program = lead({ matched_service: 'Quarterly Pest Control Service', specific_service_name: 'Quarterly Pest Control Service' });
+    expect(applyRecurringIntentDefault(program, 'Caller: I want the monthly plan.', [], v2()).specific_service_name)
+      .toBe('Monthly Pest Control Service');
+  });
+
+  test('a caller with no recurring words is untouched either way', () => {
+    const view = oneTime();
+    expect(applyRecurringIntentDefault(view, 'Caller: Can someone spray for ants today?', [], v2())).toBe(view);
+  });
+
+  describe('the first pass runs before the extraction exists; its rewrite is undone', () => {
+    const before = { matched_service: 'One-Time Pest Control Service', specific_service_name: 'One-Time Pest Control Service' };
+    const rewritten = () => ({ ...applyRecurringIntentDefault(oneTime(), TRANSCRIPT), phone: '+19415550101' });
+
+    test('an agreed one-time job puts both service fields back and keeps every other field', () => {
+      const after = rewritten();
+      expect(after.specific_service_name).toBe('Monthly Pest Control Service');
+      expect(undoRecurringDefaultForAgreedOneTimeJob(after, before, v2()))
+        .toEqual({ ...after, ...before });
+    });
+
+    test('nothing to undo returns the same object', () => {
+      const after = rewritten();
+      expect(undoRecurringDefaultForAgreedOneTimeJob(after, before, null)).toBe(after);
+      expect(undoRecurringDefaultForAgreedOneTimeJob(after, before, v2(onePrice({ unit: 'per_month' })))).toBe(after);
+      const untouched = oneTime();
+      expect(undoRecurringDefaultForAgreedOneTimeJob(untouched, before, v2())).toBe(untouched);
+    });
+  });
+
+  // The processor is too large to run here; these pin where it hands the extraction to the rule.
+  describe('processRecording wiring', () => {
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const count = (text) => src.split(text).length - 1;
+
+    test('only the first pass calls the rule with no extraction; every later pass hands one over', () => {
+      expect(count('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);')).toBe(1);
+      expect(count('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, v2Result.extraction);')).toBe(1);
+      expect(count('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, adoptedV2Extraction);')).toBe(1);
+      expect(count('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, v2ApprovedExtraction);')).toBe(1);
+      expect(count('applyRecurringIntentDefault(view, transcription, serviceNames, v2Extraction)')).toBe(2);
+      expect(count('applyRecurringIntentDefault(')).toBe(7); // the six calls and the definition
+    });
+
+    test('the first pass is undone before V2-primary adoption reads the service', () => {
+      const remembered = src.indexOf('const serviceBeforeRecurringRule = { matched_service: extracted.matched_service, specific_service_name: extracted.specific_service_name };');
+      const firstPass = src.indexOf('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);');
+      const undone = src.indexOf('undoRecurringDefaultForAgreedOneTimeJob(extracted, serviceBeforeRecurringRule, v2Result.extraction)');
+      const snapshot = src.indexOf('const preAdoptionExtracted = { ...extracted };');
+      const adoption = src.indexOf('adoptV2PrimaryFields(extracted, v2Result.extraction, {');
+      expect(remembered).toBeGreaterThan(-1);
+      expect(firstPass).toBeGreaterThan(remembered);
+      expect(undone).toBeGreaterThan(firstPass);
+      expect(snapshot).toBeGreaterThan(undone);
+      expect(adoption).toBeGreaterThan(snapshot);
+      // Only when V2-primary adoption runs: a shadow extraction changes nothing.
+      const gate = "if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid') {\n      const restored = ";
+      expect(src.indexOf(gate)).toBeGreaterThan(firstPass);
+      expect(src.indexOf(gate) + gate.length).toBe(undone);
+    });
   });
 });
