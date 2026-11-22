@@ -264,6 +264,25 @@ describe('queryParcels', () => {
     const full = Array.from({ length: 25 }, (_, i) => feature({ PARID: String(513309100 + i), PAR_SUBDIV_NAME: 'RYE RANCH PH II' }));
     await expect(queryParcels(phaseOne, { fetchImpl: answer({ features: full }) })).rejects.toThrow(/cut off/);
   });
+  test('only a phase, unit, section or plat-book part may follow the deed\'s subdivision words', async () => {
+    const named = (names) => answer({ features: names.map((name, i) => feature({ PARID: String(513309200 + i), PAR_SUBDIV_NAME: name })) });
+    const same = ['RYE RANCH', 'RYE RANCH PH IIA PB81/1', 'RYE RANCH PHASE 2', 'RYE RANCH PB81/1', 'RYE RANCH PB 81/1', 'RYE RANCH UNIT 3',
+      'RYE RANCH SEC 2', 'RYE RANCH SECTION 2', 'RYE RANCH SUBDIVISION PB81/1', 'RYE RANCH  PH I', 'Rye Ranch Ph I'];
+    expect(await queryParcels(legal, { fetchImpl: named(same) })).toHaveLength(same.length);
+    // Another subdivision that starts with the same words. With one parcel and a permit it would otherwise match.
+    const others = ['RYE RANCH ESTATES', 'RYE RANCH ESTATES PH I', 'RYE RANCH WEST PH I', 'RYE RANCH VILLAS', 'RYE RANCH III', 'RYE RANCH IA PB81/1',
+      'RYE RANCHES PH I', 'RYE RANCH PHILLIPS ADD', 'RYE RANCH UNITED PB1/1', 'RYE RANCH PBX'];
+    expect(await queryParcels(legal, { fetchImpl: named(others) })).toEqual([]);
+  });
+  test('a field that was asked for must come back, even when it is null', async () => {
+    const without = (key) => { const f = feature(); delete f.attributes[key]; return f; };
+    for (const key of ['PAR_OWNER_NAME2', 'PAR_OWNER_NAME1', 'SITUS_ADDRESS', 'PAR_SUBDIV_BLOCK', 'BLDG_R1_YRBUILT']) {
+      await expect(queryParcels(legal, { fetchImpl: answer({ features: [feature(), without(key)] }) })).rejects.toThrow(`lacks the field ${key}`);
+    }
+    // An explicit null is the map's "none".
+    const [p] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_OWNER_NAME1: null, PAR_OWNER_NAME2: null, SITUS_ADDRESS: null })] }) });
+    expect(p).toMatchObject({ ownerName: null, ownerName2: null, addressLine1: null });
+  });
   test('the second owner field is read', async () => {
     const [p] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_OWNER_NAME1: 'EXAMPLE LAND TRUST', PAR_OWNER_NAME2: ' EXAMPLE BUILDERS LLC ' })] }) });
     expect(p).toMatchObject({ ownerName: 'EXAMPLE LAND TRUST', ownerName2: 'EXAMPLE BUILDERS LLC' });

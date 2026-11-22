@@ -54,12 +54,16 @@ function parcelWhere(legal) {
   return where;
 }
 
-// The map's subdivision name is the deed's words, or those words and then more after a space ("... PH I" on the deed,
-// "... PH I PB 70/12" on the map). A name that only starts with the same letters ("... PH II") is another plat: the
-// query returns it (a LIKE cannot ask for a word boundary without an OR), and queryParcels drops it.
+// The map's subdivision name is the deed's words, or those words and then a phase, unit, section or plat-book part
+// ("SAMPLE GROVE" on the deed, "SAMPLE GROVE PH IIA PB81/1" on the map). Measured on three real days: every parcel
+// of a deed's lot continues with PH, PHASE, PB<book>/<page> or SUBDIVISION (96 of 96); UNIT, SEC and SECTION are the
+// other plat words county-parcel-gis.js knows (subdivisionBaseName). Any other continuation is another plat
+// ("SAMPLE GROVE ESTATES", "SAMPLE GROVE WEST PH I", "... PH II" for a deed that says "... PH I"). The query returns
+// those too (a LIKE cannot ask for this), and queryParcels drops them.
+const PLAT_PART = /^(PH|PHASE|UNIT|SEC|SECTION|SUBDIVISION|PB)(?![A-Z])/;
 const namesSubdivision = (mapName, deedWords) => {
   const name = String(mapName || '').toUpperCase();
-  return name === deedWords || name.startsWith(`${deedWords} `);
+  return name === deedWords || (name.startsWith(`${deedWords} `) && PLAT_PART.test(name.slice(deedWords.length + 1).trimStart()));
 };
 
 const positiveOrNull = (value) => {
@@ -77,6 +81,10 @@ function textAttr(attrs, key) {
 }
 
 function toParcel(attrs, legal) {
+  // A field that was asked for and did not come back is a broken answer, not "the map has none" (which is null):
+  // a missing second owner field must never read as "no second owner".
+  const lacking = OUT_FIELDS.split(',').find((key) => !Object.hasOwn(attrs, key));
+  if (lacking) throw new Error(`parcel map answer lacks the field ${lacking}`);
   const parid = textAttr(attrs, 'PARID');
   // One candidate dropped could make another look like the only one, so a parcel without a usable number fails
   // the lookup. (The map's parcel number is 9 or 10 digits.)
