@@ -60,6 +60,25 @@ describe('company endings written with dots or with spaces', () => {
     expect(isCompanyName('EXAMPLE CO OF SAMPLETON')).toBe(true);
     expect(isCompanyName('NA HOLDINGS LLC')).toBe(true);
   });
+  test('a company word as a last name: last name, given name, initial is a person, as a buyer and as a seller', () => {
+    expect(isCompanyName('CHURCH ALEX J')).toBe(false);
+    expect(isCompanyName('HOME ROBIN M')).toBe(false);
+    expect(isCompanyName('Bank, Jordan T.')).toBe(false);
+    expect(buyerKind(['CHURCH ALEX J'])).toBe('person');
+    expect(buyerKind(['CHURCH ALEX J', 'CHURCH ROBIN M'])).toBe('person');
+    expect(candidateFromRow(deed({ from: ['CHURCH ALEX J'] }))).toEqual({ skip: 'person_seller' });
+    expect(candidateFromRow(deed({ from: ['SAMPLE HOMES LLC', 'HOME ROBIN M'] }))).toEqual({ skip: 'person_seller' });
+  });
+  test('a company word as the first word is still a company in any other shape, or with more company evidence', () => {
+    expect(isCompanyName('CAPITAL ONE')).toBe(true);
+    expect(isCompanyName('CHURCH OF SAMPLETON')).toBe(true);
+    expect(isCompanyName('CITY OF SAMPLETON')).toBe(true);
+    expect(isCompanyName('HOME BUILDERS J')).toBe(true); // a company word after the first word
+    expect(isCompanyName('BANK SAMPLE N A')).toBe(true); // an ending
+    expect(isCompanyName('HOMES BY EXAMPLE')).toBe(true);
+    expect(isCompanyName('CHURCH ALEX')).toBe(true); // no initial: not the person shape (a known limit)
+    expect(candidateFromRow(deed({ from: ['HOMES BY EXAMPLE'] })).candidate.sellerNames).toEqual(['HOMES BY EXAMPLE']);
+  });
   test('initials before an ending do not hide it, and an initial stays apart from the word after it', () => {
     expect(buyerKind(['A B L.L.C.'])).toBe('company');
     expect(isCompanyName('A.B.CONSTRUCTION')).toBe(true);

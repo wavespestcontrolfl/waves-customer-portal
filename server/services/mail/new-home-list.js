@@ -58,12 +58,18 @@ const TRUST_WORDS = ['TRUST', 'TRUSTEE', 'TRUSTEES', 'TR', 'TRS', 'REVOCABLE', '
 const wordMatcher = (words) => new RegExp(`(?:^| )(?:${words.join('|')})(?: |$)`);
 const COMPANY_RE = wordMatcher(COMPANY_WORDS);
 const COMPANY_ENDING_RE = new RegExp(` (?:${COMPANY_ENDINGS.join('|')})(?: |$)`); // the space: never the first word
+const COMPANY_WORD_LATER_RE = new RegExp(` (?:${COMPANY_WORDS.join('|')})(?: |$)`); // a company word after the first word
+// The Clerk's usual way to write a person: last name, one given name, one initial ("CHURCH ALEX J").
+const PERSON_SHAPE_RE = /^[A-Z]+ [A-Z]+ [A-Z]$/;
 const TRUST_RE = wordMatcher(TRUST_WORDS);
 const spaced = (name) => String(name || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
 
 const isCompanyName = (name) => {
   const words = spaced(name);
-  return COMPANY_RE.test(words) || COMPANY_ENDING_RE.test(words);
+  if (COMPANY_ENDING_RE.test(words) || COMPANY_WORD_LATER_RE.test(words)) return true;
+  // A company word as the first word only can be a person's last name ("CHURCH ALEX J", "HOME ROBIN M"). It is one
+  // when the name has the person shape; in any other shape it is a company ("CAPITAL ONE", "CITY OF SAMPLETON").
+  return COMPANY_RE.test(words) && !PERSON_SHAPE_RE.test(words);
 };
 // "REAL ESTATE" is a line of business (a company word above), not the estate of a person.
 const isTrustName = (name) => TRUST_RE.test(spaced(name).replace(/\bREAL ESTATE\b/g, 'REALESTATE'));
