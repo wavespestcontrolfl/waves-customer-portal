@@ -3470,6 +3470,21 @@ though termite left the ladder itself) fails the WHOLE report card closed
 — the unseeded-next-visit gap and a just-cancelled plan are
 indistinguishable, so offering the family and advancing past it are each
 wrong in one of those worlds.
+Pest price photo facts (`GATE_PEST_PRICE_PHOTO_FACTS`, owner 2026-11-21, "1, 2";
+dark by default): the gate adds no field and removes none. On, the pest
+offer's per-application price (`crossSell.option.perVisit`, and the same
+price on the portal offer card, the portal pricing card, the plan start and
+the one-tap purchase) is computed with the photo's shrubs, complexity and
+near-water facts when the property lookup's only doubt is the lawn area,
+in place of the neutral defaults (a fact the vision providers disputed
+keeps its default). An estimate minted from that offer keeps the facts in
+`engineInputs`, so the estimate page (`GET /api/estimates/:token/data`)
+prices the same plan rate; when staff turn on its one-time choice, that
+amount is computed from the quarterly rate as before and so follows it.
+It can also add the engine's hand-check
+mark to a pest line (heavy shrubs with a complex landscape), and such an
+offer degrades to the quote CTA as any held price does. Off or unset: the
+price of today.
 
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
