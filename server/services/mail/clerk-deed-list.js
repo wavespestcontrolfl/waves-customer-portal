@@ -5,26 +5,44 @@
  * (https://records.manateeclerk.com/OfficialRecords/Search/Day/YYYY-MM-DD): the whole day on one HTML page, no login.
  * This module only reads and parses that page; services/mail/new-home-list.js decides what to keep.
  *
- * The parser FAILS CLOSED. Names from this page may end up on a postcard, so a page that does not look exactly like
- * the one we studied (a bot wall, a redesign, a second results page, a changed column order) throws a
- * ClerkPageError instead of guessing. The caller records the failed day and goes on with the others.
+ * The parser FAILS CLOSED. Names from this page may end up on a postcard, so the page is read with a real HTML parser
+ * (parse5, the tree a browser builds: a commented-out or templated table is not in it) and the tree must be the one
+ * we studied: one results table in its studied place, a header row with the 11 studied names, data rows of the 11
+ * studied cells, parties as one plain list, and pagers that say "page 1 of 1". Anything else (a bot wall, a redesign,
+ * a second results page, rows loaded later by a script) throws a ClerkPageError instead of guessing. The caller
+ * records the failed day and goes on with the others. What is proven is the HTML: no script or style sheet is run.
  *
  * From, To and Description are empty for about the first two days after a recording while the Clerk fills them in.
  * Such a row is returned as it is (empty arrays and an empty description); the caller skips it and reads it again
  * on a later run.
  */
 
-const { decodeHTML } = require('entities');
+const { parse } = require('parse5');
 
 // Same style as manatee-permit-sync.js: a plain browser-like agent with the job's name in it.
 const USER_AGENT = 'Mozilla/5.0 (WavesPortal mail-new-home-list)';
 const BASE_URL = 'https://records.manateeclerk.com/OfficialRecords/Search/Day';
+const SEARCH_FORM_ACTION = '/OfficialRecords/Search/DoSearch';
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30000;
-
-const HEADER_NAMES = ['View', 'Instrument', 'From', 'To', 'Type', 'Book', 'Page', 'Consideration', 'Description', 'Date', 'Pages'];
-const ALLOWED_TAGS = new Set(['table', 'tr', 'th', 'td', 'a', 'span', 'ol', 'li', 'tbody', 'thead']);
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+// The studied page. Attributes are compared as a whole set, so a `hidden`, a `style` or a changed class is a
+// changed page, on the table, on a row, on a cell and on every element the table sits in.
+const HEADER_NAMES = ['View', 'Instrument', 'From', 'To', 'Type', 'Book', 'Page', 'Consideration', 'Description', 'Date', 'Pages'];
+const CELL_ATTRS = HEADER_NAMES.map((name) => ({ View: { class: 'no-print' }, Date: { style: 'white-space:nowrap;' } }[name] || {}));
+const ROW_ATTRS = { class: 'data-row' };
+const TABLE_ATTRS = { id: 'results', class: 'table table-primary' };
+const TABLE_ANCESTORS = [ // from the table's parent up to <html>
+  ['div', { class: 'panel-body table-responsive' }],
+  ['div', { id: 'data-display', class: 'panel panel-primary' }],
+  ['div', { class: 'day-listing' }],
+  ['div', { id: 'content', class: 'container-fluid main-content' }],
+  ['div', { class: 'mainContainer' }],
+  ['body', {}],
+  ['html', { lang: 'en' }],
+];
+const COL = Object.fromEntries(HEADER_NAMES.map((name, i) => [name, i]));
 
 class ClerkPageError extends Error {
   constructor(reason, message) {
@@ -41,64 +59,90 @@ function dayListUrl(isoDate) {
   return `${BASE_URL}/${isoDate}`;
 }
 
-// Tags removed, character references decoded (after the tags are gone, so an encoded "<" stays text), spaces collapsed.
-function cellText(fragment) {
-  return decodeHTML(fragment.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+const isElement = (node) => typeof node.tagName === 'string';
+const attrOf = (node, name) => node.attrs.find((a) => a.name === name)?.value;
+
+function hasAttrs(node, expected) {
+  return node.attrs.length === Object.keys(expected).length
+    && node.attrs.every((a) => Object.hasOwn(expected, a.name) && expected[a.name] === a.value);
 }
 
-// A From or To cell is one list: <ol><li>NAME</li>...</ol>, or an empty <ol></ol> while the Clerk has not filled it
-// in. Text outside a list item, or a list item that holds another one, is a cell we do not understand: reading only
-// part of it would drop a buyer or join two names, so it throws.
-function listNames(fragment) {
-  const names = [];
-  let items = 0;
-  const rest = fragment.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_match, inner) => {
-    items += 1;
-    if (/<(li|ol)\b/i.test(inner)) throw new ClerkPageError('party_cell', 'Clerk party cell holds a nested list');
-    const name = cellText(inner);
-    if (name) names.push(name);
-    return ' ';
-  });
-  if (items !== (fragment.match(/<li\b/gi) || []).length || cellText(rest) !== '') {
-    throw new ClerkPageError('party_cell', 'Clerk party cell holds text outside its list');
-  }
-  return names;
-}
-
-// Rows are read from this one table only, so nothing unknown may sit inside it. (Outside it, parseDayList checks
-// just two things: no data row, and the pagers.)
-function checkTableMarkup(table) {
-  if (table.includes('<!--')) throw new ClerkPageError('comment', 'Clerk results table holds an HTML comment');
-  for (const m of table.matchAll(/<(\/?)([^\s>/]*)/g)) {
-    const name = m[2].toLowerCase();
-    if (!/^[a-z][a-z0-9]*$/.test(name) || !ALLOWED_TAGS.has(name)) {
-      throw new ClerkPageError('unknown_tag', 'Clerk results table holds an unexpected tag');
+// The elements directly under a node. Anything else there must be blank text: a comment or loose text throws.
+function elementChildren(node, reason) {
+  const elements = [];
+  for (const child of node.childNodes) {
+    if (isElement(child)) elements.push(child);
+    else if (child.nodeName !== '#text' || child.value.trim() !== '') {
+      throw new ClerkPageError(reason, 'Clerk page holds text or a comment where only elements are expected');
     }
   }
-  if ((table.match(/<table\b/gi) || []).length !== 1) {
-    throw new ClerkPageError('nested_table', 'Clerk results table is nested');
+  return elements;
+}
+
+// The text of a node that may hold text and nothing else, spaces collapsed. (parse5 has decoded &amp; and the like.)
+function textOnly(node, reason) {
+  let text = '';
+  for (const child of node.childNodes) {
+    if (child.nodeName !== '#text') throw new ClerkPageError(reason, 'Clerk page holds markup where only text is expected');
+    text += child.value;
+  }
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+// Every table, form, pager and #data-display element of the live tree. A <template>'s content is not part of it.
+function collect(node, found) {
+  for (const child of node.childNodes || []) {
+    if (!isElement(child)) continue;
+    if (child.tagName === 'table') found.tables.push(child);
+    if (child.tagName === 'form') found.forms.push(child);
+    if (child.tagName === 'ul' && /(^|\s)pagination(\s|$)/.test(attrOf(child, 'class') || '')) found.pagers.push(child);
+    if (attrOf(child, 'id') === 'data-display') found.displays.push(child);
+    collect(child, found);
+  }
+  return found;
+}
+
+// A day with no recordings (weekend, holiday) answers with the search form alone: no table, no pager and no results
+// panel. (A page that kept the panel and filled it later by script would have the panel, so it is not this page.)
+function isEmptyDay(found) {
+  return found.pagers.length === 0 && found.displays.length === 0
+    && found.forms.length === 1 && attrOf(found.forms[0], 'action') === SEARCH_FORM_ACTION;
+}
+
+function checkTablePlace(table) {
+  let node = table.parentNode;
+  const inPlace = hasAttrs(table, TABLE_ATTRS) && TABLE_ANCESTORS.every(([tag, attrs]) => {
+    const matches = Boolean(node) && node.tagName === tag && hasAttrs(node, attrs);
+    node = node && node.parentNode;
+    return matches;
+  });
+  if (!inPlace || !node || node.nodeName !== '#document') {
+    throw new ClerkPageError('table_place', 'Clerk results table is not where the studied page has it');
   }
 }
 
-function checkHeader(table) {
-  const firstData = table.search(/class="[^"]*\bdata-row\b/i);
-  const head = firstData === -1 ? table : table.slice(0, firstData);
-  const names = [...head.matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi)].map((m) => cellText(m[1]));
-  const thTotal = (table.match(/<th\b/gi) || []).length; // a header cell hiding in a data row is a changed page too
-  if (thTotal !== HEADER_NAMES.length || names.length !== HEADER_NAMES.length || names.some((n, i) => n !== HEADER_NAMES[i])) {
+function checkHeader(tr) {
+  const cells = tr.attrs.length === 0 ? elementChildren(tr, 'header') : [];
+  const names = cells.map((th) => (th.tagName === 'th' ? textOnly(th, 'header') : null));
+  if (names.length !== HEADER_NAMES.length || names.some((name, i) => name !== HEADER_NAMES[i])) {
     throw new ClerkPageError('header', 'Clerk results table header changed');
   }
 }
 
-function dataRowFragments(table) {
-  const trCount = (table.match(/<tr\b/gi) || []).length;
-  const rows = [...table.matchAll(/<tr\b([^>]*)>([\s\S]*?)<\/tr>/gi)];
-  const dataRows = rows.filter((m) => /\bclass="[^"]*\bdata-row\b/i.test(m[1]));
-  const dataMarks = (table.match(/<tr\b[^>]*\bclass="[^"]*\bdata-row\b/gi) || []).length;
-  if (trCount !== 1 + dataRows.length || rows.length !== trCount || dataMarks !== dataRows.length) {
-    throw new ClerkPageError('row_count', 'Clerk results table row count does not add up');
+// A From or To cell is one plain list: <ol><li>NAME</li>...</ol>, or an empty <ol></ol> while the Clerk has not
+// filled it in. Reading part of any other shape would drop a buyer or join two names.
+function partyNames(td) {
+  const lists = elementChildren(td, 'party_cell');
+  const plainList = lists.length === 1 && lists[0].tagName === 'ol' && lists[0].attrs.length === 0;
+  const items = plainList ? elementChildren(lists[0], 'party_cell') : null;
+  if (!items || items.some((li) => li.tagName !== 'li' || li.attrs.length !== 0)) {
+    throw new ClerkPageError('party_cell', 'Clerk party cell is not one plain list of names');
   }
-  return dataRows.map((m) => m[2]);
+  return items.map((li) => {
+    const name = textOnly(li, 'party_cell');
+    if (!name) throw new ClerkPageError('party_cell', 'Clerk party cell holds an empty name');
+    return name;
+  });
 }
 
 function parseConsideration(text) {
@@ -107,72 +151,74 @@ function parseConsideration(text) {
   return Number(text.slice(1).replaceAll(',', ''));
 }
 
-function parseDataRow(fragment, isoDate) {
-  const cells = [...fragment.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((m) => m[1]);
-  if (cells.length !== HEADER_NAMES.length || (fragment.match(/<td\b/gi) || []).length !== cells.length) {
-    throw new ClerkPageError('cell_count', 'Clerk data row does not have 11 cells');
+function readDataRow(tr, isoDate) {
+  const cells = hasAttrs(tr, ROW_ATTRS) ? elementChildren(tr, 'row_shape') : [];
+  if (cells.length !== HEADER_NAMES.length || cells.some((td, i) => td.tagName !== 'td' || !hasAttrs(td, CELL_ATTRS[i]))) {
+    throw new ClerkPageError('row_shape', 'Clerk data row is not the 11 studied cells');
   }
-  const instrument = cellText(cells[1]);
+  const instrument = textOnly(cells[COL.Instrument], 'cell');
   if (!/^\d{9,14}$/.test(instrument)) throw new ClerkPageError('instrument', 'Clerk instrument number is malformed');
-  const dateParts = cellText(cells[9]).match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  const dateParts = textOnly(cells[COL.Date], 'cell').match(/^(\d{2})-(\d{2})-(\d{4})$/);
   if (!dateParts || `${dateParts[3]}-${dateParts[1]}-${dateParts[2]}` !== isoDate) {
     throw new ClerkPageError('date', 'Clerk row date is not the day asked for');
   }
+  const type = textOnly(cells[COL.Type], 'cell');
+  if (!type) throw new ClerkPageError('type', 'Clerk row has no document type');
   return {
     instrument,
-    from: listNames(cells[2]),
-    to: listNames(cells[3]),
-    type: cellText(cells[4]),
-    consideration: parseConsideration(cellText(cells[7])),
-    description: cellText(cells[8]),
+    from: partyNames(cells[COL.From]),
+    to: partyNames(cells[COL.To]),
+    type,
+    consideration: parseConsideration(textOnly(cells[COL.Consideration], 'cell')),
+    description: textOnly(cells[COL.Description], 'cell'),
     date: isoDate,
   };
 }
 
-// A second page of results would hide rows. The real page prints its pager twice (above and below the table), each
-// with one entry, so: at least one pager, every pager closed, and none with more than one entry.
-function checkPagination(page) {
-  const opened = (page.match(/<ul\b[^>]*\bpagination\b/gi) || []).length;
-  const pagers = [...page.matchAll(/<ul\b[^>]*\bpagination\b[^>]*>([\s\S]*?)<\/ul>/gi)];
-  if (opened === 0 || pagers.length !== opened || pagers.some((m) => (m[1].match(/<li\b/gi) || []).length > 1)) {
-    throw new ClerkPageError('pagination', 'Clerk results run over more than one page, or the pager changed');
+function readRows(table, isoDate) {
+  // The page writes rows straight into the table; the parser wraps them in one <tbody>, as a browser does.
+  const sections = elementChildren(table, 'table_shape');
+  const body = sections.length === 1 && sections[0].tagName === 'tbody' && sections[0].attrs.length === 0 ? sections[0] : null;
+  const trs = body ? elementChildren(body, 'table_shape') : [];
+  if (trs.length === 0 || trs.some((tr) => tr.tagName !== 'tr')) {
+    throw new ClerkPageError('table_shape', 'Clerk results table is not one plain list of rows');
   }
-}
-
-// A day with no recordings (weekend, holiday) answers with the search form and nothing else of the results page
-// (it keeps the "skip to #data-display" link, so that word is no sign of results). Any table, row or pager, in any
-// spelling, means this is not that page.
-const RESULTS_TRACES = /<table\b|<tr\b|data-row|pagination/i;
-function isEmptyDay(page) {
-  return page.includes('action="/OfficialRecords/Search/DoSearch"') && !RESULTS_TRACES.test(page);
-}
-
-function parseDayList(html, isoDate) {
-  if (typeof isoDate !== 'string' || !ISO_DAY.test(isoDate)) throw new ClerkPageError('bad_day', 'parseDayList needs a date as YYYY-MM-DD');
-  const page = String(html || '');
-  const starts = [...page.matchAll(/<table\b[^>]*\bid="results"/gi)];
-  if (starts.length === 0) {
-    if (isEmptyDay(page)) return { rows: [] };
-    throw new ClerkPageError('not_clerk_page', 'Page is not the Clerk day list');
-  }
-  if (starts.length > 1) throw new ClerkPageError('multiple_tables', 'Clerk page has more than one results table');
-  // The first closing tag AFTER the results table starts: a table earlier on the page is not ours to judge.
-  const endInTable = page.slice(starts[0].index).search(/<\/table>/i);
-  if (endInTable === -1) throw new ClerkPageError('unclosed_table', 'Clerk results table is not closed');
-  const closeAt = starts[0].index + endInTable + '</table>'.length;
-  const table = page.slice(starts[0].index, closeAt);
-  checkTableMarkup(table);
-  checkHeader(table);
-  // A data row outside the one table we read would be a row we never see.
-  if ((page.match(/data-row/gi) || []).length !== (table.match(/data-row/gi) || []).length) {
-    throw new ClerkPageError('rows_outside_table', 'Clerk page holds data rows outside the results table');
-  }
-  const rows = dataRowFragments(table).map((fragment) => parseDataRow(fragment, isoDate));
+  const [head, ...dataRows] = trs;
+  checkHeader(head);
+  // A header with no rows is not an empty day (that one has no table): it is a page that gets its rows some other way.
+  if (dataRows.length === 0) throw new ClerkPageError('no_rows', 'Clerk results table has a header and no rows');
+  const rows = dataRows.map((tr) => readDataRow(tr, isoDate));
   // The instrument number is a deed's identity for the caller: a repeat would let one row overwrite another.
   if (new Set(rows.map((r) => r.instrument)).size !== rows.length) {
     throw new ClerkPageError('duplicate_instrument', 'Clerk page lists an instrument number twice');
   }
-  checkPagination(page);
+  return rows;
+}
+
+// A second page of results would hide rows. The real page prints its pager above and below the table, each exactly
+// <ul class="pagination"><li class="active"><a>1</a></li></ul>: at least one pager, and every pager that one shape.
+function isSinglePagePager(ul) {
+  if (!hasAttrs(ul, { class: 'pagination' })) return false;
+  const items = elementChildren(ul, 'pagination');
+  if (items.length !== 1 || items[0].tagName !== 'li' || !hasAttrs(items[0], { class: 'active' })) return false;
+  const links = elementChildren(items[0], 'pagination');
+  return links.length === 1 && links[0].tagName === 'a' && links[0].attrs.length === 0 && textOnly(links[0], 'pagination') === '1';
+}
+
+function parseDayList(html, isoDate) {
+  if (typeof isoDate !== 'string' || !ISO_DAY.test(isoDate)) throw new ClerkPageError('bad_day', 'parseDayList needs a date as YYYY-MM-DD');
+  const found = collect(parse(String(html || '')), { tables: [], forms: [], pagers: [], displays: [] });
+  if (found.tables.length === 0) {
+    if (isEmptyDay(found)) return { rows: [] };
+    throw new ClerkPageError('not_clerk_page', 'Page is not the Clerk day list');
+  }
+  // One table on the whole page: a row can only live in a table, so no row is outside the one that is read.
+  if (found.tables.length > 1) throw new ClerkPageError('multiple_tables', 'Clerk page has more than one table');
+  checkTablePlace(found.tables[0]);
+  const rows = readRows(found.tables[0], isoDate);
+  if (found.pagers.length === 0 || !found.pagers.every(isSinglePagePager)) {
+    throw new ClerkPageError('pagination', 'Clerk results run over more than one page, or the pager changed');
+  }
   return { rows };
 }
 
@@ -222,6 +268,9 @@ async function fetchDayList(isoDate, { fetchImpl = fetch, timeoutMs = DEFAULT_TI
     throw new ClerkPageError('fetch_failed', `Clerk day list request failed (${err.name || 'error'})`);
   } finally {
     clearTimeout(timer);
+    // Ends the request when its answer was refused before the body was read to the end (a non-200 status, a
+    // declared length over the limit). After a complete read this does nothing.
+    controller.abort();
   }
   if (status !== 200) throw new ClerkPageError('http_status', `Clerk day list answered HTTP ${status}`);
   return parseDayList(body, isoDate);
