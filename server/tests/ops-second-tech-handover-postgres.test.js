@@ -141,16 +141,17 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     await knex('technicians').insert(tech(ownerB));
     extraTechIds.push(ownerB);
     const on = (o) => ({ technician_id: ownerB, ...o });
-    // A pest series later changed to lawn: the parent keeps "Quarterly Pest Control".
+    // A pest series later changed to lawn: the parent keeps "Quarterly Pest Control". Its visit ahead was created
+    // before the change and keeps the old service (a visit is read by its OWN service, whatever the gate).
     const changed = await series(await customer(), on({ recurring_template_overrides: JSON.stringify({ service_type: 'Lawn Care Program' }) }));
-    await child(changed, '2099-07-06', on({ service_type: 'Lawn Care Program' }));
+    await child(changed, '2099-07-06', on());
     // A WDO inspection series later changed to a bait program: its customer's pest series stays.
     const baitCustomer = await customer();
     const wdo = await series(baitCustomer, on({
       service_type: 'WDO Inspection',
       recurring_template_overrides: JSON.stringify({ service_type: 'Quarterly Termite Active Bait Station Service' }),
     }));
-    await child(wdo, '2099-07-07', on({ service_type: 'Quarterly Termite Active Bait Station Service' }));
+    await child(wdo, '2099-07-07', on({ service_type: 'WDO Inspection' }));
     const pest = await series(baitCustomer, on());
     await child(pest, '2099-07-08', on());
 
@@ -174,11 +175,7 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     // Gate off: the app ignores the overrides, and so does the plan.
     const historical = await loadWith('false').planHandover(knex, { from: ownerB, start: START, today: TODAY, lines: NO_TERMITE });
     expect(historical.template_overrides).toBe('not_applied_gate_off');
-    // Both pest templates change technician. The first series' one visit is a lawn appointment by its OWN service,
-    // so it stays with the owner (visit_other_line): a visit moves by its own line, whatever its series template says.
-    expect(new Set(historical.ids.retemplate)).toEqual(new Set([changed.id, pest.id]));
-    expect(historical.ids.series).toEqual([pest.id]);
-    expect(historical.skipped.visit_other_line).toEqual({ series: 1, visits: 1 });
+    expect(new Set(historical.ids.series)).toEqual(new Set([changed.id, pest.id]));
     expect(historical.skipped.other_line).toEqual({ series: 1, visits: 1 }); // the WDO inspection (termite line)
     expect(historical.skipped.termite_bait_customer).toBeUndefined();
   });
@@ -292,6 +289,8 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     expect(plan.ids.visits).not.toContain(lawn.id);
     expect(plan.skipped.visit_other_line).toEqual({ series: 1, visits: 2 });
     expect(plan.capability_lines).toEqual(['rodent', 'termite']);
+    // The dry run counts each visit under its own line.
+    expect(plan.would_change.by_line).toEqual({ termite: { series: 1, visits: 1 }, rodent: { series: 0, visits: 1 } });
 
     // The trapping visit is rodent work: a hire set to Off for rodent refuses the run, and a run that leaves rodent
     // out keeps that visit with the owner.

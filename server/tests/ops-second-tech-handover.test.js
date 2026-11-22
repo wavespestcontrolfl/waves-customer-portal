@@ -106,8 +106,10 @@ describe('second-tech-handover planner', () => {
     expect(new Set(p.ids.visits)).toEqual(new Set([own.id, trapVisit.id]));
     expect(p.skipped.visit_other_line).toEqual({ series: 1, visits: 4 });
     expect(p.skipped.off_day_customer).toBeUndefined();
-    // The trap visit moves under the rodent line: the hire must be able to take it.
+    // The trap visit moves under the rodent line: the hire must be able to take it, and the dry run counts it there
+    // (the series under its template line, each visit under its own).
     expect(p.capability_lines).toEqual(['rodent', 'termite']);
+    expect(p.would_change.by_line).toEqual({ termite: { series: 1, visits: 1 }, rodent: { series: 0, visits: 1 } });
     // A run that leaves rodent out keeps the trap visit with the owner too.
     const termiteOnly = plan([termite], all, { lines: ['termite'] });
     expect(termiteOnly.ids.visits).toEqual([own.id]);
@@ -115,6 +117,23 @@ describe('second-tech-handover planner', () => {
     expect(termiteOnly.capability_lines).toEqual(['termite']);
     // A row with no line field (an older caller) goes with its series.
     expect(plan([termite], [visit(termite, MON)]).ids.visits).toHaveLength(1);
+  });
+
+  test('one appointment ahead whose own service is bait work marks its customer, like a bait add-on', () => {
+    // A pest series; one visit was changed to the combined pest + bait service (it reads general, and it is bait work).
+    const pest = parent({ customer_id: 'C-bait-visit' });
+    const baitVisit = visit(pest, MON, { line: 'general', service_key_snapshot: 'pest_termite_bait_quarterly' });
+    const plain = visit(pest, TUE, { line: 'general' });
+    const moving = plan([pest], [baitVisit, plain]);
+    expect(moving.bait_customers_moving).toBe(1);
+    expect(moving.capability_lines).toEqual(['general', 'termite']);
+    // A run that leaves termite out keeps that customer whole.
+    const kept = plan([pest], [baitVisit, plain], { lines: NO_TERMITE });
+    expect(kept.ids.visits).toEqual([]);
+    expect(kept.skipped.termite_bait_customer).toEqual({ series: 1, visits: 2, customers: 1 });
+    // A cancelled one marks nobody.
+    const cancelled = plan([pest], [{ ...baitVisit, status: 'cancelled' }, plain], { lines: NO_TERMITE });
+    expect(cancelled.ids.visits).toEqual([plain.id]);
   });
 
   test('--lines narrows what moves', () => {

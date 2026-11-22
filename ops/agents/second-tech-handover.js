@@ -121,7 +121,8 @@
 //            service_id) or key snapshot in TERMITE_BAIT_KEYS, or the label
 //            matches /bait|monitor/. A run that includes termite (the default, owner 2026-11-21)
 //            moves these customers like any other: their bait series, their pest series, the
-//            combined pest + bait plan, and the pest series whose visits carry a bait add-on;
+//            combined pest + bait plan, and the pest series whose visits carry a bait add-on
+//            (or have one appointment ahead whose own service is bait work);
 //            the plan counts them as bait_customers_moving. A bait customer's bait work
 //            reaches --to with the series (the combined plan and a bait add-on move under the
 //            general line), so a run that moves ANY series of a bait customer needs the termite
@@ -299,10 +300,13 @@ const isTermiteBaitAddon = (a) => hasBaitKey([a.catalog_key, a.service_key_snaps
 
 const bump = (map, key, n = 1) => { map[key] = (map[key] || 0) + n; };
 
-/** Is this series termite bait WORK: a bait plan in any line (the combined pest + bait plan reads general), or a bait add-on on its visits. */
-function baitSeriesTest(baitAddonSeriesIds) {
-  const addon = new Set(baitAddonSeriesIds);
-  return (p) => isBaitSeries(p) || addon.has(p.id);
+/** Is this series termite bait WORK: a bait plan in any line (the combined pest + bait plan reads general), a bait add-on on its visits, or a visit that is itself bait work (the ids given). */
+function baitSeriesTest(baitAddonSeriesIds, visits = []) {
+  // One appointment ahead whose OWN service is bait work (a pest series visit changed to the combined pest + bait
+  // service) marks its series too. A cancelled one marks nothing.
+  const baitVisits = visits.filter((v) => v.status !== 'cancelled' && isBaitSeries(v)).map((v) => v.series_id);
+  const marked = new Set([...(baitAddonSeriesIds || []), ...baitVisits]);
+  return (p) => isBaitSeries(p) || marked.has(p.id);
 }
 
 /** The weekdays the target works, and where that came from (no --to = the ruled Mon-Thu). */
@@ -364,11 +368,14 @@ function noteCandidate(byCustomer, p, isCandidate) {
 }
 
 /** One visit the run changes: counted by weekday and line, listed in the moves (a date move also names the new day). */
+/** The dry run's per-line counter: series under their template line, visits under their OWN line. */
+const lineCount = (plan, line) => plan.would_change.by_line[line] || (plan.would_change.by_line[line] = { series: 0, visits: 0 });
+
 function recordMove(plan, p, v, kind, { weekend, dateMoveCustomers }) {
   plan.would_change.visits += 1;
   bump(plan.would_change.by_weekday, WEEKDAYS[dayOfWeekOfDate(v.scheduled_date)]);
-  const byLine = plan.would_change.by_line[p.line] || (plan.would_change.by_line[p.line] = { series: 0, visits: 0 });
-  byLine.visits += 1;
+  // A visit changed to another service counts under its own line (a row with no line field: its series' line).
+  lineCount(plan, v.line || p.line).visits += 1;
   plan.ids.visits.push(v.id);
   const move = { series_id: p.id, visit_id: v.id, date: v.scheduled_date };
   if (kind === 'date') {
@@ -448,9 +455,10 @@ function buildPlan({
   const isActive = (p) => (p.recurring_ongoing === true && p.status !== 'cancelled') || live.has(p.id);
   const active = parents.filter(isActive);
 
-  // Customers with an active bait plan, or a bait add-on on an active series. A run that leaves termite out keeps every
-  // series of theirs with the owner.
-  const carriesBait = baitSeriesTest(baitAddonSeriesIds);
+  // Customers with an active bait plan, a bait add-on on an active series, or one appointment ahead whose OWN service
+  // is bait work (a pest series visit changed to the combined pest + bait service). A run that leaves termite out keeps
+  // every series of theirs with the owner.
+  const carriesBait = baitSeriesTest(baitAddonSeriesIds, visits);
   const baitCustomers = new Set(active.filter(carriesBait).map((p) => p.customer_id));
   const termiteOut = !lines.includes('termite');
   const onFrom = active.filter((series) => seriesTechnicianId(series) === from);
@@ -574,7 +582,7 @@ function buildPlan({
     if (moved) {
       plan.series.with_visits_to_move += 1;
       plan.would_change.series += 1;
-      plan.would_change.by_line[p.line].series += 1;
+      lineCount(plan, p.line).series += 1;
       plan.ids.series.push(p.id);
     }
   }
@@ -774,7 +782,14 @@ async function planHandover(db, {
   const territory = await loadZipScope(db, zips, parents);
   const parentIds = parents.map((p) => p.id);
   const visits = await loadVisits(db, parentIds, today);
-  for (const v of visits) v.line = await lineOf(v);
+  const visitServiceIds = [...new Set(visits.map((v) => v.service_id).filter((id) => id && !catalogKeys.has(id)))];
+  for (const ids of chunks(visitServiceIds, 1000)) {
+    for (const r of await db('services').whereIn('id', ids).select('id', 'service_key')) catalogKeys.set(r.id, r.service_key);
+  }
+  for (const v of visits) {
+    v.catalog_key = (v.service_id && catalogKeys.get(v.service_id)) || null;
+    v.line = await lineOf(v);
+  }
   const liveSeriesIds = await loadLiveSeriesIds(db, parentIds, today);
   const baitAddonSeriesIds = await loadBaitAddonSeriesIds(db, parentIds);
   const plan = await planWithWeekend(db, {
