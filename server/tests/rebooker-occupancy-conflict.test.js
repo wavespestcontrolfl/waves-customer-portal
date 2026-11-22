@@ -991,6 +991,43 @@ describe('findRescheduleOptions — candidate days are probed on the visit\'s te
       expect(findConflictingVisits).toHaveBeenCalledTimes(10);
       expect(db.mock.calls.some(([table]) => table === 'technicians')).toBe(false);
     });
+
+    // A grouped stop commits through the unit mover, which judges every member (visit-groups unitShiftTest;
+    // its own cases are in visit-groups-unit-move.test.js). The list asks that test, not the single-visit one.
+    describe('a grouped stop', () => {
+      const vg = require('../services/visit-groups');
+      let unitShiftTest;
+      afterEach(() => unitShiftTest.mockRestore());
+
+      test('gate on, with a reason: a window the unit\'s check refuses is not probed and not offered, though the tapped visit alone fits', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        wire(['09:00', '10:00']); // the tapped visit's own block fits this shift
+        const refuses = jest.fn(() => true);
+        unitShiftTest = jest.spyOn(vg, 'unitShiftTest').mockResolvedValue(refuses);
+        expect(await rainOptions()).toEqual([]);
+        expect(findConflictingVisits).not.toHaveBeenCalled();
+        expect(unitShiftTest).toHaveBeenCalledWith(db, expect.objectContaining({ id: 'svc-1' }));
+        expect(refuses.mock.calls[0]).toEqual([expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), '09:00', '10:00']);
+        // The unit's verdict stands alone: the single-visit shift read is not made.
+        expect(db.mock.calls.some(([table]) => table === 'technicians')).toBe(false);
+      });
+
+      test('gate on, with a reason: a window the unit\'s check holds is offered, though the tapped visit\'s own shift read would drop it', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        wire(['10:00', '14:00']);
+        unitShiftTest = jest.spyOn(vg, 'unitShiftTest').mockResolvedValue(() => false);
+        expect(await rainOptions()).toHaveLength(3);
+      });
+
+      test('the office\'s sheet and the admin picker do not ask', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        wire(['10:00', '14:00']);
+        unitShiftTest = jest.spyOn(vg, 'unitShiftTest').mockResolvedValue(() => true);
+        expect(await SmartRebooker.findRescheduleOptions('svc-1', 'weather_rain', { probeSpanMinutes: 60, initiatedBy: 'admin' })).toHaveLength(3);
+        expect(await SmartRebooker.findRescheduleOptions('svc-1')).toHaveLength(3);
+        expect(unitShiftTest).not.toHaveBeenCalled();
+      });
+    });
   });
 });
 

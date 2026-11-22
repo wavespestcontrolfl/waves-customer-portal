@@ -1055,8 +1055,12 @@ clears the picked time and reloads its list). The move's write also pins the
 technician and the length it judged, so a dispatch edit that lands between the
 move's read and its write answers this route's existing concurrent-change 409
 (`{ error, code: null }`) instead of being written over. No new status, field
-or code. Not yet checked at a commit: a public reschedule that moves a visit
-group as one unit or shifts a recurring series with it (the grouped moves, the
+or code. A grouped stop (two or more services at one address) is not moved
+from this route, gate on or off: the page answers its `grouped` verdict and the
+mover refuses a customer's move of the stop before any shift check, as before.
+So the stop's own shift check (D4 part 3b-2b: a technician's rain-out,
+auto-dispatch) adds no answer to a public route. Not yet
+checked at a commit: a public reschedule that shifts a recurring series (the
 next D4 part), and the day as the route would run it (capacity mode). Gate
 off: byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
