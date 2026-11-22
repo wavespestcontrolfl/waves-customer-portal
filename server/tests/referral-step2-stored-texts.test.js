@@ -8,6 +8,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn() }));
 
 const step2 = require('../services/referral-step2');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
@@ -80,6 +81,19 @@ describe('inviteSmsWithOffer (the invite text, column and referral_invite row)',
       `Hi Jo! Sam recommended Waves. You'll both save $10 when you sign up: ${LINK}`,
       `Hi Jo! Your neighbor Sam recommended Waves. You'll both save when you sign up, so call us: ${LINK} Thanks!`,
     ]) for (const refereeCents of [5000, 0]) expect(step2.inviteSmsWithOffer(edited, { step2On: true, refereeCents, link: LINK })).toBe(edited);
+  });
+
+  test('the saved-text renderer shows the link without https://: the row still matches the link the caller holds', () => {
+    const full = `https://${LINK}`;
+    expect(stripSmsUrlScheme(full)).toBe(LINK);
+    expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), { step2On: true, refereeCents: 5000, link: full })).toBe(
+      `Hi Jo, Sam recommended Waves to you. Start a plan and get a $50 credit after your first plan service: ${LINK}\n\nReply STOP to opt out.`,
+    );
+    // The settings column keeps the link as given.
+    const column = fillColumn(COLUMN_SEED).replace(LINK, full);
+    expect(step2.inviteSmsWithOffer(column, { step2On: true, refereeCents: 5000, link: full })).toBe(
+      `Hi Jo! Your neighbor Sam recommended Waves. Start a plan and get a $50 credit after your first plan service: ${full}`,
+    );
   });
 
   test('a text an admin pointed at something else than the referral link is not swapped, and neither is a text with no link to match', () => {
@@ -277,7 +291,8 @@ describe('submitReferral sends the stored invite (column), swapped only while th
   test('with no stored column text the referral_invite row is used and swapped the same way', async () => {
     gates.referralStep2 = true;
     settingsRow.invite_sms_template = null;
-    renderRequiredSmsTemplate.mockImplementation(async (_key, vars) => fillRow(ROW_SEED, { referee: vars.referee_name, referrer: vars.referrer_name }).replace(LINK, vars.referral_link));
+    // As the real renderer returns it: the link without https:// (getTemplate ends in stripSmsUrlScheme).
+    renderRequiredSmsTemplate.mockImplementation(async (_key, vars) => stripSmsUrlScheme(fillRow(ROW_SEED, { referee: vars.referee_name, referrer: vars.referrer_name }).replace(LINK, vars.referral_link)));
     await send();
     expect(sentBody()).toMatch(/^Hi Jo, Sam recommended Waves to you\. Start a plan and get a \$50 credit after your first plan service: \S+\n\nReply STOP to opt out\.$/);
   });

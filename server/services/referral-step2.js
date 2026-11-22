@@ -8,6 +8,7 @@
  * nothing reads, writes or shows them.)
  */
 const { parseETDateTime, etParts } = require('../utils/datetime-et');
+const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 // The owner's numbers, also the values the migration puts on the settings row. A settings row read before that
 // migration ran has none of the columns, so each falls back here.
@@ -123,13 +124,15 @@ const friendInviteSmsOffer = (refereeCents) => `Start a plan and get a ${dollars
 const NEUTRAL_INVITE_OFFER = 'Get a free quote';
 
 // `body` is the RENDERED text (names and link filled in); `link` is the referral link the caller rendered it with.
-// step2On false (the gate is off), or no link to match: exactly as rendered.
+// The settings column is filled with the link as given; the saved-text renderer shows it without https://
+// (stripSmsUrlScheme), so both forms match. step2On false (the gate is off), or no link to match: exactly as rendered.
 function inviteSmsWithOffer(body, { step2On = false, refereeCents = 0, link = '' } = {}) {
   const text = String(body ?? '');
   if (!step2On || !link) return text;
   const offer = Number(refereeCents) > 0 ? friendInviteSmsOffer(refereeCents) : NEUTRAL_INVITE_OFFER;
+  const tails = [...new Set([link, stripSmsUrlScheme(link)])].flatMap((shown) => [shown, `${shown}${INVITE_STOP_LINE}`]);
   for (const { head, legacy } of SEEDED_INVITE_OFFERS) {
-    for (const tail of [link, `${link}${INVITE_STOP_LINE}`]) {
+    for (const tail of tails) {
       const seeded = `${head}${legacy}: ${tail}`;
       if (text.endsWith(seeded)) return `${text.slice(0, text.length - seeded.length)}${head}${offer}: ${tail}`;
     }
