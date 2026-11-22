@@ -126,13 +126,15 @@ async function wavesMailboxes(db, issue) {
   ].map(mailboxKey).filter(Boolean));
 }
 
-// An address on a Waves-owned domain (internal-email-recipients.js DEFAULT_INTERNAL_DOMAINS),
+// An address on a Waves-owned mail domain or a subdomain of one (internal-email-recipients.js
+// WAVES_OWNED_EMAIL_DOMAINS: wavespestcontrol.com, its news subdomain, wavesflorida.com),
 // whatever INTERNAL_EMAIL_DOMAINS says: that setting REPLACES the defaults for
 // isInternalEmailRecipient, and a list that leaves a Waves domain out must not let an
 // address on it get the Amazon link.
 function wavesDomain(email) {
-  const { DEFAULT_INTERNAL_DOMAINS } = require('../../utils/internal-email-recipients');
-  return DEFAULT_INTERNAL_DOMAINS.includes(normalized(email).split('@')[1]);
+  const { WAVES_OWNED_EMAIL_DOMAINS } = require('../../utils/internal-email-recipients');
+  const domain = normalized(email).split('@')[1] || '';
+  return WAVES_OWNED_EMAIL_DOMAINS.some((root) => domain === root || domain.endsWith(`.${root}`));
 }
 
 // The readers of this batch who may have the block, and the block. A thrown

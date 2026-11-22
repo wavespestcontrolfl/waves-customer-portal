@@ -179,6 +179,8 @@ describe('toolBlockForBatch: the key', () => {
     const cases = [
       ['an internal domain', { email: 'someone@wavespestcontrol.com' }, {}],
       ['the newsletter sending subdomain', { email: 'someone@news.wavespestcontrol.com' }, {}],
+      ['the other Waves mail domain', { email: 'someone@wavesflorida.com' }, {}],
+      ['a subdomain of a Waves mail domain', { email: 'someone@mail.WavesFlorida.com' }, {}],
       ['the default proof address', { email: 'contact@wavespestcontrol.com' }, {}],
       ['an address on the internal allowlist', { email: 'family@example.net' }, { INTERNAL_EMAIL_ALLOWLIST: 'family@example.net' }],
       ['the configured proof address', { email: 'proof@example.net' }, { NEWSLETTER_PROOF_EMAIL: 'proof@example.net' }],
@@ -196,7 +198,7 @@ describe('toolBlockForBatch: the key', () => {
 
     // INTERNAL_EMAIL_DOMAINS replaces the default domains for isInternalEmailRecipient. A list that leaves a
     // Waves domain out must not let an address on it get the block.
-    test.each(['someone@wavespestcontrol.com', 'Someone@News.WavesPestControl.com'])('with another internal domain configured, %s still gets \'\', and so does an address on the configured domain', async (email) => {
+    test.each(['someone@wavespestcontrol.com', 'Someone@News.WavesPestControl.com', 'someone@wavesflorida.com'])('with another internal domain configured, %s still gets \'\', and so does an address on the configured domain', async (email) => {
       process.env.INTERNAL_EMAIL_DOMAINS = 'partner.example';
       process.env.NEWSLETTER_PROOF_EMAIL = 'proof@example.net';
       const waves = row(1, { email });
@@ -206,6 +208,12 @@ describe('toolBlockForBatch: the key', () => {
       expect(r.forReader({ id: 1, email })).toEqual(NOT);
       expect(r.forReader({ id: 3, email: partner.email })).toEqual(NOT);
       expect(r.forReader(sub(2))).toEqual(GOT);
+    });
+
+    test('a domain that only ends with a Waves domain name is not a Waves domain', async () => {
+      const near = row(1, { email: 'reader@notwavespestcontrol.com' });
+      const db = fakeDb({ rows: [near] });
+      expect((await run({ subscribers: [{ id: 1, email: near.email }], db })).forReader({ id: 1, email: near.email })).toEqual(GOT);
     });
 
     test.each([['email'], ['google_email']])('the staff login in technicians.%s (read once for the batch, any letter case) gets \'\'', async (column) => {
