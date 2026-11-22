@@ -2,7 +2,8 @@
  * mail_prospects store against real PostgreSQL: the migration, insert-then-update by the same key, the one-live-row-
  * per-parcel index with its duplicate_parcel fallback, the new-home permit read (both pin forms, the address proof,
  * the open-permit rule, the Eastern 24-month limit; canceled, alteration, ADU and long-finished homes left out) and
- * the known-address read. Made-up rows in a throwaway schema
+ * the known-address read. One test runs the new-home list through this store end to end (a made-up Clerk page and
+ * a made-up parcel map; the real permit read, known-address read and table). Made-up rows in a throwaway schema
  * of this worktree's own QA database or CI's database.
  */
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
@@ -28,6 +29,7 @@ const {
   findBySourceRefs, newHomePermitsForParcels, addressKnownToWaves, saveProspect,
 } = require('../services/mail/prospect-store');
 const { monthsAgoIso } = require('../services/property-lookup/manatee-permit-sync');
+const { runNewHomeList, holdBack, LIST_KEY } = require('../services/mail/new-home-list');
 
 jest.setTimeout(60000);
 
@@ -286,6 +288,14 @@ postgres('mail prospect store on PostgreSQL', () => {
     await permit('BLD9900-0032', { parcel_pin: '3200000031', co_date: monthsAgoIso(0) }); // finished today
     await permit('BLD9900-0033', { parcel_pin: '3300000031', issued_date: monthsAgoIso(0) }); // issued today
     expect(await found('3000000031', '3100000031', '3200000031', '3300000031')).toEqual(['3200000031', '3300000031']);
+    // A recent certificate with an issue date of tomorrow does not count, and it does not take the place of the
+    // parcel's real permit. A finished home's permit with no issue date still counts.
+    await permit('BLD9900-0034', { parcel_pin: '3400000031', issued_date: tomorrow, co_date: dateAgo(10) });
+    expect(await found('3400000031')).toEqual([]);
+    await permit('BLD9900-0035', { parcel_pin: '3400000031', issued_date: dateAgo(300), co_date: dateAgo(20) });
+    expect((await newHomePermitsForParcels([parcel('3400000031')]))['3400000031'].permit_no).toBe('BLD9900-0035');
+    await permit('BLD9900-0036', { parcel_pin: '3600000031', issued_date: null, co_date: dateAgo(10) });
+    expect(await found('3600000031')).toEqual(['3600000031']);
   });
 
   test('new-home permits: the 24-month limit counts back from today in Eastern time', async () => {
@@ -432,5 +442,62 @@ postgres('mail prospect store on PostgreSQL', () => {
     await conn('customers').insert({ address_line1: '77 Lastone Ln', zip: '34221' });
     expect(await addressKnownToWaves('77 LASTONE LN', '34221')).toBe(true);
     expect(await addressKnownToWaves('77 MISSING LN', '34221')).toBe(false);
+  });
+
+  test('the new-home run saves through this store: a new home, a known address and a deed with no parcel', async () => {
+    // Tuesday 2026-11-17, 9:31 PM ET: the night run reads 17, 16, 13 and 12 November.
+    const now = Date.UTC(2026, 10, 18, 2, 31);
+    const deedRow = (lot) => ({
+      instrument: String(202699200000 + lot), from: ['SAMPLE HOMES LLC'], to: ['TESTER ALEX J'], type: 'DEED',
+      consideration: 425000, description: `LOT ${lot} SAMPLE GROVE`, date: '2026-11-17',
+    });
+    const mapParcel = (extra = {}) => ({
+      parid: '513309059', addressLine1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212', subdivision: 'SAMPLE GROVE',
+      lot: '12', block: null, ownerName: 'SAMPLE HOMES LLC', ownerName2: null, livingSqft: 2100, stories: 2, yearBuilt: 2026,
+      platKnown: true, ...extra,
+    });
+    const parcelsByLot = {
+      12: [mapParcel()],
+      13: [mapParcel({ parid: '777000111', lot: '13', addressLine1: '202 KNOWN RD' })],
+      14: [],
+    };
+    const deps = {
+      fetchDayList: jest.fn(async (day) => ({ rows: day === '2026-11-17' ? [deedRow(12), deedRow(13), deedRow(14)] : [] })),
+      queryParcels: jest.fn(async (legal) => parcelsByLot[legal.lot]),
+      sleep: async () => {},
+    };
+    await permit('BLD9900-0040', { parcel_pin: '5133090590', co_date: dateAgo(15) });
+    await permit('BLD9900-0041', { parcel_pin: '7770001110', address_loose_key: '202known34212', address_raw: '202 KNOWN RD  SAMPLETON 34212' });
+    await conn('customers').insert({ address_line1: '202 Known Rd', zip: '34212' });
+    const live = holdBack(LIST_KEY, '513309059') ? 'held_back' : 'eligible';
+
+    const first = await runNewHomeList({ mode: 'night', now, deps });
+    expect(first.saved).toEqual({ [live]: 1, not_eligible: 1, unmatched: 1 });
+    expect(first.savedByReason).toEqual({ 'not_eligible/known_address': 1, 'unmatched/no_parcel': 1 });
+    expect(first.errors).toEqual({});
+    const rows = (await conn.raw(
+      `SELECT source_ref, status, reason, match_basis, parcel_pin, permit_no, to_char(co_date, 'YYYY-MM-DD') AS co_date,
+              address_line1, city, state, zip, subdivision, living_sqft, stories::float AS stories, year_built,
+              legal_description, recipient_names, to_char(recorded_date, 'YYYY-MM-DD') AS recorded_date
+         FROM mail_prospects ORDER BY source_ref`,
+    )).rows;
+    expect(rows.map((r) => [r.source_ref, r.status, r.reason])).toEqual([
+      ['202699200012', live, null], ['202699200013', 'not_eligible', 'known_address'], ['202699200014', 'unmatched', 'no_parcel'],
+    ]);
+    expect(rows[0]).toMatchObject({
+      match_basis: 'owner_permit', parcel_pin: '513309059', permit_no: 'BLD9900-0040', co_date: dateAgo(15),
+      address_line1: '101 EXAMPLE TRL', city: 'SAMPLETON', state: 'FL', zip: '34212', subdivision: 'SAMPLE GROVE',
+      living_sqft: 2100, stories: 2, year_built: 2026, legal_description: 'LOT 12 SAMPLE GROVE',
+      recipient_names: ['TESTER ALEX J'], recorded_date: '2026-11-17',
+    });
+    expect(rows[1]).toMatchObject({ parcel_pin: null, permit_no: null, address_line1: null });
+
+    // A second run asks the map about nothing: two deeds are settled, and the third waits 20 hours.
+    deps.queryParcels.mockClear();
+    const second = await runNewHomeList({ mode: 'night', now, deps });
+    expect(second.skipped).toMatchObject({ settled: 2, retry_wait: 1 });
+    expect(second.saved).toEqual({});
+    expect(deps.queryParcels).not.toHaveBeenCalled();
+    expect(await conn('mail_prospects').count('* as n').first()).toMatchObject({ n: '3' });
   });
 });

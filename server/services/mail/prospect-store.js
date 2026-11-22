@@ -133,6 +133,9 @@ async function newHomePermitsForParcels(parcels, conn = db) {
     .whereRaw("type_of_work NOT ILIKE '%accessory%'")
     .whereRaw("type_of_work NOT ILIKE '%guest%'")
     .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')")
+    // An issue date after today on any permit: the newest-first order below would put it before the parcel's
+    // real permit. A finished home's permit may have no issue date.
+    .where((b) => b.whereNull('issued_date').orWhere('issued_date', '<=', today))
     .where((b) => b
       .whereBetween('co_date', [coFloor, today])
       .orWhere((open) => open
