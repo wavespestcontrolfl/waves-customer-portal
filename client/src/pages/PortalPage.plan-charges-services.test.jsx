@@ -86,6 +86,35 @@ describe('resolvePlanServices — one service list for My Plan and Billing', () 
     expect(confirmedIds({ ...bronze, tier: 'Silver' }, LAWN, [LAWN, PEST])).toEqual(['lawn_care', 'pest_control']);
   });
 
+  // Platinum is "four or more" services on the server. A fifth family found
+  // on the schedule stays on both lists; the exact tiers still cut.
+  describe('Platinum is four or more', () => {
+    const platinum = { ...bronze, tier: 'Platinum' };
+    const FIVE = [
+      LAWN, PEST,
+      visit('Mosquito Barrier Treatment', { id: 'v-mosq' }),
+      visit('Tree & Shrub Care', { id: 'v-tree' }),
+      visit('Termite Bait Monitoring', { id: 'v-term' }),
+    ];
+    const FIVE_IDS = ['lawn_care', 'pest_control', 'mosquito', 'tree_shrub', 'termite'];
+
+    it('a Platinum member with five families on the schedule keeps all five on both lists', () => {
+      expect(ids(platinum, LAWN, FIVE)).toEqual(FIVE_IDS);
+      expect(confirmedIds(platinum, LAWN, FIVE)).toEqual(FIVE_IDS);
+    });
+
+    it('a Platinum member with two on the schedule: four for My Plan, two confirmed', () => {
+      expect(ids(platinum, LAWN, [LAWN, PEST])).toHaveLength(4);
+      expect(confirmedIds(platinum, LAWN, [LAWN, PEST])).toEqual(['lawn_care', 'pest_control']);
+    });
+
+    it('Gold is an exact count: a fourth and fifth family are cut from both lists', () => {
+      const gold = { ...bronze, tier: 'Gold' };
+      expect(ids(gold, LAWN, FIVE)).toEqual(FIVE_IDS.slice(0, 3));
+      expect(confirmedIds(gold, LAWN, FIVE)).toEqual(FIVE_IDS.slice(0, 3));
+    });
+  });
+
   it('a customer with no plan lists only what the schedule shows', () => {
     const noPlan = { id: 'cust-2', tier: null, monthlyRate: 0 };
     expect(ids(noPlan, null, [])).toEqual([]);

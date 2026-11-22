@@ -11278,7 +11278,7 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
       if (includedServiceIds.length >= tierServiceLimit) break;
       if (!includedServiceIds.includes(svc.id)) includedServiceIds.push(svc.id);
     }
-    includedServiceIds = includedServiceIds.slice(0, tierServiceLimit);
+    includedServiceIds = includedServiceIds.slice(0, tierListCut(activeTierName, detectedServiceIds.length));
   } else {
     includedServiceIds = detectedServiceIds;
   }
@@ -11292,6 +11292,15 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
   return { includedServices, confirmedServices: confirmedPlanServices(customer, upcomingServices), pestPlanName };
 }
 
+// How many services a tier's list may hold. Bronze, Silver and Gold are an
+// exact count. Platinum is "four or more" (server: inferTierFromServiceCount
+// in self-booking-plan-sync.js), so a fifth family found on the schedule is
+// never cut from a Platinum member's list.
+function tierListCut(tierName, foundCount) {
+  const size = TIER_SERVICES[tierName] || 1;
+  return tierName === 'Platinum' ? Math.max(size, foundCount) : size;
+}
+
 // The services a plan visit ON THE SCHEDULE confirms, for a surface that
 // NAMES what the member pays for (Billing's Plan Charges, the Learn
 // sentence). It reads the schedule rows alone:
@@ -11302,7 +11311,8 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
 //     family and no catalog name, has no upper date bound, and is a second
 //     read that can disagree with the schedule (a visit cancelled between the
 //     two) or fail by itself.
-// The tier's size still cuts the list, in schedule order, as on My Plan.
+// The tier's size still cuts the list, in schedule order, as on My Plan
+// (tierListCut: Platinum is never cut).
 // Pest control takes the name of its LAST upcoming visit, as on My Plan.
 export function confirmedPlanServices(customer, upcomingServices = []) {
   const names = new Map();
@@ -11316,7 +11326,7 @@ export function confirmedPlanServices(customer, upcomingServices = []) {
   if (lastPestName) names.set('pest_control', lastPestName);
   const activeTierName = resolveActiveTierName(customer);
   const ids = [...names.keys()];
-  return (activeTierName ? ids.slice(0, TIER_SERVICES[activeTierName] || 1) : ids)
+  return (activeTierName ? ids.slice(0, tierListCut(activeTierName, ids.length)) : ids)
     .map((id) => {
       const svc = SERVICE_CATALOG.find((entry) => entry.id === id);
       return { ...svc, displayName: names.get(id) || svc.name };
