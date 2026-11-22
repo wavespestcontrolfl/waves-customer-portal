@@ -7191,9 +7191,11 @@ in `routes/estimate-public.js`). The rule is two exact lists of service identiti
 row's identity is its own stored `service`, compared whole; a name, a label, a `key` or a part of a key never counts.
 Recurring: `pest_control`, `lawn_care`, `tree_shrub`, `mosquito` or `termite_bait`. One-time: `one_time_pest`,
 `one_time_lawn`, `one_time_mosquito` or `termite_bait_installation` (the termite bait plan's own install charge). A row
-is not a service only by what it stores: `waveguard_setup`, `manual_discount`, `rodent_bundle_discount`, a
-`one_time_adjustment` that adds no charge, a `kind: 'discount'` row with no stored `service`, or an empty row. Every
-other row must store a listed service, priced or not, and must not be commercial. Three reads, each failing closed. (1)
+is not a service only by its stored `service`: `waveguard_setup`, `manual_discount`, `rodent_bundle_discount`, or a
+`one_time_adjustment` whose stated `amount` / `price` are readable numbers and none is above zero; an empty row is
+nothing. Every other row must store a listed service, priced or not, and must not be commercial. A row container that
+is there and is not a list, or an entry that is there and is not a row, cannot be read and takes the key away. Three
+reads, each failing closed. (1)
 The saved estimate grants the key: the rows of `guaranteeServiceRows` without the served price (both saved result shapes,
 an inputs-only replay, an authored proposal's rows) hold at least one service row and every one is on its list. (2)
 Every saved row as it is stored can take the key away, also one the page's readers skip or drop, in both saved result

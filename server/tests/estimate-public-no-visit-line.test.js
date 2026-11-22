@@ -258,7 +258,7 @@ describe('serviceMixIsRemoteMeasured: is every service on the estimate priced fr
       { service: 'one_time_adjustment', name: 'Discount', amount: -20 },
       { service: 'manual_discount', name: 'Manual discount', amount: -10 },
       { service: 'rodent_bundle_discount', name: 'Bundle discount', amount: -15 },
-      { kind: 'discount', label: 'Neighbor discount', amount: -25 },
+      { service: 'manual_discount', label: 'Neighbor discount', amount: -25, kind: 'discount' },
       {},
     ];
     expect(serviceMixIsRemoteMeasured([pest], notServices)).toBe(true);
@@ -276,8 +276,10 @@ describe('serviceMixIsRemoteMeasured: is every service on the estimate priced fr
     }
     // A fee name on a row with no stored service is a name.
     expect(serviceMixIsRemoteMeasured([pest], [{ name: 'WaveGuard Setup', amount: 99 }])).toBe(false);
-    // A stored service wins over a discount mark.
+    // A discount mark is not an identity: with another stored service, or with none.
     expect(serviceMixIsRemoteMeasured([pest], [{ service: 'german_roach', kind: 'discount', amount: -50 }])).toBe(false);
+    expect(serviceMixIsRemoteMeasured([pest], [{ kind: 'discount', label: 'Neighbor discount', amount: -25 }])).toBe(false);
+    expect(serviceMixIsRemoteMeasured([pest], [{ kind: 'discount', label: 'Rodent trapping', amount: 75 }])).toBe(false);
     // A row with a price and nothing else is a row nobody can identify.
     expect(serviceMixIsRemoteMeasured([pest], [{ amount: 120 }])).toBe(false);
     expect(serviceMixIsRemoteMeasured([pest, { mo: 40 }], [])).toBe(false);
@@ -369,11 +371,48 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured(saved({ specItems: [{ price: 250 }] }), {})).toBe(false);
     // A fee name with no stored service is a name.
     expect(estimateIsRemoteMeasured(saved({ oneTime: { items: [{ name: 'WaveGuard Setup', price: 99 }] } }), {})).toBe(false);
-    // The stored fee, a discount row and an empty row stay out of the way.
+    // The stored fee, a stored discount and an empty row stay out of the way.
     expect(estimateIsRemoteMeasured(saved({
-      oneTime: { items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }, { kind: 'discount', label: 'Neighbor discount', price: -25 }] },
+      oneTime: { items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }, { service: 'manual_discount', label: 'Neighbor discount', price: -25 }] },
       lineItems: [{}, { service: '', name: '' }],
     }), {})).toBe(true);
+  });
+
+  test('stored pricing data nobody can read is no ground for the sentence', () => {
+    const saved = (extra) => ({ result: { ...plan('pest_control'), ...extra } });
+    const own = { result: plan('pest_control') };
+    // An entry of a row list that is not a row: a bare key, a nested list, a number.
+    const notRows = ['rodent_trapping', ['rodent_trapping'], 7, true];
+    for (const entry of notRows) {
+      const label = JSON.stringify(entry);
+      expect([label, estimateIsRemoteMeasured(saved({ specItems: [entry] }), {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 42 }, entry] }), {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured({ result: { recurring: { services: [recurringRow('pest_control'), entry] } } }, {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured(own, { firstVisitFees: [entry] })]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured(own, { oneTimeBreakdown: { items: [entry] } })]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured(own, { services: [entry] })]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured(own, { frequencies: [{ key: 'quarterly', perServiceTreatments: [entry] }] })]).toEqual([label, false]);
+      expect([label, serviceMixIsRemoteMeasured([recurringRow('pest_control'), entry], [])]).toEqual([label, false]);
+      expect([label, serviceMixIsRemoteMeasured([recurringRow('pest_control')], [entry])]).toEqual([label, false]);
+    }
+    // A row container that is there and is not a list.
+    expect(estimateIsRemoteMeasured(saved({ lineItems: 'rodent_bait' }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ oneTime: { items: { 0: { service: 'one_time_pest', price: 199 } } } }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(own, { firstVisitFees: { service: 'waveguard_setup' } })).toBe(false);
+    expect(estimateIsRemoteMeasured(own, { frequencies: 'quarterly' })).toBe(false);
+    expect(estimateIsRemoteMeasured(own, { frequencies: [{ key: 'quarterly', perServiceTreatments: 'rodent_bait' }] })).toBe(false);
+    expect(estimateIsRemoteMeasured(own, { services: [{ key: 'pest_control', isRecurring: true, memberKeys: 'rodent_bait' }] })).toBe(false);
+    // A fee field that is there and is not a row.
+    expect(estimateIsRemoteMeasured(own, { setupFee: 'rodent_bait_setup' })).toBe(false);
+    expect(estimateIsRemoteMeasured(own, { rodentBaitSetupFee: 199 })).toBe(false);
+    // Absent is not unreadable: no container, an empty list, an absent entry, an absent fee.
+    expect(estimateIsRemoteMeasured(saved({ specItems: [null], lineItems: [], oneTime: null, results: { oneTime: { items: [null] } } }), {
+      firstVisitFees: [], setupFee: null, rodentBaitSetupFee: undefined, quoteRequiredItems: [null],
+      services: [null, { key: 'pest_control', isRecurring: true, memberKeys: ['pest_control'], setupFee: null }], frequencies: [null],
+    })).toBe(true);
+    // The page's own plan reader cannot read an absent plan row. The rule then gives no answer, and does not throw.
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [null] }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: { recurring: { services: [recurringRow('pest_control'), null] } } }, {})).toBe(false);
   });
 
   test('a stored service at any depth of a saved result counts, also in a place no reader lists', () => {
@@ -414,9 +453,19 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     }
     // An adjustment row whose amount nobody can read is not a discount.
     const adjustment = (amount) => ({ oneTimeBreakdown: { items: [{ service: 'one_time_adjustment', name: 'Adjustment', amount }] } });
-    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustment(-20))).toBe(true);
-    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustment({ toString: null }))).toBe(false);
-    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustment(undefined))).toBe(false);
+    for (const amount of [-20, 0, '-20', '0']) {
+      expect([amount, estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustment(amount))]).toEqual([amount, true]);
+    }
+    for (const amount of [75, '75', '', '  ', 'abc', NaN, Infinity, { toString: null }, [0], undefined, null]) {
+      const label = String(JSON.stringify(amount));
+      expect([label, estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustment(amount))]).toEqual([label, false]);
+    }
+    // Every charge the row states counts: a blank amount does not hide a price.
+    const adjustmentRow = (fields) => ({ oneTimeBreakdown: { items: [{ service: 'one_time_adjustment', name: 'Adjustment', ...fields }] } });
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustmentRow({ amount: '', price: 75 }))).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustmentRow({ amount: -20, price: 75 }))).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustmentRow({ amount: -20, price: -20 }))).toBe(true);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustmentRow({ price: -5 }))).toBe(true);
     // A read that throws is caught: no answer, one warning.
     const logger = require('../services/logger');
     logger.warn.mockClear();

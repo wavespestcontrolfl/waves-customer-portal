@@ -24211,9 +24211,12 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // key: a name is free text, and the display categories also hold work priced from facts a technician or the customer
 // gives (a palm injection sits under tree and shrub; bed bug rooms, a roach cleanout, a flea package and a stinging
 // insect job sit under pest control).
-// A row that is not a service is known the same way, by what it stores (storedRowIsNotAService): the WaveGuard setup
-// fee, a discount, a one-time adjustment that adds no charge, or an empty row. Every other row must store a listed
-// service, priced or not: a row with a name, a key or a price and no stored `service` is a row nobody can identify.
+// A row that is not a service is known the same way, by its stored `service` (storedRowIsNotAService): the WaveGuard
+// setup fee, a discount identity, or a one-time adjustment that adds no charge. An empty row is nothing. Every other
+// row must store a listed service, priced or not: a row with a name, a key, a price or a discount mark and no stored
+// `service` is a row nobody can identify.
+// Stored pricing data nobody can read is no ground for the sentence either (storedRowReader): a row container that is
+// there and is not a list, or an entry that is there and is not a row.
 // Three reads, and each one fails closed (estimateIsRemoteMeasured):
 // 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
 //    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service
@@ -24239,24 +24242,52 @@ const serviceIdentity = (value) => {
   return typeof value === 'string' ? value.trim().toLowerCase() : '(not text)';
 };
 const isStoredRow = (row) => Boolean(row) && typeof row === 'object' && !Array.isArray(row);
-const rowList = (value) => (Array.isArray(value) ? value : []);
+
+// The charge a row states (`amount`, `price`): at least one is there, each one is a readable number, none is above zero.
+const storedRowAddsNoCharge = (row) => {
+  const charges = [row.amount, row.price].filter((value) => value != null);
+  return charges.length > 0 && charges.every((value) => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
+    && Number.isFinite(Number(value)) && Number(value) <= 0);
+};
 
 function storedRowIsNotAService(row) {
   const identity = serviceIdentity(row.service);
   // The "other one-time services" remainder is work nothing classified when it adds a charge, or when nobody can
   // read its amount.
-  if (identity === 'one_time_adjustment') {
-    const charge = row.amount ?? row.price;
-    return (typeof charge === 'number' || typeof charge === 'string') && Number(charge) <= 0;
-  }
+  if (identity === 'one_time_adjustment') return storedRowAddsNoCharge(row);
   if (identity) return NOT_A_SERVICE_IDENTITIES.has(identity);
-  return row.kind === 'discount' || Object.values(row).every((value) => value == null || value === '');
+  return Object.values(row).every((value) => value == null || value === '');
 }
 
 // A stored row passes when it is not a service, or when its stored `service` is on one of the given lists. A commercial
 // row never passes: the engine marks it, and the page's normalized one-time rows drop the mark.
-const storedRowsAreListed = (rows, ...lists) => rowList(rows).filter(isStoredRow).every((row) => row.isCommercial !== true
+const storedRowsAreListed = (rows, ...lists) => rows.every((row) => row.isCommercial !== true
   && (storedRowIsNotAService(row) || lists.some((listed) => listed.has(serviceIdentity(row.service)))));
+
+// Reads row containers and remembers when one cannot be read. A container that is absent holds no row, and so does an
+// absent entry. A container that is there and is not a list, or an entry that is there and is not a row (a bare key
+// in a list of rows), cannot be read.
+function storedRowReader() {
+  let readable = true;
+  const rows = (value) => {
+    if (value == null) return [];
+    const entries = (Array.isArray(value) ? value : [value]).filter((entry) => entry != null);
+    if (!Array.isArray(value) || !entries.every(isStoredRow)) readable = false;
+    return entries.filter(isStoredRow);
+  };
+  return {
+    rows,
+    // A field that holds one row, or nothing: a fee.
+    row: (value) => (value == null ? [] : rows([value])),
+    // A list of identities, not rows: a section's member keys.
+    identities: (value) => {
+      if (value == null) return [];
+      if (!Array.isArray(value)) readable = false;
+      return Array.isArray(value) ? value : [];
+    },
+    allReadable: () => readable,
+  };
+}
 
 // Every row that stores a `service`, at any depth of a value.
 function rowsStoringAService(value, found = [], seen = new WeakSet()) {
@@ -24268,10 +24299,12 @@ function rowsStoringAService(value, found = [], seen = new WeakSet()) {
 }
 
 function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
-  const serviceRows = (rows) => rowList(rows).filter((row) => isStoredRow(row) && !storedRowIsNotAService(row));
+  const read = storedRowReader();
+  const serviceRows = (rows) => read.rows(rows).filter((row) => !storedRowIsNotAService(row));
   const recurring = serviceRows(recurringServices);
   const oneTime = serviceRows(oneTimeItems);
-  return recurring.length + oneTime.length > 0
+  return read.allReadable()
+    && recurring.length + oneTime.length > 0
     && storedRowsAreListed(recurring, REMOTE_MEASURED_RECURRING_SERVICES)
     && storedRowsAreListed(oneTime, REMOTE_MEASURED_ONE_TIME_SERVICES);
 }
@@ -24288,6 +24321,7 @@ function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
 //   a line, a margin warning, a field no reader lists): either list. The frozen send snapshot is not part of this
 //   scan: it holds the price and scope as sent, and the price the customer is served is read by its own rule below.
 function savedRowsAreAllListed(estData = {}) {
+  const read = storedRowReader();
   const { sendSnapshot: _sentPriceAndScope, ...savedData } = isStoredRow(estData) ? estData : {};
   const results = [estData?.result, estData?.engineResult].filter(isStoredRow);
   if (!persistedGuaranteeRoots(estData).length) {
@@ -24295,19 +24329,21 @@ function savedRowsAreAllListed(estData = {}) {
     if (isStoredRow(replay.result)) results.push(replay.result);
   }
   const containers = [...results, estData].filter(isStoredRow).map((root) => ({
-    plans: [...rowList(root.recurring?.services), ...rowList(root.results?.recurring?.services)],
-    lines: rowList(root.lineItems),
+    plans: [...read.rows(root.recurring?.services), ...read.rows(root.results?.recurring?.services)],
+    lines: read.rows(root.lineItems),
     oneTime: [
-      ...rowList(root.oneTime?.items), ...rowList(root.oneTime?.specItems),
-      ...rowList(root.results?.oneTime?.items), ...rowList(root.results?.oneTime?.specItems),
-      ...rowList(root.specItems), ...rowList(root.quoteRequiredItems),
+      ...read.rows(root.oneTime?.items), ...read.rows(root.oneTime?.specItems),
+      ...read.rows(root.results?.oneTime?.items), ...read.rows(root.results?.oneTime?.specItems),
+      ...read.rows(root.specItems), ...read.rows(root.quoteRequiredItems),
     ],
   }));
-  return containers.every((rows) => (
-    storedRowsAreListed(rows.plans, REMOTE_MEASURED_RECURRING_SERVICES)
-    && storedRowsAreListed(rows.lines, REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES)
-    && storedRowsAreListed(rows.oneTime, REMOTE_MEASURED_ONE_TIME_SERVICES)
-  )) && storedRowsAreListed(rowsStoringAService([savedData, results]), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES);
+  return read.allReadable()
+    && containers.every((rows) => (
+      storedRowsAreListed(rows.plans, REMOTE_MEASURED_RECURRING_SERVICES)
+      && storedRowsAreListed(rows.lines, REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES)
+      && storedRowsAreListed(rows.oneTime, REMOTE_MEASURED_ONE_TIME_SERVICES)
+    ))
+    && storedRowsAreListed(rowsStoringAService([savedData, results]), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES);
 }
 
 // The price the customer is served.
@@ -24322,19 +24358,24 @@ function savedRowsAreAllListed(estData = {}) {
 // A cadence's `included[]` and `addOns[]` rows are page copy with display keys and no stored `service`: the work they
 // describe is in the rows above.
 function servedPriceIsAllListed(pricingBundle = {}) {
-  const sections = rowList(pricingBundle?.services).filter(isStoredRow);
+  const read = storedRowReader();
+  const sections = read.rows(pricingBundle?.services);
   const plans = sections.filter((section) => section.isRecurring !== false);
+  const planIdentities = plans.flatMap((section) => {
+    const memberKeys = read.identities(section.memberKeys);
+    return memberKeys.length ? memberKeys : [section.key];
+  });
   const planRows = [pricingBundle, ...plans]
-    .flatMap((holder) => [...rowList(holder?.frequencies), ...rowList(holder?.serviceCadenceCombos)])
-    .flatMap((cadence) => rowList(cadence?.perServiceTreatments));
+    .flatMap((holder) => [...read.rows(holder?.frequencies), ...read.rows(holder?.serviceCadenceCombos)])
+    .flatMap((cadence) => read.rows(cadence.perServiceTreatments));
   const oneTimeRows = [
-    ...rowList(pricingBundle?.oneTimeBreakdown?.items), ...rowList(pricingBundle?.oneTimeBreakdown?.quoteRequiredItems),
-    ...rowList(pricingBundle?.quoteRequiredItems), ...rowList(pricingBundle?.firstVisitFees),
-    pricingBundle?.setupFee, pricingBundle?.rodentBaitSetupFee, pricingBundle?.mistingInstallFee,
-    ...sections.flatMap((section) => [...rowList(section.oneTimeContribution?.items), section.setupFee]),
+    ...read.rows(pricingBundle?.oneTimeBreakdown?.items), ...read.rows(pricingBundle?.oneTimeBreakdown?.quoteRequiredItems),
+    ...read.rows(pricingBundle?.quoteRequiredItems), ...read.rows(pricingBundle?.firstVisitFees),
+    ...read.row(pricingBundle?.setupFee), ...read.row(pricingBundle?.rodentBaitSetupFee), ...read.row(pricingBundle?.mistingInstallFee),
+    ...sections.flatMap((section) => [...read.rows(section.oneTimeContribution?.items), ...read.row(section.setupFee)]),
   ];
-  return plans.flatMap((section) => (rowList(section.memberKeys).length ? section.memberKeys : [section.key]))
-    .every((identity) => REMOTE_MEASURED_RECURRING_SERVICES.has(serviceIdentity(identity)))
+  return read.allReadable()
+    && planIdentities.every((identity) => REMOTE_MEASURED_RECURRING_SERVICES.has(serviceIdentity(identity)))
     && storedRowsAreListed(planRows, REMOTE_MEASURED_RECURRING_SERVICES)
     && storedRowsAreListed(oneTimeRows, REMOTE_MEASURED_ONE_TIME_SERVICES)
     && storedRowsAreListed(rowsStoringAService(pricingBundle), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES);
