@@ -27,7 +27,7 @@ jest.mock('../services/pest-insider/home', () => ({
 }));
 // The friend's credit in cents, as the referral program's live setting gives it (0 = no amount to state).
 jest.mock('../services/referral-engine', () => ({
-  step2FriendCreditCents: (...args) => mockFriendCents(...args),
+  step2FriendCreditCentsOf: (...args) => mockFriendCents(...args),
   getLiveSettings: (...args) => mockLiveSettings(...args),
 }));
 
@@ -194,7 +194,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockLoadHomeFacts.mockReset();
   mockFriendCents.mockReset();
-  mockFriendCents.mockResolvedValue(0);
+  mockFriendCents.mockReturnValue(0);
   mockLiveSettings.mockReset();
   mockLiveSettings.mockResolvedValue({ program_active: true });
   process.env[GATE] = 'true';
@@ -516,16 +516,17 @@ describe('sendCampaign: the referral line', () => {
     expect(recipients()).toHaveLength(3);
     for (const r of recipients()) expect(lineOf(r)).toEqual(FIRST);
     expect(FIRST.text).toBe(`${WORDS_FIRST}\n\n`);
-    // One read of the program for the batch, not one for each reader.
-    expect(mockFriendCents).toHaveBeenCalledTimes(1);
+    // One read of the program for the batch, not one for each reader; the amount comes from that same row.
     expect(mockLiveSettings).toHaveBeenCalledTimes(1);
+    expect(mockFriendCents).toHaveBeenCalledTimes(1);
+    expect(mockFriendCents).toHaveBeenCalledWith({ program_active: true });
     expect(touchpointOf(C1).body).toContain(`${WORDS_FIRST}\n\nCatch you next time.`);
   });
 
   test('with an amount in the live setting, every reader gets the amount line, a customer or not', async () => {
     buildDb(three());
     mockLoadHomeFacts.mockResolvedValue(new Map());
-    mockFriendCents.mockResolvedValue(5000);
+    mockFriendCents.mockReturnValue(5000);
 
     await sendCampaign('send-1');
 
@@ -554,6 +555,8 @@ describe('sendCampaign: the referral line', () => {
   test('a referral program that cannot be read: no line, and the batch still goes out', async () => {
     buildDb(three());
     mockLoadHomeFacts.mockResolvedValue(new Map());
+    // Also with an amount the gate would state: there is one read, and no line without it.
+    mockFriendCents.mockReturnValue(5000);
     mockLiveSettings.mockRejectedValue(new Error('settings table gone'));
 
     await sendCampaign('send-1');
@@ -566,17 +569,18 @@ describe('sendCampaign: the referral line', () => {
   test('the program is read once per batch: a change of the amount between two batches applies from the second batch on, in the mail and in the history', async () => {
     buildDb(twoBatches());
     mockLoadHomeFacts.mockResolvedValue(new Map());
-    mockFriendCents.mockResolvedValueOnce(5000).mockResolvedValueOnce(0);
+    mockFriendCents.mockReturnValueOnce(5000).mockReturnValueOnce(0);
 
     await sendCampaign('send-1');
 
     expect(mockSendBroadcast).toHaveBeenCalledTimes(2);
+    expect(mockLiveSettings).toHaveBeenCalledTimes(2);
     expect(mockFriendCents).toHaveBeenCalledTimes(2);
     expect(recipients(0)).toHaveLength(500);
     for (const r of recipients(0)) expect(lineOf(r)).toEqual(PAID);
     expect(recipients(1).map(lineOf)).toEqual([FIRST]);
     // The second read comes after the first batch went out.
-    expect(mockSendBroadcast.mock.invocationCallOrder[0]).toBeLessThan(mockFriendCents.mock.invocationCallOrder[1]);
+    expect(mockSendBroadcast.mock.invocationCallOrder[0]).toBeLessThan(mockLiveSettings.mock.invocationCallOrder[1]);
     // Each customer's touchpoint records the offer as that customer's batch was mailed it.
     expect(touchpointOf(C1).body).toContain(WORDS_PAID);
     expect(touchpointOf(C_LAST).body).toContain(WORDS_FIRST);
@@ -601,7 +605,7 @@ describe('sendCampaign: the referral line', () => {
   test('an issue with no text part: the history is written from the HTML part, with the line that batch was mailed', async () => {
     buildDb(three({ send: sendRow({ text_body: null }) }));
     mockLoadHomeFacts.mockResolvedValue(new Map());
-    mockFriendCents.mockResolvedValue(5000);
+    mockFriendCents.mockReturnValue(5000);
 
     await sendCampaign('send-1');
 
@@ -615,7 +619,7 @@ describe('sendCampaign: the referral line', () => {
   test('the line follows the referral program alone: an issue sent with GATE_PEST_INSIDER_AUTO_SEND off states the amount too', async () => {
     delete process.env[GATE];
     buildDb(one());
-    mockFriendCents.mockResolvedValue(5000);
+    mockFriendCents.mockReturnValue(5000);
 
     await sendCampaign('send-1');
 
@@ -625,7 +629,7 @@ describe('sendCampaign: the referral line', () => {
 
   test('another newsletter that holds the tokens gets the first form for every reader, in the mail and in the history, and reads nothing', async () => {
     buildDb(three({ send: sendRow({ newsletter_type: 'free-form', segment_filter: null }) }));
-    mockFriendCents.mockResolvedValue(5000);
+    mockFriendCents.mockReturnValue(5000);
     mockLiveSettings.mockResolvedValue({ program_active: false });
 
     await sendCampaign('send-1');
@@ -640,7 +644,7 @@ describe('sendCampaign: the referral line', () => {
     const typed = (part) => part.split(REFERRAL_TOKEN).join('<p>Tell a friend. Thank you!</p>\n').split(REFERRAL_TEXT_TOKEN).join('Tell a friend. Thank you!\n\n');
     buildDb(three({ send: sendRow({ html_body: typed(ISSUE.html_body), text_body: typed(ISSUE.text_body) }) }));
     mockLoadHomeFacts.mockResolvedValue(new Map());
-    mockFriendCents.mockResolvedValue(5000);
+    mockFriendCents.mockReturnValue(5000);
 
     await sendCampaign('send-1');
 
@@ -706,7 +710,7 @@ describe('every surface without a reader strips both tokens', () => {
     expect(stored.text).toContain('Send them our way — referrals are the nicest compliment we get.\nhttps://www.wavespestcontrol.com/referral/\n\nCatch you next time.');
     expect(stored.html).toContain('>Send them our way</a> — referrals are the nicest compliment we get.</p>');
 
-    mockFriendCents.mockResolvedValue(5000);
+    mockFriendCents.mockReturnValue(5000);
     const paid = await copy();
     expect(paid.text).toContain('Send them our way. They get a $50 credit after their first plan service.\nhttps://www.wavespestcontrol.com/referral/\n\nCatch you next time.');
     expect(paid.html).toContain('>Send them our way</a>. They get a $50 credit after their first plan service.</p>');
@@ -726,7 +730,7 @@ describe('every surface without a reader strips both tokens', () => {
     expect(banner.text).toContain('FYI: this issue goes out Thursday.');
 
     // A paused referral program: the owner sees the issue without the line, as a reader would get it.
-    mockFriendCents.mockResolvedValue(0);
+    mockFriendCents.mockReturnValue(0);
     mockLiveSettings.mockResolvedValue({ program_active: false });
     const paused = await copy();
     for (const part of [paused.html, paused.text]) {

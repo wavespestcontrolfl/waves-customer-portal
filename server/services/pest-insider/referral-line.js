@@ -27,7 +27,7 @@
  *   would get it at that moment (referralLineAsOfNow).
  *
  * What a reader gets, by the state of the referral program at that moment
- * (referralLineFor):
+ * (referralLineFor, from one read of the live settings row):
  * - an amount to state (GATE_REFERRAL_STEP2 on, the program active, the
  *   live Referee Discount setting above 0): the second form;
  * - the program active and no amount to state: the first form;
@@ -117,13 +117,15 @@ function neutralizeIssueTokens(content) {
 
 /**
  * The line for `send` as of now ({ html, text }), by the state of the
- * referral program:
- * - an amount to state (referral-engine step2FriendCreditCents above 0: the
- *   gate on, the program active, the live setting above 0): the second form;
- * - no amount, and the live settings row says the program is active: the
- *   first form;
+ * referral program. ONE read of the live settings row (referral-engine
+ * getLiveSettings) decides both the program's state and the amount, so the
+ * two cannot disagree:
  * - the program paused, no live row, or a read that threw (one warning): no
- *   line. This never stops a send or a copy.
+ *   line. Only an affirmative active value keeps the line. This never stops
+ *   a send or a copy;
+ * - the program active and an amount to state (step2FriendCreditCentsOf of
+ *   that row above 0: the gate on, the setting above 0): the second form;
+ * - the program active and no amount to state: the first form.
  * Any other newsletter gets the first form and reads nothing.
  * @param {object} send the newsletter_sends row
  */
@@ -131,12 +133,9 @@ async function referralLineFor(send) {
   if (send?.newsletter_type !== PEST_INSIDER_TYPE) return referralLine(REFERRAL_TAIL);
   try {
     const engine = require('../referral-engine');
-    const cents = await engine.step2FriendCreditCents();
-    if (Number.isInteger(cents) && cents > 0) return referralLine(referralTail(cents));
-    // No amount to state: the gate is off, or the program is paused or cannot
-    // be read. Only an affirmative active value in the live row keeps the line.
     const live = await engine.getLiveSettings();
-    return live?.program_active ? referralLine(REFERRAL_TAIL) : NO_LINE;
+    if (!live?.program_active) return NO_LINE;
+    return referralLine(referralTail(engine.step2FriendCreditCentsOf(live)));
   } catch (err) {
     logger.warn(`[newsletter] Waves Pest Insider referral line: the referral program could not be read, the issue goes without the line: ${err.message}`);
     return NO_LINE;

@@ -274,4 +274,17 @@ describe('step2FriendCreditCents (GATE_REFERRAL_STEP2: the live amount for the i
     mockState.settings = { get program_active() { throw new Error('db down'); } };
     expect(await engine.step2FriendCreditCents()).toBe(0);
   });
+  test('step2FriendCreditCentsOf gives the same amount from a row the caller already read, with no read of its own', () => {
+    const row = { program_active: true, referee_discount_cents: 5000 };
+    // gate off: 0, whatever the row holds
+    expect(engine.step2FriendCreditCentsOf(row)).toBe(0);
+    gates.referralStep2 = true;
+    expect(engine.step2FriendCreditCentsOf(row)).toBe(5000);
+    expect(engine.step2FriendCreditCentsOf({ program_active: true, referee_discount_cents: '2550.9' })).toBe(2550);
+    for (const none of [
+      { program_active: false, referee_discount_cents: 5000 }, { program_active: null, referee_discount_cents: 5000 },
+      { program_active: true, referee_discount_cents: 0 }, { program_active: true, referee_discount_cents: -500 },
+      { program_active: true, referee_discount_cents: null }, { program_active: true }, null, undefined,
+    ]) expect(engine.step2FriendCreditCentsOf(none)).toBe(0);
+  });
 });
