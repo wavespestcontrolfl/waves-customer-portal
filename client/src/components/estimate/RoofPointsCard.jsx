@@ -3,7 +3,7 @@
 // place in the Waves AI card; when the photo fails to load the card calls onImageError and the page shows the satellite
 // photo again. The points are frozen when the estimate is sent (server side), and the page prints exactly what it is given.
 // No prices: the points never change the quote.
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { estimateInnerBox } from './cardStyles';
@@ -48,10 +48,11 @@ function usePhotoWidth(shown) {
 export default function RoofPointsCard({ points, address, onImageError }) {
   const shown = hasRoofPoints(points);
   const [boxRef, photoWidth] = usePhotoWidth(shown);
+  const pins = useMemo(() => (shown ? points.pins.slice().sort((a, b) => a.n - b.n) : []), [shown, points]);
+  // Worked out again only when the points or the photo width change, not on every render of the page.
+  const spread = useMemo(() => spreadPins(pins, photoWidth), [pins, photoWidth]);
   if (!shown) return null;
-  const pins = points.pins.slice().sort((a, b) => a.n - b.n);
   const count = pins.length;
-  const spread = spreadPins(pins, photoWidth);
   // A called-out point: its badge moved off it, so it gets a dot at the true point and a line to the badge. The spread
   // keeps every badge clear of that dot.
   const leaders = pins.map((p, i) => ({ p, s: spread[i] })).filter(({ s }) => s.callout);

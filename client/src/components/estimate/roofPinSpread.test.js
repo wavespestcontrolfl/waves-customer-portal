@@ -20,6 +20,33 @@ const insidePhoto = (out, size) => out.filter((p) => p.moved).every((p) => p.x *
 
 // The clear distance from a called-out point's dot to the centre of any badge: half a badge, half the 8 px dot, 5 px of roof.
 const DOT_CLEAR = PIN / 2 + 4 + 5;
+// How many times a called-out line (true point to badge) runs under a badge that is not its own: 13 px of badge and
+// 3 px of clear roof.
+const linesUnderBadges = (out, size) => {
+  const toLine = (q, a, b) => {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const t = Math.min(1, Math.max(0, ((q.x - a.x) * dx + (q.y - a.y) * dy) / (dx * dx + dy * dy)));
+    return Math.hypot(q.x - (a.x + t * dx), q.y - (a.y + t * dy));
+  };
+  const px = out.map((p) => ({ badge: { x: p.x * size, y: p.y * size }, from: { x: p.fromX * size, y: p.fromY * size }, callout: p.callout }));
+  let count = 0;
+  px.forEach((line, i) => {
+    if (!line.callout) return;
+    count += px.filter((other, j) => j !== i && toLine(other.badge, line.from, line.badge) < PIN / 2 + 3 - 0.06).length;
+  });
+  return count;
+};
+// How many pairs of called-out lines cross each other.
+const linesCrossing = (out) => {
+  const side = (a, b, c) => Math.sign((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+  const lines = out.filter((p) => p.callout).map((p) => [{ x: p.fromX, y: p.fromY }, { x: p.x, y: p.y }]);
+  let count = 0;
+  lines.forEach(([a, b], i) => lines.slice(i + 1).forEach(([c, d]) => {
+    if (side(a, b, c) * side(a, b, d) < 0 && side(c, d, a) * side(c, d, b) < 0) count += 1;
+  }));
+  return count;
+};
 // Every called-out dot is clear of every badge, its own included, so the customer can see it.
 const dotsVisible = (out, size) => out.filter((p) => p.callout).every((dot) => out.every((badge) => (
   Math.hypot((badge.x - dot.fromX) * size, (badge.y - dot.fromY) * size) >= DOT_CLEAR - 0.05)));
@@ -84,10 +111,43 @@ describe('spreadPins', () => {
         const out = spreadPins(pins, size);
         expect(out.every((p) => p.callout)).toBe(true);
         expect(dotsVisible(out, size)).toBe(true);
+        expect(linesUnderBadges(out, size)).toBe(0);
+        expect(linesCrossing(out)).toBe(0);
         expect(minPairGap(out, size)).toBeGreaterThanOrEqual(MIN - 0.05);
         expect(insidePhoto(out, size)).toBe(true);
       }
     }
+  });
+
+  it('runs no line under another badge: six points in 10 px at the photo edge fan out on one arc', () => {
+    // Placed one by one at the nearest free spot, the first badges walled the points in and the line of badge 6 ran
+    // under badge 3: the customer read it as the place of point 3.
+    const out = spreadPins([0, 2, 4, 6, 8, 10].map((x) => ({ x: x / 294, y: 0.5 })), 294);
+    expect(out.every((p) => p.callout)).toBe(true);
+    expect(linesUnderBadges(out, 294)).toBe(0);
+    expect(linesCrossing(out)).toBe(0);
+    expect(dotsVisible(out, 294)).toBe(true);
+    expect(minPairGap(out, 294)).toBeGreaterThanOrEqual(MIN - 0.05);
+    expect(insidePhoto(out, 294)).toBe(true);
+  });
+
+  it('puts 20 points on one spot on one ring: every line is clear, and all 20 are the same distance from the spot', () => {
+    const out = spreadPins(Array.from({ length: 20 }, () => ({ x: 0.5, y: 0.5 })), 294);
+    expect(linesUnderBadges(out, 294)).toBe(0);
+    expect(dotsVisible(out, 294)).toBe(true);
+    expect(minPairGap(out, 294)).toBeGreaterThanOrEqual(MIN - 0.05);
+    const shifts = out.map((p) => p.shiftPx);
+    expect(Math.max(...shifts) - Math.min(...shifts)).toBeLessThan(0.01);
+  });
+
+  it('keeps a group clear of a badge that does not move: the ring uses the free arc and no line runs under that badge', () => {
+    // Two points 10 px apart, and a third 34 px to the right of them: not crowded, so it stays where it is.
+    const out = spreadPins([{ x: 0.4, y: 0.5 }, { x: 0.4 + 10 / 294, y: 0.5 }, { x: 0.4 + 44 / 294, y: 0.5 }], 294);
+    expect(out.map((p) => p.callout)).toEqual([true, true, false]);
+    expect(out[2].moved).toBe(false);
+    expect(linesUnderBadges(out, 294)).toBe(0);
+    expect(dotsVisible(out, 294)).toBe(true);
+    expect(minPairGap(out, 294)).toBeGreaterThanOrEqual(MIN - 0.05);
   });
 
   it('never moves a point that is not crowded, also one that hangs over the photo edge, while others are called out', () => {
@@ -183,6 +243,12 @@ describe('spreadPins', () => {
         expect(dotsVisible(out, size)).toBe(true);
         // A badge is either still on its point (no dot) or called out: never moved far with no dot.
         expect(out.every((p) => p.callout || p.shiftPx <= 6 + 1e-6)).toBe(true);
+        // Tight clusters (the first shape) always get a clean ring: no line under a badge and no two lines crossed.
+        // Long rows of 10 to 20 points are not held to that.
+        if (layout % shapes.length === 0) {
+          expect(linesUnderBadges(out, size)).toBe(0);
+          expect(linesCrossing(out)).toBe(0);
+        }
       }
     }
   });
