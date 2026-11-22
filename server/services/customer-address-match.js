@@ -60,8 +60,9 @@ function candidateAddressString(row) {
  *   returning the primary leg alone (the primary leg always throws), and
  *   reads up to STRICT_LEG_LIMIT rows a leg, throwing when a leg fills it.
  *   An address it can never answer for throws with code ADDRESS_UNCHECKABLE.
- *   strict also keeps the NEAR rows: the same leading house digits and the
- *   same `zip` (a 5-digit option), but not the same street address to the
+ *   strict also keeps the NEAR rows: the same leading house digits (or no
+ *   house number it can read) and the same `zip` (a 5-digit option, or no
+ *   zip on file), but not the same street address to the
  *   comparator. Each row then carries `exactMatch: true | false`. A caller
  *   that must not miss a match treats a near row as "cannot tell": stored
  *   spellings the comparator does not read (a compound number written
@@ -82,9 +83,16 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   // "123-2"), so the comparator and the near test see every row they could keep; the wider set is why strict has
   // the higher cap.
   const leadingDigits = houseNumber.match(/^\d+/)[0];
-  const houseNumberFilter = (column) => (q) => (strict
-    ? q.whereRaw('?? ~ ?', [column, `(^|[^0-9])${leadingDigits}([^0-9]|$)`])
-    : q.where(column, 'ilike', `${houseNumber} %`));
+  // strict reads line 1 and line 2 together: a unit-first address can keep the street number in line 2.
+  const digitRun = `(^|[^0-9])${leadingDigits}([^0-9]|$)`;
+  const houseNumberFilter = (line1, line2) => (q) => (strict
+    ? q.whereRaw("concat_ws(' ', ??, ??) ~ ?", [line1, line2, digitRun])
+    : q.where(line1, 'ilike', `${houseNumber} %`));
+  // A near row names the same leading house digits, or has no house number the search can read.
+  const nearDigits = (row) => {
+    const own = houseNumberOf(candidateAddressString(row));
+    return !own || own.match(/^\d+/)[0] === leadingDigits;
+  };
   const nearZip = strict && /^\d{5}$/.test(String(zip || '')) ? String(zip) : null;
   const zip5 = (value) => String(value || '').trim().slice(0, 5);
   const complete = (rows, leg) => {
@@ -95,7 +103,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   const primary = await database('customers')
     .where((q) => q.where('active', true).orWhereNull('active'))
     .whereNull('deleted_at')
-    .where(houseNumberFilter('address_line1'))
+    .where(houseNumberFilter('address_line1', 'address_line2'))
     .orderBy('id')
     .limit(legLimit)
     .select(
@@ -111,7 +119,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
       .where('cp.active', true)
       .where((q) => q.where('c.active', true).orWhereNull('c.active'))
       .whereNull('c.deleted_at')
-      .where(houseNumberFilter('cp.address_line1'))
+      .where(houseNumberFilter('cp.address_line1', 'cp.address_line2'))
       .orderBy('cp.id')
       .limit(legLimit)
       .select(
@@ -142,6 +150,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
     if (excludeCustomerId != null && String(row.id) === String(excludeCustomerId)) continue;
     // A row with no zip on file cannot be told apart: near too.
     if (zip5(row.zip) && zip5(row.zip) !== nearZip) continue;
+    if (!nearDigits(row)) continue;
     seen.add(String(row.id));
     matches.push({ ...row, exactMatch: false });
   }

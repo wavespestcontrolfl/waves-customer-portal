@@ -106,8 +106,8 @@ describe('findCustomersAtAddress', () => {
     await findCustomersAtAddress(strictDb, '123-125 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
     const raws = strictDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw');
     expect(raws.map((c) => c[3])).toEqual([
-      ['address_line1', '(^|[^0-9])123([^0-9]|$)'],
-      ['cp.address_line1', '(^|[^0-9])123([^0-9]|$)'],
+      ['address_line1', 'address_line2', '(^|[^0-9])123([^0-9]|$)'],
+      ['cp.address_line1', 'cp.address_line2', '(^|[^0-9])123([^0-9]|$)'],
     ]);
     const plainDb = fakeDb();
     await findCustomersAtAddress(plainDb, '123 Palm Ave, Venice, FL 34285');
@@ -129,11 +129,17 @@ describe('findCustomersAtAddress', () => {
         ROW('slash', '123/2 Palm Ave'),
         ROW('no-zip', '123 Other St', null, { zip: null }),
         ROW('other-zip', '123 Palm Ave', null, { zip: '34292', city: 'Venice' }),
+        ROW('route-number', '900 County Road 123'),
+        ROW('unit-first', 'Unit 7', '123 Palm Ave'),
       ],
     });
     const rows = await findCustomersAtAddress(db, '123-2 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
     const byId = Object.fromEntries(rows.map((r) => [r.id, r.exactMatch]));
     expect(byId['other-zip']).toBeUndefined();
+    // 123 is the route's number there, not its house number: not near.
+    expect(byId['route-number']).toBeUndefined();
+    // The street number in line 2 of a unit-first line 1 is read.
+    expect(byId['unit-first'] === true || byId['unit-first'] === false).toBe(true);
     expect(byId['no-zip']).toBe(false);
     expect(byId.slash === true || byId.slash === false).toBe(true);
     expect(byId['unit-in-line2'] === true || byId['unit-in-line2'] === false).toBe(true);
