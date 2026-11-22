@@ -21,6 +21,8 @@ export default function OfferFirstDays({ firstDays, busy, canAct, onSet }) {
             <div className="min-w-0">
               <div className="text-14 text-zinc-800 break-words">{item.label}</div>
               <div className="text-14 text-zinc-500">{item.doneAt ? doneLine(item) : item.due}</div>
+              {/* What to do, for an item that needs a step elsewhere (the Waves Google login). */}
+              {!item.doneAt && item.note && <div className="text-14 text-zinc-500">{item.note}</div>}
             </div>
             {canAct && (
               <Button
