@@ -233,8 +233,7 @@ async function cleanReportNote({
   const fixed = (reason, words = []) => ({
     text: fixedReportNote({ serviceType, areasServiced, visitOutcome }), source: 'fixed', reason, ...(words.length ? { words } : {}),
   });
-  // The technician's wait starts here: the reads spend the same budget as
-  // the calls.
+  // The technician's wait starts here: reads and calls share one budget.
   const deadline = Date.now() + OWN_NOTE_BUDGET_MS;
   let refused = null;
   try {
@@ -252,8 +251,7 @@ async function cleanReportNote({
     const rejection = (text) => reportNoteRejection({
       note, text, catalogRows: rows, storedCodes: codes,
     });
-    // A tidied note is served again only if it still passes the screens as
-    // they read now: a product added to the catalog since must not go out.
+    // A cached note is served only if it passes today's screens (a new product).
     const cached = cachedClean(said);
     if (cached && !(await rejection(cached))) return { text: cached, source: 'cleaned' };
     let repair = '';
