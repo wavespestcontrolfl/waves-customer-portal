@@ -15,20 +15,25 @@
  *     active-ingredient names, the writer rules, a line that asks for contact;
  *   - same order (report-note-order.js orderRejection): the text's words
  *     are the note's words in the note's order, one sentence of the text for
- *     each sentence of the note it keeps.
+ *     each sentence of the note it keeps;
+ *   - the codes on the customer's file (storedCodesOf): a note or a text
+ *     that holds one is refused, and no model reads such a note.
  * A text that fails gets the fixed sentence (fixedReportNote).
  *
  * Known limits: report-note-order.js lists them. One more: a code that is a
  * plain word has no shape. A sentence of the note that speaks of getting in
  * is masked whole with the words beside it ("Gate, bluebird"), but a code
- * said as a sentence of its own is not, so the stored-code check belongs to
- * the code that writes the note.
+ * said as a sentence of its own is not. The codes on the customer's file
+ * are found by their value, in any wording. A plain-word code that is not
+ * on the file is not found.
  *
- * The checks read the note, the text and the product catalog, and nothing
- * else about the visit, so a completion can run them again on the text the
- * technician read (reportNoteRejection) and get the same answer.
+ * The checks read the note, the text, the product catalog and the codes on
+ * the customer's file, and nothing else about the visit, so a completion can
+ * run them again on the text the technician read (reportNoteRejection) and
+ * get the same answer.
  */
 const { redactAccessCodes } = require('../context-aggregator');
+const { savepointRead } = require('../../utils/savepoint-read');
 const CompletionRecap = require('../completion-recap');
 const {
   noteRecordCopyViolations, heldAccessCode, CODE_SHAPED_NUMBER_RE, REPORT_NOTE_LINE_BREAK, MAX_REPORT_NOTE_CHARS,
@@ -111,8 +116,50 @@ function maskAccessSentences(note) {
   return showNumberMarks(hideNumberMarks(note).split(/([.;!?\n]+)/)
     .map((piece, i) => (i % 2 === 0 && piece.trim() && withheld(piece) ? maskWhole(piece) : piece)).join(''));
 }
-const noteAsRead = (note) => maskAccessSentences(dollarweedAsOneWord(redactAccessCodes(passPhraseAsOneWord(oneForm(note)
-  .replace(/[^\S\n]+/g, ' ').replace(/ ?\n[\n ]*/g, '\n').trim()))).replace(CODE_SHAPED_RE, '[redacted]'));
+
+// ── The codes on the customer's file ───────────────────────────────────
+// No word rule knows a code that is a plain word. The customer's file does:
+// the four code fields the pre-visit brief shows the technician. A note that
+// holds one of them is not read at all (no model reads it, and no text
+// passes for it), and a text that holds one is refused.
+// A code is compared in small letters with every space and mark taken out:
+// "12 34#" on file is "1234" in a note, and "Blue Bird" is "bluebird". That
+// reads some honest figures as a code ("used 12. 34 traps set" beside "1234"
+// on file): the safe side. Fewer than three characters is no code to look
+// for: it would hide most notes. A code in a free-text field of the file
+// (the access notes) is not on this list.
+const STORED_CODE_COLUMNS = ['neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code'];
+const MIN_STORED_CODE_CHARS = 3;
+const squeezed = (text) => oneForm(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+// From each field: the field as a whole (a code written with a space, or a
+// word), each run that holds a figure ("gate 1234, door 5678#"), and each
+// group of figures in it ("c1234").
+function storedCodesOf(prefs) {
+  const forms = STORED_CODE_COLUMNS.flatMap((column) => {
+    const value = oneForm(prefs?.[column]);
+    return [value, ...(value.match(/[\p{L}\p{N}#*]*\p{Nd}[\p{L}\p{N}#*]*/gu) || []), ...(value.match(/\p{Nd}+/gu) || [])].map(squeezed);
+  });
+  return [...new Set(forms.filter((form) => form.length >= MIN_STORED_CODE_CHARS))];
+}
+// Throws when the file cannot be read: the caller then uses the fixed sentence.
+async function readStoredCodes(db, customerId) {
+  if (!db || !customerId) throw new Error('report note: the codes on the customer\'s file need a database and a customer');
+  return storedCodesOf(await savepointRead(db, (k) => k('property_preferences').where({ customer_id: customerId })
+    .first(...STORED_CODE_COLUMNS)));
+}
+// The codes are a list a caller read (readStoredCodes, storedCodesOf): with
+// none given, nothing is read or let out.
+function holdsStoredCode(text, storedCodes) {
+  if (!Array.isArray(storedCodes)) throw new TypeError('report note: the codes on the customer\'s file were not read');
+  const plain = squeezed(text);
+  return storedCodes.some((code) => plain.includes(code));
+}
+
+function noteAsRead(note, storedCodes) {
+  const said = oneForm(note).replace(/[^\S\n]+/g, ' ').replace(/ ?\n[\n ]*/g, '\n').trim();
+  if (holdsStoredCode(said, storedCodes)) return '[redacted]';
+  return maskAccessSentences(dollarweedAsOneWord(redactAccessCodes(passPhraseAsOneWord(said))).replace(CODE_SHAPED_RE, '[redacted]'));
+}
 // The tidied note as stored and screened. A line break stays in, so the
 // shape screen refuses it.
 function ownNoteText(value) {
@@ -242,12 +289,18 @@ function whatMayGo(screens, names) {
 /**
  * The completion's check of the text the technician read, against the note it
  * saves, and the clean-up's check of the model's answer: null when the text
- * may go out, else { reason, words? }. Built from the note and the product
- * catalog alone. Throws when the catalog cannot be read: the caller then
- * uses the fixed sentence.
+ * may go out, else { reason, words? }. Built from the note, the product
+ * catalog and the codes on the customer's file alone. The caller gives the
+ * codes (storedCodes) or the customer to read them for (customerId, db).
+ * Throws when the catalog or the codes cannot be read: the caller then uses
+ * the fixed sentence.
  */
-async function reportNoteRejection({ note, text, catalogRows = null, db = null } = {}) {
-  const said = noteAsRead(note);
+async function reportNoteRejection({
+  note, text, catalogRows = null, db = null, storedCodes = null, customerId = null,
+} = {}) {
+  const codes = storedCodes || await readStoredCodes(db, customerId);
+  if (holdsStoredCode(note, codes) || holdsStoredCode(text, codes)) return { reason: 'stored_code' };
+  const said = noteAsRead(note, codes);
   const rows = catalogRows || await CompletionRecap.readCatalogScreenRows(db);
   // A product the note names is screened in full, with its active
   // ingredient; every other catalog product by its brand (wholeCatalog).
@@ -287,5 +340,7 @@ module.exports = {
   fixedReportNote,
   ownNoteText,
   noteAsRead,
+  storedCodesOf,
+  readStoredCodes,
   MAX_OWN_NOTE_CHARS,
 };
