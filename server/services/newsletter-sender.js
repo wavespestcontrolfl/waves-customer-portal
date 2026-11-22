@@ -2244,6 +2244,11 @@ async function ledgerProgress(trx, send) {
   return { got, left, refused: refusedCount };
 }
 
+// A delivered copy, as spamReportCounts and gmailOpenCounts both count one (unqualified columns of
+// newsletter_send_deliveries).
+const DELIVERED_COPY_SQL = 'delivered_at is not null or opened_at is not null or clicked_at is not null'
+  + ' or complained_at is not null or unsubscribed_at is not null';
+
 /**
  * A send's spam reports and the copies it delivered, for the Waves Pest Insider spam-report stop
  * (pest-insider/schedule.js). A report is a reader's own (complained_at with no drop reason).
@@ -2260,11 +2265,49 @@ async function spamReportCounts(db, sendId) {
     .whereNot(refusedDelivery)
     .select(
       db.raw('count(*) filter (where complained_at is not null and bounce_reason is distinct from ?) as reports', [SPAM_REPORT_DROP_REASON]),
-      db.raw('count(*) filter (where delivered_at is not null or opened_at is not null or clicked_at is not null'
-        + ' or complained_at is not null or unsubscribed_at is not null) as delivered'),
+      db.raw(`count(*) filter (where ${DELIVERED_COPY_SQL}) as delivered`),
     )
     .first();
   return { reports: Number(counts?.reports) || 0, delivered: Number(counts?.delivered) || 0 };
+}
+
+// The mailed address is a Gmail mailbox. A Google Workspace mailbox on its own domain is not one
+// here: nothing in the address tells it apart.
+const GMAIL_COPY_SQL = "lower(split_part(newsletter_send_deliveries.email, '@', 2)) in ('gmail.com', 'googlemail.com')";
+// A person opened the copy: an open event on this copy's own message that SendGrid did not mark as
+// a machine open (sg_machine_open: Apple Mail Privacy Protection fetched it, read or not). The
+// ledger's opened_at takes the first open of any kind, so it cannot tell the two apart; the webhook's
+// event log (sendgrid_webhook_events) keeps the flag. A row logged before the flag was kept has none
+// and counts, as in the Waves Pest Insider warm audience (pest-insider/audience.js).
+const PERSON_OPENED_COPY_SQL = `exists (select 1 from sendgrid_webhook_events person_open
+  where person_open.event_type = 'open'
+    and person_open.message_id = newsletter_send_deliveries.provider_message_id
+    and lower(person_open.email) = lower(newsletter_send_deliveries.email)
+    and person_open.machine_open is not true)`;
+
+/**
+ * A send's delivered copies and the ones a person opened, for Gmail mailboxes and for all other
+ * mailboxes, for the newsletter Gmail check (newsletter-gmail-check.js). A delivered copy is the
+ * one spamReportCounts counts (DELIVERED_COPY_SQL, never a refused row). A click is not an open:
+ * a mail scanner follows links, and mostly outside Gmail. One statement reads all four counts.
+ */
+async function gmailOpenCounts(db, sendId) {
+  const counts = await db('newsletter_send_deliveries')
+    .where({ send_id: sendId })
+    .whereNot(refusedDelivery)
+    .whereRaw(`(${DELIVERED_COPY_SQL})`)
+    .select(
+      db.raw(`count(*) filter (where ${GMAIL_COPY_SQL}) as gmail_delivered`),
+      db.raw(`count(*) filter (where ${GMAIL_COPY_SQL} and ${PERSON_OPENED_COPY_SQL}) as gmail_opened`),
+      db.raw(`count(*) filter (where not (${GMAIL_COPY_SQL})) as other_delivered`),
+      db.raw(`count(*) filter (where not (${GMAIL_COPY_SQL}) and ${PERSON_OPENED_COPY_SQL}) as other_opened`),
+    )
+    .first();
+  const n = (value) => Number(value) || 0;
+  return {
+    gmail: { delivered: n(counts?.gmail_delivered), opened: n(counts?.gmail_opened) },
+    other: { delivered: n(counts?.other_delivered), opened: n(counts?.other_opened) },
+  };
 }
 
 // Why a planned issue did not go out: its 'failed' outcome, with the 'outcome' alert.
@@ -2614,4 +2657,4 @@ async function markEventsFeatured(send) {
 module.exports = {
   applyRetryableDeliveryFilter,
   outstandingEligibleDeliveries,
-  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, ledgerProgress, reachedDelivery, spamReportCounts, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, ledgerProgress, reachedDelivery, spamReportCounts, gmailOpenCounts, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };
