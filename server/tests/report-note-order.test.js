@@ -208,6 +208,8 @@ describe('the text is refused', () => {
     // A place word is no such sign, and the article of another word is not either.
     expect(orderRejection('I was inside checking traps.', 'inside checking traps tomorrow', dated)).toEqual(added('was'));
     expect(orderRejection('I was in the kitchen checking traps.', 'in kitchen checking traps tomorrow', dated)).toEqual(added('was'));
+    // "All" can speak of the crew.
+    expect(orderRejection('We were all treating outside.', 'we all treating outside tomorrow', dated)).toEqual(added('were'));
     expect(orderRejection('Ants were all over the ceiling.', 'ants all over ceiling. back in 2 weeks', dated)).toBeNull();
     expect(orderRejection('There was nothing in the kitchen.', 'nothing in kitchen. back in 2 weeks', dated)).toBeNull();
     // A form of "is" before another word is no tense of the word in "-ing".

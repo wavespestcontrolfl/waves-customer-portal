@@ -482,9 +482,11 @@ function leftOutRejection(usedIn, out, read, rules) {
 // Only a verb form counts. Right after an article or its like, a word in
 // "-ing" names a thing ("Ants were active in the building.", "all over the
 // ceiling"), and a few words in "-ing" are never a verb form. A place word
-// is no such sign: "I was inside checking traps." is work.
+// is no such sign ("I was inside checking traps." is work), and "all", "both"
+// and "each" are not either: they can speak of the crew ("We were all
+// treating outside.").
 const SETS_A_TENSE = new Set([...FORMS_OF_IS, 'am']);
-const BEFORE_A_THING = new Set('the a an this that these those my your his her its their our some any no all both each every'.split(' '));
+const BEFORE_A_THING = new Set('the a an this that these those my your his her its their our some any no every'.split(' '));
 const NO_VERB_FORM = new Set('nothing something anything everything during including'.split(' '));
 function addedTenseRejection(textWords, placedAt, read) {
   // The part of the note each text word took; a text word with none was added.
