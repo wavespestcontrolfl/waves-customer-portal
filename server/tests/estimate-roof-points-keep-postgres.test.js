@@ -1,7 +1,7 @@
 const SKIP = !process.env.DATABASE_URL;
 // CI's DB-gated pass runs this against PostgreSQL. Owner follow-up "keep" (2026-11-21): the roof points copy a lead
 // already holds stays on the estimate for the FIRST customer the estimate takes (migration 20261121210000,
-// estimate-roof-points.js copyForHolder and keepLeadCopy). The roof read service and the roof points service run for
+// estimate-roof-points.js copyForHolder and keepOrFreeze). The roof read service and the roof points service run for
 // real, on the real migrations in a unique schema dropped after the suite. Only the county image fetch, the model call
 // and the price table are faked: no network and no model call.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -69,7 +69,30 @@ jest.setTimeout(60000);
   const shown = async (est, lastDeliveredAt) => (await roofPointsDocBlock(await row(est, lastDeliveredAt), { knex: database })).roofPoints?.pins.map((p) => p.label);
 
   beforeAll(async () => {
-    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 5 } });
+    // This suite creates a schema, runs migrations in it and drops it: only on the isolated CI database or on this
+    // worktree's private QA database (the same check as estimate-roof-points-migration-postgres.test.js).
+    const target = new URL(process.env.DATABASE_URL);
+    const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname)
+      && target.pathname === '/waves_test';
+    const worktreeId = String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '');
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1' && /^[a-f0-9]{32}$/.test(worktreeId)
+      && target.pathname === `/waves_qa_${worktreeId}`;
+    if (!ci && !ownedQA) throw new Error('Use the isolated CI database or this worktree\'s private QA database');
+    // The driver copies every query parameter of a connection string into its settings, so the pool gets the parts
+    // checked above, never the URL text.
+    if (target.search) throw new Error('DATABASE_URL must not carry query parameters');
+    database = knex({
+      client: 'pg',
+      connection: {
+        host: target.hostname,
+        port: target.port ? Number(target.port) : undefined,
+        user: decodeURIComponent(target.username) || undefined,
+        password: decodeURIComponent(target.password) || undefined,
+        database: target.pathname.slice(1),
+      },
+      searchPath: [schema],
+      pool: { min: 0, max: 5 },
+    });
     mockDb = database;
     await database.raw('CREATE SCHEMA ??', [schema]);
     await database.raw('CREATE TABLE ??.estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, address text)', [schema]);
@@ -82,13 +105,16 @@ jest.setTimeout(60000);
   });
   afterEach(async () => {
     global.fetch = realFetch;
+    if (!database) return;
     await database('estimate_roof_points').del();
     await database('roof_entry_reads').del();
     await database('estimates').del();
     await database('customers').del();
   });
   afterAll(async () => {
-    await database.raw('DROP SCHEMA ?? CASCADE', [schema]);
+    // A refused target opened no pool and made no schema.
+    if (!database) return;
+    await database.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [schema]);
     await database.destroy();
   });
 
@@ -230,6 +256,26 @@ jest.setTimeout(60000);
     expect(await sending).toBe('frozen');
     expect(await copyOf(est)).toMatchObject({ customer_id: custA, read_id: read.id, lead_changes: null, delivered_at: new Date(T2) });
     expect(await shown(est, T2)).toEqual([label('front left')]);
+  });
+
+  test('a send to the first customer that a later handoff overtook leaves the newer copy: it does not take its time back and does not delete it', async () => {
+    const custA = await insertId('customers');
+    const est = await insertId('estimates', { address: ADDRESS });
+    const read = await leadRead(est);
+    await send(est, null, T1);
+    await link(est, custA);
+    // The handoff at T3 kept the copy. A send handed off at T2 reaches its freeze after that.
+    expect(await send(est, T1, T3)).toBe('kept');
+    expect(await send(est, T1, T2)).toBe('skipped');
+    expect(await copyOf(est)).toMatchObject({ read_id: read.id, lead_changes: 0, delivered_at: new Date(T3) });
+    expect(await shown(est, T3)).toEqual([label('front left')]);
+    // The same late send once staff hid the points: it has nothing to keep, and it does not delete the T3 copy.
+    await svc.saveTechCount(read.id, { hideOnEstimate: true });
+    expect(await send(est, T1, T2)).toBe('cleared');
+    expect(await copyOf(est)).toMatchObject({ read_id: read.id, delivered_at: new Date(T3) });
+    // A send at that handoff's time or later does clear it.
+    expect(await send(est, T3, T3)).toBe('cleared');
+    expect(await copyOf(est)).toBeUndefined();
   });
 
   test('the count of customer changes goes up by one with each change of the estimate\'s customer, and an UPDATE cannot write it', async () => {

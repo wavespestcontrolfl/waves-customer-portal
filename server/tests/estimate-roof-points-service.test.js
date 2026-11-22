@@ -26,7 +26,16 @@ function fakeKnex({ point, reads = [], throwOn = null, onLock = null }) {
     const q = {};
     let where = {};
     let pointsOnly = false;
-    q.where = (w) => { where = { ...where, ...w }; return q; };
+    // An object of equalities, or the one comparison the service uses: a copy not newer than a handoff time.
+    let notAfter = null;
+    q.where = (...args) => {
+      if (args.length === 1) { where = { ...where, ...args[0] }; return q; }
+      if (args[0] !== 'delivered_at' || args[1] !== '<=') throw new Error(`unexpected filter: ${args.slice(0, 2).join(' ')}`);
+      [, , notAfter] = args;
+      return q;
+    };
+    const inTime = () => notAfter == null || new Date(point.delivered_at) <= new Date(notAfter);
+    const noted = (write) => (notAfter == null ? write : { ...write, notAfter });
     // The one raw filter the service uses: reads whose points the technician set (a list, or a cleared one).
     q.whereRaw = (sql) => {
       if (sql !== "(crop_lat IS NOT NULL OR (tech_pins IS NOT NULL AND jsonb_typeof(tech_pins) = 'array'))") throw new Error(`unexpected raw filter: ${sql}`);
@@ -50,10 +59,10 @@ function fakeKnex({ point, reads = [], throwOn = null, onLock = null }) {
     // Writes to the copy table are recorded, not applied. An update answers 1 when its where clauses name the copy.
     let unnamedOnly = false;
     q.whereNull = (column) => { unnamedOnly = column === 'customer_id'; return q; };
-    q.del = async () => { knex.writes.push({ del: where }); return point ? 1 : 0; };
+    q.del = async () => { knex.writes.push(noted({ del: where })); return point && inTime() ? 1 : 0; };
     q.update = async (patch) => {
-      knex.writes.push({ update: patch, where });
-      return point && Object.entries(where).every(([k, v]) => point[k] === v) && (!unnamedOnly || point.customer_id == null) ? 1 : 0;
+      knex.writes.push(noted({ update: patch, where }));
+      return point && inTime() && Object.entries(where).every(([k, v]) => point[k] === v) && (!unnamedOnly || point.customer_id == null) ? 1 : 0;
     };
     q.insert = (record) => ({ onConflict: () => ({ merge: async () => { knex.writes.push({ insert: record }); } }) });
     // A row lock is recorded. `onLock` stands for what a transaction that held the row committed meanwhile.
@@ -492,7 +501,10 @@ describe('a lead\'s copy and the first customer of the estimate', () => {
     let locks;
     let raws;
     const ESTIMATE_LOCK = [{ table: 'estimates', where: { id: 'est-1' } }];
-    const KEPT = [{ update: { delivered_at: LATER }, where: { estimate_id: 'est-1', read_id: 'read-1', lead_changes: 3 } }];
+    // The keep and the clear of a first customer's send name only a copy no later handoff wrote (notAfter).
+    const KEPT = [{ update: { delivered_at: LATER }, where: { estimate_id: 'est-1', read_id: 'read-1', lead_changes: 3 }, notAfter: LATER }];
+    const CLEARED_NOT_NEWER = [{ del: { estimate_id: 'est-1' }, notAfter: LATER }];
+    // Every other send with no points clears as before.
     const CLEARED = [{ del: { estimate_id: 'est-1' } }];
 
     test('to a lead writes the estimate\'s count on the copy; to a customer, or from a row with no count, it writes none', async () => {
@@ -538,10 +550,10 @@ describe('a lead\'s copy and the first customer of the estimate', () => {
       expect(frozen.writes.map((w) => [w.insert.read_id, w.insert.customer_id, w.insert.lead_changes])).toEqual([['read-1', 'cust-a', null]]);
       // The save cleared the points for the customer: the read is theirs and holds none.
       const clearedForThem = (reads) => { Object.assign(reads[0], { customer_id: 'cust-a', tech_pins: null }); };
-      expect(await freeze(customer(4), { copy: leadCopy(), onLock: clearedForThem })).toEqual({ out: 'cleared', writes: CLEARED });
+      expect(await freeze(customer(4), { copy: leadCopy(), onLock: clearedForThem })).toEqual({ out: 'cleared', writes: CLEARED_NOT_NEWER });
       // A newer read of their own with cleared points, beside the lead's untouched read: their read decides.
       const ownCleared = (reads) => { reads.push(leadRead({ id: 'read-2', customer_id: 'cust-a', tech_pins: null, created_at: new Date('2026-11-20T15:30:00Z') })); };
-      expect(await freeze(customer(4), { copy: leadCopy(), onLock: ownCleared })).toEqual({ out: 'cleared', writes: CLEARED });
+      expect(await freeze(customer(4), { copy: leadCopy(), onLock: ownCleared })).toEqual({ out: 'cleared', writes: CLEARED_NOT_NEWER });
     });
 
     test('a lock that cannot be had in time skips the freeze: nothing is written and only the code is logged', async () => {
@@ -551,18 +563,19 @@ describe('a lead\'s copy and the first customer of the estimate', () => {
     });
 
     test('to the first customer clears the copy, as before, when the page does not show it', async () => {
-      const cleared = async (estimateRow, options) => expect(await freeze(estimateRow, options)).toEqual({ out: 'cleared', writes: CLEARED });
-      // No copy, a copy from before the count, a second customer, an older handoff, another address, hidden points.
+      const cleared = async (estimateRow, options, writes = CLEARED) => expect(await freeze(estimateRow, options)).toEqual({ out: 'cleared', writes });
+      // No copy, a copy from before the count, a second customer: not a first customer's lead copy.
       await cleared(customer(4), { copy: undefined });
       await cleared(customer(4), { copy: leadCopy({ lead_changes: null }) });
       await cleared(customer(5, 'cust-b'), { copy: leadCopy() });
-      await cleared(customer(4), { copy: leadCopy({ delivered_at: new Date('2026-11-20T10:00:00.000Z') }) });
-      await cleared({ ...customer(4), address: '99 Other Road, Bradenton, FL 34203' }, { copy: leadCopy() });
-      await cleared(customer(4), { copy: leadCopy(), reads: [leadRead({ hide_on_estimate: true })] });
+      // A first customer's lead copy under an older handoff, for another address, or hidden.
+      await cleared(customer(4), { copy: leadCopy({ delivered_at: new Date('2026-11-20T10:00:00.000Z') }) }, CLEARED_NOT_NEWER);
+      await cleared({ ...customer(4), address: '99 Other Road, Bradenton, FL 34203' }, { copy: leadCopy() }, CLEARED_NOT_NEWER);
+      await cleared(customer(4), { copy: leadCopy(), reads: [leadRead({ hide_on_estimate: true })] }, CLEARED_NOT_NEWER);
     });
 
     test('to the first customer clears the copy when the lead\'s read would no longer be sent to a lead', async () => {
-      const cleared = async (reads) => expect(await freeze(customer(4), { copy: leadCopy(), reads })).toEqual({ out: 'cleared', writes: CLEARED });
+      const cleared = async (reads) => expect(await freeze(customer(4), { copy: leadCopy(), reads })).toEqual({ out: 'cleared', writes: CLEARED_NOT_NEWER });
       // The lead's points were cleared, or confirmed as none, after that send.
       await cleared([leadRead({ tech_pins: null })]);
       await cleared([leadRead({ tech_pins: [] })]);
@@ -581,10 +594,18 @@ describe('a lead\'s copy and the first customer of the estimate', () => {
       expect(await freeze(customer(4), { copy: leadCopy(), reads: [leadRead(), { ...own, tech_pins: null }] })).toEqual({ out: 'cleared', writes: CLEARED });
     });
 
-    test('to a lead with no points clears the copy; a copy another send replaced meanwhile is not kept', async () => {
+    test('a copy a later handoff wrote is left as it is: this send does not take its time back and does not delete it', async () => {
+      const newer = leadCopy({ delivered_at: new Date('2026-11-20T21:00:00.000Z') });
+      // The keep names a copy not newer than this handoff: it matches no row, and nothing else is written.
+      expect(await freeze(customer(4), { copy: newer })).toEqual({ out: 'skipped', writes: KEPT });
+      // So does the clear (here: the points are hidden, so there is nothing to keep).
+      expect(await freeze(customer(4), { copy: newer, reads: [leadRead({ hide_on_estimate: true })] })).toEqual({ out: 'cleared', writes: CLEARED_NOT_NEWER });
+    });
+
+    test('to a lead with no points clears the copy; a copy another send replaced meanwhile is neither kept nor deleted', async () => {
       expect(await freeze(lead(3), { copy: leadCopy(), reads: [] })).toEqual({ out: 'cleared', writes: CLEARED });
       // The update names the copy it judged (read and count, no customer). A copy that is another one by then
-      // answers 0 rows: this send clears, as a send with no points does.
+      // answers 0 rows: that send's copy stays as it is, and this send reports skipped.
       const knex = fakeKnex({ point: leadCopy(), reads: [leadRead()] });
       const table = (name) => {
         const q = knex(name);
@@ -592,8 +613,8 @@ describe('a lead\'s copy and the first customer of the estimate', () => {
         return q;
       };
       Object.assign(table, { fn: knex.fn, raw: knex.raw, transaction: async (work) => work(table) });
-      expect(await freezeRoofPointsForEstimate(customer(4), { knex: table, deliveredAt: LATER })).toBe('cleared');
-      expect(knex.writes).toEqual(CLEARED);
+      expect(await freezeRoofPointsForEstimate(customer(4), { knex: table, deliveredAt: LATER })).toBe('skipped');
+      expect(knex.writes).toEqual([]);
     });
   });
 });
