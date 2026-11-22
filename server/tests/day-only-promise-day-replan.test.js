@@ -178,6 +178,38 @@ describe('loadCustomerTime', () => {
     expect(dayOnlyEligibility).toHaveBeenCalledWith({}, ['a', 'b', 'c', 'd'], NOW, { ignoreLevel: true });
   });
 
+  test('a verdict marked originUnknown (a booking source that does not say who chose the hour) is customer_time_unread, never the customer\'s own time', async () => {
+    dayOnlyEligibility.mockResolvedValue(new Map([
+      ['a', { eligible: false, level: 'none', originUnknown: true }],
+      ['b', { eligible: false, level: 'none' }],
+    ]));
+    const fixed = await _internals.loadCustomerTime({}, [{ id: 'a' }, { id: 'b' }], NOW);
+    expect([...fixed].sort()).toEqual([['a', 'customer_time_unread'], ['b', 'customer_time']]);
+  });
+
+  test('over the REAL reader: a cron_selfheal booking and a visit with no reminder row are customer_time_unread; an online booking is customer_time; an office booking can move', async () => {
+    const oneTime = (id) => ({
+      id, visit_id: null, status: 'pending', scheduled_date: '2026-11-15', is_recurring: false, recurring_parent_id: null,
+      date_exception: null, date_exception_source: null, date_exception_at: null, customer_asked_time: null,
+    });
+    const reminder = (id, source) => ({ scheduled_service_id: id, source, cancelled: false, created_at: '2026-11-09T12:00:00Z' });
+    const tables = {
+      scheduled_services: ['heal', 'online', 'office', 'bare'].map(oneTime),
+      appointment_reminders: [reminder('heal', 'cron_selfheal'), reminder('online', 'booking_new'), reminder('office', 'admin_manual')],
+    };
+    // Knex-shaped: every filter chains; the reads this reader makes return the table's rows (no move history).
+    const conn = (table) => {
+      const chain = { select: async () => tables[table] || [] };
+      for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'whereRaw', 'orderBy']) chain[m] = () => chain;
+      return chain;
+    };
+    conn.raw = (sql) => ({ sql });
+    dayOnlyEligibility.mockImplementation(jest.requireActual('../services/time-promise').dayOnlyEligibility);
+    const fixed = await _internals.loadCustomerTime(conn, tables.scheduled_services, NOW);
+    expect([...fixed].sort()).toEqual([['bare', 'customer_time_unread'], ['heal', 'customer_time_unread'], ['online', 'customer_time']]);
+    expect(fixed.has('office')).toBe(false);
+  });
+
   test('a thrown read returns every id as customer_time_unread and warns (fail closed)', async () => {
     dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
     const fixed = await _internals.loadCustomerTime({}, rows, NOW);

@@ -669,7 +669,7 @@ describe('what holds each visit, in plain words', () => {
     expect(replanHoldFor(visit('svc-1'), replan)).toBe('less than 24 hours away');
     expect(replanHoldFor(visit('svc-2'), replan)).toBe('new reason');
     expect(replanHoldFor(visit('svc-4'), replan)).toBe("the customer's own time");
-    expect(replanHoldFor(visit('svc-6'), replan)).toBe('a time rule that could not be read');
+    expect(replanHoldFor(visit('svc-6'), replan)).toBe('a time whose origin could not be read');
     // The plan lists only the stops it fixed: an unlisted visit is never called free to move.
     expect(replanHoldFor(visit('svc-3'), replan)).toBe('no lock listed in the last re-plan');
     expect(replanHoldFor(visit('svc-1', 'tech-2'), replan)).toBe('the re-plan did not plan this day');

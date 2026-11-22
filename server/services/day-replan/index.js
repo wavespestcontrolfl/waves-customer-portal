@@ -227,8 +227,9 @@ async function loadToldLevels(conn, rows, now) {
  * customer asked for it (customer_asked_time), or picked it online, on the reschedule page, from a text offer or with
  * the AI call agent. THE rule is time-promise.dayOnlyEligibility with the told level ignored: a visit that is not
  * eligible there has a set time ('customer_time'). An answer that could not be read is 'customer_time_unread': a
- * missing verdict, a verdict marked `failed` (dayOnlyEligibility catches its own database errors and returns those), or
- * a call that throws (every id). Fails CLOSED: an unread stop stays fixed.
+ * missing verdict, a verdict marked `failed` (dayOnlyEligibility catches its own database errors and returns those), a
+ * verdict marked `originUnknown` (a first or one-time visit whose booking source does not say who chose the hour:
+ * cron_selfheal, no reminder row), or a call that throws (every id). Fails CLOSED: an unread stop stays fixed.
  */
 async function loadCustomerTime(conn, rows, now) {
   const ids = rows.map((r) => r.id);
@@ -237,7 +238,7 @@ async function loadCustomerTime(conn, rows, now) {
     const verdicts = await require('../time-promise').dayOnlyEligibility(conn, ids, now, { ignoreLevel: true });
     for (const id of ids) {
       const verdict = verdicts.get(id);
-      if (!verdict || verdict.failed === true) fixed.set(id, 'customer_time_unread');
+      if (!verdict || verdict.failed === true || verdict.originUnknown === true) fixed.set(id, 'customer_time_unread');
       else if (verdict.eligible !== true) fixed.set(id, 'customer_time');
     }
   } catch (err) {

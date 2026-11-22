@@ -76,6 +76,26 @@ describe('dayOnlyEligibility: a first or one-time visit', () => {
     expect((await verdict(conn)).s1.eligible).toBe(false);
   });
 
+  // originUnknown changes no decision; it lets a reader that names the reason (the day re-plan's customer-time lock) keep a
+  // booking of unknown origin apart from a time the customer chose.
+  test.each(['booking_new', 'booking_followup', 'estimate_accept_slot', 'call_recording'])('customer source %s: the verdict carries no originUnknown', async (source) => {
+    const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1', source)] });
+    expect(await verdict(conn)).toEqual({ s1: { eligible: false, level: 'none' } });
+  });
+
+  test.each(['cron_selfheal', 'recurring_auto_extend', 'something_new', '', null])('source %p says nothing about who chose the hour: originUnknown', async (source) => {
+    const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1', source)] });
+    expect(await verdict(conn)).toEqual({ s1: { eligible: false, level: 'none', originUnknown: true } });
+  });
+
+  test('no reminder row at all: originUnknown; a customer who asked for the time, or picked it after an office booking: not', async () => {
+    expect(await verdict(fakeConn({ services: [svc('s1')] }))).toEqual({ s1: { eligible: false, level: 'none', originUnknown: true } });
+    const asked = fakeConn({ services: [svc('s1', { customer_asked_time: true })] });
+    expect(await verdict(asked)).toEqual({ s1: { eligible: false, level: 'none' } });
+    const picked = fakeConn({ services: [svc('s1')], reminders: [office('s1')], moves: { s1: [{ created_at: '2026-11-09T13:00:00Z', new_date: '2026-11-15', initiated_by: 'customer_self_serve' }] } });
+    expect(await verdict(picked)).toEqual({ s1: { eligible: false, level: 'none' } });
+  });
+
   test('no reminder row at all: not eligible', async () => {
     expect((await verdict(fakeConn({ services: [svc('s1')] }))).s1.eligible).toBe(false);
   });
