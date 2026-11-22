@@ -3,7 +3,7 @@ const calc = require('../services/tech-rewards-calc');
 
 const {
   TechRewardsCalcError, scoreBand, weightedScore, seasonMultiplier, seasonBonusCents,
-  seasonBonusPayDate, seasonWindow, stayBonus, DEFAULT_WEIGHTS, MULTIPLIER_MIN_E4, MULTIPLIER_MAX_E4,
+  seasonBonusPayDate, seasonWindow, stayBonus, stayBonusSchedule, DEFAULT_WEIGHTS, MULTIPLIER_MIN_E4, MULTIPLIER_MAX_E4,
 } = calc;
 
 function codeOf(fn) {
@@ -329,6 +329,24 @@ describe('stayBonus', () => {
     expect(stayBonus({ hireDate, asOf: '2027-03-02', priorTwelveMonthsPayCents: pay }).dueDate).toBe('2029-03-01');
     // 1, 3 and 5 years after a Feb 29 hire are always common years, so each lands on Mar 1.
     expect(stayBonus({ hireDate: '2020-02-29', asOf: '2025-02-01', priorTwelveMonthsPayCents: pay }).dueDate).toBe('2025-03-01');
+  });
+
+  test('stayBonusSchedule: the three milestones of a hire date, with the dates stayBonus gives', () => {
+    expect(stayBonusSchedule('2027-01-12')).toEqual([
+      { years: 1, rateBps: 200, dueDate: '2028-01-12' },
+      { years: 3, rateBps: 400, dueDate: '2030-01-12' },
+      { years: 5, rateBps: 800, dueDate: '2032-01-12' },
+    ]);
+    for (const hireDate of ['2024-02-29', '2026-03-10', '2027-12-31']) {
+      let asOf = hireDate;
+      for (const milestone of stayBonusSchedule(hireDate)) {
+        const next = stayBonus({ hireDate, asOf, priorTwelveMonthsPayCents: pay });
+        expect({ dueDate: next.dueDate, rateBps: next.rateBps }).toEqual({ dueDate: milestone.dueDate, rateBps: milestone.rateBps });
+        asOf = next.dueDate > asOf ? `${Number(next.dueDate.slice(0, 4)) + 1}${next.dueDate.slice(4)}` : asOf;
+      }
+    }
+    expect(codeOf(() => stayBonusSchedule('2026-13-01'))).toBe('INVALID_HIRE_DATE');
+    expect(codeOf(() => stayBonusSchedule(null))).toBe('INVALID_HIRE_DATE');
   });
 
   test('rounds half-up', () => {

@@ -311,6 +311,15 @@ function stayBonus(opts) {
   return null;
 }
 
+/**
+ * Every stay bonus of a hire date, oldest first: [{ years, rateBps, dueDate }]. The pay run asks it which milestone a pay
+ * date is for (tech-rewards-pay-lines.js); the dates are the ones stayBonus gives.
+ */
+function stayBonusSchedule(hireDate) {
+  const hire = requireDate(hireDate, 'INVALID_HIRE_DATE', 'hireDate');
+  return STAY_BONUS_MILESTONES.map(({ years, rateBps }) => ({ years, rateBps, dueDate: addYears(hire, years) }));
+}
+
 module.exports = {
   TechRewardsCalcError,
   DEFAULT_CUT_LINES,
@@ -327,4 +336,5 @@ module.exports = {
   seasonBonusPayDate,
   seasonWindow,
   stayBonus,
+  stayBonusSchedule,
 };
