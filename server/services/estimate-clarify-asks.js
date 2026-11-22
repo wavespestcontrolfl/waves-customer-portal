@@ -687,24 +687,6 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
   return { changed: changed > 0, merged };
 }
 
-// GATE_WIZARD_SUPERSEDES_FORM_DRAFT (owner 2026-11-21, "build"): a producer
-// parks its ask after its draft commits. In that gap the quote wizard may have
-// archived the draft as an untouched web-form shell. It holds the clarify lock
-// while it does (lockUntouchedWebFormShellsInTx,
-// estimate-automation-duplicates.js), so under that lock the marker is
-// committed. The person then has the wizard's own quote and the question is
-// obsolete. The gate controls new archives only: an archive outlives the
-// gate, so this read does not ask the gate. No archive = no marker = no skip.
-async function supersededByWizard(trx, estimateId) {
-  if (!estimateId) return false;
-  const row = await trx('estimates')
-    .where({ id: estimateId })
-    .whereNotNull('archived_at')
-    .whereRaw("estimate_data->'supersededByWizard' IS NOT NULL")
-    .first('id');
-  return !!row;
-}
-
 /**
  * Park one clarifying-question draft. Fail-soft by contract: callers sit on
  * quote dead-end paths that must never break because calibration/outreach
@@ -768,7 +750,6 @@ async function parkClarifyAsk({
     // hitting it under the lock is a genuine anomaly and rolls back into
     // the outer fail-soft catch).
     const outcome = await withClarifyLock(digits, async (trx) => {
-    if (await supersededByWizard(trx, estimateId)) return { parked: false, skipped: 'estimate_superseded_by_wizard' };
     // One OPEN clarify per phone; no re-ask soon after a sent one. "Open"
     // means sent_at IS NULL — the admin send path stamps sent_at but leaves
     // status 'approved'/'revised', so status alone would read a delivered

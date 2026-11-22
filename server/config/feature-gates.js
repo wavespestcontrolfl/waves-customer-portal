@@ -208,7 +208,7 @@
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=shadow (runs created + finalized as would_send, nothing dispatched) | true (live sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
- *   GATE_WIZARD_SUPERSEDES_FORM_DRAFT=true (owner 2026-11-21, "build": an old web-form draft estimate that has no price and that nobody touched no longer blocks the website quote wizard. The wizard makes its own estimate and then archives that draft (staff can unarchive it), so the person gets the booking link on the page, in the email and by text, like every other wizard visitor. A draft with a price, a draft that was changed after it was made, a draft for another address, a sent, viewed or scheduled draft, a draft a lead points at, a draft that waits for a customer answer, and every office or estimator estimate still block. It has a gate because the booking text is a text to a customer. Off unless exactly 'true', read at call time via wizardSupersedesFormDraftLive(). Kill: unset; a draft the wizard already archived stays archived until staff unarchive it.)
+ *   GATE_WIZARD_SUPERSEDES_FORM_DRAFT=true (owner 2026-11-21, "build": an old web-form draft estimate that has no price and that nobody touched no longer blocks the website quote wizard. The wizard makes its own estimate beside it, so the person gets the booking link on the page, in the email and by text. The old draft is not changed and stays in the list. Still blocks: any other open estimate for the phone, a draft with a price, a draft that was changed after it was made, a draft of another person or for another address, a draft younger than 30 minutes, a draft that waits for the customer's answer. Off = the old draft blocks as before. It can text a customer, so the flip is the owner's. Kill: unset.)
  *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
  *   GATE_PUBLIC_WATERING_PLAN=true (owner 2026-10-31, backlink tools plan step 2, 'ok go, approved'): public lawn watering calculator API + embed; dark until flipped; no paid AI; weather from the existing Open-Meteo plan, MRMS and NWS. GET /api/public/watering-plan answers one JSON plan for a curated Florida location or ZIP: last 7 days of observed rain (NOAA MRMS merged with Open-Meteo), the plan-week forecast, the turf's weekly need (ET0 x crop coefficient, seasonal fallback) and the week's run/hold decision from the same engine as the Monday irrigation email. The legal ceiling is the county's restriction policy (config/irrigation-restrictions.js) and it fails closed: outside established coverage the answer is need_only (inches, no event count, no legal maximum). No customer row, no database write, nothing sent to anyone. 120 requests per 15 minutes per IP. Read at call time via publicWateringPlanLive(), strict 'true', dark by default; off = every request to /api/public/watering-plan, any method, answers the generic 404 in server/index.js before the wildcard CORS handler, the global /api/ limiter and this route's own limiter. Kill switch: unset.)
@@ -7384,13 +7384,12 @@ function leadDraftPropertyLookupLive() {
 }
 
 // GATE_WIZARD_SUPERSEDES_FORM_DRAFT read at CALL time; strict 'true', dark by default (owner 2026-11-21, "build").
-// On, the quote wizard archives a phone's untouched web-form shell drafts (same contact, same property, no price, never written
-// again, never sent, viewed, scheduled, claimed or linked to a lead, no clarify ask waiting) when they are every
-// open estimate of the phone, so the person gets the booking link and the booking text. Rule: lockUntouchedWebFormShellsInTx +
-// archiveWebFormShellsInTx (services/estimate-automation-duplicates.js); reader: routes/public-quote.js.
-// parkClarifyAsk (services/estimate-clarify-asks.js) reads the archive marker, never this gate: an archive
-// outlives the gate. It has a gate because the booking text is a text to a customer. Off = the shell blocks
-// as before. Kill = unset.
+// On, a phone's untouched web-form shell drafts (same contact, same property, no price, never written again, never
+// sent, viewed, scheduled, claimed or linked to a lead, no clarify ask waiting) do not block the quote wizard when
+// they are every open estimate of the phone: the wizard writes its own estimate, so the person gets the booking
+// link and the booking text. The shell is only read, never changed. Rule: onlyUntouchedWebFormShellsOpen
+// (services/estimate-automation-duplicates.js); reader: routes/public-quote.js. It has a gate because the booking
+// text is a text to a customer. Off = the shell blocks as before. Kill = unset.
 function wizardSupersedesFormDraftLive() {
   return process.env.GATE_WIZARD_SUPERSEDES_FORM_DRAFT === 'true';
 }

@@ -14,27 +14,23 @@
  *
  * Owner 2026-11-21, "build" (GATE_WIZARD_SUPERSEDES_FORM_DRAFT): one more
  * case. An old web-form draft with no price that nobody touched no longer
- * blocks: the wizard goes on and archives it together with the draft it inserts.
- * planFormShellClear decides WHEN the wizard may try that; which rows count
- * as untouched is one SQL rule, proven on real Postgres in
- * wizard-form-shell-retire-postgres.test.js.
+ * blocks: the wizard writes its own estimate as for a new visitor. The old
+ * draft is only read. withoutFormShellBlock decides WHEN the wizard may ask;
+ * which drafts count as untouched is one SQL rule, proven on real Postgres in
+ * wizard-form-shell-postgres.test.js.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-// The pure helpers stay real; the two database steps are stand-ins.
+// The pure helpers stay real; the database read is a stand-in.
 jest.mock('../services/estimate-automation-duplicates', () => ({
   ...jest.requireActual('../services/estimate-automation-duplicates'),
-  lockUntouchedWebFormShellsInTx: jest.fn(),
-  archiveWebFormShellsInTx: jest.fn(),
+  onlyUntouchedWebFormShellsOpen: jest.fn(),
 }));
 
 const { _internals } = require('../routes/public-quote');
-const {
-  lockUntouchedWebFormShellsInTx,
-  archiveWebFormShellsInTx,
-} = require('../services/estimate-automation-duplicates');
+const { onlyUntouchedWebFormShellsOpen } = require('../services/estimate-automation-duplicates');
 
-const { shouldRefreshWizardDraft, planFormShellClear } = _internals;
+const { shouldRefreshWizardDraft, withoutFormShellBlock } = _internals;
 
 describe('shouldRefreshWizardDraft', () => {
   const block = (overrides = {}) => ({
@@ -68,24 +64,16 @@ describe('shouldRefreshWizardDraft', () => {
   });
 });
 
-describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
+describe('withoutFormShellBlock (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
   const GATE = 'GATE_WIZARD_SUPERSEDES_FORM_DRAFT';
   const trx = { name: 'trx' };
-  const HOME = '12 Sample St, Parrish, FL 34219';
+  const RUN = { phone: '+19415550142', address: '12 Sample St, Parrish, FL 34219', customerId: 'cust-1', email: 'sample.person@example.com' };
   const formShell = { blocked: true, reason: 'duplicate_phone', existingEstimateId: 'shell-1', existingStatus: 'draft', existingSource: 'lead_webhook' };
   const wizardDraft = { blocked: true, reason: 'duplicate_phone', existingEstimateId: 'wiz-1', existingStatus: 'draft', existingSource: 'quote_wizard' };
-  let calls;
-  let lockContactPair;
-  const EMAIL = 'sample.person@example.com';
-  const run = (block) => planFormShellClear(trx, block, {
-    phone: '+19415550142', address: HOME, customerId: 'cust-1', email: EMAIL, leadId: 'lead-9', lockContactPair,
-  });
+  const run = (block) => withoutFormShellBlock(trx, block, RUN);
 
   beforeEach(() => {
-    calls = [];
-    lockContactPair = jest.fn(async () => { calls.push('contact lock'); });
-    lockUntouchedWebFormShellsInTx.mockReset().mockImplementation(async () => { calls.push('shell locks'); return ['shell-1']; });
-    archiveWebFormShellsInTx.mockReset().mockImplementation(async () => { calls.push('archive'); return ['shell-1']; });
+    onlyUntouchedWebFormShellsOpen.mockReset().mockResolvedValue(true);
     process.env[GATE] = 'true';
   });
 
@@ -97,68 +85,37 @@ describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
     ['unset', undefined],
     ['"1", not exactly "true"', '1'],
     ['"false"', 'false'],
-  ])('gate %s: the web-form draft blocks as before and nothing is ever archived', async (_label, value) => {
+  ])('gate %s: the web-form draft blocks as before, with no read', async (_label, value) => {
     if (value === undefined) delete process.env[GATE];
     else process.env[GATE] = value;
 
-    const plan = await run(formShell);
-
-    expect(plan.duplicateBlock).toBe(formShell);
-    expect(await plan.archiveShells('draft-1')).toEqual([]);
-    expect(calls).toEqual([]);
+    expect(await run(formShell)).toBe(formShell);
+    expect(onlyUntouchedWebFormShellsOpen).not.toHaveBeenCalled();
   });
 
-  test('gate on: the run goes on as for a new visitor, and the shells are archived with the draft it inserted', async () => {
-    const plan = await run(formShell);
-
-    expect(plan.duplicateBlock).toBeNull();
-    // The contact-pair lock comes before any estimate row lock, and nothing is archived yet.
-    expect(calls).toEqual(['contact lock', 'shell locks']);
-    expect(lockContactPair).toHaveBeenCalledWith(trx);
+  test('gate on: when untouched web-form drafts are all that is open, the run goes on as for a new visitor', async () => {
+    expect(await run(formShell)).toBeNull();
     // The run's own customer, email and address go with it: a draft of another
-    // contact or for another property is not its shell.
-    expect(lockUntouchedWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', address: HOME, customerId: 'cust-1', email: EMAIL });
-
-    expect(await plan.archiveShells('draft-1')).toEqual(['shell-1']);
-    // The inserted draft's id goes with it: the final recheck must not count it as another open estimate.
-    expect(archiveWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', shellIds: ['shell-1'], leadId: 'lead-9', replacementId: 'draft-1' });
+    // contact or for another property keeps the block.
+    expect(onlyUntouchedWebFormShellsOpen).toHaveBeenCalledWith(trx, RUN);
   });
 
-  test('gate on: with no draft written, nothing is archived', async () => {
-    const plan = await run(formShell);
+  test('gate on: when anything else is open, or the draft is not untouched, the block stands', async () => {
+    onlyUntouchedWebFormShellsOpen.mockResolvedValue(false);
 
-    expect(await plan.archiveShells(null)).toEqual([]);
-    expect(await plan.archiveShells(undefined)).toEqual([]);
-    expect(archiveWebFormShellsInTx).not.toHaveBeenCalled();
+    expect(await run(formShell)).toBe(formShell);
   });
 
-  test('gate on: a planned shell that changed makes the archive throw, so the insert rolls back with it', async () => {
-    archiveWebFormShellsInTx.mockRejectedValue(new Error('web-form shell changed under the wizard run: planned 1, archived 0'));
-    const plan = await run(formShell);
-
-    await expect(plan.archiveShells('draft-1')).rejects.toThrow('planned 1, archived 0');
-  });
-
-  test('gate on: when no shell may go (another estimate still blocks, or a clarify writer is busy), the first block stands', async () => {
-    lockUntouchedWebFormShellsInTx.mockImplementation(async () => []);
-
-    const plan = await run(formShell);
-
-    expect(plan.duplicateBlock).toBe(formShell);
-    expect(await plan.archiveShells('draft-1')).toEqual([]);
-    expect(archiveWebFormShellsInTx).not.toHaveBeenCalled();
-  });
-
-  test('gate on: no block, the wizard\'s own draft, and a newest estimate that is not a web-form draft take no lock', async () => {
+  test('gate on: no block, the wizard\'s own draft, and a newest estimate that is not a web-form draft take no read', async () => {
     const office = { ...formShell, existingEstimateId: 'office-1', existingSource: 'manual' };
     const sentForm = { ...formShell, existingStatus: 'sent' };
 
-    expect((await run(null)).duplicateBlock).toBeNull();
-    expect((await run(wizardDraft)).duplicateBlock).toBe(wizardDraft);
-    expect((await run(office)).duplicateBlock).toBe(office);
-    expect((await run(sentForm)).duplicateBlock).toBe(sentForm);
-    // No lock taken, no row read: these runs go on exactly as before.
-    expect(calls).toEqual([]);
+    expect(await run(null)).toBeNull();
+    expect(await run(wizardDraft)).toBe(wizardDraft);
+    expect(await run(office)).toBe(office);
+    expect(await run(sentForm)).toBe(sentForm);
+    // These runs go on exactly as before.
+    expect(onlyUntouchedWebFormShellsOpen).not.toHaveBeenCalled();
   });
 });
 
@@ -179,31 +136,13 @@ describe('mirror refresh wiring', () => {
     );
   });
 
-  test('the same-phone duplicate read goes through planFormShellClear, with the run\'s customer, email, address and contact-pair lock', () => {
+  test('the same-phone duplicate read goes through withoutFormShellBlock, with the run\'s customer, email and address', () => {
     // The duplicate branch (refresh, block or insert) must judge the block
-    // the plan returns, never the first read.
+    // that withoutFormShellBlock returns, never the first read.
     expect(routeSource).toMatch(
-      /const shellPlan = await planFormShellClear\(\s*trx,\s*await blockIfAutomatedEstimateDuplicate\(contactPhone, \{ database: trx \}\),\s*\{\s*phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail,\s*leadId: lead\.id, lockContactPair: draftVerdictLock,\s*\},?\s*\);\s*const \{ duplicateBlock \} = shellPlan;\s*if \(duplicateBlock\) \{/
+      /const duplicateBlock = await withoutFormShellBlock\(\s*trx,\s*await blockIfAutomatedEstimateDuplicate\(contactPhone, \{ database: trx \}\),\s*\{ phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail \},?\s*\);\s*if \(duplicateBlock\) \{/
     );
     // No second, unguarded duplicate read in the wizard's estimate mirror.
     expect(routeSource.match(/blockIfAutomatedEstimateDuplicate\(contactPhone/g)).toHaveLength(1);
-  });
-
-  test('the shells are archived in the insert branch, before the draft id leaves the transaction', () => {
-    // archiveShells throws when a planned shell changed. The insert then rolls
-    // back, so draftEstimateId (which mints the booking handoff) must be
-    // assigned only after the archive.
-    expect(routeSource).toMatch(
-      /const insertedId = inserted\?\.id \|\| inserted \|\| null;\s*(?:\/\/[^\n]*\s*)*await shellPlan\.archiveShells\(insertedId\);\s*draftEstimateId = insertedId;\s*\}\s*\}\);/
-    );
-    expect(routeSource.match(/shellPlan\.archiveShells\(/g)).toHaveLength(1);
-  });
-
-  test('the shell rule and the clarify writers use one lock name', () => {
-    // lockUntouchedWebFormShellsInTx tries the lock that withClarifyLock takes;
-    // two copies of the string must not drift apart.
-    const read = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
-    expect(read('services/estimate-clarify-asks.js')).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?\)\)',\s*\['estimate_clarify', String\(digits\)\]/);
-    expect(read('services/estimate-automation-duplicates.js')).toMatch(/const CLARIFY_LOCK_NAMESPACE = 'estimate_clarify';/);
   });
 });

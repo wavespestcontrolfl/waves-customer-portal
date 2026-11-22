@@ -294,90 +294,65 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  * it is an OPEN estimate for the phone, so it blocked the quote wizard's own
  * estimate, and with no wizard estimate the person gets no booking link.
  *
+ * onlyUntouchedWebFormShellsOpen answers one question for the wizard: is
+ * every open estimate of this phone an untouched shell of this run's own
+ * contact, for this run's own property? When yes, the wizard writes its own
+ * estimate as for a new visitor. This module reads only. The shell is not
+ * written, archived or locked: the caller is a public route, and a typed
+ * phone, email and address must never change a record that is already there.
+ * The shell stays in the office's list, as it does today.
+ *
  * A row is an untouched shell when ALL of these hold:
  *   - the web form made it, and it is still an unarchived 'draft';
  *   - nothing wrote it since it was made (updated_at = created_at, the same
  *     test lead-draft-measurements.js uses). A staff edit, a later automation
- *     write, an unarchive, and this module's own archive all move updated_at,
- *     so a row that staff worked or restored is never a shell again;
+ *     write and an unarchive all move updated_at;
  *   - it has no price (monthly, one-time and annual are all empty or 0), the
  *     same test lead-intake.js uses to find a shell it may fill;
- *   - nobody sent, viewed or scheduled it, auto-send did not claim it, and no
- *     lead points at it: the #6394 rule (retireSupersededLeadWebhookDrafts,
- *     admin-estimate-persistence.js);
- *   - it passes the draft-retire sweep's own "safe to archive" rule
- *     (DRAFT_ELIGIBLE_SQL, estimate-draft-retire.js): older than 30 minutes,
- *     so the web form's background work on it is done, and no lead, booking
- *     handoff, staged clarify text, group, price lock, send in flight or
+ *   - nobody sent or viewed it, auto-send did not claim it, and no lead
+ *     points at it, a soft-deleted lead too: the #6394 rule
+ *     (retireSupersededLeadWebhookDrafts, admin-estimate-persistence.js);
+ *   - it passes the draft-retire sweep's own "nothing depends on this draft"
+ *     rule (DRAFT_ELIGIBLE_SQL, estimate-draft-retire.js): older than 30
+ *     minutes, so the web form's background work on it is done (that work
+ *     can price and send the row), and no live lead, booking handoff, staged
+ *     clarify text, group, price lock, scheduled send, send in flight or
  *     hold marker;
  *   - no office Sold-by action and no logged follow-up: staff work that does
  *     not move updated_at;
  *   - no clarify ask for the phone is open or was sent in the last 7 days
- *     without an answer: the row may be waiting for the customer's reply;
- *   - its data is a JSON object (or empty), so it can carry the marker below;
- *   - it belongs to the wizard run's own contact: the same customer row the
- *     run resolved for itself and the same email. A public caller who types
- *     someone's phone and address must not move that person's draft, and two
- *     people can share a phone and a home;
+ *     without an answer: the answer can still price and send the row;
+ *   - it belongs to the wizard run's own contact: the customer row the run
+ *     resolved for itself (findExistingCustomerByContact) and the same
+ *     email. Two people can share a phone and a home;
  *   - it is for the wizard run's own property: one phone can ask for quotes
- *     on two homes, and a draft for the other home is not replaced by this
- *     run. Same door by the test the draft-retire sweep uses
+ *     on two homes. Same door by the test the draft-retire sweep uses
  *     (estimate-draft-retire.js sameProperty): the shared premise matcher
  *     with street, city and ZIP on both sides, plus the same unit. A missing
  *     or incomplete address fails closed: the draft is not a shell.
  *
- * Two steps that bracket the wizard's own estimate write, like
- * lockSupersededDraftInTx / archiveSupersededDraftInTx above, so a shell is
- * never lost without its replacement:
- *   1. lockUntouchedWebFormShellsInTx: row-locks the phone's shells and
- *      returns their ids, but only when they are EVERY open estimate of the
- *      phone. Any other open estimate still blocks (a draft with a price, a
- *      touched draft, a draft for another property, an office or estimator
- *      estimate, the wizard's own older draft), and then no id is returned.
- *   2. archiveWebFormShellsInTx: after the wizard's draft was written in the
- *      same transaction, archives those ids, all or nothing. A planned shell
- *      that is no longer one (a lead linked it in between), or another open
- *      estimate saved for the phone since the plan (the office does not take
- *      the phone lock), makes it throw, so the caller's transaction rolls
- *      the wizard's draft back too.
+ * Any other open estimate of the phone still blocks: a draft with a price, a
+ * touched draft, a draft of another contact or for another property, an
+ * office or estimator estimate, a sent estimate.
  *
- * Archived, not deleted: staff can unarchive the row, and every draft reader
- * (auto-send, clarify asks, measurements, lists) skips an archived row. The
- * marker is `estimate_data.supersededByWizard`, deliberately NOT
- * `estimatorEngine.superseded_at`: that stamp makes the unarchive route
- * refuse the row for good.
- *
- * Locks. The caller holds the phone's automated-estimate lock (the web form
- * creates its shell under the same lock) and has taken every other advisory
- * lock it will need. Step 1 then TRIES the phone's clarify lock
- * (estimate-clarify-asks.js withClarifyLock) and keeps it to the end of the
- * transaction: the web form parks its clarify ask after its shell commits, so
- * without the lock an ask could land between the check here and the archive.
- * A try, never a wait: the clarify writers take other locks under theirs, and
- * waiting here could deadlock with them. When a clarify writer holds the lock
- * right now, no shell goes on this run. parkClarifyAsk reads the marker under
- * the same lock and does not park an ask for a shell the wizard archived. It
- * reads the marker with the gate on or off: an archive outlives the gate.
+ * No lock beyond the caller's phone lock (the web form creates its shell
+ * under the same lock). A shell that changes after the read costs nothing
+ * here: nothing is taken from it. An office estimate saved for the phone
+ * after the read is not seen, as for every new wizard visitor today: office
+ * writes do not take the phone lock.
  */
 const WEB_FORM_SHELL_SOURCE = 'lead_webhook';
 // Same window as estimate-clarify-asks.js RECENT_SENT_WINDOW_MS: a sent ask
 // counts as waiting for its answer for 7 days.
 const CLARIFY_WAIT_WINDOW_MS = 7 * 86400000;
-// The namespace of estimate-clarify-asks.js withClarifyLock (keyed by the
-// phone's 10 digits). A second copy of one string, pinned by a test.
-const CLARIFY_LOCK_NAMESPACE = 'estimate_clarify';
 
-function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
-  return trx('estimates')
+function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
+  return database('estimates')
     .where({ source: WEB_FORM_SHELL_SOURCE, status: 'draft' })
     .whereRaw(
       "right(regexp_replace(coalesce(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
       [last10]
     )
-    // The draft-retire sweep's own "safe to archive" rule: older than 30
-    // minutes (its creator's background work is done), no live lead, no
-    // booking handoff, no staged clarify text, no group, no price lock, no
-    // scheduled send, no live or uncertain send, no hold marker.
     .whereRaw(DRAFT_ELIGIBLE_SQL)
     .whereNull('sent_at')
     .whereNull('viewed_at')
@@ -389,17 +364,15 @@ function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
     .whereRaw('COALESCE(onetime_total, 0) = 0')
     .whereRaw('COALESCE(annual_total, 0) = 0')
     .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', '') = ''")
-    // Only an object can take the marker. A legacy scalar stays a blocker.
-    .whereRaw("jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object'")
     // Any lead, soft-deleted ones too (the #6394 rule): the sweep's own
     // lead check skips a soft-deleted lead.
     .whereNotExists(function linkedToLead() {
-      this.select(trx.raw('1')).from('leads').whereRaw('leads.estimate_id = estimates.id');
+      this.select(database.raw('1')).from('leads').whereRaw('leads.estimate_id = estimates.id');
     })
     // By phone, and wider than the sweep's: a text sent in the last 7 days
     // with no answer still holds the draft.
     .whereNotExists(function clarifyAskWaiting() {
-      this.select(trx.raw('1')).from('message_drafts')
+      this.select(database.raw('1')).from('message_drafts')
         .where({ intent: 'estimate_clarify', source_ref: `clarify:${last10}` })
         .whereRaw("(flags->>'answered_at') is null")
         .where(function openOrRecentlySent() {
@@ -410,19 +383,12 @@ function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
     });
 }
 
-// Same door, by the test the draft-retire sweep uses for "a draft another
-// estimate replaced" (estimate-draft-retire.js sameProperty): the shared
-// premise matcher with locality required, plus the same unit.
 function sameDoor(addressA, addressB) {
   if (!samePremiseDisplay(addressA, addressB, { requireLocality: true })) return false;
   const unit = (text) => unitLineValueKey(normalizeUnitLine(parseDisplayAddress(text).unit));
   return unit(addressA) === unit(addressB);
 }
 
-// The draft belongs to the wizard run's own contact: the customer row the
-// run resolved for itself (findExistingCustomerByContact) and the same email.
-// The caller is a public route. A typed phone and address alone must never
-// archive a draft: two people can share a phone and a home.
 function sameContact(row, { customerId, email }) {
   const runEmail = String(email || '').trim().toLowerCase();
   if (!customerId || !runEmail) return false;
@@ -430,70 +396,25 @@ function sameContact(row, { customerId, email }) {
     && String(row.customer_email || '').trim().toLowerCase() === runEmail;
 }
 
-async function lockUntouchedWebFormShellsInTx(trx, { phone, address, customerId, email, now = new Date() } = {}) {
+async function onlyUntouchedWebFormShellsOpen(database, { phone, address, customerId, email, now = new Date() } = {}) {
   const values = phoneLookupValues(phone);
-  if (!trx || !values.last10) return [];
-
-  const locked = await trx.raw(
-    'select pg_try_advisory_xact_lock(hashtext(?), hashtext(?)) as got',
-    [CLARIFY_LOCK_NAMESPACE, values.last10]
-  );
-  if (locked?.rows?.[0]?.got !== true) return [];
-
-  const open = await listOpenEstimatesByPhone(phone, { database: trx });
-  if (!open.length) return [];
-
-  // Row locks, so the verdict below is read on rows no other writer can
-  // promote, price or claim before the archive lands.
-  const shells = await untouchedWebFormShells(trx, values.last10, { now })
+  if (!database || !values.last10) return false;
+  const open = await listOpenEstimatesByPhone(phone, { database });
+  if (!open.length) return false;
+  const shells = await untouchedWebFormShells(database, values.last10, { now })
     .whereIn('id', open.map((row) => row.id))
-    .forUpdate()
     .select('id', 'address', 'customer_id', 'customer_email');
-  const shellIds = (Array.isArray(shells) ? shells : [])
+  const shellKeys = new Set((Array.isArray(shells) ? shells : [])
     .filter((row) => sameContact(row, { customerId, email }) && sameDoor(row.address, address))
-    .map((row) => row.id);
-  // Every open estimate of the phone must be one of this run's shells.
-  // Anything else still blocks the run, and then no shell goes.
-  const shellKeys = new Set(shellIds.map(String));
-  return open.every((row) => shellKeys.has(String(row.id))) ? shellIds : [];
-}
-
-async function archiveWebFormShellsInTx(trx, { phone, shellIds = [], leadId = null, replacementId = null, now = new Date() } = {}) {
-  const values = phoneLookupValues(phone);
-  if (!trx || !values.last10 || !shellIds.length) return [];
-  const marker = JSON.stringify({ at: now.toISOString(), leadId: leadId == null ? null : String(leadId) });
-  // Guarded by the full predicate again: the update can only land on a row
-  // that is still an untouched shell.
-  const retired = await untouchedWebFormShells(trx, values.last10, { now })
-    .whereIn('id', shellIds)
-    .update({
-      archived_at: now,
-      estimate_data: trx.raw(
-        "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{supersededByWizard}', ?::jsonb, true)",
-        [marker]
-      ),
-      updated_at: now,
-    })
-    .returning('id');
-  const retiredIds = (Array.isArray(retired) ? retired : []).map((row) => (row && typeof row === 'object' ? row.id : row));
-  // All or nothing. The row locks cover the estimate rows, not the leads
-  // table, and the phone lock serializes the automated writers only: since
-  // the plan, a lead can have linked a shell, and the office can have saved
-  // its own estimate for the phone. The caller planned its write on "the
-  // shells are every open estimate", so it must not commit.
-  const others = await listOpenEstimatesByPhone(phone, { database: trx, excludeEstimateId: replacementId || undefined });
-  if (retiredIds.length !== shellIds.length || others.length) {
-    throw new Error(`web-form shell changed under the wizard run: planned ${shellIds.length}, archived ${retiredIds.length}, other open estimates ${others.length}`);
-  }
-  return retiredIds;
+    .map((row) => String(row.id)));
+  return open.every((row) => shellKeys.has(String(row.id)));
 }
 
 module.exports = {
   acquireAutomatedEstimateLocks,
   lockSupersededDraftInTx,
   archiveSupersededDraftInTx,
-  lockUntouchedWebFormShellsInTx,
-  archiveWebFormShellsInTx,
+  onlyUntouchedWebFormShellsOpen,
   automatedDuplicateBlock,
   automatedEstimateLockKeys,
   blockIfAutomatedEstimateDuplicate,

@@ -156,9 +156,8 @@ const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
 const { isHoneypotTripped } = require('../utils/lead-abuse');
 const {
-  archiveWebFormShellsInTx,
   blockIfAutomatedEstimateDuplicate,
-  lockUntouchedWebFormShellsInTx,
+  onlyUntouchedWebFormShellsOpen,
   withAutomatedEstimatePhoneLock,
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
@@ -801,39 +800,21 @@ function shouldRefreshWizardDraft(duplicateBlock) {
 
 // Owner 2026-11-21, "build" (GATE_WIZARD_SUPERSEDES_FORM_DRAFT, off unless
 // exactly 'true'): an old web-form draft with no price that nobody touched
-// must not cost a wizard visitor the booking link. When such shells, of
-// this run's own contact (customer row and email) and for this run's own
-// property, are EVERY open estimate of the phone, the run
-// goes on as for a new visitor and the shells are archived together with
-// the draft it inserts. Any other open estimate still blocks, and then
-// nothing is archived (lockUntouchedWebFormShellsInTx holds the rule).
-// Returns the duplicate block the run must judge and `archiveShells`, which
-// the insert branch runs with the id of the draft it wrote in this
-// transaction. It throws when a planned shell is no longer one, or when
-// another open estimate appeared for the phone, so the insert rolls back
-// with it.
-// `lockContactPair` is the run's contact-pair lock: the estimate branches
-// take it before any estimate row lock, so it is taken first here too.
+// must not cost a wizard visitor the booking link. When such drafts, of this
+// run's own contact and for this run's own property, are EVERY open estimate
+// of the phone, the block is dropped and the run writes its own estimate as
+// for a new visitor (onlyUntouchedWebFormShellsOpen holds the rule). The old
+// draft is only read, never changed. Any other open estimate still blocks.
 // It has a gate because the unblocked run texts the person the booking link.
-async function planFormShellClear(trx, duplicateBlock, { phone, address, customerId, email, leadId, lockContactPair }) {
-  const asBefore = { duplicateBlock, archiveShells: async () => [] };
-  if (!duplicateBlock || shouldRefreshWizardDraft(duplicateBlock)) return asBefore;
-  // Only a web-form draft can be a shell. Any other newest estimate still
-  // blocks whatever is archived, so the run takes no lock for it.
-  if (duplicateBlock.existingSource !== 'lead_webhook' || duplicateBlock.existingStatus !== 'draft') return asBefore;
-  if (require('../config/feature-gates').wizardSupersedesFormDraftLive?.() !== true) return asBefore;
-  await lockContactPair(trx);
-  const shellIds = await lockUntouchedWebFormShellsInTx(trx, { phone, address, customerId, email });
-  if (!shellIds.length) return asBefore;
-  return {
-    duplicateBlock: null,
-    archiveShells: async (writtenDraftId) => {
-      if (!writtenDraftId) return [];
-      const retiredIds = await archiveWebFormShellsInTx(trx, { phone, shellIds, leadId, replacementId: writtenDraftId });
-      logger.info(`[public-quote] Archived ${retiredIds.length} untouched web-form draft(s) (${retiredIds.join(', ')}) that blocked the wizard estimate for lead ${leadId}`);
-      return retiredIds;
-    },
-  };
+async function withoutFormShellBlock(trx, duplicateBlock, { phone, address, customerId, email }) {
+  if (!duplicateBlock || shouldRefreshWizardDraft(duplicateBlock)) return duplicateBlock;
+  // Only a web-form draft can be a shell, and the block names the newest
+  // open estimate: any other newest estimate blocks without a read.
+  if (duplicateBlock.existingSource !== 'lead_webhook' || duplicateBlock.existingStatus !== 'draft') return duplicateBlock;
+  if (require('../config/feature-gates').wizardSupersedesFormDraftLive?.() !== true) return duplicateBlock;
+  if (!await onlyUntouchedWebFormShellsOpen(trx, { phone, address, customerId, email })) return duplicateBlock;
+  logger.info(`[public-quote] An untouched web-form draft (${duplicateBlock.existingEstimateId}) did not block the wizard estimate`);
+  return null;
 }
 
 function normalizePublicQuotePestFrequency(value) {
@@ -3631,17 +3612,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         });
       } else {
         await withAutomatedEstimatePhoneLock(contactPhone, async (trx) => {
-          // A web-form shell draft that blocks may be set aside (owner
-          // 2026-11-21; planFormShellClear, dark behind its gate).
-          const shellPlan = await planFormShellClear(
+          // An untouched web-form draft alone does not block (owner
+          // 2026-11-21; withoutFormShellBlock, dark behind its gate).
+          const duplicateBlock = await withoutFormShellBlock(
             trx,
             await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx }),
-            {
-              phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail,
-              leadId: lead.id, lockContactPair: draftVerdictLock,
-            },
+            { phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail },
           );
-          const { duplicateBlock } = shellPlan;
           if (duplicateBlock) {
             // A wizard re-run by the same phone lands here with a NEW lead
             // id (the lead_id-keyed lookup above only matches re-submits of
@@ -3726,12 +3703,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               status: 'draft',
               source: 'quote_wizard',
             }).returning('id');
-            const insertedId = inserted?.id || inserted || null;
-            // The shells go together with the draft this transaction wrote,
-            // all or nothing. A throw here rolls the insert back, so the id
-            // is assigned only after it.
-            await shellPlan.archiveShells(insertedId);
-            draftEstimateId = insertedId;
+            draftEstimateId = inserted?.id || inserted || null;
           }
         });
       }
@@ -4704,7 +4676,7 @@ module.exports._internals = {
   derivePerApplication,
   derivePerApplicationBreakdown,
   deriveLawnArea,
-  planFormShellClear,
+  withoutFormShellBlock,
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
   resolveEntryChannel,
