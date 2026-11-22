@@ -23,6 +23,23 @@ function portalRowWaveGuardFamily(row) {
 function portalRowQualifiesForWaveGuard(row) {
   return portalRowWaveGuardFamily(row) !== null;
 }
+// The service families of the customer's plan, for the two portal places
+// that NAME them (Billing's Plan Charges, the Learn sentence). This is the
+// tier alignment's own evidence (detectUpcomingRecurringPlanKeys: coming,
+// recurring, live rows that are not a re-service, a one-time booking, a
+// commercial row or a non-bait rodent row), reduced to families the way the
+// tier count reduces it. The portal never rebuilds that rule from labels.
+// null when the read fails: the caller then names no service, and the
+// schedule answer itself (My Plan's evidence) still goes out.
+async function portalPlanFamilies(customerId) {
+  const { detectUpcomingRecurringPlanKeys, uniqueServiceFamilies } = require('../services/self-booking-plan-sync');
+  try {
+    return uniqueServiceFamilies(await detectUpcomingRecurringPlanKeys(db, customerId, etDateString()));
+  } catch (err) {
+    logger.warn(`[schedule] plan family read failed for ${customerId}: ${err.message}`);
+    return null;
+  }
+}
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
@@ -222,6 +239,9 @@ router.get('/', async (req, res, next) => {
     const hidden = await dayOnlyIds(db, upcoming);
 
     if (allProperties) {
+      // The plan's service families (portalPlanFamilies). In this projection
+      // only: a contact session never takes this branch.
+      const planFamilies = await portalPlanFamilies(req.customerId);
       // Coverage projection only (see listQuerySchema): nothing actionable —
       // returned BEFORE the re-service tie-in and the per-row grouped-visit /
       // calendar verdicts below, which cost one or two queries per visit and
@@ -231,6 +251,7 @@ router.get('/', async (req, res, next) => {
         hasCancellableWork: cancellable,
         reservice: null,
         overlayHandoff: false,
+        planFamilies,
         upcoming: upcoming.map((s) => ({
           id: s.id,
           date: s.scheduled_date,

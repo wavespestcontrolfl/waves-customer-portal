@@ -1620,6 +1620,7 @@ module.exports = {
   buildLabelOnlyTierRealignmentUpdates,
   buildNoPlanTierEnrollmentUpdates,
   buildRecurringOccurrenceDates,
+  detectUpcomingRecurringPlanKeys,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isAutoDerivedTierLabelRow,
