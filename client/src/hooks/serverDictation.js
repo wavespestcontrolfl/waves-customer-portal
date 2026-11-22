@@ -104,7 +104,7 @@ async function postClip(url, blob, durationSeconds, token) {
     err.status = r.status;
     throw err;
   }
-  // `money` (GATE_DICTATION_MONEY_NORMALIZE) rides beside the words when the server sends it.
+  // `money` rides beside the words when the server sends it.
   return { text: String(data?.text || "").trim(), money: data?.money && typeof data.money === "object" ? data.money : null };
 }
 

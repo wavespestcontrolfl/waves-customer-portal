@@ -102,14 +102,12 @@ describe('server dictation endpoint', () => {
     mockVisitInScope.mockReturnValue(true);
     mockCustomerAllowed.mockResolvedValue(true);
     mockHints.mockResolvedValue({ prompt: 'SERVER-BUILT WORD LIST', keywords: ['Examplesmith', 'Todayman'] });
-    delete process.env.GATE_DICTATION_MONEY_NORMALIZE;
     delete process.env.GATE_DICTATION_LIVE_WORDS;
     mockTranscribe.mockResolvedValue({ text: '  Treated the lanai for roaches. ' });
     mockImplausible.mockReturnValue(false);
   });
   afterAll(() => {
     delete process.env.GATE_DICTATION_LIVE_WORDS;
-    delete process.env.GATE_DICTATION_MONEY_NORMALIZE;
     if (originalGate === undefined) delete process.env.GATE_SERVER_DICTATION;
     else process.env.GATE_SERVER_DICTATION = originalGate;
     if (originalModel === undefined) delete process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL;
@@ -147,7 +145,7 @@ describe('server dictation endpoint', () => {
     });
   });
 
-  test('gate on: availability needs the transcriber key', async () => {
+  test('availability needs the transcriber key', async () => {
     await withServer(async (baseUrl) => {
       const on = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
       expect(await on.json()).toEqual({ available: true, everyBox: false, liveWords: false });
@@ -196,7 +194,7 @@ describe('server dictation endpoint', () => {
         query: { prompt: 'also ignored', customer_id: CUSTOMER_ID, service_id: SERVICE_ID },
       });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ text: 'Treated the lanai for roaches.' });
+      expect(await res.json()).toEqual({ text: 'Treated the lanai for roaches.', money: { changes: [], ambiguous: [] } });
       expect(mockHints).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: SERVICE_ID, scope: {} });
       const [buffer, opts] = mockTranscribe.mock.calls[0];
       expect(buffer.toString()).toBe('opus-bytes');
@@ -241,7 +239,7 @@ describe('server dictation endpoint', () => {
       await withServer(async (baseUrl) => {
         const res = await clip(baseUrl, { token: 'admin', query: { customer_id: CUSTOMER_ID }, fields: { duration_seconds: '4' } });
         // only the greeted name changes; the hallucination guard saw the words as heard
-        expect(await res.json()).toEqual({ text: 'Hey Sara. Sarah from the office will call.' });
+        expect(await res.json()).toEqual({ text: 'Hey Sara. Sarah from the office will call.', money: { changes: [], ambiguous: [] } });
         expect(mockImplausible).toHaveBeenCalledWith('Hey Sarah. Sarah from the office will call.', 4);
       });
       const lines = logger.info.mock.calls.map(([line]) => line);
@@ -296,7 +294,7 @@ describe('server dictation endpoint', () => {
       await withServer(async (baseUrl) => {
         const res = await clip(baseUrl, { query: { customer_id: CUSTOMER_ID, service_id: SERVICE_ID } });
         expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ text: 'Treated the lanai for roaches.' });
+        expect(await res.json()).toEqual({ text: 'Treated the lanai for roaches.', money: { changes: [], ambiguous: [] } });
         expect(mockHints).toHaveBeenCalledWith({ customerId: null, serviceId: null, scope: { technicianId: 'tech-1' } });
       });
     });
@@ -332,7 +330,7 @@ describe('server dictation endpoint', () => {
       mockTranscribe.mockResolvedValue({ text: '' });
       const silence = await clip(baseUrl);
       expect(silence.status).toBe(200);
-      expect(await silence.json()).toEqual({ text: '' });
+      expect(await silence.json()).toEqual({ text: '', money: { changes: [], ambiguous: [] } });
     });
   });
 
@@ -345,7 +343,7 @@ describe('server dictation endpoint', () => {
     });
   });
 
-  describe('GATE_DICTATION_MONEY_NORMALIZE', () => {
+  describe('dictated money', () => {
     const say = async (baseUrl, words) => {
       mockTranscribe.mockResolvedValue({ text: words });
       const res = await clip(baseUrl);
@@ -353,21 +351,7 @@ describe('server dictation endpoint', () => {
       return res.json();
     };
 
-    test('gate off: the words come back untouched, with no money key', async () => {
-      await withServer(async (baseUrl) => {
-        expect(await say(baseUrl, 'Charge sixty-one thirty-three a month')).toEqual({ text: 'Charge sixty-one thirty-three a month' });
-      });
-    });
-
-    test('only the exact value "true" turns it on', async () => {
-      process.env.GATE_DICTATION_MONEY_NORMALIZE = '1';
-      await withServer(async (baseUrl) => {
-        expect(await say(baseUrl, 'Charge sixty-one thirty-three a month')).toEqual({ text: 'Charge sixty-one thirty-three a month' });
-      });
-    });
-
-    test('gate on: a spoken amount is suggested as dollars and cents; the heard text is never rewritten', async () => {
-      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+    test('a spoken amount is suggested as dollars and cents; the heard text is never rewritten', async () => {
       await withServer(async (baseUrl) => {
         const body = await say(baseUrl, 'Charge sixty-one thirty-three a month');
         expect(body.text).toBe('Charge sixty-one thirty-three a month');
@@ -376,8 +360,7 @@ describe('server dictation endpoint', () => {
       });
     });
 
-    test('gate on: a run-together amount keeps its digits and is flagged for the bar', async () => {
-      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+    test('a run-together amount keeps its digits and is flagged for the bar', async () => {
       await withServer(async (baseUrl) => {
         const body = await say(baseUrl, 'The price is 6133 a month');
         expect(body.text).toBe('The price is 6133 a month');
@@ -385,8 +368,7 @@ describe('server dictation endpoint', () => {
       });
     });
 
-    test('gate on: words with no money cue pass through; silence is still { text: "" } plus an empty money note', async () => {
-      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+    test('words with no money cue pass through; silence is still { text: "" } plus an empty money note', async () => {
       await withServer(async (baseUrl) => {
         const plain = await say(baseUrl, 'Treated 1234 Main St at 10:30, 5 gallons.');
         expect(plain).toEqual({ text: 'Treated 1234 Main St at 10:30, 5 gallons.', money: { changes: [], ambiguous: [] } });

@@ -24,6 +24,7 @@ const {
   buildLawnFastContext,
   buildLawnFastWateringPreview,
   buildLawnTreatmentGuide,
+  prepareLawnRecommendations,
   takeAllProductIdsFor,
   preflightLawnFastCompletion,
   normalizedTetrinoScout,
@@ -1548,6 +1549,98 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       v13VisitLimits.mockRejectedValue(new Error('limits down'));
       expect((await guide(tablesFor())).chinch).toMatchObject({ item: null, rungIds: [P_ARENA, P_TALAK], unreadableIds: [P_ARENA, P_TALAK], blockedIds: [] });
     });
+  });
+});
+
+// Report speed plan step 4 (owner 2026-11-19): the sheet names its products before the Complete tap, so the completion's
+// lawn recommendation call can run early. Regression these guard: an early call (a paid model call) for a visit the sheet
+// cannot complete or an assessment the report would not use, and product rows that differ from what the completion saves.
+describe('prepare recommendations (GATE_LAWN_REC_PREPARE)', () => {
+  const CONFIRMED = uuid(61);
+  const GATES = ['GATE_LAWN_REC_PREPARE', 'GATE_LAWN_PROPERTY_HISTORY'];
+  const saved = {};
+  const KnowledgeBridge = require('../services/knowledge-bridge');
+  const history = require('../services/lawn-assessment-history');
+  let prepare;
+  const assessmentRow = (extra = {}) => ({ id: CONFIRMED, service_id: VISIT, customer_id: 'cust-1', confirmed_by_tech: true, ...extra });
+  const tablesFor = (extra = {}) => ({
+    scheduled_services: visit(), customers: { billing_mode: null }, products_catalog: [herbicide, granular], lawn_assessments: assessmentRow(), ...extra,
+  });
+  const run = (tables, extra = {}) => prepareLawnRecommendations({ serviceId: VISIT, assessmentId: CONFIRMED, productIds: [P_HERB, P_GRAN], knex: fakeKnex(tables), ...extra });
+
+  beforeEach(() => {
+    for (const name of GATES) { saved[name] = process.env[name]; process.env[name] = 'true'; }
+    resolveCompletionProfileForScheduledService.mockReset().mockResolvedValue(PROFILE());
+    prepare = jest.spyOn(KnowledgeBridge, 'prepareAssessmentRecommendations').mockResolvedValue({ started: true });
+    jest.spyOn(history, 'installedForVisit').mockResolvedValue({ id: CONFIRMED });
+    jest.spyOn(history, 'historyForAssessment').mockResolvedValue({ current: { id: CONFIRMED } });
+  });
+  afterEach(() => {
+    for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+    jest.restoreAllMocks();
+  });
+
+  test.each([undefined, '', 'false', '1', 'TRUE'])('gate %p: nothing is read and no call starts', async (value) => {
+    if (value === undefined) delete process.env.GATE_LAWN_REC_PREPARE; else process.env.GATE_LAWN_REC_PREPARE = value;
+    const knex = fakeKnex(tablesFor());
+    expect(await prepareLawnRecommendations({ serviceId: VISIT, assessmentId: CONFIRMED, productIds: [P_HERB], knex })).toEqual({ ok: false, reason: 'disabled' });
+    expect(knex).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  test('the early call gets each product once, as the completion saves a sheet row: the catalog name and category', async () => {
+    expect(await run(tablesFor(), { productIds: [P_HERB.toUpperCase(), P_GRAN, P_HERB] })).toEqual({ ok: true, started: true });
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(prepare).toHaveBeenCalledWith(CONFIRMED, [
+      { product_name: 'Test Weed Spray', product_category: 'herbicide' },
+      { product_name: 'Test Feed Granular', product_category: 'fertilizer' },
+    ]);
+  });
+
+  test('a sheet with no product: the early call is asked with none, and the catalog is not read', async () => {
+    const knex = fakeKnex(tablesFor());
+    expect(await prepareLawnRecommendations({ serviceId: VISIT, assessmentId: CONFIRMED, productIds: [], knex })).toEqual({ ok: true, started: true });
+    expect(prepare).toHaveBeenCalledWith(CONFIRMED, []);
+    expect(knex.mock.calls.map(([table]) => table)).not.toContain('products_catalog');
+  });
+
+  test('the early call did not start (the visit rows are saved, or the limit of calls is reached): started is false', async () => {
+    prepare.mockResolvedValue({ started: false });
+    expect(await run(tablesFor())).toEqual({ ok: true, started: false });
+  });
+
+  test.each([
+    ['a malformed assessment id', { assessmentId: 'nope' }, {}, 'invalid_assessment'],
+    ['a product list that is not a list', { productIds: 'x' }, {}, 'invalid_products'],
+    ['a product id that is not a uuid', { productIds: [P_HERB, 'nope'] }, {}, 'invalid_products'],
+    ['more than 40 products', { productIds: Array.from({ length: 41 }, (_, n) => uuid(500 + n)) }, {}, 'invalid_products'],
+    ['a product the catalog does not hold', { productIds: [P_HERB, P_GRAN, P_MISSING] }, {}, 'invalid_products'],
+    ['an inactive product (the completion refuses it)', {}, { products_catalog: [herbicide, { ...granular, active: false }] }, 'invalid_products'],
+    ["an assessment that is not this visit's", {}, { lawn_assessments: undefined }, 'not_found'],
+    ['an assessment not yet confirmed', {}, { lawn_assessments: assessmentRow({ confirmed_by_tech: false }) }, 'not_confirmed'],
+    ['a visit that does not exist', {}, { scheduled_services: undefined }, 'not_found'],
+  ])('%s is refused and no call starts', async (_label, extra, tables, reason) => {
+    expect(await run(tablesFor(tables), extra)).toEqual({ ok: false, reason });
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  test('a confirmed assessment the report would reject is refused and no call starts', async () => {
+    history.installedForVisit.mockResolvedValue({ id: uuid(99) });
+    expect(await run(tablesFor())).toEqual({ ok: false, reason: 'not_usable' });
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  test('a visit the sheet cannot complete is refused and no call starts', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ serviceKey: 'lawn_re_service' }));
+    expect(await run(tablesFor())).toEqual({ ok: false, reason: 'not_eligible' });
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  test('the context carries recPrepare only while the gate is on', async () => {
+    buildPlanForService.mockReset().mockResolvedValue(null);
+    expect((await buildLawnFastContext(VISIT, { knex: fakeKnex(tablesFor()) })).recPrepare).toBe(true);
+    delete process.env.GATE_LAWN_REC_PREPARE;
+    expect('recPrepare' in (await buildLawnFastContext(VISIT, { knex: fakeKnex(tablesFor()) }))).toBe(false);
   });
 });
 
