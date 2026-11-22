@@ -24205,8 +24205,10 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // The estimate page's "no visit needed" line (owner 2026-11-22) says Waves measured the home and yard from county records
 // and satellite images. That is true of an estimate only when EVERY service on it is priced that way. So the rule is two
 // exact lists of service identities, the programs priced from the measured property alone: the recurring pest, lawn,
-// tree and shrub, barrier mosquito and termite bait plans, the general one-time pest, lawn and mosquito services, and
-// the termite bait plan's own install charge.
+// barrier mosquito and termite bait plans, the general one-time pest, lawn and mosquito services, and the termite bait
+// plan's own install charge.
+// Tree and shrub is off the list on purpose. Its price is built from a tree count, a palm count and a bed area, and a
+// person often gives those numbers. The engine cannot always tell a number counted on the image from a number stated.
 // A row's identity is its own stored `service`, compared whole. Never its name, label or `key`, and never a part of a
 // key: a name is free text, and the display categories also hold work priced from facts a technician or the customer
 // gives (a palm injection sits under tree and shrub; bed bug rooms, a roach cleanout, a flea package and a stinging
@@ -24227,8 +24229,10 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // says a measured size is large (a large lot, a large pool cage) keeps the answer: a sent estimate has had that review,
 // and a reviewed price from measured sizes is still measured. Every other reason, known or new, takes the answer away:
 // most of them say a size is unsure (stories estimated, a mosquito area nobody verified, an office-entered measurement).
-// The rule is about sizes and counts the price is built from. A fact the customer states that is neither (a roach
-// type, a grass type) is not read: it needs no visit, and the sentence does not speak of it.
+// The rule reads the marks the engine stores on a row. Where the engine stores no mark, the rule cannot tell and does
+// not try: a home size or a lawn size somebody typed is stored like a measured one. A fact the customer states that is
+// no size and no count (a roach type, a grass type) is not read: it needs no visit, and the sentence does not speak
+// of it.
 // Three reads, and each one fails closed (estimateIsRemoteMeasured):
 // 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
 //    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service
@@ -24243,7 +24247,7 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // depth of the saved estimate or of the served price, must pass (rowsThatMustPass). A row container nobody listed here
 // cannot carry a service past the rule.
 // The line is optional copy: a row the rule cannot read gives no line and a warning, never a failed page.
-const REMOTE_MEASURED_RECURRING_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait']);
+const REMOTE_MEASURED_RECURRING_SERVICES = new Set(['pest_control', 'lawn_care', 'mosquito', 'termite_bait']);
 // `termite_bait_installation` is the install charge of the termite bait plan itself: the same station count, from the
 // same measured perimeter.
 const REMOTE_MEASURED_ONE_TIME_SERVICES = new Set(['one_time_pest', 'one_time_lawn', 'one_time_mosquito', 'termite_bait_installation']);
@@ -24295,11 +24299,6 @@ function storedRowHasAnUnsureReview(row) {
   return Boolean(row.requiresManualReview) && reasons.length === 0;
 }
 
-// Tree and shrub priced from a palm count the caller gave: the engine tells it from a count read off the image
-// (`palmCountFromLookup`). It cannot tell the two apart for a tree count, so that one is not read.
-const storedRowHasACallerStatedPalmCount = (row) => row.service === 'tree_shrub' && Number(row.palmCount) > 0
-  && row.palmCountSource === 'service_line' && row.palmCountFromLookup !== true;
-
 // The engine's predicate for a priced row whose price is not exact yet, loaded when first asked.
 let engineDraftBuilder;
 const engineSaysPriceIsNotExact = (row) => {
@@ -24307,11 +24306,10 @@ const engineSaysPriceIsNotExact = (row) => {
   return engineDraftBuilder.lineNeedsReviewBeforeExactPrice(row);
 };
 
-// A priced row: the size marks, the review reasons, a caller-stated palm count, and the engine's predicate (asked with
-// the review marks taken off, because the reasons are read above).
+// A priced row: the size marks, the review reasons, and the engine's predicate (asked with the review marks taken off,
+// because the reasons are read above).
 const storedRowIsNotMeasured = (row) => storedRowHasANotMeasuredSize(row)
   || storedRowHasAnUnsureReview(row)
-  || storedRowHasACallerStatedPalmCount(row)
   || engineSaysPriceIsNotExact({ ...row, requiresManualReview: false, manualReviewReasons: null });
 
 // A stored row passes when it is not a service, or when its stored `service` is on one of the given lists. A commercial

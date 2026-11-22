@@ -7189,8 +7189,10 @@ script line). Copy only: no customer or pricing data. ABSENT unless all of these
 every service row on the estimate is one Waves prices from the measured home and yard alone (`estimateIsRemoteMeasured`
 in `routes/estimate-public.js`). The rule is two exact lists of service identities, not the page's display categories. A
 row's identity is its own stored `service`, compared whole; a name, a label, a `key` or a part of a key never counts.
-Recurring: `pest_control`, `lawn_care`, `tree_shrub`, `mosquito` or `termite_bait`. One-time: `one_time_pest`,
-`one_time_lawn`, `one_time_mosquito` or `termite_bait_installation` (the termite bait plan's own install charge). A row
+Recurring: `pest_control`, `lawn_care`, `mosquito` or `termite_bait`. One-time: `one_time_pest`, `one_time_lawn`,
+`one_time_mosquito` or `termite_bait_installation` (the termite bait plan's own install charge). `tree_shrub` is off
+the list on purpose: its price is built from a tree count, a palm count and a bed area that a person often gives, and
+the engine cannot always tell a counted number from a stated one. A row
 is not a service only by its stored `service`: `waveguard_setup`, `manual_discount`, `rodent_bundle_discount`, or a
 `one_time_adjustment` whose stated `amount` / `price` are readable numbers and none is above zero; an empty row is
 nothing. Every other row must store a listed service, priced or not, must not be commercial, and must not carry one of
@@ -7199,9 +7201,9 @@ the engine's not-measured marks: a dwelling unit priced from the bedroom count t
 `one_time_pest` too); or any mark of the engine's predicate for a priced row whose price is not exact yet
 (`lineNeedsReviewBeforeExactPrice` in `estimator-engine/draft-builder.js`: a fallback footprint, a low
 `pricingConfidence`, a heuristic or low-grade turf size, `requiresMeasurement`, `quoteRequired`, a custom quote flag,
-tree and shrub priced with no tree count); or a mosquito area taken from a lot-category proxy (`missingAreaData:
-true`); or a tree and shrub row priced from a palm count the caller gave (`palmCountSource: 'service_line'` without
-`palmCountFromLookup: true`). The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
+a row priced with no count on record); or a mosquito area taken from a lot-category proxy (`missingAreaData: true`).
+The rule reads the marks the engine stores on a row; where the engine stores no mark (a home size or a lawn size
+somebody typed is stored like a measured one), the rule cannot tell and does not try. The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
 its reasons. Only a reason that says a measured size is large keeps the key (`large_lot`,
 `pest_large_lot_manual_review`, `large_pool_cage`, `pest_large_or_oversized_pool_cage`): a reviewed price from measured
 sizes is still measured. Every other reason, a reason that is not text, and a review mark with no reason take the key
@@ -7224,8 +7226,8 @@ sections (the recurring list); `pricing.oneTimeBreakdown.items[]`, the quote-req
 `setupFee`, `rodentBaitSetupFee`, `mistingInstallFee` and each section's `oneTimeContribution.items[]` and `setupFee`
 (the one-time list); and then every row that stores a `service` or a not-measured size mark at any depth of the price
 (either list). One row off its
-list (rodent work, a misting system, foam, trenching, pre-slab, Bora-Care, a WDO inspection, traps, a palm injection, a
-bed bug, roach, flea or stinging insect job, a first-visit cockroach treatment, a termite station rental or bond row, an
+list (tree and shrub, rodent work, a misting system, foam, trenching, pre-slab, Bora-Care, a WDO inspection, traps, a palm
+injection, a bed bug, roach, flea or stinging insect job, a first-visit cockroach treatment, a termite station rental or bond row, an
 area add-on, a row with a name, a key or a price and no stored `service`, a stored `service` that is not text), no service
 row at all, or a failed replay, and the key is absent; a row the rule cannot read gives no key and a warning, never a
 failed response); and the estimate email's rule reads the row as a home

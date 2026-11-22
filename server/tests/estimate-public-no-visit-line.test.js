@@ -152,11 +152,29 @@ describe('serviceMixIsRemoteMeasured: is every service on the estimate priced fr
   const lawn = recurringRow('lawn_care');
   const oneTimePest = { service: 'one_time_pest', name: 'One-Time Pest Control', amount: 199 };
 
-  test('the recurring pest, lawn, tree and shrub, mosquito and termite bait plans are, alone or together', () => {
-    for (const key of ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait']) {
+  test('the recurring pest, lawn, mosquito and termite bait plans are, alone or together', () => {
+    for (const key of ['pest_control', 'lawn_care', 'mosquito', 'termite_bait']) {
       expect([key, serviceMixIsRemoteMeasured([recurringRow(key)], [])]).toEqual([key, true]);
     }
     expect(serviceMixIsRemoteMeasured([pest, lawn, recurringRow('mosquito')], [])).toBe(true);
+  });
+
+  test('tree and shrub is off the list: its price uses a tree count, a palm count and a bed area a person often gives', () => {
+    expect(serviceMixIsRemoteMeasured([recurringRow('tree_shrub')], [])).toBe(false);
+    expect(serviceMixIsRemoteMeasured([pest, lawn, recurringRow('tree_shrub')], [])).toBe(false);
+    // On the real engine, whatever the source of its counts: a density from the image, a count somebody stated, a
+    // palm count somebody stated, a palm count read off the image.
+    const yard = { homeSqFt: 2000, lotSqFt: 8000, treeDensity: 'moderate', shrubDensity: 'moderate' };
+    for (const treeShrub of [{}, { treeCount: 3 }, { palmCount: 4 }, { palmCount: 4, palmCountFromLookup: true }]) {
+      const label = JSON.stringify(treeShrub);
+      const inputs = { ...yard, services: { pest: { frequency: 'quarterly' }, treeShrub: { tier: 'standard', ...treeShrub } } };
+      expect([label, generateEstimate(inputs).lineItems.some((line) => line.service === 'tree_shrub')]).toEqual([label, true]);
+      expect([label, estimateIsRemoteMeasured({ engineInputs: inputs }, {})]).toEqual([label, false]);
+    }
+    // The same home with pest control alone keeps the answer.
+    expect(estimateIsRemoteMeasured({ engineInputs: { ...yard, services: { pest: { frequency: 'quarterly' } } } }, {})).toBe(true);
+    // A tree and shrub row only the served price holds takes the answer away too.
+    expect(estimateIsRemoteMeasured({ result: { recurring: { services: [recurringRow('pest_control')] } } }, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'tree_shrub' }] }] })).toBe(false);
   });
 
   test('the general one-time pest, lawn and mosquito services are, alone or beside a plan', () => {
@@ -562,9 +580,6 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
       expect([label, estimateIsRemoteMeasured(pestLine(marks), {})]).toEqual([label, false]);
       expect([label, estimateIsRemoteMeasured({ result: plan('pest_control') }, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', ...marks }] }] })]).toEqual([label, false]);
     }
-    // Tree and shrub priced with no tree count and no density data.
-    expect(estimateIsRemoteMeasured({ result: { ...plan('tree_shrub'), lineItems: [{ service: 'tree_shrub', monthly: 50, treeCountSource: 'default_zero' }] } }, {})).toBe(false);
-    expect(estimateIsRemoteMeasured({ result: { ...plan('tree_shrub'), lineItems: [{ service: 'tree_shrub', monthly: 50, treeCountSource: 'property_density' }] } }, {})).toBe(true);
     // The office's review of a price, read by its reasons. A measured size that is large keeps the answer.
     for (const manualReviewReasons of [['large_lot', 'pest_large_lot_manual_review'], ['large_pool_cage', 'pest_large_or_oversized_pool_cage'], ['large_lot'], 'large_lot']) {
       const label = JSON.stringify(manualReviewReasons);
@@ -589,7 +604,7 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', manualReviewReasons: ['large_lot'] }] }] })).toBe(true);
   });
 
-  test('a mosquito area nobody measured, and a palm count the caller gave, on the real engine', () => {
+  test('a mosquito area nobody measured, on the real engine', () => {
     const lineOf = (inputs, service) => generateEstimate(inputs).lineItems.find((line) => line.service === service);
     const ruleFor = (inputs) => estimateIsRemoteMeasured({ engineInputs: inputs }, {});
     const home = { homeSqFt: 2000, lotSqFt: 8000 };
@@ -613,17 +628,6 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured({ result: { ...plan('mosquito'), lineItems: [{ service: 'mosquito', monthly: 80, missingAreaData: true }] } }, {})).toBe(false);
     expect(estimateIsRemoteMeasured({ result: plan('mosquito') }, { oneTimeBreakdown: { items: [{ service: 'one_time_mosquito', amount: 150, missingAreaData: true }] } })).toBe(false);
 
-    // Tree and shrub: no palms, palms the caller counted, palms read off the image.
-    const yard = { ...home, treeDensity: 'moderate', shrubDensity: 'moderate' };
-    const treeShrub = (service) => ({ ...yard, services: { treeShrub: { tier: 'standard', ...service } } });
-    expect(ruleFor(treeShrub({}))).toBe(true);
-    expect(lineOf(treeShrub({ palmCount: 4 }), 'tree_shrub')).toMatchObject({ palmCount: 4, palmCountSource: 'service_line' });
-    expect(lineOf(treeShrub({ palmCount: 4 }), 'tree_shrub').palmCountFromLookup).not.toBe(true);
-    expect(ruleFor(treeShrub({ palmCount: 4 }))).toBe(false);
-    expect(lineOf(treeShrub({ palmCount: 4, palmCountFromLookup: true }), 'tree_shrub')).toMatchObject({ palmCount: 4, palmCountFromLookup: true });
-    expect(ruleFor(treeShrub({ palmCount: 4, palmCountFromLookup: true }))).toBe(true);
-    // A palm count on a row that is not tree and shrub is not this mark.
-    expect(estimateIsRemoteMeasured({ result: { ...plan('pest_control'), lineItems: [{ service: 'pest_control', monthly: 40, palmCount: 4, palmCountSource: 'service_line' }] } }, {})).toBe(true);
   });
 
   test('a saved amount is not a service row: the saved estimate must store one', () => {
