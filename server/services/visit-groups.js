@@ -2688,6 +2688,30 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
                   : await t('scheduled_services').where({ id: target.id }).first('id', 'service_type', 'technician_id');
                 await options.moveGuard({ trx: t, technicianId: options.technicianId, service: memberRow || { id: target.id } });
               }
+              // GATE_TECH_SHIFT_HOURS (D4 part 3b-2b): the plan judged this
+              // member on the destination technician under the stop lock, and
+              // the member's own move pinned the judged length through that
+              // write only. The assignment is this later transaction, so the
+              // member is judged again here as it now stands, on a locked
+              // read: a dispatch edit of its day, hours or length that landed
+              // since is seen, and one that comes later waits for this commit.
+              // The row's own technician-day is locked first (advisory locks
+              // before row locks; assignDispatchJob takes the same pair).
+              // Outside the shift: the row stays moved on its old technician
+              // and is reported failed, as a clash above is. Only a member the
+              // plan judged: the office's own move and the gate off judge
+              // none, so they take no lock and make no read here.
+              if (Object.prototype.hasOwnProperty.call(plan.shiftJudgedLengths, target.id)) {
+                await require('./scheduling/tech-day-lock').lockTechDays(t, [{ techId: target.expect.technician_id || null, date: newDateStr }]);
+                const standing = await t('scheduled_services').where({ id: target.id }).forUpdate()
+                  .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+                const shiftOf = standing ? await require('./technician-eligibility').loadTechShifts(t, { technicianIds: [String(options.technicianId)] }) : null;
+                if (standing && memberOutsideShift(shiftOf, dateOnly(standing.scheduled_date) || newDateStr, [{
+                  id: target.id, technicianId: options.technicianId, start: standing.window_start, end: standing.window_end, durationMinutes: standing.estimated_duration_minutes,
+                }]) != null) {
+                  throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), { statusCode: 409, status: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: target.id });
+                }
+              }
             }
             await alignMemberTechnician(t, target.id, options.technicianId || null, {
               skipVisitSeam: true,

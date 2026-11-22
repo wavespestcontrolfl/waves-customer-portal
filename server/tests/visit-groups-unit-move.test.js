@@ -1286,6 +1286,71 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       expect((await unit(fakeRebooker(), '10:00-11:00', 'auto_dispatch', { technicianId: 't9' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
     });
 
+    // A unit that names a technician assigns each member in a later write of its own, after the
+    // member's move. The plan's verdict and the move's length pin do not reach that write.
+    describe('the assignment to a named technician', () => {
+      // The member's locked read at its assignment: the row as it now stands.
+      const withStanding = (standing, landedRows) => {
+        const base = script({ members: pair(), landed: landedRows });
+        db.__script = { ...base, scheduled_services: { ...base.scheduled_services,
+          first: (ops, cols) => (ops.some((o) => o[0] === 'forUpdate') && cols.includes('estimated_duration_minutes')
+            ? standing[ops.find((o) => o[0] === 'where')[1].id] || null : null) } };
+      };
+      const row = (start, end, over = {}) => ({ scheduled_date: '2026-09-02', window_start: start, window_end: end, estimated_duration_minutes: 60, ...over });
+      const split = [{ ...landed('10:00', '11:00')[0], technician_id: 't1' }, { ...landed('10:00', '11:00')[1], technician_id: 't9' }];
+      const lockedReads = () => db.__calls.filter((c) => c.table === 'scheduled_services' && c.op === 'first'
+        && c.ops.some((o) => o[0] === 'forUpdate') && c.cols.includes('estimated_duration_minutes'));
+      const toT9 = (by = 'auto_dispatch', technicianId = 't9') => unit(fakeRebooker(), '10:00-11:00', by, { technicianId });
+      beforeEach(() => { jest.clearAllMocks(); db.__calls.length = 0; db.__rawCalls.length = 0; });
+
+      test('a member made longer after its move is not assigned: it is judged again on a locked read, and the others go on', async () => {
+        // t9 stops at 12:00. The plan judged a at 10:00 and b at 11:00, an hour each. a is now a four-hour job.
+        withStanding({ a: row('10:00', '11:00', { estimated_duration_minutes: 240 }), b: row('11:00', '12:00') }, split);
+        const out = await toT9();
+        expect(out.visitMove.moved).toEqual(['a', 'b']);
+        expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'SLOT_TAKEN', movedButUnassigned: true })]);
+        expect(assignDispatchJob.mock.calls.map((c) => c[0].jobId)).toEqual(['b']);
+        expect(lockedReads().map((c) => c.ops.find((o) => o[0] === 'where')[1].id)).toEqual(['a', 'b']);
+        // The member's own technician-day is locked before its row: advisory locks first.
+        expect(db.__rawCalls.some((c) => c[1][0] === 'slot-reserve' && c[1][1] === 't1:2026-09-02')).toBe(true);
+        // The second verdict is on the named technician alone.
+        expect(loadTechShifts.mock.calls.slice(1).map((c) => c[1])).toEqual([{ technicianIds: ['t9'] }, { technicianIds: ['t9'] }]);
+      });
+
+      test('the row is judged as it now stands: its own hours and its own day', async () => {
+        // Dispatch moved a to 11:30 after its move: it would end at 12:30 on t9.
+        withStanding({ a: row('11:30', '12:30'), b: row('11:00', '12:00') }, split);
+        expect((await toT9()).visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'SLOT_TAKEN' })]);
+        // Dispatch moved a to a day t9 has no set hours: no shift judges it there.
+        jest.clearAllMocks(); db.__calls.length = 0;
+        loadTechShifts.mockImplementation(async () => (id, date) => (date === '2026-09-02' ? shifts[id] || null : null));
+        withStanding({ a: row('11:30', '12:30', { scheduled_date: '2026-09-03' }), b: row('11:00', '12:00') }, landed('10:00', '11:00', 't9'));
+        expect((await toT9()).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(assignDispatchJob.mock.calls.map((c) => c[0].jobId)).toEqual(['a', 'b']);
+      });
+
+      test('a row that still fits is assigned, an end at the shift end included', async () => {
+        withStanding({ a: row('10:00', '11:00', { estimated_duration_minutes: 120 }), b: row('11:00', '12:00') }, landed('10:00', '11:00', 't9'));
+        expect((await toT9()).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(assignDispatchJob.mock.calls.map((c) => c[0].jobId)).toEqual(['a', 'b']);
+      });
+
+      test('no second verdict, no lock and no read: the office\'s own move, a technician without set hours, the gate off', async () => {
+        const late = { a: row('10:00', '11:00', { estimated_duration_minutes: 240 }), b: row('11:00', '12:00') };
+        withStanding(late, landed('10:00', '11:00', 't9'));
+        expect((await toT9('admin')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(loadTechShifts).not.toHaveBeenCalled();
+        withStanding(late, landed('10:00', '11:00', 't7'));
+        expect((await toT9('auto_dispatch', 't7')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        loadTechShifts.mockRestore();
+        withStanding(late, landed('10:00', '11:00', 't9'));
+        expect((await toT9()).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(lockedReads()).toEqual([]);
+        expect(db.__rawCalls.some((c) => c[1][0] === 'slot-reserve' && c[1][1] === 't1:2026-09-02')).toBe(false);
+        expect(assignDispatchJob).toHaveBeenCalledTimes(6);
+      });
+    });
+
     test('a member with no technician is not judged', async () => {
       db.__script = script({ members: pair({ technician_id: null }), landed: [landed('14:00', '15:00')[0], { ...landed('14:00', '15:00')[1], technician_id: null }] });
       const rebooker = fakeRebooker();

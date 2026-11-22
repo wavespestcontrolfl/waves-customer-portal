@@ -344,6 +344,48 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
         expect(await rowOf(stop.b)).toMatchObject(whereSeeded[1]);
       });
 
+      // A unit that names a technician moves each service on its old technician, then assigns it in a
+      // later write of its own. The edit lands on another connection inside that assignment (the
+      // caller's own guard hook), after the service's move and before the assignment's locked read.
+      describe('a unit that names a technician', () => {
+        const lengthenAtAssignment = (id) => async ({ service }) => {
+          if (String(service.id) === id && (await rowOf(id)).day === nextDay) await f.db('scheduled_services').where({ id }).update({ estimated_duration_minutes: 240 });
+        };
+        const toOtherTech = (stop, moveGuard) => move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'auto_dispatch',
+          { overlapAdvisory: true, technicianId: f.ids.otherTech, ...(moveGuard ? { moveGuard } : {}) });
+        // The fixture's stand-in for the technician cards lacks the "visit moved" card, which a refused assignment sends to the technician who keeps the service.
+        beforeAll(() => { require('../services/tech-visit-notifications').notifyVisitRescheduled = jest.fn(); });
+        beforeEach(() => f.db('technicians').where({ id: f.ids.otherTech }).update({ shift_start: '08:00', shift_end: '12:00' }));
+        afterEach(() => f.db('technicians').where({ id: f.ids.otherTech }).update({ shift_start: null, shift_end: null }));
+
+        test('no edit: both services move and go to the named technician', async () => {
+          const stop = await seedStop();
+          expect((await toOtherTech(stop)).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+          expect(await stopOf(stop)).toMatchObject([
+            { day: nextDay, window_start: '10:00:00', technician_id: f.ids.otherTech },
+            { day: nextDay, window_start: '11:00:00', technician_id: f.ids.otherTech },
+          ]);
+        });
+
+        test('a service made longer after its move is not assigned to the named technician; the move reports it', async () => {
+          const stop = await seedStop();
+          // 10:00 for 240 minutes ends at 14:00, after the named technician's 12:00 shift end.
+          const out = await toOtherTech(stop, lengthenAtAssignment(stop.a));
+          expect(out.visitMove.failed).toMatchObject([{ id: stop.a, code: 'SLOT_TAKEN', movedButUnassigned: true }]);
+          expect(await stopOf(stop)).toMatchObject([
+            { day: nextDay, window_start: '10:00:00', technician_id: f.ids.technician },
+            { day: nextDay, window_start: '11:00:00', technician_id: f.ids.otherTech },
+          ]);
+        });
+
+        test('gate off: the same edit does not stop the assignment, as before', async () => {
+          delete process.env.GATE_TECH_SHIFT_HOURS;
+          const stop = await seedStop();
+          expect((await toOtherTech(stop, lengthenAtAssignment(stop.a))).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+          expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
+        });
+      });
+
       test('gate off: the same edits do not stop the move, as before', async () => {
         delete process.env.GATE_TECH_SHIFT_HOURS;
         const first = await seedStop();
