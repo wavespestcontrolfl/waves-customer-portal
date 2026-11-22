@@ -3,7 +3,7 @@
  * up. The map answer shapes (features, { error }, cut off) follow what the county layer returns.
  */
 const {
-  parseLegal, parcelWhere, queryParcels, ownerRelation, chooseParcel,
+  parseLegal, parcelWhere, queryParcels, sellerOwns, chooseParcel,
 } = require('../services/mail/deed-parcel-match');
 
 describe('parseLegal', () => {
@@ -53,30 +53,26 @@ describe('parcelWhere', () => {
   });
 });
 
-describe('ownerRelation', () => {
+describe('sellerOwns', () => {
   const sellers = ['EXAMPLE BUILDERS LLC'];
   const owned = (ownerName, ownerName2 = null) => ({ ownerName, ownerName2 });
   test.each([
-    ['the same text', owned('EXAMPLE BUILDERS LLC'), sellers, 'same'],
-    ['signs and spaces differ', owned('M/I HOMES OF SAMPLETON, L.L.C.'), ['M I HOMES OF SAMPLETON LLC'], 'same'],
-    ['the seller in the second field', owned('EXAMPLE LAND TRUST', 'EXAMPLE BUILDERS LLC'), sellers, 'same'],
-    ['the second of two sellers', owned('OTHER BUILDERS INC'), ['EXAMPLE BUILDERS LLC', 'OTHER BUILDERS INC'], 'same'],
-    ['another owner', owned('TESTER ALEX J', 'TESTER SAM K'), sellers, 'other'],
-    ['a longer name that starts with the seller\'s', owned('SAMPLE HOMESTEAD LLC'), ['SAMPLE HOMES'], 'unclear'],
-    ['a shorter form of the seller\'s name', owned('EXAMPLE BUILDERS'), sellers, 'unclear'],
-    ['a look-alike in the second field only', owned('TESTER ALEX J', 'EXAMPLE BUILDERS LLC OF SAMPLETON'), sellers, 'unclear'],
-    ['an accent on the deed only', owned('GARCIA HOMES LLC'), ['GARC\u00CDA HOMES LLC'], 'same'],
-    ['an accent as a separate mark', owned('GARCI\u0301A HOMES LLC'), ['GARCIA HOMES LLC'], 'same'],
-    ['a seller name with a letter that cannot be compared', owned('TESTER ALEX J'), ['S\u00D8REN HOMES LLC'], 'unclear'],
-    ['an owner name with a letter that cannot be compared', owned('S\u00D8REN HOMES LLC', 'TESTER ALEX J'), sellers, 'unclear'],
-    ['the seller exactly, next to a name that cannot be compared', owned('S\u00D8REN HOMES LLC', 'EXAMPLE BUILDERS LLC'), sellers, 'same'],
-    ['no owner on the map', owned(null), sellers, 'unclear'],
-    ['an owner of signs only', owned(' - ', ''), sellers, 'unclear'],
-    ['no seller to compare', owned('TESTER ALEX J'), [], 'unclear'],
-    ['a seller of signs only', owned('TESTER ALEX J'), ['-', ''], 'unclear'],
-    ['no seller list', owned('TESTER ALEX J'), undefined, 'unclear'],
+    ['the same text', owned('EXAMPLE BUILDERS LLC'), sellers, true],
+    ['signs and spaces differ', owned('M/I HOMES OF SAMPLETON, L.L.C.'), ['M I HOMES OF SAMPLETON LLC'], true],
+    ['& on the map, AND on the deed', owned('A & B HOMES LLC'), ['A AND B HOMES LLC'], true],
+    ['an accent on the deed only', owned('GARCIA HOMES LLC'), ['GARC\u00CDA HOMES LLC'], true],
+    ['an accent on the map, as a separate mark', owned('GARCI\u0301A HOMES LLC'), ['GARCIA HOMES LLC'], true],
+    ['the seller in the second field', owned('EXAMPLE LAND TRUST', 'EXAMPLE BUILDERS LLC'), sellers, true],
+    ['the second of two sellers', owned('OTHER BUILDERS INC'), ['EXAMPLE BUILDERS LLC', 'OTHER BUILDERS INC'], true],
+    ['another owner', owned('TESTER ALEX J', 'TESTER SAM K'), sellers, false],
+    ['a longer name that starts with the seller\'s', owned('SAMPLE HOMESTEAD LLC'), ['SAMPLE HOMES'], false],
+    ['a shorter form of the seller\'s name', owned('EXAMPLE BUILDERS'), sellers, false],
+    ['no owner on the map', owned(null), sellers, false],
+    ['an owner of signs only, a seller of signs only', owned(' - ', ''), ['-', ''], false],
+    ['no seller list', owned('EXAMPLE BUILDERS LLC'), undefined, false],
+    ['two names with a letter that cannot be compared', owned('S\u00D8REN HOMES LLC'), ['S\u00D8REN HOMES LLC'], false],
   ])('%s', (_name, parcel, sellerNames, expected) => {
-    expect(ownerRelation(parcel, sellerNames)).toBe(expected);
+    expect(sellerOwns(parcel, sellerNames)).toBe(expected);
   });
 });
 
@@ -84,128 +80,71 @@ describe('chooseParcel', () => {
   const sellerNames = ['EXAMPLE BUILDERS LLC'];
   const parcel = (parid, ownerName, ownerName2 = null) => ({ parid, ownerName, ownerName2, addressLine1: `${parid.slice(-3)} EXAMPLE TRL` });
   const permit = (no) => ({ permit_no: no });
+  const AMBIGUOUS = { status: 'ambiguous' };
 
   test('no parcels', () => {
     expect(chooseParcel({ sellerNames, parcels: [], permitsByParid: {} })).toEqual({ status: 'no_parcel' });
+    expect(chooseParcel({ sellerNames, parcels: undefined, permitsByParid: {} })).toEqual({ status: 'no_parcel' });
   });
-  test('one parcel owned by the seller with a permit: owner_permit', () => {
+  test('no parcel with a new-home permit: no_permit (the seller\'s name on a parcel is not enough)', () => {
+    const p = parcel('100000001', 'EXAMPLE BUILDERS LLC');
+    expect(chooseParcel({ sellerNames, parcels: [p], permitsByParid: {} })).toEqual({ status: 'no_permit' });
+    expect(chooseParcel({ sellerNames, parcels: [p, parcel('100000002', 'TESTER ALEX J')], permitsByParid: undefined })).toEqual({ status: 'no_permit' });
+  });
+  test('one parcel with a permit under the seller\'s name: owner_permit', () => {
     const p = parcel('100000001', 'EXAMPLE BUILDERS LLC');
     expect(chooseParcel({ sellerNames, parcels: [p], permitsByParid: { 100000001: permit('A') } }))
       .toEqual({ status: 'matched', basis: 'owner_permit', parcel: p, permit: permit('A') });
   });
-  test('two parcels with permits, one owned by the seller: the owned one', () => {
-    const owned = parcel('100000001', 'EXAMPLE BUILDERS LLC');
-    const other = parcel('100000002', 'SOMEONE ELSE LLC');
-    const res = chooseParcel({ sellerNames, parcels: [other, owned], permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } });
-    expect(res).toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: owned });
-  });
-  test('one parcel with a permit, owner already changed, no parcel under the seller: permit basis', () => {
+  test('the only parcel of the answer has a permit and another owner: permit basis', () => {
+    for (const owner of ['TESTER ALEX J', 'EXAMPLE BUILDERS', null, 'S\u00D8REN HOMES LLC']) {
+      const p = parcel('100000001', owner);
+      expect(chooseParcel({ sellerNames, parcels: [p], permitsByParid: { 100000001: permit('A') } }))
+        .toEqual({ status: 'matched', basis: 'permit', parcel: p, permit: permit('A') });
+    }
     const p = parcel('100000001', 'TESTER ALEX J');
-    const noPermit = parcel('100000002', 'SOMEONE ELSE LLC');
-    const res = chooseParcel({ sellerNames, parcels: [p, noPermit], permitsByParid: { 100000001: permit('A') } });
-    expect(res).toMatchObject({ status: 'matched', basis: 'permit', parcel: p });
+    expect(chooseParcel({ sellerNames: [], parcels: [p], permitsByParid: { 100000001: permit('A') } })).toMatchObject({ status: 'matched', basis: 'permit' });
   });
-  test('the permit is on another owner\'s parcel and the seller still owns a different one: ambiguous', () => {
-    const permitted = parcel('100000001', 'TESTER ALEX J');
-    const sellers = parcel('100000002', 'EXAMPLE BUILDERS LLC');
-    for (const parcels of [[permitted, sellers], [sellers, permitted]]) {
-      expect(chooseParcel({ sellerNames, parcels, permitsByParid: { 100000001: permit('A') } })).toEqual({ status: 'ambiguous' });
+  test('several phases, one permit, on the parcel under the seller\'s name: owner_permit, in either order', () => {
+    const home = parcel('100000001', 'EXAMPLE BUILDERS LLC');
+    const others = [parcel('100000002', 'TESTER ALEX J'), parcel('100000003', null), parcel('100000004', 'EXAMPLE BUILDERS LLC'), parcel('100000005', 'SAMPLE HOMESTEAD LLC')];
+    for (const parcels of [[home, ...others], [...others, home]]) {
+      expect(chooseParcel({ sellerNames, parcels, permitsByParid: { 100000001: permit('A') } }))
+        .toEqual({ status: 'matched', basis: 'owner_permit', parcel: home, permit: permit('A') });
     }
   });
-  test('the seller owns two phases and only one has a permit: that one, owner_permit', () => {
-    const built = parcel('100000001', 'EXAMPLE BUILDERS LLC');
-    const vacant = parcel('100000002', 'EXAMPLE BUILDERS LLC');
-    const res = chooseParcel({ sellerNames, parcels: [vacant, built], permitsByParid: { 100000001: permit('A') } });
-    expect(res).toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: built });
+  test('the seller in the second owner field counts', () => {
+    const home = parcel('100000001', 'EXAMPLE LAND TRUST', 'EXAMPLE BUILDERS LLC');
+    expect(chooseParcel({ sellerNames, parcels: [home, parcel('100000002', 'TESTER ALEX J')], permitsByParid: { 100000001: permit('A') } }))
+      .toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: home });
   });
-  test('parcels without a new-home permit: no_permit (a parcel owned by the seller is not enough)', () => {
-    const p = parcel('100000001', 'EXAMPLE BUILDERS LLC');
-    expect(chooseParcel({ sellerNames, parcels: [p], permitsByParid: {} })).toEqual({ status: 'no_permit' });
+  test('several phases, and the one permit is not on a parcel under the seller\'s exact name: ambiguous', () => {
+    const permitsByParid = { 100000001: permit('A') };
+    // The seller still holds this lot number in another phase; the permit is on another owner's parcel.
+    expect(chooseParcel({ sellerNames, parcels: [parcel('100000001', 'TESTER ALEX J'), parcel('100000002', 'EXAMPLE BUILDERS LLC')], permitsByParid })).toEqual(AMBIGUOUS);
+    // No parcel is under the seller's name: nothing says which phase the deed means.
+    expect(chooseParcel({ sellerNames, parcels: [parcel('100000001', 'TESTER ALEX J'), parcel('100000002', 'SAMPLE PAT Q')], permitsByParid })).toEqual(AMBIGUOUS);
+    // A name that only looks like the seller's is not proof.
+    expect(chooseParcel({ sellerNames: ['SAMPLE HOMES'], parcels: [parcel('100000001', 'SAMPLE HOMESTEAD LLC'), parcel('100000002', 'TESTER ALEX J')], permitsByParid })).toEqual(AMBIGUOUS);
+    expect(chooseParcel({ sellerNames: [], parcels: [parcel('100000001', 'TESTER ALEX J'), parcel('100000002', 'SAMPLE PAT Q')], permitsByParid })).toEqual(AMBIGUOUS);
   });
-  test('two with permits, none owned by the seller: ambiguous', () => {
-    const parcels = [parcel('100000001', 'A PERSON'), parcel('100000002', 'B PERSON')];
-    expect(chooseParcel({ sellerNames, parcels, permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } }))
-      .toEqual({ status: 'ambiguous' });
-  });
-  test('two with permits, both owned by the seller: ambiguous', () => {
-    const parcels = [parcel('100000001', 'EXAMPLE BUILDERS LLC'), parcel('100000002', 'EXAMPLE BUILDERS LLC')];
-    expect(chooseParcel({ sellerNames, parcels, permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } }))
-      .toEqual({ status: 'ambiguous' });
-  });
-  test('the seller in the second owner field counts as the seller\'s parcel', () => {
-    const owned = parcel('100000001', 'EXAMPLE LAND TRUST', 'EXAMPLE BUILDERS LLC');
-    expect(chooseParcel({ sellerNames, parcels: [owned, parcel('100000002', 'X PERSON')], permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } }))
-      .toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: owned });
-    // The permit is on another owner's parcel; the seller still holds this lot in another phase, in field 2.
-    const permitted = parcel('100000003', 'TESTER ALEX J');
-    expect(chooseParcel({ sellerNames, parcels: [permitted, parcel('100000004', 'EXAMPLE LAND TRUST', 'EXAMPLE BUILDERS LLC')], permitsByParid: { 100000003: permit('A') } }))
-      .toEqual({ status: 'ambiguous' });
-  });
-  test('owner_permit needs an owner on the map for every other parcel with a permit', () => {
-    const owned = parcel('100000001', 'EXAMPLE BUILDERS LLC');
+  test('two parcels with a permit are always ambiguous, whoever the map names as owner', () => {
     const both = { 100000001: permit('A'), 100000002: permit('B') };
-    // The same lot in another phase also has a permit, and the map names no owner for it: the seller could own both.
-    for (const unknown of [parcel('100000002', null), parcel('100000002', '', ''), parcel('100000002', ' ', '-')]) {
-      for (const parcels of [[owned, unknown], [unknown, owned]]) {
-        expect(chooseParcel({ sellerNames, parcels, permitsByParid: both })).toEqual({ status: 'ambiguous' });
+    const sellers = parcel('100000001', 'EXAMPLE BUILDERS LLC');
+    const rivals = ['TESTER ALEX J', 'EXAMPLE BUILDERS LLC', 'EXAMPLE BUILDERS LLC OF SAMPLETON', 'A AND B HOMES LLC', 'OTHER BUILDERS LLC', null, '', ' - '];
+    for (const owner of rivals) {
+      const rival = parcel('100000002', owner);
+      for (const parcels of [[sellers, rival], [rival, sellers]]) {
+        expect(chooseParcel({ sellerNames, parcels, permitsByParid: both })).toEqual(AMBIGUOUS);
       }
     }
-    // Without a permit that parcel cannot be the home, so its unknown owner changes nothing.
-    expect(chooseParcel({ sellerNames, parcels: [owned, parcel('100000002', null)], permitsByParid: { 100000001: permit('A') } }))
-      .toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: owned });
+    // A rival whose second owner field was the seller is covered by the same rule.
+    expect(chooseParcel({ sellerNames, parcels: [sellers, parcel('100000002', 'TESTER ALEX J', 'EXAMPLE BUILDERS LLC')], permitsByParid: both })).toEqual(AMBIGUOUS);
   });
-  test('permit basis needs an owner on the map for every other parcel', () => {
-    const permitted = parcel('100000001', 'TESTER ALEX J');
-    const permitsByParid = { 100000001: permit('A') };
-    for (const unknown of [parcel('100000002', null), parcel('100000002', ''), parcel('100000002', '  '), parcel('100000002', '-')]) {
-      expect(chooseParcel({ sellerNames, parcels: [permitted, unknown], permitsByParid })).toEqual({ status: 'ambiguous' });
-    }
-    // The second field alone is an owner.
-    expect(chooseParcel({ sellerNames, parcels: [permitted, parcel('100000002', null, 'SOMEONE ELSE LLC')], permitsByParid }))
-      .toMatchObject({ status: 'matched', basis: 'permit', parcel: permitted });
-  });
-  test('permit basis needs a seller name to compare when there is another parcel', () => {
-    const permitted = parcel('100000001', 'TESTER ALEX J');
-    const other = parcel('100000002', 'SOMEONE ELSE LLC');
-    const permitsByParid = { 100000001: permit('A') };
-    for (const noSeller of [[], [''], ['-'], undefined]) {
-      expect(chooseParcel({ sellerNames: noSeller, parcels: [permitted, other], permitsByParid })).toEqual({ status: 'ambiguous' });
-    }
-    // One parcel alone is the lot the deed names: its permit is enough.
-    expect(chooseParcel({ sellerNames: [], parcels: [permitted], permitsByParid })).toMatchObject({ status: 'matched', basis: 'permit', parcel: permitted });
-    expect(chooseParcel({ sellerNames, parcels: [parcel('100000001', null)], permitsByParid })).toMatchObject({ status: 'matched', basis: 'permit' });
-  });
-  test('a name that only starts like the seller\'s is not the seller: no owner_permit from it', () => {
-    // Deed seller SAMPLE HOMES; the map has SAMPLE HOMESTEAD LLC on one of two parcels with permits.
-    const lookAlike = parcel('100000001', 'SAMPLE HOMESTEAD LLC');
-    const other = parcel('100000002', 'TESTER ALEX J');
-    const both = { 100000001: permit('A'), 100000002: permit('B') };
-    expect(chooseParcel({ sellerNames: ['SAMPLE HOMES'], parcels: [lookAlike, other], permitsByParid: both })).toEqual({ status: 'ambiguous' });
-    // One parcel alone: it is the lot the deed names, so its permit is enough, on the permit basis.
-    expect(chooseParcel({ sellerNames: ['SAMPLE HOMES'], parcels: [lookAlike], permitsByParid: both }))
-      .toMatchObject({ status: 'matched', basis: 'permit', parcel: lookAlike });
-  });
-  test('an accent on the deed does not hide the seller\'s parcel', () => {
-    // The seller still owns this lot in another phase (no permit there); the permit is on another owner's parcel.
-    const sellers = parcel('100000001', 'GARCIA HOMES LLC');
-    const permitted = parcel('100000002', 'TESTER ALEX J');
-    expect(chooseParcel({ sellerNames: ['GARC\u00CDA HOMES LLC'], parcels: [sellers, permitted], permitsByParid: { 100000002: permit('A') } }))
-      .toEqual({ status: 'ambiguous' });
-    expect(chooseParcel({ sellerNames: ['GARC\u00CDA HOMES LLC'], parcels: [sellers, permitted], permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } }))
-      .toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: sellers });
-  });
-  test('a look-alike name on a rival parcel blocks both bases', () => {
-    const lookAlike = parcel('100000002', 'EXAMPLE BUILDERS LLC OF SAMPLETON');
-    const owned = parcel('100000001', 'EXAMPLE BUILDERS LLC');
-    expect(chooseParcel({ sellerNames, parcels: [owned, lookAlike], permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } }))
-      .toEqual({ status: 'ambiguous' });
-    const permitted = parcel('100000003', 'TESTER ALEX J');
-    expect(chooseParcel({ sellerNames, parcels: [permitted, lookAlike], permitsByParid: { 100000003: permit('A') } })).toEqual({ status: 'ambiguous' });
-  });
-  test('one owned with a permit and one not owned with a permit never falls through to the permit basis', () => {
-    const owned = parcel('100000001', 'EXAMPLE BUILDERS LLC');
-    const res = chooseParcel({ sellerNames, parcels: [owned, parcel('100000002', 'X PERSON')], permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } });
-    expect(res.basis).toBe('owner_permit');
+  test('an accent or an "&" on one side does not hide the seller\'s parcel', () => {
+    const home = parcel('100000001', 'GARCIA & SONS HOMES LLC');
+    expect(chooseParcel({ sellerNames: ['GARC\u00CDA AND SONS HOMES LLC'], parcels: [home, parcel('100000002', 'TESTER ALEX J')], permitsByParid: { 100000001: permit('A') } }))
+      .toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: home });
   });
 });
 
@@ -283,6 +222,11 @@ describe('queryParcels', () => {
     const [p] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_OWNER_NAME1: null, PAR_OWNER_NAME2: null, SITUS_ADDRESS: null })] }) });
     expect(p).toMatchObject({ ownerName: null, ownerName2: null, addressLine1: null });
   });
+  test('an owner name with an accent is read, so the comparison can fold it', async () => {
+    const [p] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_OWNER_NAME1: 'GARC\u00CDA HOMES LLC', PAR_OWNER_NAME2: 'GARCI\u0301A HOMES LLC' })] }) });
+    expect(p).toMatchObject({ ownerName: 'GARC\u00CDA HOMES LLC', ownerName2: 'GARCI\u0301A HOMES LLC' });
+    expect(sellerOwns(p, ['GARCIA HOMES LLC'])).toBe(true);
+  });
   test('the second owner field is read', async () => {
     const [p] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_OWNER_NAME1: 'EXAMPLE LAND TRUST', PAR_OWNER_NAME2: ' EXAMPLE BUILDERS LLC ' })] }) });
     expect(p).toMatchObject({ ownerName: 'EXAMPLE LAND TRUST', ownerName2: 'EXAMPLE BUILDERS LLC' });
@@ -349,6 +293,9 @@ describe('queryParcels', () => {
     ['a second owner name with a replacement character', answer({ features: [feature({ PAR_OWNER_NAME2: 'EXAMPLE BUILD\uFFFDRS LLC' })] })],
     ['a parcel with no subdivision', answer({ features: [feature({ PAR_SUBDIV_NAME: null })] })],
     ['an owner name with a replacement character', answer({ features: [feature({ PAR_OWNER_NAME1: 'EXAMPLE BUILD\uFFFDRS LLC' })] })],
+    ['an owner name with a control character', answer({ features: [feature({ PAR_OWNER_NAME1: 'EXAMPLE\u0007BUILDERS LLC' })] })],
+    ['an owner name with a zero-width space', answer({ features: [feature({ PAR_OWNER_NAME1: 'EXAMPLE\u200BBUILDERS LLC' })] })],
+    ['an address with an accent (it would be printed)', answer({ features: [feature({ SITUS_ADDRESS: '101 EXAMPL\u00C9 TRL' })] })],
     ['an address with a no-break space', answer({ features: [feature({ SITUS_ADDRESS: '101\u00A0EXAMPLE TRL' })] })],
     ['an address that is not text', answer({ features: [feature({ SITUS_ADDRESS: 101 })] })],
     ['bytes that are not UTF-8', answer(Buffer.concat([Buffer.from('{"features":[],"x":"'), Buffer.from([0xff]), Buffer.from('"}')]))],

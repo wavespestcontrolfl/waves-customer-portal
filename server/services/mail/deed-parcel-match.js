@@ -7,8 +7,9 @@
  * The parcel map still shows the builder as owner for weeks after the deed, and one lot number exists in several
  * phases of a subdivision, so a lot query often returns 2 to 6 parcels. The new-home permit is the proof that a
  * parcel is a new home (a parcel with no such permit is never matched). The owner on the map says which phase the
- * seller conveyed: when it points at a parcel other than the one with the permit, nothing is matched. When the map
- * cannot say who owns a competing parcel, nothing is matched either.
+ * seller conveyed. A match needs positive proof only: one parcel with a permit, and either the seller's exact name
+ * on it or no other parcel in the answer. Two names that look different prove nothing (spellings vary), so no rule
+ * here reads "this parcel is not the seller's".
  */
 
 const { countyParcelGisDisabled } = require('../property-lookup/county-parcel-gis');
@@ -23,6 +24,9 @@ const RESULT_LIMIT = 25;
 const MAX_BODY_BYTES = 1024 * 1024; // real answers are 1 to 6 KB
 // Every text the map sends for a parcel is plain printable ASCII (measured: A-Z, a-z, 0-9, space and & , - /).
 const PLAIN_TEXT = /^[\x20-\x7E]*$/;
+// An owner name is only compared, never printed, so a letter with an accent may pass (GARCÍA). Still no control
+// character, no replacement character and no other sign.
+const OWNER_TEXT = /^[\x20-\x7E\p{L}\p{M}]*$/u;
 
 const LEGAL_PATTERN = /^LOT ([0-9A-Z]{1,6})(?: (?:BLK|BLOCK) ([0-9A-Z]{1,4}))? ([A-Z0-9][A-Z0-9 &'.-]{2,80})$/;
 // "LOT 1 AND 2 SAMPLE GROVE" and "LOT 3 THRU 5 ..." name several lots: not one home.
@@ -73,10 +77,10 @@ const positiveOrNull = (value) => {
 
 // One text attribute of a parcel: null when the map has none, the trimmed text when it is plain. Anything else (a
 // number, a damaged character) fails the lookup: this text may be printed as an address.
-function textAttr(attrs, key) {
+function textAttr(attrs, key, allowed = PLAIN_TEXT) {
   const value = attrs[key];
   if (value === null || value === undefined) return null;
-  if (typeof value !== 'string' || !PLAIN_TEXT.test(value)) throw new Error(`parcel map sent a ${key} that is not plain text`);
+  if (typeof value !== 'string' || !allowed.test(value)) throw new Error(`parcel map sent a ${key} that is not plain text`);
   return value.trim() || null;
 }
 
@@ -100,8 +104,8 @@ function toParcel(attrs, legal) {
     subdivision: textAttr(attrs, 'PAR_SUBDIV_NAME'),
     lot: textAttr(attrs, 'PAR_SUBDIV_LOT'),
     block: textAttr(attrs, 'PAR_SUBDIV_BLOCK'),
-    ownerName: textAttr(attrs, 'PAR_OWNER_NAME1'),
-    ownerName2: textAttr(attrs, 'PAR_OWNER_NAME2'),
+    ownerName: textAttr(attrs, 'PAR_OWNER_NAME1', OWNER_TEXT),
+    ownerName2: textAttr(attrs, 'PAR_OWNER_NAME2', OWNER_TEXT),
     livingSqft: livingSqft === null ? null : Math.round(livingSqft),
     stories: positiveOrNull(attrs.BLDG_R1_STORIES),
     yearBuilt: yearBuilt === null ? null : Math.round(yearBuilt),
@@ -181,64 +185,44 @@ async function queryParcels(legal, { fetchImpl = fetch, timeoutMs = DEFAULT_TIME
   return parcels.filter((p) => namesSubdivision(p.subdivision, legal.subdivision));
 }
 
-// A name's compare key: accents folded (GARCÍA = GARCIA), then capitals and digits only. '' for no name. null for a
-// name with a letter that is still not plain ASCII: it cannot be compared.
+// A name's compare key: accents folded (GARCÍA = GARCIA), "&" read as AND, then capitals and digits only (the map
+// writes "M/I HOMES OF SARASOTA LLC" where the deed says "M I HOMES OF SARASOTA LLC"). '' for no name and for a name
+// with a letter that is still not plain ASCII: such a name is equal to nothing.
 function nameKey(name) {
-  const folded = String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-  return /[^\x00-\x7F]/.test(folded) ? null : folded.replace(/[^A-Z0-9]/g, '');
+  const folded = String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/&/g, ' AND ');
+  return /[^\x00-\x7F]/.test(folded) ? '' : folded.replace(/[^A-Z0-9]/g, '');
 }
 
-/**
- * How a parcel's owner on the map (two fields) relates to the deed's sellers:
- *   same     a field is a seller's name once accents, signs and spaces are removed (the map writes "M/I HOMES OF
- *            SARASOTA LLC" where the deed says "M I HOMES OF SARASOTA LLC"). Measured on three real days: 64 of 65
- *            parcels still under the seller's name are this form, and the map does not cut names short (240
- *            characters).
- *   unclear  the map names no owner, there is no seller name to compare, a name cannot be compared, or one name
- *            only starts with the other ("SAMPLE HOMES" and "SAMPLE HOMESTEAD LLC", or a short form of the same
- *            company): it may or may not be the seller, so it proves nothing either way.
- *   other    the map names an owner and no field is like a seller's name.
- */
-function ownerRelation(parcel, sellerNames) {
-  const keysOf = (names) => (names || []).map(nameKey).filter((key) => key !== '');
-  const owners = keysOf([parcel.ownerName, parcel.ownerName2]);
-  const sellers = keysOf(sellerNames);
-  const known = (keys) => keys.filter((key) => key !== null);
-  if (known(owners).some((o) => known(sellers).includes(o))) return 'same';
-  if (known(owners).length === 0 || known(sellers).length === 0 || owners.includes(null) || sellers.includes(null)) return 'unclear';
-  const alike = owners.some((o) => sellers.some((s) => o.startsWith(s) || s.startsWith(o)));
-  return alike ? 'unclear' : 'other';
+// True when one of the map's two owner fields is exactly a seller's name (by compare key). Measured on three real
+// days: 64 of 65 parcels still under the seller's name are this form; the map does not cut names short. A spelling
+// that differs more is not the seller's here, and that only ever costs a match.
+function sellerOwns(parcel, sellerNames) {
+  const sellers = new Set((sellerNames || []).map(nameKey).filter(Boolean));
+  return [parcel.ownerName, parcel.ownerName2].map(nameKey).some((key) => key && sellers.has(key));
 }
 
 /**
  * The one new home among the parcels a lot query returned, or why there is none. Only a parcel with a new-home
- * permit can be the home.
- *   owner_permit  exactly one parcel with a permit is the seller's (`same`), and every other parcel with a permit
- *                 is another owner's (`other`).
- *   permit        exactly one parcel has a permit and no parcel at all is the seller's (the map already shows the
- *                 next owner). Every other parcel must be another owner's.
- * An `unclear` parcel could be the seller's, so it never counts as proof. A parcel under the seller's name without
- * a permit, next to a permit on another owner's parcel, is two pieces of evidence that point at different parcels.
- * Both are ambiguous, like every other mix.
+ * permit can be the home, and there must be exactly one.
+ *   owner_permit  that parcel is under the seller's exact name on the map.
+ *   permit        that parcel is the only parcel the query returned: it is the lot the deed names (the map already
+ *                 shows the next owner, or spells the seller another way).
+ * Everything else is ambiguous: two parcels with a permit (the same lot number in two phases; who owns the other
+ * one cannot be proven from a name), or several parcels where the one with the permit is not under the seller's
+ * exact name. The owners of the other parcels are never read. Measured on three real days: 60 of 78 deeds match
+ * (56 owner_permit, 4 permit); 6 more would need a second proof, such as the buyer's name on the map later.
  */
 function chooseParcel({ sellerNames, parcels, permitsByParid }) {
   if (!parcels || parcels.length === 0) return { status: 'no_parcel' };
-  const hasPermit = (p) => Boolean(permitsByParid && permitsByParid[p.parid]);
-  const withPermit = parcels.filter(hasPermit);
+  const withPermit = parcels.filter((p) => Boolean(permitsByParid && permitsByParid[p.parid]));
   if (withPermit.length === 0) return { status: 'no_permit' };
-  const relation = new Map(parcels.map((p) => [p, ownerRelation(p, sellerNames)]));
-  const isOthers = (p) => relation.get(p) === 'other';
-  const sellersOwn = parcels.filter((p) => relation.get(p) === 'same');
-  const sellersOwnWithPermit = sellersOwn.filter(hasPermit);
-  const pick = (parcel, basis) => ({ status: 'matched', basis, parcel, permit: permitsByParid[parcel.parid] });
-  if (sellersOwnWithPermit.length === 1) {
-    const home = sellersOwnWithPermit[0];
-    return withPermit.filter((p) => p !== home).every(isOthers) ? pick(home, 'owner_permit') : { status: 'ambiguous' };
-  }
-  if (withPermit.length !== 1 || sellersOwn.length !== 0) return { status: 'ambiguous' };
-  return parcels.filter((p) => p !== withPermit[0]).every(isOthers) ? pick(withPermit[0], 'permit') : { status: 'ambiguous' };
+  if (withPermit.length > 1) return { status: 'ambiguous' };
+  const [home] = withPermit;
+  const pick = (basis) => ({ status: 'matched', basis, parcel: home, permit: permitsByParid[home.parid] });
+  if (sellerOwns(home, sellerNames)) return pick('owner_permit');
+  return parcels.length === 1 ? pick('permit') : { status: 'ambiguous' };
 }
 
 module.exports = {
-  PARCEL_LAYER_URL, parseLegal, parcelWhere, queryParcels, ownerRelation, chooseParcel,
+  PARCEL_LAYER_URL, parseLegal, parcelWhere, queryParcels, sellerOwns, chooseParcel,
 };
