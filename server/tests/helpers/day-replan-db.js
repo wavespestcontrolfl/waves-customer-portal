@@ -166,8 +166,6 @@ function makeApplyDeps(db, { now, blocks = [], over = {} } = {}) {
     loadToldIds: jest.fn(async () => new Set()),
     loadPromiseLevels: jest.fn(async () => new Map()),
     isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
-    // With GATE_DAY_ONLY_PROMISE on: no time is the customer's own.
-    loadCustomerTime: jest.fn(async () => new Set()),
   };
   const liveRows = (dateStr) => db.rows.filter((r) => String(r.scheduled_date).slice(0, 10) === dateStr && !excludedStatuses.includes(r.status) && !r.reservation_expires_at);
   const deps = {

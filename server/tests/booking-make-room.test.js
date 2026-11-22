@@ -61,9 +61,9 @@ function makeDeps({
     // The full day facts (the night told-lock reads): E was told its hour; nobody else was told or placed by a person.
     loadDayContext: jest.fn(async (_conn, dateStr, now) => {
       const allRows = rows.filter((r) => r.scheduled_date === dateStr);
-      const ctx = { dateStr, now, allRows, visitCounts: countBy(allRows, 'visit_id'), customerCounts: countBy(allRows, 'customer_id'), sent24: new Set(), toldLock: true, told: new Set(told) };
-      // GATE_DAY_ONLY_PROMISE on (the ask is recorded): the facts are the customer's own time, not the person-placed ones.
-      return customerTime ? { ...ctx, askRecorded: true, customerTime: new Set(customerTime) } : { ...ctx, personPlaced: new Set() };
+      const ctx = { dateStr, now, allRows, visitCounts: countBy(allRows, 'visit_id'), customerCounts: countBy(allRows, 'customer_id'), sent24: new Set(), toldLock: true, told: new Set(told), personPlaced: new Set() };
+      // GATE_DAY_ONLY_PROMISE on (the ask is recorded): the customer's own time is also a fact of the day.
+      return customerTime ? { ...ctx, askRecorded: true, customerTime: new Set(customerTime) } : ctx;
     }),
     fixedReason,
     skipReason,
@@ -178,11 +178,10 @@ describe('the plan page example', () => {
     expect(report.byReason.fixed_time_told).toBeGreaterThanOrEqual(1);
   });
 
-  test('gate on (the ask is recorded): a stop whose time is the customer\'s own never moves; a confirmed stop A may', async () => {
+  test('gate on (the ask is recorded): a stop whose time is the customer\'s own never moves', async () => {
     const { report } = await check({ deps: makeDeps({ customerTime: ['visit-c'] }) });
     expect(starts(report)).not.toContain('09:00');
     expect(report.byReason.fixed_customer_time).toBeGreaterThanOrEqual(1);
-    expect(report.byReason.fixed_customer_confirmed).toBeUndefined();
   });
 
   test('a stop inside the 24-hour lock never moves', async () => {

@@ -167,20 +167,20 @@ const TOLD_ROW_COLUMNS = [
  * The told-lock facts for one visit, read inside its move transaction, so a time told to the customer or a person
  * placement made after the fresh plan still stops the write. The told read is the no-show detector's promise reader (a
  * 72-hour flag with no real promise does not stop the write); a read that throws stops the write (fail closed).
- * With GATE_DAY_ONLY_PROMISE on the ask is recorded (`askRecorded`): the facts are the promise level and whether the
- * visit's time is now the customer's own (owner 2026-11-22; loadCustomerTime fails closed too). With the gate off the
- * rule before 2026-11-22 applies unchanged: isPersonPlacedVisit fails closed too (an unreadable history = placed).
+ * isPersonPlacedVisit fails closed too (an unreadable history = placed).
  */
 async function toldLockFacts(trx, deps, { row, id, dateStr }) {
-  if (typeof deps.dayOnlyOn === 'function' && deps.dayOnlyOn() === true) {
-    return { toldLock: true, askRecorded: true, ...(await promiseLevelFacts(trx, deps, id)), customerTime: await deps.loadCustomerTime(trx, [{ id }], deps.now()) };
-  }
+  const dayOnly = typeof deps.dayOnlyOn === 'function' && deps.dayOnlyOn() === true;
+  const levels = dayOnly ? await promiseLevelFacts(trx, deps, id) : { told: new Set(await deps.loadToldIds(trx, [id], deps.now())) };
+  // askRecorded: only while GATE_DAY_ONLY_PROMISE is on does the app record whether the customer asked for the time
+  // (owner 2026-11-22): then a time that is the customer's own stops the write as customer_time (fails closed too).
+  const ask = dayOnly ? { askRecorded: true, customerTime: await deps.loadCustomerTime(trx, [{ id }], deps.now()) } : {};
   const verdict = await deps.isPersonPlacedVisit({ ...row, scheduled_date: dateStr }, trx);
-  return { toldLock: true, told: new Set(await deps.loadToldIds(trx, [id], deps.now())), personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
+  return { toldLock: true, ...levels, ...ask, personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
 }
 
 /**
- * GATE_DAY_ONLY_PROMISE: the visit's promise level, re-read inside its move transaction. 'hour' = told.
+ * GATE_DAY_ONLY_PROMISE: the visit's promise level, re-read inside its move transaction. 'hour' = told, 'day' = dayTold.
  * A read that throws fails CLOSED: the visit counts as told an hour, so the write stops (time_told).
  */
 async function promiseLevelFacts(trx, deps, id) {
@@ -191,7 +191,7 @@ async function promiseLevelFacts(trx, deps, id) {
   } catch (_) {
     level = 'hour';
   }
-  return { told: new Set(level === 'hour' ? [id] : []) };
+  return { told: new Set(level === 'hour' ? [id] : []), dayTold: new Set(level === 'day' ? [id] : []) };
 }
 
 /**

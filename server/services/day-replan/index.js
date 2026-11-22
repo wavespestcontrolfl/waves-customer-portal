@@ -20,21 +20,22 @@
  *   other live stop that day for the same customer (co-visits stay together), its appointment starts
  *   more than 24.25 hours from now (America/New_York), its 24-hour reminder is not sent, and that reminder will go out
  *   (reminder_24h_off: the customer turned it off, or the answer is unknown or unreadable; it is the only notice of a new hour).
- * A night tool never changes a time the customer was already told (owner 2026-11-05, "D1 a"). The reasons that follow
- * depend on GATE_DAY_ONLY_PROMISE, because only while it is on does the app record whether the customer asked for the
- * time (the office form's tick, time-promise.recordCustomerAskedTime): `askRecorded` is true only then.
- *   Gate on (the rule of owner 2026-11-22: it does not matter whether staff picked the time or the customer confirmed
- *   it; the rule follows what the customer asked for): two more kinds of stop are fixed, checked after the rules
- *   above: customer_time (the customer asked for the time, or picked it online, on the reschedule page, from a text
- *   offer or with the AI call agent: time-promise.dayOnlyEligibility says the visit may not be promised as a day only;
- *   an unreadable answer keeps the stop fixed) and time_told (the customer has a known time from a delivered text,
- *   email, call or booking, by the no-show detector's promise reader). Staff placement, a confirmation and a first or
- *   one-time visit do not fix a stop. The owner's other three reasons are not in this pair: a preferred time in the app
- *   is the stop's `pref` (a movable stop only takes hours inside it), "keep auto-dispatch off this visit" is the
- *   staff_lock above, and a mowing day or a preferred day is a date rule (this job never changes a date).
- *   Gate off: the rule before 2026-11-22 applies unchanged: customer_confirmed, first_or_one_time (not a recurring
- *   visit with a parent series), person_placed (staff or the customer chose the date or time; an unreadable history
- *   keeps the stop fixed) and time_told.
+ * A night tool never changes a time the customer was already told (owner 2026-11-05, "D1 a"), so four more kinds of
+ * stop are fixed, checked after the rules above: customer_confirmed, first_or_one_time (not a recurring
+ * visit with a parent series), person_placed (staff or the customer chose the date or time; the auto-dispatch rule,
+ * and an unreadable history keeps the stop fixed) and time_told (the customer has a known time from a delivered
+ * text, email, call or booking, by the no-show detector's promise reader).
+ * With GATE_DAY_ONLY_PROMISE on, two things change (owner 2026-11-22), and only then, because only then does the app
+ * record whether the customer asked for the time (`askRecorded`, set only then; the office form's tick,
+ * time-promise.recordCustomerAskedTime): (1) customer_time is checked FIRST and fixes a stop whatever the customer was
+ * told: the customer asked for the time, or picked it online, on the reschedule page, from a text offer or with the AI
+ * call agent (time-promise.dayOnlyEligibility says the visit may not be promised as a day only; an unreadable answer
+ * keeps the stop fixed). It is not a preferred time in the app (that is the stop's `pref`; a movable stop only takes
+ * hours inside it), "keep auto-dispatch off this visit" (the staff_lock above) or a mowing day or preferred day (date
+ * rules; this job never changes a date). (2) Staff placement, a first or one-time visit and a confirmation stop fixing
+ * a stop only once a day-only notice was delivered to the customer (promise level `day`, `dayTold`): that notice is the
+ * only evidence the customer knows just the day, because the office may have given the hour by phone and nothing
+ * records it. With no such notice customer_confirmed, first_or_one_time and person_placed still fix the stop.
  * Also enforced for movable stops: the technician's tech_schedule_blocks (own and global, every type but
  * 'available') may not overlap a stop's service interval; hours held by unassigned (and, while occupancy is
  * tech-blind, other technicians') visits are taken; the day closes at the night pass's DAY_CLOSE (after_hours);
@@ -202,35 +203,22 @@ async function loadToldIds(conn, rows, now) {
 
 /**
  * GATE_DAY_ONLY_PROMISE: what the customer was told for each stop, in ONE bulk read (told-visits.loadPromiseLevels).
- * Returns { told }: the stops with an hour promise (a known slot, or an unknown window, which counts as an hour on
- * purpose). A stop told only the day is not in it. A failed read fails CLOSED: every stop counts as told an hour, so
- * the day stays fixed.
+ * Returns { told, dayTold }: `told` = stops with an hour promise (a known slot, or an unknown window, which counts as
+ * an hour on purpose), `dayTold` = stops told only the day. A failed read fails CLOSED: every stop counts as told an
+ * hour, so the day stays fixed.
  */
 async function loadToldLevels(conn, rows, now) {
   const ids = rows.map((r) => r.id);
   try {
     const levels = await require('../auto-dispatch/told-visits').loadPromiseLevels(conn, ids, now);
-    return { told: new Set(ids.filter((id) => levels.get(id) === 'hour')) };
+    return {
+      told: new Set(ids.filter((id) => levels.get(id) === 'hour')),
+      dayTold: new Set(ids.filter((id) => levels.get(id) === 'day')),
+    };
   } catch (err) {
     logger.warn(`[day-replan] the told-level read failed (${err.message}); the day stays fixed`);
-    return { told: new Set(ids) };
+    return { told: new Set(ids), dayTold: new Set() };
   }
-}
-
-/**
- * Ids of stops a person (staff or the customer) placed on their current date or time, by the auto-dispatch rule
- * (eligibility.isPersonPlacedVisit: the newest slot-changing reschedule_log row by a non-automatic initiator that
- * lands on the date, or a person date exception). A day holds a handful of rows, so one bounded read per row.
- * isPersonPlacedVisit fails CLOSED: a read failure counts as placed, so the stop stays fixed.
- */
-async function loadPersonPlaced(conn, rows) {
-  const { isPersonPlacedVisit } = require('../auto-dispatch/eligibility');
-  const placed = new Set();
-  for (const row of rows) {
-    const verdict = await isPersonPlacedVisit(row, conn);
-    if (!verdict || verdict.placed !== false) placed.add(row.id);
-  }
-  return placed;
 }
 
 /**
@@ -251,6 +239,22 @@ async function loadCustomerTime(conn, rows, now) {
   }
 }
 
+/**
+ * Ids of stops a person (staff or the customer) placed on their current date or time, by the auto-dispatch rule
+ * (eligibility.isPersonPlacedVisit: the newest slot-changing reschedule_log row by a non-automatic initiator that
+ * lands on the date, or a person date exception). A day holds a handful of rows, so one bounded read per row.
+ * isPersonPlacedVisit fails CLOSED: a read failure counts as placed, so the stop stays fixed.
+ */
+async function loadPersonPlaced(conn, rows) {
+  const { isPersonPlacedVisit } = require('../auto-dispatch/eligibility');
+  const placed = new Set();
+  for (const row of rows) {
+    const verdict = await isPersonPlacedVisit(row, conn);
+    if (!verdict || verdict.placed !== false) placed.add(row.id);
+  }
+  return placed;
+}
+
 /** The date's live rows and the facts every tech-day plan of that date reads. Null when the date has no rows. Throws on a failed read. */
 async function loadDayContext(conn, dateStr, now, makeRoomWriteProof = false) {
   const rows = await loadDayStops(conn, dateStr, makeRoomWriteProof);
@@ -258,11 +262,11 @@ async function loadDayContext(conn, dateStr, now, makeRoomWriteProof = false) {
   const sent24 = await loadReminder24hSent(conn, rows.map((r) => r.id));
   const reminder24hOff = await loadReminder24hOffIds(conn, rows);
   const ctx = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24, reminder24hOff };
-  // askRecorded: the app records whether the customer asked for a time only while GATE_DAY_ONLY_PROMISE is on.
-  const facts = dayOnlyOn()
-    ? { ...(await loadToldLevels(conn, rows, now)), askRecorded: true, customerTime: await loadCustomerTime(conn, rows, now) }
-    : { told: await loadToldIds(conn, rows, now), personPlaced: await loadPersonPlaced(conn, rows) };
-  return { ...ctx, toldLock: true, ...facts };
+  const dayOnly = dayOnlyOn();
+  const facts = dayOnly ? await loadToldLevels(conn, rows, now) : { told: await loadToldIds(conn, rows, now) };
+  // askRecorded: only while GATE_DAY_ONLY_PROMISE is on does the app record whether the customer asked for the time.
+  const ask = dayOnly ? { askRecorded: true, customerTime: await loadCustomerTime(conn, rows, now) } : {};
+  return { ...ctx, toldLock: true, ...facts, ...ask, personPlaced: await loadPersonPlaced(conn, rows) };
 }
 
 /**
@@ -302,26 +306,22 @@ function officeReviewPending(row) {
 }
 
 /**
- * Told-lock reasons, checked after the existing ones. With GATE_DAY_ONLY_PROMISE on (`askRecorded`, set only then,
- * because only then does the app record whether the customer asked for the time: the office tick and
- * time-promise.recordCustomerAskedTime) the rule of owner 2026-11-22 applies: a time that is the customer's own
- * (customer_time, loadCustomerTime) and a time the customer was told (time_told) do not change; who placed the time
- * (staff or the office), a confirmation and a first or one-time visit do not matter. A fact the day load did not
- * provide counts as not yet known, so the stop stays fixed. A context without `askRecorded` (the gate off, or one a
- * caller built by hand) gets the rule before 2026-11-22 unchanged.
+ * Told-lock reasons, checked after the existing ones: a time the customer was told or chose does not change. A
+ * told-lock fact the day load did not provide counts as not yet known, so the stop stays fixed. With
+ * GATE_DAY_ONLY_PROMISE on (`askRecorded`) a time that is the customer's own (customer_time) fixes the stop first,
+ * whatever the customer was told; a context without `askRecorded` ignores `customerTime` (the gate off: unchanged).
  */
-function toldLockReason(row, ctx) {
-  if (ctx.askRecorded !== true) return toldLockReasonBeforeAsk(row, ctx);
-  if (!ctx.customerTime || ctx.customerTime.has(row.id)) return 'customer_time';
-  if (!ctx.told || ctx.told.has(row.id)) return 'time_told';
-  return null;
-}
-
-// The rule before 2026-11-22 (GATE_DAY_ONLY_PROMISE off): removed with that gate.
-function toldLockReasonBeforeAsk(row, { told, personPlaced }) {
-  if (row.customer_confirmed === true) return 'customer_confirmed';
-  if (row.is_recurring !== true || row.recurring_parent_id == null) return 'first_or_one_time';
-  if (!personPlaced || personPlaced.has(row.id)) return 'person_placed';
+function toldLockReason(row, { told, personPlaced, dayTold, askRecorded, customerTime }) {
+  if (askRecorded === true && (!customerTime || customerTime.has(row.id))) return 'customer_time';
+  // GATE_DAY_ONLY_PROMISE: a stop the customer was told only the DAY for (a delivered day-only notice, dayTold) may
+  // change its hour inside that day: a confirmation, a first or one-time visit and a placement by a person do not fix
+  // it. With no such notice they do, because the office may have given the hour by phone (the booking and move
+  // windows say "Tell the customer this time." for a same-date re-time, a slot today or tomorrow and a customer with
+  // the 24-hour reminder off) and nothing records it.
+  const dayOnly = !!dayTold && dayTold.has(row.id);
+  if (!dayOnly && row.customer_confirmed === true) return 'customer_confirmed';
+  if (!dayOnly && (row.is_recurring !== true || row.recurring_parent_id == null)) return 'first_or_one_time';
+  if (!dayOnly && (!personPlaced || personPlaced.has(row.id))) return 'person_placed';
   if (!told || told.has(row.id)) return 'time_told';
   return null;
 }
@@ -840,9 +840,9 @@ function applyDeps() {
     // The move transaction re-reads whether the visit's 24-hour reminder will go out (apply.js recheckVisit).
     loadReminder24hOffIds,
     loadPromiseLevels: (conn, ids, now) => require('../auto-dispatch/told-visits').loadPromiseLevels(conn, ids, now),
-    isPersonPlacedVisit: (row, conn) => require('../auto-dispatch/eligibility').isPersonPlacedVisit(row, conn),
     // With that gate on, whether the visit's time is now the customer's own (apply.js toldLockFacts).
     loadCustomerTime,
+    isPersonPlacedVisit: (row, conn) => require('../auto-dispatch/eligibility').isPersonPlacedVisit(row, conn),
     // The ids among `ids` the customer has a known time for (the no-show detector's promise reader); throws when unreadable.
     loadToldIds: (conn, ids, now) => require('../auto-dispatch/told-visits').loadToldVisitIds(conn, ids, now),
     rowHours,
