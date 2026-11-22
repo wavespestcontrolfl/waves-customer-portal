@@ -530,6 +530,24 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/email',
     }),
   },
+  // The phone banner for a website quote (bell-banners.js kind new_lead_quote, owner 2026-11-19 "do phase 1 first").
+  // The bell row is the plain 'new_lead' category row routes/public-quote.js already writes ("Calculator quote: ...",
+  // "Manual quote needed: ...", "Estimate requested: ..."), which carries no triggerKey of its own (the writer names
+  // this kind with notifyAdmin's bannerKind), so its rule is the retention expiry. `build` takes the written row's own
+  // words as alertTitle/alertBody/alertLink. Admin-only like the lead bell.
+  new_lead_quote: {
+    label: 'New website quote banner',
+    category: 'new_lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'New website quote',
+      body: p.alertBody || 'Open the lead to see the quote and call.',
+      link: p.alertLink || '/admin/leads',
+    }),
+  },
   // The phone banner for an upset caller on a live call (GATE_LIVE_CALL_UPSET_ALERT, bell-banners.js kind live_call_upset,
   // owner 2026-11-16). live-call-upset-alert.js writes the bell row (category live_call_upset, one per call) and names
   // this kind with notifyAdmin's bannerKind; `build` takes the row's own words. The call ends within the hour, so the
