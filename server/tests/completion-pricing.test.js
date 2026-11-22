@@ -84,9 +84,12 @@ describe('completion estimate evidence', () => {
     // A row with its own per-application net has no annual rounding: it must match to the cent.
     expect(names(acceptedPricing(row(96, { priceAfterDiscount: 96 }), platinum))).toEqual([['WaveGuard Platinum', 24, 20, true]]);
     expect(names(acceptedPricing(row(96.04, { priceAfterDiscount: 96.04 }), platinum))).toEqual(unnamed(23.96));
-    // One cent is the half-cent rounding either way: $100.10 at 15% is $85.085, saved by the engine as $85.09.
+    // A half cent rounds either way: $100.10 at 15% is $85.085, saved by the engine as $85.09. No other cent passes.
     const gold = { tierDiscounted: true, estimateTier: { tier: 'gold', amount: 0.15 } };
     expect(names(acceptedPricing(row(85.09, { perTreatment: 100.1, priceAfterDiscount: 85.09 }), gold))).toEqual([['WaveGuard Gold', 15.01, 15, true]]);
+    expect(names(acceptedPricing(row(85.08, { perTreatment: 100.1, priceAfterDiscount: 85.08 }), gold))).toEqual([['WaveGuard Gold', 15.02, 15, true]]);
+    expect(names(acceptedPricing(row(85.1, { perTreatment: 100.1, priceAfterDiscount: 85.1 }), gold))).toEqual(unnamed(15));
+    expect(names(acceptedPricing(row(79.99, { perTreatment: 100, priceAfterDiscount: 79.99 }), platinum))).toEqual(unnamed(20.01));
     // The row's own net is another price than the one billed: the row conflicts with itself, so nothing is named.
     expect(names(acceptedPricing(row(85, { perTreatment: 100, priceAfterDiscount: 90 }), gold))).toEqual(unnamed(15));
     expect(names(acceptedPricing(row(108), platinum))).toEqual(unnamed(12));

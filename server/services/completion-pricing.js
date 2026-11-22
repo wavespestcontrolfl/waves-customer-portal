@@ -178,6 +178,13 @@ function staffAdjustedRow(raw) {
   return adjusted !== null && adjusted !== money(raw.annualAfterDiscount);
 }
 
+// The per-application nets a tier rate can leave on a list price: the exact cents, or either neighbour when they land
+// on a half cent (the engine and applyDiscount round a half cent in opposite directions).
+function tierNets(base, rate) {
+  const cents = Math.round(base * 100) * (1 - rate);
+  return [Math.round(cents - 1e-6) / 100, Math.round(cents + 1e-6) / 100];
+}
+
 // A discount rate the row itself recorded (the legacy mapper writes one on lawn rows, with no tier record) that is not
 // the estimate's tier rate: the row says it took another rate, or none.
 function rowRateConflicts(raw, rate) {
@@ -199,14 +206,15 @@ function namingTier(raw, base, savings, { estimateTier, credited, serviceKey }) 
     && !rowRateConflicts(raw, estimateTier.amount)
     && require('../routes/estimate-public').recurringServiceReceivesTierDiscount({ ...raw, service: raw.service || serviceKey || undefined });
   if (lineTier || !inferable) return lineTier || null;
-  // A row with its own per-application net must be billed at that net, or the row records another price.
-  const ownNet = money(raw.priceAfterDiscount);
-  if (ownNet !== null && ownNet !== money(base - savings)) return null;
   const tierSavings = tierSavingsOn(base, Number(estimateTier.amount));
-  // The rounding allowance is for a net derived from the annual. A row's own net has none: it may differ by the one
-  // cent a half-cent rounds either way (the engine and applyDiscount round a half cent in opposite directions).
-  const allowance = ownNet !== null ? 1 : TIER_ROUNDING_CENTS;
-  return tierSavings !== null && Math.abs(Math.round((savings - tierSavings) * 100)) <= allowance ? estimateTier : null;
+  if (tierSavings === null) return null;
+  // A row with its own per-application net has no annual rounding: that net must be the net billed and a net the
+  // tier's rate leaves on the list price (tierNets). The rounding allowance is only for a net derived from the annual.
+  const ownNet = money(raw.priceAfterDiscount);
+  if (ownNet !== null) {
+    return ownNet === money(base - savings) && tierNets(base, Number(estimateTier.amount)).includes(ownNet) ? estimateTier : null;
+  }
+  return Math.abs(Math.round((savings - tierSavings) * 100)) <= TIER_ROUNDING_CENTS ? estimateTier : null;
 }
 
 // One line's accepted saving split into the discounts that made it: the WaveGuard tier (namingTier), then the
