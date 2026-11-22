@@ -191,7 +191,7 @@ maybeDescribe('call booking check (live Postgres)', () => {
     expect(row.link).toBe(`/admin/dispatch?tab=schedule&date=2026-11-21&appointment=${b.visitId}`);
     expect(row.done_at).toBeNull();
     expect(row.detail).toContain('When this bell rang, the reading of the call held $250 for that service');
-    expect(row.detail).toContain('Check the call and the visit as it is now, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
+    expect(row.detail).toContain('Check the call and the visit as it is now, then set the visit\'s price before it is billed. In the same edit, turn on "Create invoice on completion": the booking left it off because the visit had no price. Nothing was changed and the customer was not contacted.');
     expect(row.metadata).toMatchObject({
       area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'visit_priced', subject: { type: 'visit', id: b.visitId },
       scheduledServiceId: b.visitId, customerId: b.customerId, callLogId: b.callId, problem: 'price',

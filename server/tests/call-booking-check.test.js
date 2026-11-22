@@ -231,6 +231,8 @@ describe('what a visit and the reading of its call say about the price', () => {
     // The call spoke of a second property: the price can be the other one's.
     expect(verdict(pricedAs({}, { property: { additional_properties: [{ city: 'Venice' }] } }))).toBe('unknown');
     expect(verdict(pricedAs({}, { triage_flags: ['multi_property_call'] }))).toBe('unknown');
+    // The reading itself could not tell the service, and still names the visit's.
+    expect(verdict(pricedAs({}, { triage_flags: ['ambiguous_pest_or_service'] }))).toBe('unknown');
     expect(verdict(pricedAs({}, { property: { additional_properties: [] }, triage_flags: ['quote_promised'] }))).toBe('problem');
   });
 
@@ -342,11 +344,16 @@ describe('the price bell copy passes the notification rule', () => {
     expect(composeAdminAlert(priceSpecFor({ visit: unpriced(), name: '' })).headline).toBe('Schedule — set the price on a phone-booked visit');
   });
 
+  test('the detail names the invoice switch only while it is off', () => {
+    expect(priceDetailFor({ visit: unpriced({ create_invoice_on_complete: true }), amount: 250, name: 'Pat Synthetic' }))
+      .toMatch(/then set the visit's price before it is billed\. Nothing was changed and the customer was not contacted\.$/);
+  });
+
   test('the detail gives the number as a dated fact, sends the reader to the call, and says nothing was changed', () => {
     expect(priceDetailFor({ visit: unpriced(), amount: 250, name: 'Pat Synthetic' }))
-      .toBe('Pat Synthetic: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. When this bell rang, the reading of the call held $250 for that service: a price staff stated and the caller accepted, not confirmed as final (it can vary, or a charge was added). Check the call and the visit as it is now, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
+      .toBe('Pat Synthetic: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. When this bell rang, the reading of the call held $250 for that service: a price staff stated and the caller accepted, not confirmed as final (it can vary, or a charge was added). Check the call and the visit as it is now, then set the visit\'s price before it is billed. In the same edit, turn on "Create invoice on completion": the booking left it off because the visit had no price. Nothing was changed and the customer was not contacted.');
     expect(priceDetailFor({ visit: unpriced(), amount: 149.5, name: '' }))
-      .toBe('A customer: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. When this bell rang, the reading of the call held $149.50 for that service: a price staff stated and the caller accepted, not confirmed as final (it can vary, or a charge was added). Check the call and the visit as it is now, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
+      .toBe('A customer: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. When this bell rang, the reading of the call held $149.50 for that service: a price staff stated and the caller accepted, not confirmed as final (it can vary, or a charge was added). Check the call and the visit as it is now, then set the visit\'s price before it is billed. In the same edit, turn on "Create invoice on completion": the booking left it off because the visit had no price. Nothing was changed and the customer was not contacted.');
   });
 });
 

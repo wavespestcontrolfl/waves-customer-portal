@@ -138,12 +138,17 @@ function rowTakesNoCallPrice(row) {
 // The intents of a call about a one-time job.
 const ONE_TIME_JOB_INTENTS = new Set(['active_infestation_treatment', 'preventative_one_time']);
 
+// Flags by which the reading itself says the job is not settled: a second property, or a service it could not
+// tell (the call pipeline sends such a call to a person).
+const UNSETTLED_JOB_FLAGS = Object.freeze(['multi_property_call', 'ambiguous_pest_or_service']);
+
 // Whether the reading says the call was about ONE one-time job and nothing else. The reading's price block is
 // call-wide: it does not say which job a price covers. So a price counts for the visit only when the reading
 // holds no other job, no other property and no plan. The intent is a list of what counts, not of what does not:
 // a plan ask, an inspection, a quote, a follow-up, a complaint, a cancellation and no intent all fail. A plan
 // shows as a bundle category, a tier the caller named, a billing choice, or a tier or an annual prepay on any
-// stored price entry (the caller's own number, and an entry with no amount, too).
+// stored price entry (the caller's own number, and an entry with no amount, too). A flag that says the reading
+// could not tell the service, or that the call spoke of a second property, fails too.
 function readsAsOneOneTimeJob(reading) {
   const request = reading.service_request;
   const entries = [request.price, ...(Array.isArray(request.prices) ? request.prices : [])].filter((entry) => entry && typeof entry === 'object');
@@ -155,7 +160,7 @@ function readsAsOneOneTimeJob(reading) {
     && !require('./call-prepay-choice').billingChoiceOf(reading)
     && !entries.some((entry) => entry.tier_mentioned || entry.prepay_term === 'annual')
     && !others.some((list) => Array.isArray(list) && list.length)
-    && !flags.includes('multi_property_call');
+    && !flags.some((flag) => UNSETTLED_JOB_FLAGS.includes(flag));
 }
 
 // The price the reading holds for the job it names: the one-time price staff stated and the caller accepted, on
@@ -271,13 +276,16 @@ function priceSpecFor({ visit, name }) {
   };
 }
 
-// The number is a dated fact here ("when this bell rang"), and the reader is sent to the call.
+// The number is a dated fact here ("when this bell rang"), and the reader is sent to the call. A call booking
+// with no price leaves "Create invoice on completion" off (callBookingInvoiceOnComplete), so the detail names
+// that switch of the schedule editor too while it is off: a price alone may not invoice.
 function priceDetailFor({ visit, amount, name }) {
   const booked = tidy(visit.row_name || visit.service_type || 'a visit');
   return `${name || 'A customer'}: the visit booked from a phone call for ${visit.visit_date} is "${booked}", a one-time visit with no price. `
     + `When this bell rang, the reading of the call held ${dollars(amount)} for that service: `
     + 'a price staff stated and the caller accepted, not confirmed as final (it can vary, or a charge was added). '
     + 'Check the call and the visit as it is now, then set the visit\'s price before it is billed. '
+    + (visit.create_invoice_on_complete ? '' : 'In the same edit, turn on "Create invoice on completion": the booking left it off because the visit had no price. ')
     + 'Nothing was changed and the customer was not contacted.';
 }
 
