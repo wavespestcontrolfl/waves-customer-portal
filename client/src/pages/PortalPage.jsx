@@ -6658,9 +6658,13 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   // the plan (WaveGuard tier, discount, services under Plan Charges), so the
   // customer record reloads; and the offers read again, so the service just
   // bought is no longer offered here.
+  // The purchase can also change how the account is billed (per visit to
+  // per application); Plan Charges reads that from the Auto Pay data, so
+  // that reloads too.
   const handleOfferPurchased = () => {
     if (typeof refreshCustomer === 'function') Promise.resolve(refreshCustomer()).catch(() => {});
     setOffersReloadKey((k) => k + 1);
+    handleOfferCardSaved();
   };
 
   const loadBilling = useCallback(() => {

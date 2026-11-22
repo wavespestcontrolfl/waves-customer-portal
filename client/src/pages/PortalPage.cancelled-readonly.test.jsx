@@ -208,6 +208,10 @@ describe('BillingTab — add-a-service and refer cards', () => {
       expect(await screen.findByText('Lawn Care is confirmed')).toBeInTheDocument();
       expect(api.oneTapConfirm).toHaveBeenCalledWith('p-7', { termsAccepted: true });
       expect(refreshCustomer).toHaveBeenCalledTimes(1);
+      // The payment methods and the Auto Pay data (the billing terms Plan
+      // Charges shows) read again: at mount, after the bank-page save, and
+      // after the purchase.
+      await waitFor(() => expect(api.getCards).toHaveBeenCalledTimes(3));
       await waitFor(() => expect(screen.queryByText('Not on your plan yet.')).not.toBeInTheDocument());
       expect(api.getPropertyRecommendations).toHaveBeenCalledTimes(2);
       expect(screen.getByText('Lawn Care is confirmed')).toBeInTheDocument();
