@@ -576,6 +576,9 @@ function visitPriceDecisionRecorded(service) {
 // `firstApplication`: the first bill at acceptance, which also bills the first visits a multi-program accept leaves
 // unpriced (the bill covers them) at the accepted price, and a visit with no saving at its own price (discounts: []),
 // so one undiscounted program does not keep a bundle's discounts off that bill; that caller reconciles its total.
+// A breakdown, and reason discount_unnamed, also carry `estimate` (the accepted estimate row read here) and `line` (the
+// saved row of it the visit matched, by service id or key), so a check of the estimate's own records reads the same
+// line (invoice-tier-line-check.js).
 async function acceptedVisitBreakdown(service, { database = db, firstApplication = false } = {}) {
   const none = (reason) => ({ breakdown: null, reason });
   const unpricedFirst = firstApplication && service.estimated_price == null;
@@ -592,8 +595,9 @@ async function acceptedVisitBreakdown(service, { database = db, firstApplication
   if (!quote.breakdownAvailable) return none('no_breakdown');
   if (!(quote.savings > 0) && !firstApplication) return none('no_discount');
   if (!unpricedFirst && !sameMoney(service.estimated_price, quote.amount)) return none('price_changed');
-  if (!quote.discounts.every((row) => row.named)) return none('discount_unnamed');
-  return { breakdown: { base: quote.base, amount: quote.amount, discounts: quote.discounts.map(({ name, dollars }) => ({ name, dollars })) } };
+  const matched = { estimate: source.estimate, line: match.line.sourceLine };
+  if (!quote.discounts.every((row) => row.named)) return { ...none('discount_unnamed'), ...matched };
+  return { breakdown: { base: quote.base, amount: quote.amount, discounts: quote.discounts.map(({ name, dollars }) => ({ name, dollars })) }, ...matched };
 }
 
 module.exports = { MONEY_FIELDS, visitPriceDecisionRecorded, loadCompletionPricing, prepareCompletionPricingReview, lockCompletionPricingEstimate,
