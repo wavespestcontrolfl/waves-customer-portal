@@ -889,6 +889,13 @@ async function mintPricedEstimate(args) {
   const reused = await reuseLiveQuote(mint, { priorRows, offer, estimateData, primaryStreet, premisesStamp });
   if (reused) return reused;
   if (mint.reuseOnly) throw new RestartUnavailableError('pricing_unavailable', handMessage);
+  // An offer's own end date (expiresAt), read again on the clock as it stands NOW. The entry checked it before
+  // the customer locks and the recompute, and it can pass during that work. A passed one retires nothing and
+  // publishes nothing (the transaction rolls back): the prior quote and its hold stay, and no link is handed
+  // out already expired. A caller that asks this late has a bug, as for the offer's other bounds: a plain Error.
+  if (mint.expiresAt && !(mint.expiresAt.getTime() > (mint.now ? mint.now() : nowDate).getTime())) {
+    throw new Error('mintPlanStartEstimate offer needs an end date that is still ahead when the quote is published');
+  }
 
   await retireLineage({ trx, fresh, source, nowDate, releaseEstimateHolds: mintDeps.releaseEstimateHolds });
   return publishMintedEstimate(mint, { offer, estimateData });

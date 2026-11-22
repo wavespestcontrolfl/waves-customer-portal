@@ -6726,7 +6726,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
   // C4 plan-restart quote: server-frozen offer (see /data planRestart) —
   // the repricing controls and the one-time mode toggle are omitted.
-  const restartQuote = data?.estimate?.planRestart === true;
+  // A plan offer's quote (/data planOffer: the quarterly plan with the setup fee waived) is frozen the same way.
+  const restartQuote = data?.estimate?.planRestart === true || data?.estimate?.planOffer === true;
   const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
   // Payment-only accept (guarantee-only renewal): no slot picker, no
   // reservation — accept goes straight to review, then invoice.

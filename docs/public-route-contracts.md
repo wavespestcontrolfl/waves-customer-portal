@@ -8440,7 +8440,19 @@ of the offer quote itself is unchanged). A grouped sibling's extension, from
 `POST /:token/extension-request` or from staff, never revives or re-dates an
 offer quote in its group: the sibling update and the revivable-sibling verdict
 both carry `PLAN_OFFER_ABSENT_SQL` (`estimate-extension.js`), so that quote
-keeps its expiry and its status. The portal pricing card's plain tap (`POST /api/requests/start-plan`)
+keeps its expiry and its status. The offer quote is a FROZEN offer, as a
+restart quote is (`frozenOfferRefusal`): the waiver sits on the whole estimate,
+so the offer sells the quarterly plan it opens on and nothing else. `PUT
+/:token/select-tier`, `/bond`, `/service-opt-out` and `/preferences` answer 409
+`{ error: 'This offer is for the plan as shown. For a different plan, call or
+text us.', code: 'plan_offer_frozen' }` and write nothing; `PUT /:token/accept`
+answers the same 409 for the one-time mode, for a `selectedFrequency` other
+than the stored offer's default key (`frozenOfferFrequencyRefusal`; the page
+always sends that default) and for a combo that is not the default one at the
+stored totals, each before any billing or booking; and `/data` carries
+`estimate.planOffer: true` (present only on an offer row) so the page draws the
+cadence as fixed text and omits the repricing controls, the add-a-service
+offer, the opt-out and the one-time toggle, as for `planRestart`. The portal pricing card's plain tap (`POST /api/requests/start-plan`)
 never retires a live offer quote of the same service and option: it re-opens the
 offer through the mint core (`reuseOnly`), which re-proves the single premises,
 today's price against the card with the setup fee taken as 0, the frozen page
@@ -8450,7 +8462,8 @@ back (`reused: true`) only if every check holds; otherwise it answers 409
 archives nothing and frees no hold. A tap for another service or option, or for
 an offer quote that is expired, archived, accepted or changed by staff, takes the
 standard flow. No new route, token, header or rate limit; the only new response
-codes are the two above.
+codes are `BEFORE_PLAN_VISIT_WINDOW`, `plan_offer_frozen` and the tap's two, and
+the only new response field is `estimate.planOffer`.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

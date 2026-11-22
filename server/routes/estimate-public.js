@@ -10713,12 +10713,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // resolution instead (GH r22 P1 + its pre-push follow-on): the
     // estimate page ALWAYS serializes both — defaults included — so bare
     // nonempty checks bricked every normal restart accept.
-    if (String(estimate.source || '') === 'plan_restart' && requestedOneTime) {
-      return res.status(409).json({
-        error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
-        code: 'restart_quote_frozen',
-      });
-    }
+    // A plan offer's quote is frozen the same way (frozenOfferRefusal): its accept sells the quarterly plan only.
+    const frozenOffer = frozenOfferRefusal(estimate);
+    if (frozenOffer && requestedOneTime) return res.status(409).json(frozenOffer);
     // Billing choices are only meaningful for recurring accepts: the
     // converter creates the matching invoice after the slot is confirmed.
     // Reject up front rather than fulfill the request half-way.
@@ -11495,13 +11492,10 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // the first offered frequency — so the submitted key is allowed only
     // when it IS the stored offer's deterministic default; any other key
     // would accept a cadence/price the mint never offered.
-    if (String(estimate.source || '') === 'plan_restart' && selectedFrequencyKey
-        && selectedFrequencyKey !== String(defaultFrequencyFromList(pricingFrequencies)?.key || '')) {
-      return res.status(409).json({
-        error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
-        code: 'restart_quote_frozen',
-      });
-    }
+    // A plan offer's quote too: the waived setup fee belongs to the quarterly plan it opens on, never to a
+    // bi-monthly or monthly pick. Before any billing or booking.
+    const frozenFrequency = frozenOfferFrequencyRefusal(estimate, selectedFrequencyKey, pricingFrequencies);
+    if (frozenFrequency) return res.status(409).json(frozenFrequency);
     // Tier-aware annual-prepay eligibility (codex r10 P1). Mosquito ladder
     // entries carry their own annualPrepayEligible (finalizePricingBundle);
     // that flag decides for the SELECTED tier — the stored-mix rule remains
@@ -11570,7 +11564,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // server-stamped totals must equal the minted row's stored totals.
       // Totals alone were not enough: equal-priced combos can differ in
       // composition, and conversion schedules the combo.
-      if (String(estimate.source || '') === 'plan_restart') {
+      if (frozenOffer) {
         const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
         const defaultKeyFor = (axis) => {
           const section = sections.find((s) => s && s.key === axis);
@@ -11584,10 +11578,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         if (nonDefaultAxis
           || centsOf(selectedCombo.monthly) !== centsOf(estimate.monthly_total)
           || centsOf(selectedCombo.annual) !== centsOf(estimate.annual_total)) {
-          return res.status(409).json({
-            error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
-            code: 'restart_quote_frozen',
-          });
+          return res.status(409).json(frozenOffer);
         }
       }
     }
@@ -22548,12 +22539,37 @@ function adminDraftPreviewEligible(estimate, adminPreviewParam) {
 // mutations 409 with a code the portal can message on; the customer
 // re-taps "Restart my plan" for a fresh mint instead.
 function refuseFrozenRestartMutation(estimate, res) {
-  if (String(estimate?.source || '') !== 'plan_restart') return false;
-  res.status(409).json({
-    error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
-    code: 'restart_quote_frozen',
-  });
+  const frozen = frozenOfferRefusal(estimate);
+  if (!frozen) return false;
+  res.status(409).json(frozen);
   return true;
+}
+
+// The 409 body of a FROZEN offer, or null for every other estimate. Two kinds:
+//   - a restart quote (above);
+//   - a plan offer's quote (owner 2026-11-19: after a one-time job, the standard quarterly pest plan with the
+//     setup fee waived). The waiver sits on the whole estimate (operatorPriceAdjustment.waiveSetupFee), so
+//     another cadence, another tier, an added or removed service or the one-time mode would carry the $0 fee
+//     to a plan the offer never named. The offer is the quarterly plan as emailed, nothing else.
+// The repricing routes (refuseFrozenRestartMutation) and the accept's selection checks read this one answer,
+// and /data tells the page to draw the offer as fixed (planRestart / planOffer).
+function frozenOfferRefusal(estimate) {
+  if (String(estimate?.source || '') === 'plan_restart') {
+    return { error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.', code: 'restart_quote_frozen' };
+  }
+  if (require('../services/plan-offer-estimate').planOfferOf(estimate?.estimate_data)) {
+    return { error: 'This offer is for the plan as shown. For a different plan, call or text us.', code: 'plan_offer_frozen' };
+  }
+  return null;
+}
+
+// A frozen offer's accept may name only the stored offer's default frequency (the page always sends
+// selectedFrequency, and it opens on that default): any other key is a cadence and a price the mint never
+// offered. Answers the 409 body, or null when the accept may go on.
+function frozenOfferFrequencyRefusal(estimate, selectedFrequencyKey, pricingFrequencies) {
+  const frozen = frozenOfferRefusal(estimate);
+  if (!frozen || !selectedFrequencyKey) return null;
+  return selectedFrequencyKey !== String(defaultFrequencyFromList(pricingFrequencies)?.key || '') ? frozen : null;
 }
 
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
@@ -32669,6 +32685,9 @@ async function composeEstimateDataPayload(estimate, {
         // offering controls that can only fail. Present only on restart rows
         // so every other response stays byte-identical.
         ...(String(estimate.source || '') === 'plan_restart' ? { planRestart: true } : {}),
+        // A plan offer's quote is frozen the same way (frozenOfferRefusal): the page draws it as fixed too.
+        // Present only on an offer row.
+        ...(require('../services/plan-offer-estimate').planOfferOf(estimate.estimate_data) ? { planOffer: true } : {}),
         // Present only on a plan quote staff changed (staffChangedQuoteForData above): the accept's code and words.
         ...(staffChangedQuoteForData
           ? { quoteRefusal: { code: staffChangedQuoteForData.code, error: staffChangedQuoteForData.message } } : {}),
@@ -33324,6 +33343,8 @@ module.exports.commercialFirstVisitPreGuard = commercialFirstVisitPreGuard;
 module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
+module.exports.frozenOfferRefusal = frozenOfferRefusal;
+module.exports.frozenOfferFrequencyRefusal = frozenOfferFrequencyRefusal;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
 // GATE_ESTIMATE_DUE_FIRST_VISIT: the accept invoice's later due date, on its own line for the unit test.
 module.exports.acceptInvoiceVisitDueDate = acceptInvoiceVisitDueDate;

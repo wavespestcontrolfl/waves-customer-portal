@@ -1017,6 +1017,20 @@ describe('mintPlanStartEstimate', () => {
       expect(recompute).not.toHaveBeenCalled();
     });
 
+    // The entry checks the end date before the customer locks and the recompute. It is read again on the clock
+    // before the old quote is retired: an end date that passed during the work retires nothing and mints nothing.
+    test('an end date that passes while the mint works is a plain Error: the prior quote stays, nothing is minted', async () => {
+      const plain = await mint();
+      let worked = false;
+      const priced = recompute.getMockImplementation();
+      recompute.mockImplementationOnce(async (...args) => { worked = true; return priced(...args); });
+      const now = () => (worked ? new Date(ENDS.getTime() + 1000) : FIXED_NOW());
+      await expect(mintOffer(OFFER, { randomBytes: SECOND_TOKEN, now })).rejects.toThrow(/offer needs an end date that is still ahead/);
+      expect(worked).toBe(true);
+      expect(tables.estimates).toHaveLength(1);
+      expect(tables.estimates.find((r) => r.id === plain.estimateId).archived_at).toBeFalsy();
+    });
+
     test('an end date exactly 31 days out is allowed', async () => {
       await expect(mintOffer({ ...OFFER, endsAt: new Date(FIXED_NOW().getTime() + 31 * 24 * 3600 * 1000) })).resolves.toMatchObject({ reused: false });
     });
