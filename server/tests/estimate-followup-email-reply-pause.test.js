@@ -20,6 +20,8 @@ jest.mock('../models/db', () => {
       rec.wheres.push(args); return q;
     });
     q.whereRaw = chain('whereRaw', 'raws');
+    q.whereNot = chain('whereNot', 'wheres');
+    q.whereNotNull = chain('whereNotNull', 'wheres');
     q.andWhere = jest.fn((fn) => {
       const g = {
         where: (...a) => { rec.groupWheres.push(['where', ...a]); return g; },
@@ -50,6 +52,8 @@ jest.mock('../services/estimate-conversion-guard', () => ({
   customerConvertedSince: jest.fn(async () => ({ converted: false })),
 }));
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+19413180000') }));
+// A bare-object mock, as in many suites: no estimateReplyPauseSinceEstimateLive here means the gate is off. The
+// since-estimate describe below sets the reader per test.
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
 }));
@@ -321,5 +325,299 @@ describe('text arm: the stored phone and its E.164 form both match', () => {
     const lead = { id: 'est-5', customer_id: null, customer_phone: '   ', customer_email: null };
     expect(await hasRepliedSince(lead, CUTOFF)).toBe(false);
     expect(messagesCall().groupWheres).toEqual([]);
+  });
+});
+
+// GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE (owner 2026-11-21, option A): the 14-day reply pause counts only messages since
+// the estimate was made, for a person's first sent estimate.
+describe('reply pause since the estimate (gate)', () => {
+  const gates = require('../config/feature-gates');
+  const DAY = 86400000;
+  const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+  const estimatesCalls = () => db._calls.filter((c) => c.table === 'estimates');
+  const messagesCall = () => db._calls.find((c) => c.table === 'messages');
+  // The cutoff both reply arms receive, as a time.
+  const smsCutoff = () => messagesCall().wheres.find((w) => w[0] === 'messages.created_at')[2].getTime();
+  // The engagement engine's call: only this call takes the since-estimate window.
+  const SINCE = { sinceEstimate: true };
+  const madeAgo = (days) => ({ ...CUSTOMER_EST, created_at: iso(days * DAY) });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db._calls.length = 0;
+    db._rows = null;
+    gates.estimateReplyPauseSinceEstimateLive = jest.fn(() => true);
+  });
+  afterAll(() => { delete gates.estimateReplyPauseSinceEstimateLive; });
+
+  test('gate off: an estimate made 2 days ago keeps now minus 14 days, and no estimates read happens', async () => {
+    gates.estimateReplyPauseSinceEstimateLive = jest.fn(() => false);
+    setRows({ messages: null, emails: [] });
+    const before = Date.now();
+    await hasRepliedRecently(madeAgo(2), 14, SINCE);
+    expect(before - smsCutoff()).toBeGreaterThanOrEqual(14 * DAY - 1000);
+    expect(before - smsCutoff()).toBeLessThan(14 * DAY + 5000);
+    expect(estimatesCalls()).toHaveLength(0);
+  });
+
+  test('the gate reader missing from a bare-object mock is gate off', async () => {
+    delete gates.estimateReplyPauseSinceEstimateLive;
+    setRows({ messages: null, emails: [] });
+    await hasRepliedRecently(madeAgo(2), 14, SINCE);
+    expect(estimatesCalls()).toHaveLength(0);
+    expect(Date.now() - smsCutoff()).toBeGreaterThanOrEqual(14 * DAY - 1000);
+  });
+
+  test('gate on, first estimate made 2 days ago: both arms read from created_at', async () => {
+    const est = madeAgo(2);
+    setRows({ estimates: null, messages: null, customers: { email: 'pat@example.com' }, emails: [] });
+    expect(await hasRepliedRecently(est, 14, SINCE)).toBe(false);
+    expect(smsCutoff()).toBe(new Date(est.created_at).getTime());
+    expect(emailCalls()[0].wheres[0]).toEqual(['emails.received_at', '>=', new Date(est.created_at)]);
+  });
+
+  test('gate on, the other-estimate read asks for any other sent estimate of the same person, made before or after this one', async () => {
+    const est = { ...madeAgo(2), customer_phone: '(941) 555-0123' };
+    setRows({ estimates: null, messages: null, emails: [] });
+    await hasRepliedRecently(est, 14, SINCE);
+    const [c] = estimatesCalls();
+    expect(c.wheres).toContainEqual(['whereNot', 'id', 'est-1']);
+    expect(c.wheres).toContainEqual(['whereNotNull', 'sent_at']);
+    // no created_at clause: an estimate made after this one counts too
+    expect(JSON.stringify(c.wheres)).not.toContain('created_at');
+    expect(c.groupWheres).toEqual([
+      ['where', 'customer_id', 'cust-1'],
+      ['orWhere', 'customer_phone', '(941) 555-0123'],
+      ['orWhere', 'customer_phone', '+19415550123'],
+    ]);
+    // bindings, never an interpolated address; trimmed and lower-cased; every address a reply can come from
+    expect(c.groupRaws).toEqual([
+      ["orWhereRaw", "RIGHT(REGEXP_REPLACE(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", ['9415550123']],
+      ['orWhereRaw', 'LOWER(TRIM(customer_email)) = ANY(?)', [['pat@example.com']]],
+    ]);
+    expect(c.limit).toBeUndefined();
+  });
+
+  test('gate on: a reply BEFORE the estimate does not pause, a reply AFTER it does (the reply arms read from created_at)', async () => {
+    const est = madeAgo(2);
+    const created = new Date(est.created_at).getTime();
+    const inboxSince = (rows) => (table, rec) => {
+      if (table === 'estimates') return null;
+      const w = rec.wheres.find((x) => x[0] === 'messages.created_at' || x[0] === 'emails.received_at');
+      if (table === 'customers') return { email: 'pat@example.com' };
+      const cutoff = w[2].getTime();
+      return rows[table].filter((t) => t >= cutoff).length ? (table === 'messages' ? { id: 'm1' } : [CUSTOMER_REPLY]) : (table === 'messages' ? null : []);
+    };
+    db._rows = inboxSince({ messages: [created - 3600000], emails: [created - 3600000] });
+    expect(await hasRepliedRecently(est, 14, SINCE)).toBe(false);
+    db._calls.length = 0;
+    db._rows = inboxSince({ messages: [created + 3600000], emails: [] });
+    expect(await hasRepliedRecently(est, 14, SINCE)).toBe(true);
+    db._calls.length = 0;
+    db._rows = inboxSince({ messages: [], emails: [created + 3600000] });
+    expect(await hasRepliedRecently(est, 14, SINCE)).toBe(true);
+  });
+
+  test('gate on, another sent estimate of the same person exists: today\'s window (customer_id, phone and email forms)', async () => {
+    for (const est of [
+      madeAgo(2),
+      { ...madeAgo(2), customer_id: null, customer_email: null },
+      { ...madeAgo(2), customer_id: null, customer_phone: null },
+    ]) {
+      db._calls.length = 0;
+      setRows({ estimates: { id: 'est-0' }, messages: null, emails: [] });
+      const before = Date.now();
+      await hasRepliedRecently(est, 14, SINCE);
+      expect(estimatesCalls()).toHaveLength(1);
+      expect(before - smsCutoff()).toBeGreaterThanOrEqual(14 * DAY - 1000);
+      expect(before - smsCutoff()).toBeLessThan(14 * DAY + 5000);
+    }
+  });
+
+  test('gate on, a person with no identifier at all: no estimates read, today\'s window', async () => {
+    setRows({ messages: null, emails: [] });
+    await hasRepliedRecently({ id: 'est-9', customer_id: null, customer_phone: ' ', customer_email: '', created_at: iso(2 * DAY) }, 14, SINCE);
+    expect(estimatesCalls()).toHaveLength(0);
+  });
+
+  test('gate on, estimate made 30 days ago: today\'s window and no extra read', async () => {
+    setRows({ messages: null, customers: { email: 'pat@example.com' }, emails: [] });
+    const before = Date.now();
+    await hasRepliedRecently(madeAgo(30), 14, SINCE);
+    expect(estimatesCalls()).toHaveLength(0);
+    expect(before - smsCutoff()).toBeGreaterThanOrEqual(14 * DAY - 1000);
+    expect(before - smsCutoff()).toBeLessThan(14 * DAY + 5000);
+  });
+
+  test('gate on, created_at missing, unparsable or in the future: today\'s window and no extra read', async () => {
+    for (const created_at of [undefined, null, '', 'not a date', new Date(Date.now() + 3600000).toISOString()]) {
+      db._calls.length = 0;
+      setRows({ messages: null, emails: [] });
+      const before = Date.now();
+      await hasRepliedRecently({ ...CUSTOMER_EST, created_at }, 14, SINCE);
+      expect(estimatesCalls()).toHaveLength(0);
+      expect(before - smsCutoff()).toBeGreaterThanOrEqual(14 * DAY - 1000);
+      expect(before - smsCutoff()).toBeLessThan(14 * DAY + 5000);
+    }
+  });
+
+  test('gate on, created_at as a Date object works like the string', async () => {
+    const created = new Date(Date.now() - 2 * DAY);
+    setRows({ estimates: null, messages: null, emails: [] });
+    await hasRepliedRecently({ ...CUSTOMER_EST, created_at: created }, 14, SINCE);
+    expect(smsCutoff()).toBe(created.getTime());
+  });
+
+  test('gate on, the other-estimate read throws: today\'s window, nothing thrown (cron and replay), only the code logged', async () => {
+    const boom = Object.assign(new Error('select ... customer_phone = +19415550123 at 12 Palm Way'), { code: '57P01' });
+    for (const opts of [{}, { throwOnError: true }]) {
+      db._calls.length = 0;
+      logger.warn.mockClear();
+      setRows({ estimates: boom, messages: null, customers: { email: 'pat@example.com' }, emails: [] });
+      const before = Date.now();
+      await expect(hasRepliedRecently(madeAgo(2), 14, { ...opts, sinceEstimate: true })).resolves.toBe(false);
+      expect(before - smsCutoff()).toBeGreaterThanOrEqual(14 * DAY - 1000);
+      expect(before - smsCutoff()).toBeLessThan(14 * DAY + 5000);
+      expect(logger.warn).toHaveBeenCalledWith('[est-followup] reply-pause window check skipped for estimate est-1: 57P01');
+      const logged = JSON.stringify(logger.warn.mock.calls);
+      expect(logged).not.toContain('19415550123');
+      expect(logged).not.toContain('Palm Way');
+      expect(logged).not.toContain('pat@example.com');
+    }
+  });
+
+  test('gate on, a failed other-estimate read does not hide a later reply-arm failure on replay', async () => {
+    setRows({ estimates: new Error('estimates down'), messages: new Error('messages down') });
+    await expect(hasRepliedRecently(madeAgo(2), 14, { throwOnError: true, sinceEstimate: true })).rejects.toThrow('reply-pause check failed');
+  });
+
+  test('gate on WITHOUT sinceEstimate (the safetyGate path) = today\'s window and no estimates read, also on replay', async () => {
+    for (const opts of [undefined, {}, { throwOnError: true }]) {
+      db._calls.length = 0;
+      setRows({ messages: null, customers: { email: 'pat@example.com' }, emails: [] });
+      const before = Date.now();
+      await hasRepliedRecently(madeAgo(2), 14, opts);
+      expect(estimatesCalls()).toHaveLength(0);
+      expect(before - smsCutoff()).toBeGreaterThanOrEqual(14 * DAY - 1000);
+      expect(before - smsCutoff()).toBeLessThan(14 * DAY + 5000);
+    }
+  });
+
+  test('sinceEstimate is not passed on to hasRepliedSince: only throwOnError is', async () => {
+    setRows({ estimates: null, messages: new Error('messages down'), customers: { email: 'pat@example.com' }, emails: [] });
+    // throwOnError still reaches the reply arms; the unknown option does not change them
+    await expect(hasRepliedRecently(madeAgo(2), 14, { sinceEstimate: true, throwOnError: true })).rejects.toThrow('reply-pause check failed');
+    await expect(hasRepliedRecently(madeAgo(2), 14, SINCE)).resolves.toBe(false);
+  });
+
+  const LAST_TEN = 'RIGHT(REGEXP_REPLACE(COALESCE(customer_phone, \'\'), \'[^0-9]\', \'\', \'g\'), 10) = ?';
+
+  test('the other-estimate lookup matches a phone stored in any format by its last ten digits', async () => {
+    for (const phone of ['+19415550123', '(941) 555-0123', '1-941-555-0123']) {
+      db._calls.length = 0;
+      setRows({ estimates: null, messages: null, emails: [] });
+      await hasRepliedRecently({ ...madeAgo(2), customer_phone: phone }, 14, SINCE);
+      const [c] = estimatesCalls();
+      expect(c.groupRaws).toContainEqual(['orWhereRaw', LAST_TEN, ['9415550123']]);
+      // the exact stored form is still compared too
+      expect(c.groupWheres).toContainEqual(['orWhere', 'customer_phone', phone]);
+    }
+  });
+
+  test('a phone under ten digits adds no last-ten clause (the exact form still matches)', async () => {
+    setRows({ estimates: null, messages: null, emails: [] });
+    await hasRepliedRecently({ ...madeAgo(2), customer_phone: '555-0123' }, 14, SINCE);
+    const [c] = estimatesCalls();
+    expect(c.groupRaws.map((r) => r[1])).toEqual(['LOWER(TRIM(customer_email)) = ANY(?)']);
+    expect(c.groupWheres).toContainEqual(['orWhere', 'customer_phone', '555-0123']);
+  });
+
+  test('the customer\'s ON-FILE address (not the estimate\'s own) matching another sent estimate = today\'s window', async () => {
+    const est = madeAgo(2);
+    db._rows = (table, rec) => {
+      if (table === 'customers') return { email: 'Owner@Example.org' };
+      if (table === 'estimates') {
+        // the stand-in for SQL: the other estimate matches only through the on-file address
+        const anyAddr = rec.groupRaws.find((r) => r[1] === 'LOWER(TRIM(customer_email)) = ANY(?)');
+        return anyAddr && anyAddr[2][0].includes('owner@example.org') ? { id: 'est-0' } : null;
+      }
+      return table === 'emails' ? [] : null;
+    };
+    const before = Date.now();
+    await hasRepliedRecently(est, 14, SINCE);
+    const [c] = estimatesCalls();
+    expect(c.groupRaws).toContainEqual(['orWhereRaw', 'LOWER(TRIM(customer_email)) = ANY(?)', [['pat@example.com', 'owner@example.org']]]);
+    expect(before - smsCutoff()).toBeGreaterThanOrEqual(14 * DAY - 1000);
+    expect(before - smsCutoff()).toBeLessThan(14 * DAY + 5000);
+  });
+
+  test('one of our own addresses is never an identity address in the lookup', async () => {
+    setRows({ estimates: null, messages: null, customers: null, emails: [] });
+    await hasRepliedRecently({ ...madeAgo(2), customer_id: null, customer_phone: null, customer_email: 'Contact@WavesPestControl.com' }, 14, SINCE);
+    // no identifier left: no estimates read
+    expect(estimatesCalls()).toHaveLength(0);
+  });
+
+  test('gate on, the customers read INSIDE the lookup throws: today\'s window, nothing thrown (cron and replay), only the code logged', async () => {
+    const boom = Object.assign(new Error('select email from customers where id = cust-1 (pat@example.com, 12 Palm Way)'), { code: '57P01' });
+    for (const opts of [{}, { throwOnError: true }]) {
+      db._calls.length = 0;
+      logger.warn.mockClear();
+      let customersReads = 0;
+      db._rows = (table) => {
+        if (table === 'customers') {
+          customersReads += 1;
+          if (customersReads === 1) throw boom; // the lookup's own read; the reply arms read it later and succeed
+          return { email: 'pat@example.com' };
+        }
+        return table === 'emails' ? [] : null;
+      };
+      const before = Date.now();
+      await expect(hasRepliedRecently(madeAgo(2), 14, { ...opts, sinceEstimate: true })).resolves.toBe(false);
+      expect(estimatesCalls()).toHaveLength(0);
+      expect(before - smsCutoff()).toBeGreaterThanOrEqual(14 * DAY - 1000);
+      expect(before - smsCutoff()).toBeLessThan(14 * DAY + 5000);
+      expect(logger.warn).toHaveBeenCalledWith('[est-followup] reply-pause window check skipped for estimate est-1: 57P01');
+      const logged = JSON.stringify(logger.warn.mock.calls);
+      expect(logged).not.toContain('pat@example.com');
+      expect(logged).not.toContain('Palm Way');
+    }
+  });
+
+  test('a draft made first and sent last: with another estimate sent, A keeps the full window and a reply after B still pauses', async () => {
+    // A (the estimate checked) was made 5 days ago as a draft; B was made 3 days ago and sent; the customer replied
+    // 1 day ago; then A is sent. B is another sent estimate of the person, made after A, so A keeps today's window.
+    const estA = { ...CUSTOMER_EST, id: 'est-A', created_at: iso(5 * DAY) };
+    const replyAt = Date.now() - DAY;
+    db._rows = (table, rec) => {
+      if (table === 'estimates') return { id: 'est-B' };
+      if (table === 'customers') return { email: 'pat@example.com' };
+      const w = rec.wheres.find((x) => x[0] === 'messages.created_at' || x[0] === 'emails.received_at');
+      if (table === 'messages') return replyAt >= w[2].getTime() ? { id: 'm1' } : null;
+      return [];
+    };
+    const before = Date.now();
+    expect(await hasRepliedRecently(estA, 14, SINCE)).toBe(true);
+    const [c] = estimatesCalls();
+    expect(JSON.stringify(c.wheres)).not.toContain('created_at');
+    expect(before - smsCutoff()).toBeGreaterThanOrEqual(14 * DAY - 1000);
+    expect(before - smsCutoff()).toBeLessThan(14 * DAY + 5000);
+  });
+
+  test('the gate reader is strict: only the exact string true turns it on', () => {
+    jest.isolateModules(() => {
+      const real = jest.requireActual('../config/feature-gates');
+      const prior = process.env.GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE;
+      try {
+        for (const [v, want] of [['true', true], ['TRUE', false], ['True', false], ['1', false], ['yes', false], [' true', false], ['', false], [undefined, false]]) {
+          if (v === undefined) delete process.env.GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE;
+          else process.env.GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE = v;
+          expect(real.estimateReplyPauseSinceEstimateLive()).toBe(want);
+        }
+      } finally {
+        if (prior === undefined) delete process.env.GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE;
+        else process.env.GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE = prior;
+      }
+    });
   });
 });

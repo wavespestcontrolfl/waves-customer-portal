@@ -654,7 +654,7 @@ async function processDueBatch(now = new Date()) {
         await markJob(job.id, 'skipped', `converted:${conv.reason}`);
         continue;
       }
-      if (await followupShared.hasRepliedRecently(est)) {
+      if (await followupShared.hasRepliedRecently(est, 14, { sinceEstimate: true })) {
         await markJob(job.id, 'skipped', 'customer-replied');
         continue;
       }

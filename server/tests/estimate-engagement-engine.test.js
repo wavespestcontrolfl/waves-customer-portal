@@ -492,6 +492,9 @@ describe('processDueJobs', () => {
     const result = await Engine.processDueJobs(NOW);
 
     expect(result.sent).toBe(1);
+    // Only the engine's emails take the since-estimate reply window (GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE); the
+    // reader decides whether it applies. safetyGate never passes the flag.
+    expect(followupShared.hasRepliedRecently).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }), 14, { sinceEstimate: true });
     expect(followupShared.claimFollowupSend).toHaveBeenCalledWith(
       'est-1', 'viewed_gone_quiet_72h', 'estimate.engage_gone_quiet', expect.any(Object),
       { blockLegacyFlags: [], blockRuleKeys: [] },
