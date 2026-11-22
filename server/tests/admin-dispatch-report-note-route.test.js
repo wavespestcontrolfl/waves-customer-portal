@@ -30,19 +30,26 @@ const REPORT_NOTE = '/:reportNoteServiceId/pest-recap/report-note';
 const VISIT_ID = '0b9f4c1e-2a3d-4e5f-8a6b-7c8d9e0f1a2b';
 const TECHNICIAN = { techRole: 'technician', technicianId: 'tech-1' };
 
+const routeStack = () => router.stack.find((l) => l.route && l.route.path === REPORT_NOTE && l.route.methods.post).route.stack;
+// The gate, then the handler (the staff limiter between them is checked on its own below).
 function invoke(body, actor = TECHNICIAN, id = VISIT_ID) {
-  const layer = router.stack.find((l) => l.route && l.route.path === REPORT_NOTE && l.route.methods.post);
-  const { handle } = layer.route.stack[layer.route.stack.length - 1];
+  const stack = routeStack();
+  const gate = stack[0].handle;
+  const { handle } = stack[stack.length - 1];
   const res = {
     statusCode: 200,
     body: null,
     status(code) { this.statusCode = code; return this; },
     json(payload) { this.body = payload; return this; },
   };
+  const req = {
+    params: { reportNoteServiceId: id }, body, query: {}, ...actor,
+  };
   return new Promise((resolve, reject) => {
-    handle({
-      params: { reportNoteServiceId: id }, body, query: {}, ...actor,
-    }, res, reject).then(() => resolve(res)).catch(reject);
+    let passed = false;
+    gate(req, res, () => { passed = true; });
+    if (!passed) { resolve(res); return; }
+    handle(req, res, reject).then(() => resolve(res)).catch(reject);
   });
 }
 
@@ -54,7 +61,9 @@ const visitOf = (technician_id) => jest.fn(() => {
   };
   return read;
 });
-const PEST_VISIT = { ok: true, eligible: true, svc: { id: VISIT_ID, customer_id: 'customer-1', service_type: 'Quarterly Pest Control' } };
+const PEST_VISIT = { ok: true, eligible: true, svc: {
+  id: VISIT_ID, customer_id: 'customer-1', service_type: 'Quarterly Pest Control', technician_id: 'tech-1', status: 'confirmed', scheduled_date: etDateString(new Date()),
+} };
 
 beforeEach(() => {
   process.env.GATE_REPORT_OWN_NOTE = 'true';
@@ -116,6 +125,19 @@ describe('POST pest-recap/report-note', () => {
     expect(cleanReportNote).not.toHaveBeenCalled();
     const office = await invoke({ note: 'treated shed' }, { techRole: 'admin', technicianId: 'admin-1' });
     expect(office.statusCode).toBe(200);
+  });
+
+  test('a visit reassigned between the two reads is refused before the writer', async () => {
+    PestRecap.resolveEligibility.mockResolvedValue({ ...PEST_VISIT, svc: { ...PEST_VISIT.svc, technician_id: 'tech-2' } });
+    const res = await invoke({ note: 'treated shed' });
+    expect([res.statusCode, res.body.code]).toEqual([403, 'service_not_assigned']);
+    expect(cleanReportNote).not.toHaveBeenCalled();
+  });
+
+  test('the gate runs first, then a staff limiter, then the handler', () => {
+    const stack = routeStack();
+    expect(stack).toHaveLength(3);
+    expect(stack[0].name).toBe('reportOwnNoteGate');
   });
 
   test('a visit that is gone, is no pest visit, or has no customer gets no model call', async () => {

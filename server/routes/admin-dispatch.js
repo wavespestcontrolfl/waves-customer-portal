@@ -4013,9 +4013,21 @@ function reportNoteVisitRefusal({ ok, reason, svc, eligible }) {
   if (!eligible) return 'not_pest_control';
   return svc.customer_id ? null : VISIT_NO_CUSTOMER_CODE;
 }
-router.post('/:reportNoteServiceId/pest-recap/report-note', async (req, res, next) => {
+// Dark gate ahead of the limiter: while off, a request is the 404 and never spends the staff bucket. Paid calls: a cap
+// per staff bucket (rate-limit-key.js), like the voice-fill reads.
+const reportOwnNoteGate = (req, res, next) => (
+  require('../config/feature-gates').reportOwnNoteLive() ? next() : res.status(404).json({ enabled: false })
+);
+const reportOwnNoteLimiter = require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many note previews. Type the report for now.' },
+});
+router.post('/:reportNoteServiceId/pest-recap/report-note', reportOwnNoteGate, reportOwnNoteLimiter, async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').reportOwnNoteLive()) return res.status(404).json({ enabled: false });
     const id = req.params.reportNoteServiceId;
     if (!require('../services/reservice-office-request').isUuid(id)) {
       return res.status(404).json({ error: 'Service not found', code: 'not_found' });
@@ -4025,6 +4037,10 @@ router.post('/:reportNoteServiceId/pest-recap/report-note', async (req, res, nex
     const visit = await PestRecap.resolveEligibility(req.params.serviceId);
     const refusal = reportNoteVisitRefusal(visit);
     if (refusal) return res.status(recapStatusForReason(refusal)).json({ error: refusal, code: refusal });
+    // The row the writer reads is judged again: a visit reassigned since the ownership read is refused.
+    if (!technicianVisitRowInScope(req, visit.svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
     const { note } = req.body || {};
     // The codes on the customer's file are read for this customer before any model reads the note.
     const { text, source, reason } = await require('../services/service-report/report-own-note-writer').cleanReportNote({
