@@ -275,6 +275,8 @@ maybeDescribe('call booking check (live Postgres)', () => {
     ['the call spoke of a second service', {}, pricedCall({ secondary_categories: ['lawn_care'] })],
     ['the reading records the caller\'s choice of a plan\'s billing', {}, pricedCall({ billing_choice: 'per_application' })],
     ['the visit is a free callback', { visitOver: { is_callback: true } }, pricedCall()],
+    ['the office made the visit recurring', { visitOver: { is_recurring: true } }, pricedCall()],
+    ['the visit\'s label names another service than its catalog row', { visitOver: { service_type: 'Another One-Time Service' } }, pricedCall()],
     ['the call holds no price', {}, {}],
     ['the call spoke of a second property', {}, pricedCall({}, { property: { additional_properties: [{ city: 'Venice' }] } })],
     ['the call named another service than the visit has', {}, pricedCall({ specific_service_name: 'Another One-Time Service' })],

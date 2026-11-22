@@ -126,6 +126,9 @@ describe('what a visit and the reading of its call say about the price', () => {
     expect(verdict(unpriced({ row_billing_type: 'free' }))).toBe('agrees');
     // A free callback never takes a price.
     expect(verdict(unpriced({ is_callback: true }))).toBe('agrees');
+    // The office made the visit recurring; the schedule editor keeps the one-time catalog row. It is a plan's visit now.
+    expect(verdict(unpriced({ is_recurring: true }))).toBe('agrees');
+    expect(verdict(unpriced({ recurring_parent_id: 'p1' }))).toBe('agrees');
     // A call booking never prices a Waves Assessment (by its key or its name) or a free re-service, even when
     // the call names that visit and speaks of a treatment price: that price is the quote, not this visit's charge.
     for (const row of ASSESSMENT_AND_RE_SERVICE) expect(verdict(row)).toBe('agrees');
@@ -192,6 +195,10 @@ describe('what a visit and the reading of its call say about the price', () => {
       expect(verdict(pricedAs({ prices: [statedTerm(mark)] }))).toBe('unknown');
       expect(verdict(pricedAs({ prices: [statedTerm(), callersNumber(mark)] }))).toBe('unknown');
     }
+    // An entry with no amount that records a plan talk counts too.
+    for (const mark of [{ tier_mentioned: 'silver' }, { prepay_term: 'annual' }]) {
+      expect(verdict(pricedAs({ prices: [statedTerm(), { amount_usd: null, amount_max_usd: null, unit: null, accepted: null, stated_by: 'agent', ...mark }] }))).toBe('unknown');
+    }
     // No plan mark: a prepay the call ruled out, and what the caller pays another company each month.
     expect(verdict(pricedAs({ prices: [statedTerm({ prepay_term: 'none', tier_mentioned: null })] }))).toBe('problem');
     expect(verdict(pricedAs({ prices: [statedTerm(), callersNumber()] }))).toBe('problem');
@@ -203,6 +210,9 @@ describe('what a visit and the reading of its call say about the price', () => {
     expect(verdict(pricedAs({ secondary_categories: [] }))).toBe('problem');
     // The reading's price block is call-wide. The call named one service; the visit is another.
     expect(verdict(unpriced({ row_name: 'Rodent Exclusion Service', service_type: 'Rodent Exclusion Service' }))).toBe('unknown');
+    // The schedule editor can change the label alone: the catalog row still matches the call, the visit does not.
+    expect(verdict(unpriced({ service_type: 'Rodent Exclusion Service' }))).toBe('unknown');
+    expect(verdict(unpriced({ service_type: ' one-time pest control service' }))).toBe('problem');
     expect(verdict(pricedAs({ specific_service_name: 'Cockroach Treatment Service' }))).toBe('unknown');
     expect(verdict(pricedAs({ specific_service_name: null }))).toBe('unknown');
     // The catalog holds the name under two billing types: the price can be the plan's.
@@ -256,6 +266,7 @@ describe('when an open bell closes', () => {
     expect(closeKeyFor('price', pricedAs({ prices: [statedTerm({ amount_usd: 300 })] }), BILLING)).toBeNull();
     expect(closeKeyFor('price', pricedAs({ quoted_price_usd: 350 }), BILLING)).toBeNull();
     expect(closeKeyFor('price', unpriced({ row_name: 'Rodent Exclusion Service', service_type: 'Rodent Exclusion Service' }), BILLING)).toBeNull();
+    expect(closeKeyFor('price', unpriced({ service_type: 'Rodent Exclusion Service' }), BILLING)).toBeNull();
     expect(closeKeyFor('price', unpriced({ row_name: null, row_service_key: null, row_billing_type: null }), BILLING)).toBeNull();
   });
 
@@ -271,6 +282,7 @@ describe('when an open bell closes', () => {
     for (const row of ASSESSMENT_AND_RE_SERVICE) expect(closeKeyFor('price', row, BILLING)).toBe('noPriceNeeded');
     expect(closeKeyFor('price', planVisit({ estimated_price: null, ai_extraction_enriched: pricedReading() }), BILLING)).toBe('noPriceNeeded');
     expect(closeKeyFor('price', unpriced({ is_callback: true }), BILLING)).toBe('noPriceNeeded');
+    expect(closeKeyFor('price', unpriced({ is_recurring: true }), BILLING)).toBe('noPriceNeeded');
     expect(closeKeyFor('price', unpriced({ status: 'completed' }), BILLING)).toBe('visitClosed');
     expect(closeKeyFor('price', undefined, BILLING)).toBe('gone');
   });

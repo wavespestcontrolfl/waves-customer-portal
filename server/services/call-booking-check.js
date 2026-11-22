@@ -43,7 +43,7 @@ const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
-const { resolveStatedOneTimeCallPrice, statedPriceTerms } = require('../utils/call-agreed-price');
+const { resolveStatedOneTimeCallPrice } = require('../utils/call-agreed-price');
 
 const OWN_PREFIX = 'call-booking-check:';
 const AREA = 'Schedule';
@@ -120,10 +120,12 @@ const catalogRowOf = (visit) => ({ name: visit.row_name, service_key: visit.row_
 // that is not one-time, a free re-service, and a Waves Assessment, the free look-before-quote visit (a treatment
 // price said on the same call is the quote, not this visit's charge). Also a free callback, and a visit whose
 // label completion billing always treats as free (isAlwaysFreeServiceType: an appointment, an estimate, a
-// follow-up), where a price would be skipped at completion.
+// follow-up), where a price would be skipped at completion. Also a visit the office made recurring (the
+// schedule editor keeps the one-time catalog row): it is a plan's visit now, not the call's one-time job.
 function takesNoCallPrice(visit) {
   const row = catalogRowOf(visit);
   return row.billing_type !== 'one_time' || Boolean(visit.is_callback)
+    || Boolean(visit.is_recurring) || visit.recurring_parent_id != null
     || require('./no-cost-visit-types').isAlwaysFreeServiceType(visit.service_type)
     || require('./call-booking-catalog').isReServiceCatalogRow(row)
     || require('./assessment-booking').isAssessmentServiceRow(row);
@@ -137,16 +139,17 @@ const ONE_TIME_JOB_INTENTS = new Set(['active_infestation_treatment', 'preventat
 // holds no other job, no other property and no plan. The intent is a list of what counts, not of what does not:
 // a plan ask, an inspection, a quote, a follow-up, a complaint, a cancellation and no intent all fail. A plan
 // shows as a bundle category, a tier the caller named, a billing choice, or a tier or an annual prepay on any
-// price term (the caller's own number too).
+// stored price entry (the caller's own number, and an entry with no amount, too).
 function readsAsOneOneTimeJob(reading) {
   const request = reading.service_request;
+  const entries = [request.price, ...(Array.isArray(request.prices) ? request.prices : [])].filter((entry) => entry && typeof entry === 'object');
   const flags = Array.isArray(reading.triage_flags) ? reading.triage_flags : [];
   const others = [request.secondary_categories, reading.property && reading.property.additional_properties];
   return ONE_TIME_JOB_INTENTS.has(request.service_intent)
     && request.primary_service_category !== 'bundled_waveguard'
     && !request.waveguard_tier_mentioned
     && !require('./call-prepay-choice').billingChoiceOf(reading)
-    && !statedPriceTerms(request).some((term) => term.tier_mentioned || term.prepay_term === 'annual')
+    && !entries.some((entry) => entry.tier_mentioned || entry.prepay_term === 'annual')
     && !others.some((list) => Array.isArray(list) && list.length)
     && !flags.includes('multi_property_call');
 }
@@ -175,7 +178,8 @@ function statedPriceFor(reading, catalogRow) {
 //   unknown  the visit has no catalog row, the reading cannot be read or holds no stated price, or the price
 //            cannot be tied to this visit as a one-time charge: the reading names another service than the
 //            visit's or a name the catalog holds under two billing types (`billingByName`, as in judgeService),
-//            or it does not read as one one-time job and nothing else (readsAsOneOneTimeJob).
+//            the visit's label is no longer its catalog row's name (the schedule editor can change the label
+//            alone), or the reading does not read as one one-time job and nothing else (readsAsOneOneTimeJob).
 function judgePrice(visit, billingByName) {
   // A price settles it, whatever else can be read (a visit whose catalog row is gone, too).
   if (visitHasPrice(visit)) return { verdict: 'agrees' };
@@ -185,7 +189,8 @@ function judgePrice(visit, billingByName) {
   const request = reading && reading.service_request;
   if (!request || typeof request !== 'object') return { verdict: 'unknown' };
   const heardKey = nameKey(request.specific_service_name);
-  if (heardKey !== nameKey(visit.row_name) || billingByName.get(heardKey) !== 'one_time' || !readsAsOneOneTimeJob(reading)) return { verdict: 'unknown' };
+  const sameService = heardKey === nameKey(visit.row_name) && heardKey === nameKey(visit.service_type);
+  if (!sameService || billingByName.get(heardKey) !== 'one_time' || !readsAsOneOneTimeJob(reading)) return { verdict: 'unknown' };
   const amount = statedPriceFor(reading, catalogRowOf(visit));
   return amount ? { verdict: 'problem', amount } : { verdict: 'unknown' };
 }
