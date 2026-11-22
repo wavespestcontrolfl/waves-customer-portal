@@ -4926,6 +4926,8 @@ async function createSelfBooking(payload = {}) {
         source: 'book', scheduledServiceId: row.id, customerId: row.customer_id, date: row.scheduled_date,
         windowStart: row.window_start, windowEnd: row.window_end, serviceId: row.service_id, serviceKey: serviceKey || null,
         serviceType: row.service_type, durationMinutes: row.estimated_duration_minutes, actualTechnicianId: row.technician_id,
+        // The lead a Waves Assessment was booked for (the lead link's own lead, the estimate's linked lead).
+        leadId: callbackVisit?.lineLeadId || null,
       });
     }
 
