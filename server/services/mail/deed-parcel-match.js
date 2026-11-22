@@ -37,10 +37,18 @@ const SEVERAL_LOTS = /^(AND|THRU|THROUGH|TO|&)(\s|$)/;
 // A deed that names a phase, unit, section or plat book itself ("... PH I", "... UNIT 3") is not handled. The map
 // spells such a part in several ways (PH and PHASE), and this module compares names letter by letter: two spellings
 // of one part would count as two names. The Clerk's text leaves these parts out (0 of 69 measured deeds have one).
-// The word alone, or written as one with its number ("PH2", "UNIT3A", "PHII", "PHIIA", "PB81"). Not PHILLIPS,
-// UNITY, SECOND.
-const PLAT_PART_WORD = /^(?:PH|PHASE|SUBPH|SUBPHASE|UNIT|SEC|SECTION|PB)(?:\d[0-9A-Z]*|[IVX]{1,4}[A-Z]?[0-9]{0,2})?$/;
-const namesPlatPart = (words) => words.split(/[^A-Z0-9]+/).some((word) => PLAT_PART_WORD.test(word));
+// One id of a phase, subphase, unit or section: IIA, ID9, IV-C1, II-B-9, 9A, N9A, A-D ... The plat-name grammar
+// (platRestKnown) reads the map's ids with it, and the deed-side guard below refuses a deed word with it: one
+// definition for both.
+const PHASE_ID = /^(?:[IVX]{1,4}[A-Z]?[0-9]{0,2}|[A-Z]?[0-9]{1,2}[A-Z]?|[A-Z])(?:-(?:[IVX]{1,4}|[0-9]{1,2}[A-Z]?|[A-Z][0-9]{0,2})){0,3}$/;
+const isPhaseId = (token) => typeof token === 'string' && token.length <= 12 && PHASE_ID.test(token);
+// A plat-part word: the marker alone, or written as one word with any id the grammar reads ("PH2", "PHIIA",
+// "PHN1A", "UNIT3A", "SECB"), or a plat book ("PB", "PB81"). Not PHILLIPS, SECOND. A few plain words read as a
+// marker and an id too (PHIL, UNITY): a deed with one is refused, which only means it is not matched.
+const PLAT_PART_MARKERS = ['SUBPHASE', 'SUBPH', 'PHASE', 'PH', 'SECTION', 'SEC', 'UNIT'];
+const isPlatPartWord = (word) => /^PB\d*$/.test(word)
+  || PLAT_PART_MARKERS.some((marker) => word.startsWith(marker) && (word.length === marker.length || isPhaseId(word.slice(marker.length))));
+const namesPlatPart = (words) => words.split(/[^A-Z0-9]+/).some(isPlatPartWord);
 // A lot or block number has one letter at most ("12A", "B"). The map writes a letter in either case, and the list
 // of forms (mapForms) covers both cases of one letter, not every mix of two ("12Ab"): such a deed is not handled.
 const ONE_NUMBER = /^(?=.)[0-9]*[A-Z]?[0-9]*$/;
@@ -139,13 +147,11 @@ function restAfterDeedWords(name, deedWords) {
 // GROVE" on the deed, "SAMPLE GROVE PH IIA PB81/1" on the map. The whole rest of the name must fit this grammar,
 // taken from the 126 plat names of 32 real subdivisions (2026-11-22):
 //   [PH|PHASE <ids> [SUBPH|SUBPHASE <ids>]] [PB<book>/<page>]   or   SUBDIVISION [PB<book>/<page>]
-//   <ids> = phase ids joined by ",", "AND", "&" or a space; an id = IIA, ID9, IV-C1, II-B-9, 9A, N9A, A-D ...
+//   <ids> = phase ids (PHASE_ID above) joined by ",", "AND", "&" or a space
 // A name that does not fit ("SAMPLE GROVE ESTATES", "... WEST PB1/2", "... PH II REPLAT OF LOT 4", "... PH III-A
 // TOWNHOMES") may be another subdivision or another piece of land: its parcel is marked platKnown false, and
 // chooseParcel matches nothing while one is in the answer.
 // The rest is read token by token (no pattern runs over the whole list, so a long name costs linear time).
-const PHASE_ID = /^(?:[IVX]{1,4}[A-Z]?[0-9]{0,2}|[A-Z]?[0-9]{1,2}[A-Z]?|[A-Z])(?:-(?:[IVX]{1,4}|[0-9]{1,2}[A-Z]?|[A-Z][0-9]{0,2})){0,3}$/;
-const isPhaseId = (token) => typeof token === 'string' && token.length <= 12 && PHASE_ID.test(token);
 const BOOK_PAGE = /^[0-9]{1,4}\/[0-9]{1,4}$/;
 const isPhaseWord = (token) => token === 'PH' || token === 'PHASE';
 const isSubphaseWord = (token) => token === 'SUBPH' || token === 'SUBPHASE';
