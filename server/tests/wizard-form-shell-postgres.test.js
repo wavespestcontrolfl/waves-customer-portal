@@ -183,6 +183,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     ['was viewed', () => ({ viewed_at: new Date() })],
     ['has a send time', () => ({ scheduled_at: new Date(Date.now() + DAY) })],
     ['was claimed by auto-send', () => ({ estimate_data: JSON.stringify({ automation: { autoSend: { claimedAt: '2026-11-20T12:00:00.000Z' } } }) })],
+    ['was claimed by auto-send (the older key)', () => ({ estimate_data: JSON.stringify({ automation: { autoSend: { claimed_at: '2026-11-20T12:00:00.000Z' } } }) })],
     // A staff edit can leave every total at 0 and every delivery time empty.
     ['was written again after it was made', () => ({ updated_at: new Date() })],
     // Staff work that does not move updated_at (created_at = updated_at here).
@@ -213,6 +214,13 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     await estimate({ address: '12 sample street, parrish, fl 34219' });
 
     expect(await shellsOnly()).toBe(true);
+  });
+
+  test('a street with no house number is not a door: it can be many homes', async () => {
+    const street = 'Sample St, Parrish, FL 34219';
+    await estimate({ address: street });
+
+    expect(await shellsOnly({ address: street })).toBe(false);
   });
 
   // The run side of the same checks.

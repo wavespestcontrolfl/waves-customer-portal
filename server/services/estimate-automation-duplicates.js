@@ -329,7 +329,15 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *     on two homes. Same door by the test the draft-retire sweep uses
  *     (estimate-draft-retire.js sameProperty): the shared premise matcher
  *     with street, city and ZIP on both sides, plus the same unit. A missing
- *     or incomplete address fails closed: the draft is not a shell.
+ *     or incomplete address, or a street with no house number, fails closed:
+ *     the draft is not a shell.
+ *
+ * Not a condition, on purpose: the SMS intake state of the customer
+ * (customers.lead_intake_status). A lead who never answers keeps
+ * 'awaiting_service' for good (134 of 173 such drafts on 2026-11-22), so the
+ * rule would then help almost nobody. A late answer does what it does today:
+ * lead-intake.js writes the service on the shell and alerts the owner. The
+ * estimator does not draft from it while an estimate is open for the phone.
  *
  * Any other open estimate of the phone still blocks: a draft with a price, a
  * touched draft, a draft of another contact or for another property, an
@@ -363,7 +371,8 @@ function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
     .whereRaw('COALESCE(monthly_total, 0) = 0')
     .whereRaw('COALESCE(onetime_total, 0) = 0')
     .whereRaw('COALESCE(annual_total, 0) = 0')
-    .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', '') = ''")
+    // Both keys lead-estimate-auto-send.js reads.
+    .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', estimate_data->'automation'->'autoSend'->>'claimed_at', '') = ''")
     // Any lead, soft-deleted ones too (the #6394 rule): the sweep's own
     // lead check skips a soft-deleted lead.
     .whereNotExists(function linkedToLead() {
@@ -385,8 +394,13 @@ function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
 
 function sameDoor(addressA, addressB) {
   if (!samePremiseDisplay(addressA, addressB, { requireLocality: true })) return false;
-  const unit = (text) => unitLineValueKey(normalizeUnitLine(parseDisplayAddress(text).unit));
-  return unit(addressA) === unit(addressB);
+  const a = parseDisplayAddress(addressA);
+  const b = parseDisplayAddress(addressB);
+  // A street with no house number can be many homes. The street keys are
+  // equal here, so one side answers for both.
+  if (!/^\d/.test(a.street)) return false;
+  const unit = (parsed) => unitLineValueKey(normalizeUnitLine(parsed.unit));
+  return unit(a) === unit(b);
 }
 
 function sameContact(row, { customerId, email }) {
