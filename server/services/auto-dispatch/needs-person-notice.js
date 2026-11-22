@@ -10,7 +10,7 @@
  * is NOT this lane's: the recurring-placement alert (`recurring-dispatch:*`,
  * flagUnplacedVisits) already tells a person, and a second bell for the same
  * visit would be noise (Codex #6253 r5). The reason only picks the wording:
- *       move_limit    it has used all its automatic moves (move-limit.js);
+ *       move_limit    it has used all its automatic day moves (move-limit.js);
  *       no_near_slot  every free slot adds more drive than
  *                     config.conflictMaxAddedDriveMinutes;
  *       no_slot       no valid slot exists;
@@ -106,7 +106,7 @@ function collectUnmoved(bucket, service, reasonCode, conflict) {
 // `subject`: "The Nov 15 visit", with the soon words inside SOON_DAYS (audit.visitSubject).
 function whyFor(item, subject) {
   const [now, still] = PROBLEM[item.problem];
-  if (item.kind === 'move_limit') return `${subject} used all its automatic moves and ${still}.`;
+  if (item.kind === 'move_limit') return `${subject} used all its automatic day moves and ${still}.`;
   const reason = {
     no_near_slot: 'every open slot adds too much drive', no_slot: 'no open slot fits it',
   }[item.kind] || 'auto-dispatch did not move it';
