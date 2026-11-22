@@ -123,9 +123,10 @@ function maskAccessSentences(note) {
 // three: the four code fields of the profile (property_preferences), the
 // access codes section (customer_access_codes: a code found in a message,
 // accepted by the office, or retired), and the gate directory of the
-// neighborhood of each of the customer's homes (neighborhood_access). A
-// note that holds one of them is not read at all (no model reads it, and no
-// text passes for it), and a text that holds one is refused.
+// neighborhood of each of the customer's homes (neighborhood_access). The
+// card also shows the visitor pass links of the neighbors in those
+// neighborhoods. A note that holds one of them is not read at all (no model
+// reads it, and no text passes for it), and a text that holds one is refused.
 // A code field can hold more than the code ("use bluebird", "gate 1234,
 // door 5678#"), and nothing tells the code from the words beside it. So
 // every word and every run with a figure of a code field is a code, and the
@@ -139,7 +140,10 @@ function maskAccessSentences(note) {
 // note, it would hide most notes.
 // The directions filed beside a code ("dial 4471 then #") are sentences, not
 // a code field: only their runs with a figure, of three or more characters,
-// are codes. A code in another free-text field of the file (the access
+// are codes, and each link in them (a visitor pass is a link, filed with no
+// code; the link counts with or without its "https://"). Of a neighbor's
+// pass only the link is a code here: the card shows the technician nothing
+// else of it. A code in another free-text field of the file (the access
 // notes) is not on this list.
 const STORED_CODE_COLUMNS = ['neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code'];
 const squeezed = (text) => oneForm(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
@@ -149,14 +153,20 @@ const squeezed = (text) => oneForm(text).toLowerCase().replace(/[^\p{L}\p{N}]+/g
 const runsOf = (value) => (oneForm(value).match(/[\p{L}\p{N}#*]+/gu) || []).map(squeezed);
 const withFigureGroups = (runs) => [...runs, ...runs.flatMap((run) => run.match(/\p{Nd}{3,}/gu) || [])];
 const codeFieldForms = (field) => [squeezed(field), ...withFigureGroups(runsOf(field))];
-const directionForms = (directions) => withFigureGroups(runsOf(directions))
-  .filter((form) => form.length >= 3 && /\p{Nd}/u.test(form));
+const LINK_RE = /https?:\/\/(?:www\.)?(\S+)/giu;
+const linkForms = (directions) => [...oneForm(directions).matchAll(LINK_RE)].map((link) => squeezed(link[1]));
+const directionForms = (directions) => [
+  ...withFigureGroups(runsOf(directions)).filter((form) => form.length >= 3 && /\p{Nd}/u.test(form)),
+  ...linkForms(directions),
+];
 // `prefs` is the profile row; `filed` are rows of the access codes section
-// and of the gate directory ({ code, instructions }).
-function storedCodesOf(prefs, filed = []) {
+// and of the gate directory ({ code, instructions }); `neighborPasses` are
+// the pass rows of the customer's neighborhoods ({ instructions }).
+function storedCodesOf(prefs, filed = [], neighborPasses = []) {
   const forms = [
     ...STORED_CODE_COLUMNS.flatMap((column) => codeFieldForms(prefs?.[column])),
     ...filed.flatMap((row) => [...codeFieldForms(row?.code), ...directionForms(row?.instructions)]),
+    ...neighborPasses.flatMap((row) => linkForms(row?.instructions)),
   ];
   return [...new Set(forms.filter(Boolean))];
 }
@@ -173,7 +183,11 @@ async function readStoredCodes(db, customerId) {
   const gates = await savepointRead(db, (k) => k('neighborhood_access as gate')
     .join('customer_properties as home', 'home.neighborhood_id', 'gate.neighborhood_id')
     .where('home.customer_id', customerId).select('gate.code', 'gate.instructions'));
-  return storedCodesOf(prefs, [...section, ...gates]);
+  const passes = await savepointRead(db, (k) => k('customer_access_codes as pass')
+    .join('customer_properties as theirs', 'theirs.id', 'pass.property_id')
+    .join('customer_properties as home', 'home.neighborhood_id', 'theirs.neighborhood_id')
+    .where({ 'home.customer_id': customerId, 'pass.kind': 'pass' }).select('pass.instructions'));
+  return storedCodesOf(prefs, [...section, ...gates], passes);
 }
 // The codes are a list a caller read (readStoredCodes, storedCodesOf): with
 // none given, nothing is read or let out.

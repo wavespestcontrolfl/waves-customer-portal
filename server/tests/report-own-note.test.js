@@ -151,6 +151,16 @@ describe('a code on the customer\'s file is found by its value, in any wording',
     expect(storedCodesOf(undefined, [{ code: 'Rose 77', instructions: 'dial 4471 then press 2. Ask for Sam' }]).sort())
       .toEqual(['4471', '77', 'rose', 'rose77']);
     expect(storedCodesOf(undefined, [{ code: null, instructions: null }])).toEqual([]);
+    // A visitor pass is a link, filed with no code: the link is the code,
+    // with or without its "https://".
+    const pass = storedCodesOf(undefined, [{ code: null, instructions: 'Visitor pass: https://www.passes.example/p/abcdef.' }]);
+    expect(pass).toEqual(['passesexamplepabcdef']);
+    expect(noteAsRead('treated shed. pass is https://passes.example/p/abcdef', pass)).toBe('[redacted]');
+    expect(noteAsRead('treated shed. passes.example/p/abcdef', pass)).toBe('[redacted]');
+    expect(noteAsRead('treated shed. passes checked', pass)).toBe('treated shed. passes checked');
+    // Of a neighbor's pass only the link is a code: its words and figures are not this customer's.
+    expect(storedCodesOf(undefined, [], [{ instructions: 'Show this at gate 4471: https://passes.example/p/qrstuv' }]))
+      .toEqual(['passesexamplepqrstuv']);
     // Another field of the file is no code field.
     expect(storedCodesOf({ parking_notes: 'park at 7788' })).toEqual([]);
   });
@@ -215,7 +225,7 @@ describe('a code on the customer\'s file is found by its value, in any wording',
       const read = { table };
       asked.push(read);
       const chain = {
-        join: (...on) => { read.join = on; return chain; },
+        join: (...on) => { read.join = [...(read.join || []), on]; return chain; },
         where: (...filter) => { read.where = filter; return chain; },
         first: async (...columns) => { read.columns = columns; return rows[table]; },
         select: async (...columns) => { read.columns = columns; return rows[table] || []; },
@@ -226,8 +236,9 @@ describe('a code on the customer\'s file is found by its value, in any wording',
       property_preferences: { lockbox_code: 'bluebird' },
       customer_access_codes: [{ code: '#9031', instructions: null }, { code: null, instructions: 'call box, dial 2040' }],
       'neighborhood_access as gate': [{ code: '6612#', instructions: 'guard on weekends' }],
+      'customer_access_codes as pass': [{ instructions: 'Gate 5150. https://passes.example/p/qrstuv' }],
     });
-    expect((await readStoredCodes(db, 'customer-1')).sort()).toEqual(['2040', '6612', '9031', 'bluebird']);
+    expect((await readStoredCodes(db, 'customer-1')).sort()).toEqual(['2040', '6612', '9031', 'bluebird', 'passesexamplepqrstuv']);
     expect(asked).toEqual([
       {
         table: 'property_preferences',
@@ -237,13 +248,25 @@ describe('a code on the customer\'s file is found by its value, in any wording',
       { table: 'customer_access_codes', where: [{ customer_id: 'customer-1' }], columns: ['code', 'instructions'] },
       {
         table: 'neighborhood_access as gate',
-        join: ['customer_properties as home', 'home.neighborhood_id', 'gate.neighborhood_id'],
+        join: [['customer_properties as home', 'home.neighborhood_id', 'gate.neighborhood_id']],
         where: ['home.customer_id', 'customer-1'],
         columns: ['gate.code', 'gate.instructions'],
       },
+      {
+        table: 'customer_access_codes as pass',
+        join: [
+          ['customer_properties as theirs', 'theirs.id', 'pass.property_id'],
+          ['customer_properties as home', 'home.neighborhood_id', 'theirs.neighborhood_id'],
+        ],
+        where: [{ 'home.customer_id': 'customer-1', 'pass.kind': 'pass' }],
+        columns: ['pass.instructions'],
+      },
     ]);
     // A code of each place stops the note.
-    for (const note of ['bluebird. treated shed', 'treated shed. 9031', 'treated shed. 20 40 at the box', 'treated shed\n6612']) {
+    for (const note of [
+      'bluebird. treated shed', 'treated shed. 9031', 'treated shed. 20 40 at the box', 'treated shed\n6612',
+      'treated shed. passes.example/p/qrstuv',
+    ]) {
       expect(await reportNoteRejection({
         note, text: 'I treated the shed.', catalogRows: CATALOG, db, customerId: 'customer-1',
       })).toEqual({ reason: 'stored_code' });
