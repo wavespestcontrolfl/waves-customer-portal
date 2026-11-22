@@ -441,6 +441,21 @@ describe('the assessment line reads the estimate\'s own lead', () => {
     expect(calls[calls.length - 1][1]).toMatchObject({ leadId: 'lead-new' });
   });
 
+  test('map live, the time is not in the fresh build after a relink: the 409 times are for the lead linked now', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    const build = mockInspection.buildAvailabilityForLead.getMockImplementation();
+    mockInspection.buildAvailabilityForLead.mockImplementationOnce(async (...args) => {
+      linked.mockResolvedValue('lead-new'); // staff linked the estimate to another lead while the single-day build ran
+      return build ? build(...args) : undefined;
+    });
+    const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '13:00' } });
+    expect(res).toMatchObject({ status: 409, body: { code: 'SLOT_TAKEN' } });
+    expect(mockInspection.bookAssessmentVisit).not.toHaveBeenCalled();
+    const calls = mockInspection.buildAvailabilityForLead.mock.calls;
+    expect(calls[0][1]).toMatchObject({ leadId: 'lead-9' });
+    expect(calls[calls.length - 1][1]).toMatchObject({ leadId: 'lead-new' });
+  });
+
   test('map live, no unambiguous lead for the estimate: no lead id, so the customer is read', async () => {
     process.env.GATE_SERVICE_LINE_MAP = 'live';
     linked.mockResolvedValue(null);

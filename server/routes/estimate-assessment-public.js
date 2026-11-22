@@ -275,6 +275,15 @@ async function sendSlotTaken(res, setup, error) {
   });
 }
 
+// 409 SLOT_TAKEN for the estimate and its linked lead as they are NOW: the link is resolved again, so a relink or a
+// changed service interest during this request never offers the old line's times (a retry would refuse them). An
+// estimate that stopped qualifying answers the page's own state for it.
+async function sendSlotTakenNow(token, res, error) {
+  const again = await resolveRequest(token);
+  if (again.body) return send(res, again);
+  return sendSlotTaken(res, await bookingSetup(again.customer, again.lead, again.leadId), error);
+}
+
 // The booking transaction's re-check of this page's preflight read (AGENTS.md: the commit re-checks it on the locked
 // row), under the per-estimate lock createSelfBooking takes (callbackVisit.estimateGuard): the estimate, share-locked,
 // still open and customer-viewable for the same customer; its call-side verdict held under lock; still eligible on
@@ -340,7 +349,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       rangeFrom: date, rangeTo: date, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer, leadId: setup.leadId, lineScope,
     });
     const slot = inspection().findSlotIn(day, date, time);
-    if (!slot) return sendSlotTaken(res, setup);
+    if (!slot) return sendSlotTakenNow(req.params.token, res);
 
     const result = await inspection().bookAssessmentVisit({
       booking: setup.booking,
@@ -371,11 +380,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
       // A slot race, the customer's pin moved under the booking fence, or the line changed (a relink, a changed
       // service interest): fresh times at the current pin, for the estimate and its linked lead as they are NOW.
-      if (result.status === 409) {
-        const again = await resolveRequest(req.params.token);
-        if (again.body) return send(res, again);
-        return sendSlotTaken(res, await bookingSetup(again.customer, again.lead, again.leadId), result.error);
-      }
+      if (result.status === 409) return sendSlotTakenNow(req.params.token, res, result.error);
       return res.status(result.status || 500).json({ error: result.error || 'Booking is temporarily unavailable — please text or call us.' });
     }
     return res.json(await inspection().finishCommittedBooking({
