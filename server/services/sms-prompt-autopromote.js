@@ -303,6 +303,12 @@ function examRunsMismatch({ run, baselineRun, runResults, baselineResults }) {
   return null;
 }
 
+// THE unsafe rule, read by the bar and again at activation: is the candidate's average unsafe count above the
+// baseline's by more than the allowance? Whole counts on both sides (each side's unsafe verdicts on the shared
+// items, summed over its sittings, times the OTHER side's sitting count), so a rise that only equals the
+// allowance never reads as above it, and both readers get the same answer from the same numbers.
+const unsafeAbove = (totals, sittings, allowance) => totals.candidate * sittings.baseline - totals.baseline * sittings.candidate > allowance * sittings.candidate * sittings.baseline;
+
 // The first reason two sides may not be compared: every candidate sitting against every baseline sitting.
 function sittingsMismatch(candidateSittings, baselineSittings) {
   if (!candidateSittings.length) return { reason: 'exam_incomplete', detail: {} };
@@ -334,6 +340,7 @@ function decidePromotion({ candidateSittings = [], baselineSittings = [] } = {})
   const allowance = unsafeAllowance();
   const tally = pairedTally(candidateSittings.map((s) => s.results), baselineSittings.map((s) => s.results), ['overall', 'actions']);
   const { deltas } = tally;
+  const unsafeTotals = { candidate: tally.candidateUnsafe, baseline: tally.baselineUnsafe };
   const rounded = (v) => (v == null ? null : Number(v.toFixed(3)));
   const meanUnsafeCount = (side) => mean(side.map((s) => s.run.unsafe_count));
   // McNemar's counts describe ONE pair of runs, so they are reported only for one sitting a side.
@@ -348,15 +355,14 @@ function decidePromotion({ candidateSittings = [], baselineSittings = [] } = {})
     candidateUnsafe: meanUnsafeCount(candidateSittings), baselineUnsafe: meanUnsafeCount(baselineSittings),
     // On the paired items only, which is what the bar reads: the candidate's average unsafe count minus the baseline's.
     sittings, unsafeRise: rounded(tally.candidateUnsafe / sittings.candidate - tally.baselineUnsafe / sittings.baseline), unsafeAllowance: allowance,
+    // The whole counts unsafeRise is rounded from: activation reads these, never the rounded figure.
+    unsafeTotals,
   };
   // Final: the shared items only shrink as sittings are added.
   if (tally.pairedItems < MIN_PAIRED_ITEMS) return reject('too_few_items', detail, true);
-  // Whole counts on both sides (each side's unsafe verdicts times the OTHER side's sitting count), so a rise that
-  // only equals the allowance never reads as above it. With one sitting a side and no allowance this is the net
-  // rule "more newly unsafe items than newly safe ones", which also rules out a McNemar regression; an allowance
-  // never lets a significant one through.
-  const aboveAllowance = tally.candidateUnsafe * sittings.baseline - tally.baselineUnsafe * sittings.candidate > allowance * sittings.candidate * sittings.baseline;
-  if (aboveAllowance || (sig && sig.significant && sig.direction === 'regressed')) return reject('unsafe_rose', detail);
+  // With one sitting a side and no allowance this is the net rule "more newly unsafe items than newly safe
+  // ones", which also rules out a McNemar regression; an allowance never lets a significant one through.
+  if (unsafeAbove(unsafeTotals, sittings, allowance) || (sig && sig.significant && sig.direction === 'regressed')) return reject('unsafe_rose', detail);
   if (deltas.overall == null || deltas.actions == null) return reject('scores_missing', detail);
   // riseMeets: a mean of float quotients that is the margin exactly (18 of 30 items one point up in one of three
   // sittings is 0.2, computed as 0.19999999999999982) meets it.
@@ -428,6 +434,20 @@ async function examWindowReason({ dbi, patch, now }) {
     .where('started_at', '>', new Date(now.getTime() - EXAM_MIN_INTERVAL_DAYS * DAY_MS))
     .first('id');
   return recent ? 'interval' : null;
+}
+
+// Called when the exam is decided: a run this loop started for it that is still 'running' (the process exited
+// during a sitting the decision no longer needs: the count was lowered, or the finished sittings are refused for
+// good) is marked failed under the exam lock, so it never keeps the one-running index and nothing more is paid
+// for it. A baseline marked so stays resumable for the next candidate. { settled } | { skipped: 'lock_busy' }.
+async function settleExamRuns({ dbi, lock, patch }) {
+  const mine = () => dbi('sms_sealed_eval_runs').where({ status: 'running', provider_leg: EXAM_LEG })
+    .where((own) => own.where({ prompt_patch_id: patch.id }).orWhere((base) => base.where({ triggered_by: BASELINE_TRIGGER }).whereNull('prompt_patch_id')));
+  if (!(await mine().first('id'))) return { settled: 0 };
+  const result = await lock(LOCK_NAME, async () => ({
+    settled: await mine().update({ status: 'failed', error: 'superseded: the rule was decided on its finished sittings', finished_at: new Date() }),
+  }), { recordHealth: false });
+  return result && result.skipped ? { skipped: 'lock_busy' } : result;
 }
 
 // The candidate's exam runs (finished, running or failed), newest first: a sitting a crash or the
@@ -512,8 +532,9 @@ async function obtainBaseline({ dbi, patch, runner, lock, now, exclude }) {
 }
 
 // One more sitting of the candidate: resume the run an earlier sitting left unfinished, else a new run against a
-// baseline no finished sitting of this candidate has used. { run } (finished) | { skipped } | { failed } | { rejected }.
-async function sitCandidate({ dbi, patch, runner, lock, now, open, complete, firstSitting }) {
+// baseline no finished sitting of this candidate has used. { run } (finished) | { skipped } | { failed } |
+// { rejected } | { decide: sittings } (the baseline it would use already settles the exam).
+async function sitCandidate({ dbi, patch, runner, lock, now, open, complete, finished, firstSitting }) {
   // The attempt limit guards another paid sitting, never a finished exam: a sitting that completed
   // before the process exited is decided without one. It counts the sittings that did NOT finish, from
   // their own audit rows: exam_attempts also counts every finished sitting, and a run that finished just
@@ -528,6 +549,13 @@ async function sitCandidate({ dbi, patch, runner, lock, now, open, complete, fir
     const got = await obtainBaseline({ dbi, patch, runner, lock, now, exclude: complete.map((r) => r.baseline_run_id).filter(Boolean) });
     if (!got.baseline) return got;
     baselineId = got.baseline.id;
+    // A candidate sitting is the one spend nobody else can use (a baseline is the live prompt's own exam). Before
+    // it is paid for, the finished sittings are read together with the baseline this one would use: a baseline
+    // they may not be compared with (another judge ruler, say) already settles the exam.
+    if (finished) {
+      const next = { candidateSittings: finished.candidateSittings, baselineSittings: [await withResults(dbi, got.baseline), ...finished.baselineSittings] };
+      if (decidePromotion(next).final) return { decide: next };
+    }
   }
   const sitting = open
     ? { runId: open.id }
@@ -541,24 +569,33 @@ async function sitCandidate({ dbi, patch, runner, lock, now, open, complete, fir
   return sat;
 }
 
+const withResults = async (dbi, run) => ({ run, results: await dbi('sms_sealed_eval_results').where({ run_id: run.id }).select('item_id', 'verdict', 'scores') });
+
 // The sittings a decision reads: each finished candidate run with its result rows, and that run's own baseline
 // with its rows. null when a baseline row is gone.
 async function loadSittings(dbi, runs) {
   const found = await dbi('sms_sealed_eval_runs').whereIn('id', runs.map((r) => r.baseline_run_id).filter(Boolean));
   const baselines = runs.map((r) => found.find((b) => b.id === r.baseline_run_id));
   if (!baselines.every(Boolean)) return null;
-  const withResults = async (run) => ({ run, results: await dbi('sms_sealed_eval_results').where({ run_id: run.id }).select('item_id', 'verdict', 'scores') });
-  return { candidateSittings: await Promise.all(runs.map(withResults)), baselineSittings: await Promise.all(baselines.map(withResults)) };
+  return { candidateSittings: await Promise.all(runs.map((r) => withResults(dbi, r))), baselineSittings: await Promise.all(baselines.map((b) => withResults(dbi, b))) };
 }
 
 /**
  * { candidateSittings, baselineSittings } for a decision (newest sitting first, each run's own baseline beside
- * it), or { skipped } / { failed } / { rejected } (attempts used up). Sits until the candidate has examSittings()
- * finished runs, one sitting a pass. A pass that does not finish its sitting ends the tick, and the next tick
- * goes on from the rows it left.
+ * it), or { skipped } / { failed } / { rejected } (attempts used up). One sitting a pass, until the candidate has
+ * examSittings() finished runs. A pass that does not finish its sitting ends the tick, and the next tick goes on
+ * from the rows it left. Two rules hold at every pass, whatever a crash or a changed setting left behind:
+ *  - Before any paid step (a resumed run, a baseline, a candidate sitting) the decision is taken if the finished
+ *    sittings already allow it: enough of them for the count as it is set NOW, or sittings the bar refuses for
+ *    good (decidePromotion `final`).
+ *  - When it is taken, no run this loop started for the exam is left 'running' (settleExamRuns).
  */
 async function runCandidateExam({ dbi, patch, runner, lock, now }) {
   const wanted = examSittings();
+  const decideOn = async (sittings) => {
+    const freed = await settleExamRuns({ dbi, lock, patch });
+    return freed.skipped ? { skipped: freed.skipped } : sittings;
+  };
   // A pass finishes one sitting or returns, and at most `wanted` sittings are ever owed (a run an earlier tick left
   // open is one of them), so the last pass only reads. The bound keeps a runner that reports runs this candidate
   // does not own from sitting paid exams without end.
@@ -566,20 +603,14 @@ async function runCandidateExam({ dbi, patch, runner, lock, now }) {
     const rows = await candidateRunRows(dbi, patch.id);
     const complete = rows.filter((r) => r.status === 'complete');
     const open = rows[0] && rows[0].status !== 'complete' ? rows[0] : null;
-    // A run a crash left 'running' is always finished first, as the nightly sweep does: it holds the one-running
-    // index, and its cohort is already paid for.
-    const stranded = Boolean(open && open.status === 'running');
-    if (complete.length && !stranded) {
-      // Before any further paid sitting, a failed one that would be resumed included: enough finished sittings
-      // for the count as it is set NOW (it may have been lowered since a sitting failed), or sittings the bar
-      // already refuses for good, are decided on what there is.
-      const done = complete.length >= wanted;
-      const sittings = await loadSittings(dbi, complete.slice(0, wanted));
-      if (!sittings) return { failed: 'baseline_missing' };
-      if (done || decidePromotion(sittings).final) return sittings;
+    const finished = complete.length ? await loadSittings(dbi, complete.slice(0, wanted)) : null;
+    if (complete.length) {
+      if (!finished) return { failed: 'baseline_missing' };
+      if (complete.length >= wanted || decidePromotion(finished).final) return decideOn(finished);
     }
     const current = pass ? await dbi(PATCHES).where({ id: patch.id }).first() : patch;
-    const sat = await sitCandidate({ dbi, patch: current, runner, lock, now, open, complete, firstSitting: !rows.length });
+    const sat = await sitCandidate({ dbi, patch: current, runner, lock, now, open, complete, finished, firstSitting: !rows.length });
+    if (sat.decide) return decideOn(sat.decide);
     if (!sat.run) return sat;
   }
   return { failed: 'exam_not_complete' };
@@ -671,10 +702,13 @@ async function staleEvidenceReason(dbi, cand) {
   if (run.model !== EXAM_LEG_ROUTES[EXAM_LEG].model) return 'exam_model_changed';
   const profile = await require('./sms-shadow-drafter').resolveEffectiveVoiceProfile({ dbi });
   if ((run.voice_profile_version ?? null) !== (profile?.version ?? null)) return 'exam_profile_changed';
-  // A decision from before the sittings settings has neither key: it was one sitting a side with no net rise.
+  // A decision from before the sittings settings has none of these keys: one sitting a side, no net unsafe rise.
   const detail = cand.decision_detail || {};
-  const sat = detail.sittings ? Math.min(Number(detail.sittings.candidate) || 0, Number(detail.sittings.baseline) || 0) : 1;
-  return sat < examSittings() || (Number(detail.unsafeRise) || 0) > unsafeAllowance() ? 'bar_changed' : null;
+  const count = (side, key, fallback) => (side && Number.isFinite(Number(side[key])) ? Number(side[key]) : fallback);
+  const sittings = { candidate: count(detail.sittings, 'candidate', 1), baseline: count(detail.sittings, 'baseline', 1) };
+  const totals = { candidate: count(detail.unsafeTotals, 'candidate', 0), baseline: count(detail.unsafeTotals, 'baseline', 0) };
+  if (Math.min(sittings.candidate, sittings.baseline) < examSittings()) return 'bar_changed';
+  return unsafeAbove(totals, sittings, unsafeAllowance()) ? 'bar_changed' : null;
 }
 
 /**

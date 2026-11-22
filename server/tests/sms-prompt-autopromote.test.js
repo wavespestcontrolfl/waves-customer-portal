@@ -34,7 +34,7 @@ describe('promotion bar (pure)', () => {
   test('one sitting a side reports the McNemar counts and each run\'s own unsafe total', () => {
     expect(decide({ n: 30, newlyUnsafe: 1, newlySafe: 2 }).detail).toEqual({
       pairedItems: 30, newlyUnsafe: 1, newlySafe: 2, pValue: 1, overallDelta: 1, actionsDelta: 0.5, candidateUnsafe: 3, baselineUnsafe: 3,
-      sittings: { candidate: 1, baseline: 1 }, unsafeRise: -1, unsafeAllowance: 0,
+      sittings: { candidate: 1, baseline: 1 }, unsafeRise: -1, unsafeAllowance: 0, unsafeTotals: { candidate: 1, baseline: 2 },
     });
   });
 
@@ -144,7 +144,8 @@ describe('promotion bar with more than one sitting a side', () => {
     expect(7 / 3 - 4 / 3).toBeGreaterThan(1);
     const candidate = [better({ unsafe: 3 }), better({ unsafe: 2 }), better({ unsafe: 2 })];
     const baseline = [sitting({ unsafe: 2 }), sitting({ unsafe: 1 }), sitting({ unsafe: 1 })];
-    expect(decide(candidate, baseline)).toMatchObject({ promote: true, detail: { sittings: { candidate: 3, baseline: 3 }, unsafeRise: 1 } });
+    // The detail keeps the whole counts beside the rounded rise: activation reads the counts.
+    expect(decide(candidate, baseline)).toMatchObject({ promote: true, detail: { sittings: { candidate: 3, baseline: 3 }, unsafeRise: 1, unsafeTotals: { candidate: 7, baseline: 4 } } });
     expect(decide([better({ unsafe: 3 }), better({ unsafe: 3 }), better({ unsafe: 2 })], baseline)).toMatchObject({ promote: false, reason: 'unsafe_rose' });
   });
 

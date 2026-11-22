@@ -976,33 +976,86 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         expect((await rowOf(patch.id)).decision_detail).toMatchObject({ sittings: { candidate: 1, baseline: 1 } });
       });
 
-      test('a sitting a crash left running is still finished first (it holds the one-running index), then the newest sittings decide', async () => {
-        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '1';
+      // The state a crash leaves: the first pair finished, and the process exited during `kind` of the second
+      // sitting (its baseline, or the candidate's own run), which is still 'running'.
+      const crashedDuringSecond = async (kind) => {
         setMode('observe');
         const items = await seedItems();
         const patch = await insertPatch({ over: { mode_at_creation: 'observe' } });
         const version = patchLib.stampPatchVersion(baseVersion(), patch.version_tag);
         const live = drafter.currentPromptVersion();
-        const firstBase = await insertRun({ items, version: live, over: { started_at: new Date(NOW.getTime() - 5 * 3600_000) } });
-        await insertRun({ items, version, patchId: patch.id, baselineId: firstBase.id, overall: 7, actions: 6.5, over: { started_at: new Date(NOW.getTime() - 4 * 3600_000) } });
-        const secondBase = await insertRun({ items, version: live, over: { started_at: new Date(NOW.getTime() - 3 * 3600_000) } });
-        const stranded = await insertRun({ items, version, patchId: patch.id, baselineId: secondBase.id, overall: 7, actions: 6.5, status: 'running', over: { started_at: new Date(NOW.getTime() - 2 * 3600_000) } });
-        const { runner, calls } = sittingRunner({ items });
+        const at = (hours) => ({ started_at: new Date(NOW.getTime() - hours * 3600_000) });
+        const firstBase = await insertRun({ items, version: live, over: at(5) });
+        const first = await insertRun({ items, version, patchId: patch.id, baselineId: firstBase.id, overall: 7, actions: 6.5, over: at(4) });
+        const secondBase = await insertRun({ items, version: live, status: kind === 'baseline' ? 'running' : 'complete', over: { ...at(3), triggered_by: 'auto:autopromote-baseline' } });
+        const second = kind === 'baseline' ? null
+          : await insertRun({ items, version, patchId: patch.id, baselineId: secondBase.id, overall: 7, actions: 6.5, status: 'running', over: at(2) });
+        await trx('sms_prompt_patches').where({ id: patch.id }).update({ baseline_run_id: secondBase.id });
+        return { items, patch, first, firstBase, running: second || secondBase };
+      };
+      const statusOf = async (id) => (await trx('sms_sealed_eval_runs').where({ id }).first('status')).status;
+
+      test.each(['baseline', 'candidate'])('a decision the finished sittings can already take is taken at once: the %s run a crash left running is not paid for, and is marked failed so it frees the one-running index', async (kind) => {
+        const { items, patch, first, firstBase, running } = await crashedDuringSecond(kind);
+        // The count is 1 by the next tick: the finished pair is enough.
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '1';
+        const { runner } = sittingRunner({ items });
         expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ decided: 'would_promote', patchId: patch.id });
-        expect(calls).toHaveLength(1);
-        expect(calls[0]).toMatchObject({ runId: stranded.id });
-        expect(await rowOf(patch.id)).toMatchObject({ exam_run_id: stranded.id, baseline_run_id: secondBase.id });
+        expect(runner).not.toHaveBeenCalled();
+        expect(await rowOf(patch.id)).toMatchObject({ exam_run_id: first.id, baseline_run_id: firstBase.id });
+        expect(await statusOf(running.id)).toBe('failed');
         expect(await trx('sms_sealed_eval_runs').where({ status: 'running' })).toHaveLength(0);
       });
 
+      test('while another worker holds the exam lock the running run is left alone and nothing is decided', async () => {
+        const { items, patch, running } = await crashedDuringSecond('candidate');
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '1';
+        const { runner } = sittingRunner({ items });
+        const busy = jest.fn(async () => ({ skipped: true }));
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: busy })).toEqual({ skipped: 'lock_busy' });
+        expect(await statusOf(running.id)).toBe('running');
+        expect(await rowOf(patch.id)).toMatchObject({ status: 'candidate', decided_at: null });
+      });
+
+      test.each(['baseline', 'candidate'])('a %s run a crash left running is resumed when the exam still needs it', async (kind) => {
+        const { items, patch, running } = await crashedDuringSecond(kind);
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '2';
+        const { runner, calls } = sittingRunner({ items });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ decided: 'would_promote', patchId: patch.id });
+        expect(calls[0]).toMatchObject({ runId: running.id });
+        // The baseline is resumed and then its candidate sits; the candidate's own run is only resumed.
+        expect(calls).toHaveLength(kind === 'baseline' ? 2 : 1);
+        expect((await rowOf(patch.id)).decision_detail).toMatchObject({ sittings: { candidate: 2, baseline: 2 } });
+        expect(await trx('sms_sealed_eval_runs').where({ status: 'running' })).toHaveLength(0);
+      });
+
+      test('a baseline the finished sittings may not be compared with settles the exam before its candidate sitting is paid for', async () => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '3';
+        const items = await seedItems();
+        const patch = await insertPatch();
+        // Two fresh baselines: the newer one is used first; the older one was graded by another judge ruler.
+        const older = await insertRun({ items, version: drafter.currentPromptVersion(), over: { finished_at: new Date(NOW.getTime() - DAY) } });
+        await trx('sms_sealed_eval_results').where({ run_id: older.id }).update({ scores: JSON.stringify({ safety: 8, voice: 8, overall: 6, actions: 6, judge_version: 'j2' }) });
+        await insertRun({ items, version: drafter.currentPromptVersion(), over: { finished_at: new Date(NOW.getTime() - 3600_000) } });
+        const { runner, calls } = sittingRunner({ items });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toEqual({ rejected: patch.id, reason: 'judge_mismatch' });
+        // One candidate sitting, against the newer baseline. The second was never started.
+        expect(calls).toHaveLength(1);
+        expect(await candidateRuns(patch.id)).toHaveLength(1);
+      });
+
       // A decision recorded in observe mode is activated only when it meets the bar as it is set at activation.
-      // Each case: the settings when the decision is recorded, then the settings when the loop goes live.
+      // Each case: the settings when the decision is recorded, the settings when the loop goes live, the refusal
+      // (null = activated), and the unsafe count of each candidate sitting (the baselines have none).
       test.each([
-        ['on one sitting, and the count is 2 at activation', { sittings: '1' }, { sittings: '2' }, 'bar_changed'],
-        ['with a rise of 1.5, and the allowance is 1 at activation', { sittings: '2', allowance: '1.5' }, { sittings: '2', allowance: '1' }, 'bar_changed'],
-        ['on three sittings, and the count is 2 at activation', { sittings: '3', allowance: '1.5' }, { sittings: '2', allowance: '1.5' }, null],
-        ['with the settings unchanged', { sittings: '2', allowance: '1.5' }, { sittings: '2', allowance: '1.5' }, null],
-      ])('a decision recorded in observe mode %s', async (_name, recorded, live, refused) => {
+        ['on one sitting, and the count is 2 at activation', { sittings: '1' }, { sittings: '2' }, 'bar_changed', []],
+        ['with a rise of 1.5, and the allowance is 1 at activation', { sittings: '2', allowance: '1.5' }, { sittings: '2', allowance: '1' }, 'bar_changed', [2, 1]],
+        ['on three sittings, and the count is 2 at activation', { sittings: '3', allowance: '1.5' }, { sittings: '2', allowance: '1.5' }, null, [2, 1]],
+        ['with the settings unchanged', { sittings: '2', allowance: '1.5' }, { sittings: '2', allowance: '1.5' }, null, [2, 1]],
+        // The whole counts decide, never the rounded rise: 2/3 rounds UP to 0.667, 1/3 rounds DOWN to 0.333.
+        ['with a rise of 2/3 under an allowance of 0.6668, unchanged', { sittings: '3', allowance: '0.6668' }, { sittings: '3', allowance: '0.6668' }, null, [2]],
+        ['with a rise of 1/3, and the allowance is 0.3331 at activation', { sittings: '3', allowance: '0.5' }, { sittings: '3', allowance: '0.3331' }, 'bar_changed', [1]],
+      ])('a decision recorded in observe mode %s', async (_name, recorded, live, refused, unsafe) => {
         const set = ({ sittings, allowance = '0' }) => {
           process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = sittings;
           process.env.PROMPT_AUTOPROMOTE_UNSAFE_ALLOWANCE = allowance;
@@ -1011,8 +1064,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         setMode('observe');
         const items = await seedItems();
         const patch = await insertPatch({ over: { mode_at_creation: 'observe' } });
-        // With an allowance: 2 and 1 unsafe against 0, an average rise of 1.5 on two sittings (1 on three).
-        const { runner } = sittingRunner({ items, candidates: recorded.allowance ? [{ unsafe: 2 }, { unsafe: 1 }] : [] });
+        const { runner } = sittingRunner({ items, candidates: unsafe.map((n) => ({ unsafe: n })) });
         expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ decided: 'would_promote', patchId: patch.id });
         runner.mockClear();
         set(live);
