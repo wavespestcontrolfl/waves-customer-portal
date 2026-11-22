@@ -34,6 +34,8 @@ const mockDb = jest.fn((table) => {
   return b;
 });
 mockDb.raw = jest.fn((sql, bindings) => ({ rawSql: sql, bindings }));
+// The performance rows are written inside one transaction; the mock runs the body on the same recorder.
+mockDb.transaction = jest.fn(async (body) => body(mockDb));
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
@@ -343,12 +345,20 @@ describe('runDailySync', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test('leads with no campaign row to carry them are not written, and the log says how many', async () => {
+  test('leads with no campaign row to carry them fail the step instead of being dropped in silence', async () => {
     lsaCampaignRows = [];
     answerGoogle({ campaigns: [], leads: [lead('2026-11-20 09:15:00', 3, true), lead('2026-11-20 10:15:00', 2, false)] });
-    await GoogleLsa.runDailySync();
+    await expect(GoogleLsa.runDailySync()).rejects.toThrow('syncDailyPerformance: 2 lead(s) not counted');
     expect(perfInserts()).toEqual([]);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('2 lead(s) not counted'));
+  });
+
+  test('the day rows are written in one transaction', async () => {
+    storedPerfRows = [{ id: 'perf-1', campaign_id: 'local-1', day: '2026-11-19' }];
+    answerGoogle({ metrics: [{ campaign: { id: 555 }, segments: { date: '2026-11-20' }, metrics: { cost_micros: 31000000 } }] });
+    await GoogleLsa.runDailySync();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    expect(perfInserts()).toHaveLength(1); // 11-20
+    expect(updateCalls.filter((c) => c.table === 'ad_performance_daily')).toHaveLength(1); // 11-19 reset
   });
 
   test('a campaign removed since the last run still gets its cost, and its leads do not move to the live campaign', async () => {

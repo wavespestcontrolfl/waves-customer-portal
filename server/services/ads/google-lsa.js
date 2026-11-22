@@ -381,20 +381,26 @@ async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
     campaigns,
     storedKeys: [...stored.keys()],
   });
+  // Leads with no row to carry them would be dropped while the job reads as a
+  // success, so the step fails and job_health shows it.
   if (plan.uncounted) {
-    logger.warn(`[google-lsa] ${plan.uncounted} lead(s) not counted: the portal holds no campaign row for the account`);
+    throw new Error(`${plan.uncounted} lead(s) not counted: the portal holds no campaign row for the account`);
   }
 
+  // One transaction: when a day's leads move from one row to another, a reader
+  // never sees them on both rows, and a failure leaves the earlier state whole.
   const results = [];
-  for (const { key, campaignId, date, metrics, leads } of plan.days) {
-    const data = { campaign_id: campaignId, date, ...mapPerformanceRow(metrics, leads) };
-    if (stored.has(key)) {
-      await db('ad_performance_daily').where({ id: stored.get(key) }).update(data);
-    } else {
-      await db('ad_performance_daily').insert({ id: uuidv4(), ...data, created_at: new Date() });
+  await db.transaction(async (trx) => {
+    for (const { key, campaignId, date, metrics, leads } of plan.days) {
+      const data = { campaign_id: campaignId, date, ...mapPerformanceRow(metrics, leads) };
+      if (stored.has(key)) {
+        await trx('ad_performance_daily').where({ id: stored.get(key) }).update(data);
+      } else {
+        await trx('ad_performance_daily').insert({ id: uuidv4(), ...data, created_at: new Date() });
+      }
+      results.push(data);
     }
-    results.push(data);
-  }
+  });
 
   logger.info(`[google-lsa] Synced ${results.length} daily performance rows`);
   return results;
