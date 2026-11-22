@@ -49,7 +49,7 @@ function flexPolicyText(config) {
   }
   parts.push("A move to another day lands at least 5 days out, within 5 days of the visit's date.");
   if (Number(config.flexWideRadiusDays) === 7) {
-    parts.push("A visit that repeats every 2 months or less often (bimonthly, quarterly, longer) may move up to 7 days, when the nearest other visit of its series is 56 days away or more.");
+    parts.push("A visit that repeats every 8 weeks or less often (bimonthly, quarterly, longer) may move up to 7 days, when the nearest other visit of its series is 56 days away or more.");
   }
   return parts.join(" ");
 }

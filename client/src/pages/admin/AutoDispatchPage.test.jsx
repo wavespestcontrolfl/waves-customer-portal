@@ -45,7 +45,7 @@ it("words the policy by the guard mode in force", async () => {
   automation = { scheduledEnabled: true, config: { ...config, routeTiersEnabled: false, flexTierEnabled: true, guardMode: "flex", flexFreezeHours: 25, flexWideRadiusDays: 7, dayOnlyPromise: true } };
   mount();
   await screen.findByText("Original decision");
-  const flex = screen.getAllByText(/^Flexible rule: checks plan visits from tomorrow\. A visit is frozen 25 hours before it, once its 24-hour reminder is sent, or once the customer was told its day or time\. A move to another day lands at least 5 days out, within 5 days of the visit's date\. A visit that repeats every 2 months or less often \(bimonthly, quarterly, longer\) may move up to 7 days, when the nearest other visit of its series is 56 days away or more\.$/);
+  const flex = screen.getAllByText(/^Flexible rule: checks plan visits from tomorrow\. A visit is frozen 25 hours before it, once its 24-hour reminder is sent, or once the customer was told its day or time\. A move to another day lands at least 5 days out, within 5 days of the visit's date\. A visit that repeats every 8 weeks or less often \(bimonthly, quarterly, longer\) may move up to 7 days, when the nearest other visit of its series is 56 days away or more\.$/);
   expect(flex.length).toBeGreaterThan(0);
   expect(screen.queryByText(/more than 14 days out/)).not.toBeInTheDocument();
   cleanup();

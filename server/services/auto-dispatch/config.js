@@ -290,7 +290,7 @@ function getAutoDispatchConfig(overrides = {}) {
     // runs — behavior is the legacy flat lock, byte for byte.
     routeTiersEnabled,
     // FLEX-TIER: when true, auto-dispatch's day-move guard is the Flexible
-    // tier (flex-tier.js: 25h night freeze, a ±5-day radius (±7 for a visit that repeats every 2 months or less often) clamped by the
+    // tier (flex-tier.js: 25h night freeze, a ±5-day radius (±7 for a visit that repeats every 8 weeks or less often) clamped by the
     // series' adjacent occurrence) instead of the route-tiers days-out
     // ladder. Independent of routeTiersEnabled; guardMode below gives this
     // one precedence when both are somehow on.

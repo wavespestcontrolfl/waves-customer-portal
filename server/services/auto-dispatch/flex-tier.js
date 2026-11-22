@@ -123,14 +123,16 @@ function flexBandRadius({ radiusDays, neighbors }) {
 /**
  * Days from `self` to the nearest OTHER live row of its series (`family`: every
  * live row the read saw, an unpositioned one included), by actual scheduled
- * date on either side (0 = a sibling on the same date). null when the series
- * has no other live row. A row whose own date, or a sibling's, cannot be read
- * counts as 0: the band stays narrow (fail closed).
+ * date on either side (0 = a sibling on the same date). A skipped,
+ * rescheduled or no-show sibling (NO_VISIT_STATUSES) does not count: no visit
+ * happens on it (it still holds its cadence slot for the crossing guard,
+ * adjacentBounds). null when the series has no other row that counts. A row whose own date, or a sibling's, cannot be read counts as
+ * 0: the band stays narrow (fail closed).
  */
 function nearestActualDays(family, self) {
   let nearest = null;
   for (const o of family) {
-    if (o.id === self.id) continue;
+    if (o.id === self.id || o.noVisit === true) continue;
     const apart = daysBetween(self.actual, o.actual);
     const days = apart === null ? 0 : Math.abs(apart);
     if (nearest === null || days < nearest) nearest = days;
@@ -148,6 +150,9 @@ function flexFreezeHoursFor(lock24h) {
 // rebooker.js's own TERMINAL exclusion (readSiblings/seriesPosition), so a
 // cancelled/completed occurrence never bounds the window.
 const TERMINAL_STATUSES = ['completed', 'cancelled'];
+// A series row in one of these holds its cadence slot (the crossing guard reads it) but no visit happens on it, so the
+// 56-day room check for the wide band does not count it (candidate-slots and rebooker.js leave the same rows out).
+const NO_VISIT_STATUSES = new Set(['skipped', 'rescheduled', 'no_show']);
 
 /** One row's position in its series — mirrors rebooker.js's seriesPosition. */
 function seriesPosition(row) {
@@ -191,10 +196,10 @@ function joinFamilies(familyRows, rows) {
   }
 }
 
-// One live series row as the neighbor read orders it; `radiusDays` only when the band facts are asked for.
+// One live series row as the neighbor read orders it; `radiusDays` and `noVisit` only when the band facts are asked for.
 function positionedRow(r, withRadius) {
   const row = { id: String(r.id), position: seriesPosition(r), actual: toDateStr(r.scheduled_date) };
-  return withRadius ? { ...row, radiusDays: flexRadiusDaysFor(r) } : row;
+  return withRadius ? { ...row, radiusDays: flexRadiusDaysFor(r), noVisit: NO_VISIT_STATUSES.has(r.status) } : row;
 }
 
 // The map entry for positioned[idx]: its bounds, plus the band facts (its own radius, the distance to its nearest live sibling in `family`) when asked.
@@ -255,7 +260,7 @@ async function loadSeriesNeighbors(db, services, { lock = false, withRadius = fa
         .whereNotIn('status', TERMINAL_STATUSES);
       if (lock) query = query.forShare().noWait();
       const rows = await query
-        .select('id', 'recurring_parent_id', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'recurring_pattern', 'recurring_interval_days');
+        .select('id', 'recurring_parent_id', 'status', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'recurring_pattern', 'recurring_interval_days');
       joinFamilies(familyRows, rows);
     }
     for (const [parentId, members] of byParent) {

@@ -370,6 +370,29 @@ describe('loadSeriesNeighbors — withRadius (the apply-time read)', () => {
     expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(5);
   });
 
+  test('a skipped, rescheduled or no-show sibling does not narrow the band; the crossing guard still sees its slot', async () => {
+    for (const status of ['skipped', 'rescheduled', 'no_show']) {
+      const rows = { p1: [
+        { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly', status: 'confirmed' },
+        { id: 's2', scheduled_date: '2027-01-10', recurring_pattern: 'quarterly', status },
+        { id: 's3', scheduled_date: '2027-03-01', recurring_pattern: 'quarterly', status: 'confirmed' },
+      ] };
+      const entry = (await loadSeriesNeighbors(seriesDbStub(rows), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+      expect(entry).toEqual({ prev: null, next: '2027-01-10', radiusDays: 7, nearestDays: 90 });
+      expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(7);
+    }
+  });
+
+  test('a scheduled sibling 40 days away still narrows the band', async () => {
+    const rows = { p1: [
+      { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly', status: 'confirmed' },
+      { id: 's2', scheduled_date: '2027-01-10', recurring_pattern: 'quarterly', status: 'pending' },
+    ] };
+    const entry = (await loadSeriesNeighbors(seriesDbStub(rows), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+    expect(entry.nearestDays).toBe(40);
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(5);
+  });
+
   test('a series with no other live occurrence: nearestDays null, the pattern alone decides', async () => {
     const alone = { p1: [{ id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly' }] };
     const entry = (await loadSeriesNeighbors(seriesDbStub(alone), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
