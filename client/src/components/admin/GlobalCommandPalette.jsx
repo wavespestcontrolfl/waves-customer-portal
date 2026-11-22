@@ -341,7 +341,7 @@ function renderMarkdown(text, onNavigate) {
   return elements;
 }
 
-// The stuck-answer mark for a reply (GATE_IB_ANSWER_SEND_TO_CLAUDE): the gap id the server saved, and the owner's own
+// The stuck-answer mark for a reply: the gap id the server saved, and the owner's own
 // typed question for this exchange (null when it came from a tap, carried photos or held pasted text), with the page route
 // and record ids of the moment he pressed Ask: a thread keeps an answer on screen after he opens another record, so a send
 // never takes the page it is on now. Null when the reply is not marked.
@@ -385,7 +385,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // the way, so Ask waits for them instead of sending what was typed so far.
   const dictationPending = useDictationPending();
   const dictationPendingRef = useRef(false);
-  // GATE_IB_ANSWER_SEND_TO_CLAUDE: set from a reply's `answerClaude` ({ gapId, question, pasted, route, ids, forResponse,
+  // Set from a reply's `answerClaude` ({ gapId, question, pasted, route, ids, forResponse,
   // exchange }). `question` is the owner's own typed composer text for that exchange, captured when he pressed Ask; null
   // for a choice, quick action or recent (text a model or the app wrote), for an ask with photos, and for pasted text
   // (it may be a customer's words). The answer's text never goes in. Cleared whenever another conversation is shown.
@@ -396,7 +396,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const dictationUsedRef = useRef(false); // a dictated chunk is in the message being composed
   const pastedRef = useRef(false); // text pasted or dropped into the message being composed
   dictationPendingRef.current = dictationPending;
-  // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
+  // Operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
   // Knowledge searches that came back empty (payload knowledgeMisses):
   // offered as "add to knowledge gaps", saved only on the operator's tap.
@@ -969,7 +969,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // The stuck-answer line or button: only beside the answer it was made for, and only while the status allows it.
   // Never beside a card or a receipt, for the same reason as the choices.
   const cardsShown = Boolean(pendingActions.length || activeTask?.pendingActions?.length || activeTask?.receipts?.length);
-  const shownAnswerClaude = claudeIdea.answerButton && answerClaude && answerClaude.forResponse === response && !loading && !cardsShown ? answerClaude : null;
+  const shownAnswerClaude = claudeIdea.enabled && answerClaude && answerClaude.forResponse === response && !loading && !cardsShown ? answerClaude : null;
   const shownChoices = cardsShown ? null : choices;
   const answerSend = useSendAnswerToClaude({ exchange: answerClaude?.exchange });
   const taskCard = <IntelligenceTaskCard task={activeTask}
@@ -1052,7 +1052,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   };
 
   // Merge each dictation transcript chunk into the input, space-separated.
-  // The server reads the whole question for dictated amounts (GATE_DICTATION_MONEY_NORMALIZE) when
+  // The server reads the whole question for dictated amounts when
   // any dictation went into it; the flag is all it needs.
   const appendTranscript = useCallback((text) => {
     if (!text) return;

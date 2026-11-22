@@ -1,10 +1,7 @@
 /**
- * GATE_IB_TOOL_ACTIVITY — operator-facing activity lines on /query.
+ * Operator-facing activity lines on /query.
  *
- * Invariants:
- *  1. Gate off (unset / anything but 1|true|on): the response carries NO
- *     toolActivity key — byte-identical to today's payload.
- *  2. Gate on: one line per tool call — label, status (done / error /
+ * Invariant: one line per tool call — label, status (done / error /
  *     proposed), durationMs, round — and NEVER the tool input, the tool
  *     result, or a pending-action id.
  *
@@ -159,16 +156,14 @@ async function postQuery(baseUrl, body, token = 'admin') {
   return { status: res.status, body: await res.json() };
 }
 
-describe('GATE_IB_TOOL_ACTIVITY on /query', () => {
+describe('toolActivity on /query', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    delete process.env.GATE_IB_TOOL_ACTIVITY;
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
     mockCreatePendingAction.mockResolvedValue({
       id: PENDING_ID, tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString(),
     });
   });
-  afterAll(() => { delete process.env.GATE_IB_TOOL_ACTIVITY; });
 
   function script() {
     mockExecuteTool.mockImplementation(async (name) => {
@@ -186,18 +181,7 @@ describe('GATE_IB_TOOL_ACTIVITY on /query', () => {
     ]);
   }
 
-  test('gate off: no toolActivity key at all (payload byte-identical to today)', async () => {
-    script();
-    await withServer(async (baseUrl) => {
-      const { status, body } = await postQuery(baseUrl, { prompt: 'set Jeff city', context: 'customers' });
-      expect(status).toBe(200);
-      expect('toolActivity' in body).toBe(false);
-      expect(body.toolCalls).toHaveLength(3);
-    });
-  });
-
-  test('gate on: one labeled line per tool call with outcome + timing, never inputs, results, or the pending id', async () => {
-    process.env.GATE_IB_TOOL_ACTIVITY = 'true';
+  test('one labeled line per tool call with outcome + timing, never inputs, results, or the pending id', async () => {
     script();
     await withServer(async (baseUrl) => {
       const { status, body } = await postQuery(baseUrl, { prompt: 'set Jeff city', context: 'customers' });
@@ -221,15 +205,6 @@ describe('GATE_IB_TOOL_ACTIVITY on /query', () => {
       expect(serialized).not.toContain(PENDING_ID); // confirmation credential
       // Model traffic never carries the activity list either.
       expect(JSON.stringify(mockMessagesCreate.mock.calls)).not.toContain('toolActivity');
-    });
-  });
-
-  test('gate value is strict: "yes" stays off', async () => {
-    process.env.GATE_IB_TOOL_ACTIVITY = 'yes';
-    script();
-    await withServer(async (baseUrl) => {
-      const { body } = await postQuery(baseUrl, { prompt: 'set Jeff city', context: 'customers' });
-      expect('toolActivity' in body).toBe(false);
     });
   });
 });

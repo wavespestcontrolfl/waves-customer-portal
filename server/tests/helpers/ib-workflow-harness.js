@@ -325,7 +325,6 @@ async function initHarness({ databaseUrl, mockModel, providers = {} }, held) {
     ANTHROPIC_API_KEY: 'scripted-model-only',
     GATE_IB_PLATFORM: 'true',
     GATE_IB_THREADS: 'false',
-    GATE_IB_TOOL_ACTIVITY: 'true',
     GATE_IB_WRITES_DISABLED: 'false',
     GATE_EDIT_APPT_ADDRESS: 'true',
     IB_FULL_ACCESS_EMAILS: ownerEmail,
