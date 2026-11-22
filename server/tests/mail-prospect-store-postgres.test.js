@@ -184,24 +184,44 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(await refusedBy(prospect('202699000010', { status: 'not_eligible', reason: 'company_buyer' }))).toBe('saved');
   });
 
-  test('two saves of one deed never interleave: the second waits for the whole first save', async () => {
+  test('two saves of one deed never interleave: a second save cannot land between the refused write and the fallback', async () => {
     await saveProspect(live('202699000001', '5133090590')); // the parcel is live under another deed
-    const first = await conn.transaction(); // a caller's open transaction
-    let waited;
+    const until = async (check, what) => {
+      for (let i = 0; i < 400; i += 1) {
+        if (await check()) return;
+        await new Promise((resolve) => { setTimeout(resolve, 25); });
+      }
+      throw new Error(`never happened: ${what}`);
+    };
+    // The lock saveProspect takes on this deed, as pg_locks shows it (a bigint key is classid high, objid low).
+    const deedLocks = async (granted) => (await conn.raw(
+      `SELECT count(*)::int AS n FROM pg_locks l
+        WHERE l.locktype = 'advisory' AND l.granted = ?
+          AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended(?, 0)`,
+      [granted, 'mail_prospects:new_home:manatee_clerk_deed:202699000002'],
+    )).rows[0].n;
+    // Hold the first save in the gap: its fallback row waits 2 seconds before it is written.
+    await conn.raw(`
+      CREATE FUNCTION mail_test_pause_fallback() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.reason = 'duplicate_parcel' THEN PERFORM pg_sleep(2); END IF;
+        RETURN NEW;
+      END $$`);
+    await conn.raw('CREATE TRIGGER mail_test_pause_fallback BEFORE INSERT ON mail_prospects FOR EACH ROW EXECUTE FUNCTION mail_test_pause_fallback()');
     try {
-      // The first save is refused by the parcel index and falls back; its lock on the deed stays until the commit.
-      expect(await saveProspect(live('202699000002', '5133090590'), first)).toBe('not_eligible');
-      let done = false;
-      const second = saveProspect(live('202699000002', '6000000060')).then((status) => { done = true; return status; });
-      await new Promise((resolve) => { setTimeout(resolve, 400); });
-      waited = !done;
-      await first.commit();
+      const first = saveProspect(live('202699000002', '5133090590')); // refused by the parcel index, then falls back
+      await until(async () => (await deedLocks(true)) === 1, 'the first save holds the lock on the deed');
+      // A second read of the same deed finds a valid match while the first save is still in its fallback.
+      const second = saveProspect(live('202699000002', '6000000060'));
+      await until(async () => (await deedLocks(false)) === 1, 'the second save waits for the lock on the deed');
+      expect(await first).toBe('not_eligible');
       expect(await second).toBe('eligible');
     } finally {
-      if (!first.isCompleted()) await first.rollback();
+      await conn.raw('DROP TRIGGER IF EXISTS mail_test_pause_fallback ON mail_prospects');
+      await conn.raw('DROP FUNCTION IF EXISTS mail_test_pause_fallback()');
     }
-    expect(waited).toBe(true);
-    // The later, valid match stands: the first save's fallback did not overwrite it.
+    // The later, valid match stands. Without the lock the second save would be written during the pause, and the
+    // first save's fallback would then overwrite it with not_eligible.
     const row = await conn('mail_prospects').where({ source_ref: '202699000002' }).first();
     expect(row).toMatchObject({ status: 'eligible', reason: null, parcel_pin: '6000000060' });
   });
@@ -257,6 +277,15 @@ postgres('mail prospect store on PostgreSQL', () => {
     // The same four with a recent certificate all count: a finished home needs no open permit.
     await conn('construction_permit_records').whereIn('permit_no', ['BLD9900-0012', 'BLD9900-0013', 'BLD9900-0014', 'BLD9900-0015']).update({ co_date: dateAgo(30) });
     expect(await found('1100000011', '1200000011', '1300000011', '1400000011', '1500000011')).toEqual(['1100000011', '1200000011', '1300000011', '1400000011', '1500000011']);
+  });
+
+  test('new-home permits: a certificate or an issue date after today does not count', async () => {
+    const tomorrow = new Date(Date.parse(`${monthsAgoIso(0)}T00:00:00Z`) + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    await permit('BLD9900-0030', { parcel_pin: '3000000031', co_date: tomorrow }); // "finished" tomorrow
+    await permit('BLD9900-0031', { parcel_pin: '3100000031', issued_date: tomorrow }); // "issued" tomorrow, no certificate
+    await permit('BLD9900-0032', { parcel_pin: '3200000031', co_date: monthsAgoIso(0) }); // finished today
+    await permit('BLD9900-0033', { parcel_pin: '3300000031', issued_date: monthsAgoIso(0) }); // issued today
+    expect(await found('3000000031', '3100000031', '3200000031', '3300000031')).toEqual(['3200000031', '3300000031']);
   });
 
   test('new-home permits: the 24-month limit counts back from today in Eastern time', async () => {

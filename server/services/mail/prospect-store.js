@@ -108,7 +108,8 @@ function permitNamesParcelAddress(addressRaw, parcel) {
  *     rule for "under construction": issued in the last CONSTRUCTION_ACTIVE_MONTHS months, seen in the county's
  *     report in the last ACTIVE_SEEN_WITHIN_DAYS days, not closed. A permit that left the report keeps its last
  *     status for ever; it must not count for ever.
- * Months count back from today in Eastern time (monthsAgoIso), not from the database session's date.
+ * Months count back from today in Eastern time (monthsAgoIso), not from the database session's date. A certificate
+ * or an issue date after today is a mistake in the county's data, not a new home: both dates stop at today.
  */
 async function newHomePermitsForParcels(parcels, conn = db) {
   const wanted = new Map(); // pin form -> the parcels that could own a permit under it
@@ -121,6 +122,7 @@ async function newHomePermitsForParcels(parcels, conn = db) {
     }
   }
   if (wanted.size === 0) return {};
+  const today = monthsAgoIso(0);
   const coFloor = monthsAgoIso(NEW_HOME_CO_MONTHS);
   const issuedFloor = monthsAgoIso(CONSTRUCTION_ACTIVE_MONTHS);
   const seenAfter = new Date(Date.now() - ACTIVE_SEEN_WITHIN_DAYS * 24 * 60 * 60 * 1000);
@@ -132,10 +134,10 @@ async function newHomePermitsForParcels(parcels, conn = db) {
     .whereRaw("type_of_work NOT ILIKE '%guest%'")
     .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')")
     .where((b) => b
-      .where('co_date', '>=', coFloor)
+      .whereBetween('co_date', [coFloor, today])
       .orWhere((open) => open
         .whereNull('co_date')
-        .where('issued_date', '>=', issuedFloor)
+        .whereBetween('issued_date', [issuedFloor, today])
         .where('last_seen_at', '>=', seenAfter)
         .whereRaw("LOWER(COALESCE(status, '')) <> 'closed'")))
     .orderByRaw('issued_date DESC NULLS LAST, permit_no DESC')
