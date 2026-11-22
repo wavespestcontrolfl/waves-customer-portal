@@ -235,10 +235,27 @@ describe('toolBlockForBatch: the key', () => {
       expect(r.forReader(sub(2))).toEqual(GOT);
     });
 
-    test('an issue row with no recorded FYI address, or an unreadable record, excludes nobody more', async () => {
-      for (const diagnostics of [undefined, null, {}, { fyiTo: null }, { fyiTo: ['reader1@example.net'] }, '{not json']) {
+    test('an issue row with no recorded FYI address excludes nobody more', async () => {
+      for (const diagnostics of [undefined, null, {}, { fyiTo: null }, '{}', 'null']) {
         expect(await keyOf({ db: fakeDb({ issue: { tool_id: GAUGE, diagnostics }, rows: [row(1)] }) })).toEqual(GOT);
       }
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+
+    // An unreadable list must not read as "nobody got a copy": the old proof address could be in it.
+    test.each([
+      ['text that is not JSON', '{"fyiTo": {"old-proof@example.net": tru'],
+      ['a list where the address map belongs', { fyiTo: ['old-proof@example.net'] }],
+      ['a text where the address map belongs', { fyiTo: 'old-proof@example.net' }],
+      ['a record that is no object', ['old-proof@example.net']],
+    ])('an unreadable FYI record (%s) gives every reader of the batch \'\' and one warning that holds no address', async (_label, diagnostics) => {
+      const db = fakeDb({ issue: { tool_id: GAUGE, diagnostics }, rows: [row(1), row(2)] });
+      const r = await run({ subscribers: [sub(1), sub(2)], db });
+      expect(r.forReader(sub(1))).toEqual(NOT);
+      expect(r.forReader(sub(2))).toEqual(NOT);
+      expect(mockWarn).toHaveBeenCalledTimes(1);
+      expect(mockWarn.mock.calls[0].join(' ')).toContain('FYI recipient record is unreadable');
+      expect(mockWarn.mock.calls[0].join(' ')).not.toContain('old-proof');
     });
   });
 

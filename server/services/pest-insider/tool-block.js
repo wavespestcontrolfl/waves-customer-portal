@@ -92,6 +92,24 @@ function mailboxKey(value) {
 // internal domain by isInternalEmailRecipient. A family
 // member's address cannot be told from data: such a reader who opted in gets the block,
 // and the owner keeps that rule by not buying.
+// The addresses a copy of this issue's FYI went to (the issue row's diagnostics.fyiTo). No
+// record means no copy went out. A record that cannot be read throws, and the caller gives
+// every reader of the batch '': an unreadable list must not read as "nobody". The error
+// names no content of the record (it can hold addresses).
+function fyiAddresses(issue) {
+  const unreadable = () => new Error("the issue's FYI recipient record is unreadable");
+  let diagnostics = issue?.diagnostics;
+  if (typeof diagnostics === 'string') {
+    try { diagnostics = JSON.parse(diagnostics); } catch { throw unreadable(); }
+  }
+  if (diagnostics == null) return [];
+  if (typeof diagnostics !== 'object' || Array.isArray(diagnostics)) throw unreadable();
+  const recorded = diagnostics.fyiTo;
+  if (recorded == null) return [];
+  if (typeof recorded !== 'object' || Array.isArray(recorded)) throw unreadable();
+  return require('../newsletter-proof').issueFyiAddresses({ diagnostics });
+}
+
 async function wavesMailboxes(db, issue) {
   const proof = require('../newsletter-proof');
   const { internalEmailAllowlist } = require('../../utils/internal-email-recipients');
@@ -99,7 +117,7 @@ async function wavesMailboxes(db, issue) {
   return new Set([
     ...internalEmailAllowlist(),
     proof.proofRecipient(), proof.syncedApprovalMailbox(), ...proof.approvalSenders(),
-    ...proof.issueFyiAddresses(issue),
+    ...fyiAddresses(issue),
     ...staff.flatMap((s) => [s.email, s.google_email]),
   ].map(mailboxKey).filter(Boolean));
 }

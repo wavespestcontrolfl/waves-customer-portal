@@ -87,7 +87,7 @@ require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: n
 
 const { buildIssue } = require('../../server/services/pest-insider');
 const { sendDateET } = require('../../server/services/pest-insider/facts');
-const { wrapIssueHtml, toolBlock, TOOL_TOKEN } = require('../../server/services/pest-insider/render');
+const { wrapIssueHtml, toolBlock, toolBlockErrors, TOOL_TOKEN } = require('../../server/services/pest-insider/render');
 const { neutralizeIssueTokens } = require('../../server/services/pest-insider/referral-line');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
 const { POSTS, POST_URLS, postUrl, checkLivePosts } = require('../../server/services/pest-insider/posts');
@@ -138,9 +138,12 @@ async function main() {
       console.log(`   subject: ${result.issue.subject}\n   preview: ${result.issue.preview}`);
       console.log(`   wrote ${saveIssue(sendDate, result.issue)}.html and .txt`);
       // The tool as the sender reads it: looked up again, so a row paused since the build gives no opted-in copy.
+      // It is also checked as the sender checks it (toolBlockErrors): a block the send check refuses is not shown.
       const tool = result.tool ? toolById(result.tool.productId) : null;
-      if (tool) console.log(`   wrote ${saveIssue(`${sendDate}.optin`, result.issue, { toolHtml: toolBlock(tool).html })}.html and .txt (opted-in readers: + "A tool we'd use" in the HTML part)`);
-      else if (result.tool) console.log(`   no opted-in copy: tool ${result.tool.productId} is not usable now`);
+      const block = tool ? toolBlock(tool) : null;
+      const refused = block ? toolBlockErrors(block, tool) : [];
+      if (block && !refused.length) console.log(`   wrote ${saveIssue(`${sendDate}.optin`, result.issue, { toolHtml: block.html })}.html and .txt (opted-in readers: + "A tool we'd use" in the HTML part)`);
+      else if (result.tool) console.log(`   no opted-in copy: ${block ? `the send check refused the block (${refused[0]})` : `tool ${result.tool.productId} is not usable now`}`);
       // Only a built issue counts toward the rotation, like a sent one will.
       recent.factIds.push(d.factId);
       recent.speciesSlugs.push(d.speciesSlug);
