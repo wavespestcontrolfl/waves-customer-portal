@@ -77,10 +77,22 @@ const isTrustName = (name) => TRUST_RE.test(spaced(name).replace(/\bREAL ESTATE\
 // ("TESTER ALEX CO-TRUSTEE" reads as "CO TRUSTEE"), and so can a trust's name ("TESTER HOME TRUST").
 const isBuilderName = (name) => isCompanyName(name) && !isTrustName(name);
 
+// The shape of a person's name on the Clerk's list: 2 to 5 words, letters only, none of these words. Measured on
+// four real days: all 120 buyers of the candidate deeds have it, and 3,169 of the 3,205 party names with no
+// company or trust word. A name without it can be an organization with no listed word ("UNITED STATES OF AMERICA").
+const NOT_IN_A_PERSONS_NAME = new Set(['OF', 'THE', 'FOR', 'AND']);
+function hasPersonShape(name) {
+  const words = spaced(name).split(' ');
+  return words.length >= 2 && words.length <= 5
+    && words.every((word) => /^[A-Z]+$/.test(word) && !NOT_IN_A_PERSONS_NAME.has(word));
+}
+
+// A buyer with no company word and no trust word is not yet a person: every name must also have a person's shape.
+// "unclear" gets no card (the safe side), and the log line counts it.
 function buyerKind(toNames) {
   if (toNames.some(isCompanyName)) return 'company';
   if (toNames.some(isTrustName)) return 'trust';
-  return 'person';
+  return toNames.every(hasPersonShape) ? 'person' : 'unclear';
 }
 
 /** A deed worth looking at, or the reason it is not (counted, never stored). */
@@ -158,6 +170,7 @@ async function evaluate(candidate, deps) {
   const row = baseRow(candidate);
   if (candidate.buyerKind === 'company') return withStatus(row, 'not_eligible', 'company_buyer');
   if (candidate.buyerKind === 'trust') return withStatus(row, 'not_eligible', 'trust_buyer');
+  if (candidate.buyerKind !== 'person') return withStatus(row, 'not_eligible', 'unclear_buyer');
   const legal = parseLegal(candidate.description);
   if (!legal) return withStatus(row, 'not_eligible', 'no_lot');
   let parcels;
@@ -166,7 +179,8 @@ async function evaluate(candidate, deps) {
   } catch {
     return withStatus(row, 'unmatched', 'lookup_failed');
   }
-  const permitsByParid = await deps.newHomePermitsForParcels(parcels);
+  // The sale day bounds the permit: a permit issued after it is the buyer's own, not the home a builder sold.
+  const permitsByParid = await deps.newHomePermitsForParcels(parcels, { soldOn: candidate.date });
   const choice = chooseParcel({ sellerNames: candidate.sellerNames, parcels, permitsByParid });
   if (choice.status !== 'matched') return withStatus(row, 'unmatched', choice.status);
   const { addressLine1, zip } = choice.parcel;

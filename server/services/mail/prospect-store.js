@@ -85,6 +85,15 @@ function permitNamesParcelAddress(addressRaw, parcel) {
   return false;
 }
 
+// The last issue date that counts for a permit: the sale day when the caller gives one, else today.
+function lastIssueDay(options, today) {
+  // The connection is the last argument, as in the other store functions. A handle in the options' place would be
+  // ignored, and the read would run on the default handle: refuse it.
+  if (typeof options === 'function') throw new TypeError('newHomePermitsForParcels: the connection is the third argument');
+  const soldOn = String(options?.soldOn || '');
+  return /^\d{4}-\d{2}-\d{2}$/.test(soldOn) && soldOn < today ? soldOn : today;
+}
+
 /**
  * The newest new-home permit of each parcel, as `{ [parid]: permit row }`. `parcels` are the county map's parcels:
  * `{ parid, addressLine1, city, zip }`.
@@ -110,8 +119,12 @@ function permitNamesParcelAddress(addressRaw, parcel) {
  *     status for ever; it must not count for ever.
  * Months count back from today in Eastern time (monthsAgoIso), not from the database session's date. A certificate
  * or an issue date after today is a mistake in the county's data, not a new home: both dates stop at today.
+ * With options.soldOn (the deed's recording date, YYYY-MM-DD) the issue date stops at that day: a deed is read for
+ * several days, and the buyer of a lot can get a permit in those days. That permit is not a home a builder sold.
  */
-async function newHomePermitsForParcels(parcels, conn = db) {
+async function newHomePermitsForParcels(parcels, options, conn = db) {
+  const today = monthsAgoIso(0);
+  const issuedBy = lastIssueDay(options, today);
   const wanted = new Map(); // pin form -> the parcels that could own a permit under it
   for (const parcel of parcels || []) {
     const key = looseAddressKey(parcel?.addressLine1, parcel?.zip);
@@ -122,7 +135,6 @@ async function newHomePermitsForParcels(parcels, conn = db) {
     }
   }
   if (wanted.size === 0) return {};
-  const today = monthsAgoIso(0);
   const coFloor = monthsAgoIso(NEW_HOME_CO_MONTHS);
   const issuedFloor = monthsAgoIso(CONSTRUCTION_ACTIVE_MONTHS);
   const seenAfter = new Date(Date.now() - ACTIVE_SEEN_WITHIN_DAYS * 24 * 60 * 60 * 1000);
@@ -135,7 +147,7 @@ async function newHomePermitsForParcels(parcels, conn = db) {
     .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')")
     // An issue date after today on any permit: the newest-first order below would put it before the parcel's
     // real permit. A finished home's permit may have no issue date.
-    .where((b) => b.whereNull('issued_date').orWhere('issued_date', '<=', today))
+    .where((b) => b.whereNull('issued_date').orWhere('issued_date', '<=', issuedBy))
     .where((b) => b
       .whereBetween('co_date', [coFloor, today])
       .orWhere((open) => open

@@ -60,6 +60,18 @@ describe('company endings written with dots or with spaces', () => {
     expect(isCompanyName('EXAMPLE CO OF SAMPLETON')).toBe(true);
     expect(isCompanyName('NA HOLDINGS LLC')).toBe(true);
   });
+  test('a buyer with no company or trust word is a person only with the shape of a person\'s name', () => {
+    expect(buyerKind(['UNITED STATES OF AMERICA'])).toBe('unclear'); // OF
+    expect(buyerKind(['SECRETARY FOR SAMPLE AFFAIRS'])).toBe('unclear'); // FOR
+    expect(buyerKind(['EXAMPLE'])).toBe('unclear'); // one word
+    expect(buyerKind(['ONE TWO THREE FOUR FIVE SIX'])).toBe('unclear'); // six words
+    expect(buyerKind(['SAMPLE 2020 EXAMPLE'])).toBe('unclear'); // a digit
+    expect(buyerKind(['TESTER ALEX J', 'UNITED STATES OF AMERICA'])).toBe('unclear'); // one unclear name is enough
+    expect(buyerKind(['TESTER ALEX', "O'TESTER MARY ANN", 'TESTER-SAMPLE ROBIN M JR', 'DE LA TESTER ALEX J'])).toBe('person');
+    // A company or a trust word still decides first.
+    expect(buyerKind(['UNITED STATES OF AMERICA', 'SAMPLE HOLDINGS LLC'])).toBe('company');
+    expect(buyerKind(['THE TESTER FAMILY TRUST'])).toBe('trust');
+  });
   test('a company word as a last name: last name, given name, initial is a person, as a buyer and as a seller', () => {
     expect(isCompanyName('CHURCH ALEX J')).toBe(false);
     expect(isCompanyName('HOME ROBIN M')).toBe(false);
@@ -264,7 +276,7 @@ describe('evaluate', () => {
   test('the store gets the map\'s parcels as they are (it needs the address and the city)', async () => {
     const d = deps();
     await evaluate(candidate(), d);
-    expect(d.newHomePermitsForParcels).toHaveBeenCalledWith([parcel()]);
+    expect(d.newHomePermitsForParcels).toHaveBeenCalledWith([parcel()], { soldOn: '2026-11-17' });
   });
   test('the fixed one-in-five home is held back', async () => {
     const pin = pinWhere(true);
@@ -380,6 +392,20 @@ describe('runNewHomeList', () => {
     expect(deps.saveProspect).toHaveBeenCalledTimes(MAX_PARCEL_QUERIES);
     expect(summary.skipped.waits_for_next_run).toBe(1); // one newer deed, read again tomorrow
     expect(summary.leftOnLastDay).toEqual({});
+  });
+
+  test('an unclear buyer is stored as not eligible and costs no map query', async () => {
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(12, { to: ['UNITED STATES OF AMERICA'] })] }, ...HOME });
+    const summary = await run(deps);
+    expect(deps.queryParcels).not.toHaveBeenCalled();
+    expect(deps.saveProspect.mock.calls[0][0]).toMatchObject({ status: 'not_eligible', reason: 'unclear_buyer', buyer_kind: 'unclear' });
+    expect(summary.savedByReason).toEqual({ 'not_eligible/unclear_buyer': 1 });
+  });
+
+  test('the permit read gets the sale day of each deed', async () => {
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(1)], '2026-11-12': [person(2, { date: '2026-11-12' })] } });
+    await run(deps);
+    expect(deps.newHomePermitsForParcels.mock.calls.map(([, options]) => options)).toEqual([{ soldOn: '2026-11-12' }, { soldOn: '2026-11-17' }]);
   });
 
   test('the 20-hour wait does not apply on the last day a run reads the deed', async () => {

@@ -342,6 +342,25 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(await found('1100000011', '1200000011', '1300000011', '1400000011', '1500000011')).toEqual(['1100000011', '1200000011', '1300000011', '1400000011', '1500000011']);
   });
 
+  test('new-home permits: with the sale day, a permit issued after it does not count', async () => {
+    await permit('BLD9900-0040', { parcel_pin: '4000000041', issued_date: dateAgo(3) }); // the buyer of a lot got it
+    const forSale = async (soldOn) => Object.keys(await newHomePermitsForParcels([parcel('4000000041')], { soldOn }));
+    expect(await forSale(dateAgo(5))).toEqual([]); // sold five days ago: the permit came after
+    expect(await forSale(dateAgo(3))).toEqual(['4000000041']); // issued on the sale day
+    expect(await forSale(dateAgo(1))).toEqual(['4000000041']);
+    // No sale day, or one that is not a date: today is the bound, as before.
+    expect(await forSale(undefined)).toEqual(['4000000041']);
+    expect(await forSale('not a date')).toEqual(['4000000041']);
+    expect(Object.keys(await newHomePermitsForParcels([parcel('4000000041')]))).toEqual(['4000000041']);
+    // The later permit does not take the place of the home's real one.
+    await permit('BLD9900-0041', { parcel_pin: '4000000041', issued_date: dateAgo(300), co_date: dateAgo(20) });
+    const atSale = await newHomePermitsForParcels([parcel('4000000041')], { soldOn: dateAgo(5) });
+    expect(atSale['4000000041'].permit_no).toBe('BLD9900-0041');
+    // A connection in the options' place (the call form before this change) is refused, not ignored.
+    await expect(newHomePermitsForParcels([parcel('4000000041')], conn)).rejects.toThrow('the connection is the third argument');
+    expect(Object.keys(await newHomePermitsForParcels([parcel('4000000041')], undefined, conn))).toEqual(['4000000041']);
+  });
+
   test('new-home permits: a certificate or an issue date after today does not count', async () => {
     const tomorrow = new Date(Date.parse(`${monthsAgoIso(0)}T00:00:00Z`) + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     await permit('BLD9900-0030', { parcel_pin: '3000000031', co_date: tomorrow }); // "finished" tomorrow
