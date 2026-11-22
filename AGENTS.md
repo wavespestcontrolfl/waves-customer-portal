@@ -13,10 +13,9 @@ The pre-push hook (`scripts/hooks/pre-push`, wired via `core.hooksPath` by
 
 **Budget: this file stays under 30 KB** — `npm run check:domain-rules`
 fails when it grows past that; Codex truncates the loaded instruction
-chain at 32 KiB. Repo orientation lives in `CLAUDE.md`, procedures live
-in `.claude/skills/*`, and the per-route security contracts live in
-`docs/public-route-contracts.md`. Do not duplicate them here; point at
-them.
+chain at 32 KiB. Orientation lives in `CLAUDE.md`, procedures in
+`.claude/skills/*`, per-route security contracts in
+`docs/public-route-contracts.md`: point at them, never duplicate.
 
 For coding work read `CLAUDE.md` first and load only the relevant skills
 and reference sections. For an audit, read rules as evidence; do not
@@ -351,27 +350,20 @@ execute the workflows they describe.
   resends once to the other pass's settled spelling, same customer, taken
   on delivery, no card (11-05); `GATE_CALL_BOUNCE_SELF_FIX` saves one small
   call fix per customer, never resends (`isSmallFix`; 11-17).
-- **Estimator engine authority.** `generateEstimate` is the sole dollar
-  authority — LLM output proposes intent only and never reaches
-  proposal/price fields; engine drafts never auto-send; existing customers
-  are blocked from engine drafting; low-confidence markers (fpSource
-  fallback, low pricingConfidence, turfBasis fallbacks) route to review.
-  Caller-stated unit size + `relationship_to_property: tenant` outrank
-  county sqft for commercial tenants. Three owner-approved taps mint the
-  tapping customer an estimate: a priced cross-sell
-  (`GATE_REPORT_CLICK_TO_ESTIMATE`), "Restart my plan" (`plan_restart`;
-  re-verified churned under the row lock, live recurring families
-  excluded) and "See my price and book" (`plan_start`; no membership,
-  recurring row or prepay term, re-verified under the row lock and at
-  accept). Same bounds: deterministic options only, no LLM, the server
-  recompute matches the shown/snapshotted price to the cent or it refuses,
-  zero delivery (no send, follow-up automation or customer comms).
-  "Never auto-send" stands
-  everywhere else except website estimate self-service
-  (`website-quote-publication.js`, `GATE_WEBSITE_QUOTE_BOOKING`): eligible
-  new-customer engine quotes publish without staff approval, under estimate
-  then customer row locks, with a cent-exact frozen booking snapshot; existing
-  quote-invite and booking-confirmation communications remain allowed.
+- **Estimator engine authority.** `generateEstimate` is the sole dollar authority; LLM output proposes intent
+  only, never proposal/price fields; engine drafts never auto-send; existing customers are blocked from engine
+  drafting; low-confidence markers route to review. Caller-stated unit size + `relationship_to_property:
+  tenant` outrank county sqft for commercial tenants. Three owner-approved taps mint the customer an estimate:
+  a priced cross-sell (`GATE_REPORT_CLICK_TO_ESTIMATE`), "Restart my plan" (`plan_restart`; re-verified
+  churned under row lock, live recurring families excluded) and "See my price and book" (`plan_start`; no
+  membership, recurring row or prepay term; re-verified under row lock and at accept). Same bounds:
+  deterministic options only, no LLM, server recompute matches the shown price to the cent or it refuses, zero
+  delivery (no send, follow-up or customer comms). "Never auto-send" stands except website estimate
+  self-service (`website-quote-publication.js`, `GATE_WEBSITE_QUOTE_BOOKING`: eligible new-customer engine
+  quotes publish without staff approval, under estimate then customer row locks, cent-exact frozen booking
+  snapshot; quote-invite and booking-confirmation mail stays allowed) and the one-time pest or cockroach plan
+  offer (`GATE_ONETIME_PLAN_OFFER=live`, 2026-11-20: one quote, setup fee waived, emailed via
+  `sendWithLedger`; same bounds but it delivers, once per customer per 12 months).
 - **Lawn-diagnostic lockstep.** `CONDITION_LABELS` / `SUMMARY_CAUSE_RE` /
   the `GOVERNED_CAUSE` test stay mirrored and
   plural-aware; customer egress is confidence-gated and allowlisted —
