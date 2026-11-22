@@ -365,8 +365,7 @@ function adminPost(path, body) {
     body: JSON.stringify(body || {}),
   }).then(async (r) => {
     const data = await r.json().catch(() => ({}));
-    // The server's reason code rides on the error, for a caller that acts on one (the thank-you note card).
-    if (!r.ok) throw Object.assign(new Error(data.error || `HTTP ${r.status}`), { code: data.code });
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
     return data;
   });
 }
@@ -662,98 +661,80 @@ function InboundReferralCard({ item, step2, onDone, flash }) {
 // Step 2: one handwritten thank-you note to the member for every friend who books. The card lists the member and
 // the mailing address only: the note never names the friend, so the friend is not on this card or in its data.
 // It reads its own list when the Queue opens and shows nothing when no note is owed.
-// One page of the list (200 notes, oldest first). `after` is the nextCursor of the page before; none: the first.
-const thankYouNotesPage = (after = "") => af(`/admin/referrals/thank-you-notes?after=${encodeURIComponent(after)}`);
+// One page of the list (200 notes, oldest first). `after` is the nextCursor of the page before; "": the first.
+const thankYouNotesPage = (after) => af(`/admin/referrals/thank-you-notes?after=${encodeURIComponent(after)}`);
 
 function ThankYouNotes({ flash }) {
   const isMobile = useIsMobile();
-  const [notes, setNotes] = useState([]);
-  const [total, setTotal] = useState(0); // every note owed, not only the rows on screen
-  const [nextCursor, setNextCursor] = useState(null); // set while the server holds a page after the rows on screen
+  // The card shows exactly one page, as the server last answered it: the rows, the count of every note owed and
+  // the position of the next page come from one statement. Nothing is kept from an earlier read and nothing is
+  // counted on this side, so two logins working the list cannot leave a written note or an old count on the card
+  // past the next read.
+  const [after, setAfter] = useState(""); // the position this page starts after; "": the oldest notes
+  const [page, setPage] = useState({ notes: [], total: 0, nextCursor: null });
   const [failed, setFailed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [busyId, setBusyId] = useState(null); // the note a mark is being saved for
   const [loading, setLoading] = useState(true); // a page is being read
-  // One action at a time: a page read and a mark never overlap, so an answer that was read before a mark can
-  // never put the old count or a written row back on the card.
+  // One action at a time: a page read and a mark never overlap.
   const idle = busyId === null && !loading;
 
   useEffect(() => {
     let current = true;
     setLoading(true);
-    thankYouNotesPage()
-      .then((page) => {
+    thankYouNotesPage(after)
+      .then((answer) => {
         if (!current) return;
-        setNotes(page.notes || []);
-        setTotal(Number(page.total) || 0);
-        setNextCursor(page.nextCursor || null);
+        const notes = answer.notes || [];
+        const total = Number(answer.total) || 0;
+        // Every note of a later page was written since it was read: back to the oldest notes still owed. The
+        // card stays in "reading" until that page answers.
+        if (notes.length === 0 && total > 0 && after) {
+          setAfter("");
+          return;
+        }
+        setPage({ notes, total, nextCursor: answer.nextCursor || null });
         setFailed(false);
+        setLoading(false);
       })
       .catch(() => {
-        if (current) setFailed(true);
-      })
-      .finally(() => {
-        if (current) setLoading(false);
+        if (!current) return;
+        setFailed(true);
+        setLoading(false);
       });
     return () => {
       current = false;
     };
-  }, [reloadKey]);
+  }, [after, reloadKey]);
 
-  // The next page goes below the rows on screen; the rows already there keep their place.
-  const readNextPage = async () => {
-    setLoading(true);
-    try {
-      const page = await thankYouNotesPage(nextCursor);
-      setNotes((rows) => {
-        const onScreen = new Set(rows.map((row) => row.referralId));
-        return [...rows, ...(page.notes || []).filter((row) => !onScreen.has(row.referralId))];
-      });
-      setTotal(Number(page.total) || 0);
-      setNextCursor(page.nextCursor || null);
-    } catch (e) {
-      flash("Error: " + e.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // More notes are owed than the card shows: the next page when the server named one, else the list from its
-  // start (the count and the rows went apart, e.g. another login worked the list).
-  const showMore = () => {
+  const goTo = (position) => {
     if (!idle) return;
-    if (nextCursor) readNextPage();
-    else setReloadKey((k) => k + 1);
+    setLoading(true);
+    setAfter(position);
   };
 
   const markWritten = async (note) => {
     if (!idle) return;
     setBusyId(note.referralId);
-    let left = false;
     try {
       await adminPost(`/admin/referrals/thank-you-notes/${note.referralId}/written`);
-      left = true;
       flash(`Thank-you note for ${note.memberName || "the member"} marked written`);
     } catch (e) {
       flash("Error: " + e.message);
-      // The server says this note is no longer owed (the referral was rejected, the member archived): it leaves
-      // the card. Any other failure keeps the row for another try.
-      left = e.code === "NO_NOTE_OWED";
     }
-    if (left) {
-      setNotes((rows) => rows.filter((row) => row.referralId !== note.referralId));
-      setTotal((count) => Math.max(0, count - 1));
-    }
+    // Read this page again after every answer. A note that is no longer owed (written, or the referral was
+    // rejected, or the member archived) leaves the card; one that only failed to save stays for another try; the
+    // notes behind it move up.
+    setLoading(true);
     setBusyId(null);
-    // That was the last row on screen and the server holds more: bring the next page, so the card never stands
-    // empty while a note is owed.
-    if (left && notes.length === 1 && nextCursor) await readNextPage();
+    setReloadKey((k) => k + 1);
   };
 
+  const { notes, total, nextCursor } = page;
   if (failed) {
     return <ErrorRow what="thank-you notes to write" onRetry={() => setReloadKey((k) => k + 1)} />;
   }
-  if (total === 0 && notes.length === 0) return null;
+  if (total === 0) return null;
   return (
     <div
       style={{
@@ -768,7 +749,7 @@ function ThankYouNotes({ flash }) {
     >
       <div>
         <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
-          Thank-you notes to write ({Math.max(total, notes.length)})
+          Thank-you notes to write ({total})
         </div>
         <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
           Write one note by hand to each member below. Each row is one friend who booked. Do not name the friend in
@@ -819,18 +800,29 @@ function ThankYouNotes({ flash }) {
           </button>
         </div>
       ))}
-      {(nextCursor || total > notes.length) && (
+      {(nextCursor || after) && (
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, fontSize: 14, color: D.text }}>
           <span>
-            Showing the oldest {notes.length} of {Math.max(total, notes.length)}.
+            Showing {after ? "the next" : "the oldest"} {notes.length} of {total}.
           </span>
-          <button
-            onClick={showMore}
-            disabled={!idle}
-            style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
-          >
-            {loading ? "Loading..." : nextCursor ? "Show more" : "Refresh list"}
-          </button>
+          {after && (
+            <button
+              onClick={() => goTo("")}
+              disabled={!idle}
+              style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
+            >
+              First page
+            </button>
+          )}
+          {nextCursor && (
+            <button
+              onClick={() => goTo(nextCursor)}
+              disabled={!idle}
+              style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
+            >
+              Next page
+            </button>
+          )}
         </div>
       )}
     </div>

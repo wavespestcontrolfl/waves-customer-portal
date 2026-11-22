@@ -97,7 +97,7 @@ describe("Referrals queue: thank-you notes to write", () => {
     expect(screen.getByRole("button", { name: "Mark written" })).toBeEnabled();
   });
 
-  it("Mark written posts that referral once, takes the row off the card and keeps the other row", async () => {
+  it("Mark written posts that referral once, then reads the page again: the row leaves and the other row stays", async () => {
     await openQueue();
     const buttons = await screen.findAllByRole("button", { name: "Mark written" });
     fireEvent.click(buttons[0]);
@@ -106,12 +106,14 @@ describe("Referrals queue: thank-you notes to write", () => {
     expect(writes()).toHaveLength(1);
     expect(writes()[0][0]).toBe(`/api/admin/referrals/thank-you-notes/${FIRST}/written`);
     expect(writes()[0][1].method).toBe("POST");
-    expect(screen.queryByText("Fixture Member")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Fixture Member")).not.toBeInTheDocument());
     expect(screen.getByText("Thank-you notes to write (1)")).toBeInTheDocument();
     expect(screen.getByText("Second Member")).toBeInTheDocument();
+    // The rows and the count are the server's answer to a second read, not a local sum.
+    expect(listReads()).toEqual([`${LIST}?after=`, `${LIST}?after=`]);
   });
 
-  it("the count is every note owed; when the last row on screen is written the next page comes up, and the card does not hide while one is owed", async () => {
+  it("the count is every note owed; after a mark the notes behind it move up, and the card does not hide while one is owed", async () => {
     batch = 1;
     await openQueue();
     expect(await screen.findByText("Thank-you notes to write (2)")).toBeInTheDocument();
@@ -123,17 +125,15 @@ describe("Referrals queue: thank-you notes to write", () => {
     expect(await screen.findByText("Second Member")).toBeInTheDocument();
     expect(screen.getByText("Thank-you notes to write (1)")).toBeInTheDocument();
     expect(screen.queryByText("Fixture Member")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Showing the oldest/)).not.toBeInTheDocument();
-    // The second read asked for the page after the first one. It did not read the first page again.
-    expect(listReads()).toEqual([`${LIST}?after=`, `${LIST}?after=${encodeURIComponent(`after:${FIRST}`)}`]);
+    expect(screen.queryByText(/Showing the/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Mark written" }));
     await waitFor(() => expect(screen.queryByText(/Thank-you notes to write/)).not.toBeInTheDocument());
     expect(writes()).toHaveLength(2);
   });
 
-  it("Show more adds the next page below the rows on screen, with no mark on an earlier note", async () => {
-    // Page 1 is one row that waits for an address; the note behind it can be written today.
+  it("Next page shows the later notes with no mark on an earlier one; First page goes back", async () => {
+    // Page 1 is one row that waits for an address; the notes behind it can be written today.
     batch = 1;
     owed = [
       { ...NOTES[0], addressLines: ["FL"], addressComplete: false },
@@ -142,45 +142,84 @@ describe("Referrals queue: thank-you notes to write", () => {
     ];
     await openQueue();
     expect(await screen.findByText("Showing the oldest 1 of 3.")).toBeInTheDocument();
-    expect(screen.queryByText("Second Member")).not.toBeInTheDocument();
-    expect(listReads()).toEqual([`${LIST}?after=`]);
+    expect(screen.queryByRole("button", { name: "First page" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
 
+    // The card is that one page: the first page's row is not on it.
     expect(await screen.findByText("Second Member")).toBeInTheDocument();
-    expect(screen.getByText("Fixture Member")).toBeInTheDocument();
+    expect(screen.queryByText("Fixture Member")).not.toBeInTheDocument();
     expect(screen.getByText("Thank-you notes to write (3)")).toBeInTheDocument();
-    expect(screen.getByText("Showing the oldest 2 of 3.")).toBeInTheDocument();
-    // One page was asked for: the position after the first row. The first page was not read again.
+    expect(screen.getByText("Showing the next 1 of 3.")).toBeInTheDocument();
     expect(listReads()).toEqual([`${LIST}?after=`, `${LIST}?after=${encodeURIComponent(`after:${FIRST}`)}`]);
     expect(writes()).toHaveLength(0);
 
-    // A mark on the later note keeps both pages on screen and reads nothing.
-    fireEvent.click(screen.getAllByRole("button", { name: "Mark written" })[1]);
-    await waitFor(() => expect(screen.queryByText("Second Member")).not.toBeInTheDocument());
-    expect(screen.getByText("Fixture Member")).toBeInTheDocument();
-    expect(screen.getByText("Thank-you notes to write (2)")).toBeInTheDocument();
-    expect(listReads()).toHaveLength(2);
-
-    // The last page: the control leaves.
-    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    // A mark on this page reads this page again: the note behind it moves up.
+    fireEvent.click(screen.getByRole("button", { name: "Mark written" }));
     expect(await screen.findByText("Third Member")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
-    expect(listReads().at(-1)).toBe(`${LIST}?after=${encodeURIComponent(`after:${SECOND}`)}`);
+    expect(screen.queryByText("Second Member")).not.toBeInTheDocument();
+    expect(screen.getByText("Thank-you notes to write (2)")).toBeInTheDocument();
+    expect(listReads().at(-1)).toBe(`${LIST}?after=${encodeURIComponent(`after:${FIRST}`)}`);
+    expect(screen.queryByRole("button", { name: "Next page" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "First page" }));
+    expect(await screen.findByText("Fixture Member")).toBeInTheDocument();
+    expect(screen.queryByText("Third Member")).not.toBeInTheDocument();
+    expect(screen.getByText("Showing the oldest 1 of 2.")).toBeInTheDocument();
   });
 
-  it("one action at a time: no mark while a page is read, and no page read while a mark is saved", async () => {
+  it("the last note of a later page is written: the card goes back to the oldest notes still owed", async () => {
     batch = 1;
     await openQueue();
-    await screen.findByText("Showing the oldest 1 of 2.");
+    fireEvent.click(await screen.findByRole("button", { name: "Next page" }));
+    expect(await screen.findByText("Second Member")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Mark written" }));
+
+    expect(await screen.findByText("Fixture Member")).toBeInTheDocument();
+    expect(screen.getByText("Thank-you notes to write (1)")).toBeInTheDocument();
+    expect(screen.queryByText("Second Member")).not.toBeInTheDocument();
+    expect(listReads().at(-1)).toBe(`${LIST}?after=`);
+  });
+
+  it("another login wrote a note of this page: the next read shows the server's rows and count, never the old ones", async () => {
+    batch = 2;
+    owed = [...NOTES, { ...NOTES[1], referralId: THIRD, memberName: "Third Member" }];
+    await openQueue();
+    expect(await screen.findByText("Showing the oldest 2 of 3.")).toBeInTheDocument();
+
+    // Another login marks the first note written. This card still shows it.
+    owed = owed.filter((note) => note.referralId !== FIRST);
+    expect(screen.getByText("Fixture Member")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+
+    // One page, the server's: the third note only, and the count is 2. The written note is not on the card.
+    expect(await screen.findByText("Third Member")).toBeInTheDocument();
+    expect(screen.queryByText("Fixture Member")).not.toBeInTheDocument();
+    expect(screen.queryByText("Second Member")).not.toBeInTheDocument();
+    expect(screen.getByText("Thank-you notes to write (2)")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "First page" }));
+    expect(await screen.findByText("Second Member")).toBeInTheDocument();
+    expect(screen.getByText("Third Member")).toBeInTheDocument();
+    expect(screen.queryByText("Fixture Member")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Showing the/)).not.toBeInTheDocument();
+  });
+
+  it("one action at a time: no mark while a page is read, and no page read or second mark while a mark is saved", async () => {
+    batch = 1;
+    owed = [...NOTES, { ...NOTES[1], referralId: THIRD, memberName: "Third Member" }];
+    await openQueue();
+    await screen.findByText("Showing the oldest 1 of 3.");
 
     // A page read that has not answered yet.
     const answer = notesResponse;
     let release;
     notesResponse = (url) => new Promise((resolve) => { release = () => resolve(answer(url)); });
-    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
-    expect(await screen.findByRole("button", { name: "Loading..." })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Mark written" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Mark written" })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Mark written" }));
     expect(writes()).toHaveLength(0);
     release();
@@ -191,47 +230,33 @@ describe("Referrals queue: thank-you notes to write", () => {
     const saved = writtenResponse;
     let finish;
     writtenResponse = (url) => new Promise((resolve) => { finish = () => resolve(saved(url)); });
-    owed = [...owed, { ...NOTES[1], referralId: THIRD, memberName: "Third Member" }];
-    everOwed = owed;
-    fireEvent.click(screen.getAllByRole("button", { name: "Mark written" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Mark written" }));
     expect(await screen.findByRole("button", { name: "Saving..." })).toBeDisabled();
-    for (const button of screen.getAllByRole("button", { name: "Mark written" })) expect(button).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "First page" })).toBeDisabled();
     const reads = listReads().length;
-    finish();
-    await waitFor(() => expect(screen.queryByText("Fixture Member")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
     expect(listReads()).toHaveLength(reads);
-    expect(screen.getByText("Thank-you notes to write (1)")).toBeInTheDocument();
+    finish();
+    expect(await screen.findByText("Third Member")).toBeInTheDocument();
+    expect(writes()).toHaveLength(1);
+    expect(screen.getByText("Thank-you notes to write (2)")).toBeInTheDocument();
   });
 
-  it("more notes owed than rows and no next page named: Refresh list reads the list from its start", async () => {
-    // Another login worked the list: the count and the rows went apart.
-    notesResponse = () => response({ notes: [NOTES[0]], total: 2, nextCursor: null });
-    await openQueue();
-    expect(await screen.findByText("Showing the oldest 1 of 2.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
-
-    notesResponse = () => response({ notes: NOTES, total: 2, nextCursor: null });
-    fireEvent.click(screen.getByRole("button", { name: "Refresh list" }));
-
-    expect(await screen.findByText("Second Member")).toBeInTheDocument();
-    expect(screen.queryByText(/Showing the oldest/)).not.toBeInTheDocument();
-    expect(listReads()).toEqual([`${LIST}?after=`, `${LIST}?after=`]);
-  });
-
-  it("a next page that fails to load says so and keeps the rows and the control", async () => {
+  it("a next page that fails to load is an error with Retry, and Retry reads that page", async () => {
     batch = 1;
     await openQueue();
     await screen.findByText("Showing the oldest 1 of 2.");
-    const first = notesResponse;
+    const answer = notesResponse;
     notesResponse = () => response({ error: "down" }, 503);
 
-    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
 
-    expect(await screen.findByText("Error: down")).toBeInTheDocument();
-    expect(screen.getByText("Fixture Member")).toBeInTheDocument();
-    notesResponse = first;
-    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    expect(await screen.findByText("Could not load thank-you notes to write. This is not an empty list.")).toBeInTheDocument();
+    notesResponse = answer;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("Second Member")).toBeInTheDocument();
+    expect(listReads().at(-1)).toBe(`${LIST}?after=${encodeURIComponent(`after:${FIRST}`)}`);
   });
 
   it("a note the server says is no longer owed leaves the card and the count, and the reason is shown", async () => {
@@ -255,7 +280,9 @@ describe("Referrals queue: thank-you notes to write", () => {
     fireEvent.click((await screen.findAllByRole("button", { name: "Mark written" }))[0]);
 
     expect(await screen.findByText("Error: down")).toBeInTheDocument();
-    // No reason code from the server: the note may still be owed, so the row stays.
+    // The page was read again and the server still holds the note.
+    await waitFor(() => expect(listReads()).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Mark written" })[0]).toBeEnabled());
     expect(screen.getByText("Fixture Member")).toBeInTheDocument();
     expect(screen.getByText("Thank-you notes to write (2)")).toBeInTheDocument();
   });
