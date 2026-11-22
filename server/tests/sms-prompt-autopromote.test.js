@@ -60,6 +60,13 @@ describe('promotion bar (pure)', () => {
     expect(decide(opts, runs)).toMatchObject({ promote: false, reason });
   });
 
+  test('a score mean with no item left is final, under the one-sitting reason: more sittings only take items away', () => {
+    expect(decide({ candidateScoresMissing: true })).toMatchObject({ promote: false, reason: 'scores_missing', final: true });
+    // The unsafe rule is still read first, as on the one-sitting bar; the missing score makes that rejection final too.
+    expect(decide({ candidateScoresMissing: true, newlyUnsafe: 2, newlySafe: 1 })).toMatchObject({ promote: false, reason: 'unsafe_rose', final: true });
+    expect(decide({ newlyUnsafe: 2, newlySafe: 1 })).toEqual(expect.not.objectContaining({ final: true }));
+  });
+
   test('runs graded by different judge rulers, or a run that mixes them, are never compared', () => {
     const judged = (rows, version, from = 0) => rows.map((r, i) => (i >= from ? { ...r, scores: JSON.stringify({ ...JSON.parse(r.scores), judge_version: version }) } : r));
     const { candidateResults, baselineResults } = results();

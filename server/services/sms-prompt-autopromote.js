@@ -334,7 +334,7 @@ function sittingsMismatch(candidateSittings, baselineSittings) {
  * candidate's average unsafe count on those items is not above the baseline's by more than the allowance, and
  * the overall and actions score means each improve by their margin.
  * A rejection marked `final` is one no further sitting can change (sittings that may not be compared, too few
- * shared items): runCandidateExam stops paying for sittings on it.
+ * shared items, a score mean with no item left): runCandidateExam stops paying for sittings on it.
  */
 function decidePromotion({ candidateSittings = [], baselineSittings = [] } = {}) {
   const { computeSignificance } = require('./sms-sealed-eval');
@@ -367,8 +367,11 @@ function decidePromotion({ candidateSittings = [], baselineSittings = [] } = {})
   if (tally.pairedItems < MIN_PAIRED_ITEMS) return reject('too_few_items', detail, true);
   // With one sitting a side and no allowance this is the net rule "more newly unsafe items than newly safe
   // ones", which also rules out a McNemar regression; an allowance never lets a significant one through.
-  if (unsafeAbove(unsafeTotals, sittings, allowance) || (sig && sig.significant && sig.direction === 'regressed')) return reject('unsafe_rose', detail);
-  if (deltas.overall == null || deltas.actions == null) return reject('scores_missing', detail);
+  // Final whatever the reason: a score mean reads only the items EVERY sitting scored, so one with no item left
+  // stays without one as sittings are added. The reason is the one-sitting bar's (the unsafe rule is read first).
+  const scoresMissing = deltas.overall == null || deltas.actions == null;
+  if (unsafeAbove(unsafeTotals, sittings, allowance) || (sig && sig.significant && sig.direction === 'regressed')) return reject('unsafe_rose', detail, scoresMissing);
+  if (scoresMissing) return reject('scores_missing', detail, true);
   // riseMeets: a mean of float quotients that is the margin exactly (18 of 30 items one point up in one of three
   // sittings is 0.2, computed as 0.19999999999999982) meets it.
   if (!riseMeets(deltas.overall, MIN_OVERALL_GAIN)) return reject('overall_not_improved', detail);
