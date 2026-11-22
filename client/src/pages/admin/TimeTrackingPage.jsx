@@ -3584,11 +3584,16 @@ export function TeamTab({ showToast }) {
     setHireError("");
     try {
       // The Google press has its own endpoint: a server that does not know it answers 404, and never reads it as
-      // the emailed-link press.
-      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire${fields.googleEmail ? "/google" : ""}`, {
-        method: "POST",
-        body: JSON.stringify(fields),
-      });
+      // the emailed-link press. (Two literal calls: the Intelligence Bar coverage record keys on each call's text.)
+      const res = fields.googleEmail
+        ? await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire/google`, {
+          method: "POST",
+          body: JSON.stringify(fields),
+        })
+        : await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire`, {
+          method: "POST",
+          body: JSON.stringify(fields),
+        });
       showToast(
         res && res.login === "google"
           ? `Hired. ${fields.name} signs in with Google. No email was sent.`
