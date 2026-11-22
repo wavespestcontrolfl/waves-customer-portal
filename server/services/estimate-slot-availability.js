@@ -2996,7 +2996,15 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     };
   }
 
-  const { dateFrom, dateTo } = etDateRange(opts.windowDays);
+  // Same first bookable day as the live path (moveInWindow): a new-home estimate's move-in date, or a plan
+  // offer's first visit date. Without it this view lists slots before the first day the customer can book.
+  const { dateFrom, dateTo } = moveInWindow({
+    moveInDate: await estimateMoveInDate(estimate),
+    ...etDateRange(opts.windowDays),
+    explicit: false,
+    seasonal: !!seasonalSelectionProfile(serviceProfile),
+    windowDays: opts.windowDays,
+  });
 
   // Same zone-route-day lift as the live path (GATE_ZONE_ROUTE_DAYS), from
   // coordinates only — this debug view has no resolved estimateZone.

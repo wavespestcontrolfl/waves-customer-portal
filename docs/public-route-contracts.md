@@ -8436,7 +8436,15 @@ self-extends: `isEstimateExtensionRequestEligible` is false for it, so `POST
 /:token/extension-request` and the expired `/data` response answer the generic
 404 with no `extensionRequestEligible`, `expiresAt`, `sentAt` or
 `extensionSelfServe` (the customer's way back is the office; a staff extension
-of the offer quote itself is unchanged). A grouped sibling's extension, from
+of the offer quote itself is unchanged). An offer quote is never a member of a
+multi-property group: `ensureEstimateGroupId` (the only write that groups an
+existing estimate) refuses it as the anchor of "Add another property" with 400
+`plan_offer_grouped`, on the locked row. So the group exceptions of these routes
+never apply to it, and each one also refuses an offer row by itself: the
+expired-group navigation (`publishedGroupLinks` gives it no
+`groupLinkViewableThrough` promise and `refreshExpiredGroupNavigation` answers
+null for it) and the `/data` and map-image `groupLinkViewBypass`, so an expired
+offer token answers the generic 404 even beside a live sibling. A grouped sibling's extension, from
 `POST /:token/extension-request` or from staff, never revives or re-dates an
 offer quote in its group: the sibling update and the revivable-sibling verdict
 both carry `PLAN_OFFER_ABSENT_SQL` (`estimate-extension.js`), so that quote

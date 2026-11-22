@@ -32992,6 +32992,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       && ['sent', 'viewed', 'expired'].includes(estimate.status)
       && !estimate.archived_at
       && !estimateOffCustomerSurface(estimate)
+      // Never a plan offer's quote: its expired link answers the generic 404 (frozenOfferRefusal's offer).
+      && !require('../services/plan-offer-estimate').planOfferOf(estimate.estimate_data)
       && groupLinkStillViewable(estimate);
     if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass && !docPinStaffDraftBypass && !groupLinkViewBypass) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
@@ -33218,6 +33220,8 @@ async function handleEstimateMapImage(kind, req, res, next) {
       && ['sent', 'viewed', 'expired'].includes(estimate.status)
       && !estimate.archived_at
       && !estimateOffCustomerSurface(estimate)
+      // Never a plan offer's quote: its expired link answers the generic 404 (frozenOfferRefusal's offer).
+      && !require('../services/plan-offer-estimate').planOfferOf(estimate.estimate_data)
       && groupLinkStillViewable(estimate);
     if (!isEstimateCustomerViewable(estimate) && !groupLinkViewBypass) return mapImageNotFound(res);
 

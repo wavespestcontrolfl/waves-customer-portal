@@ -325,6 +325,50 @@ postgres('plan offer quote (live Postgres)', () => {
     expect(rows[0].archived_at).toBeNull();
   });
 
+  // An offer quote is never a member of a multi-property group. "Add another property" on it is refused on the
+  // locked row (the only write that groups an existing estimate); a plain plan-start quote may anchor a group.
+  test('an offer quote cannot anchor a multi-property group; a plain plan-start quote can', async () => {
+    const { ensureEstimateGroupId } = require('../services/admin-estimate-persistence');
+    const { customer, job } = await seedCustomerWithJob();
+    const option = await cardOption(customer, job);
+    const offered = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
+    const sibling = { customer_id: customer.id, address: '77 Other Home Rd, Parrish, FL 34219' };
+    await expect(ensureEstimateGroupId(trx, offered.estimateId, sibling))
+      .rejects.toMatchObject({ statusCode: 400, code: 'plan_offer_grouped' });
+    expect((await rowOf(offered.estimateId)).estimate_group_id).toBeNull();
+
+    const other = await seedCustomerWithJob();
+    const plain = await mintFor({ customer: other.customer, option, shown: shownOf(option, option.setupFee) });
+    const groupId = await ensureEstimateGroupId(trx, plain.estimateId, { ...sibling, customer_id: other.customer.id });
+    expect((await rowOf(plain.estimateId)).estimate_group_id).toBe(groupId);
+  });
+
+  // The belt behind that rule: an offer row that carries a group all the same (written by hand here) is not one of
+  // the group's links. It gets no navigation promise from a live sibling, and its expired link is not refreshed.
+  test('an offer row in a group is never a group link: no navigation promise, no refresh of its expired link', async () => {
+    const navigation = require('../services/estimate-group-navigation');
+    const { customer, job } = await seedCustomerWithJob();
+    const option = await cardOption(customer, job);
+    const offered = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
+    const other = await seedCustomerWithJob();
+    const live = await mintFor({ customer: other.customer, option, shown: shownOf(option, option.setupFee) });
+    const groupId = crypto.randomUUID();
+    await trx('estimates').whereIn('id', [offered.estimateId, live.estimateId]).update({ estimate_group_id: groupId });
+    await trx('estimates').where({ id: offered.estimateId }).update({ status: 'expired', expires_at: new Date(Date.now() - 2 * DAY_MS) });
+
+    const links = await navigation.publishedGroupLinks(trx, await rowOf(live.estimateId));
+    expect(links.map((link) => link.id)).toEqual([live.estimateId]);
+    await navigation.extendPublishedGroupLinks(trx, await rowOf(live.estimateId));
+    expect(parse((await rowOf(offered.estimateId)).estimate_data).groupLinkViewableThrough).toBeUndefined();
+    expect(await navigation.refreshExpiredGroupNavigation(trx, await rowOf(offered.estimateId))).toBeNull();
+    expect(parse((await rowOf(offered.estimateId)).estimate_data).groupLinkViewableThrough).toBeUndefined();
+
+    // The same row without the stamp is a group link and takes the live sibling's promise: only the stamp closes it.
+    await trx.raw("UPDATE estimates SET estimate_data = estimate_data #- '{planStart,offer}' WHERE id = ?", [offered.estimateId]);
+    const refreshed = await navigation.refreshExpiredGroupNavigation(trx, await rowOf(offered.estimateId));
+    expect(parse(refreshed.estimate_data).groupLinkViewableThrough).toBeTruthy();
+  });
+
   // Staff can put estimates of several homes on one link (a group). The extension of one of them brings its siblings
   // back to the same new date. The offer quote keeps its own end date and its status: the real extension, on real rows.
   test("a grouped sibling's extension never revives or re-dates the offer quote; an ordinary sibling is revived", async () => {
