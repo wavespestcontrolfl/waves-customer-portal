@@ -51,6 +51,19 @@ describe('swapLongLinkForShort', () => {
     expect(swapLongLinkForShort(`${other} ${longer}`, longUrl, shortUrl)).toBe(`${other} ${longer}`);
   });
 
+  test('a link the office extended with a sub-path, a query or a fragment goes out as typed', () => {
+    for (const tail of ['/assessment', '?intent=accept', '#terms', '&x=1', '=1', '%20']) {
+      expect(swapLongLinkForShort(`See ${longUrl}${tail} today`, longUrl, shortUrl)).toBe(`See ${longUrl}${tail} today`);
+    }
+  });
+
+  test('sentence punctuation right after the link still swaps', () => {
+    for (const tail of ['.', ',', '!', ')', ';', ' ', '\n']) {
+      expect(swapLongLinkForShort(`(${longUrl}${tail}`, longUrl, shortUrl)).toBe(`(${shortUrl}${tail}`);
+    }
+    expect(swapLongLinkForShort(longUrl, longUrl, shortUrl)).toBe(shortUrl);
+  });
+
   test('a short link with a $ pattern is inserted as written', () => {
     expect(swapLongLinkForShort(longUrl, longUrl, 'https://x.test/$&$1')).toBe('https://x.test/$&$1');
   });

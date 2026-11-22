@@ -161,6 +161,11 @@ describe('GET /:id/follow-up-draft', () => {
     ['a phone that cannot take texts', { customer_phone: '+11235550123' }],
     ['an accepted estimate', { status: 'accepted' }],
     ['no token', { token: null }],
+    ['an expiry date that has passed (the sweep has not marked it yet)', { status: 'viewed', expires_at: new Date(Date.now() - 60000).toISOString() }],
+    ['an unreadable expiry date', { expires_at: 'not-a-date' }],
+    ['a declined estimate', { status: 'declined' }],
+    ['an estimate the sweep marked expired', { status: 'expired' }],
+    ['a draft that was never sent', { status: 'draft' }],
   ])('message is null for %s', async (_label, extra) => {
     const { res, next } = await draft(estimateRow(extra));
     expect(res.json).toHaveBeenCalledWith({ message: null });
@@ -187,6 +192,13 @@ describe('GET /:id/follow-up-draft', () => {
     const { res } = await draft(estimateRow());
     expect(res.json).toHaveBeenCalledWith({
       message: `Hi Dana, it's Waves. Your ${name} estimate is here: ${LONG} Any questions? Just reply to this text.`,
+    });
+  });
+
+  test('a viewed estimate with an expiry date still ahead gets the ready text', async () => {
+    const { res } = await draft(estimateRow({ status: 'viewed', expires_at: new Date(Date.now() + 86400000).toISOString() }));
+    expect(res.json).toHaveBeenCalledWith({
+      message: `Hi Dana, it's Waves. Your Waves estimate is here: ${LONG} Any questions? Just reply to this text.`,
     });
   });
 

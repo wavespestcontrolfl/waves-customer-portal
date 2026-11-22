@@ -6002,9 +6002,17 @@ async function followUpRefusal(estimate) {
 
 const followUpLongUrl = (estimate) => `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
 
+// The ready text says "your estimate is here: <link>", so the link must open the estimate for the customer.
+function followUpLinkOpens(estimate, now = Date.now()) {
+  if (!estimate.token || !['sent', 'viewed'].includes(estimate.status)) return false;
+  return !estimate.expires_at || new Date(estimate.expires_at).getTime() > now;
+}
+
 // GET /api/admin/estimates/:id/follow-up-draft — the ready text for the Follow Up button. Read only: it sends nothing,
-// mints no short link and writes no row. { message: null } = the send would be refused (or has no link), so the box keeps
-// its own default words.
+// mints no short link and writes no row. { message: null } = the box keeps its own default words, which carry no link:
+// the send would be refused, the estimate has no link, it is not an open sent estimate (sent or viewed, where the
+// Follow Up button shows), or its expiry date has passed (the nightly sweep may not have marked it expired yet, and the
+// link would open the expired page: the public page's own rule, estimate-public.js).
 router.get('/:id/follow-up-draft', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
@@ -6016,7 +6024,7 @@ router.get('/:id/follow-up-draft', async (req, res, next) => {
       if (!err.statusCode) throw err;
       refused = true;
     }
-    if (refused || !estimate.token) return res.json({ message: null });
+    if (refused || !followUpLinkOpens(estimate)) return res.json({ message: null });
     const [firstName, serviceName] = await Promise.all([
       estimateGreetingFirstName(db, estimate),
       followUpServiceNameFor(estimate),

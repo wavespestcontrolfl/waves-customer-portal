@@ -46,10 +46,12 @@ async function followUpServiceNameFor(estimate) {
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Every occurrence of THIS estimate's exact long link becomes the short link. A longer link that only starts with it
-// (another estimate's token) is left alone. Anything that is not text, or has no long link, comes back as it was.
+// is left alone and goes out as typed: another estimate's token, a sub-path (/assessment) or a query (?intent=accept),
+// because the short link carries neither a path nor a query. Sentence punctuation after the link (. , ! ) ;) still
+// swaps. Anything that is not text, or has no long link, comes back as it was.
 function swapLongLinkForShort(message, longUrl, shortUrl) {
   if (typeof message !== 'string' || !longUrl || !shortUrl || !message.includes(longUrl)) return message;
-  return message.replace(new RegExp(`${escapeRegExp(longUrl)}(?![A-Za-z0-9_-])`, 'g'), () => shortUrl);
+  return message.replace(new RegExp(`${escapeRegExp(longUrl)}(?![A-Za-z0-9_/?#&=%-])`, 'g'), () => shortUrl);
 }
 
 module.exports = {
