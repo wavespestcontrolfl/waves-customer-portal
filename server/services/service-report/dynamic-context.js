@@ -18,6 +18,7 @@ const { roundStepForPlan } = require('../lawn-program');
 const roundsCatchUp = require('../lawn-rounds-catchup');
 const { sqlZip5 } = require('../stamped-address');
 const { dateOnlyStamp } = require('./time-format');
+const octoberStonewall = require('../../models/migrations/20261122120000_lawn_v13_october_stonewall');
 
 async function safeBuild(label, fn) {
   try {
@@ -304,7 +305,40 @@ async function buildLawnProtocolReportContext(record, knex, now) {
   }
 
   const summary = await withCatchUpIfApplied(summarizeProtocolContext(context), { record, knex, catchUp });
-  return attachProtocolOperationalContext(await withoutUnappliedSwapRows(summary, { record, knex }), { completion, assignment });
+  const listed = await withBagAsRecorded(await withoutUnappliedSwapRows(summary, { record, knex }), { record, knex });
+  return attachProtocolOperationalContext(listed, { completion, assignment });
+}
+
+// The October v13 bag changed IN PLACE on the staged row (migration 20261122120000: the Dimension granular became Stonewall 0.37%), and a
+// report opened later reads that row. A visit that recorded the earlier bag, and not the current one, keeps the earlier bag on its card:
+// the row's product and the window goal read as they did when the visit was made. A visit that recorded the current bag or neither bag,
+// another window, or a failed read: the summary as it is (the same object).
+async function withBagAsRecorded(summary, { record, knex }) {
+  const { OCTOBER_WINDOW, OLD_NAME, NEW_NAME, OLD_GOAL, NEW_GOAL, OLD_COUNTER_KEY } = octoberStonewall;
+  const row = summary?.window?.key === OCTOBER_WINDOW && Array.isArray(summary.products)
+    ? summary.products.find((product) => product.protocolProductName === NEW_NAME)
+    : null;
+  if (!row || !record?.id) return summary;
+  const applied = await knex('service_products as sp').leftJoin('products_catalog as pc', 'sp.product_id', 'pc.id')
+    .where('sp.service_record_id', record.id)
+    .select('sp.product_id', 'sp.product_name', 'pc.name as catalog_name', 'pc.frac_group', 'pc.irac_group', 'pc.hrac_group', 'pc.moa_group')
+    .catch(() => []);
+  const isBag = (name) => (line) => line.catalog_name === name || line.product_name === name;
+  const earlier = applied.find(isBag(OLD_NAME));
+  if (!earlier || applied.some(isBag(NEW_NAME))) return summary;
+  return {
+    ...summary,
+    window: { ...summary.window, goal: summary.window.goal === NEW_GOAL ? OLD_GOAL : summary.window.goal },
+    products: summary.products.map((product) => (product !== row ? product : {
+      ...product,
+      productId: earlier.product_id || null,
+      productName: earlier.catalog_name || earlier.product_name,
+      protocolProductName: OLD_NAME,
+      gates: { ...parseJson(product.gates, {}), annualCounter: OLD_COUNTER_KEY },
+      annualCounter: { ...parseJson(product.annualCounter, {}), counter: OLD_COUNTER_KEY },
+      groups: { frac: earlier.frac_group || null, irac: earlier.irac_group || null, hrac: earlier.hrac_group || null, moa: earlier.moa_group || null },
+    })),
+  };
 }
 
 // The catch-up's product (the March Dimension 2EW row the window read added for an eligible visit) is listed on the CUSTOMER report only when

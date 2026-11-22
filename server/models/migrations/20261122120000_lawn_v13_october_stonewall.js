@@ -52,11 +52,15 @@
  *     fan-out); an office edit is never overwritten either. The Dimension product id is the one
  *     catalog row with that exact name, else the one product an alias spells that way (the
  *     upgrade path 20261007120500 supports); it is only compared, never written.
+ *   - Every v13 protocol holds exactly ONE October window, or none of them holds one. A track
+ *     with no window, or two, beside tracks that have one: throws (the other tracks would be
+ *     swapped while that track's recipe step has no staged row).
  *   - The Stonewall catalog row is the production row (exactly ONE row with this exact name, no
  *     alias that spells the name on another product, active, an active ingredient that BEGINS
  *     with prodiamine as the yearly cap check reads it (ILIKE 'prodiamine%', so a leading space
  *     fails here too), EPA 10404-114, rates in pounds, a fertilizer analysis that is empty or
- *     18-0-10, a watering rule that is empty or meets the label), or the database has NO row and no alias for the name (CI, a dev copy) and the
+ *     18-0-10, a watering rule that is empty or exactly the label rule below; the name is
+ *     compared again, exactly, on the locked row), or the database has NO row and no alias for the name (CI, a dev copy) and the
  *     row is inserted. Two rows, a row known only through an alias, another ingredient,
  *     registration or unit: throws.
  *   - The bag has NO yearly prodiamine cap row, or exactly ONE that is a hard block in lb per
@@ -110,7 +114,8 @@
  *   7. The label water-in rule (0.5 inch within 14 days), only where post_application_watering
  *      is NULL (20261022120000 stores it on the row with this exact name; a row created after
  *      that migration ran has none). A rule the row holds stays; the gate has already stopped
- *      one that does not meet the label (less water, or later than 14 days).
+ *      any other rule, a stricter one too: the report's watering reader accepts only a rule it
+ *      can validate and falls back to 0.25 inch, under the label's 0.5, for one it cannot.
  *
  * Chemical group: no write. The production Stonewall row holds its group in the older free-text
  * column (moa_group 'Group 3', hrac_group NULL), as the liquid pre-emergents do. The rotation
@@ -245,11 +250,10 @@ async function catalogMatches(knex, name) {
   return { rows, aliasIds };
 }
 
-const meetsLabelWatering = (rule) => rule.mode === LABEL_WATERING.mode
-  && Number(rule.water_in_inches) >= LABEL_WATERING.water_in_inches && Number(rule.water_in_by_hours) <= LABEL_WATERING.water_in_by_hours;
-
 // What the production Stonewall row must state for the swap to be safe: [is it so, what is wrong].
 const BAG_CHECKS = [
+  // The name, exactly, on the LOCKED row: the lookup before the lock is not locked, and the recipe finds the product by this name.
+  [(bag) => bag.name === NEW_NAME, (bag) => `is named ${JSON.stringify(bag.name)} on the locked row, not exactly ${JSON.stringify(NEW_NAME)}`],
   [(bag) => bag.active !== false, () => 'is not active'],
   // application-limits.js finds a prodiamine application by `active_ingredient ILIKE 'prodiamine%'`: the same test, no trim.
   [(bag) => /^prodiamine/i.test(String(bag.active_ingredient ?? '')),
@@ -261,9 +265,10 @@ const BAG_CHECKS = [
   // Empty (it is filled) or the bag's own figures: another analysis would plan 18-0-10 and book something else in the nutrient ledger.
   [(bag) => ANALYSIS_COLUMNS.every((column) => bag[column] == null || Number(bag[column]) === ANALYSIS[column]),
     (bag) => `holds the fertilizer analysis ${ANALYSIS_COLUMNS.map((column) => (bag[column] == null ? '?' : Number(bag[column]))).join('-')}, not 18-0-10`],
-  // Empty (it is filled) or a water-in rule that meets the label: at least 0.5 inch, within 14 days at the latest.
-  [(bag) => bag.post_application_watering == null || meetsLabelWatering(asObject(bag.post_application_watering)),
-    () => `holds a watering rule that does not meet the label (water in at least ${LABEL_WATERING.water_in_inches} inch within ${LABEL_WATERING.water_in_by_hours / 24} days)`],
+  // Empty (it is filled) or exactly the label rule 20261022120000 stores. Any other rule stops here: the report's reader
+  // falls back to 0.25 inch for a rule it cannot validate, and this migration cannot run that reader.
+  [(bag) => bag.post_application_watering == null || isDeepStrictEqual(asObject(bag.post_application_watering), LABEL_WATERING),
+    () => `holds a watering rule that is not the label rule this migration stores (water in ${LABEL_WATERING.water_in_inches} inch within ${LABEL_WATERING.water_in_by_hours / 24} days, source ${LABEL_WATERING.source})`],
 ];
 
 const stop = (what) => { throw new Error(`lawn v13 October Stonewall: ${what}. Nothing was written. Correct it, then run the migration again.`); };
@@ -276,7 +281,8 @@ async function readBag(knex) {
   if (rows.length !== 1) stop(`${rows.length} catalog rows are named ${NEW_NAME}${aliasIds.length ? ', and an alias spells that name' : ''}; the migration needs exactly one row with the name`);
   if (aliasIds.some((id) => id !== String(rows[0].id))) stop(`an alias spells ${NEW_NAME} on another product than the catalog row with that name`);
   const bag = await knex('products_catalog').where({ id: rows[0].id }).forUpdate()
-    .first('id', 'active', 'active_ingredient', 'epa_reg_number', 'default_rate_per_1000', 'rate_unit', ...ANALYSIS_COLUMNS, 'post_application_watering');
+    .first('id', 'name', 'active', 'active_ingredient', 'epa_reg_number', 'default_rate_per_1000', 'rate_unit', ...ANALYSIS_COLUMNS, 'post_application_watering');
+  if (!bag) stop(`the catalog row of ${NEW_NAME} was removed while the migration read it`);
   const wrong = BAG_CHECKS.filter(([holds]) => !holds(bag)).map(([, why]) => why(bag));
   if (wrong.length) stop(`the catalog row of ${NEW_NAME} ${wrong.join('; ')}`);
   return bag;
@@ -348,12 +354,18 @@ function isOctoberBagRow(row, name, productId, counterKey) {
     && isDeepStrictEqual(asObject(row.annual_counter), { counter: counterKey });
 }
 
-// The October windows of the v13 protocols, read FOR UPDATE, each with its protocol key.
+// The October windows of the v13 protocols, read FOR UPDATE, each with its protocol key. Every v13 protocol holds exactly
+// one, or none of them holds one (an empty list); a track with no window or two beside tracks with one stops the migration.
 async function octoberWindows(knex) {
   const protocols = await knex('lawn_protocols').where({ version: V13_VERSION }).select('id', 'protocol_key');
   const known = new Map(protocols.map((protocol) => [String(protocol.id), protocol.protocol_key]));
-  const windows = await knex('lawn_protocol_windows').where({ window_key: OCTOBER_WINDOW }).select('id', 'lawn_protocol_id', 'goal').forUpdate();
-  return windows.filter((window) => known.has(String(window.lawn_protocol_id))).map((window) => ({ ...window, protocolKey: known.get(String(window.lawn_protocol_id)) }));
+  const windows = (await knex('lawn_protocol_windows').where({ window_key: OCTOBER_WINDOW }).select('id', 'lawn_protocol_id', 'goal').forUpdate())
+    .filter((window) => known.has(String(window.lawn_protocol_id))).map((window) => ({ ...window, protocolKey: known.get(String(window.lawn_protocol_id)) }));
+  const uneven = protocols.filter((protocol) => windows.filter((window) => String(window.lawn_protocol_id) === String(protocol.id)).length !== 1);
+  if (windows.length && uneven.length) {
+    stop(`the v13 protocol(s) ${uneven.map((protocol) => protocol.protocol_key).join(', ')} do not hold exactly one ${OCTOBER_WINDOW} window while others do; the swap would leave that track's October step with no staged row`);
+  }
+  return windows;
 }
 
 // The rows to swap ({ protocolId, window, row }) and the protocol keys whose window is neither TO SWAP nor SWAPPED.
@@ -575,6 +587,7 @@ exports.down = async function down(knex) {
 };
 
 exports.ACTION = ACTION;
+exports.OCTOBER_WINDOW = OCTOBER_WINDOW;
 exports.CATALOG_ACTION = CATALOG_ACTION;
 exports.OLD_NAME = OLD_NAME;
 exports.NEW_NAME = NEW_NAME;

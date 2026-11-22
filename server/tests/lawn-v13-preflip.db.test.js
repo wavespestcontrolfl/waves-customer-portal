@@ -15,6 +15,7 @@
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildPlanForService, lawnVisitsPerYear } = require('../services/waveguard-plan-engine');
 const applicationLimits = require('../services/application-limits');
+const { buildLawnProtocolReportContext } = require('../services/service-report/dynamic-context');
 const capMigration = require('../models/migrations/20261006140000_lawn_v13_prodiamine_year_cap');
 const aprilMigration = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
 const reconcileMigration = require('../models/migrations/20261006160000_lawn_v13_april_9x_reconcile');
@@ -1341,6 +1342,20 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         });
       });
 
+      test('a catalog name that differs only in letter case is not the exact name the recipe finds: up throws and writes nothing', async () => {
+        await withReset(async () => {
+          await knex('products_catalog').where({ id: stonewallId() }).update({ name: STW_037.toLowerCase() });
+          try { await refuses('on the locked row, not exactly "LESCO Stonewall 0.37% 18-0-10"'); } finally { await knex('products_catalog').where({ id: stonewallId() }).update({ name: STW_037 }); }
+        });
+      });
+
+      test('a second v13 protocol with no October window: up throws and writes nothing (that track\'s recipe step would have no staged row)', async () => {
+        await withReset(async () => {
+          const [other] = await knex('lawn_protocols').insert({ protocol_key: 'fixture_v13_no_october', version: LAWN_V13_VERSION, name: 'Fixture v13, no October', status: 'staged', grass_track: 'zoysia', region: 'swfl' }).returning('id');
+          try { await refuses('the v13 protocol(s) fixture_v13_no_october do not hold exactly one oct_v13_spreader_fall window while others do'); } finally { await knex('lawn_protocols').where({ id: other.id ?? other }).del(); }
+        });
+      });
+
       test('two catalog rows with the name: up throws and writes nothing', async () => {
         await withReset(async () => {
           const [twin] = await knex('products_catalog').insert({ name: `${STW_037} `, category: 'herbicide', active: true, active_ingredient: 'Prodiamine 0.37% + 18-0-10', epa_reg_number: '10404-114', rate_unit: 'lb' }).returning('id');
@@ -1484,28 +1499,18 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         });
       });
 
-      test('a stricter watering rule the row already holds (more water, sooner) is kept', async () => {
-        await withReset(async () => {
-          const own = { mode: 'water_in', source: 'office', water_in_inches: 0.75, water_in_by_hours: 48 };
-          await setWatering(JSON.stringify(own));
-          try {
-            await stonewallMigration.up(knex);
-            expect((await catalogRow()).post_application_watering).toEqual(own);
-            expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ wateringFilled: false });
-          } finally { await setWatering(JSON.stringify(LABEL_RULE)); }
-        });
-      });
-
-      // The customer's aftercare would say less than the label needs while the recipe tells the technician 0.5 inch.
+      // The report's watering reader accepts only a rule it can validate (another one reads as 0.25 inch): any rule but the label rule stops the swap.
       test.each([
+        ['more water, sooner (a stricter rule the migration cannot validate)', { mode: 'water_in', source: 'office', water_in_inches: 0.75, water_in_by_hours: 48 }],
         ['less water than the label needs', { mode: 'water_in', source: 'office', water_in_inches: 0.25, water_in_by_hours: 24 }],
-        ['a later deadline than the label\'s 14 days', { mode: 'water_in', source: 'office', water_in_inches: 0.5, water_in_by_hours: 500 }],
+        ['a later deadline than the label\'s 14 days', { ...LABEL_RULE, water_in_by_hours: 500 }],
+        ['the label figures from another source', { ...LABEL_RULE, source: 'office' }],
         ['a hold rule in place of a water-in rule', { mode: 'hold', source: 'office', hold_hours: 24 }],
         ['no watering at all', { mode: 'none', source: 'office' }],
       ])('a catalog row whose watering rule states %s: up throws and writes nothing', async (_label, rule) => {
         await withReset(async () => {
           await setWatering(JSON.stringify(rule));
-          try { await refuses('holds a watering rule that does not meet the label (water in at least 0.5 inch within 14 days)'); } finally { await setWatering(JSON.stringify(LABEL_RULE)); }
+          try { await refuses('holds a watering rule that is not the label rule this migration stores (water in 0.5 inch within 14 days, source label)'); } finally { await setWatering(JSON.stringify(LABEL_RULE)); }
         });
       });
 
@@ -1566,6 +1571,46 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         const result = await plan(scheduled);
         expect(item(result, DIMENSION).mix).toMatchObject({ amount: 27.778 });
         expect(item(result, STW_037)).toBeUndefined();
+      });
+    });
+
+    // The staged row is live data: a report opened after the swap reads it. A visit completed with the earlier bag keeps that bag.
+    describe('the report card of a completed October visit, opened after the swap', () => {
+      beforeAll(async () => { await resetToDimension(); await stonewallMigration.up(knex); });
+      afterAll(async () => { await resetToDimension(); await stonewallMigration.up(knex); });
+
+      const card = async (recorded) => {
+        const { scheduled, customerId } = await visit('2026-10-12');
+        const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: scheduled.id, service_date: '2026-10-12', service_type: 'Lawn fixture' }).returning('*');
+        const protocol = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();
+        const window = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id, window_key: stonewallMigration.OCTOBER_WINDOW }).first();
+        await knex('lawn_protocol_service_completions').insert({
+          service_record_id: record.id, scheduled_service_id: scheduled.id, customer_id: customerId, lawn_protocol_id: protocol.id,
+          lawn_protocol_window_id: window.id, protocol_key: KEY, protocol_version: LAWN_V13_VERSION, window_key: stonewallMigration.OCTOBER_WINDOW,
+        });
+        for (const line of recorded) await knex('service_products').insert({ service_record_id: record.id, ...line });
+        const context = await buildLawnProtocolReportContext({ id: record.id, customer_id: customerId, service_date: '2026-10-12', scheduled_service_id: scheduled.id }, knex, new Date('2026-12-01T16:00:00Z'));
+        const bag = context.products.find((product) => product.role === 'fall_pre_emergent_nutrition');
+        return { goal: context.window.goal, name: bag.productName, protocolName: bag.protocolProductName, productId: bag.productId, counter: bag.gates.annualCounter, rate: bag.ratePer1000 };
+      };
+      const DIMENSION_CARD = { goal: stonewallMigration.OLD_GOAL, name: DIMENSION, protocolName: DIMENSION, counter: 'dithiopyr_lb_per_1000', rate: 4.04 };
+      const STONEWALL_CARD = { goal: stonewallMigration.NEW_GOAL, name: STW_037, protocolName: STW_037, counter: 'prodiamine_lb_per_1000', rate: 4.04 };
+
+      test('a visit that recorded the Dimension bag keeps it: the Dimension name, its counter and the goal the visit followed', async () => {
+        expect(await card([{ product_id: dimensionId(), product_name: DIMENSION }])).toEqual({ ...DIMENSION_CARD, productId: dimensionId() });
+      });
+
+      test('a record that froze the Dimension name with no product id reads the same way', async () => {
+        expect(await card([{ product_id: null, product_name: DIMENSION }])).toEqual({ ...DIMENSION_CARD, productId: null });
+      });
+
+      test.each([
+        ['the Stonewall bag', () => [{ product_id: stonewallId(), product_name: STW_037 }]],
+        ['both bags (the current bag was applied)', () => [{ product_id: dimensionId(), product_name: DIMENSION }, { product_id: stonewallId(), product_name: STW_037 }]],
+        ['neither bag', () => [{ product_id: catalog[STW_4FL].id, product_name: STW_4FL }]],
+        ['no product at all', () => []],
+      ])('a visit that recorded %s shows the window as it is now: Stonewall 0.37% and its goal', async (_label, recorded) => {
+        expect(await card(recorded())).toEqual({ ...STONEWALL_CARD, productId: stonewallId() });
       });
     });
   });
