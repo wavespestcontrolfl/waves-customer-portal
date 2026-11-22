@@ -219,7 +219,7 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     const skip = notAskable(record, state);
     if (skip) return { answer: withUnread(skip, record) };
     const question = questionPrint(move, record);
-    const kept = await keptAnswer(conn, service, question);
+    const kept = await keptAnswer(conn, service, question, record);
     if (kept) return { answer: withUnread(kept, record) };
     // Only a call that goes to the model spends the run's call limit: a
     // record that cannot be read, or one too long to send, asks nobody
@@ -249,14 +249,17 @@ function recordPrint(record) {
 // the prompt and the user turn (the move with both slots, the record's words).
 // A change to any of them is a new question. The unread parts of the record
 // are not in the user turn, but they decide the answer (an allow on an
-// incomplete record is "unknown"), so they are part of the question too. A
-// complete record prints exactly as it did before they were added.
+// incomplete record is "unknown"), so they are part of the question too, in
+// a sorted order: the record builder's reads return them in no fixed order,
+// and the same parts in another order are the same question. A complete
+// record prints exactly as it did before they were added.
 function questionPrint(move, record) {
   const { SYSTEM_PROMPT, PROMPT_VERSION, buildText } = require('./prompt');
   const { model } = require('../../../config/models').ROUTES.autoDispatchProofreader;
   const hash = require('crypto').createHash('sha256')
     .update(`${model}\n${PROMPT_VERSION}\n${SYSTEM_PROMPT}\n${buildText({ move, record })}`);
-  for (const row of record.unread) hash.update(`\nunread|${row.channel}|${row.reason}|${row.at || ''}`);
+  const unread = record.unread.map((row) => `unread|${row.channel}|${row.reason}|${row.at || ''}`).sort();
+  for (const line of unread) hash.update(`\n${line}`);
   return hash.digest('hex');
 }
 
@@ -270,8 +273,12 @@ function questionPrint(move, record) {
 // auditOf). A failed read asks the model, as before. The kept answer's why is
 // 'kept_hold' or 'kept_unsure': the audit row says no model was asked, and it
 // is not counted as an answer (NOT_ANSWERED).
+// A row stored before the unread parts joined the print (2026-11-22) printed
+// an incomplete record like a complete one with the same words. Such a row is
+// not an answer about a complete record: its own unread summary (auditOf)
+// tells them apart, and the model is asked.
 const KEPT_WHY = { hold: 'kept_hold', unknown: 'kept_unsure' };
-async function keptAnswer(conn, service, question) {
+async function keptAnswer(conn, service, question, record) {
   try {
     const row = await conn('auto_dispatch_audit_logs')
       .where({ scheduled_service_id: service.id })
@@ -282,6 +289,7 @@ async function keptAnswer(conn, service, question) {
     const was = row && row.constraints_checked && row.constraints_checked.proofreader;
     const why = was && Object.prototype.hasOwnProperty.call(KEPT_WHY, was.verdict) ? KEPT_WHY[was.verdict] : null;
     if (!why) return null;
+    if (!record.unread.length && Array.isArray(was.unread) && was.unread.length) return null;
     return {
       verdict: was.verdict, why, entry_id: was.entry_id || null, model: was.model || null, prompt_version: was.prompt_version || null, question,
     };

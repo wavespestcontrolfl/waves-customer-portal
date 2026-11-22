@@ -278,6 +278,14 @@ describe('checkMove', () => {
       expect(got).toMatchObject({ allowed: true });
     });
 
+    // Before 2026-11-22 an incomplete record printed like a complete one with the same words.
+    test('a row stored for an incomplete record is not an answer about a complete record with the same words: the model is asked', async () => {
+      const legacy = { ...first, unread: [{ channel: 'email', reason: 'recipients_not_captured' }] };
+      const { got, proofreader } = await askAgain(legacy);
+      expect(proofreader.proofreadMove).toHaveBeenCalledTimes(1);
+      expect(got).toMatchObject({ allowed: true });
+    });
+
     // The holds already in the decision log were stored under this print: it must not change for a complete record.
     test('a complete record prints its question exactly as before the unread parts joined the print', async () => {
       const { SYSTEM_PROMPT, PROMPT_VERSION, buildText } = require('../services/auto-dispatch/proofreader/prompt');
@@ -338,6 +346,14 @@ describe('checkMove', () => {
       const { got, proofreader } = await askAgain(first, { record: RECORD });
       expect(proofreader.proofreadMove).toHaveBeenCalledTimes(1);
       expect(got).toMatchObject({ allowed: true });
+    });
+
+    test('the same unread parts in another order are the same question: the answer is kept', async () => {
+      const call = { channel: 'call', at: '2026-05-04T09:00:00-04:00', reason: 'not_transcribed' };
+      const first = await firstAnswer('record_incomplete', { ...RECORD, unread: [INCOMPLETE.unread[0], call] });
+      const { got, proofreader } = await askAgain(first, { record: { ...RECORD, unread: [call, INCOMPLETE.unread[0]] } });
+      expect(proofreader.proofreadMove).not.toHaveBeenCalled();
+      expect(got).toMatchObject({ allowed: false, audit: { why: 'kept_unsure' } });
     });
 
     test('another target slot is a new question: the model is asked', async () => {
