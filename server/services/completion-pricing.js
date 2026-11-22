@@ -7,7 +7,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
-const { normalizedEstimatePropertyKey, normalizedStampedStreet, samePropertyKey } = require('./estimate-property-linkage');
+const { estimateQuotesCustomerAddress, normalizedEstimatePropertyKey, normalizedStampedStreet, samePropertyKey } = require('./estimate-property-linkage');
 const { getEffectiveDiscount, lineFlagsBlockPercentDiscount } = require('./pricing-engine/discount-engine');
 const { isActivePlanCustomer } = require('./waveguard-existing-services');
 const { completionInvoiceAmount } = require('./billing-lane');
@@ -57,8 +57,18 @@ function scheduledPropertyKey(service) {
   };
 }
 
-function propertyMatches(service, estimate) {
+// A visit with no property and no stamped address is at the customer's primary address: dispatch routes it there, and
+// an accept at that address leaves its series unstamped (estimate-property-linkage.js). A row read without those
+// columns proves nothing.
+function unstampedVisit(service) {
+  return 'property_id' in service && 'service_address_line1' in service
+    && !service.property_id && !scheduledPropertyKey(service).street;
+}
+
+// `customer` (address_line1/2, city, zip) places an unstamped visit; without it an unstamped visit matches nothing.
+function propertyMatches(service, estimate, customer = null) {
   if (service.property_id && estimate.property_id) return String(service.property_id) === String(estimate.property_id);
+  if (customer && unstampedVisit(service)) return estimateQuotesCustomerAddress(estimate.address, customer);
   return samePropertyKey(normalizedEstimatePropertyKey(estimate.address), scheduledPropertyKey(service));
 }
 
@@ -226,7 +236,9 @@ async function readEstimate(service, database) {
   const estimate = await database('estimates').where({ id: estimateId }).first();
   if (!estimate || String(estimate.customer_id) !== String(service.customer_id)) return { status: 'unlinked', estimate: null, parent };
   if (estimate.status !== 'accepted') return { status: 'not_accepted', estimate: null, parent };
-  if (!propertyMatches(service, estimate)) return { status: 'property_mismatch', estimate: null, parent };
+  const customer = unstampedVisit(service)
+    ? await database('customers').where({ id: service.customer_id }).first('address_line1', 'address_line2', 'city', 'zip') : null;
+  if (!propertyMatches(service, estimate, customer)) return { status: 'property_mismatch', estimate: null, parent };
   return { status: 'linked', estimate, parent };
 }
 
@@ -437,9 +449,13 @@ function visitPriceDecisionRecorded(service) {
 // discounts: [{ name, dollars }] } } only while the visit still bills exactly the accepted per-application price with
 // nothing recorded of its own (no primary price, discount, add-on or prepayment) and the estimate names every dollar of
 // the saving; otherwise { breakdown: null, reason }. Read-only. base − Σ dollars = amount = the visit's own price.
-async function acceptedVisitBreakdown(service, { database = db } = {}) {
+// `firstApplication`: the first bill at acceptance, which also bills the first visits a multi-program accept leaves
+// unpriced (the bill covers them) at the accepted price, and a visit with no saving at its own price (discounts: []),
+// so one undiscounted program does not keep a bundle's discounts off that bill; that caller reconciles its total.
+async function acceptedVisitBreakdown(service, { database = db, firstApplication = false } = {}) {
   const none = (reason) => ({ breakdown: null, reason });
-  if (!(money(service.estimated_price) > 0)) return none('not_priced');
+  const unpricedFirst = firstApplication && service.estimated_price == null;
+  if (!unpricedFirst && !(money(service.estimated_price) > 0)) return none('not_priced');
   if (visitPriceDecisionRecorded(service)) return none('own_price_or_discount');
   if (Number(service.prepaid_amount) > 0 || service.annual_prepay_term_id) return none('prepaid');
   if (await database('scheduled_service_addons').where({ scheduled_service_id: service.id }).first('id')) return none('add_ons');
@@ -450,8 +466,8 @@ async function acceptedVisitBreakdown(service, { database = db } = {}) {
   const quote = acceptedPricing(match.line, estimateDiscountContext(source.estimate));
   if (quote.unit !== 'application') return none('not_per_application');
   if (!quote.breakdownAvailable) return none('no_breakdown');
-  if (!(quote.savings > 0)) return none('no_discount');
-  if (!sameMoney(service.estimated_price, quote.amount)) return none('price_changed');
+  if (!(quote.savings > 0) && !firstApplication) return none('no_discount');
+  if (!unpricedFirst && !sameMoney(service.estimated_price, quote.amount)) return none('price_changed');
   if (!quote.discounts.every((row) => row.named)) return none('discount_unnamed');
   return { breakdown: { base: quote.base, amount: quote.amount, discounts: quote.discounts.map(({ name, dollars }) => ({ name, dollars })) } };
 }
