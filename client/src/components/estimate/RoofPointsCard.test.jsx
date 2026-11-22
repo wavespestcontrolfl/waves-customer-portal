@@ -112,6 +112,26 @@ describe('RoofPointsCard', () => {
       expect(dots.map((d) => [d.style.left, d.style.top])).toEqual([['50%', '50%'], ['50%', '50%']]);
     });
 
+    it('keeps each dot in view for two points 10 px apart: no badge sits on a dot (a badge moved 9 px used to cover its own)', () => {
+      render(<RoofPointsCard points={points([pin(1, { x: 0.4, y: 0.5 }), pin(2, { x: 0.4 + 10 / 294, y: 0.5 })])} />);
+      const badges = screen.getAllByTestId('roof-point-pin');
+      const dots = screen.getAllByTestId('roof-point-dot');
+      expect(dots).toHaveLength(2);
+      expect(screen.getAllByTestId('roof-point-leader')).toHaveLength(2);
+      // A badge is 13 px in radius and a dot 4 px: 17 px between the centres is the least that shows the whole dot.
+      dots.forEach((dot) => badges.forEach((badge) => expect(badgeGap(dot, badge)).toBeGreaterThanOrEqual(21.9)));
+      expect(badgeGap(badges[0], badges[1])).toBeGreaterThanOrEqual(27.9);
+    });
+
+    it('draws no dot and no line for two badges that only touch: each moves a few px and stays on its point', () => {
+      render(<RoofPointsCard points={points([pin(1, { x: 0.4, y: 0.5 }), pin(2, { x: 0.4 + 20 / 294, y: 0.5 })])} />);
+      const [a, b] = screen.getAllByTestId('roof-point-pin');
+      expect(badgeGap(a, b)).toBeGreaterThanOrEqual(27.9);
+      expect(px(a.style.left)).toBeCloseTo(0.4 * 294 - 4, 1);
+      expect(screen.queryAllByTestId('roof-point-leader')).toHaveLength(0);
+      expect(screen.queryAllByTestId('roof-point-dot')).toHaveLength(0);
+    });
+
     it('hides the lines and dots from assistive tech and from clicks, and puts the lines under the badges', () => {
       const { container } = render(<RoofPointsCard points={points([pin(1, { x: 0.5, y: 0.5 }), pin(2, { x: 0.5, y: 0.5 })])} />);
       const svg = container.querySelector('svg');

@@ -14,8 +14,15 @@ function minPairGap(out, size) {
   return min;
 }
 
-const insidePhoto = (out, size) => out.every((p) => p.x * size >= PIN / 2 - 1e-9 && p.x * size <= size - PIN / 2 + 1e-9
-  && p.y * size >= PIN / 2 - 1e-9 && p.y * size <= size - PIN / 2 + 1e-9);
+// Every badge that moved sits fully inside the photo (a badge that did not move keeps its place, as on the old page).
+const insidePhoto = (out, size) => out.filter((p) => p.moved).every((p) => p.x * size >= PIN / 2 - 1e-6 && p.x * size <= size - PIN / 2 + 1e-6
+  && p.y * size >= PIN / 2 - 1e-6 && p.y * size <= size - PIN / 2 + 1e-6);
+
+// The clear distance from a called-out point's dot to the centre of any badge: half a badge, half the 8 px dot, 5 px of roof.
+const DOT_CLEAR = PIN / 2 + 4 + 5;
+// Every called-out dot is clear of every badge, its own included, so the customer can see it.
+const dotsVisible = (out, size) => out.filter((p) => p.callout).every((dot) => out.every((badge) => (
+  Math.hypot((badge.x - dot.fromX) * size, (badge.y - dot.fromY) * size) >= DOT_CLEAR - 0.05)));
 
 describe('spreadPins', () => {
   it('returns the true positions exactly when no two badges are closer than a badge plus the gap', () => {
@@ -47,12 +54,49 @@ describe('spreadPins', () => {
     expect(insidePhoto(out, 294)).toBe(true);
   });
 
-  it('pushes a close pair apart along the line between them and moves each about half the shortfall', () => {
-    const out = spreadPins([{ x: 0.4, y: 0.5 }, { x: 0.4 + 10 / 294, y: 0.5 }], 294);
+  it('nudges two badges that only touch: each moves a few px, stays on its point, and gets no dot or line', () => {
+    const out = spreadPins([{ x: 0.4, y: 0.5 }, { x: 0.4 + 20 / 294, y: 0.5 }], 294);
     expect(dist(out[0], out[1], 294)).toBeGreaterThanOrEqual(MIN - 0.05);
     expect(out[0].y).toBeCloseTo(0.5, 6);
-    expect(out[0].shiftPx).toBeCloseTo(9, 1);
-    expect(out[1].shiftPx).toBeCloseTo(9, 1);
+    expect(out[0].shiftPx).toBeCloseTo(4, 1);
+    expect(out[1].shiftPx).toBeCloseTo(4, 1);
+    expect(out.map((p) => [p.moved, p.callout])).toEqual([[true, false], [true, false]]);
+  });
+
+  it('calls out two points 10 px apart: each badge moves off its point to the far side, and both dots stay visible', () => {
+    const out = spreadPins([{ x: 0.4, y: 0.5 }, { x: 0.4 + 10 / 294, y: 0.5 }], 294);
+    expect(out.map((p) => p.callout)).toEqual([true, true]);
+    // A badge that moved 9 px used to cover its own dot. Now each sits a full clear distance from its own point.
+    expect(out[0].shiftPx).toBeCloseTo(DOT_CLEAR, 1);
+    expect(out[1].shiftPx).toBeCloseTo(DOT_CLEAR, 1);
+    expect(out[0].x).toBeLessThan(out[0].fromX);
+    expect(out[1].x).toBeGreaterThan(out[1].fromX);
+    expect(out[0].y).toBeCloseTo(0.5, 6);
+    expect(dotsVisible(out, 294)).toBe(true);
+    expect(dist(out[0], out[1], 294)).toBeGreaterThanOrEqual(MIN - 0.05);
+  });
+
+  it('keeps every dot visible in a tight group of four, and in the stress group of ten', () => {
+    const four = [[0.5, 0.5], [0.52, 0.5], [0.5, 0.53], [0.53, 0.53]].map(([x, y]) => ({ x, y }));
+    const ten = [[0.50, 0.50], [0.51, 0.50], [0.50, 0.51], [0.52, 0.52], [0.505, 0.49], [0.53, 0.50], [0.49, 0.53], [0.55, 0.55], [0.48, 0.48], [0.51, 0.545]].map(([x, y]) => ({ x, y }));
+    for (const pins of [four, ten]) {
+      for (const size of [294, 480]) {
+        const out = spreadPins(pins, size);
+        expect(out.every((p) => p.callout)).toBe(true);
+        expect(dotsVisible(out, size)).toBe(true);
+        expect(minPairGap(out, size)).toBeGreaterThanOrEqual(MIN - 0.05);
+        expect(insidePhoto(out, size)).toBe(true);
+      }
+    }
+  });
+
+  it('never moves a point that is not crowded, also one that hangs over the photo edge, while others are called out', () => {
+    const out = spreadPins([{ x: 0.3, y: 0.3 }, { x: 0.31, y: 0.3 }, { x: 1, y: 0 }, { x: 0.31 + 30 / 294, y: 0.3 }], 294);
+    expect(out[0].callout && out[1].callout).toBe(true);
+    expect([out[2].x, out[2].y, out[2].moved]).toEqual([1, 0, false]);
+    // 30 px from the nearest point: not crowded, so it stays, and the called-out badges keep clear of it.
+    expect([out[3].moved, out[3].callout]).toEqual([false, false]);
+    expect(minPairGap(out.filter((_, i) => i !== 2), 294)).toBeGreaterThanOrEqual(MIN - 0.05);
   });
 
   it('moves only the pins that overlap and leaves a far pin where it was', () => {
@@ -95,6 +139,7 @@ describe('spreadPins', () => {
     const [p] = spreadPins([{ x: 1.4, y: -0.2 }], 294);
     expect([p.x, p.y]).toEqual([1, 0]);
   });
+
   it('spreads a row of pins that is longer than the photo: the row cannot fit on its own line', () => {
     // 12 pins in one line need 11 gaps of 28 px = 308 px, and a 294 px photo has 268 px between its edge positions.
     const row = Array.from({ length: 12 }, (_, i) => ({ x: 0.12 + 0.035 * i, y: 0.5 }));
@@ -102,14 +147,16 @@ describe('spreadPins', () => {
       const out = spreadPins(row, size);
       expect(minPairGap(out, size)).toBeGreaterThanOrEqual(MIN - 0.05);
       expect(insidePhoto(out, size)).toBe(true);
+      expect(dotsVisible(out, size)).toBe(true);
     }
     const edge = Array.from({ length: 12 }, (_, i) => ({ x: 0.03 * i, y: 0 }));
     const out = spreadPins(edge, 294);
     expect(minPairGap(out, 294)).toBeGreaterThanOrEqual(MIN - 0.05);
     expect(insidePhoto(out, 294)).toBe(true);
+    expect(dotsVisible(out, 294)).toBe(true);
   });
 
-  it('leaves no two badges overlapping for 400 generated layouts of 2 to 20 pins (lines, clusters and scattered)', () => {
+  it('for 400 generated layouts of 2 to 20 pins (lines, clusters and scattered): no two badges overlap, every dot is visible, and a point that is not crowded stays', () => {
     // A fixed sequence (no Math.random): the same layouts on every run.
     let seed = 20261121;
     const next = () => {
@@ -128,12 +175,14 @@ describe('spreadPins', () => {
       const pins = Array.from({ length: count }, shape);
       const size = layout % 2 ? 294 : 480;
       const out = spreadPins(pins, size);
-      const overlapped = minPairGap(pins.map((p) => ({ x: p.x, y: p.y })), size) < MIN;
-      if (!overlapped) {
-        expect(out.every((p) => !p.moved)).toBe(true);
-      } else {
+      const crowded = pins.map((p, i) => pins.some((q, j) => j !== i && dist(p, q, size) < MIN));
+      expect(out.every((p, i) => crowded[i] || !p.moved)).toBe(true);
+      if (crowded.some(Boolean)) {
         expect(minPairGap(out, size)).toBeGreaterThanOrEqual(MIN - 0.05);
         expect(insidePhoto(out, size)).toBe(true);
+        expect(dotsVisible(out, size)).toBe(true);
+        // A badge is either still on its point (no dot) or called out: never moved far with no dot.
+        expect(out.every((p) => p.callout || p.shiftPx <= 6 + 1e-6)).toBe(true);
       }
     }
   });

@@ -8,7 +8,7 @@ import { FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { estimateInnerBox } from './cardStyles';
 import { resolveApiAssetUrl } from '../../utils/apiAssetUrl';
-import { spreadPins } from './roofPinSpread';
+import { DOT_PX, spreadPins } from './roofPinSpread';
 
 const unit = (v) => {
   const n = Number(v);
@@ -25,9 +25,6 @@ export function roofPointsLead(count) {
 // Whether a roof points block can show: a photo and at least one point. The Waves AI card asks this before it swaps out
 // the satellite photo, so the card never hides that photo for an empty block.
 export const hasRoofPoints = (points) => Boolean(points?.imageUrl) && Array.isArray(points.pins) && points.pins.length > 0;
-
-// A badge that moved further than this from its true point gets a dot at the point and a line to the badge.
-const LEADER_MIN_PX = 3;
 
 // The photo box width in px (0 until measured, or where the browser cannot measure): the spread needs it to know how many
 // px a badge covers. A width of 0 means "unknown" and the badges stay on their true points. It is the layout width
@@ -55,7 +52,9 @@ export default function RoofPointsCard({ points, address, onImageError }) {
   const pins = points.pins.slice().sort((a, b) => a.n - b.n);
   const count = pins.length;
   const spread = spreadPins(pins, photoWidth);
-  const leaders = pins.map((p, i) => ({ p, s: spread[i] })).filter(({ s }) => s.shiftPx > LEADER_MIN_PX);
+  // A called-out point: its badge moved off it, so it gets a dot at the true point and a line to the badge. The spread
+  // keeps every badge clear of that dot.
+  const leaders = pins.map((p, i) => ({ p, s: spread[i] })).filter(({ s }) => s.callout);
   return (
     <div data-testid="roof-points-card">
       <div style={estimateInnerBox({ padding: 6 })}>
@@ -87,8 +86,8 @@ export default function RoofPointsCard({ points, address, onImageError }) {
                 top: percent(s.fromY),
                 transform: 'translate(-50%, -50%)',
                 boxSizing: 'border-box',
-                width: 8,
-                height: 8,
+                width: DOT_PX,
+                height: DOT_PX,
                 borderRadius: '50%',
                 background: '#FFFFFF',
                 border: `2px solid ${CUSTOMER_SURFACE.text}`,
