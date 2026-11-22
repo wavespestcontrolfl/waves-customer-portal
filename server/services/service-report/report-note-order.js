@@ -95,6 +95,7 @@ const PRONOUNS = new Set(['she', 'he', 'they', 'them', 'her', 'his', 'their']);
 // off" may be "You were advised to keep pets off".
 const TREATMENTS = new Set('sprayed treated baited dusted fogged misted trapped poisoned fumigated'.split(' '));
 const FORMS_OF_IS = new Set(['was', 'were', 'is', 'are']);
+const DENIALS = new Set(['not', 'never']);
 const AND = new Set(['and']);
 // Words that end in "ed" and say no action done ("treated shed sealed gap").
 const NOT_DONE = new Set('shed bed weed seed feed need'.split(' '));
@@ -230,13 +231,12 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
   // A form of "is" between a person and a word of treatment says who was
   // treated, so it stays: "customer was sprayed outside" is not "You sprayed
   // outside".
+  // Whatever stands between it and the treatment ("was never sprayed").
   const saysWhoWasTreated = (i) => {
-    const near = (step) => {
-      let j = i + step;
-      while (samePart(i, j) && SMALL.has(note[j])) j += step;
-      return samePart(i, j) ? note[j] : '';
-    };
-    return FORMS_OF_IS.has(note[i]) && TREATMENTS.has(near(1)) && isActor(near(-1));
+    if (!FORMS_OF_IS.has(note[i])) return false;
+    let before = i - 1;
+    while (samePart(i, before) && SMALL.has(note[before])) before -= 1;
+    return samePart(i, before) && isActor(note[before]) && note.some((word, j) => j > i && samePart(i, j) && TREATMENTS.has(word));
   };
   const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word) && !saysWhoWasTreated(i)));
   const [whole, conditional] = [new Set(), new Set()];
@@ -319,16 +319,23 @@ function addedActorRefused(added, place, read, sameSentence) {
 //     word between them or none) and both say an action done. The second
 //     may be what the first was done to: "inspected damaged traps" is not
 //     "I inspected and damaged traps".
-//   - a form of "is" between a person and a word of treatment (TREATMENTS).
-function addedSmallRefused(textWords, k, place, last, read) {
+//   - a form of "is" between a person and a word of treatment (TREATMENTS),
+//     also with a denial between them ("customer never sprayed outside" is
+//     not "You were never sprayed outside").
+// `placedAt` is the text word that took each word of the note (-1 = none).
+function addedSmallRefused(textWords, k, place, last, read, placedAt) {
   if (!last) return -1;
-  const added = (words) => textWords.findIndex((entry, at) => at > last.k && at < k && words.has(entry.word));
+  const taken = new Set(placedAt);
+  const added = (words, after = last.k) => textWords.findIndex((entry, at) => at > after && at < k && !taken.has(at) && words.has(entry.word));
   const [before, here] = [read.words[last.place], read.words[place]];
   const done = (word) => word.endsWith('ed') && !NOT_DONE.has(word);
   const sideBySide = read.words.slice(last.place + 1, place).every((entry) => SMALL.has(entry.word));
   if (sideBySide && before.part === here.part && done(before.word) && done(here.word) && added(AND) >= 0) return added(AND);
-  const named = read.words.slice(0, place).filter((entry) => entry.part === here.part && !SMALL.has(entry.word)).pop();
-  return TREATMENTS.has(here.word) && named && isActor(named.word) ? added(FORMS_OF_IS) : -1;
+  if (!TREATMENTS.has(here.word)) return -1;
+  let actor = place - 1;
+  while (actor >= 0 && read.words[actor].part === here.part && (SMALL.has(read.words[actor].word) || DENIALS.has(read.words[actor].word))) actor -= 1;
+  if (actor < 0 || read.words[actor].part !== here.part || !isActor(read.words[actor].word)) return -1;
+  return added(FORMS_OF_IS, placedAt[actor] >= 0 ? placedAt[actor] : last.k);
 }
 
 // Why the commas of the text do not fit the note between the word the walk
@@ -374,6 +381,7 @@ function walkNote(textWords, read, rules, hidden) {
   const out = textWords.map((entry) => entry.word);
   const noteList = read.words.map((entry) => (hidden.has(entry.part) ? '' : entry.word));
   const usedIn = noteList.map(() => -1);
+  const placedAt = noteList.map(() => -1);
   const [noteSentenceOf, textSentenceOf, saysSomething] = [new Map(), new Map(), new Set()];
   const stop = (reason, k) => ({ rejection: { reason, words: [out[k]] } });
   const taken = (j) => usedIn[j] >= 0;
@@ -398,7 +406,7 @@ function walkNote(textWords, read, rules, hidden) {
     }
     if (place < 0) return { rejection: noPlaceRejection(out, k, noteList, from, rules, taken) };
     const actor = addedActorRefused(added, place, read, (at) => textWords[at].id === id);
-    const wrong = actor >= 0 ? actor : addedSmallRefused(textWords, k, place, last, read);
+    const wrong = actor >= 0 ? actor : addedSmallRefused(textWords, k, place, last, read, placedAt);
     if (wrong >= 0) return stop('not_in_note', wrong);
     // A small word of the note does not say whose work it is: the added
     // word waits for the next word.
@@ -411,6 +419,7 @@ function walkNote(textWords, read, rules, hidden) {
     textSentenceOf.set(sentence, id);
     if (!SMALL.has(noteList[place])) saysSomething.add(id);
     usedIn[place] = id;
+    placedAt[place] = k;
     from = place + 1;
   }
   // An added "I" or "you" with no word of the note after it ("Neighbor told

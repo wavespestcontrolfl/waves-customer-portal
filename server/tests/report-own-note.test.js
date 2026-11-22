@@ -40,7 +40,7 @@ describe('same order, with the report\'s own screens', () => {
     ['a period of time is left out with its figure', 'set 4 traps in the attic will recheck in two weeks', 'I set four traps in the attic and will recheck.'],
     ['a refused pair of words is left out together', 'quiet visit no issues sprayed outside', 'It was a quiet visit and I sprayed outside.'],
     ['a part for the office is left out whole', 'billing: charge extra for the wasp nest. customer was rude. treated outside', 'I treated outside.'],
-    ['a part that names a gate goes whole', 'treated around the gate and the fence, swept the eaves', 'I swept the eaves.'],
+    ['a sentence that names a gate goes whole', 'treated around the gate and the fence. swept the eaves', 'I swept the eaves.'],
     ['an inch mark as the last character stays', 'gap under the door was 5"', 'The gap under the door was 5"'],
     ['a note of four sentences keeps four sentences', 'checked the kitchen. checked the shed. checked the attic. checked the yard',
       'I checked the kitchen. I checked the shed. I checked the attic. I checked the yard.'],
@@ -94,6 +94,8 @@ describe('the wordings the reader lets stand are refused where the note is writt
     'Drying time? Two days.',
     'The patio is good to go in two days.',
     'I treated the patio. Foot traffic can resume on Monday.',
+    'Foot traffic can resume on Nov 22.',
+    'Foot traffic can resume on the 3rd of December.',
     'Use rose at the back.',
     'For the shed, use bluebird when prompted.',
     'The pass phrase is bluebird.',
@@ -117,20 +119,25 @@ describe('the note a model reads holds no access code', () => {
   });
 
   test('a number shaped like a code, with no code word beside it', async () => {
-    expect(noteAsRead('used 4471 at the side. treated shed')).toBe('used [redacted] at the side. treated shed');
+    expect(noteAsRead('used 4471 at the side. treated shed')).toBe('[redacted]. treated shed');
     expect(noteAsRead('side door four four seven one. treated shed')).not.toMatch(/four four seven one/);
     await expect(refusal('used 4471 at the side. treated shed', 'I treated the shed.')).resolves.toBeNull();
   });
 
-  test('a word of access never goes alone: its part is masked with the word beside it', async () => {
-    const note = 'Gate: bluebird. Treated shed.';
-    expect(noteAsRead(note)).toBe('[redacted]. Treated shed.');
-    await expect(refusal(note, 'I treated the shed.')).resolves.toBeNull();
-    expect(await refusal(note, 'Bluebird. I treated the shed.')).not.toBeNull();
-    // Two parts the reader's screen reads together: the sentence is masked whole.
+  test('a word of access never goes alone: its sentence is masked with the words beside it', async () => {
+    for (const note of ['Gate: bluebird. Treated shed.', 'Gate, bluebird. Treated shed.', 'For the shed, use bluebird when prompted. Treated shed.']) {
+      expect(noteAsRead(note)).toBe('[redacted]. Treated shed.');
+      await expect(refusal(note, 'I treated the shed.')).resolves.toBeNull();
+      expect(await refusal(note, 'Bluebird. I treated the shed.')).not.toBeNull();
+    }
     expect(noteAsRead('set traps in the garage, by the AC unit. swept eaves')).toBe('[redacted]. swept eaves');
-    // A number inside a part keeps its mark.
-    expect(noteAsRead('found 2.5 inch gap, side gate open')).toBe('found 2.5 inch gap, [redacted]');
+    // A number in the next sentence keeps its mark.
+    expect(noteAsRead('side gate open. found 2.5 inch gap')).toBe('[redacted]. found 2.5 inch gap');
+  });
+
+  test('a condition masked with its sentence takes its work with it', async () => {
+    expect(noteAsRead('will treat shed, if gate opens')).toBe('[redacted]');
+    expect(await refusal('will treat shed, if gate opens', 'I will treat shed.')).not.toBeNull();
   });
 
   test('a pass phrase', async () => {
@@ -169,6 +176,12 @@ describe('the stored text and the fixed sentence', () => {
       expect(reportNoteCustomerCopy({ reportNote: { v: 1, text, source: 'fixed' } }).body).toBe(text);
     }));
     expect(fixedReportNote({ serviceType: 'Pest Control', areasServiced: [], visitOutcome: 'inspection_only' })).not.toMatch(/accessible/);
+    // A service name and an area the reader refuses: still a sentence it shows.
+    outcomes.forEach((visitOutcome) => {
+      const text = fixedReportNote({ serviceType: 'Gate inspection', areasServiced: ['side gate'], visitOutcome });
+      expect(text).not.toBe('');
+      expect(reportNoteCustomerCopy({ reportNote: { v: 1, text, source: 'fixed' } }).body).toBe(text);
+    });
   });
 
   test('a catalog that cannot be read throws: the caller uses the fixed sentence', async () => {

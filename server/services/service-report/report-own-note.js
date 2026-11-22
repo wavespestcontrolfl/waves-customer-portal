@@ -19,10 +19,10 @@
  * A text that fails gets the fixed sentence (fixedReportNote).
  *
  * Known limits: report-note-order.js lists them. One more: a code that is a
- * plain word has no shape. A part of the note that speaks of getting in is
- * masked whole with the word beside it ("Gate: bluebird"), but a code said
- * as a sentence of its own is not, so the stored-code check belongs to the
- * code that writes the note.
+ * plain word has no shape. A sentence of the note that speaks of getting in
+ * is masked whole with the words beside it ("Gate, bluebird"), but a code
+ * said as a sentence of its own is not, so the stored-code check belongs to
+ * the code that writes the note.
  *
  * The checks read the note, the text and the product catalog, and nothing
  * else about the visit, so a completion can run them again on the text the
@@ -83,22 +83,22 @@ const passPhraseAsOneWord = (text) => text.replace(/\b(pass)[ -](phrases?|words?
 // ("used 4471 at the side"): the reader refuses it in any text, so no text
 // loses a word it could keep, and no model reads it.
 const CODE_SHAPED_RE = new RegExp(CODE_SHAPED_NUMBER_RE.source, 'giu');
-// A part that speaks of getting in is masked whole (the reader's own access
-// screen, heldAccessCode): a code can be a plain word beside the access word
-// ("Gate: bluebird"), so the word never goes alone. Where the screen reads
-// two parts of a sentence together (a door and a word in capitals), the
-// sentence is masked whole.
+// A sentence that holds a removed code, speaks of getting in (the reader's
+// own access screen, heldAccessCode) or of a pass phrase is masked whole: a
+// code can be a plain word beside the access word ("Gate, bluebird"), and a
+// condition in it must not be cut from its work ("will treat shed, if gate
+// opens"). No model reads the sentence, and no text can hold a word of it.
+const PASS_PHRASE_RE = /\bpass\s?phrases?\b|\bprompt(?:s|ed|ing)?\b/i;
 const maskWhole = (piece) => piece.replace(/^(\s*)[\s\S]*?(\s*)$/, '$1[redacted]$2');
-const eachPiece = (text, marks, change) => text.split(marks).map((piece, i) => (i % 2 ? piece : change(piece))).join('');
-const speaksOfAccess = (piece) => heldAccessCode(showNumberMarks(piece).replace(/\[redacted\]/g, ' '));
-function maskAccessParts(note) {
-  return showNumberMarks(eachPiece(hideNumberMarks(note), /([.;!?\n]+)/, (sentence) => {
-    if (!speaksOfAccess(sentence)) return sentence;
-    const masked = eachPiece(sentence, /(,+)/, (part) => (speaksOfAccess(part) ? maskWhole(part) : part));
-    return speaksOfAccess(masked) ? maskWhole(sentence) : masked;
-  }));
+function maskAccessSentences(note) {
+  const withheld = (sentence) => {
+    const text = showNumberMarks(sentence);
+    return REDACTED_RE.test(text) || heldAccessCode(text) || PASS_PHRASE_RE.test(text);
+  };
+  return showNumberMarks(hideNumberMarks(note).split(/([.;!?\n]+)/)
+    .map((piece, i) => (i % 2 === 0 && piece.trim() && withheld(piece) ? maskWhole(piece) : piece)).join(''));
 }
-const noteAsRead = (note) => maskAccessParts(dollarweedAsOneWord(redactAccessCodes(passPhraseAsOneWord(String(note || '')
+const noteAsRead = (note) => maskAccessSentences(dollarweedAsOneWord(redactAccessCodes(passPhraseAsOneWord(String(note || '')
   .replace(/[^\S\n]+/g, ' ').replace(/ ?\n[\n ]*/g, '\n').trim()))).replace(CODE_SHAPED_RE, '[redacted]'));
 // The tidied note as stored and screened. A line break stays in, so the
 // shape screen refuses it.
@@ -113,15 +113,19 @@ function ownNoteText(value) {
 // 2026-11-20, *A*: each wording today's screens miss is refused where the
 // note is written). A word of time: the report gives no day, date or period
 // ("Wait a day before stepping onto the grass.", "Drying time? Two days.",
-// "Foot traffic can resume on Monday."). A part that opens with an order to
+// "Foot traffic can resume on Monday.", "... on Nov 22."). A part that opens with an order to
 // the customer ("Use rose at the back."). A pass phrase, and a prompt for one.
 // A word for the office alone.
 const TIME_WORD_RE = /\b(?:minutes?|hours?|days?|weeks?|months?|years?|today|tonight|tomorrow|yesterday|overnight|daily|weekly|monthly|(?:mon|tues|wednes|thurs|fri|satur|sun)days?|mornings?|afternoons?|evenings?|nights?|nightly|noon|midnight)\b/i;
 const ORDER_OPENERS = new Set(`use wait keep stay avoid leave make remember try please do call contact enter press open close lock
 vacuum wash mop wipe mow`.split(/\s+/));
-const PASS_PHRASE_RE = /\bpass\s?phrases?\b|\bprompt(?:s|ed|ing)?\b/i;
+// A calendar date: a month with its day, either way round ("Nov 22", "22nd
+// of November"). "May" counts only before its day: "2 may be more" is no date.
+const MONTH_SRC = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+const DAY_SRC = '\\d{1,2}(?:st|nd|rd|th)?';
+const DATE_RE = new RegExp(`\\b(?:${MONTH_SRC}|may)\\.?\\s+${DAY_SRC}\\b|\\b${DAY_SRC}\\s+(?:of\\s+)?${MONTH_SRC}\\b`, 'i');
 function writeTimeRejection(text) {
-  const time = TIME_WORD_RE.exec(text);
+  const time = TIME_WORD_RE.exec(text) || DATE_RE.exec(text);
   if (time) return { reason: 'time', words: [time[0]] };
   if (PASS_PHRASE_RE.test(text)) return { reason: 'access_code' };
   const office = noteWords(text).find((word) => OFFICE_ONLY_WORDS.has(word));
@@ -168,9 +172,9 @@ function wordRejection(text, { namesProduct, activeIngredients }) {
 //   - One word goes when it names a thing the report never names: a product,
 //     an active ingredient, a word of time. A word that states a result
 //     ("gone", "eliminated", "safe") never goes alone: "roaches eliminated
-//     in kitchen" is not "roaches in kitchen". Its part goes whole. So does
-//     the part of a word of access (noteAsRead masks it): the word beside it
-//     can be the code.
+//     in kitchen" is not "roaches in kitchen". Its part goes whole. A word
+//     of access goes with its whole sentence (noteAsRead masks it): a word
+//     beside it can be the code.
 //   - Two words go together: a refused pair, a figure with its unit or period.
 //   - A part goes whole when the screens refuse it as a text, when it holds a
 //     removed code, or when it is an order to the customer. Not for the
@@ -232,10 +236,13 @@ async function reportNoteRejection({ note, text, catalogRows = null, db = null }
 // A sentence of the recap the reader's screen refuses is left out, so the
 // reader shows the rest ("We checked the accessible areas": "accessible"
 // reads as a word of access).
+// When no sentence is left (a service name the reader refuses: "Gate
+// inspection"), the recap is written with no service name and no areas.
 function fixedReportNote({ serviceType, areasServiced, visitOutcome } = {}) {
-  const recap = CompletionRecap.deterministicRecap({ serviceType, areasTreated: areasServiced, visitOutcome });
   const shown = (text) => !noteRecordCopyViolations(text).length;
-  return shown(recap) ? recap : recap.split(/(?<=\.)\s+/).filter(shown).join(' ');
+  const kept = (recap) => (shown(recap) ? recap : recap.split(/(?<=\.)\s+/).filter(shown).join(' '));
+  return kept(CompletionRecap.deterministicRecap({ serviceType, areasTreated: areasServiced, visitOutcome }))
+    || kept(CompletionRecap.deterministicRecap({ visitOutcome }));
 }
 
 module.exports = {
