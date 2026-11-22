@@ -210,6 +210,10 @@ describe('parseDayList: pages that must throw', () => {
     ['a raw NUL anywhere on the page', page().replace('<title>', '<title>\u0000'), 'encoding'],
     ['a letter outside plain text in a name', page({ rows: [row({ to: ['TEST\u00C9R ALEX J'] })] }), 'encoding'],
     ['a replacement character in a description', page({ rows: [row({ description: 'LOT 12 SAMPLE GR\uFFFDVE' })] }), 'encoding'],
+    ['a byte order mark inside a name (it would read as a space)', page({ rows: [row({ to: ['TESTER AL\uFEFFEX J'] })] }), 'encoding'],
+    ['a no-break space inside a name', page({ rows: [row({ to: ['TESTER\u00A0ALEX J'] })] }), 'encoding'],
+    ['a no-break space reference inside a name', page({ rows: [row({ to: ['TESTER&nbsp;ALEX J'] })] }), 'encoding'],
+    ['a line separator inside a description', page({ rows: [row({ description: 'LOT 12\u2028SAMPLE GROVE' })] }), 'encoding'],
     ['a zero-width space in an instrument number', page({ rows: [row({ instrument: '2026990\u200B00001' })] }), 'encoding'],
 
     ['a buyer in a span next to the listed buyer', page({ rows: [withToCell(`${ol(['TESTER ALEX J'])}<span>TESTER JORDAN M</span>`)] }), 'party_cell'],

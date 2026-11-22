@@ -70,14 +70,15 @@ function dayListUrl(isoDate) {
   return `${BASE_URL}/${isoDate}`;
 }
 
-// Every text that is read must be plain printable ASCII. All 2,833 rows of six studied days are (names use A-Z,
-// 0-9, space and &). So a replacement character (a damaged byte in the source, or a character reference such as
-// &#0;) or any other sign is a page we do not know.
-const PLAIN_TEXT = /^[\x20-\x7E]*$/;
+// Every text that is read must be plain printable ASCII, with the page's own line breaks and tabs around it. All
+// 2,833 rows of six studied days are (names use A-Z, 0-9, space and &). So a replacement character (a damaged byte
+// in the source, or a character reference such as &#0;), a no-break or zero-width space, or any other sign is a
+// page we do not know. The check runs on the text as decoded, before any space is merged.
+const PLAIN_TEXT = /^[\x20-\x7E\t\n\f\r]*$/;
 
 const isElement = (node) => typeof node.tagName === 'string';
 const attrOf = (node, name) => node.attrs.find((a) => a.name === name)?.value;
-const collapse = (text) => text.replace(/\s+/g, ' ').trim();
+const collapse = (text) => text.replace(/[ \t\n\f\r]+/g, ' ').replace(/^ | $/g, '');
 
 function hasAttrs(node, expected) {
   return node.attrs.length === Object.keys(expected).length
@@ -96,9 +97,8 @@ function ownParts(node, reason) {
     else if (child.nodeName === '#text') text += child.value;
     else throw new ClerkPageError(reason, 'Clerk page holds a comment inside the part that is read');
   }
-  const own = collapse(text);
-  if (!PLAIN_TEXT.test(own)) throw new ClerkPageError('encoding', 'Clerk page holds a character that is not plain text in a part that is read');
-  return { text: own, elements };
+  if (!PLAIN_TEXT.test(text)) throw new ClerkPageError('encoding', 'Clerk page holds a character that is not plain text in a part that is read');
+  return { text: collapse(text), elements };
 }
 
 // The elements directly under a node that may hold elements and nothing else.
