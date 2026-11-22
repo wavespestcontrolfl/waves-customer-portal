@@ -3,12 +3,10 @@
  *
  * The job's promise: it prices real cases and emails SAMPLES to the office, and no customer gets anything.
  * This suite pins the decisions around that promise with a recording fake database and stub collaborators:
- * the gate values, who the offer is not for and under which reason, what goes to the office to price by hand,
- * the two sample sends (recipient, test send, once per job), that one bad job never stops the others, and the
- * one admin notification for a morning the price settings stopped.
- * This step does not judge the state of the account on the day (invoices, other visits, review asks,
- * complaints, estimates, the email division's checks for the day of the send): those send rules come with
- * the customer email.
+ * the gate values, which send rule holds a job and under which reason (and in which order the rules run),
+ * what goes to the office to price by hand, the two sample sends (recipient, test send, once per job), that
+ * one bad job never stops the others, and the one admin notification for a morning the price settings stopped.
+ * A sample means that the customer would get the offer today.
  * The SQL itself, the real collaborators and the seeded templates run against PostgreSQL in
  * onetime-plan-offer-postgres.test.js.
  */
@@ -24,8 +22,10 @@ const { CUSTOMER_STAGES } = require('../services/customer-stages');
 
 // 11:30 PM ET on March 12 (already March 13 in UTC): the day window must come from the ET day.
 const NOW = new Date('2030-03-13T03:30:00Z');
-// `service_day` is the day the service was done, from the visit's service record (the job's own SQL).
-const JOB = { id: 'job-1', customer_id: 'cust-1', service_day: '2030-03-05' };
+const HOUR = 3600000;
+// `service_day` is the offer day and `job_day` is the day the job itself was done, both from service records
+// (the job's own SQL). With no included follow-up done, the two are the same day.
+const JOB = { id: 'job-1', customer_id: 'cust-1', service_day: '2030-03-05', job_day: '2030-03-05' };
 const CUSTOMER = {
   id: 'cust-1', first_name: 'Jordan', last_name: 'Example', email: 'jordan@example.test', phone: '+19415550100',
   address_line1: '12 Example Test Ln', active: true,
@@ -51,7 +51,7 @@ function fakeDb(tables = {}) {
     };
     const recorded = [
       'where', 'orWhere', 'whereNot', 'whereIn', 'orWhereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereRaw',
-      'whereBetween', 'leftJoin', 'join', 'joinRaw', 'orderBy', 'limit',
+      'whereBetween', 'leftJoin', 'join', 'joinRaw', 'orderBy', 'orderByRaw', 'limit',
     ];
     for (const method of recorded) {
       builder[method] = (...args) => {
@@ -72,16 +72,26 @@ const called = (query, method, ...args) => query.calls.some((call) => JSON.strin
 const whereValue = (query, column) => (query.calls.find(([method, first]) => method === 'where' && first === column) || [])[2];
 // The live-customer read is the one that filters on the customer stages (whereLiveCustomer in customer-stages.js).
 const isLiveCustomerRead = (query) => called(query, 'whereIn', 'pipeline_stage', CUSTOMER_STAGES);
-// A page of due jobs behind the first one carries the (date, id) of the last job read.
-const isLaterPageRead = (query) => query.calls.some(([method, sql]) => method === 'whereRaw' && String(sql).startsWith('(done.service_day, s.id) >'));
+// The offer day: the follow-up's performed day when the job's included follow-up was done, else the job's own.
+const OFFER_DAY = 'GREATEST(done.service_day, COALESCE(follow.service_day, done.service_day))';
+// A page of due jobs behind the first one carries the (offer day, id) of the last job read.
+const isLaterPageRead = (query) => query.calls.some(([method, sql]) => method === 'whereRaw' && String(sql).startsWith(`(${OFFER_DAY}, s.id) >`));
+// A part-paid invoice of the customer with $60 still to pay: owed, but not in the balance the Waves app counts.
+const PART_PAID = { id: 'inv-2', customer_id: 'cust-1', status: 'partially_paid', total: '100.00', amount_paid: '40.00' };
+const partPaid = (change = {}) => ({ tables: { invoices: [{ ...PART_PAID, ...change }] } });
+// A job's invoice as the job reads it: paid, with no line that names a visit. By default it sits under the job
+// that is read (ownInvoice).
+const INVOICE = { id: 'inv-1', status: 'paid', total: '225.00', scheduled_service_id: 'job-1', line_items: [] };
+const ownInvoice = (query) => [{ ...INVOICE, scheduled_service_id: whereValue(query, 'i.scheduled_service_id') }];
 
-// A world where job-1 is in the offer's audience and prices. Each test changes one thing.
+// A world where job-1 passes every send rule and prices. Each test changes one thing.
 // `jobs` is the first page of due jobs (a later page is empty).
 function world({ tables = {}, jobs = [JOB], ...deps } = {}) {
   return {
     db: fakeDb({
       'scheduled_services as s': (query) => (isLaterPageRead(query) ? [] : jobs),
       customers: [CUSTOMER],
+      'invoices as i': ownInvoice,
       'email_template_versions as v': (query) => [{ id: `ver:${whereValue(query, 't.template_key')}` }],
       ...tables,
     }),
@@ -89,6 +99,20 @@ function world({ tables = {}, jobs = [JOB], ...deps } = {}) {
     isInternalTestContact: jest.fn(() => false),
     activeSuppressionsFor: jest.fn(async () => []),
     eligibleForEmail: jest.fn(async () => ({ ok: true, reason: null, checks: {} })),
+    reviewAskOnItsWay: jest.fn(async () => false),
+    combinedFirstInvoiceOf: jest.fn(async () => null),
+    lastDeliveredAskAt: jest.fn(async () => null),
+    lastManualAskAt: jest.fn(async () => null),
+    askSpacingMs: 72 * HOUR,
+    liveEstimateStatuses: ['sending', 'sent', 'viewed'],
+    repricePendingAbsentSql: "COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') = ''",
+    openBalanceExists: jest.fn(async () => false),
+    partiallyPaidStatus: 'partially_paid',
+    isUncountedPartialDue: jest.fn((invoice) => Number(invoice.total) - Number(invoice.amount_paid) > 0 && !invoice.scheduled_send_error),
+    invoicePayerOwnership: jest.fn(async () => null),
+    itemizedMemberIds: jest.fn((lines) => (typeof lines === 'string' ? JSON.parse(lines) : lines || [])
+      .map((line) => /^scheduled_(.+?)_(primary|addon_.+)$/.exec(line.client_id || '')?.[1]).filter(Boolean)),
+    openRequestTerminalStatuses: ['resolved', 'closed', 'cancelled'],
     sendTemplate: jest.fn(async () => ({ sent: true })),
     unsubscribeUrl: (token) => `https://unsub.test/${token}`,
     raisePriceSettingsAlert: jest.fn(async () => ({ id: 'alert-1' })),
@@ -133,14 +157,14 @@ describe('GATE_ONETIME_PLAN_OFFER', () => {
   });
 });
 
-describe("a job in the offer's audience that prices", () => {
+describe('a job that passes every send rule and prices', () => {
   test('one sample of the offer and one of the reminder go to the office inbox as test sends, keyed once per job', async () => {
     const deps = world();
     const summary = await run(deps);
     expect(summary).toEqual({ mode: 'shadow', jobs: 1, ...NONE, sample: 1, reasons: {} });
 
-    const note = 'Sample only. No estimate was saved and the customer got no email. This step does not check the account'
-      + ' (open balance, other visits, review asks), so this customer may not get the offer. Job job-1.';
+    const note = 'Sample only. No estimate was saved and the customer got no email. This account passed the send rules today,'
+      + ' so this customer would get the offer. Job job-1.';
     const sends = deps.sendTemplate.mock.calls.map(([send]) => send);
     expect(sends).toEqual([OFFER_TEMPLATE, REMINDER_TEMPLATE].map((key) => ({
       versionId: `ver:${key}`,
@@ -168,11 +192,17 @@ describe("a job in the offer's audience that prices", () => {
     });
   });
 
-  test('the price is the pest plan for this customer, asked with the job', async () => {
+  test('the price is the pest plan for this customer, asked with the job; the email verdict is asked for the nurture stream', async () => {
     const deps = world();
     await run(deps);
     // The pricer gets the job, so it can prove the job was at the home it prices.
     expect(deps.buildStartOffer).toHaveBeenCalledWith('cust-1', deps.db, 'pest_control', { visitId: 'job-1' });
+    // The job names its completed visit: the email division reads that row as the relationship, so the caps and
+    // the human-contact check run for a customer with no estimate on file yet. Stream nurture: its unsubscribe
+    // group is marketing_nurture, the group the two templates carry.
+    expect(deps.eligibleForEmail.mock.calls).toEqual([[{
+      customerId: 'cust-1', stream: 'nurture', emailKey: OFFER_TEMPLATE, now: NOW, conn: deps.db, completedVisitId: 'job-1',
+    }]]);
   });
 
   test('the jobs read are completed one-time pest and cockroach jobs whose service was done 3 to 14 days ago on the ET calendar', async () => {
@@ -182,16 +212,29 @@ describe("a job in the offer's audience that prices", () => {
     expect(called(due, 'where', 's.status', 'completed')).toBe(true);
     // The day is the service day of a service record that says the service was performed. The outcomes that
     // say "nothing was performed" are the shared list, bound in its order.
-    const [, joinSql, joinBindings] = due.calls.find(([method]) => method === 'joinRaw');
+    const [[, joinSql, joinBindings], [, followSql, followBindings]] = due.calls.filter(([method]) => method === 'joinRaw');
     expect(joinSql).toContain('SELECT MAX(r.service_date) AS service_day');
     expect(joinSql).toContain("r.status = 'completed'");
     // A record of another customer that names this visit is not this visit's record.
     expect(joinSql).toContain('r.scheduled_service_id = s.id\n      AND r.customer_id = s.customer_id');
     expect(joinSql).toContain("COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN (?, ?, ?)");
-    expect(joinBindings).toEqual(require('../services/pest-pressure/first-visit').NON_PERFORMED_VISIT_OUTCOMES);
-    // March 12 in ET (March 13 in UTC): 14 days back is February 26, 3 days back is March 9.
-    expect(called(due, 'whereBetween', 'done.service_day', ['2030-02-26', '2030-03-09'])).toBe(true);
-    expect(called(due, 'orderBy', 'done.service_day', 'asc')).toBe(true);
+    const notPerformed = require('../services/pest-pressure/first-visit').NON_PERFORMED_VISIT_OUTCOMES;
+    expect(joinBindings).toEqual(notPerformed);
+    // The included follow-up: the same customer's row, linked to the job, completed, with a performed record.
+    expect(followSql).toContain('LEFT JOIN LATERAL');
+    expect(followSql).toContain('f.customer_id = s.customer_id');
+    expect(followSql).toContain('f.followup_included IS TRUE');
+    expect(followSql).toContain('(f.followup_source_service_id = s.id OR f.parent_service_id = s.id)');
+    expect(followSql).toContain("f.status = 'completed'");
+    expect(followSql).toContain('r.customer_id = f.customer_id');
+    expect(followSql).toContain("COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN (?, ?, ?)");
+    expect(followBindings).toEqual(notPerformed);
+    // GREATEST skips a NULL: a job with no performed record is kept out by its own test.
+    expect(called(due, 'whereRaw', 'done.service_day IS NOT NULL')).toBe(true);
+    // March 12 in ET (March 13 in UTC): 14 days back is February 26, 3 days back is March 9. The window, the
+    // order and the page cursor all use the offer day.
+    expect(called(due, 'whereRaw', `${OFFER_DAY} BETWEEN ?::date AND ?::date`, ['2030-02-26', '2030-03-09'])).toBe(true);
+    expect(called(due, 'orderByRaw', `${OFFER_DAY} ASC`)).toBe(true);
     expect(called(due, 'whereIn', { sql: 'COALESCE(s.service_key_snapshot, sv.service_key)' }, ['one_time_pest_control', 'cockroach_control'])).toBe(true);
     expect(called(due, 'whereNull', 's.recurring_parent_id')).toBe(true);
     // A one-time visit stores no pattern or the 'one_time' marker. Any other pattern is a plan's cadence.
@@ -201,7 +244,7 @@ describe("a job in the offer's audience that prices", () => {
 
   test('more due jobs than one page holds: the next page starts behind the last job read, and every job is counted', async () => {
     const firstPage = Array.from({ length: 50 }, (_, index) => ({ ...JOB, id: `job-${index + 1}` }));
-    const lastPage = [{ ...JOB, id: 'job-51', service_day: '2030-03-06' }];
+    const lastPage = [{ ...JOB, id: 'job-51', service_day: '2030-03-06', job_day: '2030-03-06' }];
     const deps = world({ tables: { 'scheduled_services as s': (query) => (isLaterPageRead(query) ? lastPage : firstPage) } });
     const summary = await run(deps);
     expect(summary).toMatchObject({ jobs: 51, sample: 51 });
@@ -209,7 +252,7 @@ describe("a job in the offer's audience that prices", () => {
     expect(reads).toHaveLength(2);
     for (const read of reads) expect(called(read, 'limit', 50)).toBe(true);
     expect(isLaterPageRead(reads[0])).toBe(false);
-    expect(called(reads[1], 'whereRaw', '(done.service_day, s.id) > (?::date, ?::uuid)', ['2030-03-05', 'job-50'])).toBe(true);
+    expect(called(reads[1], 'whereRaw', `(${OFFER_DAY}, s.id) > (?::date, ?::uuid)`, ['2030-03-05', 'job-50'])).toBe(true);
   });
 
   test('a last page that is exactly full costs one more read, which finds nothing', async () => {
@@ -233,8 +276,11 @@ describe("a job in the offer's audience that prices", () => {
   });
 });
 
-describe('the offer is not for this customer: no price is computed and nothing is sent', () => {
+describe('a send rule holds the job: no price is computed and nothing is sent', () => {
+  const invoice = (change) => ({ tables: { 'invoices as i': [{ ...INVOICE, ...change }] } });
+
   test.each([
+    ['another visit is booked or was done after the job', { tables: { 'scheduled_services as o': [{ id: 'job-2' }] } }, 'another_visit'],
     ['the customer row is gone', { tables: { customers: [] } }, 'no_customer'],
     ['the customer is inactive', { tables: { customers: [{ ...CUSTOMER, active: false }] } }, 'inactive'],
     // The account row is there and active, and the shared live-customer read finds nothing: a lead stage or a
@@ -246,12 +292,35 @@ describe('the offer is not for this customer: no price is computed and nothing i
     ['the customer chose marketing by text only', { tables: { notification_prefs: [{ marketing_offers: true, marketing_channel: 'sms' }] } }, 'offers_by_text_only'],
     ['the email is unsubscribed from Waves marketing', { activeSuppressionsFor: jest.fn(async () => [{ id: 's-1' }]) }, 'email_suppressed'],
     // The email division's standing answers, under its own reason names.
+    ['the job has no invoice', { tables: { 'invoices as i': [] } }, 'no_invoice'],
+    ['the invoice is not paid', invoice({ status: 'sent' }), 'invoice_not_paid'],
+    // An invoice that also bills another visit: its total is not the price of this job.
+    ['the paid invoice sits under another visit', invoice({ scheduled_service_id: 'job-9' }), 'combined_invoice'],
+    ['the service record of the paid invoice belongs to another visit', invoice({ scheduled_service_id: null, record_visit_id: 'job-9', line_items: [{ client_id: 'scheduled_job-1_primary' }] }), 'combined_invoice'],
+    ['a line of the paid invoice names another visit', invoice({ line_items: [{ client_id: 'scheduled_job-1_primary' }, { client_id: 'scheduled_job-9_primary' }] }), 'combined_invoice'],
+    ['the completion packet of the paid invoice links another visit', { tables: { visit_completion_packet_items: [{ id: 'item-2' }] } }, 'combined_invoice'],
+    ["the job is a member of an estimate's combined first invoice", { combinedFirstInvoiceOf: jest.fn(async () => 'inv-9') }, 'combined_invoice'],
+    ['Billing Recovery recorded a visit as billed elsewhere on the paid invoice', { tables: { visit_billing_dispositions: [{ id: 'disp-1' }] } }, 'combined_invoice'],
+    ['another balance is open', { openBalanceExists: jest.fn(async () => true) }, 'open_balance'],
+    ['a part-paid invoice of the customer has an amount due', partPaid(), 'open_balance'],
+    ['a review ask is still on its way (queued, being sent, or a cadence with touches to come)', { reviewAskOnItsWay: jest.fn(async () => true) }, 'review_ask'],
+    ['a review ask went out 71 hours ago', { lastDeliveredAskAt: jest.fn(async () => new Date(NOW.getTime() - 71 * HOUR)) }, 'review_ask'],
+    ['the office typed a review ask 71 hours ago', { lastManualAskAt: jest.fn(async () => new Date(NOW.getTime() - 71 * HOUR)) }, 'review_ask'],
+    ['the customer rated the job under 7', { tables: { review_requests: [{ id: 'rating-1' }] } }, 'low_rating'],
+    ['a complaint was logged since the job', { tables: { customer_interactions: [{ id: 'c-1' }] } }, 'complaint'],
+    ['a service request is open', { tables: { service_requests: [{ id: 'r-1' }] } }, 'open_request'],
+    ['an estimate is open', { tables: { estimates: [{ id: 'e-1' }] } }, 'open_estimate'],
     ['the customer is on the staff do-not-contact list', emailVerdict('STAFF_DNC'), 'staff_dnc'],
     ["the email is unsubscribed from the offer's own group", emailVerdict('EMAIL_SUPPRESSED_GROUP'), 'email_suppressed_group'],
     ['the customer turned email off', emailVerdict('EMAIL_SWITCH_OFF'), 'email_switch_off'],
     // Fail closed: an answer the job does not know holds the job.
     ['the email division gives an answer the job does not know', emailVerdict('A_RULE_ADDED_LATER'), 'a_rule_added_later'],
     ['the email division says no with no reason', emailVerdict(undefined), 'email_not_allowed'],
+    // The division's three checks for the day of the send now hold the job: a sample means "would get it today".
+    // The division finds no relationship when the named visit is not a completed visit of this customer.
+    ['the email division finds no relationship', emailVerdict('RELATIONSHIP_NOT_ELIGIBLE'), 'relationship_not_eligible'],
+    ['another marketing email went out today', emailVerdict('CAP_SAME_DAY'), 'cap_same_day'],
+    ['the office and the customer were in touch in the last 3 days', emailVerdict('RECENT_HUMAN_CONTACT'), 'recent_human_contact'],
   ])('%s', async (_name, change, reason) => {
     const deps = world(change);
     const summary = await run(deps);
@@ -265,11 +334,12 @@ describe('the offer is not for this customer: no price is computed and nothing i
     // The owner chose "all": a customer who never set the offers switch still gets the offer.
     ['the offers switch was never set', { tables: { notification_prefs: [{ marketing_offers: null }] } }],
     ['the customer chose marketing by text and email', { tables: { notification_prefs: [{ marketing_offers: true, marketing_channel: 'both' }] } }],
-    // The email division's three checks for the day of the send. They come with the customer email. The
-    // division runs them last, so each of these answers also says that no standing opt-out exists.
-    ['no estimate is on file yet (the customer step saves one)', emailVerdict('RELATIONSHIP_NOT_ELIGIBLE')],
-    ['another marketing email went out today', emailVerdict('CAP_SAME_DAY')],
-    ['the office and the customer were in touch in the last 3 days', emailVerdict('RECENT_HUMAN_CONTACT')],
+    ['the last review ask is exactly 72 hours old', { lastDeliveredAskAt: jest.fn(async () => new Date(NOW.getTime() - 72 * HOUR)) }],
+    ['the office typed a review ask exactly 72 hours ago', { lastManualAskAt: jest.fn(async () => new Date(NOW.getTime() - 72 * HOUR)) }],
+    ["a part-paid invoice with an amount due is a payer's debt", { ...partPaid(), invoicePayerOwnership: jest.fn(async () => 'payer_owned') }],
+    ['a part-paid invoice has nothing left to pay', partPaid({ amount_paid: '100.00' })],
+    ['a part-paid invoice was withdrawn to a payer', partPaid({ scheduled_send_error: 'payer_billed:7' })],
+    ['the lines of the paid invoice name this job only', { tables: { 'invoices as i': [{ ...INVOICE, line_items: JSON.stringify([{ client_id: 'scheduled_job-1_primary' }, { client_id: 'scheduled_job-1_addon_a1' }]) }] } }],
   ])('not a hold: %s', async (_name, change) => {
     const deps = world(change);
     expect(counts(await run(deps))).toEqual({ ...NONE, sample: 1 });
@@ -293,11 +363,138 @@ describe('the offer is not for this customer: no price is computed and nothing i
     expect(deps.activeSuppressionsFor).toHaveBeenCalledWith(null, 'jordan@example.test', 'marketing_newsletter', deps.db);
   });
 
-  test("the email division is asked about the stream both templates use, on the job's clock", async () => {
+  // The rules run in this order, and the first one that fails names the hold. Each row adds a failure that the
+  // rows above it do not have: a world with every failure from row N down must answer with row N's reason.
+  test('the rules run in order: another visit, the customer, opt-outs, the job invoice, review asks, complaints, estimates, the email division', async () => {
+    const ordered = [
+      ['another_visit', { tables: { 'scheduled_services as o': [{ id: 'job-2' }] } }],
+      ['no_email', { tables: { customers: [{ ...CUSTOMER, email: null }] } }],
+      ['offers_off', { tables: { notification_prefs: [{ marketing_offers: false }] } }],
+      ['no_invoice', { tables: { 'invoices as i': [] } }],
+      ['review_ask', { reviewAskOnItsWay: jest.fn(async () => true) }],
+      ['low_rating', { tables: { review_requests: [{ id: 'rating-1' }] } }],
+      ['open_estimate', { tables: { estimates: [{ id: 'e-1' }] } }],
+      ['cap_same_day', emailVerdict('CAP_SAME_DAY')],
+    ];
+    for (let row = 0; row < ordered.length; row += 1) {
+      const change = ordered.slice(row).reduce((all, [, one]) => ({ ...all, ...one, tables: { ...all.tables, ...one.tables } }), { tables: {} });
+      const summary = await run(world(change));
+      expect(summary.reasons).toEqual({ [ordered[row][0]]: 1 });
+    }
+  });
+
+  test('the last-visit rule orders visits in the database: the job is joined as its own row, never bound as a value', async () => {
     const deps = world();
     await run(deps);
-    // Stream nurture: its unsubscribe group is marketing_nurture, the group the two templates carry.
-    expect(deps.eligibleForEmail.mock.calls).toEqual([[{ customerId: 'cust-1', stream: 'nurture', emailKey: OFFER_TEMPLATE, now: NOW, conn: deps.db }]]);
+    const [read] = deps.db.queriesOf('scheduled_services as o');
+    expect(called(read, 'join', 'scheduled_services as j', 'j.customer_id', 'o.customer_id')).toBe(true);
+    expect(called(read, 'where', 'j.id', 'job-1')).toBe(true);
+    expect(called(read, 'whereNot', 'o.id', 'job-1')).toBe(true);
+  });
+
+  test("a visit completed after the job holds it, except the job's own included follow-up, which only a completed one is excused", async () => {
+    const deps = world();
+    await run(deps);
+    const [read] = deps.db.queriesOf('scheduled_services as o');
+    const later = read.calls.filter(([method, sql]) => method === 'whereRaw' && String(sql).includes('<') === false);
+    expect(later.map(([, sql]) => sql)).toEqual(expect.arrayContaining([
+      expect.stringContaining("(o.scheduled_date, COALESCE(o.completed_at, 'epoch'::timestamptz), o.id)"),
+      // NULL-safe: a follow-up row with no link ids is not excused, and a NULL never drops the row.
+      'NOT (o.followup_included IS TRUE AND (COALESCE(o.followup_source_service_id = j.id, FALSE) OR COALESCE(o.parent_service_id = j.id, FALSE)))',
+    ]));
+    // The excuse is on the completed-later arm alone: the open and parked arms carry no such test.
+    const completedArm = read.calls.findIndex(([method, column, value]) => method === 'where' && column === 'o.status' && value === 'completed');
+    const excuse = read.calls.findIndex(([method, sql]) => method === 'whereRaw' && String(sql).startsWith('NOT (o.followup_included'));
+    expect(completedArm).toBeGreaterThan(-1);
+    expect(excuse).toBeGreaterThan(completedArm);
+    expect(read.calls.filter(([method, sql]) => method === 'whereRaw' && String(sql).startsWith('NOT (o.followup_included'))).toHaveLength(1);
+  });
+
+  test('the packet read of the paid invoices looks for a visit other than the job', async () => {
+    const deps = world();
+    await run(deps);
+    // The table is read twice: inside the invoice read (the job's own packet items), then for the other visits.
+    const read = deps.db.queriesOf('visit_completion_packet_items').find((query) => called(query, 'whereIn', 'invoice_id', ['inv-1']));
+    expect(read).toBeDefined();
+    expect(called(read, 'whereNot', { scheduled_service_id: 'job-1' })).toBe(true);
+    expect(deps.combinedFirstInvoiceOf).toHaveBeenCalledWith(JOB, deps.db);
+  });
+
+  test('the estimate read covers an estimate that is being sent, and one on the send queue', async () => {
+    const deps = world();
+    await run(deps);
+    const [read] = deps.db.queriesOf('estimates');
+    expect(called(read, 'whereNull', 'archived_at')).toBe(true);
+    // Open now: the public estimate page's list, with its expiry test.
+    expect(called(read, 'whereIn', 'status', ['sending', 'sent', 'viewed'])).toBe(true);
+    expect(called(read, 'orWhere', 'expires_at', '>', NOW)).toBe(true);
+    // On its way: the scheduler's queue test, which has no expiry.
+    expect(called(read, 'where', 'status', 'scheduled')).toBe(true);
+    expect(called(read, 'whereNotNull', 'scheduled_at')).toBe(true);
+    expect(called(read, 'whereRaw', "COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') = ''")).toBe(true);
+  });
+
+  test('a visit parked for a new day is open work from today on, by the Eastern day', async () => {
+    const deps = world();
+    await run(deps);
+    const [read] = deps.db.queriesOf('scheduled_services as o');
+    expect(called(read, 'whereNotIn', 'o.status', ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'])).toBe(true);
+    expect(called(read, 'where', 'o.status', 'rescheduled')).toBe(true);
+    // NOT IN is never true for a row with no status, so that row is read on its own.
+    expect(called(read, 'whereNull', 'o.status')).toBe(true);
+    // NOW is 11:30 PM Eastern on March 12. The UTC day is already March 13.
+    expect(called(read, 'where', 'o.scheduled_date', '>=', '2030-03-12')).toBe(true);
+  });
+
+  test("the invoice read follows the invoice's service record to its visit", async () => {
+    const deps = world();
+    await run(deps);
+    const [read] = deps.db.queriesOf('invoices as i');
+    expect(called(read, 'leftJoin', 'service_records as r', 'r.id', 'i.service_record_id')).toBe(true);
+    expect(called(read, 'orWhere', 'r.scheduled_service_id', 'job-1')).toBe(true);
+  });
+
+  test('Billing Recovery links are read both ways: an invoice that covers the job, and any visit billed elsewhere on a paid invoice', async () => {
+    const deps = world();
+    await run(deps);
+    const reads = deps.db.queriesOf('visit_billing_dispositions');
+    // Inside the invoice read: an invoice made for other work that Billing Recovery recorded for this job.
+    expect(reads.some((query) => called(query, 'where', { scheduled_service_id: 'job-1', disposition: 'billed_elsewhere' }))).toBe(true);
+    // On the paid invoices: a record for ANY visit, the job included, means the total is not the job's price.
+    const onPaid = reads.find((query) => called(query, 'whereIn', 'invoice_id', ['inv-1']));
+    expect(onPaid).toBeDefined();
+    expect(called(onPaid, 'where', { disposition: 'billed_elsewhere' })).toBe(true);
+    expect(called(onPaid, 'whereNot', { scheduled_service_id: 'job-1' })).toBe(false);
+  });
+
+  test("the typed review ask is read over the same 72 hours, by the job's customer", async () => {
+    const deps = world();
+    await run(deps);
+    expect(deps.lastManualAskAt).toHaveBeenCalledWith('cust-1', { since: new Date(NOW.getTime() - 72 * HOUR) });
+  });
+
+  test('the low-rating and complaint rules look only at the time since the job, from midnight Eastern on its day', async () => {
+    const deps = world();
+    await run(deps);
+    // March 5, 2030 is on standard time: midnight Eastern is 05:00 UTC. Midnight UTC is 7 PM on March 4.
+    const since = new Date('2030-03-05T05:00:00Z');
+    expect(called(deps.db.queriesOf('review_requests')[0], 'where', 'rated_at', '>=', since)).toBe(true);
+    expect(called(deps.db.queriesOf('customer_interactions')[0], 'where', 'created_at', '>=', since)).toBe(true);
+  });
+
+  // The offer day is the follow-up's day, so the emails and the 30 days start there. The complaint check still
+  // starts at the job's own day: a signal that came between the job and its follow-up counts.
+  test('a job whose follow-up was done: the emails name the offer day, and the complaint check starts at the job day', async () => {
+    const deps = world({ jobs: [{ ...JOB, service_day: '2030-03-08', job_day: '2030-03-02' }] });
+    await run(deps);
+    const [offer] = deps.sendTemplate.mock.calls.map(([send]) => send);
+    expect(offer.payload).toMatchObject({
+      visit_weekday: 'Friday', visit_date_short: 'Mar 8', next_visit_window: 'May 24 to Jun 7', offer_end_date: 'April 7',
+    });
+    // March 2, 2030 is on standard time: midnight Eastern is 05:00 UTC.
+    const since = new Date('2030-03-02T05:00:00Z');
+    expect(called(deps.db.queriesOf('review_requests')[0], 'where', 'rated_at', '>=', since)).toBe(true);
+    expect(called(deps.db.queriesOf('customer_interactions')[0], 'where', 'created_at', '>=', since)).toBe(true);
   });
 });
 
@@ -307,12 +504,31 @@ describe('pricing outcomes', () => {
     ['the app cannot price the home', { option: null, reason: 'not_priced' }, { office: 1 }, 'not_priced'],
     ['the account fails the premises proof', { option: null, reason: 'premises' }, { office: 1 }, 'premises'],
     ['the plan has no setup fee to remove', { option: { ...OPTION, setupFee: null }, reason: null }, { office: 1 }, 'no_setup_fee'],
+    ['a plan visit costs as much as the job did', { option: { ...OPTION, perVisit: 225 }, reason: null }, { office: 1 }, 'plan_not_below_job'],
   ])('%s: no sample', async (_name, priced, expected, reason) => {
     const deps = world({ buildStartOffer: jest.fn(async () => priced) });
     const summary = await run(deps);
     expect(counts(summary)).toEqual({ ...NONE, ...expected });
     expect(summary.reasons).toEqual({ [reason]: 1 });
     expect(deps.sendTemplate).not.toHaveBeenCalled();
+  });
+});
+
+describe('the job price', () => {
+  test('is the largest PAID invoice of the job; a void or open one never counts', async () => {
+    const invoices = (...rows) => ({ tables: { 'invoices as i': rows.map(([status, total], index) => ({ ...INVOICE, id: `inv-${index + 1}`, status, total })) } });
+    const paidAbove = world(invoices(['paid', '60.00'], ['paid', '150.00'], ['void', '500.00']));
+    expect(counts(await run(paidAbove))).toEqual({ ...NONE, sample: 1 });
+    const paidBelow = world(invoices(['paid', '60.00'], ['paid', '90.00'], ['void', '500.00']));
+    const summary = await run(paidBelow);
+    expect(counts(summary)).toEqual({ ...NONE, office: 1 });
+    expect(summary.reasons).toEqual({ plan_not_below_job: 1 });
+  });
+
+  test('a plan price above the job price does not count as a priced home with a sample: the price settings still loaded', async () => {
+    const deps = world({ buildStartOffer: jest.fn(async () => ({ option: { ...OPTION, perVisit: 300 }, reason: null })) });
+    await run(deps);
+    expect(deps.closePriceSettingsAlert).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -392,6 +608,9 @@ describe('once per job, and one bad job never stops the others', () => {
     ['a template has no version to sample', { tables: { 'email_template_versions as v': [] } }, 'TEMPLATE_MISSING'],
     // The division turns a failed read into a verdict. For the job it is an outage, never "not for this customer".
     ['the email division could not read', emailVerdict('LOOKUP_FAILED'), 'LOOKUP_FAILED'],
+    // openBalanceExists answers null when it could not decide. Only an explicit "no" lets the job go on.
+    ['the open-balance check could not decide', { openBalanceExists: jest.fn(async () => null) }, 'OPEN_BALANCE_UNKNOWN'],
+    ['whose debt a part-paid invoice is could not be decided', { ...partPaid(), invoicePayerOwnership: jest.fn(async () => 'payer_unverifiable') }, 'OPEN_BALANCE_UNKNOWN'],
   ])('%s: the job fails and is read again the next morning', async (_name, change, code) => {
     const summary = await run(world(change));
     expect(counts(summary)).toEqual({ ...NONE, failed: 1 });
@@ -504,7 +723,7 @@ describe('the price settings notification itself', () => {
 });
 
 describe('the sample payload', () => {
-  const payload = (overrides = {}) => _test.offerPayload({ customer: CUSTOMER, jobDate: '2030-11-18', option: OPTION, ...overrides });
+  const payload = (overrides = {}) => _test.offerPayload({ customer: CUSTOMER, offerDay: '2030-11-18', option: OPTION, ...overrides });
 
   test('dates cross a year end without a year in the words', () => {
     expect(payload()).toMatchObject({
@@ -549,11 +768,19 @@ describe('the default wiring', () => {
   test('every collaborator the job needs resolves from its real module', () => {
     const deps = _test.defaultDeps();
     for (const name of [
-      'buildStartOffer', 'channelFor', 'eligibleForEmail', 'isInternalTestContact', 'activeSuppressionsFor', 'sendTemplate', 'unsubscribeUrl',
-      'raisePriceSettingsAlert', 'closePriceSettingsAlert',
+      'buildStartOffer', 'channelFor', 'eligibleForEmail', 'reviewAskOnItsWay', 'lastDeliveredAskAt', 'lastManualAskAt',
+      'openBalanceExists', 'isUncountedPartialDue', 'invoicePayerOwnership', 'itemizedMemberIds', 'combinedFirstInvoiceOf',
+      'isInternalTestContact', 'activeSuppressionsFor', 'sendTemplate', 'unsubscribeUrl', 'raisePriceSettingsAlert', 'closePriceSettingsAlert',
     ]) {
       expect([name, typeof deps[name]]).toEqual([name, 'function']);
     }
+    expect(deps.askSpacingMs).toBe(72 * HOUR);
+    expect(deps.partiallyPaidStatus).toBe('partially_paid');
+    // The public estimate page's own list of the estimates a customer can open.
+    expect(deps.liveEstimateStatuses).toEqual(['sending', 'sent', 'viewed']);
+    // The scheduler's own test for an estimate held for a new price.
+    expect(deps.repricePendingAbsentSql).toContain('reprice_pending_at');
+    expect(deps.openRequestTerminalStatuses).toEqual(expect.arrayContaining(['resolved', 'closed', 'cancelled']));
   });
 
   test('the sample recipient is an internal address', () => {
