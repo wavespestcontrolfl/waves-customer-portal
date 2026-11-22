@@ -8436,7 +8436,11 @@ self-extends: `isEstimateExtensionRequestEligible` is false for it, so `POST
 /:token/extension-request` and the expired `/data` response answer the generic
 404 with no `extensionRequestEligible`, `expiresAt`, `sentAt` or
 `extensionSelfServe` (the customer's way back is the office; a staff extension
-is unchanged). The portal pricing card's plain tap (`POST /api/requests/start-plan`)
+of the offer quote itself is unchanged). A grouped sibling's extension, from
+`POST /:token/extension-request` or from staff, never revives or re-dates an
+offer quote in its group: the sibling update and the revivable-sibling verdict
+both carry `PLAN_OFFER_ABSENT_SQL` (`estimate-extension.js`), so that quote
+keeps its expiry and its status. The portal pricing card's plain tap (`POST /api/requests/start-plan`)
 never retires a live offer quote of the same service and option: it re-opens the
 offer through the mint core (`reuseOnly`), which re-proves the single premises,
 today's price against the card with the setup fee taken as 0, the frozen page

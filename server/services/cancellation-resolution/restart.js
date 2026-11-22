@@ -34,7 +34,7 @@ const logger = require('../logger');
 const { FAMILY_LABELS } = require('./templates');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 const { holdLockSlot } = require('../../utils/cron-lock');
-const { planOfferOf, PLAN_OFFER_WAIVER_REASON } = require('../plan-offer-estimate');
+const { planOfferOf, samePlanOffer, PLAN_OFFER_WAIVER_REASON } = require('../plan-offer-estimate');
 
 const SOURCE = 'plan_restart';
 const HAND_PRICED_RESTART = 'This restart needs to be set up by hand — please call or text us and we will take care of it.';
@@ -1672,10 +1672,12 @@ async function mintPlanStartEstimate({
       } : {}),
       ...(reopened ? { reuseOnly: true } : {}),
       // Reuse only the quote for THIS option (the core adds today's-offer equality). An offer mint also
-      // reuses only its own job's quote: a plain quote, or the offer of another job, is retired and re-minted.
+      // reuses only its own job's quote with the SAME dates: a plain quote, the offer of another job, or this
+      // job's offer with an older end or first visit date (the offer day moved) is retired and re-minted.
+      // The core's fingerprint carries neither date, and the booking checks read the stored one.
       matchesLive: (liveData) => liveData?.planStart?.serviceKey === serviceKey
         && liveData?.planStart?.optionId === option.id
-        && (!offer || planOfferOf(liveData)?.jobId === offer.jobId),
+        && (!offer || samePlanOffer(planOfferOf(liveData), offer)),
       // Every amount the card showed, to the cent (codex pre-push P0; AGENTS.md:
       // the recompute matches the shown price or the mint refuses): the
       // estimate's monthly total, and the card's own derivation

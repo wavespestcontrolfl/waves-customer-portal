@@ -107,8 +107,10 @@ postgres('plan offer quote (live Postgres)', () => {
     customer, serviceKey: 'pest_control', optionId: option.id, shown, ...(offer ? { offer } : {}),
     deps: { db: trx, propertyLookup: async () => SAVED_LOOKUP },
   });
+  // One end date for the whole file: the same job's offer is the same offer only with the same dates.
+  const ENDS = new Date(Date.now() + 30 * DAY_MS);
   const offerOf = (job, change = {}) => ({
-    jobId: String(job.id), endsAt: new Date(Date.now() + 30 * DAY_MS), firstVisitFrom: day(85), ...change,
+    jobId: String(job.id), endsAt: ENDS, firstVisitFrom: day(85), ...change,
   });
   const rowOf = (id) => trx('estimates').where({ id }).first();
 
@@ -176,6 +178,71 @@ postgres('plan offer quote (live Postgres)', () => {
     expect(next.estimateId).not.toBe(first.estimateId);
     expect((await rowOf(first.estimateId)).archived_at).not.toBeNull();
     expect(parse((await rowOf(next.estimateId)).estimate_data).planStart.offer.jobId).toBe(String(otherJob.id));
+  });
+
+  // The offer day of one job can move (a follow-up visit done later). The mint's fingerprint holds no date, and the
+  // picker, the reservation and the accept read the STORED first visit date, so the old quote is never handed back.
+  test.each([
+    ['a later first visit date', () => ({ firstVisitFrom: day(88) })],
+    ['another end date', () => ({ endsAt: new Date(ENDS.getTime() - DAY_MS) })],
+  ])('the same job with %s is a new quote: the old one is retired and the new one stores the new dates', async (_label, change) => {
+    const { customer, job } = await seedCustomerWithJob();
+    const option = await cardOption(customer, job);
+    const first = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
+    const asked = offerOf(job, change());
+    const moved = await mintFor({ customer, option, shown: shownOf(option, 0), offer: asked });
+    expect(moved.reused).toBe(false);
+    expect(moved.estimateId).not.toBe(first.estimateId);
+    expect((await rowOf(first.estimateId)).archived_at).not.toBeNull();
+    const movedRow = await rowOf(moved.estimateId);
+    expect(parse(movedRow.estimate_data).planStart.offer).toEqual({
+      jobId: String(job.id), endsAt: asked.endsAt.toISOString(), firstVisitFrom: asked.firstVisitFrom,
+    });
+    expect(new Date(movedRow.expires_at).getTime()).toBe(asked.endsAt.getTime());
+    // What the picker and the 07:05 fill list read as the first day they may offer.
+    expect(await require('../services/estimate-slot-availability').estimateMoveInDate(movedRow)).toBe(asked.firstVisitFrom);
+  });
+
+  // Staff can put estimates of several homes on one link (a group). The extension of one of them brings its siblings
+  // back to the same new date. The offer quote keeps its own end date and its status: the real extension, on real rows.
+  test("a grouped sibling's extension never revives or re-dates the offer quote; an ordinary sibling is revived", async () => {
+    const { extendEstimate } = require('../services/estimate-extension');
+    const plainQuote = async () => {
+      const { customer, job } = await seedCustomerWithJob();
+      const option = await cardOption(customer, job);
+      return mintFor({ customer, option, shown: shownOf(option, option.setupFee) });
+    };
+    const { customer, job } = await seedCustomerWithJob();
+    const option = await cardOption(customer, job);
+    const offered = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
+    const extended = await plainQuote();
+    const ordinary = await plainQuote();
+    const ids = [offered.estimateId, extended.estimateId, ordinary.estimateId];
+    const groupId = crypto.randomUUID();
+    const past = new Date(Date.now() - 2 * DAY_MS);
+    await trx('estimates').whereIn('id', ids).update({ estimate_group_id: groupId, status: 'expired', expires_at: past });
+
+    await extendEstimate({ estimate: await rowOf(extended.estimateId), days: 7, silent: true, entryPoint: 'test' });
+    const anchor = await rowOf(extended.estimateId);
+    expect(anchor.status).toBe('sent');
+    expect(new Date(anchor.expires_at).getTime()).toBeGreaterThan(Date.now());
+    const sibling = await rowOf(ordinary.estimateId);
+    expect(sibling.status).toBe('sent');
+    expect(new Date(sibling.expires_at).getTime()).toBe(new Date(anchor.expires_at).getTime());
+    const offerRow = await rowOf(offered.estimateId);
+    expect(offerRow.status).toBe('expired');
+    expect(new Date(offerRow.expires_at).getTime()).toBe(past.getTime());
+    expect(offerRow.extension_auto_granted_at).toBeNull();
+
+    // A LIVE offer quote in the group keeps its own end date too, when a sibling is extended past it.
+    await trx('estimates').where({ id: offered.estimateId }).update({ status: 'sent', expires_at: ENDS });
+    await trx('estimates').where({ id: extended.estimateId }).update({ status: 'expired', expires_at: past });
+    await extendEstimate({ estimate: await rowOf(extended.estimateId), days: 90, silent: true, entryPoint: 'test' });
+    expect(new Date((await rowOf(extended.estimateId)).expires_at).getTime()).toBeGreaterThan(ENDS.getTime());
+    expect(new Date((await rowOf(ordinary.estimateId)).expires_at).getTime()).toBeGreaterThan(ENDS.getTime());
+    const liveOffer = await rowOf(offered.estimateId);
+    expect(liveOffer.status).toBe('sent');
+    expect(new Date(liveOffer.expires_at).getTime()).toBe(ENDS.getTime());
   });
 
   describe('a plain portal tap on the card', () => {

@@ -2,7 +2,9 @@
 
 // The plan offer's stamp reader (owner 2026-11-19 "build"): the one function the mint, the slot reservation, the estimate
 // page and the extension check read the stamp through. Pure, no database.
-const { planOfferOf, PLAN_OFFER_WAIVER_REASON } = require('../services/plan-offer-estimate');
+const {
+  planOfferOf, samePlanOffer, PLAN_OFFER_WAIVER_REASON, PLAN_OFFER_ABSENT_SQL,
+} = require('../services/plan-offer-estimate');
 
 const OFFER = { jobId: 'job-1', endsAt: '2026-12-22T17:38:16.650Z', firstVisitFrom: '2027-02-15' };
 const dataWith = (offer) => ({ planStart: { serviceKey: 'pest_control', offer } });
@@ -41,5 +43,33 @@ describe('planOfferOf', () => {
 
   test('the waiver reason is the owner-dated audit text', () => {
     expect(PLAN_OFFER_WAIVER_REASON).toBe('One-time job to plan offer: setup fee waived (owner 2026-11-19)');
+  });
+});
+
+describe('samePlanOffer', () => {
+  const asked = { jobId: 'job-1', endsAt: new Date(OFFER.endsAt), firstVisitFrom: OFFER.firstVisitFrom };
+
+  test('the same job, end and first visit date is the same offer, whatever form the end date has', () => {
+    expect(samePlanOffer(OFFER, asked)).toBe(true);
+    expect(samePlanOffer(OFFER, { ...asked, endsAt: OFFER.endsAt })).toBe(true);
+  });
+
+  test.each([
+    ['another job', { jobId: 'job-2' }],
+    ['a later first visit date (the offer day moved)', { firstVisitFrom: '2027-02-20' }],
+    ['another end date', { endsAt: new Date('2026-12-27T05:00:00.000Z') }],
+  ])('%s is another offer', (_label, change) => {
+    expect(samePlanOffer(OFFER, { ...asked, ...change })).toBe(false);
+  });
+
+  test('no stored stamp, or no offer asked, is never the same offer', () => {
+    expect(samePlanOffer(null, asked)).toBe(false);
+    expect(samePlanOffer(OFFER, null)).toBe(false);
+  });
+});
+
+describe('PLAN_OFFER_ABSENT_SQL', () => {
+  test('keys on the job id of the stamp, so a write that carries it never touches an offer quote', () => {
+    expect(PLAN_OFFER_ABSENT_SQL).toBe("COALESCE(estimate_data->'planStart'->'offer'->>'jobId', '') = ''");
   });
 });

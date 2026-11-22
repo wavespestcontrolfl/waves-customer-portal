@@ -32,4 +32,19 @@ function planOfferOf(estimateData) {
   return { jobId, endsAt, firstVisitFrom };
 }
 
-module.exports = { planOfferOf, PLAN_OFFER_WAIVER_REASON };
+// The SQL mirror of "this row carries no offer", for a write that must never touch an offer quote (the
+// grouped extension's sibling revive, estimate-extension.js). It keys on the job id alone, so a stamp that
+// planOfferOf rejects for its dates still counts as an offer here: the stricter side for a revive.
+const PLAN_OFFER_ABSENT_SQL = "COALESCE(estimate_data->'planStart'->'offer'->>'jobId', '') = ''";
+
+// True when a stored stamp (planOfferOf) is the offer a caller asks for: the same job, the same end and
+// the same first visit date. The offer day of one job can move (a follow-up visit done later), so the job
+// id alone does not prove that a stored quote still carries today's dates.
+function samePlanOffer(stamp, offer) {
+  return Boolean(stamp && offer)
+    && stamp.jobId === offer.jobId
+    && stamp.firstVisitFrom === offer.firstVisitFrom
+    && new Date(stamp.endsAt).getTime() === new Date(offer.endsAt).getTime();
+}
+
+module.exports = { planOfferOf, samePlanOffer, PLAN_OFFER_WAIVER_REASON, PLAN_OFFER_ABSENT_SQL };

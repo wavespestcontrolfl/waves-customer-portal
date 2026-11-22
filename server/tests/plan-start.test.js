@@ -974,6 +974,24 @@ describe('mintPlanStartEstimate', () => {
       expect(JSON.parse(tables.estimates.find((r) => r.id === next.estimateId).estimate_data).planStart.offer.jobId).toBe('job-2');
     });
 
+    // The offer day of one job can move (a follow-up visit done later). The core's fingerprint holds no date and the
+    // booking checks read the stored one, so the same job with other dates is never handed the old quote.
+    test.each([
+      ['a later first visit date', { firstVisitFrom: '2027-02-24' }],
+      ['another end date', { endsAt: new Date(ENDS.getTime() - 24 * 3600 * 1000) }],
+    ])('the same job with %s retires the old quote and mints again with the new dates', async (_label, change) => {
+      const first = await mintOffer();
+      const asked = { ...OFFER, ...change };
+      const moved = await mintOffer(asked, { randomBytes: SECOND_TOKEN });
+      expect(moved.reused).toBe(false);
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
+      const movedRow = tables.estimates.find((r) => r.id === moved.estimateId);
+      expect(JSON.parse(movedRow.estimate_data).planStart.offer).toEqual({
+        jobId: 'job-1', endsAt: asked.endsAt.toISOString(), firstVisitFrom: asked.firstVisitFrom,
+      });
+      expect(movedRow.expires_at).toEqual(asked.endsAt);
+    });
+
     test('an offer mint never reuses a plain portal quote of the same option: that quote is retired', async () => {
       const plain = await mint();
       const offered = await mintOffer({ ...OFFER }, { randomBytes: SECOND_TOKEN });
