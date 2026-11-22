@@ -51,8 +51,10 @@ describe('what a visit and the reading of its call say about the service', () =>
     expect(verdict(heardAs({ specific_service_name: ' one-time  pest control SERVICE ' }))).toBe('problem');
   });
 
-  test('they agree: a one-time visit, a reading that names a plan, a reading that heard a plan ask', () => {
+  test('they agree: a visit that is not a plan visit, a reading that names a plan, a reading that heard a plan ask', () => {
     expect(verdict(visit())).toBe('agrees');
+    // A free visit (an assessment) is not a plan visit either.
+    expect(verdict(planVisit({ row_billing_type: 'free' }))).toBe('agrees');
     // A corrected visit agrees whatever became of the reading.
     expect(verdict(visit({ v2_extraction_status: 'schema_failed', ai_extraction_enriched: null }))).toBe('agrees');
     expect(verdict(heardAs({ specific_service_name: 'Monthly Pest Control Service' }))).toBe('agrees');

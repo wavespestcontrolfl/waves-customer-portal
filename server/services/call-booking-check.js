@@ -71,15 +71,17 @@ const tidy = (text) => String(text || '').replace(/\s+/g, ' ').trim();
 
 // What the visit and the reading of its call say about the service, as they stand now:
 //   problem  the reading names a one-time service and the visit is a plan visit ({ verdict, heard });
-//   agrees   the visit is a one-time visit, or the reading names a plan or says the caller asked about one;
+//   agrees   the visit is not a plan visit (one-time or free), or the reading names a plan or says the caller
+//            asked about one;
 //   unknown  one side cannot be read: no valid reading, a name the catalog does not hold or holds under two
 //            billing types, or a visit with no catalog row.
-// `billingByName` maps a catalog service name to its billing type.
+// `billingByName` maps a catalog service name to its billing type (recurring, one_time or free).
 function judgeService(visit, billingByName) {
-  if (visit.row_billing_type === 'one_time') return { verdict: 'agrees' };
+  if (!visit.row_billing_type) return { verdict: 'unknown' };
+  if (visit.row_billing_type !== 'recurring') return { verdict: 'agrees' };
   const reading = visit.v2_extraction_status === 'valid' ? readingOf(visit) : null;
   const request = reading && reading.service_request;
-  if (!visit.row_billing_type || !request || typeof request !== 'object') return { verdict: 'unknown' };
+  if (!request || typeof request !== 'object') return { verdict: 'unknown' };
   const heard = tidy(request.specific_service_name);
   const heardBilling = billingByName.get(nameKey(heard));
   if (!heardBilling) return { verdict: 'unknown' };
@@ -163,7 +165,9 @@ async function loadBillingByName() {
 
 // ------------------------------------------------------------------ passes
 
-// Judge each open bell again, from its visit read by id; close the ones evidence closes. Returns { closed, failed }.
+// Judge each open bell again, from its visit read by id; close the ones evidence closes. A bell that stays open
+// for a problem is raised again, which only rewrites it quietly (raiseBell): its link follows a visit the office
+// moved, at any age (the raise pass reads 7 days). Returns { closed, failed }.
 async function closePass(episodes, billingByName, now) {
   const bells = (await episodes.openAdminAlertMetadata(db, OWN_PREFIX))
     .filter((meta) => meta.scheduledServiceId && KINDS.includes(meta.problem));
@@ -173,11 +177,15 @@ async function closePass(episodes, billingByName, now) {
   const visits = new Map((await visitRows().whereIn('ss.id', ids)).map((visit) => [String(visit.id), visit]));
   for (const meta of bells) {
     try {
-      const key = closeKeyFor(meta.problem, visits.get(String(meta.scheduledServiceId)), billingByName);
+      const visit = visits.get(String(meta.scheduledServiceId));
+      const key = closeKeyFor(meta.problem, visit, billingByName);
       if (key) {
         tally.closed += Number(await episodes.closeAdminAlertKeys(
           db, [`${OWN_PREFIX}${meta.problem}:${meta.scheduledServiceId}`], CLOSED[key].reason, { now, resolution: CLOSED[key].text },
         )) || 0;
+      } else {
+        const judged = judgeService(visit, billingByName);
+        if (judged.verdict === 'problem') await raiseBell(visit, judged.heard);
       }
     } catch (err) {
       tally.failed += 1;
@@ -187,7 +195,9 @@ async function closePass(episodes, billingByName, now) {
   return tally;
 }
 
-// Raise one bell. Returns 1 when a new row rang, 0 when the visit already has a row for this problem.
+// Raise one bell. Returns 1 when a new row rang, 0 when the visit already has a row for this problem. A repeat
+// raise rewrites that row without a ring when its content changed: a visit the office moved keeps a link that
+// opens it on its new day, and the row keeps its read and Done state.
 async function raiseBell(visit, heard) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const { lookupCustomerName } = require('./admin-alert-names');
@@ -195,6 +205,8 @@ async function raiseBell(visit, heard) {
   const result = await raiseAdminAlert('schedule', specFor({ visit, heard, name }), {
     bell: true,
     dedupeKey: `${OWN_PREFIX}service:${visit.id}`,
+    refreshOnDedupe: true,
+    ringOnRefresh: () => false,
     detail: detailFor({ visit, heard, name }),
     metadata: {
       scheduledServiceId: String(visit.id), customerId: visit.customer_id && String(visit.customer_id),

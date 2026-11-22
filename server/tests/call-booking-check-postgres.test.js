@@ -125,6 +125,23 @@ maybeDescribe('call booking check (live Postgres)', () => {
     const second = await run();
     expect(second.raised).toBe(0);
     expect(await rowsFor(b.visitId)).toHaveLength(1);
+
+    // The office reads the bell, then moves the visit: the link follows it, with no second row and no new ring.
+    await trx('notifications').where({ id: row.id }).update({ read_at: trx.fn.now() });
+    await trx('scheduled_services').where({ id: b.visitId }).update({ scheduled_date: '2026-11-24' });
+    expect((await run()).raised).toBe(0);
+    const moved = await rowsFor(b.visitId);
+    expect(moved).toHaveLength(1);
+    expect(moved[0].link).toBe(`/admin/dispatch?tab=schedule&date=2026-11-24&appointment=${b.visitId}`);
+    expect(moved[0].read_at).not.toBeNull();
+
+    // The same holds for a bell older than the raise pass reads: the close pass keeps an open bell on its visit.
+    await trx('scheduled_services').where({ id: b.visitId })
+      .update({ scheduled_date: '2026-11-25', created_at: new Date(NOW.getTime() - 9 * 24 * 60 * 60 * 1000) });
+    expect((await run()).raised).toBe(0);
+    const old = await rowsFor(b.visitId);
+    expect(old).toHaveLength(1);
+    expect(old[0].link).toBe(`/admin/dispatch?tab=schedule&date=2026-11-25&appointment=${b.visitId}`);
   });
 
   test('correcting the service closes the bell, and it does not ring again when the problem comes back', async () => {
