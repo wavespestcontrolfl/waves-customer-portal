@@ -49,22 +49,34 @@ function noVisitLineFor(estimate = {}, { proposalMode = false } = {}) {
   }
 }
 
-// A reviewed or scheduled send carries the email the office reviewed. The review keeps the line its payload had
-// (messages.email.noVisitLine, present only when there was one: buildEstimateSendPreview), and the send puts that
-// same value back. The row is not read again. So the email that goes out is the reviewed one:
-// - whatever the template does with the variable (a paragraph, the subject, a row that drops, nothing at all); and
-// - whatever changed on the row since (its category, tier or service label can change with no change to the
-//   saved offer, and the template content hash does not cover payload values).
-// Nothing is compared, so nothing can refuse a send here: the reviewed text is sent the same way, as reviewed.
-// A review that kept no line sends none. That includes a review or a schedule made before this line existed; the
-// template version it pinned has no paragraph for it. The SMTP copy has no line.
-// An unreviewed send has no reviewed email to keep: it reads the row at the send (through module.exports, so a
-// test can set the reading).
-function noVisitLineForSend(reviewedMessages, estimate, { proposalMode = false } = {}) {
-  if (!reviewedMessages) return module.exports.noVisitLineFor(estimate, { proposalMode });
-  const reviewedEmail = reviewedMessages.email;
+// A reviewed or scheduled send carries the email the office reviewed, and a business never gets the home-and-yard
+// sentence. The review keeps the line (messages.email.noVisitLine) only when the value changes the reviewed email
+// (buildEstimateSendPreview renders it with and without). At the send, `lineNow` is the line as the row reads at
+// that moment (its category, tier or service label can change with no change to the saved offer, and the
+// template content hash does not cover payload values):
+// - no review: the send carries lineNow;
+// - the review kept the line and the row still gets it: the send carries it;
+// - the review kept the line and the row no longer gets it (the estimate was made commercial after the review):
+//   STALE. The send is refused and the office reviews again. The approved words are never sent to an estimate
+//   they no longer fit, and never dropped in silence;
+// - the review kept no line: the send carries none, whatever the row reads now. That is an email the line does
+//   not change (the updated-estimate email, a template an admin rewrote), an estimate that had no line, and a
+//   review or a schedule made before this line existed (the template version it pinned has no paragraph).
+//   Nothing is stale there: a sentence the office did not see is left out, never added.
+// The SMTP copy has no line, so an SMTP review keeps none.
+function reviewedNoVisitLine(reviewedMessages) {
+  const reviewedEmail = reviewedMessages?.email;
   if (!reviewedEmail || reviewedEmail.provider === 'smtp') return '';
   return typeof reviewedEmail.noVisitLine === 'string' ? reviewedEmail.noVisitLine : '';
 }
+function noVisitLineStale(reviewedMessages, lineNow) {
+  const reviewed = reviewedNoVisitLine(reviewedMessages);
+  return reviewed !== '' && reviewed !== lineNow;
+}
+function noVisitLineForSend(reviewedMessages, lineNow) {
+  if (!reviewedMessages) return lineNow || '';
+  const reviewed = reviewedNoVisitLine(reviewedMessages);
+  return reviewed !== '' && reviewed === lineNow ? reviewed : '';
+}
 
-module.exports = { NO_VISIT_QUOTE_LINE, NO_VISIT_LINE_VARIABLE, noVisitLineFor, noVisitLineForSend };
+module.exports = { NO_VISIT_QUOTE_LINE, NO_VISIT_LINE_VARIABLE, noVisitLineFor, noVisitLineStale, noVisitLineForSend };
