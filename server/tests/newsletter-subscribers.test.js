@@ -349,8 +349,8 @@ describe('the reader-confirmed stamps are written by the confirm click only', ()
     expect(write.update.status).toBe('active');
     expect(write.update.confirmed_at).toBeInstanceOf(Date);
     expect(stamps(write.update)).toEqual([]);
-    // The promotion flips only a row that is still pending.
-    expect(write.wheres).toContainEqual({ id: 'sub-7', status: 'pending' });
+    // The promotion flips only a row that is still pending at the address the caller added.
+    expect(write.wheres).toContainEqual({ id: 'sub-7', status: 'pending', email: 'mixed.case@example.com' });
 
     queries = useRecordingDb({ firsts: [{ ...UNSUB_ROW }, { ...UNSUB_ROW, status: 'active' }] });
     expect((await subscribeOrResubscribe({ email: 'reader@example.com', source: 'admin_add', requireConfirmation: false, linkCustomer: false })).action).toBe('resubscribed');
@@ -403,15 +403,31 @@ describe('a trusted add of a pending row that moved before its write', () => {
   test.each([
     ['the reader\'s confirm click', { status: 'active', confirmed_at: new Date(), reader_confirmed_at: new Date(), reader_confirmed_email: 'reader@example.com' }],
     ['an opt-out', { status: 'unsubscribed', unsubscribed_at: new Date() }],
+    // The email fanout keeps the id and the pending status, and rotates the token.
+    ['an address move', { email: 'corrected@example.com', confirmation_token: 'rotated-tok' }],
   ])('%s landed first: the promotion misses, nothing more is written, and the add returns the row as it is', async (_label, moved) => {
     // Reads: the pending row, then the row as it is after the missed promotion.
     const queries = useRecordingDb({ firsts: [{ ...PENDING }, { ...PENDING, ...moved }], updateCounts: [0] });
     const result = await add();
     expect(result).toEqual({ subscriber: { ...PENDING, ...moved }, action: 'unchanged' });
-    // One write was tried, the missed promotion, and it was fenced on the pending status.
-    // No second run of the state machine: nothing wrote confirmed_at or cleared the opt-out.
+    // One write was tried, the missed promotion, fenced on the pending status and the added address.
+    // No second run of the state machine: nothing wrote confirmed_at, cleared the opt-out or
+    // activated the corrected address.
     expect(queries).toHaveLength(1);
-    expect(queries[0].wheres).toContainEqual({ id: 'sub-7', status: 'pending' });
+    expect(queries[0].wheres).toContainEqual({ id: 'sub-7', status: 'pending', email: 'reader@example.com' });
+  });
+
+  test('a promotion that lands links the customer first, then reads the row it returns', async () => {
+    const db = require('../models/db');
+    const LINKED = { ...PENDING, status: 'active', customer_id: 'cust-1' };
+    const firsts = [{ ...PENDING }, { ...LINKED }];
+    useRecordingDb({ firsts });
+    let unreadAtLink = null;
+    db.raw.mockImplementationOnce((sql) => { unreadAtLink = firsts.length; return sql; });
+    const result = await subscribeOrResubscribe({ email: 'reader@example.com', source: 'admin_add', requireConfirmation: false });
+    expect(result).toEqual({ subscriber: LINKED, action: 'confirmed' });
+    // When the link ran, the returned row was not read yet.
+    expect(unreadAtLink).toBe(1);
   });
 
   test('a row deleted before the write: the add returns the row it read, unchanged', async () => {

@@ -279,22 +279,28 @@ async function subscribeOrResubscribeOnce({
 }
 
 // An existing 'pending' row met a trusted add (requireConfirmation:false): flip it to active.
-// The flip is a CAS on the pending status. Between the caller's read and this write the row
-// can move: the reader's own confirm click (an id-only update would then write a later
-// confirmed_at over that click, which reads as a trusted re-activation after it and voids
-// the reader's proof: pest-insider/tool-block.js optedIn), or an opt-out (an id-only update
-// would reactivate the reader). On a miss nothing is written and no other transition
+// The flip is a CAS on the pending status AND the address the caller added. Between the
+// caller's read and this write the row can move: the reader's own confirm click (an id-only
+// update would then write a later confirmed_at over that click, which reads as a trusted
+// re-activation after it and voids the reader's proof: pest-insider/tool-block.js optedIn),
+// an opt-out (an id-only update would reactivate the reader), or an address move (the email
+// fanout keeps the id and the pending status, and an id-only update would activate the
+// corrected mailbox that the caller never added). On a miss nothing is written and no other transition
 // starts: a re-run of the state machine could take the trusted resubscribe branch and clear
 // the opt-out that just landed. The caller gets the row as it is now ('unchanged').
 async function promotePendingRow(existing, { linkCustomer, lc, conn }) {
-  const promoted = await conn('newsletter_subscribers').where({ id: existing.id, status: 'pending' }).update({
+  const promoted = await conn('newsletter_subscribers').where({ id: existing.id, status: 'pending', email: lc }).update({
     status: 'active',
     confirmed_at: new Date(),
     updated_at: new Date(),
   });
-  const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
-  if (!promoted) return { subscriber: fresh || existing, action: 'unchanged' };
+  if (!promoted) {
+    const current = await conn('newsletter_subscribers').where({ id: existing.id }).first();
+    return { subscriber: current || existing, action: 'unchanged' };
+  }
+  // The link first, then the read: the caller gets the row with its customer link.
   if (linkCustomer) await linkToCustomer(lc, conn);
+  const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
   return { subscriber: fresh, action: 'confirmed' };
 }
 
