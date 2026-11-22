@@ -450,7 +450,9 @@ async function decideOne(conn, callId, entry, now) {
 // window: staging lookback + the 24 h give-up + a day), so a tick never reads the whole call table. A row is staged
 // within 3 days of its call and decided or given up within about 38 h of staging, so no live row falls outside it.
 function duePending(conn, now) {
-  return conn('call_log')
+  // A sandbox test call is never staged, so it never carries the key; the exclusion still rides this read, as on
+  // every call_log scan that is not keyed by id.
+  return whereNotSandboxCall(conn('call_log'))
     .where('created_at', '>=', new Date(now.getTime() - QUEUE_SCAN_LOOKBACK_MS))
     .whereRaw("metadata->:key->>'status' = 'pending' AND (metadata->:key->>'send_at')::timestamptz <= :now::timestamptz",
       { key: METADATA_KEY, now: now.toISOString() })
