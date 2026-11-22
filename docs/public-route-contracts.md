@@ -7186,10 +7186,14 @@ county records and satellite images, so most quotes need no visit." (`NO_VISIT_Q
 `services/estimate-no-visit-line.js`, the same sentence as the `estimate.delivery` email paragraph and the office call
 script line). Copy only: no customer or pricing data. ABSENT unless all of these hold: the estimate is open (the same
 `cta.terminalState === null` the page reads, so an accepted, declined, expired or quote-required estimate carries none);
-every service row on the estimate is one Waves prices from the home and yard measured remotely (`serviceMixIsRemoteMeasured`
-in `routes/estimate-public.js`, over the rows `serviceCategory` is derived from: pest control, lawn care, tree and shrub,
-barrier mosquito and termite bait stations qualify; one row of rodent work, a misting system, foam, trenching, pre-slab,
-Bora-Care, a WDO inspection or traps, one service row that cannot be classified, or no service row at all, and the key is
+every service row on the estimate is one Waves prices from the measured home and yard alone (`estimateIsRemoteMeasured`
+in `routes/estimate-public.js`, over `guaranteeServiceRows`: both saved result shapes, an inputs-only replay, the price
+snapshot's one-time rows and an authored proposal's rows). The rule is an exact list of service identities, not the page's
+display categories: recurring rows whose `recurringServiceKey` is `pest_control`, `lawn_care`, `tree_shrub`, `mosquito` or
+`termite_bait` and that are not commercial, and one-time rows whose `service` is `one_time_pest`, `one_time_lawn` or
+`one_time_mosquito`. One row off the lists (rodent work, a misting system, foam, trenching, pre-slab, Bora-Care, a WDO
+inspection, traps, a palm injection, a bed bug, roach, flea or stinging insect job, a termite station rental or bond row, an
+area add-on, a row with no service key), no service row at all, or a failed replay, and the key is
 absent; setup, discount and membership rows are not services); and the estimate email's rule reads the row as a home
 estimate (`noVisitLineFor`: category `RESIDENTIAL`, not a proposal, and no commercial mark by `isCommercialEstimateRow` at
 its strict reading, so a commercial estimate, a proposal and a condo carry none). A row the rule cannot read omits the key

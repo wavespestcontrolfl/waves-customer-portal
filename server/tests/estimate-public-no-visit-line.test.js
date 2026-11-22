@@ -3,7 +3,7 @@ process.env.ESTIMATE_DOC_PIN_SECRET = 'test-doc-pin-secret';
 
 // The "no visit needed" line on the customer estimate page (owner 2026-11-22, option B): GET /:token/data carries
 // `noVisitLine`, the owner's exact sentence, only on the page load of an open home estimate whose every service Waves
-// prices from the home and yard measured remotely. In every other case the key is absent. The page prints the words
+// prices from the measured home and yard alone (an exact list of programs). In every other case the key is absent. The page prints the words
 // under the satellite photo; who gets them is decided here, by the same home rule as the estimate email.
 jest.mock('../models/db', () => {
   const mock = jest.fn();
@@ -75,7 +75,7 @@ function chainFor(result) {
 db.mockImplementation((table) => chainFor(dbRows[table]));
 
 const { NO_VISIT_QUOTE_LINE, noVisitLinePageBlock } = require('../services/estimate-no-visit-line');
-const { serviceMixIsRemoteMeasured } = estimatePublicRouter;
+const { serviceMixIsRemoteMeasured, estimateIsRemoteMeasured } = estimatePublicRouter;
 
 const SENT = '2026-11-20T16:00:00.000Z';
 const recurringRow = (service) => ({ service, name: service, visitsPerYear: 6 });
@@ -94,7 +94,11 @@ function estimateRow({ services = ['pest_control'], oneTime = [], estimateData =
     monthly_total: 42.3, annual_total: 507.6, onetime_total: 0,
     estimate_data: {
       deliveryState: { firstDeliveredAt: SENT, lastDeliveredAt: SENT },
-      result: { recurring: { services: services.map(recurringRow) } },
+      // One-time rows sit where an estimate saves them (result.oneTime) and in the price snapshot made from them.
+      result: {
+        recurring: { services: services.map(recurringRow) },
+        ...(oneTime.length ? { oneTime: { items: oneTime, total: oneTime.reduce((sum, item) => sum + item.amount, 0) } } : {}),
+      },
       sendSnapshot: { pricingBundle: {
         combinedRecurring: { waveGuardDiscountPct: 0 },
         frequencies: [{ key: 'quarterly', monthly: 42.3, annual: 507.6, perServiceTreatments: services.map((service) => ({ label: service, service, displayPrice: 56.4, visitsPerYear: 6, monthly: 42.3, annual: 507.6 })) }],
@@ -132,54 +136,118 @@ async function pageLoad(estimate, query = '') {
   });
 }
 
-describe('serviceMixIsRemoteMeasured: is every service on the estimate priced from the home measured remotely', () => {
+describe('serviceMixIsRemoteMeasured: is every service on the estimate priced from the measured home and yard alone', () => {
   const pest = recurringRow('pest_control');
   const lawn = recurringRow('lawn_care');
+  const oneTimePest = { service: 'one_time_pest', name: 'One-Time Pest Control', amount: 199 };
 
-  test('pest control, lawn care, tree and shrub, mosquito and termite bait stations are, alone or together', () => {
+  test('the recurring pest, lawn, tree and shrub, mosquito and termite bait plans are, alone or together', () => {
     for (const key of ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait']) {
       expect([key, serviceMixIsRemoteMeasured([recurringRow(key)], [])]).toEqual([key, true]);
     }
     expect(serviceMixIsRemoteMeasured([pest, lawn, recurringRow('mosquito')], [])).toBe(true);
-    expect(serviceMixIsRemoteMeasured([], [{ service: 'one_time_pest', name: 'One-Time Pest Control', amount: 199 }])).toBe(true);
-    expect(serviceMixIsRemoteMeasured([pest], [{ service: 'one_time_mosquito', name: 'One-Time Mosquito Treatment', amount: 150 }])).toBe(true);
   });
 
-  test('a service priced from what a technician measured on site is not, and it takes the whole estimate with it', () => {
-    for (const key of ['rodent', 'rodent_bait', 'mosquito_misting', 'foam_recurring', 'termite_trenching', 'pre_slab_termiticide']) {
+  test('the general one-time pest, lawn and mosquito services are, alone or beside a plan', () => {
+    for (const service of ['one_time_pest', 'one_time_lawn', 'one_time_mosquito', 'ONE_TIME_PEST']) {
+      expect([service, serviceMixIsRemoteMeasured([], [{ service, name: 'One-time service', amount: 150 }])]).toEqual([service, true]);
+      expect([service, serviceMixIsRemoteMeasured([pest], [{ service, name: 'One-time service', amount: 150 }])]).toEqual([service, true]);
+    }
+  });
+
+  test('a recurring service off the list is not, and it takes the whole estimate with it', () => {
+    const offList = [
+      'rodent', 'rodent_bait', 'mosquito_misting', 'foam_recurring', 'termite_trenching', 'pre_slab_termiticide',
+      // A palm injection shows under tree and shrub on the page, but its price needs a confirmed diagnosis.
+      'palm_injection',
+      // Rows of a termite bait plan that are not the plan itself.
+      'termite_station_rental', 'termite_bond_10yr',
+      'commercial_pest', 'commercial_lawn', 'some_new_service',
+    ];
+    for (const key of offList) {
       expect([key, serviceMixIsRemoteMeasured([recurringRow(key)], [])]).toEqual([key, false]);
       expect([key, serviceMixIsRemoteMeasured([pest, recurringRow(key)], [])]).toEqual([key, false]);
     }
-    const onSite = [
+    expect(serviceMixIsRemoteMeasured([{ ...pest, isCommercial: true }], [])).toBe(false);
+  });
+
+  test('a one-time service off the list is not: its category on the page does not count', () => {
+    const offList = [
+      // These read as pest control on the page. Their price comes from rooms, an infestation or a nest, not the home's size.
+      { service: 'bed_bug', name: 'Bed Bug Treatment', amount: 900 },
+      { service: 'german_roach', name: 'German Roach Cleanout Service', amount: 450 },
+      { service: 'flea_package', name: 'Flea Elimination Package', amount: 300 },
+      { service: 'stinging_insect', name: 'Stinging Insect', amount: 180 },
+      { service: 'pest_initial_roach', name: 'Initial Roach Service', amount: 150 },
+      // These read as lawn care or tree and shrub on the page.
+      { service: 'top_dressing', name: 'Top Dressing', amount: 600 },
+      { service: 'palm_injection', name: 'Palm Injection', amount: 240 },
       { service: 'wdo_inspection', name: 'WDO Inspection', amount: 150 },
       { service: 'rodent_exclusion', name: 'Rodent Exclusion', amount: 900 },
+      { service: 'rodent_trapping', name: 'Rodent Trapping', amount: 400 },
       { service: 'trenching', name: 'Termite Trenching', amount: 1200 },
       { service: 'bora_care', name: 'Bora-Care Treatment', amount: 800 },
-      { service: 'termite_foam', name: 'Termite Foam Treatment', amount: 400 },
+      { service: 'foam_drill', name: 'Termite Foam Service', amount: 400 },
       { service: 'trap_only_rodent', name: 'Trap Only', amount: 250 },
       { service: 'mosquito_misting_installation', name: 'Misting System Installation', amount: 3000 },
+      { service: 'area_addon', name: 'Garage', addOnKey: 'garage', amount: 20 },
+      // A service row with a name and no key: nothing says which program it is.
+      { name: 'One-Time Pest Control', amount: 199 },
+      { service: 'custom_job', name: 'Attic work', amount: 500 },
     ];
-    for (const item of onSite) {
-      expect([item.service, serviceMixIsRemoteMeasured([pest], [item])]).toEqual([item.service, false]);
+    for (const item of offList) {
+      const label = item.service || item.name;
+      expect([label, serviceMixIsRemoteMeasured([pest], [item])]).toEqual([label, false]);
+      expect([label, serviceMixIsRemoteMeasured([], [oneTimePest, item])]).toEqual([label, false]);
     }
   });
 
-  test('it fails closed: no service row, and a service row that cannot be classified', () => {
+  test('it fails closed on an estimate with no service row', () => {
     expect(serviceMixIsRemoteMeasured([], [])).toBe(false);
     expect(serviceMixIsRemoteMeasured(null, undefined)).toBe(false);
-    expect(serviceMixIsRemoteMeasured([recurringRow('some_new_service')], [])).toBe(false);
-    expect(serviceMixIsRemoteMeasured([pest], [{ service: 'custom_job', name: 'Attic work', amount: 500 }])).toBe(false);
+    expect(serviceMixIsRemoteMeasured([null, 'pest_control'], [null])).toBe(false);
   });
 
   test('setup, discount and membership rows are not services: they neither count nor block', () => {
     const notServices = [
       { service: 'waveguard_setup', name: 'WaveGuard Setup', amount: 99 },
       { service: 'one_time_adjustment', name: 'Discount', amount: -20 },
+      { service: 'manual_discount', name: 'Manual discount', amount: -10 },
     ];
     expect(serviceMixIsRemoteMeasured([pest], notServices)).toBe(true);
     expect(serviceMixIsRemoteMeasured([pest, { service: 'waveguard_membership', name: 'WaveGuard Membership' }], [])).toBe(true);
-    // Rows that are not services do not make an estimate with no service a home-measured one.
+    // Rows that are not services do not make an estimate with no service a measured one.
     expect(serviceMixIsRemoteMeasured([], notServices)).toBe(false);
+    // A positive "other one-time services" remainder is real work nothing classified.
+    expect(serviceMixIsRemoteMeasured([pest], [{ service: 'one_time_adjustment', name: 'Other one-time services', amount: 75 }])).toBe(false);
+  });
+});
+
+describe('estimateIsRemoteMeasured: the rule reads every saved shape of the estimate', () => {
+  const plan = (...keys) => ({ recurring: { services: keys.map(recurringRow) } });
+
+  test('one saved shape, and two that agree, are read as they are', () => {
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ engineResult: plan('pest_control', 'lawn_care') }, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), engineResult: plan('pest_control') }, {})).toBe(true);
+  });
+
+  test('a service that only the second saved shape holds still counts', () => {
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), engineResult: plan('pest_control', 'rodent_bait') }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control', 'rodent_bait'), engineResult: plan('pest_control') }, {})).toBe(false);
+  });
+
+  test('the price snapshot\'s one-time rows count', () => {
+    const estData = { result: plan('pest_control') };
+    expect(estimateIsRemoteMeasured(estData, { oneTimeBreakdown: { items: [{ service: 'one_time_pest', name: 'One-Time Pest', amount: 199 }] } })).toBe(true);
+    expect(estimateIsRemoteMeasured(estData, { oneTimeBreakdown: { items: [{ service: 'german_roach', name: 'German Roach Cleanout Service', amount: 450 }] } })).toBe(false);
+  });
+
+  test('an authored proposal\'s rows count, and an estimate with nothing to read fails closed', () => {
+    const proposal = { enabled: true, programs: [{ name: 'Quarterly pest control', service: 'pest_control' }] };
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), proposal }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({}, {})).toBe(false);
+    expect(estimateIsRemoteMeasured(undefined, undefined)).toBe(false);
   });
 });
 
@@ -202,6 +270,25 @@ describe('GET /:token/data: noVisitLine', () => {
     expect(mixed.body.estimate.serviceCategory).toBe('bundle');
     expect(mixed.body.cta.terminalState).toBeNull();
     expect(mixed.body).not.toHaveProperty('noVisitLine');
+  });
+
+  test('a service only the second saved shape holds, and a one-time service off the list, carry none', async () => {
+    const secondShape = await pageLoad(estimateRow({
+      estimateData: { engineResult: { recurring: { services: [recurringRow('pest_control'), recurringRow('rodent_bait')] } } },
+    }));
+    expect(secondShape.status).toBe(200);
+    expect(secondShape.body.cta.terminalState).toBeNull();
+    expect(secondShape.body).not.toHaveProperty('noVisitLine');
+
+    const roach = await pageLoad(estimateRow({ oneTime: [{ service: 'german_roach', name: 'German Roach Cleanout Service', amount: 450, price: 450 }] }));
+    expect(roach.status).toBe(200);
+    expect(roach.body.cta.terminalState).toBeNull();
+    expect(roach.body).not.toHaveProperty('noVisitLine');
+
+    // The general one-time pest service is on the list, so the same estimate with that row keeps the line.
+    const oneTimePest = await pageLoad(estimateRow({ oneTime: [{ service: 'one_time_pest', name: 'One-Time Pest Control', amount: 199, price: 199 }] }));
+    expect(oneTimePest.body.cta.terminalState).toBeNull();
+    expect(oneTimePest.body.noVisitLine).toBe(NO_VISIT_QUOTE_LINE);
   });
 
   test('a service priced from what a technician measured on site carries none', async () => {

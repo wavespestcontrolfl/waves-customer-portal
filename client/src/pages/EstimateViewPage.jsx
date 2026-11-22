@@ -988,6 +988,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
   // satellite photo's place too, unless a misting layout is showing (misting wins). A photo that fails to load puts the
   // satellite photo back.
   const [roofPointsFailed, setRoofPointsFailed] = useState(false);
+  // The satellite photo that failed to load, by its URL, so a card that later gets another photo starts clean.
+  const [failedSatelliteUrl, setFailedSatelliteUrl] = useState(null);
   if (!intelligence) return null;
   const showMisting = Boolean(mistingLayout?.imageUrl) && !mistingFailed;
   const showRoofPoints = !showMisting && !roofPointsFailed && hasRoofPoints(roofPoints);
@@ -1000,9 +1002,10 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
   const satelliteUrl = showYourWork?.overlaySatelliteUrl || intelligence.satelliteUrl;
   // The owner's "no visit needed" sentence (2026-11-22, option B) sits under the satellite photo. The server decides who
   // gets it and sends the words (/data `noVisitLine`): an open home estimate whose every service Waves prices from the
-  // home measured remotely. The card adds one condition of its own: the satellite photo itself is the picture on the
-  // card. A staff-made picture in its place (misting layout, roof points) means a visit happened.
-  const showNoVisitLine = Boolean(noVisitLine) && Boolean(satelliteUrl) && !photoReplaced;
+  // measured home and yard alone. The card adds one condition of its own: the satellite photo itself is the picture on the
+  // card. A staff-made picture in its place (misting layout, roof points) means a visit happened, and a photo that did
+  // not load leaves the sentence with nothing to describe.
+  const showNoVisitLine = Boolean(noVisitLine) && Boolean(satelliteUrl) && !photoReplaced && failedSatelliteUrl !== satelliteUrl;
   const showYourWorkFacts = Array.isArray(showYourWork?.facts) ? showYourWork.facts : [];
 
   return (
@@ -1042,6 +1045,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
           src={resolveApiAssetUrl(satelliteUrl)}
           alt={`Satellite view of ${address || 'your property'}`}
           loading="lazy"
+          onError={() => setFailedSatelliteUrl(satelliteUrl)}
           style={{
             display: 'block',
             width: '100%',

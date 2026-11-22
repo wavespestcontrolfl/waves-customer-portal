@@ -24126,24 +24126,6 @@ function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = 
   return classified === 0;
 }
 
-// The estimate page's "no visit needed" line (owner 2026-11-22) says Waves measured the home and yard from county records
-// and satellite images. That is true of an estimate only when EVERY service on it is priced that way, so this reads the
-// rows the guarantee rule above reads and fails closed the same way. It returns false for a service priced from what a
-// technician measured on site (rodent work, a misting system, foam, trenching, pre-slab, Bora-Care, a WDO inspection,
-// traps), for a service row that cannot be classified, and for an estimate with no service row. Setup, discount and
-// credit rows are not services and never count.
-const REMOTE_MEASURED_SERVICE_CATEGORIES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait']);
-function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
-  const recurring = (Array.isArray(recurringServices) ? recurringServices : [])
-    .filter((svc) => svc && typeof svc === 'object' && !NON_SERVICE_RECURRING_KEY_RX.test(recurringServiceKey(svc) || ''))
-    .map((svc) => categoryForRecurringServiceKey(recurringServiceKey(svc)));
-  const oneTime = (Array.isArray(oneTimeItems) ? oneTimeItems : [])
-    .filter((item) => item && typeof item === 'object' && !isNonServiceOneTimeItem(item))
-    .map(serviceCategoryForOneTimeItem);
-  const categories = [...recurring, ...oneTime];
-  return categories.length > 0 && categories.every((category) => REMOTE_MEASURED_SERVICE_CATEGORIES.has(category));
-}
-
 // Inputs-only saves are rendered by replaying the engine, and the guarantee
 // decisions classify that same complete result (its one-time work included)
 // instead of treating a sellable recurring plan as empty or losing its
@@ -24218,6 +24200,35 @@ function guaranteeServiceRows(estData = {}, pricingBundle = {}) {
 function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
   const rows = guaranteeServiceRows(estData, pricingBundle);
   return rows ? serviceMixMakesNoGuaranteeClaim(rows.recurring, rows.oneTime) : true;
+}
+
+// The estimate page's "no visit needed" line (owner 2026-11-22) says Waves measured the home and yard from county records
+// and satellite images. That is true of an estimate only when EVERY service on it is priced that way. So the rule is an
+// exact list of service identities, not the display categories: a category also holds work priced from facts a
+// technician or the customer gives (a palm injection sits under tree and shrub; bed bug rooms, a roach cleanout, a flea
+// package and a stinging insect job sit under pest control). The lists are the programs priced from the measured
+// property alone: the recurring pest, lawn, tree and shrub, barrier mosquito and termite bait plans, and the general
+// one-time pest, lawn and mosquito services. It reads the rows the guarantee rule reads (guaranteeServiceRows: both
+// saved result shapes, an inputs-only replay, the price snapshot's one-time rows, an authored proposal's rows) and
+// fails closed the same way: one row off the lists, a commercial row, no service row at all, or a failed replay, and
+// the answer is false. Setup, discount and credit rows are not services and never count.
+const REMOTE_MEASURED_RECURRING_KEYS = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait']);
+const REMOTE_MEASURED_ONE_TIME_SERVICES = new Set(['one_time_pest', 'one_time_lawn', 'one_time_mosquito']);
+function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
+  const recurring = (Array.isArray(recurringServices) ? recurringServices : [])
+    .filter((svc) => svc && typeof svc === 'object')
+    .map((svc) => ({ key: String(recurringServiceKey(svc) || ''), commercial: svc.isCommercial === true }))
+    .filter(({ key }) => !NON_SERVICE_RECURRING_KEY_RX.test(key));
+  const oneTime = (Array.isArray(oneTimeItems) ? oneTimeItems : [])
+    .filter((item) => item && typeof item === 'object' && !isNonServiceOneTimeItem(item));
+  return recurring.length + oneTime.length > 0
+    && recurring.every(({ key, commercial }) => !commercial && REMOTE_MEASURED_RECURRING_KEYS.has(key))
+    && oneTime.every((item) => REMOTE_MEASURED_ONE_TIME_SERVICES.has(String(item.service || '').toLowerCase()));
+}
+
+function estimateIsRemoteMeasured(estData = {}, pricingBundle = {}) {
+  const rows = guaranteeServiceRows(estData, pricingBundle);
+  return rows ? serviceMixIsRemoteMeasured(rows.recurring, rows.oneTime) : false;
 }
 
 // Whether a guarantee line may cover the whole estimate: every service
@@ -32019,11 +32030,10 @@ async function composeEstimateDataPayload(estimate, {
       ...(await roofPointsDocBlock(estimate, { staffPreview: verifiedStaffPreview })),
       // "No visit needed" line (owner 2026-11-22, option B): the owner's sentence, printed under the satellite photo in
       // the Waves AI card. Page load only. The key is absent on the document render pass, on an accepted, declined,
-      // expired or quote-required estimate, when any service on the estimate is priced from what a technician measured
-      // on site, and for an estimate the estimate email's rule does not read as a home estimate (commercial, a proposal,
-      // a condo), so those responses stay byte-identical. Copy only: no prices.
-      ...(!isPdfRenderPass && ctaTerminalState === null
-        && serviceMixIsRemoteMeasured(recurringServicesForIntelligence, oneTimeItemsForCategory)
+      // expired or quote-required estimate, when any service on the estimate is not one Waves prices from the measured
+      // home and yard alone (estimateIsRemoteMeasured), and for an estimate the estimate email's rule does not read as a
+      // home estimate (commercial, a proposal, a condo), so those responses stay byte-identical. Copy only: no prices.
+      ...(!isPdfRenderPass && ctaTerminalState === null && estimateIsRemoteMeasured(estimateDataForIntelligence, pricingBundle)
         ? noVisitLinePageBlock(estimate)
         : {}),
       // Authored commercial proposal, rendered on-page under the commercial
@@ -33114,6 +33124,7 @@ module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice
 module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
 module.exports.serviceMixMakesNoGuaranteeClaim = serviceMixMakesNoGuaranteeClaim;
 module.exports.serviceMixIsRemoteMeasured = serviceMixIsRemoteMeasured;
+module.exports.estimateIsRemoteMeasured = estimateIsRemoteMeasured;
 module.exports.estimateMakesNoGuaranteeClaim = estimateMakesNoGuaranteeClaim;
 module.exports.estimateCarriesPlanTerms = estimateCarriesPlanTerms;
 module.exports.estimateHasCommercialScope = estimateHasCommercialScope;

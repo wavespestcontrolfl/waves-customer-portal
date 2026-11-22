@@ -82,7 +82,7 @@ function noVisitLineForSend(reviewedMessages, lineNow) {
 // The estimate page's copy of the line (owner 2026-11-22, option B: under the satellite photo in the Waves AI card). It is
 // the `noVisitLine` key of GET /api/estimates/:token/data, and it is there only for an estimate the email's rule above
 // reads as a home estimate, so the page and the email never disagree about who is a home customer. The route asks only
-// for an open estimate whose every service is priced from the home measured remotely (serviceMixIsRemoteMeasured in
+// for an open estimate whose every service is priced from the measured home and yard alone (estimateIsRemoteMeasured in
 // routes/estimate-public.js). A row that cannot be read gets no key, never a failed page.
 function noVisitLinePageBlock(estimate) {
   try {

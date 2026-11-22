@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 // The "no visit needed" sentence on the customer estimate page (owner 2026-11-22, option B: under the satellite photo in
 // the Waves AI card). The server decides who gets it and sends the words (GET /api/estimates/:token/data `noVisitLine`).
-// The card prints them only while the satellite photo itself is the picture on the card: a card with no photo, and a card
-// whose photo a staff-made picture replaced (roof points), never show them.
+// The card prints them only while the satellite photo itself is the picture on the card: a card with no photo, a card
+// whose photo did not load, and a card whose photo a staff-made picture replaced (roof points), never show them.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage from './EstimateViewPage';
 
@@ -98,6 +98,15 @@ describe('estimate page: the "no visit needed" sentence on the Waves AI card', (
   it('prints nothing when the card has no satellite photo', async () => {
     await renderPage(payload({ satelliteUrl: null }));
     expect(screen.getByText(LEAD)).toBeInTheDocument();
+    expect(screen.queryByTestId('no-visit-line')).toBeNull();
+    expect(document.body.textContent).not.toContain(LINE);
+  });
+
+  it('takes the sentence away when the satellite photo fails to load', async () => {
+    await renderPage(payload());
+    const photo = await screen.findByAltText('Satellite view of 77 Preview Lane');
+    expect(screen.getByTestId('no-visit-line')).toHaveTextContent(LINE);
+    fireEvent.error(photo);
     expect(screen.queryByTestId('no-visit-line')).toBeNull();
     expect(document.body.textContent).not.toContain(LINE);
   });
