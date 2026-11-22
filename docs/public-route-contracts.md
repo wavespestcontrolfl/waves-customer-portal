@@ -3477,7 +3477,11 @@ price on the portal offer card, the portal pricing card, the plan start and
 the one-tap purchase) is computed with the photo's shrubs, complexity and
 near-water facts when the property lookup's only doubt is the lawn area,
 in place of the neutral defaults (a fact the vision providers disputed
-keeps its default). It can also add the engine's hand-check
+keeps its default). An estimate minted from that offer keeps the facts in
+`engineInputs`, so the estimate page (`GET /api/estimates/:token/data`)
+prices the same plan rate; when staff turn on its one-time choice, that
+amount is computed from the quarterly rate as before and so follows it.
+It can also add the engine's hand-check
 mark to a pest line (heavy shrubs with a complex landscape), and such an
 offer degrades to the quote CTA as any held price does. Off or unset: the
 price of today.

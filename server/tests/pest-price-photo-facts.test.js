@@ -9,9 +9,10 @@
  * mosquito price would move by a whole tier); (2) a photo that conflicts with
  * county records, a weak or unscored photo, a photo with no lawn number of
  * its own, a flagged feature read, or a fact the vision providers disputed
- * starts to price; (3) the gate off changes any price; (4) a one-time pest
- * price on the same estimate moves with the recurring line; (5) a "no water"
- * word the map does not know adds the near-water charge.
+ * starts to price; (3) the gate off changes any price; (4) the one-time pest
+ * price beside a plan stops following the plan's quarterly rate, or a
+ * one-time job priced alone starts to read the facts; (5) a "no water" word
+ * the map does not know adds the near-water charge.
  *
  * Gap in existing proof: customer-pricing-ai.test.js proves a flagged read
  * drops every feature; nothing covered a per-line exception.
@@ -225,14 +226,23 @@ describe('pricing engine: input.pestPhotoFacts', () => {
     expect(line(withFacts, 'mosquito')).toEqual(line(base, 'mosquito'));
   });
 
-  // The one-time pest price anchors on the recurring line's quarterly rate.
-  // Photo facts are for the recurring line alone.
-  test.each(['quarterly', 'monthly'])('a one-time pest price on the same estimate does not move (%s plan)', (frequency) => {
+  // A one-time pest price is the recurring quarterly rate times a multiplier.
+  // Beside a recurring pest line it is computed from that line's rate, so it
+  // follows the photo facts exactly as it follows the same facts in
+  // `features` (a staff estimate). One rate for the plan and the one-time
+  // price beside it.
+  test.each(['quarterly', 'monthly'])('a one-time pest line beside the %s plan follows the plan rate, as with features', (frequency) => {
     const mixed = { ...input, services: { pest: { frequency }, oneTimePest: {} } };
-    const base = generateEstimate(mixed);
     const withFacts = generateEstimate({ ...mixed, pestPhotoFacts: facts });
-    expect(line(withFacts, 'one_time_pest')).toEqual(line(base, 'one_time_pest'));
-    expect(line(withFacts, 'pest_control').perApp).not.toBe(line(base, 'pest_control').perApp);
+    const viaFeatures = generateEstimate({ ...mixed, features: facts });
+    expect(line(withFacts, 'one_time_pest').price).toBe(line(viaFeatures, 'one_time_pest').price);
+    expect(line(withFacts, 'pest_control').perApp).toBe(line(viaFeatures, 'pest_control').perApp);
+  });
+
+  test('a one-time pest job priced alone never reads the key', () => {
+    const alone = { ...input, services: { oneTimePest: {} } };
+    expect(line(generateEstimate({ ...alone, pestPhotoFacts: facts }), 'one_time_pest'))
+      .toEqual(line(generateEstimate(alone), 'one_time_pest'));
   });
 
   test('an unknown value leaves the feature as it was', () => {
