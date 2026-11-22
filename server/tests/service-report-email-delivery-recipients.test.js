@@ -223,6 +223,33 @@ describe('service report email recipient delivery', () => {
     }
   });
 
+  // The report's offer is quote-only: the report page lets the customer ask
+  // for a quote, so the line must not say "Add" or "Start".
+  test('a quote-only offer on the report: the line asks for a quote', async () => {
+    const gates = require('../config/feature-gates');
+    const gateSpy = jest.spyOn(gates, 'isEnabled')
+      .mockImplementation((key) => ['docCrossSellEmail', 'reportCrossSell'].includes(key));
+    const offerSpy = jest.spyOn(require('../services/service-report/cross-sell-record'), 'buildCrossSellForServiceRecord')
+      .mockResolvedValue({ serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'quote_cta', relationship: 'add', option: null });
+    const referralSpy = jest.spyOn(require('../services/referral-share'), 'composeReferralCard').mockResolvedValue(null);
+    const pitchSpy = jest.spyOn(require('../services/email-division/eligibility'), 'embeddedPitchAllowed').mockResolvedValue(true);
+    const referralAskSpy = jest.spyOn(require('../services/email-division/eligibility'), 'embeddedReferralAskAllowed').mockResolvedValue(true);
+    try {
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+      await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      const byEmail = Object.fromEntries(EmailTemplateLibrary.sendTemplate.mock.calls.map(([args]) => [args.to, args.bodyAppend]));
+      expect(byEmail['owner@example.com'].text).toMatch(/^Get a quote for lawn care from your report: /);
+      expect(byEmail['owner@example.com'].text).not.toMatch(/Add lawn care|Start lawn care/);
+    } finally {
+      gateSpy.mockRestore();
+      offerSpy.mockRestore();
+      referralSpy.mockRestore();
+      pitchSpy.mockRestore();
+      referralAskSpy.mockRestore();
+    }
+  });
+
   // The referral part is a referral ask by email (pre-push audit P1
   // 2026-11-22): a customer who turned referral nudges off, or takes them by
   // text only, gets the service offer without it.

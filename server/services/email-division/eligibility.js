@@ -276,18 +276,33 @@ function prefsAllowPitch(prefs) {
   return prefs?.marketing_offers === true && channelFor(prefs, 'marketing_channel') !== 'sms';
 }
 
-// May an OPERATIONAL email to this customer carry a promotional line? The
-// embedded-pitch rule (checks.allowPitch below), for a sender outside the
-// eligibleForEmail pipeline (the receipt and service-report emails'
-// add-a-service line): marketing offers on, a marketing channel that
-// includes email, and no active marketing unsubscribe for the address. Any
-// other answer, a missing prefs row included, is no.
-async function embeddedPitchAllowed({ customerId, email, conn } = {}) {
-  if (!customerId || !email) return false;
-  const database = conn || db;
-  const prefs = await database('notification_prefs').where({ customer_id: customerId }).first();
-  if (!prefsAllowPitch(prefs)) return false;
-  return (await activeSuppressionsFor(null, email, 'marketing_newsletter', database)).length === 0;
+// May an OPERATIONAL email to this customer carry a promotional line? For a
+// sender outside the eligibleForEmail pipeline (the receipt and
+// service-report emails' add-a-service line). It runs the pipeline's own
+// contact checks, in the pipeline's order, as an operational email of this
+// customer meets them: the customer row, a staff do-not-contact, a global or
+// operational suppression, the email switch. The last check also gives the
+// pipeline's embedded-pitch verdict (checks.allowPitch: marketing offers on,
+// a marketing channel that includes email, no marketing unsubscribe).
+// → the checked context, or null when a check says no. The suppression reads
+// cover `email`, the address the line rides.
+const EMBEDDED_LINE_HOST = { stream: 'lifecycle', marketingClass: 'relationship', emailKey: 'embedded-line-host' };
+async function embeddedLineContext({ customerId, email, conn } = {}) {
+  if (!customerId || !email) return null;
+  const ctx = { ...EMBEDDED_LINE_HOST, customerId, database: conn || db, checks: {} };
+  if (await checkCustomer(ctx)) return null;
+  ctx.customer = { ...ctx.customer, email };
+  for (const check of [checkStaffDnc, checkSuppression, checkEmailSwitchStreamFlagAndChannel]) {
+    if (await check(ctx)) return null;
+  }
+  return ctx;
+}
+
+// The add-a-service part of that line: the pipeline's embedded-pitch verdict.
+// Any other answer, a missing prefs row included, is no.
+async function embeddedPitchAllowed(who = {}) {
+  const ctx = await embeddedLineContext(who);
+  return Boolean(ctx?.checks.allowPitch);
 }
 
 // The referral part of that line is also a referral ask by email, so it
@@ -297,14 +312,13 @@ async function embeddedPitchAllowed({ customerId, email, conn } = {}) {
 // Asked after embeddedPitchAllowed said yes; a no here drops the referral
 // part only, so an allowed service offer still rides the line.
 const REFERRAL_ASK_KEY = 'lc.referral';
-async function embeddedReferralAskAllowed({ customerId, email, conn } = {}) {
-  if (!customerId || !email) return false;
-  const database = conn || db;
-  const prefs = await database('notification_prefs').where({ customer_id: customerId }).first();
-  if (!streamFlagOk('lifecycle', REFERRAL_ASK_KEY, prefs)) return false;
-  if (streamChannelBlocksEmail('lifecycle', REFERRAL_ASK_KEY, prefs)) return false;
+async function embeddedReferralAskAllowed(who = {}) {
+  const ctx = await embeddedLineContext(who);
+  if (!ctx) return false;
+  if (!streamFlagOk('lifecycle', REFERRAL_ASK_KEY, ctx.prefs)) return false;
+  if (streamChannelBlocksEmail('lifecycle', REFERRAL_ASK_KEY, ctx.prefs)) return false;
   const group = groupKeyFor('lifecycle', REFERRAL_ASK_KEY);
-  return (await activeSuppressionsFor(null, email, group, database)).length === 0;
+  return (await activeSuppressionsFor(null, who.email, group, ctx.database)).length === 0;
 }
 
 async function checkEmailSwitchStreamFlagAndChannel(ctx) {

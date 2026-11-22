@@ -12,6 +12,10 @@ const { docOfferEmailLine, joinBodyAppends } = require('../services/doc-offer-em
 // the cut-down link card. The line reads label and relationship only.
 const OFFER = { serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', option: { perVisit: 62.5 } };
 const LINK_CARD = { label: 'Lawn Care', relationship: 'add', perApplication: 62.5 };
+// Quote-only: the report's offer says so in its mode, a link page's card by
+// carrying no per-application price.
+const QUOTE_OFFER = { serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'quote_cta', relationship: 'add', option: null };
+const QUOTE_CARD = { label: 'Lawn Care', relationship: 'add' };
 const REFERRAL = { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' };
 const URL = 'https://portal.example/report/abc';
 const APP = { offer: 'https://portal.example/?tab=billing', referral: 'https://portal.example/?tab=refer' };
@@ -28,6 +32,11 @@ describe('a page that holds the cards (the service report)', () => {
     [{ crossSell: { ...OFFER, relationship: 'start' }, referral: REFERRAL }, 'Start lawn care or refer a friend from your report'],
     [{ crossSell: { ...OFFER, relationship: 'start' } }, 'Start lawn care from your report'],
     [{ crossSell: { ...OFFER, relationship: 'add' } }, 'Add lawn care to your plan from your report'],
+    // A quote-only offer: the page lets the customer ask for a quote, not add
+    // or start the service, so the line must not say "Add" or "Start".
+    [{ crossSell: QUOTE_OFFER, referral: REFERRAL }, 'Get a quote for lawn care or refer a friend from your report'],
+    [{ crossSell: QUOTE_OFFER }, 'Get a quote for lawn care from your report'],
+    [{ crossSell: { ...QUOTE_OFFER, relationship: 'start' } }, 'Get a quote for lawn care from your report'],
   ])('names only what the page shows: %j', (cards, lead) => {
     const line = docOfferEmailLine({ ...cards, url: URL, place: 'report' });
     expect(line.text).toBe(`${lead}: ${URL}`);
@@ -67,6 +76,25 @@ describe('the Waves app (the receipt email)', () => {
   test('a customer with no plan reads "Start"', () => {
     const line = docOfferEmailLine({ crossSell: { ...LINK_CARD, relationship: 'start' }, appUrls: APP });
     expect(line.text).toBe(`Start lawn care in the Waves app: ${APP.offer}`);
+  });
+
+  // The app shows a quote-only offer as a quote request. The line says so,
+  // in its words and in its link.
+  test.each([
+    ['with the referral card', { crossSell: QUOTE_CARD, referral: REFERRAL }, `Get a quote for lawn care in the Waves app: ${APP.offer}\nTo refer a friend, get your referral link: ${APP.referral}`],
+    ['alone', { crossSell: QUOTE_CARD }, `Get a quote for lawn care in the Waves app: ${APP.offer}`],
+    ['for a customer with no plan', { crossSell: { ...QUOTE_CARD, relationship: 'start' } }, `Get a quote for lawn care in the Waves app: ${APP.offer}`],
+  ])('a quote-only offer %s asks for a quote, never "Add" or "Start"', (_label, cards, text) => {
+    const line = docOfferEmailLine({ ...cards, appUrls: APP });
+    expect(line.text).toBe(text);
+    expect(line.html).toContain('>ask for a quote</a>');
+    expect(`${line.text}${line.html}`).not.toMatch(/Add |Start |see your offer/);
+  });
+
+  test('a priced offer keeps its own link words', () => {
+    const line = docOfferEmailLine({ crossSell: LINK_CARD, appUrls: APP });
+    expect(line.html).toContain('>see your offer</a>');
+    expect(line.html).not.toContain('ask for a quote');
   });
 
   test('never a price, and no cards means no line', () => {

@@ -446,9 +446,12 @@ describe('email-division eligibility', () => {
     };
     const allowed = ({
       prefs = { marketing_offers: true }, suppressions = [], email = 'sandy@example.test', customerId = 'cust-1',
+      customer = customerRow(), dnc,
     } = {}) => {
       db.mockImplementation((table) => {
         const map = {
+          customers: chain({ first: customer }),
+          messaging_suppression: chain({ first: dnc }),
           notification_prefs: chain({ first: prefs }),
           email_suppressions: chain({ result: suppressions }),
         };
@@ -469,6 +472,14 @@ describe('email-division eligibility', () => {
       ['no prefs row', { prefs: null }],
       ['marketing by text only', { prefs: { marketing_offers: true, marketing_channel: 'sms' } }],
       ['a marketing unsubscribe on the address', { suppressions: [MARKETING_UNSUBSCRIBE] }],
+      // The pipeline's own contact checks run first (pre-push audit P1
+      // 2026-11-22): a customer who turned email off still gets the receipt,
+      // without promotional copy.
+      ['the email switch off', { prefs: { email_enabled: false, marketing_offers: true, referral_channel: 'email' } }],
+      ['a staff do-not-contact on the customer\'s phone', { dnc: { phone: '+19415550100' } }],
+      ['a removed customer', { customer: customerRow({ deleted_at: '2026-11-01T00:00:00Z' }) }],
+      ['no customer row', { customer: null }],
+      ['a bounce on the address', { suppressions: [{ email: 'sandy@example.test', group_key: 'service_operational', suppression_type: 'bounce', status: 'active' }] }],
       ['no address', { email: '' }],
       ['no customer', { customerId: null }],
     ])('%s: no', async (_label, world) => {
@@ -501,9 +512,12 @@ describe('email-division eligibility', () => {
     };
     const allowed = ({
       prefs = { referral_channel: 'email' }, suppressions = [], email = 'sandy@example.test', customerId = 'cust-1',
+      customer = customerRow(), dnc,
     } = {}) => {
       db.mockImplementation((table) => {
         const map = {
+          customers: chain({ first: customer }),
+          messaging_suppression: chain({ first: dnc }),
           notification_prefs: chain({ first: prefs }),
           email_suppressions: chain({ result: suppressions }),
         };
@@ -527,6 +541,13 @@ describe('email-division eligibility', () => {
       ['no referral channel chosen', { prefs: { referral_nudge: true } }],
       ['no prefs row', { prefs: null }],
       ['a referral unsubscribe on the address', { suppressions: [REFERRAL_UNSUBSCRIBE] }],
+      // The pipeline's own contact checks run first (pre-push audit P1
+      // 2026-11-22): a customer who turned email off still gets the receipt,
+      // without promotional copy.
+      ['the email switch off', { prefs: { email_enabled: false, marketing_offers: true, referral_channel: 'email' } }],
+      ['a staff do-not-contact on the customer\'s phone', { dnc: { phone: '+19415550100' } }],
+      ['a removed customer', { customer: customerRow({ deleted_at: '2026-11-01T00:00:00Z' }) }],
+      ['no customer row', { customer: null }],
       ['a bounce on the address', { suppressions: [BOUNCE] }],
       ['no address', { email: '' }],
       ['no customer', { customerId: null }],

@@ -365,6 +365,17 @@ describe('invoice.receipt: the add-a-service line follows the marketing email ch
     expect(args.bodyAppend?.text || '').not.toMatch(/lawn care|refer|Waves app/i);
   });
 
+  // The receipt's card is quote-only (no per-application price): the app lets
+  // the customer ask for a quote, so the line must not say "Add".
+  test('a quote-only offer on the receipt: the line asks for a quote', async () => {
+    pitchSpy.mockResolvedValue(true);
+    cardsSpy.mockResolvedValue({ crossSell: { label: 'Lawn Care', relationship: 'add' } });
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.bodyAppend.text).toMatch(/^Get a quote for lawn care in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing$/);
+    expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/Add |Start |see your offer/);
+  });
+
   test('a receipt with no referral card never asks the referral choice', async () => {
     pitchSpy.mockResolvedValue(true);
     cardsSpy.mockResolvedValue({ crossSell: CARDS.crossSell });

@@ -25,26 +25,36 @@ function escapeHtml(value) {
 
 const link = (url, words) => `<a class="dm-link" href="${escapeHtml(url)}" style="color:#0A7EC2;text-decoration:underline;">${escapeHtml(words)}</a>`;
 
-// relationship 'start': the customer has no recurring plan to add to (the
-// card says the same).
+// Can the customer add or start this offer where the link goes, or only ask
+// for a quote? The report's offer says so in `mode`; a link page's card says
+// so by carrying a per-application price or none.
+function offerIsPriced(crossSell) {
+  if (crossSell.mode !== undefined) return crossSell.mode === 'priced';
+  return Number(crossSell.perApplication) > 0;
+}
+
+// The line must not promise more than its link gives: a quote-only offer is
+// asked for, never added or started. relationship 'start': the customer has
+// no recurring plan to add to (the card says the same).
 function offerAsk(crossSell) {
   const label = crossSell?.label ? String(crossSell.label).toLowerCase() : '';
   if (!label) return '';
+  if (!offerIsPriced(crossSell)) return `Get a quote for ${label}`;
   return crossSell.relationship === 'start' ? `Start ${label}` : `Add ${label} to your plan`;
 }
 
-function appLine(ask, referral, appUrls) {
+function appLine(ask, offerLinkWords, referral, appUrls) {
   const offerUrl = ask ? appUrls.offer : null;
   const referralUrl = referral ? appUrls.referral : null;
   if (offerUrl && referralUrl) {
     return {
-      html: `${escapeHtml(ask)} in the Waves app: ${link(offerUrl, 'see your offer')}. To refer a friend, ${link(referralUrl, 'get your referral link')}.`,
+      html: `${escapeHtml(ask)} in the Waves app: ${link(offerUrl, offerLinkWords)}. To refer a friend, ${link(referralUrl, 'get your referral link')}.`,
       text: `${ask} in the Waves app: ${offerUrl}\nTo refer a friend, get your referral link: ${referralUrl}`,
     };
   }
   if (offerUrl) {
     return {
-      html: `${escapeHtml(ask)} in the Waves app: ${link(offerUrl, 'see your offer')}.`,
+      html: `${escapeHtml(ask)} in the Waves app: ${link(offerUrl, offerLinkWords)}.`,
       text: `${ask} in the Waves app: ${offerUrl}`,
     };
   }
@@ -61,7 +71,7 @@ function appLine(ask, referral, appUrls) {
 function docOfferEmailLine({ crossSell = null, referral = null, url = null, place = null, appUrls = null }) {
   if (!require('../config/feature-gates').isEnabled('docCrossSellEmail')) return null;
   const ask = offerAsk(crossSell);
-  if (appUrls) return appLine(ask, referral, appUrls);
+  if (appUrls) return appLine(ask, ask && !offerIsPriced(crossSell) ? 'ask for a quote' : 'see your offer', referral, appUrls);
   if (!url || !place) return null;
   let lead;
   if (ask && referral) lead = `${ask} or refer a friend from your ${place}`;
