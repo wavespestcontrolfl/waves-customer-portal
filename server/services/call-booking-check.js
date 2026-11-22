@@ -123,14 +123,17 @@ function takesNoCallPrice(visit) {
     || require('./assessment-booking').isAssessmentServiceRow(row);
 }
 
-// Whether the reading's total can be a one-time total, by the price terms the caller accepted: none at all (an
-// older reading carries only the total), or exactly one, with the total's own exact amount and the one-time
+// Whether the reading's total can be a one-time total, by its price terms: none at all (an older reading
+// carries only the total), or exactly one accepted term, with the total's own exact amount and the one-time
 // unit. "$90" next to an accepted "$90 per quarter" is a plan rate; a second accepted term, a range or a term
-// with no unit leaves the visit's share unknown.
+// with no unit leaves the visit's share unknown; and terms of which the caller accepted none (a declined
+// price) contradict a total.
 function totalIsOneTime(request) {
-  const accepted = (Array.isArray(request.prices) && request.prices.length ? request.prices : [request.price])
-    .filter((entry) => entry && typeof entry === 'object' && entry.accepted === true);
-  if (!accepted.length) return true;
+  const terms = (Array.isArray(request.prices) && request.prices.length ? request.prices : [request.price])
+    .filter((entry) => entry && typeof entry === 'object'
+      && (typeof entry.amount_usd === 'number' || typeof entry.amount_max_usd === 'number' || entry.accepted === true));
+  if (!terms.length) return true;
+  const accepted = terms.filter((entry) => entry.accepted === true);
   const [term] = accepted;
   return accepted.length === 1 && term.unit === 'one_time' && term.amount_max_usd == null && term.amount_usd === request.quoted_price_usd;
 }
@@ -168,10 +171,11 @@ function readingPrice(reading, catalogRow) {
 //            one-time service, a free re-service, a Waves Assessment, a free callback);
 //   unknown  the visit has no catalog row, the reading cannot be read, holds no price or disputes its own
 //            price, or the price cannot be tied to this visit as a one-time charge: the reading names another
-//            service than the visit's, the call spoke of a second service or a second property (the reading's
+//            service than the visit's or a name the catalog holds under two billing types (`billingByName`,
+//            as in judgeService), the call spoke of a second service or a second property (the reading's
 //            price block does not say which job a price covers), or the reading records a plan ask or the
 //            caller's choice of a plan's billing (the price can be the plan's).
-function judgePrice(visit) {
+function judgePrice(visit, billingByName) {
   // A stored price settles it, whatever else can be read (a visit whose catalog row is gone, too).
   if (visitHasPrice(visit)) return { verdict: 'agrees' };
   if (!visit.row_billing_type) return { verdict: 'unknown' };
@@ -179,7 +183,8 @@ function judgePrice(visit) {
   const reading = visit.v2_extraction_status === 'valid' ? readingOf(visit) : null;
   const request = reading && reading.service_request;
   if (!request || typeof request !== 'object') return { verdict: 'unknown' };
-  if (!nameKey(visit.row_name) || nameKey(request.specific_service_name) !== nameKey(visit.row_name)) return { verdict: 'unknown' };
+  const heardKey = nameKey(request.specific_service_name);
+  if (heardKey !== nameKey(visit.row_name) || billingByName.get(heardKey) !== 'one_time') return { verdict: 'unknown' };
   const others = [request.secondary_categories, reading.property && reading.property.additional_properties];
   if (others.some((list) => Array.isArray(list) && list.length)) return { verdict: 'unknown' };
   if (request.service_intent === 'recurring_membership_inquiry' || require('./call-prepay-choice').billingChoiceOf(reading)) return { verdict: 'unknown' };
@@ -191,7 +196,7 @@ function judgePrice(visit) {
 function problemOf(visit, billingByName) {
   const service = judgeService(visit, billingByName);
   if (service.verdict === 'problem') return { kind: 'service', heard: service.heard };
-  const { verdict, ...facts } = judgePrice(visit);
+  const { verdict, ...facts } = judgePrice(visit, billingByName);
   return verdict === 'problem' ? { kind: 'price', ...facts } : null;
 }
 
@@ -202,7 +207,7 @@ function closeKeyFor(kind, visit, billingByName) {
   if (!visit) return 'gone';
   if (CLOSED_VISIT_STATUSES.has(String(visit.status))) return 'visitClosed';
   if (kind === 'price') {
-    if (judgePrice(visit).verdict !== 'agrees') return null;
+    if (judgePrice(visit, billingByName).verdict !== 'agrees') return null;
     return visitHasPrice(visit) ? 'price' : 'noPriceNeeded';
   }
   return judgeService(visit, billingByName).verdict === 'agrees' ? kind : null;

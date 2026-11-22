@@ -95,13 +95,13 @@ const ASSESSMENT_AND_RE_SERVICE = [
 ];
 
 describe('what a visit and the reading of its call say about the price', () => {
-  const verdict = (row) => judgePrice(row).verdict;
+  const verdict = (row) => judgePrice(row, BILLING).verdict;
 
   test('a one-time visit with no price for a call that holds a price for that job: problem', () => {
-    expect(judgePrice(unpriced())).toEqual({ verdict: 'problem', amount: 250, agreed: false });
+    expect(judgePrice(unpriced(), BILLING)).toEqual({ verdict: 'problem', amount: 250, agreed: false });
     // The total the call agreed outranks any term.
-    expect(judgePrice(totalAs())).toEqual({ verdict: 'problem', amount: 350, agreed: true });
-    expect(judgePrice(pricedAs({ quoted_price_usd: 149.5, prices: [] }))).toEqual({ verdict: 'problem', amount: 149.5, agreed: true });
+    expect(judgePrice(totalAs(), BILLING)).toEqual({ verdict: 'problem', amount: 350, agreed: true });
+    expect(judgePrice(pricedAs({ quoted_price_usd: 149.5, prices: [] }), BILLING)).toEqual({ verdict: 'problem', amount: 149.5, agreed: true });
     // The stored reading may be a JSON string, and the name may carry stray spaces or another case.
     expect(verdict(unpriced({ ai_extraction_enriched: JSON.stringify(pricedReading()) }))).toBe('problem');
     expect(verdict(pricedAs({ specific_service_name: ' one-time  pest control SERVICE ' }))).toBe('problem');
@@ -109,13 +109,13 @@ describe('what a visit and the reading of its call say about the price', () => {
 
   test('a total reads as agreed only when the reading does not mark it as changed after it was accepted', () => {
     const proofs = { price_offered_by_staff: true, price_accepted_by_caller: true };
-    expect(judgePrice(totalAs({ ...proofs, price_is_final: true }))).toEqual({ verdict: 'problem', amount: 350, agreed: true });
+    expect(judgePrice(totalAs({ ...proofs, price_is_final: true }), BILLING)).toEqual({ verdict: 'problem', amount: 350, agreed: true });
     // An older reading carries no proof fields.
-    expect(judgePrice(totalAs()).agreed).toBe(true);
+    expect(judgePrice(totalAs(), BILLING).agreed).toBe(true);
     // A later correction or an added charge: the number is shown, never as the agreed total.
-    expect(judgePrice(totalAs({ ...proofs, price_is_final: false }))).toEqual({ verdict: 'problem', amount: 350, agreed: false });
+    expect(judgePrice(totalAs({ ...proofs, price_is_final: false }), BILLING)).toEqual({ verdict: 'problem', amount: 350, agreed: false });
     // The 2026-11-21 reading: no total, the proof fields speak of a total that is not there. The stated price stands.
-    expect(judgePrice(pricedAs({ price_offered_by_staff: false, price_accepted_by_caller: null, price_is_final: false, price_discussed: true })))
+    expect(judgePrice(pricedAs({ price_offered_by_staff: false, price_accepted_by_caller: null, price_is_final: false, price_discussed: true }), BILLING))
       .toEqual({ verdict: 'problem', amount: 250, agreed: false });
   });
 
@@ -182,8 +182,11 @@ describe('what a visit and the reading of its call say about the price', () => {
     expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350 }), statedTerm({ amount_usd: 31, unit: 'per_month' })] }))).toBe('unknown');
     expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350, amount_max_usd: 400 })] }))).toBe('unknown');
     expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 250 })] }))).toBe('unknown');
-    // A term nobody accepted does not count against the total.
+    // A term nobody accepted does not count against the total, next to the one the caller accepted.
     expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350 }), statedTerm({ amount_usd: 99, unit: 'per_month', accepted: false })] }))).toBe('problem');
+    // Terms of which the caller accepted none contradict a total: the price was declined, or got no answer.
+    expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350, accepted: false, caller_response: 'declined' })] }))).toBe('unknown');
+    expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350, accepted: null, caller_response: 'no_response' })] }))).toBe('unknown');
   });
 
   test('unknown when the reading records a plan ask or a plan billing choice: the price can be the plan\'s', () => {
@@ -205,6 +208,10 @@ describe('what a visit and the reading of its call say about the price', () => {
     expect(verdict(unpriced({ row_name: 'Rodent Exclusion Service', service_type: 'Rodent Exclusion Service' }))).toBe('unknown');
     expect(verdict(pricedAs({ specific_service_name: 'Cockroach Treatment Service' }))).toBe('unknown');
     expect(verdict(pricedAs({ specific_service_name: null }))).toBe('unknown');
+    // The catalog holds the name under two billing types: the price can be the plan's.
+    expect(verdict(namedVisit('Shared Name', 'shared_one_time'))).toBe('unknown');
+    // The catalog does not hold the name the visit and the reading share.
+    expect(verdict(namedVisit('Some Service Nobody Sells', 'nobody'))).toBe('unknown');
     // The call spoke of a second property: the price can be the other one's.
     expect(verdict(pricedAs({}, { property: { additional_properties: [{ city: 'Venice' }] } }))).toBe('unknown');
     expect(verdict(totalAs({}, { property: { additional_properties: [{ city: 'Venice' }] } }))).toBe('unknown');
