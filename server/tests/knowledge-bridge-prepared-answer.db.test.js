@@ -56,6 +56,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     dispatch.mockReset();
     mockCreate.mockReset();
     KnowledgeBridge._test.preparedAnswers.clear();
+    KnowledgeBridge._test.preparedCalls.clear();
     await db.knex('knowledge_base').del();
   });
 
@@ -82,7 +83,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
   };
   const answersWith = (...summaries) => summaries.forEach((summary) => dispatch.mockResolvedValueOnce({ ok: true, json: answer(summary) }));
   // The answers one assessment holds, oldest first.
-  const held = (id) => [...KnowledgeBridge._test.preparedAnswers.get(id).answers.values()];
+  const held = (id) => [...KnowledgeBridge._test.preparedAnswers.get(id).values()];
 
   test('the same scores and products: the grounded run makes no call and stores the prepared answer as grounded', async () => {
     const assessment = await seedAssessment();
@@ -266,6 +267,11 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     await expect(KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FUNGICIDE])).resolves.toEqual({ started: false });
     // A prompt asked before is still answered from what is held.
     await expect(KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER])).resolves.toEqual({ started: true });
+    expect(dispatch).toHaveBeenCalledTimes(5);
+
+    // The limit holds after newer assessments pushed this one's answers out.
+    KnowledgeBridge._test.preparedAnswers.delete(assessment.id);
+    await expect(KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER])).resolves.toEqual({ started: false });
     expect(dispatch).toHaveBeenCalledTimes(5);
   });
 

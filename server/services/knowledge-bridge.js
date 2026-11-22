@@ -760,10 +760,15 @@ Return a JSON object with:
 const PREPARED_ANSWER_TTL_MS = 30 * 60 * 1000;
 const PREPARED_ANSWER_MAX = 100;
 const PREPARED_CALLS_MAX = 5;
-const _preparedAnswers = new Map(); // assessmentId -> { calls, answers: Map<promptKey, { at, answer: Promise<string|null> }> }
+const PREPARED_CALLS_KEPT = 10000;
+const _preparedAnswers = new Map(); // assessmentId -> Map<promptKey, { at, answer: Promise<string|null> }>
+// The early calls made for an assessment, in a map of its own: the count stays
+// when the answers are used or pushed out by newer assessments.
+const _preparedCalls = new Map(); // assessmentId -> number
+const dropOldest = (map, max) => { while (map.size > max) map.delete(map.keys().next().value); };
 
 function heldPreparedAnswer(held, promptKey) {
-  const one = held?.answers.get(promptKey);
+  const one = held?.get(promptKey);
   return one && Date.now() - one.at <= PREPARED_ANSWER_TTL_MS ? one : null;
 }
 
@@ -1236,7 +1241,8 @@ const KnowledgeBridge = {
   // sheet is about to record, as the completion will save them:
   // { product_name, product_category }. Returns as soon as the call is running.
   // One prompt is asked once in 30 minutes (answered, running or failed), and
-  // one assessment gets at most PREPARED_CALLS_MAX calls. Writes nothing.
+  // one assessment gets at most PREPARED_CALLS_MAX calls while this process
+  // lives. Writes nothing.
   async prepareAssessmentRecommendations(assessmentId, plannedProducts) {
     // A linked assessment's grounded run has started or finished: a call
     // started now would serve no run.
@@ -1250,18 +1256,21 @@ const KnowledgeBridge = {
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     if (!assessment || assessment.service_record_id) return { started: false };
     const { systemPrompt, userPrompt, promptKey } = recommendationPrompt({ assessment, appliedProducts: plannedProducts }, context);
-    const held = _preparedAnswers.get(assessmentId) || { calls: 0, answers: new Map() };
+    const held = _preparedAnswers.get(assessmentId) || new Map();
     if (heldPreparedAnswer(held, promptKey)) return { started: true };
-    if (held.calls >= PREPARED_CALLS_MAX) return { started: false };
+    const calls = _preparedCalls.get(assessmentId) || 0;
+    if (calls >= PREPARED_CALLS_MAX) return { started: false };
     const answer = callClaude(systemPrompt, userPrompt, 1500)
       .catch((err) => { logger.warn(`[knowledge-bridge] prepared recommendation call failed for ${assessmentId}: ${err.message}`); return null; })
       .then((text) => (text && usablePreparedAnswer(text) ? text : null));
-    held.calls += 1;
-    held.answers.set(promptKey, { at: Date.now(), answer });
-    // Deleted first so the newest request is also the newest key of the map.
+    held.set(promptKey, { at: Date.now(), answer });
+    // Deleted first so the newest request is also the newest key of each map.
     _preparedAnswers.delete(assessmentId);
     _preparedAnswers.set(assessmentId, held);
-    while (_preparedAnswers.size > PREPARED_ANSWER_MAX) _preparedAnswers.delete(_preparedAnswers.keys().next().value);
+    _preparedCalls.delete(assessmentId);
+    _preparedCalls.set(assessmentId, calls + 1);
+    dropOldest(_preparedAnswers, PREPARED_ANSWER_MAX);
+    dropOldest(_preparedCalls, PREPARED_CALLS_KEPT);
     return { started: true };
   },
 
@@ -1687,7 +1696,7 @@ const KnowledgeBridge = {
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { kbFtsQuery, kbIlikeQuery, callClaude, recommendationPayloadHasContent, sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive, recommendationPrompt, preparedAnswers: _preparedAnswers, PREPARED_ANSWER_TTL_MS };
+module.exports._test = { kbFtsQuery, kbIlikeQuery, callClaude, recommendationPayloadHasContent, sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive, recommendationPrompt, preparedAnswers: _preparedAnswers, preparedCalls: _preparedCalls, PREPARED_ANSWER_TTL_MS };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
 module.exports.sealRecommendationsForSend = sealForSend;
