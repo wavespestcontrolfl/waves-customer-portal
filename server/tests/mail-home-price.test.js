@@ -348,6 +348,35 @@ describe('a price engine that is away', () => {
     expect(failure.summary).toMatchObject({ engineStop: true, quotes: 3, engineFailures: 3, priced: 0, byReason: { 'failed/engine': 3 } });
   });
 
+  test('the third failure in a row on the LAST row of a batch still fails the run: a price, then three failures', async () => {
+    const rows = Array.from({ length: 4 }, () => makeRow());
+    priceHome.mockResolvedValueOnce(PRICED).mockResolvedValue(ENGINE_FAILED);
+    const t = setup({ rows });
+    const failure = await t.run().catch((err) => err);
+    expect(failure.message).toBe('Mail home prices: stopped after 3 price engine failures in a row');
+    expect(saved(t.deps)).toHaveLength(4);
+    expect(failure.summary).toMatchObject({ engineStop: true, quotes: 4, engineFailures: 3, priced: 1 });
+  });
+
+  test('a budget that is spent on the third failure in a row does not hide it', async () => {
+    const rows = Array.from({ length: 6 }, () => makeRow());
+    priceHome.mockResolvedValueOnce(PRICED).mockResolvedValue(ENGINE_FAILED);
+    let clockNow = NOW;
+    let saves = 0;
+    const t = setup({ rows, savePriceResult: jest.fn(async () => { saves += 1; if (saves === 4) clockNow += BUDGET_MS; return { written: true }; }) });
+    const failure = await runHomePrices({ now: () => clockNow, deps: t.deps }).catch((err) => err);
+    expect(failure.message).toBe('Mail home prices: stopped after 3 price engine failures in a row');
+    expect(failure.summary).toMatchObject({ engineStop: true, budgetSpent: false, quotes: 4 });
+  });
+
+  test('three errors in a row on the last rows of a batch set the stop too', async () => {
+    const rows = Array.from({ length: 3 }, () => makeRow());
+    const t = setup({ rows, permitFacts: jest.fn(async () => { throw Object.assign(new Error('x'), { code: 'ECONNREFUSED' }); }) });
+    const failure = await t.run().catch((err) => err);
+    expect(failure.message).toBe('Mail home prices: stopped after errors in a row; 3 rows could not be read or saved (ECONNREFUSED: 3)');
+    expect(failure.summary.errorStop).toBe(true);
+  });
+
   test('an answer from the engine starts the count again: two failures, a price, two failures do not stop the run or fail it', async () => {
     const rows = Array.from({ length: 5 }, () => makeRow());
     priceHome

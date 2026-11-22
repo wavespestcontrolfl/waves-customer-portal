@@ -106,14 +106,12 @@ function nextErrorStreak(streak, err) {
 }
 
 // The due rows, one at a time, until the budget is spent, the database is away or the price engine is away.
+// Each stop is judged right after the row that causes it: the last row of a batch counts too, and a spent budget
+// cannot hide it.
 async function handleDueRows(due, ctx, startedAt, summary) {
   let errorStreak = 0;
   for (const row of due) {
     if (ctx.clock() - startedAt >= BUDGET_MS) { summary.budgetSpent = true; return; }
-    // Several errors in a row that are not a row's own mean the database is away: the rest waits.
-    if (errorStreak >= MAX_ERRORS_IN_A_ROW) { summary.errorStop = true; return; }
-    // Several price engine failures in a row mean the engine or the live price list is away: the rest waits.
-    if (ctx.state.engineStreak >= MAX_ENGINE_FAILURES_IN_A_ROW) { summary.engineStop = true; return; }
     try {
       await handleRow(row, ctx);
       errorStreak = 0;
@@ -121,6 +119,10 @@ async function handleDueRows(due, ctx, startedAt, summary) {
       errorStreak = nextErrorStreak(errorStreak, err);
       bump(ctx.state.errors, errorCode(err));
     }
+    // Several errors in a row that are not a row's own mean the database is away: the rest waits.
+    if (errorStreak >= MAX_ERRORS_IN_A_ROW) { summary.errorStop = true; return; }
+    // Several price engine failures in a row mean the engine or the live price list is away: the rest waits.
+    if (ctx.state.engineStreak >= MAX_ENGINE_FAILURES_IN_A_ROW) { summary.engineStop = true; return; }
   }
 }
 
