@@ -49,4 +49,33 @@ function noVisitLineFor(estimate = {}, { proposalMode = false } = {}) {
   }
 }
 
-module.exports = { NO_VISIT_QUOTE_LINE, NO_VISIT_LINE_VARIABLE, noVisitLineFor };
+// A reviewed or scheduled send carries the email the office reviewed. The review keeps the line its email had
+// (messages.email.noVisitLine, present only when there was one, like the monthly average copy). At the send,
+// `lineNow` is the line as the row reads at that moment:
+// - no review: the send carries lineNow;
+// - the review kept the line and the row still gets it: the send carries it;
+// - the review kept the line and the row no longer gets it (the estimate turned commercial after the review, an
+//   edit that does not change the saved offer): STALE. The send is refused before any channel and the office
+//   reviews again; the approved words are never sent to an estimate they no longer fit, and never dropped in
+//   silence;
+// - the review kept no line: the send carries none, whatever the row reads now. A review or a schedule made
+//   before this line existed has no record, and the template version it pinned has no paragraph for the line.
+//   A refusal there would fail every send scheduled before the deploy. A sentence the office did not see is
+//   left out, never added.
+// The SMTP copy has no line, so an SMTP review is never stale.
+function reviewedNoVisitLine(reviewedMessages) {
+  const reviewedEmail = reviewedMessages?.email;
+  if (!reviewedEmail || reviewedEmail.provider === 'smtp') return '';
+  return typeof reviewedEmail.noVisitLine === 'string' ? reviewedEmail.noVisitLine : '';
+}
+function noVisitLineStale(reviewedMessages, lineNow) {
+  const reviewed = reviewedNoVisitLine(reviewedMessages);
+  return reviewed !== '' && reviewed !== lineNow;
+}
+function noVisitLineForSend(reviewedMessages, lineNow) {
+  if (!reviewedMessages) return lineNow || '';
+  const reviewed = reviewedNoVisitLine(reviewedMessages);
+  return reviewed !== '' && reviewed === lineNow ? reviewed : '';
+}
+
+module.exports = { NO_VISIT_QUOTE_LINE, NO_VISIT_LINE_VARIABLE, noVisitLineFor, noVisitLineStale, noVisitLineForSend };

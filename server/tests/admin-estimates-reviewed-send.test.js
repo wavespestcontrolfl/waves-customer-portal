@@ -2825,6 +2825,85 @@ describe('delivery email monthly average', () => {
   });
 });
 
+describe('delivery email "no visit needed" line: a reviewed or scheduled send keeps the reviewed line', () => {
+  const featureGates = require('../config/feature-gates');
+  const averageService = require('../services/estimate-monthly-average');
+  const noVisit = require('../services/estimate-no-visit-line');
+  const LINE = noVisit.NO_VISIT_QUOTE_LINE;
+  const reviewed = (record = {}) => ({ sms: null, email: { provider: 'sendgrid', ...record } });
+  const sentPayload = () => email.sendTemplate.mock.calls.at(-1)[0].payload;
+  let current;
+  beforeEach(() => {
+    current = LINE;
+    featureGates.isEnabled.mockImplementation(() => false);
+    jest.spyOn(noVisit, 'noVisitLineFor').mockImplementation(() => current);
+    jest.spyOn(averageService, 'emailAverageParts').mockResolvedValue(null);
+  });
+  afterEach(() => { jest.restoreAllMocks(); featureGates.isEnabled.mockImplementation(() => false); });
+
+  test('the review records the line its email carries, and an email with no line leaves no key', async () => {
+    expect((await invoke('/:id/send-preview', 'get')).body.messages.email.noVisitLine).toBe(LINE);
+    current = '';
+    expect((await invoke('/:id/send-preview', 'get')).body.messages.email).not.toHaveProperty('noVisitLine');
+  });
+
+  test('a reviewed line that still fits the estimate sends', async () => {
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { reviewedMessages: reviewed({ noVisitLine: LINE }) });
+    expect(result.channels.email.ok).toBe(true);
+    expect(sentPayload().estimate_no_visit_line).toBe(LINE);
+  });
+
+  test('the estimate stopped being a home estimate after the review: stale, and neither channel sends', async () => {
+    current = '';
+    await expect(router.sendEstimateNow(structuredClone(row), 'both', {
+      callerPreClaimed: false, reviewedMessages: { sms: 'x', email: { provider: 'sendgrid', noVisitLine: LINE } },
+    })).rejects.toMatchObject({ statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a change between the claim and the email build fails the email channel stale; nothing reaches the provider', async () => {
+    // Call 1 is the check in the claim, call 2 the email build: the row changes in between.
+    noVisit.noVisitLineFor.mockReset();
+    noVisit.noVisitLineFor.mockReturnValueOnce(LINE).mockReturnValue('');
+    let result;
+    let thrown;
+    try {
+      result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: false, reviewedMessages: reviewed({ noVisitLine: LINE }) });
+    } catch (err) { thrown = err; }
+    expect(noVisit.noVisitLineFor).toHaveBeenCalledTimes(2);
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    const channel = result?.channels?.email || thrown?.channels?.email || thrown?.result?.channels?.email;
+    expect(channel).toMatchObject({ ok: false, error: expect.stringContaining('Review the current version; nothing was sent') });
+    expect(channel.uncertain).toBeFalsy();
+  });
+
+  test('a review with no recorded line sends without one, though the row would now get it', async () => {
+    // A schedule made before the line existed: its pinned template version has no paragraph for it.
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: false, reviewedMessages: reviewed() });
+    expect(result.channels.email.ok).toBe(true);
+    expect(sentPayload()).not.toHaveProperty('estimate_no_visit_line');
+  });
+
+  test('an unreviewed send carries the line the row reads at the send', async () => {
+    await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(sentPayload().estimate_no_visit_line).toBe(LINE);
+    row.status = 'sending';
+    current = '';
+    await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(sentPayload()).not.toHaveProperty('estimate_no_visit_line');
+  });
+
+  test('a text-only send and an SMTP review are never stale on the line', async () => {
+    current = '';
+    const textOnly = await router.sendEstimateNow(structuredClone(row), 'sms', { reviewedMessages: { sms: 'x', email: { provider: 'sendgrid', noVisitLine: LINE } } });
+    expect(textOnly.channels.sms.ok).toBe(true);
+    row.status = 'sending';
+    const smtp = await router.sendEstimateNow(structuredClone(row), 'email', { reviewedMessages: { sms: null, email: { provider: 'smtp', noVisitLine: LINE } } }).catch((e) => e);
+    expect(smtp?.code).not.toBe('ESTIMATE_REVIEW_STALE');
+  });
+});
+
 describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING)', () => {
   const gates = require('../config/feature-gates');
   const { deliveredEstimateScope } = require('../services/triage-auto-resolve');
