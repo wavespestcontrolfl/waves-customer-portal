@@ -6534,7 +6534,10 @@ business credentials).
 automation step's HTML body with SAMPLE merge values only — no real customer
 data — for operator preview/share. Token in path, `noindex`. Every status
 sends `Content-Security-Policy: sandbox` (no allow-* tokens), so stored HTML
-cannot run script on the portal origin).
+cannot run script on the portal origin). With `GATE_REFERRAL_STEP2` on, the
+`referral_nudge` step shows the approved Step 2 words and the live
+referral-setting amounts in place of its seeded sentence and summary line
+(no customer data; nothing stored is changed).
 `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
 target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
