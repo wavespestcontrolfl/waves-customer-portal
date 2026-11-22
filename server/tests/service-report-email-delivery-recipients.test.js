@@ -355,6 +355,37 @@ describe('service report email recipient delivery', () => {
     }
   });
 
+  // The referral card is composed before the choice is read, for every
+  // customer. A card that cannot be read is no card: it must not take an
+  // allowed service offer off the line (pre-push audit P1 2026-11-22).
+  test.each([
+    ['who takes referral asks by email', { pitch: true, referralAsk: true }],
+    ['who turned referral asks off', { pitch: true, referralAsk: false }],
+  ])('the referral card cannot be read, for a customer %s: the line keeps the offer', async (_label, consent) => {
+    const gateSpy = jest.spyOn(require('../config/feature-gates'), 'isEnabled')
+      .mockImplementation((key) => ['docCrossSellEmail', 'reportCrossSell'].includes(key));
+    const offerSpy = jest.spyOn(require('../services/service-report/cross-sell'), 'buildReportCrossSell')
+      .mockResolvedValue({ serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', option: { perVisit: 62 } });
+    const referralSpy = jest.spyOn(require('../services/referral-share'), 'composeReferralCard')
+      .mockRejectedValue(new Error('db blip'));
+    const consentSpy = jest.spyOn(require('../services/email-division/eligibility'), 'embeddedLineConsent').mockResolvedValue(consent);
+    try {
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+      const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      expect(result.ok).toBe(true);
+      const byEmail = Object.fromEntries(EmailTemplateLibrary.sendTemplate.mock.calls.map(([args]) => [args.to, args.bodyAppend]));
+      expect(byEmail['owner@example.com'].text).toMatch(/^Get a quote for lawn care from your report: /);
+      expect(byEmail['owner@example.com'].text).not.toMatch(/refer a friend|referral/i);
+      expect(consentSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      gateSpy.mockRestore();
+      offerSpy.mockRestore();
+      referralSpy.mockRestore();
+      consentSpy.mockRestore();
+    }
+  });
+
   // The customer's choices are read ONCE, AFTER the cards are composed
   // (pre-push audit P1 2026-11-22): a customer who turns offers off, or
   // unsubscribes, WHILE the offer is priced gets the report email without

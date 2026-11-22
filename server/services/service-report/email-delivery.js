@@ -764,8 +764,14 @@ async function sendServiceReportV1Email(recordId, {
         // null on any failure.
         const crossSell = await require('./cross-sell').buildReportCrossSell(service, db);
         // The customer's own card: with GATE_REFERRAL_STEP2 on, the report
-        // page's per-customer reward decision.
-        const referralCard = await require('../referral-share').composeReferralCard({ customerId: service.customer_id });
+        // page's per-customer reward decision. A card that cannot be read is
+        // no card: the service offer still rides the line.
+        let referralCard = null;
+        try {
+          referralCard = await require('../referral-share').composeReferralCard({ customerId: service.customer_id });
+        } catch (err) {
+          logger.warn(`[report-email] referral card skipped (code=${err?.code || 'none'})`);
+        }
         if (crossSell || referralCard) {
           // The customer's choices are read ONCE, AFTER the cards are
           // composed (pricing can take seconds): a customer who turned
