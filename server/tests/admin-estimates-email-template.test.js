@@ -178,6 +178,12 @@ describe('admin estimate email delivery', () => {
       expect(sent().payload).not.toHaveProperty('estimate_no_visit_line');
     });
 
+    test('a condo estimate gets no line: its contact can be a property manager, and the estimate cannot tell', async () => {
+      await send(estimateOf({ estimate_data: JSON.stringify({ inputs: { propertyType: 'condo' } }) }));
+      expect(sent().templateKey).toBe('estimate.delivery');
+      expect(sent().payload).not.toHaveProperty('estimate_no_visit_line');
+    });
+
     test('a commercial proposal sends its own email with no line', async () => {
       await send(estimateOf({ category: 'COMMERCIAL' }), { proposalMode: true });
       expect(sent().templateKey).toBe('estimate.proposal_delivery');

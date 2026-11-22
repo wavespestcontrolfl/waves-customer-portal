@@ -77,6 +77,20 @@ describe('who gets the "no visit needed" line', () => {
     expect(noVisitLineFor({ category: 'RESIDENTIAL' })).toBe(LINE);
   });
 
+  test('a condo gets nothing whoever the contact is; the other home types get the sentence', () => {
+    const of = (propertyType) => ({ category: 'RESIDENTIAL', estimate_data: { inputs: { propertyType } } });
+    // The contact's role is on the customer, not on the estimate, so the rule cannot tell a condo's owner from its
+    // property manager. It reads every condo as managed.
+    expect(noVisitLineFor(of('condo'))).toBe('');
+    expect(noVisitLineFor(of('Condo'))).toBe('');
+    expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: { property: { property_type: 'condo' }, unitScope: { customerRelationship: 'owner' } } })).toBe('');
+    for (const home of ['single_family', 'Single Family', 'townhome', 'duplex', 'mobile_home']) {
+      expect(noVisitLineFor(of(home))).toBe(LINE);
+    }
+    expect(noVisitLineFor(of('multi_family'))).toBe('');
+    expect(noVisitLineFor(of('apartment'))).toBe('');
+  });
+
   test('a commercial estimate gets nothing, with or without a proposal', () => {
     expect(noVisitLineFor({ ...HOME, category: 'COMMERCIAL' })).toBe('');
     expect(noVisitLineFor({ ...HOME, category: 'COMMERCIAL' }, { proposalMode: true })).toBe('');
