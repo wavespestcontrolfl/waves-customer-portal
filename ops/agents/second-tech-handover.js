@@ -551,8 +551,13 @@ function buildPlan({
   const lineSkipped = ['no_line', 'other_line'].reduce((n, reason) => n + (plan.skipped[reason] ? plan.skipped[reason].series : 0), 0);
   plan.series.in_lines = plan.series.on_from - lineSkipped;
   // Weekend customers (owner 2026-10-28, question 1 = C): an off-day visit inside the window, in any in-scope series.
+  // An off-day visit of a line this run does not move counts too (as on main, which read no visit line): the visit
+  // stays with --from, but it shows the series' weekday, and its template must not seed that weekday to --to. The
+  // day-60 resolver never re-dates it, so that customer stays whole (weekend_kept_visit_other_line).
+  const offDay = (v) => !workDays.includes(dayOfWeekOfDate(v.scheduled_date));
+  const marksWeekend = ({ v, outcome }) => outcome === 'off_day' || (outcome === 'visit_other_line' && offDay(v));
   const weekendCustomers = new Set(inScope
-    .filter(({ outcomes }) => outcomes.some(({ v, outcome }) => outcome === 'off_day' && (weekendMove || v.scheduled_date < plan.off_day_customer_until)))
+    .filter(({ outcomes }) => outcomes.some((o) => marksWeekend(o) && (weekendMove || o.v.scheduled_date < plan.off_day_customer_until)))
     .map(({ p }) => p.customer_id));
   // --weekend-move (the day-60 run): weekend customers are planned, not skipped. A first read (no decisions yet) lists them;
   // the decisions then keep some customers whole and give every other change its new date (second-tech-handover-weekend.js).

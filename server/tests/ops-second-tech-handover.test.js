@@ -99,12 +99,10 @@ describe('second-tech-handover planner', () => {
     const exclusionVisit = visit(termite, WED, { line: 'exclusion' });
     const unknownVisit = visit(termite, THU, { line: null });
     const trapVisit = visit(termite, MON_LATE, { line: 'rodent' });
-    // A lawn visit on a day off never makes its customer a weekend customer: it is not the hire's work.
-    const lawnFriday = visit(termite, FRI, { line: 'lawn' });
-    const all = [own, lawnVisit, exclusionVisit, unknownVisit, trapVisit, lawnFriday];
+    const all = [own, lawnVisit, exclusionVisit, unknownVisit, trapVisit];
     const p = plan([termite], all);
     expect(new Set(p.ids.visits)).toEqual(new Set([own.id, trapVisit.id]));
-    expect(p.skipped.visit_other_line).toEqual({ series: 1, visits: 4 });
+    expect(p.skipped.visit_other_line).toEqual({ series: 1, visits: 3 });
     expect(p.skipped.off_day_customer).toBeUndefined();
     // The trap visit moves under the rodent line: the hire must be able to take it, and the dry run counts it there
     // (the series under its template line, each visit under its own).
@@ -113,10 +111,33 @@ describe('second-tech-handover planner', () => {
     // A run that leaves rodent out keeps the trap visit with the owner too.
     const termiteOnly = plan([termite], all, { lines: ['termite'] });
     expect(termiteOnly.ids.visits).toEqual([own.id]);
-    expect(termiteOnly.skipped.visit_other_line).toEqual({ series: 1, visits: 5 });
+    expect(termiteOnly.skipped.visit_other_line).toEqual({ series: 1, visits: 4 });
     expect(termiteOnly.capability_lines).toEqual(['termite']);
     // A row with no line field (an older caller) goes with its series.
     expect(plan([termite], [visit(termite, MON)]).ids.visits).toHaveLength(1);
+  });
+
+  test('an off-day visit of another line still marks its customer a weekend customer: the series keeps that weekday', () => {
+    // A termite series on Fridays (a day off for the hire); staff changed the one appointment ahead to lawn. The visit
+    // stays with the owner either way, but a moved template would seed the next Friday visits to the hire.
+    const termite = parent({ customer_id: 'C-fri-lawn', line: 'termite', service_type: 'Termite Monitoring Service' });
+    const lawnFriday = visit(termite, FRI, { line: 'lawn', is_recurring: true });
+    const first = plan([termite], [lawnFriday]);
+    expect(first.skipped.off_day_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+    expect(first.ids.retemplate).toEqual([]);
+    // The day-60 run lists the customer for the resolver and gives the lawn visit no new date and no new technician.
+    const draft = plan([termite], [lawnFriday], { weekendMove: true });
+    expect(draft.weekend_candidates).toEqual([{ customer_id: 'C-fri-lawn', series_ids: [termite.id] }]);
+    expect(draft.ids.moves).toEqual([]);
+    expect(draft.skipped.visit_other_line).toEqual({ series: 1, visits: 1 });
+    // The resolver never re-dates that visit (stayStillReason), so the customer stays whole and the template stays.
+    const kept = plan([termite], [lawnFriday], { weekendMove: true, weekend: { kept: new Map([['C-fri-lawn', 'visit_other_line']]), newDates: new Map(), anchors: [] } });
+    expect(kept.ids.retemplate).toEqual([]);
+    expect(kept.skipped.weekend_kept_visit_other_line).toEqual({ series: 1, visits: 1, customers: 1 });
+    // The same lawn visit on a work day marks nobody: the template moves and the visit stays.
+    const workday = plan([termite], [visit(termite, TUE, { line: 'lawn' })]);
+    expect(workday.ids.retemplate).toEqual([termite.id]);
+    expect(workday.skipped.off_day_customer).toBeUndefined();
   });
 
   test('one appointment ahead whose own service is bait work marks its customer, like a bait add-on', () => {
