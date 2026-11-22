@@ -12,16 +12,13 @@
  *     refuse: a word, two words together, or a whole part of the note.
  * It reads the two strings and nothing else about the visit, and it holds no
  * list of what a report may not say. That is the caller's `screen`:
- *   wordGoes(word)           may this one word of the note go? The answer
- *                            'time' means a word of time: it carried the
- *                            tense of its part (addedTenseRejection).
+ *   wordGoes(word)           may this one word of the note go?
  *   pairGoes(first, second)  do these two words go together, or not at all
  *                            ("no issues", a figure and its unit)?
- *   partGoes(part)           may this whole part of the note go? The
- *                            answer 'time' means it goes for a time the
- *                            screen reads in more than one word ("on
- *                            11/22", "on March 4"): it carried a tense too.
+ *   partGoes(part)           may this whole part of the note go?
  *   names                    the product names the note holds
+ *   dated                    true when the note holds a time, anywhere: a
+ *                            time carries a tense (addedTenseRejection)
  * report-own-note.js builds it from the report's own screens (the next PR),
  * so what may go is what no report text may hold. Nothing calls this module
  * yet.
@@ -255,13 +252,10 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
     return samePart(i, before) && isActor(note[before]) && note.some((word, j) => j > i && samePart(i, j) && TREATMENTS.has(word));
   };
   const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word) && !saysWhoWasTreated(i)));
-  const timed = note.map((word) => wordGoes(word) === 'time');
-  const [whole, conditional, timedParts] = [new Set(), new Set(), new Set()];
+  const [whole, conditional] = [new Set(), new Set()];
   parts.forEach((raw, id) => {
     const partWords = words.filter((entry) => entry.part === id).map((entry) => entry.word);
-    const goes = partWords.length && partGoes(raw);
-    if (goes) whole.add(id);
-    if (goes === 'time') timedParts.add(id);
+    if (partWords.length && partGoes(raw)) whole.add(id);
     const opensWith = partWords.find((word) => !SMALL.has(word) && !CONDITION_LEADS.has(word));
     if (CONDITIONS.has(opensWith) || partWords.some((word) => QUALIFIERS.has(word))) conditional.add(id);
   });
@@ -269,7 +263,7 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
   // word before it: see placeInNote.
   const follows = new Map(groups.filter((group) => group.length > 1).map((group) => [group[0], group[1]]));
   const continues = new Map(groups.flatMap((group) => group.slice(1).map((at, n) => [at, group[n]])));
-  return { single, leans, groups, follows, continues, whole, conditional, timed, timedParts };
+  return { single, leans, groups, follows, continues, whole, conditional };
 }
 
 // ── Same order ─────────────────────────────────────────────────────────
@@ -298,14 +292,15 @@ function noPlaceRejection(out, k, note, from, { continues }, taken) {
 
 // A word the text adds: a small word; "I" where a sentence starts (`opens`)
 // or after a joining word (walkNote then looks for a person before it);
-// "am" right after "I" ("I'm seeing ants": addedTenseRejection refuses it
-// where a word of time went);
+// "am" only between "I" and a word in "-ing" ("I'm seeing ants"; "I am
+// treated outside" is not "treated outside"; addedTenseRejection refuses
+// it where the note holds a time);
 // "you" after a word of speech ("You said you"; walkNote then looks for
 // the customer). Never "me": "neighbor said" is not "Neighbor told me".
 function addedWordAllowed(out, k, opens) {
   const word = out[k];
   if (word === 'i') return opens || CLAUSE_OPENERS.has(out[k - 1]);
-  if (word === 'am') return out[k - 1] === 'i';
+  if (word === 'am') return out[k - 1] === 'i' && /ing$/.test(out[k + 1] || '');
   if (ADDABLE.has(word)) return true;
   return word === 'you' && ['said', 'told', 'me'].includes(out[k - 1]);
 }
@@ -473,37 +468,19 @@ function leftOutRejection(usedIn, out, read, rules) {
   return { reason: out.some((word) => sameWord(word, noteList[missing])) ? 'out_of_order' : 'left_out', words: [noteList[missing]] };
 }
 
-// A word of time carries the tense of its part: "treating outside tomorrow"
-// is a plan. Where one went, the text adds no form of "is" before a word in
-// "-ing" of that part ("I was treating outside." is past work, "I am
-// treating outside." is work now), also with words of the part between the
-// two ("I was spot treating outside."). A contracted form is a form too
-// ("I'm treating outside."). A part the screen refuses for a time counts
-// as words of time ("on 11/22", "on March 4"). What a lost word of time
-// speaks for:
-//   - its own part;
-//   - every part of its sentence, when its part went whole ("treating
-//     outside, in two weeks", "treating outside, hopefully tomorrow"). The
-//     safe side: after "ants trailing in kitchen, back in 2 weeks" the text
-//     may say "Ants trailing in the kitchen." and not "Ants were trailing";
-//   - the parts beside its part, across a sentence mark too, when the part
-//     holds nothing but the time ("treating outside. In two weeks.").
+// A time in the note carries a tense: "treating outside tomorrow" is a plan,
+// and no report text holds the time. So where the note holds a time,
+// anywhere (`dated`), the text adds no form of "is" before a word in "-ing"
+// ("I was treating outside." is past work, "I am treating outside." is work
+// now), also with words of the part between the two ("I was spot treating
+// outside."). A contracted form is a form too ("I'm treating outside.").
+// The whole note is the unit on purpose. Which part a time speaks for has
+// no rule that holds: "treating outside. On March 4.", "treating outside,
+// pest free on March 4", "tomorrow, treating outside". The cost is the safe
+// side: after "ants trailing in kitchen. back in 2 weeks" the text says
+// "Ants trailing in the kitchen.", not "Ants were trailing".
 const SETS_A_TENSE = new Set([...FORMS_OF_IS, 'am']);
-const LEADS_TO_A_TIME = new Set('in on at by for next this last until till after before within about around every each coming following'.split(' '));
-function addedTenseRejection(textWords, placedAt, read, rules) {
-  const parts = [...new Set(read.words.map((entry) => entry.part))];
-  const everyWordOf = (part, test) => read.words.every((entry, i) => entry.part !== part || test(entry.word, i));
-  const wentWhole = (part) => everyWordOf(part, (_, i) => placedAt[i] < 0);
-  const onlyTime = (part) => everyWordOf(part, (word, i) => rules.timed[i] || SMALL.has(word) || isCount(word) || LEADS_TO_A_TIME.has(word));
-  const lostTime = new Set();
-  read.words.forEach((entry, i) => {
-    if (placedAt[i] >= 0 || !(rules.timed[i] || rules.timedParts.has(entry.part))) return;
-    lostTime.add(entry.part);
-    if (!wentWhole(entry.part)) return;
-    read.words.filter((other) => other.sentence === entry.sentence).forEach((other) => lostTime.add(other.part));
-    const at = parts.indexOf(entry.part);
-    if (onlyTime(entry.part)) [parts[at - 1], parts[at + 1]].forEach((part) => lostTime.add(part));
-  });
+function addedTenseRejection(textWords, placedAt, read) {
   // The part of the note each text word took; a text word with none was added.
   const partOf = new Map(read.words.map((entry, i) => [placedAt[i], entry.part]));
   const addedIsBefore = (at, part) => {
@@ -513,7 +490,7 @@ function addedTenseRejection(textWords, placedAt, read, rules) {
     return -1;
   };
   for (const [i, entry] of read.words.entries()) {
-    const wrong = placedAt[i] >= 0 && lostTime.has(entry.part) && entry.word.endsWith('ing') ? addedIsBefore(placedAt[i], entry.part) : -1;
+    const wrong = placedAt[i] >= 0 && entry.word.endsWith('ing') ? addedIsBefore(placedAt[i], entry.part) : -1;
     if (wrong >= 0) return { reason: 'not_in_note', words: [textWords[wrong].word] };
   }
   return null;
@@ -534,14 +511,14 @@ function addedTenseRejection(textWords, placedAt, read, rules) {
  *   'question'     a question became a statement, or a statement a question.
  * `screen` is what the report's own screens say may go (see leaveOutRules).
  */
-function orderRejection(text, note, { wordGoes = NOTHING_GOES, pairGoes = NOTHING_GOES, partGoes = NOTHING_GOES, names = [] } = {}) {
+function orderRejection(text, note, { wordGoes = NOTHING_GOES, pairGoes = NOTHING_GOES, partGoes = NOTHING_GOES, names = [], dated = false } = {}) {
   const read = readNote(note);
   const rules = leaveOutRules(read, { wordGoes, pairGoes, partGoes, names });
   const textWords = readText(text);
   const out = textWords.map((entry) => entry.word);
   const check = (hidden) => {
     const { usedIn, placedAt, rejection } = walkNote(textWords, read, rules, hidden);
-    return rejection || leftOutRejection(usedIn, out, read, rules) || addedTenseRejection(textWords, placedAt, read, rules);
+    return rejection || leftOutRejection(usedIn, out, read, rules) || (dated ? addedTenseRejection(textWords, placedAt, read) : null);
   };
   // A part that goes may share a word with a part that stays ("no activity
   // inside. no ants in the kitchen"), and the walk takes the first place it

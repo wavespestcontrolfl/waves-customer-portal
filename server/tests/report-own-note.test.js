@@ -108,6 +108,7 @@ describe('the wordings the reader lets stand are refused where the note is writt
     'Foot traffic can resume on 3/4 in all rooms.',
     'Foot traffic can resume on 3/4 in shaded areas.',
     'Foot traffic can resume on 3/4 in deep shade.',
+    'Foot traffic can resume on 3/4 in hardware storage areas.',
     'Foot traffic can resume on 3/4 in 2027.',
     'I treated the patio on 11/22/26.',
     'Do not enter the yard.',
@@ -252,12 +253,11 @@ describe('the stored text and the fixed sentence', () => {
     await expect(refusal('do not see activity in the attic', 'I do not see activity in the attic.')).resolves.toBeNull();
     await expect(refusal('put mesh on 1/4 inch gaps', 'I put mesh on 1/4 inch gaps.')).resolves.toBeNull();
     await expect(refusal('put mesh on 3/4" gaps', 'I put mesh on 3/4" gaps.')).resolves.toBeNull();
-    await expect(refusal('put mesh on 1/4 in gaps', 'I put mesh on 1/4 in gaps.')).resolves.toBeNull();
-    await expect(refusal('put mesh on 1/4 in vents', 'I put mesh on 1/4 in vents.')).resolves.toBeNull();
-    await expect(refusal('put mesh on 3/8 in. hardware cloth', 'I put mesh on 3/8 in. hardware cloth.')).resolves.toBeNull();
+    // "In" alone is no measure after a word that leads to a day: the safe side.
+    expect((await refusal('put mesh on 1/4 in gaps', 'I put mesh on 1/4 in gaps.'))?.reason).toBe('time');
   });
 
-  test('a plan stays a plan when its word of time goes', async () => {
+  test('a plan stays a plan when its time goes, wherever the note holds the time', async () => {
     expect(await refusal('treating outside tomorrow', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
     await expect(refusal('treating outside tomorrow', 'Treating outside.')).resolves.toBeNull();
     expect(await refusal('spot treating outside tomorrow', 'I was spot treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
@@ -267,6 +267,13 @@ describe('the stored text and the fixed sentence', () => {
     await expect(refusal('treating outside, in two weeks', 'Treating outside.')).resolves.toBeNull();
     expect(await refusal('treating outside, on 11/22', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
     expect(await refusal('treating outside, on March 4', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
+    // A date in a sentence of its own, in a part another screen refuses first, and in a sentence the access mask took.
+    expect(await refusal('treating outside. on March 4.', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
+    expect(await refusal('treating outside, pest free on March 4', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
+    expect(await refusal('gate opens tomorrow. treating outside', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
+    await expect(refusal('gate opens tomorrow. treating outside', 'Treating outside.')).resolves.toBeNull();
+    // A note with no time.
     await expect(refusal('seeing ants in the kitchen', 'I\'m seeing ants in the kitchen.')).resolves.toBeNull();
+    expect(await refusal('treated outside', 'I am treated outside.')).toEqual({ reason: 'not_in_note', words: ['am'] });
   });
 });

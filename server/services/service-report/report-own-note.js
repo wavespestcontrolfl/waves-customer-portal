@@ -147,19 +147,17 @@ const DATE_RE = new RegExp(`\\b(?:${MONTH_SRC}|may)\\.?\\s+${DAY_SRC}\\b|\\b${DA
 // A date in figures: with its year anywhere ("11/22/26"), else a month and
 // a day after a word that leads to a day ("on 11/22", "on 3/4"). Figures
 // with a measure after them are a fraction ("mesh on 1/4 inch gaps"). "In"
-// is a measure only after a fraction of an inch (halves to sixty-fourths)
-// and before the thing it measures ("on 1/4 in vents", "on 3/8 in. hardware
-// cloth"): "on 11/22 in vents", "on 3/4 in the yard", "on 3/4 in shaded
-// areas" and "on 3/4 in deep shade" are dates. The list is the safe side on purpose: a date in a
-// report is a promise, and a measure before a thing that is not listed
-// costs the note one refusal.
+// alone is no measure: "on 3/4 in the yard" is a date, and no list of
+// things tells "on 1/4 in vents" from "on 3/4 in hardware storage areas".
+// The safe side: a date in a report is a promise, and "mesh on 1/4 in gaps"
+// costs the note one refusal ("1/4 inch gaps" passes).
 const MEASURE_SRC = '["\'″′]|(?:inch(?:es)?|ft|foot|feet|oz|ounces?|gal(?:lons?)?|cups?|lbs?|pounds?|acres?|yards?|of)\\b';
-const INCH_FRACTION_SRC = '(?:1\\/2|[13]\\/4|[1357]\\/8|(?:[13579]|1[135])\\/16|\\d{1,2}\\/(?:32|64))';
-const MEASURED_SRC = '(?:gaps?|holes?|cracks?|crevices?|openings?|vents?|mesh|screens?|screening|hardware|cloth|wire|pipes?|lines?|tubing|conduits?|weep)';
-const INCHES_SRC = `${INCH_FRACTION_SRC}[\\s-]*in\\b\\.?\\s+${MEASURED_SRC}\\b`;
 const FIGURE_DATE_RE = new RegExp('\\b\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}\\b'
-  + `|\\b(?:on|by|until|till|after|before|since)\\s+(?:the\\s+)?(?!${INCHES_SRC})\\d{1,2}\\/\\d{1,2}\\b(?![\\s-]*(?:${MEASURE_SRC}))`, 'i');
+  + `|\\b(?:on|by|until|till|after|before|since)\\s+(?:the\\s+)?\\d{1,2}\\/\\d{1,2}\\b(?![\\s-]*(?:${MEASURE_SRC}))`, 'i');
 const timeIn = (text) => TIME_WORD_RE.exec(text) || DATE_RE.exec(text) || FIGURE_DATE_RE.exec(text);
+// A time anywhere in a note, whatever other screen answers first for the
+// part that holds it ("treating outside, pest free on March 4").
+const holdsTime = (note) => noteRecordCopyViolations(note).includes('note_record_time') || Boolean(timeIn(note));
 function writeTimeRejection(text) {
   const time = timeIn(text);
   if (time) return { reason: 'time', words: [time[0]] };
@@ -230,19 +228,12 @@ function whatMayGo(screens, names) {
   const reasonOf = (fragment) => wordRejection(fragment, screens)?.reason || null;
   const figure = (word) => word.replace('point', '.').replace(/mark(\d+)mark/g, (_, code) => String.fromCodePoint(Number(code)));
   return {
-    // The reason is the answer: 'time' tells the order check that the word
-    // carried the tense of its part.
-    wordGoes: (word) => {
-      const reason = word === 'redacted' ? word : reasonOf(word);
-      return (reason === 'redacted' || GOES_ALONE.has(reason)) && reason;
-    },
+    wordGoes: (word) => word === 'redacted' || GOES_ALONE.has(reasonOf(word)),
     pairGoes: (first, second) => REFUSED_PAIRS.includes(`${first} ${second}`)
       || (isCount(first) && !isCount(second) && (PERIOD_RE.test(second) || reasonOf(`${figure(first)} ${second}`) === 'amount')),
-    // The reason is the answer here too: 'time' tells the order check that
-    // the part carried a tense ("on 11/22" has no one word of time).
     partGoes: (part) => {
       const reason = reasonOf(part);
-      return REDACTED_RE.test(part) || (reason !== 'instruction' && reason) || orderToCustomer(noteWords(part));
+      return REDACTED_RE.test(part) || (Boolean(reason) && reason !== 'instruction') || orderToCustomer(noteWords(part));
     },
     names,
   };
@@ -268,7 +259,9 @@ async function reportNoteRejection({ note, text, catalogRows = null, db = null }
   const tidied = ownNoteText(text);
   return shapeRejection(tidied)
     || wordRejection(tidied, screens)
-    || orderRejection(tidied, said, whatMayGo(screens, mentioned.names.map(nameThatGoes)));
+    // The time is read in the note as given: a sentence the mask took holds
+    // one too ("gate opens tomorrow. treating outside").
+    || orderRejection(tidied, said, { ...whatMayGo(screens, mentioned.names.map(nameThatGoes)), dated: holdsTime(oneForm(note)) });
 }
 
 // The sentence code writes when there is no note to send: today's fallback
