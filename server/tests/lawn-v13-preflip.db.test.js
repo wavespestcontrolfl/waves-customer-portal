@@ -995,6 +995,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         name: STW_037, category: 'herbicide', label_verified_at: new Date(), inventory_on_hand: 100000, inventory_unit: 'lb', active: true,
         active_ingredient: 'Prodiamine 0.37% + 18-0-10', formulation: 'granular', default_rate_per_1000: 4.04, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10,
         min_label_rate_per_1000: 3.1, max_label_rate_per_1000: 9.3, best_price: 33.46, best_vendor: 'Fixture vendor',
+        post_application_watering: stonewallMigration.CATALOG_ROW.post_application_watering,
       }).returning('*');
       catalog[STW_037] = row;
       await resetToDimension();
@@ -1059,31 +1060,25 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect((await ours()).map((log) => log.action).sort()).toEqual([stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION].sort());
     });
 
-    test('a value changed since stays: the October rate, a gate someone edited, a cap row the office edited', async () => {
+    // Identity, dose and counter are one rollback decision: an edited Stonewall dose never ends on the Dimension row.
+    test.each([
+      ['re-rated', (row) => ({ rate_per_1000: 3.9 })],
+      ['on another N target', (row) => ({ gates: JSON.stringify({ ...row.gates, targetN: '0.7 lb N/1000' }) })],
+      ['turned off', () => ({ default_in_plan: false })],
+      ['renamed', () => ({ product_name: 'Renamed by the office' })],
+    ])('a swapped row %s since is not the row this wrote: down leaves the whole row, its goal and both audit rows', async (_label, edit) => {
+      const log = jest.spyOn(console, 'log').mockImplementation(() => {});
       const row = await octoberRow();
-      const [cap] = await limitRows(stonewallId());
-      await knex('lawn_protocol_products').where({ id: row.id }).update({ rate_per_1000: 3.9, gates: JSON.stringify({ ...row.gates, targetN: '0.7 lb N/1000' }) });
-      await knex('product_limits').where({ id: cap.id }).update({ description: 'Edited by the office' });
+      await knex('lawn_protocol_products').where({ id: row.id }).update(edit(row));
       try {
+        const stateOf = async () => JSON.stringify([await octoberRow(), await limitRows(stonewallId()), await ours()]);
+        const before = await stateOf();
         await stonewallMigration.down(knex);
-        const after = await octoberRow();
-        expect(after).toMatchObject({ product_name: DIMENSION, goal: stonewallMigration.OLD_GOAL });
-        expect(Number(after.rate_per_1000)).toBe(3.9);
-        expect(after.gates).toEqual({ ...DIMENSION_OCTOBER.gates, targetN: '0.7 lb N/1000' });
-        expect((await knex('product_limits').where({ id: cap.id }).first()).description).toBe('Edited by the office');
+        expect(await stateOf()).toBe(before);
+        expect(await octoberRow()).toMatchObject({ product_id: stonewallId(), goal: stonewallMigration.NEW_GOAL });
+        expect(log).toHaveBeenCalledWith(expect.stringContaining(`rollback skipped for protocol ${KEY}: its October row is no longer the row this migration wrote`));
       } finally {
-        await resetToDimension();
-        await stonewallMigration.up(knex);
-      }
-    });
-
-    test('a row renamed since is not the Stonewall row this wrote: down leaves it whole', async () => {
-      const row = await octoberRow();
-      await knex('lawn_protocol_products').where({ id: row.id }).update({ product_name: 'Renamed by the office' });
-      try {
-        await stonewallMigration.down(knex);
-        expect(await knex('lawn_protocol_products').where({ id: row.id }).first()).toMatchObject({ product_name: 'Renamed by the office', product_id: stonewallId() });
-      } finally {
+        log.mockRestore();
         await resetToDimension();
         await stonewallMigration.up(knex);
       }
@@ -1351,9 +1346,10 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       const rateOf = async () => { const row = await catalogRow(); return [row.default_rate_per_1000 == null ? null : Number(row.default_rate_per_1000), row.rate_unit]; };
 
       test.each([
-        ['the label\'s lowest rate, 3.1 lb (the production row)', 3.1, 3.1],
-        ['no standard rate', null, null],
-      ])('a catalog row with %s gets the program rate, 4.04 lb; the change is audited and down leaves it', async (_label, stored, before) => {
+        ['the label\'s lowest rate, 3.1 lb (the production row)', 3.1],
+        ['no standard rate', null],
+        ['another figure in pounds', 3.5],
+      ])('a catalog row with %s gets the program rate, 4.04 lb; the change is audited with the old figure and down leaves it', async (_label, stored) => {
         await withReset(async () => {
           await setRate({ default_rate_per_1000: stored, rate_unit: 'lb' });
           try {
@@ -1362,7 +1358,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
             await stonewallMigration.up(knex);
             expect(await rateOf()).toEqual([4.04, 'lb']);
             expect(strip(await catalogRow())).toBe(others);
-            expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ defaultRate: { before, after: 4.04 } });
+            expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ defaultRate: { before: stored, after: 4.04 } });
             await stonewallMigration.down(knex);
             expect(await rateOf()).toEqual([4.04, 'lb']);
           } finally { await setRate({ default_rate_per_1000: 4.04, rate_unit: 'lb' }); }
@@ -1370,16 +1366,45 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       });
 
       test.each([
-        ['another figure the office set', { default_rate_per_1000: 3.5, rate_unit: 'lb' }, [3.5, 'lb']],
-        ['3.1 in another unit', { default_rate_per_1000: 3.1, rate_unit: 'oz' }, [3.1, 'oz']],
-      ])('a standard rate that is %s is kept', async (_label, values, expected) => {
+        ['ounces', { default_rate_per_1000: 3.1, rate_unit: 'oz' }],
+        ['no unit', { default_rate_per_1000: 4.04, rate_unit: null }],
+      ])('a catalog row whose rates are in %s cannot take the program rate: up throws and writes nothing', async (_label, values) => {
         await withReset(async () => {
           await setRate(values);
           try {
-            await stonewallMigration.up(knex);
-            expect(await rateOf()).toEqual(expected);
-            expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ defaultRate: null });
+            const stateOf = async () => JSON.stringify([await octoberRow(), await catalogJson(), await limitRows(stonewallId()), await otherRows(), await ours()]);
+            const before = await stateOf();
+            await expect(stonewallMigration.up(knex)).rejects.toThrow('so its standard rate cannot be set to the program rate of 4.04 lb per 1,000 sq ft. Nothing was written.');
+            expect(await stateOf()).toBe(before);
           } finally { await setRate({ default_rate_per_1000: 4.04, rate_unit: 'lb' }); }
+        });
+      });
+
+      // 20261022120000 stored the label water-in rule on the row it found by exact name: a bag known only through an alias has none.
+      const setWatering = (value) => knex('products_catalog').where({ id: stonewallId() }).update({ post_application_watering: value });
+      const LABEL_RULE = JSON.parse(stonewallMigration.CATALOG_ROW.post_application_watering);
+
+      test('a catalog row with no watering rule gets the label water-in rule (0.5 inch within 14 days); the fill is audited', async () => {
+        await withReset(async () => {
+          await setWatering(null);
+          try {
+            await stonewallMigration.up(knex);
+            expect((await catalogRow()).post_application_watering).toEqual(LABEL_RULE);
+            expect(LABEL_RULE).toMatchObject({ mode: 'water_in', source: 'label', water_in_inches: 0.5, water_in_by_hours: 336 });
+            expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ wateringFilled: true });
+          } finally { await setWatering(JSON.stringify(LABEL_RULE)); }
+        });
+      });
+
+      test('a watering rule the row already holds is kept', async () => {
+        await withReset(async () => {
+          const own = { mode: 'water_in', source: 'office', water_in_inches: 0.25, water_in_by_hours: 24 };
+          await setWatering(JSON.stringify(own));
+          try {
+            await stonewallMigration.up(knex);
+            expect((await catalogRow()).post_application_watering).toEqual(own);
+            expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ wateringFilled: false });
+          } finally { await setWatering(JSON.stringify(LABEL_RULE)); }
         });
       });
 
