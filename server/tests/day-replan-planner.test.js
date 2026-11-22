@@ -243,16 +243,26 @@ describe('the route reads in hour order', () => {
   });
 
   test('every plan the search returns has hours that never go down (exhaustive and local search)', () => {
-    // A fixed pseudo-random stream, so the days are the same on every run.
+    // A fixed pseudo-random stream (the high bits of a linear congruential generator), so the days are the same on
+    // every run. Each stop is booked on its own hour, so the day as booked is a feasible plan and the search
+    // always returns one.
     let seed = 20261122;
-    const next = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+    const next = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return Math.floor(seed / 65536) % n; };
+    const checked = { exhaustive: 0, local: 0, movedAnHour: 0 };
     for (let day = 0; day < 40; day += 1) {
-      const count = 4 + next(8); // 4 to 11 stops: both search paths
-      const hours = Array.from({ length: count }, () => 8 + next(8));
-      const stops = hours.map((hour, i) => stop(`s${i}`, next(60) - 20, hour, { lng: next(40) - 20, movable: next(4) !== 0 }));
-      const result = planDay(input(stops));
-      if (result.best) expect(neverGoDown(hoursInOrder(result))).toBe(true);
+      const count = day % 2 === 0 ? 4 + next(5) : 10 + next(2); // 4 to 8 stops: every order; 10 or 11: local search
+      const stops = Array.from({ length: count }, (_, i) => stop(`s${i}`, next(50) - 25, 6 + i, { lng: next(50) - 25, workMin: 20, movable: next(4) !== 0 }));
+      const inp = input(stops, { departureMin: 6 * 60, options: { firstHour: 6, closeMin: 20 * 60 } });
+      const result = planDay(inp);
+      expect(result.best).not.toBeNull();
+      expect(neverGoDown(hoursInOrder(result))).toBe(true);
+      checked[count <= 9 ? 'exhaustive' : 'local'] += 1;
+      if (result.best.order.some((id) => result.best.slots[id] !== inp.stops.find((x) => x.id === id).slotStartMin)) checked.movedAnHour += 1;
     }
+    expect(checked.exhaustive).toBe(20);
+    expect(checked.local).toBe(20);
+    // The sweep is not only days left as booked: on most of them the best plan gives a stop a new hour.
+    expect(checked.movedAnHour).toBeGreaterThanOrEqual(10);
   });
 });
 
