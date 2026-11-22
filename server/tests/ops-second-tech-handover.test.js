@@ -74,18 +74,20 @@ describe('second-tech-handover planner', () => {
     expect(p.series.retemplate).toBe(1);
   });
 
-  test('rodent, mosquito and termite move too; a lawn series is skipped as other_line; a run without termite skips termite too', () => {
+  test('rodent, mosquito and termite move too; lawn and rodent exclusion stay as other_line; a run without termite skips termite too', () => {
     const rodent = parent({ line: 'rodent' });
     const mosq = parent({ line: 'mosquito' });
     const lawn = parent({ line: 'lawn' });
+    // Owner 2026-11-21 ("you seal, he traps"): the exclusion line stays with the owner in every run.
+    const exclusion = parent({ line: 'exclusion' });
     const termite = parent({ line: 'termite' });
-    const all = [rodent, mosq, lawn, termite];
+    const all = [rodent, mosq, lawn, exclusion, termite];
     const p = plan(all, all.map((s) => visit(s, MON)));
     expect(p.would_change.by_line).toEqual({ rodent: { series: 1, visits: 1 }, mosquito: { series: 1, visits: 1 }, termite: { series: 1, visits: 1 } });
-    expect(p.skipped.other_line).toEqual({ series: 1, visits: 1 });
+    expect(p.skipped.other_line).toEqual({ series: 2, visits: 2 });
     const noTermite = plan(all, all.map((s) => visit(s, MON)), { lines: NO_TERMITE });
     expect(noTermite.would_change.by_line).toEqual({ rodent: { series: 1, visits: 1 }, mosquito: { series: 1, visits: 1 } });
-    expect(noTermite.skipped.other_line).toEqual({ series: 2, visits: 2 });
+    expect(noTermite.skipped.other_line).toEqual({ series: 3, visits: 3 });
   });
 
   test('--lines narrows what moves', () => {
@@ -797,7 +799,7 @@ describe('second-tech-handover — termite / WDO in every run', () => {
     expect(p.series.retemplate).toBe(0);
   });
 
-  test('parseArgs: the default is the four lines with and without --zips; --lines takes any subset of them; lawn exits 2', () => {
+  test('parseArgs: the default is the four lines with and without --zips; --lines takes any subset of them; lawn and exclusion exit 2', () => {
     const four = ['general', 'rodent', 'mosquito', 'termite'];
     expect(parseArgs(['--from', OWNER]).lines).toEqual(four);
     expect(parseArgs(['--from', OWNER, '--zips', '34293']).lines).toEqual(four);
@@ -808,6 +810,7 @@ describe('second-tech-handover — termite / WDO in every run', () => {
     const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
     const err = jest.spyOn(console, 'error').mockImplementation(() => {});
     expect(() => parseArgs(['--from', OWNER, '--lines', 'lawn'])).toThrow('exit 2');
+    expect(() => parseArgs(['--from', OWNER, '--lines', 'general,exclusion'])).toThrow('exit 2');
     expect(err.mock.calls.map((c) => c[0]).join(' ')).not.toMatch(/--zips/);
     exit.mockRestore(); err.mockRestore();
   });

@@ -30,7 +30,9 @@
 //            before it are never touched.
 //   --lines  subset of general,rodent,mosquito,termite (default all four, with or without
 //            --zips; the same four lines as services/territory.js TERRITORY_LINES). Lawn /
-//            tree & shrub are never movable here. `termite` is termite and WDO series
+//            tree & shrub and rodent exclusion (the `exclusion` line: sealing, sanitation,
+//            the rodent inspection, the general rodent visit; owner 2026-11-21 "you seal, he
+//            traps") are never movable here. `termite` is termite and WDO series
 //            (the catalog category first, then the name, serviceLineFor). Owner 2026-11-21:
 //            the default run moves termite too, and termite BAIT customers move with it
 //            (see BAIT). A run with --lines general,rodent,mosquito leaves termite out and
@@ -211,7 +213,7 @@ const VALUE_FLAGS = {
   '--lines': (v) => {
     const lines = [...new Set(v.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean))];
     const ok = lines.length && lines.every((l) => MOVABLE_LINES.includes(l));
-    return ok ? { lines } : `--lines takes ${MOVABLE_LINES.join(', ')} only (lawn is never handed over), got ${JSON.stringify(v)}`;
+    return ok ? { lines } : `--lines takes ${MOVABLE_LINES.join(', ')} only (lawn and rodent exclusion are never handed over), got ${JSON.stringify(v)}`;
   },
   '--zips': (v) => {
     const zips = [...new Set(v.split(',').map((x) => x.trim()).filter(Boolean))].sort();
