@@ -205,7 +205,8 @@ function rowBlockMinutes(row, minutes = null) {
   const startMin = parseHHMM(row?.window_start);
   if (startMin == null) return { startMin: null, endMin: null };
   if (Number(minutes) > 0) return { startMin, endMin: startMin + Number(minutes) };
-  const storedEnd = parseHHMM(row?.window_end);
+  // PostgreSQL's TIME also holds 24:00:00, the end of the day; parseHHMM does not read it.
+  const storedEnd = /^24:00(?::00(?:\.0+)?)?$/.test(String(row?.window_end ?? '').trim()) ? 1440 : parseHHMM(row?.window_end);
   const windowEnd = storedEnd == null ? 0 : (storedEnd < startMin ? storedEnd + 1440 : storedEnd);
   const lengthEnd = Number(row?.estimated_duration_minutes) > 0 ? startMin + Number(row.estimated_duration_minutes) : 0;
   const endMin = Math.max(windowEnd, lengthEnd);

@@ -53,6 +53,7 @@ describe('rowBlockMinutes (a visit row as the shift check reads it)', () => {
     ['a zero length is no length', { window_start: '09:00', window_end: '10:00' }, 0, { startMin: 540, endMin: 600 }],
     ['a long job late in the day, not wrapped at midnight', { window_start: '16:00', window_end: null, estimated_duration_minutes: 480 }, undefined, { startMin: 960, endMin: 1440 }],
     ['a stored end that wrapped at midnight, read as the next day', { window_start: '16:00', window_end: '00:00' }, undefined, { startMin: 960, endMin: 1440 }],
+    ['a stored end of 24:00:00 (PostgreSQL holds it), the end of the day and not the stored length', { window_start: '16:00', window_end: '24:00:00', estimated_duration_minutes: 60 }, undefined, { startMin: 960, endMin: 1440 }],
     ['an end past midnight, not clamped', { window_start: '23:30', window_end: null, estimated_duration_minutes: 60 }, undefined, { startMin: 1410, endMin: 1470 }],
     ['no block for a row with no start', { window_start: null, window_end: '10:00' }, undefined, none],
     ['no block for a start that is not a time', { window_start: '25:00', window_end: '10:00' }, 90, none],
