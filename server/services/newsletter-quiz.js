@@ -32,6 +32,7 @@
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
+const { etDateString } = require('../utils/datetime-et');
 
 // Body substitution tokens. Hyphenated like {{greeting-name}} / {{grass-type}}
 // so a model-written _italic_ marker can't split them mid-render. {{quiz}} is
@@ -157,17 +158,18 @@ const NEWSLETTER_POLLS = [
   ['nl-poll-music-v1', 'Poll: live music', "Live music: what's your speed?",
     [['rock', 'Rock'], ['country', 'Country'], ['jazz-blues', 'Jazz or blues'], ['anything-live', 'Anything live']]],
 ];
-// Waves Pest Insider polls: the list the owner approved the same day (PI1-PI6
-// on the same page), in his order, on the same rules. The Pest Insider planner
-// adds one to at most every 3rd issue (pest-insider/schedule.js, through
+// Waves Pest Insider polls: the wording and order the owner approved on
+// 2026-11-22 ("polls rec", choice C), which replace the 2026-11-20 list (PI1-PI6
+// on the same page). Same rules as the Waves Newsletter's. The Pest Insider
+// planner adds one to at most every 3rd issue (pest-insider/schedule.js, through
 // chooseNewsletterPoll); nothing else adds one.
 const PEST_INSIDER_POLLS = [
-  ['pi-poll-bugging-you-v1', 'Poll: pest bugging you', 'Which pest bugs you most this month?',
+  ['pi-poll-house-spider-v1', 'Poll: spider in the house', 'Spider in the house. What happens next?',
+    [['cup-and-card', 'Cup and card'], ['leave-it-be', 'Leave it be'], ['shoe', 'Shoe'], ['move-out', 'Move out']]],
+  ['pi-poll-worst-guest-v1', 'Poll: worst house guest', 'Which pest is the worst house guest?',
     [['ants', 'Ants'], ['roaches', 'Roaches'], ['mosquitoes', 'Mosquitoes'], ['spiders', 'Spiders']]],
   ['pi-poll-lizards-v1', 'Poll: lizards on the lanai', 'Lizards on the lanai: friend or foe?',
     [['friend', 'Friend'], ['foe', 'Foe'], ['depends', 'Depends'], ['what-lizards', 'What lizards?']]],
-  ['pi-poll-house-spider-v1', 'Poll: spider in the house', 'Spider in the house. What happens next?',
-    [['cup-and-card', 'Cup and card'], ['leave-it-be', 'Leave it be'], ['shoe', 'Shoe'], ['move-out', 'Move out']]],
   ['pi-poll-bug-surprise-v1', 'Poll: Florida bug surprise', 'Biggest Florida bug surprise?',
     [['palmetto-bugs', 'Palmetto bugs'], ['lovebugs', 'Lovebugs'], ['fire-ants', 'Fire ants'], ['no-see-ums', 'No-see-ums']]],
   ['pi-poll-yard-smell-v1', 'Poll: yard smell', 'Best smell in a Florida yard?',
@@ -177,13 +179,13 @@ const PEST_INSIDER_POLLS = [
 ];
 // Adds one newsletter's polls to QUIZZES; returns their ids in the owner's
 // order: the newsletter uses each once, then stops.
-function addPolls(polls, newsletterName) {
+function addPolls(polls, landingLine) {
   for (const [id, label, question, answers] of polls) {
     QUIZZES[id] = {
       label,
       question,
       emailCta: 'Tap one, then confirm. Just for fun.',
-      landingLine: `Your vote is in. See you in the next ${newsletterName}.`,
+      landingLine,
       // The archive and the owner's Monday or FYI copy show the poll with no links.
       neutralLine: 'Readers vote right in the email. Just for fun.',
       landingCtaSuppressed: true,
@@ -195,8 +197,9 @@ function addPolls(polls, newsletterName) {
   }
   return Object.freeze(polls.map(([id]) => id));
 }
-const NEWSLETTER_POLL_IDS = addPolls(NEWSLETTER_POLLS, 'Waves Newsletter');
-const PEST_INSIDER_POLL_IDS = addPolls(PEST_INSIDER_POLLS, 'Waves Pest Insider');
+const NEWSLETTER_POLL_IDS = addPolls(NEWSLETTER_POLLS, 'Your vote is in. See you in the next Waves Newsletter.');
+// The Waves Pest Insider's next issue opens with the last poll's result (pollResultLine).
+const PEST_INSIDER_POLL_IDS = addPolls(PEST_INSIDER_POLLS, "Your vote is in. We'll share the top answer in the Waves Pest Insider.");
 const isNewsletterPoll = (quizId) => NEWSLETTER_POLL_IDS.includes(quizId);
 const isPestInsiderPoll = (quizId) => PEST_INSIDER_POLL_IDS.includes(quizId);
 const isPoll = (quizId) => isNewsletterPoll(quizId) || isPestInsiderPoll(quizId);
@@ -537,6 +540,37 @@ function chooseNewsletterPoll({ recent = [], used = [], ids = NEWSLETTER_POLL_ID
   return ids.find((id) => !taken.has(id)) || null;
 }
 
+// An issue's time: its sent_at, else the earliest time any of its delivery rows
+// records, else its schedule, else its draft time (the rule newsletterIssuePolls
+// describes). Both history reads sort and date issues by it.
+const ISSUE_TIME_SQL = `COALESCE(s.sent_at,
+      (SELECT LEAST(MIN(f.sent_at), MIN(f.delivered_at), MIN(f.opened_at), MIN(f.clicked_at),
+          MIN(f.complained_at), MIN(f.unsubscribed_at))
+        FROM newsletter_send_deliveries f WHERE f.send_id = s.id),
+      s.scheduled_for, s.created_at)`;
+
+// whereExists callback: one of the issue's delivery rows reached its reader by
+// the sender's own rule. reachedDelivery's unqualified columns are d's: SQL
+// resolves a name in the innermost FROM first, before the outer newsletter_sends row.
+function reachedRowFilter(knex) {
+  // Loaded here, not at the top: newsletter-sender.js loads this module first.
+  const { reachedDelivery } = require('./newsletter-sender');
+  return (sub) => {
+    reachedDelivery(sub.select(knex.raw('1')).from('newsletter_send_deliveries as d').whereRaw('d.send_id = s.id'));
+  };
+}
+
+// The newest `limit` issues of one newsletter type that readers got (newest
+// first), with `columns` of each (newsletter_sends as s).
+function newestReachedIssues({ newsletterType, knex, limit, columns }) {
+  return knex('newsletter_sends as s')
+    .where('s.newsletter_type', newsletterType)
+    .whereExists(reachedRowFilter(knex))
+    .orderByRaw(`${ISSUE_TIME_SQL} DESC`)
+    .limit(limit)
+    .select(columns);
+}
+
 /**
  * Reads what chooseNewsletterPoll needs from the issues of one newsletter
  * type: its list (pollIdsFor), the polls of the newest POLL_ISSUE_GAP issues
@@ -572,14 +606,10 @@ function chooseNewsletterPoll({ recent = [], used = [], ids = NEWSLETTER_POLL_ID
  */
 async function newsletterIssuePolls({ newsletterType, knex = require('../models/db') } = {}) {
   // Loaded here, not at the top: newsletter-sender.js loads this module first.
-  const { reachedDelivery, outstandingEligibleDeliveries } = require('./newsletter-sender');
+  const { outstandingEligibleDeliveries } = require('./newsletter-sender');
   const ids = pollIdsFor(newsletterType);
   const issues = () => knex('newsletter_sends as s').where('s.newsletter_type', newsletterType);
-  const deliveryRows = (sub) => sub.select(knex.raw('1'))
-    .from('newsletter_send_deliveries as d').whereRaw('d.send_id = s.id');
-  // reachedDelivery's unqualified columns are d's: SQL resolves a name in the
-  // innermost FROM first, before the outer newsletter_sends row.
-  const reachedRow = (sub) => { reachedDelivery(deliveryRows(sub)); };
+  const reachedRow = reachedRowFilter(knex);
   const resumableRow = () => outstandingEligibleDeliveries('s.id', { database: knex, correlate: true })
     .select(knex.raw('1'));
   // An unsent Waves Pest Insider issue holds its poll while its send row
@@ -592,15 +622,7 @@ async function newsletterIssuePolls({ newsletterType, knex = require('../models/
   // repeated one. A flagship issue goes out only on its own Tuesday, so there
   // only a resumable row holds.
   const UNSENT = ['draft', 'scheduled', 'sending', 'failed'];
-  const newest = await issues()
-    .whereExists(reachedRow)
-    .orderByRaw(`COALESCE(s.sent_at,
-      (SELECT LEAST(MIN(f.sent_at), MIN(f.delivered_at), MIN(f.opened_at), MIN(f.clicked_at),
-          MIN(f.complained_at), MIN(f.unsubscribed_at))
-        FROM newsletter_send_deliveries f WHERE f.send_id = s.id),
-      s.scheduled_for, s.created_at) DESC`)
-    .limit(POLL_ISSUE_GAP)
-    .select('s.html_body', 's.text_body');
+  const newest = await newestReachedIssues({ newsletterType, knex, limit: POLL_ISSUE_GAP, columns: ['s.html_body', 's.text_body'] });
   // A loose prefilter (any token form, either part, any letter case);
   // pollInIssue then reads the tokens exactly as the sender renders them.
   const holding = await issues()
@@ -618,6 +640,69 @@ async function newsletterIssuePolls({ newsletterType, knex = require('../models/
   };
 }
 
+/** A poll issue older than this many days (by ET calendar date) leaves its result out of the next issue. */
+const POLL_RESULT_MAX_AGE_DAYS = 45;
+const DAY_MS = 24 * 60 * 60 * 1000;
+// Whole days from one ET calendar date to another (both 'YYYY-MM-DD').
+const daysBetweenETDates = (from, to) => Math.round((Date.parse(`${to}T12:00:00Z`) - Date.parse(`${from}T12:00:00Z`)) / DAY_MS);
+
+/**
+ * The vote counts of a Waves Pest Insider's last poll, for the issue sent on
+ * `sendDate` ('YYYY-MM-DD', ET), or null. Only the NEWEST issue readers got
+ * counts (newestReachedIssues, the rule and the issue time newsletterIssuePolls
+ * reads): when it held a poll, and its time is at most POLL_RESULT_MAX_AGE_DAYS
+ * before `sendDate`, the result is { quizId, counts } with one count per
+ * answer key. A vote is one of that issue's own delivery rows with the poll's
+ * id and an answer time; a reader who voted again changed the row's answer
+ * (recordQuizResponse), so each row counts once. Throws on a read failure: the
+ * planner's caller drops the line and warns (schedule.js lastPollLine).
+ */
+async function newsletterLastPoll({ newsletterType, sendDate, knex = require('../models/db') } = {}) {
+  const [issue] = await newestReachedIssues({
+    newsletterType,
+    knex,
+    limit: 1,
+    columns: ['s.id', 's.html_body', 's.text_body', knex.raw(`${ISSUE_TIME_SQL} AS issue_time`)],
+  });
+  const quizId = issue ? pollInIssue(issue, pollIdsFor(newsletterType)) : null;
+  if (!quizId) return null;
+  if (daysBetweenETDates(etDateString(new Date(issue.issue_time)), sendDate) > POLL_RESULT_MAX_AGE_DAYS) return null;
+  const rows = await knex('newsletter_send_deliveries')
+    .where({ send_id: issue.id, quiz_id: quizId })
+    .whereNotNull('quiz_answered_at')
+    .groupBy('quiz_answer')
+    .select('quiz_answer')
+    .count({ n: '*' });
+  return { quizId, counts: Object.fromEntries(rows.map((row) => [row.quiz_answer, Number(row.n)])) };
+}
+
+// A label ends its sentence with a period unless it already ends in ? . or !
+// ("What lizards?" stays "What lizards?").
+const endSentence = (text) => (/[.?!]$/.test(text) ? text : `${text}.`);
+
+/**
+ * The words that tell readers how a Waves Pest Insider poll came out, or null
+ * (owner 2026-11-22, "polls rec"): `Last poll: <question> The top answer was
+ * <label>.`; for two answers tied at the top `It was a tie between X and Y.`
+ * (the poll's own answer order, except a label that holds " and " goes last);
+ * for three or four, `It was a tie. No answer came out on top.` No line for no
+ * votes, an unknown poll, or a poll of another newsletter. Only the poll's own
+ * answer keys count. It never prints a count or a percentage.
+ * @param {{ quizId: string, counts: Record<string, number> }} result
+ */
+function pollResultLine({ quizId, counts } = {}) {
+  const quiz = isPestInsiderPoll(quizId) ? getQuiz(quizId) : null;
+  if (!quiz) return null;
+  const votes = quiz.answers.map((a) => ({ label: a.label, n: Number(counts?.[a.key]) || 0 }));
+  const top = Math.max(...votes.map((v) => v.n));
+  if (!(top > 0)) return null;
+  const labels = votes.filter((v) => v.n === top).map((v) => v.label);
+  if (labels.length === 1) return `Last poll: ${quiz.question} The top answer was ${endSentence(labels[0])}`;
+  if (labels.length > 2) return `Last poll: ${quiz.question} It was a tie. No answer came out on top.`;
+  const [first, second] = [...labels].sort((a, b) => a.includes(' and ') - b.includes(' and '));
+  return `Last poll: ${quiz.question} It was a tie between ${first} and ${endSentence(second)}`;
+}
+
 module.exports = {
   NEWSLETTER_POLL_IDS,
   PEST_INSIDER_POLL_IDS,
@@ -628,6 +713,8 @@ module.exports = {
   pollInIssue,
   chooseNewsletterPoll,
   newsletterIssuePolls,
+  newsletterLastPoll,
+  pollResultLine,
   QUIZ_HTML_TOKEN,
   QUIZ_TEXT_TOKEN,
   QUIZ_TOKEN_PATTERN,

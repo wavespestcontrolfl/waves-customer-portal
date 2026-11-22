@@ -212,17 +212,28 @@ router.get('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
     const quizIdSafe = encodeURIComponent(quizId);
     const answerSafe = encodeURIComponent(answer);
 
-    const heading = 'One tap to confirm.';
+    // A poll vote that names one of its answers reads like a poll: its question,
+    // "Count my vote", and the way to change the vote. A vote counts once per
+    // email and the last confirmed one wins (recordQuizResponse overwrites the
+    // delivery row). Every other quiz, and a poll link with no such answer,
+    // keeps the confirm page below. Nothing is written on a GET.
+    const quiz = getQuiz(quizId);
+    const pollVote = quiz?.poll && label;
+    const heading = pollVote ? escapeHtml(quiz.question) : 'One tap to confirm.';
     // A poll is just for fun and nothing follows a vote (no tag, no call, no
     // visit), so its page names the answer and promises no next step.
     const picked = label ? `You picked <strong>${escapeHtml(label)}</strong>.` : '';
-    const lead = getQuiz(quizId)?.poll ? picked : `${picked}${picked ? ' ' : ''}Tap confirm and we'll take it from here.`;
+    const lead = quiz?.poll ? picked : `${picked}${picked ? ' ' : ''}Tap confirm and we'll take it from here.`;
+    const buttonText = pollVote ? 'Count my vote' : `Confirm${label ? ` — ${escapeHtml(label)}` : ''}`;
+    const smallLine = pollVote
+      ? 'Changed your mind? Tap another answer in the email. Your last vote counts.'
+      : "If you didn't tap this, just close this tab — nothing changes until you click the button.";
     const bodyHtml = `
           ${lead ? `<p>${lead}</p>` : ''}
           <form method="POST" action="/api/public/newsletter/quiz/${tokenSafe}/${quizIdSafe}/${answerSafe}">
-            <button type="submit" class="btn">Confirm${label ? ` — ${escapeHtml(label)}` : ''}</button>
+            <button type="submit" class="btn">${buttonText}</button>
           </form>
-          <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>
+          <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">${smallLine}</p>
         `;
     res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {

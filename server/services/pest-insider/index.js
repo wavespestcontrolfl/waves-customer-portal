@@ -26,6 +26,13 @@
  * `pollQuizId` is the issue's poll, which the planner picks
  * (newsletter-quiz.js chooseNewsletterPoll); the renderer shows only a Waves
  * Pest Insider poll, and the send check reads its words.
+ * `lastPoll` is { quizId, counts }: the poll of the issue just before this one
+ * and its votes (newsletter-quiz.js newsletterLastPoll). The renderer opens the
+ * issue with its result line (pollResultLine) under the greeting, so the line
+ * is part of the shared body and goes through the same send check as the rest.
+ * A line the check refuses is left out, and the issue still builds without it
+ * (diagnostics.lastPollLineBlocked names why); `diagnostics.lastPollId` names
+ * the poll whose line the body carries, else it is absent.
  * Returns { ok, reason, issue, tool, diagnostics } where `issue` is
  * { subject, preview, html_body, text_body } and `tool` is the live tool or
  * null, when ok.
@@ -38,7 +45,7 @@ const { renderIssue } = require('./render');
 const { sendDateET } = require('./facts');
 const { postUrl } = require('./posts');
 const { validateNewsletterDraft } = require('../newsletter-validator');
-const { neutralizeQuizTokens, pollInIssue, PEST_INSIDER_POLL_IDS } = require('../newsletter-quiz');
+const { neutralizeQuizTokens, pollInIssue, pollResultLine, PEST_INSIDER_POLL_IDS } = require('../newsletter-quiz');
 const { neutralizeIssueTokens } = require('./referral-line');
 
 // The Pest Insider's newsletter type key: the send path, the proof kill
@@ -68,12 +75,29 @@ function sendGateErrors(issue) {
   return errors;
 }
 
+// The issue as rendered, with the send check's errors. The last poll's result
+// line is a nice-to-have: a line the check refuses is left out, the reason is
+// noted in the diagnostics, and the issue is checked again without it. A line
+// the issue keeps is named in diagnostics.lastPollId.
+function renderChecked(draft, lastPoll, diagnostics) {
+  const withLine = pollResultLine(lastPoll || undefined) ? renderIssue({ ...draft, lastPoll }) : null;
+  const errors = withLine ? sendGateErrors(withLine) : [];
+  if (withLine && !errors.length) {
+    diagnostics.lastPollId = lastPoll.quizId;
+    return { issue: withLine, errors };
+  }
+  if (withLine) diagnostics.lastPollLineBlocked = errors[0];
+  const issue = renderIssue(draft);
+  return { issue, errors: sendGateErrors(issue) };
+}
+
 /**
  * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[], toolIds?: (string|null)[] },
- *   recheckedFactIds?: string[], livePostFactIds?: string[], liveToolUrls?: string[], pollQuizId?: string|null }} input
+ *   recheckedFactIds?: string[], livePostFactIds?: string[], liveToolUrls?: string[], pollQuizId?: string|null,
+ *   lastPoll?: { quizId: string, counts: Record<string, number> }|null }} input
  *   The issue is one email for every subscriber and takes no caller text (render.js says why).
  */
-function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFactIds = [], liveToolUrls = [], pollQuizId = null }) {
+function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFactIds = [], liveToolUrls = [], pollQuizId = null, lastPoll = null }) {
   const dateET = sendDateET(sendDate);
   const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, toolId: null, pollId: null, problems: [] };
 
@@ -108,18 +132,18 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
   diagnostics.problems = copy.problems;
   if (!copy.ok) return { ok: false, reason: copyFailReason(copy), issue: null, diagnostics };
 
-  const issue = renderIssue({
+  const draft = {
     sendDate: dateET,
     subject: copy.subject,
     preview: copy.preview,
     lead: { headline: copy.headline, sentences: copy.lead.map((text) => ({ text })), postUrl: post, factId: leadFact.id },
     idItem: { text: copy.idText, species: idItem },
     pollQuizId,
-  });
+  };
+  const { issue, errors } = renderChecked(draft, lastPoll, diagnostics);
   // The poll the body carries, read as the sender and the poll history read it.
   diagnostics.pollId = pollInIssue(issue, PEST_INSIDER_POLL_IDS);
 
-  const errors = sendGateErrors(issue);
   if (errors.length) {
     diagnostics.problems = errors.map((err) => ({ part: 'send_validator', text: '', reason: err }));
     return { ok: false, reason: `send_validator_blocked: ${errors[0]}`, issue: null, diagnostics };

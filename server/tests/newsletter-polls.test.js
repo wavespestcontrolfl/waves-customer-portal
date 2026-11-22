@@ -35,7 +35,7 @@ jest.mock('../services/newsletter-event-selection', () => ({
 const db = require('../models/db');
 const {
   NEWSLETTER_POLL_IDS, PEST_INSIDER_POLL_IDS, POLL_ID_MARK, POLL_ISSUE_GAP, QUIZ_TOKEN_PATTERN, getQuiz,
-  chooseNewsletterPoll, pollInIssue, hasQuizToken, buildQuizSubstitutions, neutralizeQuizTokens,
+  chooseNewsletterPoll, pollInIssue, hasQuizToken, buildQuizSubstitutions, neutralizeQuizTokens, pollResultLine, recordQuizResponse, newsletterLastPoll,
 } = require('../services/newsletter-quiz');
 const {
   assembleBeehiivNewsletter, buildFlagshipTextBody, createNewsletterDraft, GREETING_NAME_TOKEN, CITY_TOKEN, GRASS_TYPE_TOKEN,
@@ -229,14 +229,14 @@ describe('Waves Newsletter polls', () => {
 describe('Waves Pest Insider polls', () => {
   const [PI1, PI2] = PEST_INSIDER_POLL_IDS;
 
-  test('the polls are the PI1-PI6 list the owner approved on 2026-11-20, in his order, on the Waves Newsletter poll rules', () => {
+  test('the polls are the wording and order the owner approved on 2026-11-22 (polls rec, C), on the Waves Newsletter poll rules', () => {
     expect(PEST_INSIDER_POLL_IDS.map((id) => {
       const quiz = getQuiz(id);
       return `${quiz.question} ${quiz.answers.map((a) => a.label).join(' · ')}`;
     })).toEqual([
-      'Which pest bugs you most this month? Ants · Roaches · Mosquitoes · Spiders',
-      'Lizards on the lanai: friend or foe? Friend · Foe · Depends · What lizards?',
       'Spider in the house. What happens next? Cup and card · Leave it be · Shoe · Move out',
+      'Which pest is the worst house guest? Ants · Roaches · Mosquitoes · Spiders',
+      'Lizards on the lanai: friend or foe? Friend · Foe · Depends · What lizards?',
       'Biggest Florida bug surprise? Palmetto bugs · Lovebugs · Fire ants · No-see-ums',
       'Best smell in a Florida yard? Orange blossom · Cut grass · Jasmine · Rain coming',
       'Who gets the mosquito bites at your house? Me, always · Everyone · Not me · Nobody',
@@ -250,8 +250,15 @@ describe('Waves Pest Insider polls', () => {
       expect(quiz.landingCtaSuppressed).toBe(true);
       expect(quiz.emailCta).toBe('Tap one, then confirm. Just for fun.');
     }
-    // Each thank-you page names its own newsletter.
-    expect(getQuiz(PI1).landingLine).toBe('Your vote is in. See you in the next Waves Pest Insider.');
+    expect(PEST_INSIDER_POLL_IDS).toEqual([
+      'pi-poll-house-spider-v1', 'pi-poll-worst-guest-v1', 'pi-poll-lizards-v1',
+      'pi-poll-bug-surprise-v1', 'pi-poll-yard-smell-v1', 'pi-poll-mosquito-bites-v1',
+    ]);
+    expect(getQuiz('pi-poll-worst-guest-v1').label).toBe('Poll: worst house guest');
+    // The reworded poll has a new id; the old one is gone.
+    expect(getQuiz('pi-poll-bugging-you-v1')).toBeNull();
+    // Each thank-you page names its own newsletter: the Pest Insider's says the top answer will come in the issue.
+    expect(getQuiz(PI1).landingLine).toBe("Your vote is in. We'll share the top answer in the Waves Pest Insider.");
     expect(getQuiz(P1).landingLine).toBe('Your vote is in. See you in the next Waves Newsletter.');
   });
 
@@ -271,5 +278,133 @@ describe('Waves Pest Insider polls', () => {
     expect(pollInIssue(issue)).toBe(P1);
     expect(pollInIssue({ html_body: `{{quiz:${PI1}}}`, text_body: '' })).toBeNull();
     expect(chooseNewsletterPoll({ recent: [], used: [P1, P2], ids: PEST_INSIDER_POLL_IDS })).toBe(PI1);
+  });
+});
+
+describe('the last poll result line (Waves Pest Insider)', () => {
+  const SPIDER = 'pi-poll-house-spider-v1'; // Cup and card · Leave it be · Shoe · Move out
+  const LIZARDS = 'pi-poll-lizards-v1'; // Friend · Foe · Depends · What lizards?
+  const QUESTION = 'Spider in the house. What happens next?';
+
+  test.each([
+    ['one top answer', { 'cup-and-card': 7, 'leave-it-be': 3, shoe: 1 }, `Last poll: ${QUESTION} The top answer was Cup and card.`],
+    ['one top answer, whatever its place in the list', { 'cup-and-card': 1, 'move-out': 2 }, `Last poll: ${QUESTION} The top answer was Move out.`],
+    ['two tied: the poll\'s own order', { 'leave-it-be': 4, 'move-out': 4, shoe: 1 }, `Last poll: ${QUESTION} It was a tie between Leave it be and Move out.`],
+    ['two tied, one label holds " and ": it goes last', { 'cup-and-card': 2, shoe: 2 }, `Last poll: ${QUESTION} It was a tie between Shoe and Cup and card.`],
+    ['three tied', { 'cup-and-card': 2, 'leave-it-be': 2, shoe: 2, 'move-out': 1 }, `Last poll: ${QUESTION} It was a tie. No answer came out on top.`],
+    ['four tied', { 'cup-and-card': 1, 'leave-it-be': 1, shoe: 1, 'move-out': 1 }, `Last poll: ${QUESTION} It was a tie. No answer came out on top.`],
+    ['an answer unknown to the poll is ignored', { 'not-a-key': 99, shoe: 1 }, `Last poll: ${QUESTION} The top answer was Shoe.`],
+  ])('%s', (_name, counts, want) => {
+    expect(pollResultLine({ quizId: SPIDER, counts })).toBe(want);
+  });
+
+  test('a label that ends in a question mark takes no second period', () => {
+    expect(pollResultLine({ quizId: LIZARDS, counts: { 'what-lizards': 5 } }))
+      .toBe('Last poll: Lizards on the lanai: friend or foe? The top answer was What lizards?');
+    expect(pollResultLine({ quizId: LIZARDS, counts: { friend: 2, 'what-lizards': 2 } }))
+      .toBe('Last poll: Lizards on the lanai: friend or foe? It was a tie between Friend and What lizards?');
+  });
+
+  test.each([
+    ['no votes', { quizId: SPIDER, counts: {} }],
+    ['zero votes', { quizId: SPIDER, counts: { shoe: 0 } }],
+    ['only unknown answers', { quizId: SPIDER, counts: { nope: 5 } }],
+    ['counts that are not numbers', { quizId: SPIDER, counts: { shoe: 'many', 'move-out': -2 } }],
+    ['an unknown poll', { quizId: 'pi-poll-unknown-v1', counts: { shoe: 3 } }],
+    ['a Waves Newsletter poll', { quizId: P1, counts: { beach: 3 } }],
+    ['a service quiz', { quizId: 'pest-pressure-v1', counts: { ants: 3 } }],
+    ['nothing at all', undefined],
+  ])('no line for %s', (_name, result) => {
+    expect(pollResultLine(result)).toBeNull();
+  });
+
+  test('no line prints a count, a percentage or any digit, for every poll and every vote mix', () => {
+    for (const id of PEST_INSIDER_POLL_IDS) {
+      const keys = getQuiz(id).answers.map((a) => a.key);
+      const mixes = [
+        { [keys[0]]: 12 }, { [keys[1]]: 7, [keys[2]]: 1 }, { [keys[0]]: 3, [keys[3]]: 3 },
+        { [keys[0]]: 2, [keys[1]]: 2, [keys[2]]: 2 }, Object.fromEntries(keys.map((k) => [k, 5])),
+      ];
+      for (const counts of mixes) {
+        const line = pollResultLine({ quizId: id, counts });
+        expect(line).toMatch(/^Last poll: /);
+        expect(line).not.toMatch(/\d|%/);
+      }
+    }
+  });
+});
+
+describe('a vote from the same email twice (the last vote counts)', () => {
+  test('recordQuizResponse overwrites the delivery row: no "first vote wins" guard', async () => {
+    const [PI] = PEST_INSIDER_POLL_IDS;
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = {
+        where: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'newsletter_send_deliveries'
+          ? { id: 7, subscriber_id: null, send_id: 3 }
+          : { html_body: `{{quiz:${PI}}}`, text_body: '' })),
+        update: jest.fn(async (row) => { updates.push({ table, ...row }); }),
+      };
+      return q;
+    });
+    await recordQuizResponse({ token: TOKEN, quizId: PI, answerKey: 'cup-and-card' });
+    await recordQuizResponse({ token: TOKEN, quizId: PI, answerKey: 'shoe' });
+    expect(updates.map((u) => [u.table, u.quiz_id, u.quiz_answer])).toEqual([
+      ['newsletter_send_deliveries', PI, 'cup-and-card'],
+      ['newsletter_send_deliveries', PI, 'shoe'],
+    ]);
+  });
+});
+
+describe('newsletterLastPoll (the planner\'s read, on a fake database; real SQL runs in newsletter-polls-postgres.test.js)', () => {
+  const [PI] = PEST_INSIDER_POLL_IDS;
+  // The newest issue readers got (the query's own ordering and reach rule are SQL), and the vote rows.
+  function fakeKnex({ issue, votes = [] }) {
+    const seen = { votes: null, notNull: null, groupBy: null };
+    const issues = {};
+    ['where', 'whereExists', 'orderByRaw', 'limit'].forEach((m) => { issues[m] = jest.fn(() => issues); });
+    issues.select = jest.fn(async () => (issue ? [issue] : []));
+    const voteQuery = {
+      where: jest.fn((cond) => { seen.votes = cond; return voteQuery; }),
+      whereNotNull: jest.fn((col) => { seen.notNull = col; return voteQuery; }),
+      groupBy: jest.fn((col) => { seen.groupBy = col; return voteQuery; }),
+      select: jest.fn(() => voteQuery),
+      count: jest.fn(async () => votes),
+    };
+    const knex = jest.fn((table) => (String(table).startsWith('newsletter_sends') ? issues : voteQuery));
+    knex.raw = jest.fn((sql) => sql);
+    return { knex, seen, issues };
+  }
+  const issueOf = (poll, time) => ({ id: 41, html_body: poll ? `{{quiz:${poll}}}` : '<p>x</p>', text_body: '', issue_time: new Date(time) });
+  const read = (knex) => newsletterLastPoll({ newsletterType: 'pest-insider-monthly', sendDate: '2026-12-03', knex });
+
+  test('the newest issue readers got held a poll: its own answered rows, counted per answer', async () => {
+    const { knex, seen, issues } = fakeKnex({
+      issue: issueOf(PI, '2026-11-19T12:00:00Z'),
+      votes: [{ quiz_answer: 'shoe', n: '3' }, { quiz_answer: 'move-out', n: 1 }],
+    });
+    expect(await read(knex)).toEqual({ quizId: PI, counts: { shoe: 3, 'move-out': 1 } });
+    expect(issues.limit).toHaveBeenCalledWith(1);
+    expect(seen).toEqual({ votes: { send_id: 41, quiz_id: PI }, notNull: 'quiz_answered_at', groupBy: 'quiz_answer' });
+  });
+
+  test('no poll in the newest issue readers got, or no such issue: no read of votes, no result', async () => {
+    for (const issue of [issueOf(null, '2026-11-19T12:00:00Z'), issueOf(NEWSLETTER_POLL_IDS[0], '2026-11-19T12:00:00Z'), null]) {
+      const { knex } = fakeKnex({ issue, votes: [{ quiz_answer: 'shoe', n: 1 }] });
+      expect(await read(knex)).toBeNull();
+      expect(knex).not.toHaveBeenCalledWith('newsletter_send_deliveries');
+    }
+  });
+
+  test('a poll issue 45 days before the new issue (by ET date) counts; 46 days does not', async () => {
+    const votes = [{ quiz_answer: 'shoe', n: 1 }];
+    // 2026-10-19 8:00 AM ET is 45 days before 2026-12-03; the late-evening ET edge is still that ET date.
+    for (const time of ['2026-10-19T12:00:00Z', '2026-10-20T03:30:00Z']) {
+      expect(await read(fakeKnex({ issue: issueOf(PI, time), votes }).knex)).toEqual({ quizId: PI, counts: { shoe: 1 } });
+    }
+    for (const time of ['2026-10-18T12:00:00Z', '2026-10-19T03:30:00Z']) {
+      expect(await read(fakeKnex({ issue: issueOf(PI, time), votes }).knex)).toBeNull();
+    }
   });
 });

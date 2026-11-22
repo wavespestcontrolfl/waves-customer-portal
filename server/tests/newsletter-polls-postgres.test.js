@@ -39,8 +39,10 @@ const { randomUUID } = require('crypto');
 postgres('Waves Newsletter polls (real Postgres)', () => {
   const db = require('../models/db');
   const {
-    newsletterIssuePolls, chooseNewsletterPoll, recordQuizResponse, NEWSLETTER_POLL_IDS, PEST_INSIDER_POLL_IDS,
+    newsletterIssuePolls, newsletterLastPoll, pollResultLine, chooseNewsletterPoll, recordQuizResponse,
+    NEWSLETTER_POLL_IDS, PEST_INSIDER_POLL_IDS,
   } = require('../services/newsletter-quiz');
+  const { etDateString } = require('../utils/datetime-et');
   const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
   const [P1, P2, P3, P4] = NEWSLETTER_POLL_IDS;
   const [PI1, PI2] = PEST_INSIDER_POLL_IDS;
@@ -307,17 +309,64 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     const tagsOf = async () => (await db('newsletter_subscribers').where({ id: sub.id }).first('tags')).tags;
     const tagsBefore = await tagsOf();
     // The issue that never showed PI1 records no PI1 vote.
-    await expect(recordQuizResponse({ token: otherPoll.engagement_token, quizId: PI1, answerKey: 'ants' }))
+    await expect(recordQuizResponse({ token: otherPoll.engagement_token, quizId: PI1, answerKey: 'cup-and-card' }))
       .resolves.toEqual({ ok: false, reason: 'not-in-issue' });
     expect(await answerOf(otherPoll)).toEqual({ quiz_id: null, quiz_answer: null });
-    await expect(recordQuizResponse({ token: withPoll.engagement_token, quizId: PI1, answerKey: 'ants' }))
+    await expect(recordQuizResponse({ token: withPoll.engagement_token, quizId: PI1, answerKey: 'cup-and-card' }))
       .resolves.toEqual({ ok: true, reason: 'tagged' });
-    expect(await answerOf(withPoll)).toEqual({ quiz_id: PI1, quiz_answer: 'ants' });
+    expect(await answerOf(withPoll)).toEqual({ quiz_id: PI1, quiz_answer: 'cup-and-card' });
     // A hand-made link with a service quiz's answer neither replaces the vote nor adds a tag.
     await expect(recordQuizResponse({ token: withPoll.engagement_token, quizId: 'pest-pressure-v1', answerKey: 'roaches' }))
       .resolves.toEqual({ ok: false, reason: 'not-in-issue' });
-    expect(await answerOf(withPoll)).toEqual({ quiz_id: PI1, quiz_answer: 'ants' });
+    expect(await answerOf(withPoll)).toEqual({ quiz_id: PI1, quiz_answer: 'cup-and-card' });
     expect(await tagsOf()).toEqual(tagsBefore);
+  });
+
+  test('a second confirmed vote from the same email replaces the first: the last vote counts', async () => {
+    await onlyThisTestsPestInsiderIssues();
+    const [[row]] = await insertIssues(PEST_INSIDER_TYPE, [{ poll: PI2, sentAt: daysAgo(1) }]);
+    const answerOf = async () => db('newsletter_send_deliveries').where({ id: row.id }).first('quiz_id', 'quiz_answer');
+    await recordQuizResponse({ token: row.engagement_token, quizId: PI2, answerKey: 'ants' });
+    expect(await answerOf()).toEqual({ quiz_id: PI2, quiz_answer: 'ants' });
+    await recordQuizResponse({ token: row.engagement_token, quizId: PI2, answerKey: 'spiders' });
+    expect(await answerOf()).toEqual({ quiz_id: PI2, quiz_answer: 'spiders' });
+  });
+
+  test('the last poll result reads the newest issue readers got: its own votes, one per delivery row, only its poll', async () => {
+    await onlyThisTestsPestInsiderIssues();
+    const voted = (quizId, answer, at = daysAgo(6)) => ({ status: 'sent', sentAt: daysAgo(7), answered: { quizId, answer, at } });
+    await insertIssues(PEST_INSIDER_TYPE, [
+      // An older poll issue: not the newest, so its votes never count.
+      { poll: PI1, sentAt: daysAgo(30), deliveries: [{ status: 'sent', sentAt: daysAgo(30), answered: { quizId: PI1, answer: 'shoe', at: daysAgo(29) } }] },
+      {
+        poll: PI2,
+        sentAt: daysAgo(7),
+        deliveries: [
+          voted(PI2, 'ants'), voted(PI2, 'ants'), voted(PI2, 'spiders'),
+          // Did not vote; a vote for another quiz; an answer the poll does not define.
+          { status: 'sent', sentAt: daysAgo(7) }, voted(PI1, 'shoe'), voted(PI2, 'not-a-key'),
+        ],
+      },
+      // A newer issue nobody got (a draft) does not decide.
+      { poll: PI1, status: 'draft' },
+    ]);
+    const sendDate = etDateString(new Date());
+    const last = await newsletterLastPoll({ newsletterType: PEST_INSIDER_TYPE, sendDate });
+    expect(last).toEqual({ quizId: PI2, counts: { ants: 2, spiders: 1, 'not-a-key': 1 } });
+    expect(pollResultLine(last)).toBe('Last poll: Which pest is the worst house guest? The top answer was Ants.');
+  });
+
+  test('the last poll result is none when the newest issue readers got had no poll, or when it is over 45 days old', async () => {
+    await onlyThisTestsPestInsiderIssues();
+    const sendDate = etDateString(new Date());
+    const vote = (daysOld) => [{ status: 'sent', sentAt: daysAgo(daysOld), answered: { quizId: PI2, answer: 'ants', at: daysAgo(daysOld - 1) } }];
+    await insertIssues(PEST_INSIDER_TYPE, [{ poll: PI2, sentAt: daysAgo(47), deliveries: vote(47) }]);
+    expect(await newsletterLastPoll({ newsletterType: PEST_INSIDER_TYPE, sendDate })).toBeNull();
+    await insertIssues(PEST_INSIDER_TYPE, [{ poll: PI2, sentAt: daysAgo(43), deliveries: vote(43) }]);
+    expect((await newsletterLastPoll({ newsletterType: PEST_INSIDER_TYPE, sendDate })).quizId).toBe(PI2);
+    // The next issue had no poll: the line is for the issue right after a poll issue only.
+    await insertIssues(PEST_INSIDER_TYPE, [{ poll: null, sentAt: daysAgo(2) }]);
+    expect(await newsletterLastPoll({ newsletterType: PEST_INSIDER_TYPE, sendDate })).toBeNull();
   });
 
   test('an unsent Waves Pest Insider issue holds its poll while its send row exists; the flagship rule does not change', async () => {

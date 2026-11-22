@@ -18,7 +18,12 @@ jest.mock('../services/newsletter-sender', () => ({ spamReportCounts: jest.fn() 
 // No Pest Insider issue reached readers yet, unless a case says otherwise: the first poll is due.
 jest.mock('../services/newsletter-quiz', () => {
   const actual = jest.requireActual('../services/newsletter-quiz');
-  return { ...actual, newsletterIssuePolls: jest.fn(async () => ({ ids: actual.PEST_INSIDER_POLL_IDS, recent: [], used: [] })) };
+  return {
+    ...actual,
+    newsletterIssuePolls: jest.fn(async () => ({ ids: actual.PEST_INSIDER_POLL_IDS, recent: [], used: [] })),
+    // The newest issue readers got held no poll, unless a case says otherwise: no result line.
+    newsletterLastPoll: jest.fn(async () => null),
+  };
 });
 
 const { buildIssue } = require('../services/pest-insider/index');
@@ -26,7 +31,7 @@ const { checkLivePosts } = require('../services/pest-insider/posts');
 const { selectIssueAudience } = require('../services/pest-insider/audience');
 const { triggerNotification } = require('../services/notification-triggers');
 const { spamReportCounts } = require('../services/newsletter-sender');
-const { newsletterIssuePolls, PEST_INSIDER_POLL_IDS } = require('../services/newsletter-quiz');
+const { newsletterIssuePolls, newsletterLastPoll, PEST_INSIDER_POLL_IDS } = require('../services/newsletter-quiz');
 const logger = require('../services/logger');
 const {
   issueDatesInMonth, isIssueDate, nextIssueDate, todayET, nextDay, recentHistory, runIssuePlanner, USED_STATUSES,
@@ -249,9 +254,12 @@ describe('runIssuePlanner', () => {
       livePostFactIds: ['fact-live-1', 'fact-live-2'],
       liveToolUrls: [],
       pollQuizId: PEST_INSIDER_POLL_IDS[0],
+      lastPoll: null,
     });
     // The poll history is this newsletter's, read through the planner's database.
     expect(newsletterIssuePolls).toHaveBeenCalledWith({ newsletterType: 'pest-insider-monthly', knex: database });
+    // The last poll's votes are read for the issue's own date, through the same database.
+    expect(newsletterLastPoll).toHaveBeenCalledWith({ newsletterType: 'pest-insider-monthly', sendDate: '2026-12-03', knex: database });
     expect(database.calls.inserts).toHaveLength(1);
     const row = database.calls.inserts[0];
     expect(row).toMatchObject({
@@ -275,6 +283,23 @@ describe('runIssuePlanner', () => {
     expect(buildIssue).toHaveBeenCalledTimes(1);
     expect(buildIssue.mock.calls[0][0].pollQuizId).toBeNull();
     if (warning) expect(logger.warn).toHaveBeenCalledWith(`[pest-insider] ${warning}`);
+  });
+
+  test.each([
+    ['the newest issue readers got held a poll with votes', async () => ({ quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } }), { quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } }, null],
+    ['the newest issue readers got held no poll (or it is over 45 days old)', async () => null, null, null],
+    ['the poll got no votes', async () => ({ quizId: PEST_INSIDER_POLL_IDS[0], counts: {} }), null, null],
+    ['the votes cannot be read', async () => { throw new Error('relation does not exist'); }, null, 'last poll result failed (relation does not exist); this issue has no result line'],
+  ])("the issue's result line: %s", async (_name, read, want, warning) => {
+    newsletterLastPoll.mockImplementationOnce(read);
+    buildIssue.mockReturnValue({ ok: false, reason: 'x', issue: null, diagnostics: {} });
+    const result = await runIssuePlanner({ now: WED_BUILD_DAY, database: fakeDb() });
+    // The read never stops the build, and the build still runs once.
+    expect(result.skipped).toBe(false);
+    expect(buildIssue).toHaveBeenCalledTimes(1);
+    expect(buildIssue.mock.calls[0][0].lastPoll).toEqual(want);
+    if (warning) expect(logger.warn).toHaveBeenCalledWith(`[pest-insider] ${warning}`);
+    else expect(logger.warn).not.toHaveBeenCalled();
   });
 
   test('a refused build is recorded as skipped with the reason and no subject', async () => {
