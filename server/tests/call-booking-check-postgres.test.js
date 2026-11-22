@@ -160,6 +160,12 @@ maybeDescribe('call booking check (live Postgres)', () => {
     expect(row.resolution).toBe('The visit is done or cancelled');
   });
 
+  test.each(['ai_call_outbound_review', 'voice_agent'])('a booking that waits for the office (%s) rings the same way', async (sourceAction) => {
+    const b = await booking({ status: 'pending', visitOver: { source_action: sourceAction } });
+    await run();
+    expect(await rowsFor(b.visitId)).toHaveLength(1);
+  });
+
   test.each([
     ['the call was a voice sandbox call', { callOver: { source: 'voice_relay_sandbox' } }],
     ['the call has no valid reading', { callOver: { v2_extraction_status: 'schema_failed' } }],

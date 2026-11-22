@@ -115,9 +115,8 @@ describe('the run', () => {
   test('it stands down, before any read, when alert episodes are off', async () => {
     const gates = require('../config/feature-gates');
     const live = jest.spyOn(gates, 'alertEpisodesLive').mockReturnValue(false);
-    const database = jest.fn(() => { throw new Error('no read expected'); });
-    await expect(runCallBookingCheck({ database })).resolves.toEqual({ skipped: 'episodes_off' });
-    expect(database).not.toHaveBeenCalled();
+    await expect(runCallBookingCheck()).resolves.toEqual({ skipped: 'episodes_off' });
+    expect(require('../models/db')).not.toHaveBeenCalled();
     live.mockRestore();
   });
 });
