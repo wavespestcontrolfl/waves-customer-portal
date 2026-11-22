@@ -104,7 +104,7 @@ describe('findCustomersAtAddress', () => {
   it('strict: the leading house digits are a whole digit run anywhere in the line, on both legs; default keeps the prefix', async () => {
     const strictDb = fakeDb();
     await findCustomersAtAddress(strictDb, '123-125 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
-    const raws = strictDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw');
+    const raws = strictDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw' && c[2].startsWith('concat_ws'));
     expect(raws.map((c) => c[3])).toEqual([
       ['address_line1', 'address_line2', '(^|[^0-9])123([^0-9]|$)'],
       ['cp.address_line1', 'cp.address_line2', '(^|[^0-9])123([^0-9]|$)'],
@@ -156,8 +156,9 @@ describe('findCustomersAtAddress', () => {
     // Default: a row with no line 1 is skipped, as before.
     expect(await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285')).toEqual([]);
     // Each leg's zip group (fakeDb records the inner where calls).
-    expect(db.calls).toContainEqual(['where', 'customers', 'zip', 'like', '34285%']);
-    expect(db.calls).toContainEqual(['where', 'customer_properties as cp', 'cp.zip', 'like', '34285%']);
+    const zipSql = "(btrim(coalesce(??, '')) like ? or btrim(coalesce(??, '')) = '')";
+    expect(db.calls).toContainEqual(['whereRaw', 'customers', zipSql, ['zip', '34285%', 'zip']]);
+    expect(db.calls).toContainEqual(['whereRaw', 'customer_properties as cp', zipSql, ['cp.zip', '34285%', 'cp.zip']]);
   });
 
   it('a failing property leg is skipped, not fatal', async () => {

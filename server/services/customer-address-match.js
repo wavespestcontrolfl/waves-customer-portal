@@ -97,7 +97,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   // strict with a zip: only rows with that zip or no zip on file. The comparator rejects any other zip, and rows
   // from other zips would only fill the cap.
   const zipFilter = (column) => (q) => (nearZip
-    ? q.where((z) => z.where(column, 'like', `${nearZip}%`).orWhereNull(column).orWhere(column, ''))
+    ? q.whereRaw("(btrim(coalesce(??, '')) like ? or btrim(coalesce(??, '')) = '')", [column, `${nearZip}%`, column])
     : q);
   const zip5 = (value) => String(value || '').trim().slice(0, 5);
   const complete = (rows, leg) => {
