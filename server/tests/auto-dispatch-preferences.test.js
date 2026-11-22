@@ -30,8 +30,20 @@ describe('service category classification', () => {
     // Sanitation, sealing and plugging count only beside a rodent, attic or entry-point word.
     ['Cockroach sanitation', 'general'],
     ['Lawn Plugging', 'lawn'],
-    // The public booking page's rodent option (the bait-station program).
-    ['Rodent Control', 'rodent'],
+    // The GENERAL rodent visit (the whole name: /book's rodent choice, the call booking's coarse
+    // label, an estimate hold saved under the lead's interest) is the first look: exclusion line.
+    ['Rodent Control', 'exclusion'],
+    ['Rodent Control Service', 'exclusion'],
+    ['Rodent Pest Control Service', 'exclusion'],
+    ['rodent', 'exclusion'],
+    ['rodent_general_one_time', 'exclusion'],
+    // One whole part of a two-service name (what /book saves for two choices) counts the same.
+    ['Mosquito Control + Rodent Control', 'exclusion'],
+    ['Rodent Control + Pest Control', 'exclusion'],
+    ['Pest Control + Rodent Trapping Service', 'rodent'],
+    // ...but a name that says more than "rodent control" keeps its own reading.
+    ['Pest & Rodent Control Service', 'rodent'],
+    ['Rodent Control and Trapping', 'rodent'],
     // A key-only slot search passes the service KEY as the name: an exclusion key reads exclusion,
     // a trapping or bait key stays rodent.
     ['rodent_inspection', 'exclusion'],

@@ -30,12 +30,22 @@ const TIME_WINDOWS = {
 // plugging count only beside a rodent, attic or entry-point word: "Cockroach sanitation" stays
 // general pest and "Lawn Plugging" stays lawn. "Rodent Guarantee Service" is the payment-only
 // guarantee rider, never a visit, and stays rodent.
+//
+// The GENERAL rodent visit is on this line too: a visit named only "Rodent Control" or "Rodent Pest
+// Control Service" (the whole name) is the first look at a rodent problem, the same job as the
+// rodent inspection. /book's rodent choice, the booking-link text for an inspection and an estimate
+// hold saved under the lead's "Rodent Control" interest all save that name, whatever work was
+// sold. So the rodent line is only what a name or key says is trapping or bait work; everything
+// else about rodents goes to the exclusion line's technician, who does the first visit.
 const EXCLUSION_NAME = new RegExp([
   'exclusion', 'wire\\s*mesh', 'bird\\s*box', 'roof[- ]?entry',
   'rodent\\s+inspection',
   '(?:rodent|attic).*sanitation', 'sanitation.*(?:rodent|attic)',
   '(?:rodent|entry[- ]?points?).*\\b(?:plug|seal)', '\\b(?:plug|seal)\\w*.*(?:rodent|entry[- ]?points?)',
   'rodent\\s+guarantee(?!\\s+service)',
+  // ...the whole name, or one whole part of a two-service name ("Mosquito Control + Rodent Control",
+  // what /book saves for two choices).
+  '(?:^|\\+)\\s*(?:rodents?|rats?|mice|mouse)(?:\\s+(?:pest\\s+)?control)?(?:\\s+service)?\\s*(?:$|\\+)',
 ].join('|'), 'i');
 
 // Ordered most-specific-first; first regex match wins. General pest is the fallback.
@@ -97,6 +107,8 @@ const CATALOG_KEY_LINES = Object.freeze({
   rodent_sanitation_standard: 'exclusion',
   rodent_sanitation_heavy: 'exclusion',
   rodent_inspection: 'exclusion',
+  // The general rodent visit ("Rodent Pest Control Service"): the first look, as the inspection.
+  rodent_general_one_time: 'exclusion',
 });
 
 /**

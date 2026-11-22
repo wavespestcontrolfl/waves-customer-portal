@@ -35,7 +35,7 @@ const CATEGORY_LABELS = {
   mosquito: 'Mosquito',
   lawn: 'Lawn, tree & shrub',
   rodent: 'Rodent trapping & bait',
-  exclusion: 'Rodent exclusion',
+  exclusion: 'Rodent exclusion & inspection',
   termite: 'Termite / WDO',
 };
 

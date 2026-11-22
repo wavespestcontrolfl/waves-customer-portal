@@ -84,15 +84,19 @@ describe('the catalog category table (one table, shared with the service-line ma
   });
 
   test('lineForCatalogRow: an exclusion service key reads exclusion; trapping keys and other rows read their category', () => {
-    // Owner 2026-11-21 (rodent jobs = A): sealing, sanitation and the rodent inspection are the owner's line.
+    // Owner 2026-11-21 (rodent jobs = A): sealing, sanitation, the rodent inspection and the general
+    // first rodent visit are the owner's line.
     expect(Object.keys(CATALOG_KEY_LINES).sort()).toEqual([
-      'rodent_bird_box', 'rodent_exclusion', 'rodent_exclusion_only', 'rodent_inspection',
+      'rodent_bird_box', 'rodent_exclusion', 'rodent_exclusion_only', 'rodent_general_one_time', 'rodent_inspection',
       'rodent_sanitation_heavy', 'rodent_sanitation_light', 'rodent_sanitation_standard',
       'rodent_trapping_exclusion', 'rodent_trapping_exclusion_sanitation', 'rodent_trapping_sanitation', 'rodent_wire_mesh',
     ]);
     expect(new Set(Object.values(CATALOG_KEY_LINES))).toEqual(new Set(['exclusion']));
     expect(lineForCatalogRow({ service_key: 'rodent_exclusion', category: 'rodent', name: 'Rodent Exclusion & Trapping Service' })).toBe('exclusion');
     expect(lineForCatalogRow({ service_key: 'rodent_inspection', category: 'inspection', name: 'Rodent Inspection Service' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'rodent_general_one_time', category: 'rodent', name: 'Rodent Pest Control Service' })).toBe('exclusion');
+    // A general rodent row under another key reads its own name: only the whole name "Rodent Control" is general.
+    expect(lineForCatalogRow({ service_key: 'rodent_visit', category: 'rodent', name: 'Rodent Control Service' })).toBe('exclusion');
     for (const key of ['rodent_trapping', 'rodent_trapping_followup', 'rodent_trap_check_additional', 'rodent_bait_quarterly', 'trap_only_retainer_monthly']) {
       expect(lineForCatalogRow({ service_key: key, category: 'rodent', name: 'Rodent Trapping Service' })).toBe('rodent');
     }
@@ -160,8 +164,8 @@ describe('categoriesForServices', () => {
     // The capacity finder has no visit name for a key-only request and passes the key as service_type.
     // A technician set Off for exclusion and On for trapping must not be offered a sealing job.
     const conn = fakeConn({ catalog: CATALOG });
-    const rows = ['rodent_inspection', 'rodent_wire_mesh', 'rodent_bird_box', 'rodent_trapping'].map((key) => ({ service_type: key }));
-    expect(await capabilities.categoriesForServices(conn, rows)).toEqual(['exclusion', 'exclusion', 'exclusion', 'rodent']);
+    const rows = ['rodent_inspection', 'rodent_wire_mesh', 'rodent_bird_box', 'rodent_general_one_time', 'rodent_trapping'].map((key) => ({ service_type: key }));
+    expect(await capabilities.categoriesForServices(conn, rows)).toEqual(['exclusion', 'exclusion', 'exclusion', 'exclusion', 'rodent']);
     expect(conn).not.toHaveBeenCalled();
   });
 

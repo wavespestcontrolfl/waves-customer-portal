@@ -68,11 +68,11 @@ describe('TeamTab service lines', () => {
     const card = await screen.findByRole('region', { name: 'Service lines' });
     await waitFor(() => expect(within(card).getByLabelText('General pest Home tech')).toHaveValue('tech-new'));
     expect(within(card).getAllByRole('group').map((g) => g.getAttribute('aria-label'))).toEqual([
-      'General pest', 'Mosquito', 'Lawn / tree & shrub', 'Rodent trapping & bait', 'Rodent exclusion', 'Termite / WDO',
+      'General pest', 'Mosquito', 'Lawn / tree & shrub', 'Rodent trapping & bait', 'Rodent exclusion & inspection', 'Termite / WDO',
     ]);
     expect(within(card).getByLabelText('General pest Gap tech')).toHaveValue('tech-adam');
     expect(within(card).getByLabelText('Mosquito Home tech')).toHaveValue('');
-    const options = within(within(card).getByLabelText('Rodent exclusion Home tech')).getAllByRole('option').map((o) => o.textContent);
+    const options = within(within(card).getByLabelText('Rodent exclusion & inspection Home tech')).getAllByRole('option').map((o) => o.textContent);
     expect(options).toEqual(['None', 'Owner Tech', 'New Hire (not started)']);
   });
 

@@ -1512,9 +1512,17 @@ other's probe.
 these routes byte-identical, with no extra query).** `/api/booking/availability`,
 `/find-slots` and the `/capture-intent` revalidation (all through
 `buildFunnelAvailability`) pass the funnel service's lines (`pest_control` →
-general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent`,
-`termite` / `bora_care` → termite) to `buildBookingAvailability` as
-`serviceLines`. When at least one of those lines has a home or gap technician set
+general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent` →
+exclusion, `termite` / `bora_care` → termite) to `buildBookingAvailability` as
+`serviceLines`. The `rodent` choice saves a general "Rodent Control" visit, the
+first look at a rodent problem (the booking-link text sends a rodent inspection
+here too); since 2026-11-21 that visit is on the `exclusion` line with the
+rodent inspection (`BOOKING_FUNNEL_SERVICE_LINES` in `routes/booking.js`; the
+saved visit's name reads the same line, alone or as one part of a two-service
+name such as "Mosquito Control + Rodent Control"), and the `rodent` line is
+only trapping and bait-station work. So `/availability`, `/find-slots` and the
+`/capture-intent` revalidation offer the rodent choice on the exclusion line's
+home or gap technician. When at least one of those lines has a home or gap technician set
 in `service_line_techs` (the Team tab "Service lines" card), the offer keeps only
 slots on a technician who is the home or gap technician of EVERY mapped line (a
 two-service key such as `pest_control+lawn_care` therefore needs one technician
@@ -1974,7 +1982,9 @@ estimate's primary program's line (the program the hold stamps), or every
 program's line for a combined capacity hold, so only a technician on every one of
 those lines is offered. Rodent exclusion work is its own line since 2026-11-21
 (`exclusion`: the sealing, wire mesh, roof-entry cover, sanitation and rodent
-inspection service keys, `CATALOG_KEY_LINES`); trapping and bait stations stay on
+inspection service keys, `CATALOG_KEY_LINES`, and the general rodent visit: a
+visit named only "Rodent Control", which is also what `/book`'s rodent choice
+saves and offers by); trapping and bait stations stay on
 `rodent`, so an exclusion estimate and a trapping estimate can list different
 technicians. A line with no technician set in `service_line_techs`
 adds no rule. At a date and start both have, the home technician's slot is the

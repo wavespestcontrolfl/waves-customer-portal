@@ -6,7 +6,8 @@
  * A second technician starts early 2027. Owner 2026-11-21: the new technician is the
  * HOME tech for general pest, mosquito, rodent (trapping, bait stations) and termite /
  * WDO in every ZIP; the owner is the home tech for lawn / tree & shrub and rodent
- * exclusion, and covers every gap (the new tech's days off, absences).
+ * exclusion (sealing, sanitation, the rodent inspection and the general first rodent
+ * visit), and covers every gap (the new tech's days off, absences).
  * service_line_techs holds the home and gap technician per line.
  *
  * SHADOW. Six booking choice points call recordLinePickShadow AFTER their own
