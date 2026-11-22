@@ -469,13 +469,23 @@ function briefTargetKeyword(opportunity) {
   return opportunity?.query || opportunity?.signal_metadata?.representative_query || null;
 }
 
-// A run that ended before any draft existed: the publish-cap pre-check (autonomous-runner step 2c) and the
-// wait for the terminal's draft file (terminal-writer AWAITING_OUTCOME with MISSING or AWAITS_MAC). The
+// A run that ended before any draft existed: the publish-cap pre-check (autonomous-runner step 2c) and a
+// wait for the terminal's draft (terminal-writer AWAITING_OUTCOME) that read no draft. The
 // same two outcomes can also end a run that had a draft (the cap filled between claim and publish; the
 // editorial review could not run; the draft file was invalid). Those runs are tries: the stored draft
 // or the skip reason tells them apart.
 const NO_DRAFT_OUTCOMES = new Set(['deferred_publish_cap', 'deferred_terminal_draft']);
-const NO_DRAFT_TERMINAL_WAITS = new Set(['terminal_draft_missing', 'terminal_draft_awaits_mac']);
+// Terminal waits that read no draft: no file yet, the Mac job has not come, GitHub could not be read, or
+// the Mac process could not take the row (terminal-writer MISSING, AWAITS_MAC, UNREADABLE,
+// MAX_PLAN_MISSING, MAC_BRIEF_MISSING, MAC_NO_AGENT).
+const NO_DRAFT_TERMINAL_WAITS = new Set([
+  'terminal_draft_missing',
+  'terminal_draft_awaits_mac',
+  'terminal_draft_unreadable',
+  'terminal_max_plan_missing',
+  'terminal_mac_brief_missing',
+  'terminal_mac_no_agent',
+]);
 
 function isNoDraftWait(row) {
   if (row.has_draft) return false;

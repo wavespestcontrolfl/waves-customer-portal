@@ -1568,7 +1568,11 @@ describe('loop review counts only briefs whose run got as far as a draft', () =>
 
   test('the waits are the publish-cap wait and the two terminal waits that have no draft file', () => {
     expect([...NO_DRAFT_OUTCOMES].sort()).toEqual(['deferred_publish_cap', terminalWriter.AWAITING_OUTCOME].sort());
-    expect([...NO_DRAFT_TERMINAL_WAITS].sort()).toEqual([terminalWriter.MISSING, terminalWriter.AWAITS_MAC].sort());
+    expect([...NO_DRAFT_TERMINAL_WAITS].sort()).toEqual([
+      terminalWriter.MISSING, terminalWriter.AWAITS_MAC, terminalWriter.UNREADABLE,
+      terminalWriter.MAX_PLAN_MISSING, terminalWriter.MAC_BRIEF_MISSING, terminalWriter.MAC_NO_AGENT,
+    ].sort());
+    expect(NO_DRAFT_TERMINAL_WAITS.has(undefined)).toBe(false);
   });
 
   test('a brief counts unless every one of its runs waited without a draft', () => {
@@ -1589,6 +1593,17 @@ describe('loop review counts only briefs whose run got as far as a draft', () =>
       ended('b2', 'skipped_gate_fail'),
       ended('b3', 'completed_pending_review'),
     ])).toBe(3);
+  });
+
+  test('two real tries and one brief that only waited on the Mac are not a loop', () => {
+    expect(countLoopBriefs([
+      ended('b1', 'deferred_gate_retry'),
+      ended('b2', 'skipped_gate_fail'),
+      terminalWait('b3', terminalWriter.MAX_PLAN_MISSING),
+      terminalWait('b3', terminalWriter.MAC_NO_AGENT),
+      terminalWait('b3', terminalWriter.UNREADABLE),
+      terminalWait('b3', terminalWriter.MAC_BRIEF_MISSING),
+    ])).toBe(2);
   });
 
   test('the same outcomes count when the run had a draft', () => {
