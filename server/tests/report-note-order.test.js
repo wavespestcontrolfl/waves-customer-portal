@@ -183,15 +183,15 @@ describe('the text is refused', () => {
     expect(rejection('customer not paid treated kitchen', 'You not treated the kitchen.')).toEqual({ reason: 'left_out', words: ['paid'] });
   });
 
-  test('a part the screen lets go only with its whole sentence', () => {
-    const timed = { wordGoes: (word) => word === 'tomorrow', partGoes: (part) => /tomorrow/.test(part) && 'sentence' };
+  test('a part that qualifies the rest goes only with its whole sentence', () => {
+    const timed = { wordGoes: (word) => word === 'tomorrow', partGoes: (part) => /tomorrow/.test(part) };
     const note = 'will treat outside, weather permitting tomorrow';
     expect(orderRejection('I will treat outside.', note, timed)).toEqual({ reason: 'left_out', words: ['weather'] });
     expect(orderRejection('I will treat outside, weather permitting.', note, timed)).toBeNull();
     // Its sentence stays a plan: the text cannot drop it.
     expect(orderRejection('I treated the shed.', `treated shed. ${note}`, timed)).toEqual({ reason: 'left_out', words: ['will'] });
-    // Alone in its sentence, the part goes as before.
-    expect(orderRejection('I treated the shed.', 'treated shed. back tomorrow', timed)).toBeNull();
+    // A part with a word of time that is no condition goes as before.
+    expect(orderRejection('I sprayed the perimeter.', 'sprayed perimeter, back tomorrow', timed)).toBeNull();
   });
 
   test('a denial, a condition or a person never goes as one word, whatever the screens say', () => {

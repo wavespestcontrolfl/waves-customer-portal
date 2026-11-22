@@ -76,6 +76,7 @@ describe('the report\'s word screens run on the text', () => {
     ['a banned word in full-width letters', 'spray is safe', 'Spray is ｓａｆｅ.', 'shape'],
     ['a full-width sentence mark', 'treated outside. use rose at the back', 'I treated outside。Use rose at the back.', 'shape'],
     ['a line break the reader refuses', 'treated shed', 'I treated\u0085shed.', 'shape'],
+    ['a line separator inside the text', 'treated shed', 'I treated\u2028shed.', 'shape'],
     ['a sign-off', 'treated outside', 'I treated outside. - Marcus', 'shape'],
     ['no text', 'treated outside', '  ', 'empty'],
     ['a text that is too long', 'treated outside', `I treated outside. ${'I treated outside. '.repeat(40)}`, 'too_long'],
@@ -100,6 +101,7 @@ describe('the wordings the reader lets stand are refused where the note is writt
     'Foot traffic can resume on the 3rd of May.',
     'Foot traffic can resume on Fri.',
     'Foot traffic can resume on 11/22.',
+    'Foot traffic can resume on 3/4.',
     'I treated the patio on 11/22/26.',
     'Do not enter the yard.',
     'Use rose at the back.',
@@ -150,12 +152,17 @@ describe('the note a model reads holds no access code', () => {
     expect(noteAsRead('applied 1½ oz')).toBe('applied 1½ oz');
   });
 
-  test('a part with a word of time goes only with its whole sentence', async () => {
+  test('a part that qualifies the rest goes only with its whole sentence, whatever screen refuses it', async () => {
     const note = 'will treat outside, weather permitting tomorrow';
     expect(await refusal(note, 'I will treat outside.')).toEqual({ reason: 'left_out', words: ['weather'] });
     await expect(refusal(note, 'I will treat outside, weather permitting.')).resolves.toBeNull();
-    // Alone in its sentence, the part goes as before.
-    await expect(refusal('treated shed. back tomorrow', 'I treated the shed.')).resolves.toBeNull();
+    // The product screen answers first for this part: the rule still holds.
+    const named = 'will treat outside, weather permitting in two days with Borlux';
+    expect(await refusal(named, 'I will treat outside.')).toEqual({ reason: 'left_out', words: ['weather'] });
+    await expect(refusal(named, 'I will treat outside, weather permitting.')).resolves.toBeNull();
+    // A part with a word of time that is no condition goes whole.
+    await expect(refusal('sprayed perimeter, back in 2 weeks', 'I sprayed the perimeter.')).resolves.toBeNull();
+    await expect(refusal('treated kitchen, roaches should be gone in 2 weeks', 'I treated the kitchen.')).resolves.toBeNull();
     // "may" is no month without its day.
     await expect(refusal('found 2 may be more nests', 'I found 2 may be more nests.')).resolves.toBeNull();
   });
@@ -230,5 +237,6 @@ describe('the stored text and the fixed sentence', () => {
   test('a finding that opens with "do not", and a fraction after "on", are no order and no date', async () => {
     await expect(refusal('do not see activity in the attic', 'I do not see activity in the attic.')).resolves.toBeNull();
     await expect(refusal('put mesh on 1/4 inch gaps', 'I put mesh on 1/4 inch gaps.')).resolves.toBeNull();
+    await expect(refusal('put mesh on 3/4" gaps', 'I put mesh on 3/4" gaps.')).resolves.toBeNull();
   });
 });

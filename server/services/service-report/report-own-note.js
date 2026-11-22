@@ -117,8 +117,10 @@ const noteAsRead = (note) => maskAccessSentences(dollarweedAsOneWord(redactAcces
 // shape screen refuses it.
 function ownNoteText(value) {
   // Only a pair of quotation marks around the whole text goes: an inch mark
-  // at the end stays ('The gap was 5"').
-  const text = String(value || '').trim().replace(/[^\S\r\n]+/g, ' ').replace(/^["“”']([\s\S]*)["“”']$/, '$1').trim();
+  // at the end stays ('The gap was 5"'). A run of spaces is one space; a run
+  // with a line break the reader knows (U+2028 too) stays as it is.
+  const text = String(value || '').trim().replace(/\s+/g, (run) => (REPORT_NOTE_LINE_BREAK.test(run) ? run : ' '))
+    .replace(/^["“”']([\s\S]*)["“”']$/, '$1').trim();
   return dollarweedAsOneWord(lowercaseGermanRoach(text));
 }
 
@@ -143,14 +145,14 @@ const MONTH_SRC = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|june?|jul
 const DAY_SRC = '\\d{1,2}(?:st|nd|rd|th)?';
 const DATE_RE = new RegExp(`\\b(?:${MONTH_SRC}|may)\\.?\\s+${DAY_SRC}\\b|\\b${DAY_SRC}\\s+(?:of\\s+)?${MONTH_SRC}\\b|\\b${DAY_SRC}\\s+of\\s+may\\b`, 'i');
 // A date in figures: with its year anywhere ("11/22/26"), else a month and
-// a day after a word that leads to a day ("on 11/22"). A fraction is no
-// date ("mesh on 1/4 inch gaps").
-const FIGURE_DATE_RE = /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:on|by|until|till|after|before|since)\s+(?:the\s+)?(\d{1,2})\/(\d{1,2})\b/gi;
-const FRACTION_BOTTOMS = new Set(['2', '3', '4', '8', '16', '32']);
-const figureDate = (text) => [...text.matchAll(FIGURE_DATE_RE)]
-  .find(([, top, bottom]) => !(top && Number(top) < Number(bottom) && FRACTION_BOTTOMS.has(bottom)));
+// a day after a word that leads to a day ("on 11/22", "on 3/4"). Figures
+// with a measure after them are a fraction ("mesh on 1/4 inch gaps").
+const MEASURE_SRC = '["\'″′]|(?:inch(?:es)?|in|ft|foot|feet|oz|ounces?|gal(?:lons?)?|cups?|lbs?|pounds?|acres?|yards?|of)\\b';
+const FIGURE_DATE_RE = new RegExp('\\b\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}\\b'
+  + `|\\b(?:on|by|until|till|after|before|since)\\s+(?:the\\s+)?\\d{1,2}\\/\\d{1,2}\\b(?![\\s-]*(?:${MEASURE_SRC}))`, 'i');
+const timeIn = (text) => TIME_WORD_RE.exec(text) || DATE_RE.exec(text) || FIGURE_DATE_RE.exec(text);
 function writeTimeRejection(text) {
-  const time = TIME_WORD_RE.exec(text) || DATE_RE.exec(text) || figureDate(text);
+  const time = timeIn(text);
   if (time) return { reason: 'time', words: [time[0]] };
   if (PASS_PHRASE_RE.test(text)) return { reason: 'access_code' };
   const office = noteWords(text).find((word) => OFFICE_ONLY_WORDS.has(word));
@@ -198,10 +200,11 @@ function wordRejection(text, { namesProduct, activeIngredients }) {
 //     beside it can be the code.
 //   - Two words go together: a refused pair, a figure with its unit or period.
 //   - A part goes whole when the screens refuse it as a text, when it holds a
-//     removed code, or when it is an order to the customer. A part refused
-//     for a word of time goes only with its whole sentence. Not for the
+//     removed code, or when it is an order to the customer. Not for the
 //     screen that reads how a part opens: "open gap under the sink" is a
-//     finding.
+//     finding. A part that qualifies the rest of its sentence ("weather
+//     permitting tomorrow") goes only with the whole sentence, whatever
+//     screen refuses it: that rule is the order check's (QUALIFIERS).
 const GOES_ALONE = new Set(['trade_name', 'active_ingredient', 'time']);
 // The words of a product name that go together. A name that ends in plain
 // report words the product screen lets stand ("Advion Gel") goes by its own
@@ -222,13 +225,8 @@ function whatMayGo(screens, names) {
     pairGoes: (first, second) => REFUSED_PAIRS.includes(`${first} ${second}`)
       || (isCount(first) && !isCount(second) && (PERIOD_RE.test(second) || reasonOf(`${figure(first)} ${second}`) === 'amount')),
     partGoes: (part) => {
-      if (REDACTED_RE.test(part) || orderToCustomer(noteWords(part))) return true;
       const reason = reasonOf(part);
-      if (!reason || reason === 'instruction') return false;
-      // The word of time can go alone, and what else its part says may
-      // qualify the rest ("will treat outside, weather permitting
-      // tomorrow"): the part goes only with its whole sentence.
-      return reason === 'time' ? 'sentence' : true;
+      return REDACTED_RE.test(part) || (Boolean(reason) && reason !== 'instruction') || orderToCustomer(noteWords(part));
     },
     names,
   };

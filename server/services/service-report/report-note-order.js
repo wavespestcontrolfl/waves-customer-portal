@@ -15,8 +15,7 @@
  *   wordGoes(word)           may this one word of the note go?
  *   pairGoes(first, second)  do these two words go together, or not at all
  *                            ("no issues", a figure and its unit)?
- *   partGoes(part)           may this whole part of the note go? The answer
- *                            'sentence' means: only with its whole sentence.
+ *   partGoes(part)           may this whole part of the note go?
  *   names                    the product names the note holds
  * report-own-note.js builds it from the report's own screens (the next PR),
  * so what may go is what no report text may hold. Nothing calls this module
@@ -32,7 +31,7 @@
  *     rats by the gate");
  *   - the check does not ask how the rest reads without what went, past the
  *     words in NEVER_LEFT_OUT and the rule for a part that opens with a
- *     condition;
+ *     condition or holds a word of QUALIFIERS;
  *   - a clause of the note that names no one is read as the technician's
  *     work: the text may add "I" there. After a person the note names, in
  *     the same part, the text adds no "I" ("customer inspected and treated
@@ -77,6 +76,12 @@ const JOINERS = new Set([...CLAUSE_OPENERS, 'or']);
 // until dry").
 const CONDITIONS = new Set('if unless until except when whenever once while after before since because provided'.split(' '));
 const CONDITION_LEADS = new Set('but only or even not so'.split(' '));
+// A word that makes its part a condition wherever it stands ("will treat
+// outside, weather permitting tomorrow"). The screens refuse that part for
+// its word of time, and without it the plan reads as a promise. A list on
+// purpose: a part with a word of time is most often no condition ("sprayed
+// perimeter, back in 2 weeks").
+const QUALIFIERS = new Set('permitting depending assuming barring'.split(' '));
 // The parts tried out of sight one set at a time (64 walks at most).
 const MAX_HIDDEN_PARTS = 6;
 const NOTHING_GOES = () => false;
@@ -209,7 +214,7 @@ const readText = (text) => sentencesOf(text).flatMap(({ text: sentence, asks }, 
 // for a word that goes only when the word it leans on goes, `groups` for
 // words that go together or not at all, `whole` for the parts that may go
 // whole, of which the `conditional` ones go only with their whole sentence
-// (a part that opens with a condition, or one the screen answers 'sentence').
+// (a part that opens with a condition, or holds a word of QUALIFIERS).
 // The report's screens say which words, pairs and parts (`screen`).
 function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }) {
   const note = words.map((entry) => entry.word);
@@ -248,9 +253,9 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
   const [whole, conditional] = [new Set(), new Set()];
   parts.forEach((raw, id) => {
     const partWords = words.filter((entry) => entry.part === id).map((entry) => entry.word);
-    const goes = partWords.length ? partGoes(raw) : false;
-    if (goes) whole.add(id);
-    if (goes === 'sentence' || CONDITIONS.has(partWords.find((word) => !SMALL.has(word) && !CONDITION_LEADS.has(word)))) conditional.add(id);
+    if (partWords.length && partGoes(raw)) whole.add(id);
+    const opensWith = partWords.find((word) => !SMALL.has(word) && !CONDITION_LEADS.has(word));
+    if (CONDITIONS.has(opensWith) || partWords.some((word) => QUALIFIERS.has(word))) conditional.add(id);
   });
   // The second word of each group by its first, and each later word by the
   // word before it: see placeInNote.
