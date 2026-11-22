@@ -172,8 +172,8 @@ const TECHNICIAN_ALLOW_LIST = [
   // 2026-10-02 ruling). The router scopes both reads to req.technicianId. Pay runs, W-4s and tax forms stay admin-only.
   { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/payroll\/checks(\/[^/]+\/stub)?$/ },
   // A technician's own rewards scoreboard (GATE_TECH_REWARDS_SCOREBOARD, owner 2026-11-20, Tech Rewards Plan D5-4). The router
-  // reads only req.technicianId and refuses any other id with 403.
-  { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/rewards-scoreboard(\/availability)?$/ },
+  // reads only req.technicianId and refuses any other id with 403. Under the board, their own yearly pay statement (D5-6).
+  { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/rewards-scoreboard(\/availability|\/year-statement)?$/ },
 
   // Knowledge base: read, and ask. Never write, verify, or run paid jobs.
   { bucket: 'knowledge-read', methods: READ, pattern: /^\/api\/admin\/kb(\/[^/]+)?$/ },

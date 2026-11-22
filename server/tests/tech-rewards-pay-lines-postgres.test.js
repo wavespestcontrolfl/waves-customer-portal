@@ -41,6 +41,7 @@ const router = require('../routes/admin-payroll');
 const { syncTechRewardLines, stayBonusStatus, seasonBonusPaidCents } = require('../services/tech-rewards-pay-lines');
 const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
 const { readBonusPay, closedSeason, seasonBonusOf, readSeasonFigures } = require('../services/tech-rewards-scoreboard');
+const { getYearStatement } = require('../services/tech-rewards-year-statement');
 const scores = require('../services/tech-rewards-scores');
 const { TAX_YEARS } = require('../services/payroll-calc');
 const { workedWeeks } = require('../services/payroll-runs');
@@ -1971,6 +1972,9 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 18480 });
       expect([await seasonBonusPaidCents(trx, alpha, 2027), await seasonBonusPaidCents(trx, bravo, 2027), await seasonBonusPaidCents(trx, alpha, 2026)])
         .toEqual([18480, 3520, null]);
+      // the yearly pay statement (D5-6) names the bonus from the lines the finalized check itself froze, with nothing left unnamed
+      expect((await getYearStatement(alpha, '2027')).pay).toMatchObject({ seasonBonusCents: 18480, stayBonusCents: 0, decemberGiftCents: 0, otherCents: 0 });
+      expect((await getYearStatement(bravo, '2027')).pay).toMatchObject({ seasonBonusCents: 3520, otherCents: 0 });
       await approvedWeek(alpha, NEXT);
       const next = await draft(NEXT);
       expect(await linesOf(alpha)).toHaveLength(1);

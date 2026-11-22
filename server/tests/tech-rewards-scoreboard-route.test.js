@@ -19,9 +19,12 @@ jest.mock('../services/tech-rewards-scoreboard', () => ({
   listTechnicians: jest.fn(),
 }));
 
+jest.mock('../services/tech-rewards-year-statement', () => ({ getYearStatement: jest.fn() }));
+
 const express = require('express');
 const logger = require('../services/logger');
 const scoreboard = require('../services/tech-rewards-scoreboard');
+const { getYearStatement } = require('../services/tech-rewards-year-statement');
 const techRouter = require('../routes/tech-rewards-scoreboard');
 const adminRouter = require('../routes/admin-tech-rewards-scoreboard');
 
@@ -46,6 +49,7 @@ beforeEach(() => {
   process.env.GATE_TECH_REWARDS_SCOREBOARD = 'true';
   scoreboard.getScoreboard.mockResolvedValue({ technician: { id: OWN, name: 'Sample Alpha' } });
   scoreboard.listTechnicians.mockResolvedValue([{ id: OWN, name: 'Sample Alpha' }]);
+  getYearStatement.mockResolvedValue({ technician: { id: OWN, name: 'Sample Alpha' }, year: 2027 });
 });
 
 describe('tech route (gated, own numbers only)', () => {
@@ -100,6 +104,83 @@ describe('tech route (gated, own numbers only)', () => {
   });
 });
 
+describe('tech yearly pay statement (same gate, own numbers only)', () => {
+  test('gate off answers 404 before any read, and no login is refused first', async () => {
+    delete process.env.GATE_TECH_REWARDS_SCOREBOARD;
+    const response = await get(techBase, '/year-statement?year=2027');
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ enabled: false });
+    expect((await get(techBase, '/year-statement', null)).status).toBe(401);
+    process.env.GATE_TECH_REWARDS_SCOREBOARD = 'true';
+    expect((await get(techBase, '/year-statement', null)).status).toBe(401);
+    expect((await get(techBase, '/year-statement', 'customer')).status).toBe(403);
+    expect(getYearStatement).not.toHaveBeenCalled();
+  });
+
+  test('reads the authenticated technician for the year asked, and sets no-store', async () => {
+    const response = await get(techBase, '/year-statement?year=2027');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toEqual({ statement: { technician: { id: OWN, name: 'Sample Alpha' }, year: 2027 } });
+    expect(getYearStatement).toHaveBeenCalledWith(OWN, '2027');
+    await get(techBase, '/year-statement');
+    expect(getYearStatement).toHaveBeenLastCalledWith(OWN, undefined);
+    expect(scoreboard.getScoreboard).not.toHaveBeenCalled();
+  });
+
+  test('another technician id is 403 before any read, for a technician and for an admin login', async () => {
+    expect((await get(techBase, `/year-statement?technicianId=${OTHER}`)).status).toBe(403);
+    expect((await get(techBase, `/year-statement?technicianId=${OTHER}`, 'admin')).status).toBe(403);
+    expect(getYearStatement).not.toHaveBeenCalled();
+    expect((await get(techBase, `/year-statement?technicianId=${OWN}`)).status).toBe(200);
+    expect(getYearStatement).toHaveBeenCalledWith(OWN, undefined);
+  });
+
+  test('a technician id that is not one plain value is 403 before any read, on both routes, never a 500', async () => {
+    for (const query of [`technicianId[]=${OWN}`, `technicianId=${OWN}&technicianId=${OTHER}`, 'technicianId[toString]=x', `technicianId[id]=${OWN}`]) {
+      expect((await get(techBase, `?${query}`)).status).toBe(403);
+      expect((await get(techBase, `/year-statement?${query}`)).status).toBe(403);
+    }
+    expect(scoreboard.getScoreboard).not.toHaveBeenCalled();
+    expect(getYearStatement).not.toHaveBeenCalled();
+  });
+
+  test('a bad year answers 400 with the service message; any other failure 500 with a code logged, never the error text', async () => {
+    getYearStatement.mockRejectedValueOnce(new scoreboard.ScoreboardError(400, 'INVALID_YEAR', 'Year must be a four-digit year, 2020 or later.'));
+    const bad = await get(techBase, '/year-statement?year=27');
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toEqual({ error: 'Year must be a four-digit year, 2020 or later.' });
+    getYearStatement.mockRejectedValueOnce(Object.assign(new Error('select * from payroll_checks where name = Pat'), { code: '42P01' }));
+    const failed = await get(techBase, '/year-statement');
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toEqual({ error: 'The pay statement failed to load. Try again.' });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('42P01'));
+    expect(logger.error.mock.calls[0][0]).not.toMatch(/payroll_checks/);
+  });
+});
+
+// The real allow-list (middleware/technician-scope.js), not the login stub above: with GATE_STAFF_DEFAULT_DENY on,
+// adminAuthenticate refuses a technician on any path the list does not name, before the router runs.
+describe('technician allow-list', () => {
+  const { technicianMayReach } = jest.requireActual('../middleware/technician-scope');
+
+  test('a technician reaches the three scoreboard reads, and nothing else under the route', () => {
+    for (const path of ['', '/availability', '/year-statement']) {
+      expect(technicianMayReach('GET', `/api/tech/rewards-scoreboard${path}`)).toBe(true);
+      expect(technicianMayReach('POST', `/api/tech/rewards-scoreboard${path}`)).toBe(false);
+    }
+    for (const path of ['/year-statement/2027', '/year-statements', `/${OTHER}`, `/${OTHER}/year-statement`]) {
+      expect(technicianMayReach('GET', `/api/tech/rewards-scoreboard${path}`)).toBe(false);
+    }
+  });
+
+  test('the owner preview stays closed to a technician', () => {
+    for (const path of ['', `/${OTHER}`, `/${OTHER}/year-statement`]) {
+      expect(technicianMayReach('GET', `/api/admin/tech-rewards-scoreboard${path}`)).toBe(false);
+    }
+  });
+});
+
 describe('tech availability check (the Staff page every-load request)', () => {
   test('answers only whether the tab shows, never reads a board, and needs the staff login', async () => {
     let response = await get(techBase, '/availability');
@@ -143,5 +224,30 @@ describe('admin preview (not gated)', () => {
     expect((await get(adminBase, '/nope', 'admin')).status).toBe(400);
     scoreboard.getScoreboard.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'XX' }));
     expect((await get(adminBase, `/${OTHER}`, 'admin')).status).toBe(500);
+  });
+
+  test('opens any one technician\'s yearly pay statement with the gate off; a technician login is refused before any read', async () => {
+    delete process.env.GATE_TECH_REWARDS_SCOREBOARD;
+    const one = await get(adminBase, `/${OTHER}/year-statement?year=2027`, 'admin');
+    expect(one.status).toBe(200);
+    expect(one.headers.get('cache-control')).toBe('no-store');
+    expect(await one.json()).toEqual({ statement: { technician: { id: OWN, name: 'Sample Alpha' }, year: 2027 } });
+    expect(getYearStatement).toHaveBeenCalledWith(OTHER, '2027');
+    expect(scoreboard.getScoreboard).not.toHaveBeenCalled();
+    getYearStatement.mockClear();
+    expect((await get(adminBase, `/${OTHER}/year-statement`, 'technician')).status).toBe(403);
+    expect((await get(adminBase, `/${OTHER}/year-statement`, null)).status).toBe(401);
+    expect(getYearStatement).not.toHaveBeenCalled();
+  });
+
+  test('maps the statement errors: unknown 404, bad year 400, other 500', async () => {
+    getYearStatement.mockRejectedValueOnce(new scoreboard.ScoreboardError(404, 'NOT_FOUND', 'Technician not found.'));
+    expect((await get(adminBase, `/${OTHER}/year-statement`, 'admin')).status).toBe(404);
+    getYearStatement.mockRejectedValueOnce(new scoreboard.ScoreboardError(400, 'INVALID_YEAR', 'Year must be a four-digit year, 2020 or later.'));
+    expect((await get(adminBase, `/${OTHER}/year-statement?year=x`, 'admin')).status).toBe(400);
+    getYearStatement.mockRejectedValueOnce(Object.assign(new Error('select * from payroll_checks'), { code: 'XX' }));
+    const failed = await get(adminBase, `/${OTHER}/year-statement`, 'admin');
+    expect(failed.status).toBe(500);
+    expect(JSON.stringify(await failed.json())).not.toMatch(/payroll_checks/);
   });
 });

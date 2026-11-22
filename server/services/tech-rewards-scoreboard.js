@@ -659,10 +659,21 @@ async function getScoreboard(technicianId, { now = new Date() } = {}) {
   return composeScoreboard(inputs);
 }
 
-/** Active technicians for the admin preview picker: id and name only. */
+/**
+ * The technicians of the admin preview picker: id and name only. The active ones, and anyone no longer active who has a
+ * finalized paycheck of a finalized pay run, so the owner can still open a former technician's yearly pay statement
+ * (tech-rewards-year-statement.js). Only such a one carries `active: false`; an active technician keeps exactly id and name.
+ */
 async function listTechnicians(conn = db) {
-  const rows = await conn('technicians').where({ active: true }).orderBy('name').select('id', 'name');
-  return rows.map((row) => ({ id: row.id, name: row.name }));
+  const rows = await conn('technicians as t')
+    .where('t.active', true)
+    .orWhereExists(function hasFinalCheck() {
+      this.select(conn.raw('1')).from('payroll_checks as c').join('payroll_runs as r', 'r.id', 'c.run_id')
+        .whereRaw('c.technician_id = t.id').where({ 'c.status': 'finalized', 'r.status': 'finalized' });
+    })
+    .orderBy([{ column: 't.name' }, { column: 't.id' }])
+    .select('t.id', 't.name', 't.active');
+  return rows.map((row) => ({ id: row.id, name: row.name, ...(row.active ? {} : { active: false }) }));
 }
 
 module.exports = {
