@@ -3,7 +3,7 @@
  * up. The map answer shapes (features, { error }, cut off) follow what the county layer returns.
  */
 const {
-  parseLegal, parcelWhere, queryParcels, ownerMatchesSeller, chooseParcel,
+  parseLegal, parcelWhere, queryParcels, ownerRelation, chooseParcel,
 } = require('../services/mail/deed-parcel-match');
 
 describe('parseLegal', () => {
@@ -47,18 +47,25 @@ describe('parcelWhere', () => {
   });
 });
 
-describe('ownerMatchesSeller', () => {
-  test('the map and the deed spell punctuation differently', () => {
-    expect(ownerMatchesSeller('M/I HOMES OF SAMPLETON LLC', ['M I HOMES OF SAMPLETON LLC'])).toBe(true);
-  });
-  test('one name starting the other counts when the shorter has 8 or more characters', () => {
-    expect(ownerMatchesSeller('EXAMPLE BUILDERS OF SAMPLETON LLC', ['EXAMPLE BUILDERS'])).toBe(true);
-    expect(ownerMatchesSeller('ACME LLC', ['ACME LLC OF SAMPLETON'])).toBe(false); // "ACMELLC" is 7 characters
-  });
-  test('different owners and empty names do not match', () => {
-    expect(ownerMatchesSeller('OTHER BUILDERS LLC', ['EXAMPLE BUILDERS LLC'])).toBe(false);
-    expect(ownerMatchesSeller('', ['EXAMPLE BUILDERS LLC'])).toBe(false);
-    expect(ownerMatchesSeller('EXAMPLE BUILDERS LLC', [])).toBe(false);
+describe('ownerRelation', () => {
+  const sellers = ['EXAMPLE BUILDERS LLC'];
+  const owned = (ownerName, ownerName2 = null) => ({ ownerName, ownerName2 });
+  test.each([
+    ['the same text', owned('EXAMPLE BUILDERS LLC'), sellers, 'same'],
+    ['signs and spaces differ', owned('M/I HOMES OF SAMPLETON, L.L.C.'), ['M I HOMES OF SAMPLETON LLC'], 'same'],
+    ['the seller in the second field', owned('EXAMPLE LAND TRUST', 'EXAMPLE BUILDERS LLC'), sellers, 'same'],
+    ['the second of two sellers', owned('OTHER BUILDERS INC'), ['EXAMPLE BUILDERS LLC', 'OTHER BUILDERS INC'], 'same'],
+    ['another owner', owned('TESTER ALEX J', 'TESTER SAM K'), sellers, 'other'],
+    ['a longer name that starts with the seller\'s', owned('SAMPLE HOMESTEAD LLC'), ['SAMPLE HOMES'], 'unclear'],
+    ['a shorter form of the seller\'s name', owned('EXAMPLE BUILDERS'), sellers, 'unclear'],
+    ['a look-alike in the second field only', owned('TESTER ALEX J', 'EXAMPLE BUILDERS LLC OF SAMPLETON'), sellers, 'unclear'],
+    ['no owner on the map', owned(null), sellers, 'unclear'],
+    ['an owner of signs only', owned(' - ', ''), sellers, 'unclear'],
+    ['no seller to compare', owned('TESTER ALEX J'), [], 'unclear'],
+    ['a seller of signs only', owned('TESTER ALEX J'), ['-', ''], 'unclear'],
+    ['no seller list', owned('TESTER ALEX J'), undefined, 'unclear'],
+  ])('%s', (_name, parcel, sellerNames, expected) => {
+    expect(ownerRelation(parcel, sellerNames)).toBe(expected);
   });
 });
 
@@ -157,6 +164,24 @@ describe('chooseParcel', () => {
     expect(chooseParcel({ sellerNames: [], parcels: [permitted], permitsByParid })).toMatchObject({ status: 'matched', basis: 'permit', parcel: permitted });
     expect(chooseParcel({ sellerNames, parcels: [parcel('100000001', null)], permitsByParid })).toMatchObject({ status: 'matched', basis: 'permit' });
   });
+  test('a name that only starts like the seller\'s is not the seller: no owner_permit from it', () => {
+    // Deed seller SAMPLE HOMES; the map has SAMPLE HOMESTEAD LLC on one of two parcels with permits.
+    const lookAlike = parcel('100000001', 'SAMPLE HOMESTEAD LLC');
+    const other = parcel('100000002', 'TESTER ALEX J');
+    const both = { 100000001: permit('A'), 100000002: permit('B') };
+    expect(chooseParcel({ sellerNames: ['SAMPLE HOMES'], parcels: [lookAlike, other], permitsByParid: both })).toEqual({ status: 'ambiguous' });
+    // One parcel alone: it is the lot the deed names, so its permit is enough, on the permit basis.
+    expect(chooseParcel({ sellerNames: ['SAMPLE HOMES'], parcels: [lookAlike], permitsByParid: both }))
+      .toMatchObject({ status: 'matched', basis: 'permit', parcel: lookAlike });
+  });
+  test('a look-alike name on a rival parcel blocks both bases', () => {
+    const lookAlike = parcel('100000002', 'EXAMPLE BUILDERS LLC OF SAMPLETON');
+    const owned = parcel('100000001', 'EXAMPLE BUILDERS LLC');
+    expect(chooseParcel({ sellerNames, parcels: [owned, lookAlike], permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } }))
+      .toEqual({ status: 'ambiguous' });
+    const permitted = parcel('100000003', 'TESTER ALEX J');
+    expect(chooseParcel({ sellerNames, parcels: [permitted, lookAlike], permitsByParid: { 100000003: permit('A') } })).toEqual({ status: 'ambiguous' });
+  });
   test('one owned with a permit and one not owned with a permit never falls through to the permit basis', () => {
     const owned = parcel('100000001', 'EXAMPLE BUILDERS LLC');
     const res = chooseParcel({ sellerNames, parcels: [owned, parcel('100000002', 'X PERSON')], permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } });
@@ -218,6 +243,21 @@ describe('queryParcels', () => {
   test('the second owner field is read', async () => {
     const [p] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_OWNER_NAME1: 'EXAMPLE LAND TRUST', PAR_OWNER_NAME2: ' EXAMPLE BUILDERS LLC ' })] }) });
     expect(p).toMatchObject({ ownerName: 'EXAMPLE LAND TRUST', ownerName2: 'EXAMPLE BUILDERS LLC' });
+  });
+  test('the county map kill switch stops the lookup before any request, as an error', async () => {
+    const before = process.env.COUNTY_PARCEL_GIS_DISABLED;
+    const fetchImpl = jest.fn(answer({ features: [] }));
+    try {
+      for (const on of ['1', 'true']) {
+        process.env.COUNTY_PARCEL_GIS_DISABLED = on;
+        await expect(queryParcels(legal, { fetchImpl })).rejects.toThrow(/turned off/);
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+      process.env.COUNTY_PARCEL_GIS_DISABLED = '0';
+      await expect(queryParcels(legal, { fetchImpl })).resolves.toEqual([]);
+    } finally {
+      if (before === undefined) delete process.env.COUNTY_PARCEL_GIS_DISABLED; else process.env.COUNTY_PARCEL_GIS_DISABLED = before;
+    }
   });
   test('a block in the question must be the block of every parcel', async () => {
     const withBlock = { lot: '171', block: '48', subdivision: 'RYE RANCH' };

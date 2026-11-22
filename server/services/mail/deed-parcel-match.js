@@ -11,6 +11,8 @@
  * cannot say who owns a competing parcel, nothing is matched either.
  */
 
+const { countyParcelGisDisabled } = require('../property-lookup/county-parcel-gis');
+
 // Same layer as COUNTY_LAYERS.Manatee.url in server/services/property-lookup/county-parcel-gis.js (that constant is
 // not exported, so the address is repeated here; change both together).
 const PARCEL_LAYER_URL = 'https://gis.manateepao.gov/arcgis/rest/services/Website/WebLayers/MapServer/0/query';
@@ -21,7 +23,6 @@ const RESULT_LIMIT = 25;
 const MAX_BODY_BYTES = 1024 * 1024; // real answers are 1 to 6 KB
 // Every text the map sends for a parcel is plain printable ASCII (measured: A-Z, a-z, 0-9, space and & , - /).
 const PLAIN_TEXT = /^[\x20-\x7E]*$/;
-const MIN_PREFIX_LENGTH = 8;
 
 const LEGAL_PATTERN = /^LOT ([0-9A-Z]{1,6})(?: (?:BLK|BLOCK) ([0-9A-Z]{1,4}))? ([A-Z0-9][A-Z0-9 &'.-]{2,80})$/;
 // "LOT 1 AND 2 SAMPLE GROVE" and "LOT 3 THRU 5 ..." name several lots: not one home.
@@ -124,6 +125,8 @@ async function readCapped(res) {
 }
 
 async function queryParcels(legal, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  // The portal's kill switch for county parcel maps. Off is "no answer" (an error), never "no parcel".
+  if (countyParcelGisDisabled()) throw new Error('parcel map lookups are turned off (COUNTY_PARCEL_GIS_DISABLED)');
   const params = new URLSearchParams({
     where: parcelWhere(legal),
     outFields: OUT_FIELDS,
@@ -166,57 +169,54 @@ async function queryParcels(legal, { fetchImpl = fetch, timeoutMs = DEFAULT_TIME
 
 const alnum = (name) => String(name || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-// The map writes "M/I HOMES OF SARASOTA LLC" where the deed says "M I HOMES OF SARASOTA LLC", and sometimes cuts a
-// long name short, so a name that starts the other counts when it is long enough not to be a coincidence.
-function ownerMatchesSeller(ownerName, sellerNames) {
-  const owner = alnum(ownerName);
-  if (!owner) return false;
-  return (sellerNames || []).some((seller) => {
-    const s = alnum(seller);
-    if (!s) return false;
-    if (s === owner) return true;
-    const [shorter, longer] = s.length <= owner.length ? [s, owner] : [owner, s];
-    return shorter.length >= MIN_PREFIX_LENGTH && longer.startsWith(shorter);
-  });
+/**
+ * How a parcel's owner on the map (two fields) relates to the deed's sellers:
+ *   same     a field is a seller's name once signs and spaces are removed (the map writes "M/I HOMES OF SARASOTA
+ *            LLC" where the deed says "M I HOMES OF SARASOTA LLC"). Measured on three real days: 64 of 65 parcels
+ *            still under the seller's name are this form, and the map does not cut names short (240 characters).
+ *   unclear  the map names no owner, there is no seller name to compare, or one name only starts with the other
+ *            ("SAMPLE HOMES" and "SAMPLE HOMESTEAD LLC", or a short form of the same company): it may or may not
+ *            be the seller, so it proves nothing either way.
+ *   other    the map names an owner and no field is like a seller's name.
+ */
+function ownerRelation(parcel, sellerNames) {
+  const owners = [parcel.ownerName, parcel.ownerName2].map(alnum).filter(Boolean);
+  const sellers = (sellerNames || []).map(alnum).filter(Boolean);
+  if (owners.some((o) => sellers.includes(o))) return 'same';
+  if (owners.length === 0 || sellers.length === 0) return 'unclear';
+  const alike = owners.some((o) => sellers.some((s) => o.startsWith(s) || s.startsWith(o)));
+  return alike ? 'unclear' : 'other';
 }
-
-// The map has two owner fields; the seller may be in either.
-const sellerOwns = (parcel, sellerNames) => ownerMatchesSeller(parcel.ownerName, sellerNames)
-  || ownerMatchesSeller(parcel.ownerName2, sellerNames);
-const ownerKnown = (parcel) => Boolean(alnum(parcel.ownerName) || alnum(parcel.ownerName2));
 
 /**
  * The one new home among the parcels a lot query returned, or why there is none. Only a parcel with a new-home
- * permit can be the home. Each parcel is the seller's, another owner's, or of unknown owner (the map names none).
- *   owner_permit  exactly one parcel with a permit is the seller's, and every other parcel with a permit is
- *                 another owner's.
- *   permit        exactly one parcel has a permit, it is not the seller's, and no parcel at all is the seller's
- *                 (the map already shows the next owner). With more than one parcel this needs a seller name to
- *                 compare, and every other parcel must be another owner's.
- * A parcel of unknown owner could be the seller's, so it never counts as proof. A parcel under the seller's name
- * without a permit, next to a permit on another owner's parcel, is two pieces of evidence that point at different
- * parcels. Both are ambiguous, like every other mix.
+ * permit can be the home.
+ *   owner_permit  exactly one parcel with a permit is the seller's (`same`), and every other parcel with a permit
+ *                 is another owner's (`other`).
+ *   permit        exactly one parcel has a permit and no parcel at all is the seller's (the map already shows the
+ *                 next owner). Every other parcel must be another owner's.
+ * An `unclear` parcel could be the seller's, so it never counts as proof. A parcel under the seller's name without
+ * a permit, next to a permit on another owner's parcel, is two pieces of evidence that point at different parcels.
+ * Both are ambiguous, like every other mix.
  */
 function chooseParcel({ sellerNames, parcels, permitsByParid }) {
   if (!parcels || parcels.length === 0) return { status: 'no_parcel' };
   const hasPermit = (p) => Boolean(permitsByParid && permitsByParid[p.parid]);
   const withPermit = parcels.filter(hasPermit);
   if (withPermit.length === 0) return { status: 'no_permit' };
-  const sellerOwned = parcels.filter((p) => sellerOwns(p, sellerNames));
-  const sellerOwnedWithPermit = sellerOwned.filter(hasPermit);
+  const relation = new Map(parcels.map((p) => [p, ownerRelation(p, sellerNames)]));
+  const isOthers = (p) => relation.get(p) === 'other';
+  const sellersOwn = parcels.filter((p) => relation.get(p) === 'same');
+  const sellersOwnWithPermit = sellersOwn.filter(hasPermit);
   const pick = (parcel, basis) => ({ status: 'matched', basis, parcel, permit: permitsByParid[parcel.parid] });
-  const allOtherOwners = (rivals) => rivals.every(ownerKnown); // none is the seller's where this is used
-  if (sellerOwnedWithPermit.length === 1) {
-    const home = sellerOwnedWithPermit[0];
-    return allOtherOwners(withPermit.filter((p) => p !== home)) ? pick(home, 'owner_permit') : { status: 'ambiguous' };
+  if (sellersOwnWithPermit.length === 1) {
+    const home = sellersOwnWithPermit[0];
+    return withPermit.filter((p) => p !== home).every(isOthers) ? pick(home, 'owner_permit') : { status: 'ambiguous' };
   }
-  if (withPermit.length !== 1 || sellerOwned.length !== 0) return { status: 'ambiguous' };
-  const others = parcels.filter((p) => p !== withPermit[0]);
-  const sellerNamed = (sellerNames || []).some((name) => alnum(name));
-  if (others.length === 0 || (sellerNamed && allOtherOwners(others))) return pick(withPermit[0], 'permit');
-  return { status: 'ambiguous' };
+  if (withPermit.length !== 1 || sellersOwn.length !== 0) return { status: 'ambiguous' };
+  return parcels.filter((p) => p !== withPermit[0]).every(isOthers) ? pick(withPermit[0], 'permit') : { status: 'ambiguous' };
 }
 
 module.exports = {
-  PARCEL_LAYER_URL, parseLegal, parcelWhere, queryParcels, ownerMatchesSeller, chooseParcel,
+  PARCEL_LAYER_URL, parseLegal, parcelWhere, queryParcels, ownerRelation, chooseParcel,
 };
