@@ -87,6 +87,10 @@ describe('completion estimate evidence', () => {
     // A row flagged out of percentage discounts never takes the tier, whatever its numbers.
     expect(names(acceptedPricing(row(96, { excludeFromPctDiscount: true }), platinum))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96, { discountEligible: false }), platinum))).toEqual(unnamed(24));
+    // Staff moved this row's own price (its final annual is under its tier annual): part of the saving is theirs.
+    expect(names(acceptedPricing(row(96, { annualAfterDiscount: 400, manualFinalAnnual: 384 }), platinum))).toEqual(unnamed(24));
+    expect(names(acceptedPricing(row(96, { annualAfterDiscount: undefined, manualFinalAnnual: 384 }), platinum))).toEqual(unnamed(24));
+    expect(names(acceptedPricing(row(96, { manualFinalAnnual: 384 }), platinum))).toEqual([['WaveGuard Platinum', 24, 20, true]]);
     expect(names(acceptedPricing(row(96), { tierDiscounted: true, estimateTier: null }))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96), { tierDiscounted: true, estimateTier: { tier: 'platinum', amount: 0 } }))).toEqual(unnamed(24));
     // The line's own record still wins over the estimate's.
