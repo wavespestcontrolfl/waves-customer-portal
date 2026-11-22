@@ -118,6 +118,34 @@ const allowanceSchema = Joi.object({
     return text;
   }).required().messages({ 'any.required': 'Enter the hours per year, or leave it empty to clear it' }),
 });
+// The pay week of a bank payout, by its first day. Empty takes the payout back.
+const PAYOUT_WEEK_MESSAGE = 'Pick the first day of a pay week (YYYY-MM-DD)';
+const payoutWeek = (value, helpers) => {
+  if (value == null || value === '') return null;
+  const day = typeof value === 'string' ? validCalendarDate(value.trim()) : null;
+  if (!day || staffWeekStartForWorkDate(day) !== day) return helpers.message(PAYOUT_WEEK_MESSAGE);
+  return day;
+};
+// What a page shows of a payout (payoutOf): none, set (its pay run is not final), paid (a final pay run kept
+// it), or missed (that week's final pay run kept none).
+const PAYOUT_STATES = ['none', 'set', 'paid', 'missed'];
+function payoutStateOf(payout) {
+  if (!payout) return 'none';
+  if (payout.final) return 'paid';
+  return payout.missed ? 'missed' : 'set';
+}
+// `shownWeekStart` and `shownState`: the payout the page showed when the button was pressed (empty week and
+// 'none' = no payout). The change is made only when the employee's payout is still that one, in that state
+// (setPtoPayoutWeek).
+const SHOWN_MESSAGE = 'Send the bank payout the page shows (shownWeekStart, empty for none, and shownState)';
+const PAYOUT_CHANGED = 'The bank payout of this employee changed after this page was read. Check it, then press again.';
+const PAYOUT_PAID = 'That bank payout is paid: its pay run is final. Void that pay run to change it.';
+const PAYOUT_WEEK_PASSED = 'This employee already has a final paycheck or bank payout in a later week. Pick a week after it.';
+const payoutSchema = Joi.object({
+  weekStart: Joi.any().custom(payoutWeek).required().messages({ 'any.required': PAYOUT_WEEK_MESSAGE }),
+  shownWeekStart: Joi.any().custom(payoutWeek).required().messages({ 'any.required': SHOWN_MESSAGE }),
+  shownState: Joi.any().valid(...PAYOUT_STATES).required().messages({ 'any.required': SHOWN_MESSAGE, 'any.only': SHOWN_MESSAGE }),
+});
 
 // ---- Dates (ET calendar dates as text)
 
@@ -261,9 +289,24 @@ async function balanceAt(conn, technicianId, year) {
         fullWeekHours: (bank.fullWeekHundredths(banked.hoursPerYear) / 100).toFixed(2),
         capHours: bank.CAP_HOURS,
         usableFrom: bank.usableFromOf(banked.hireDate),
+        payout: await payoutOf(conn, technicianId, banked.payoutWeek),
       },
     } : {}),
   };
+}
+
+// The standing "Pay out the bank" instruction, or null when there is none: { weekStart, final }, with `hours`
+// when final and `missed: true` when the week is closed without it.
+//   final   the finalized pay run of that week kept the payout among its decisions (payroll_runs.bank_payouts),
+//           with the hours it paid out. Only a void of that run changes it.
+//   missed  that week's pay run is final and kept no payout for the employee (it was finalized with the gate
+//           off, or before the employee had a bank): no run will pay the bank out until the owner acts.
+async function payoutOf(conn, technicianId, weekStart) {
+  if (!weekStart) return null;
+  const done = await conn('payroll_runs').where({ week_start: weekStart, status: 'finalized' }).first('id', 'bank_payouts');
+  if (!done) return { weekStart, final: false };
+  const kept = (Array.isArray(done.bank_payouts) ? done.bank_payouts : []).find((row) => row.technicianId === technicianId);
+  return kept ? { weekStart, final: true, hours: kept.hours } : { weekStart, final: false, missed: true };
 }
 
 // ---- Writing
@@ -351,6 +394,8 @@ async function deleteTimeOff(id, actor, conn = db) {
   return { deleted: true };
 }
 
+const PAYOUT_HOLDS_ALLOWANCE = 'A time-off bank payout is set for this employee. Take it back first ("Do not pay out", owner account), then clear the yearly hours.';
+
 // The yearly paid time off hours, a setting: what a year of full weeks adds to the technician's time-off bank
 // (payroll-time-off-bank.js). null clears it: no bank, and the pay run pays every recorded hour.
 async function setPtoAllowance(technicianId, input, actor, conn = db) {
@@ -361,9 +406,17 @@ async function setPtoAllowance(technicianId, input, actor, conn = db) {
     // The lock finalizeRun takes: a finalize in progress read "no bank" or "bank" for this technician, and the
     // setting must not change under it. A finalize that starts after this save sees the new answer and a changed token.
     await lockPayrollMutations(trx);
-    const tech = await trx('technicians').where({ id: technicianId }).forUpdate().first('id', 'employment_type');
+    const tech = await trx('technicians').where({ id: technicianId }).forUpdate()
+      .first('id', 'employment_type', trx.raw("to_char(pto_payout_week_start, 'YYYY-MM-DD') as payout_week"));
     if (!tech) throw new PayrollError(404, 'Technician not found.');
     if (tech.employment_type !== 'w2') throw new PayrollError(409, 'Paid time off is for W-2 employees.');
+    // With no yearly hours there is no bank, and the pay run could not pay out what the owner set. The payout is
+    // taken back first (the owner account), or its pay run is made final.
+    // tech.id: the id as the row spells it. A pay run keeps its payouts by that spelling, and the id in the
+    // address can be typed in capitals.
+    if (v.hoursPerYear == null && tech.payout_week && !(await payoutOf(trx, tech.id, tech.payout_week)).final) {
+      throw new PayrollError(409, PAYOUT_HOLDS_ALLOWANCE);
+    }
     await trx('technicians').where({ id: technicianId }).update({ pto_hours_per_year: v.hoursPerYear, updated_at: trx.fn.now() });
     await recordAuditEvent({
       trx, critical: true, actor_type: 'admin', actor_id: actorId,
@@ -372,6 +425,58 @@ async function setPtoAllowance(technicianId, input, actor, conn = db) {
     });
     const row = await trx('technicians').where({ id: technicianId }).first('id', 'pto_hours_per_year');
     return { id: row.id, ptoHoursPerYear: row.pto_hours_per_year == null ? null : Number(row.pto_hours_per_year) };
+  });
+}
+
+// "Pay out the bank" (handbook, "When you leave"): the pay run for the week starting `weekStart` pays the
+// technician every hour the bank holds after that week, on their check (payroll-time-off-bank.js). The handbook
+// pays unused hours except after a quit without 14 days' notice or a dismissal for misconduct, so only the
+// owner account sets this (the route), one decision each time. null takes it back. Nothing is paid until that
+// pay run is final, and a final pay run does not read the setting again: a week whose run is final cannot be
+// picked, and what that run decided stays on its row (payroll_runs.bank_payouts).
+async function setPtoPayoutWeek(technicianId, input, actor, conn = db) {
+  requireUuid(technicianId, 'Technician');
+  const v = validate(payoutSchema, input);
+  const actorId = actorOf(actor);
+  return conn.transaction(async (trx) => {
+    // The lock finalizeRun takes, as for the yearly hours: the setting must not change under a finalize.
+    await lockPayrollMutations(trx);
+    const tech = await trx('technicians').where({ id: technicianId }).forUpdate()
+      .first('id', 'employment_type', 'pto_hours_per_year', trx.raw("to_char(pto_payout_week_start, 'YYYY-MM-DD') as payout_week"));
+    if (!tech) throw new PayrollError(404, 'Technician not found.');
+    // Another tab can have changed the payout since the page was read: moved it, taken it back, made its pay
+    // run final, or voided that run. A press there must not change a payout the owner did not see: "Do not pay
+    // out" for week A would clear week B, and a new week set from a page that showed week A as paid would
+    // drop week A after its run was voided. Asked under the payroll lock and the row lock, for a set and for a
+    // take-back. tech.id: the id as the row spells it, which is how a pay run keeps its payouts.
+    const now = await payoutOf(trx, tech.id, tech.payout_week);
+    if ((tech.payout_week || null) !== v.shownWeekStart || payoutStateOf(now) !== v.shownState) {
+      throw new PayrollError(409, PAYOUT_CHANGED);
+    }
+    // A payout that a final pay run kept is paid: only a void of that run changes it (no page offers "Do not
+    // pay out" then). Another week can still be set (the employee leaves a second time); the run keeps its
+    // own record.
+    if (!v.weekStart && now && now.final) throw new PayrollError(409, PAYOUT_PAID);
+    // A payout is set only for an employee with a bank. It is taken back whatever they are now: a pay run holds
+    // for a payout whose bank is gone, and this is how the owner lets it go.
+    if (v.weekStart && (tech.employment_type !== 'w2' || tech.pto_hours_per_year == null)) {
+      throw new PayrollError(409, 'This employee has no time-off bank.');
+    }
+    if (v.weekStart && await trx('payroll_runs').where({ week_start: v.weekStart, status: 'finalized' }).first('id')) {
+      throw new PayrollError(409, "That week's pay run is final. Void it first, or pick a later pay run.");
+    }
+    // A week before a final bank check or a final payout of theirs could never pay the bank out: no pay run of
+    // that week can be made final (payroll-runs.js finalizeRun), and the payout would hold their next paychecks.
+    if (v.weekStart && await bank.laterWeekBankUseExists(trx, v.weekStart, tech.id)) {
+      throw new PayrollError(409, PAYOUT_WEEK_PASSED);
+    }
+    await trx('technicians').where({ id: tech.id }).update({ pto_payout_week_start: v.weekStart, updated_at: trx.fn.now() });
+    await recordAuditEvent({
+      trx, critical: true, actor_type: 'admin', actor_id: actorId,
+      action: 'payroll.pto_payout_week_changed', resource_type: 'technicians', resource_id: tech.id,
+      metadata: { technician_id: tech.id, week_start: v.weekStart },
+    });
+    return { id: tech.id, ptoPayoutWeekStart: v.weekStart };
   });
 }
 
@@ -388,4 +493,5 @@ module.exports = {
   updateTimeOff,
   deleteTimeOff,
   setPtoAllowance,
+  setPtoPayoutWeek,
 };

@@ -812,10 +812,11 @@ postgres('tech rewards pay lines: the December gift', () => {
       // Alpha and Charlie have a time-off bank and no hours this week: only the gift makes a check for them.
       const alpha = await readyTech('Sample Alpha', { pto_hours_per_year: '80.00' });
       const charlie = await readyTech('Sample Charlie', { pto_hours_per_year: '80.00' });
+      const delta = await readyTech('Sample Delta', { pto_hours_per_year: '80.00' });
       const bravo = await readyTech('Sample Bravo');
       await approvedWeek(bravo, GIFT_WEEK);
       const run = await draft(GIFT_WEEK);
-      expect([checkOf(run, alpha).techRewardsCents, checkOf(run, charlie).techRewardsCents]).toEqual([GIFT, GIFT]);
+      expect([checkOf(run, alpha).techRewardsCents, checkOf(run, charlie).techRewardsCents, checkOf(run, delta).techRewardsCents]).toEqual([GIFT, GIFT, GIFT]);
       // A later week is already final, and its run left time off of Alpha unpaid from the bank, with no check. A check of
       // Charlie in the next tax year is final too, and it read the bank (the year-to-date guard does not see another year).
       // Finalize refuses a run that holds a check of either now (the bank's order guards), so both gifts wait and the run
@@ -824,14 +825,43 @@ postgres('tech rewards pay lines: the December gift', () => {
       await trx('payroll_runs').insert({
         week_start: later, pay_date: addDays(later, 11), status: 'finalized',
         unpaid_time_off: JSON.stringify([{ technicianId: alpha, name: 'Sample Alpha', hours: '8.00', reason: 'Sample reason.' }]),
+        // That run also paid out Delta's bank, which was empty: a kept decision with no check.
+        bank_payouts: JSON.stringify([{ technicianId: delta, name: 'Sample Delta', hours: '0.00' }]),
       });
       await paidWeek(charlie, '2027-01-04', { pto_earned_minutes: '92.40' });
       const again = await recompute(run.id);
-      expect([checkOf(again, alpha), checkOf(again, charlie)]).toEqual([undefined, undefined]);
-      expect([await linesOf(alpha), await linesOf(charlie)]).toEqual([[], []]);
+      expect([checkOf(again, alpha), checkOf(again, charlie), checkOf(again, delta)]).toEqual([undefined, undefined, undefined]);
+      expect([await linesOf(alpha), await linesOf(charlie), await linesOf(delta)]).toEqual([[], [], []]);
       const why = 'a later pay run that is already final used their time-off bank, so this pay run cannot hold a paycheck for them';
-      expect((await notesOf(run.id)).sort()).toEqual([waits('Sample Alpha', why), waits('Sample Charlie', why)]);
+      expect((await notesOf(run.id)).sort()).toEqual([waits('Sample Alpha', why), waits('Sample Charlie', why), waits('Sample Delta', why)]);
       expect((await finalize(run.id)).checks.map((c) => c.technicianId)).toEqual([bravo]);
+    });
+
+    it('waits while a time-off bank payout set for an earlier week is not final, so a gift alone never blocks the run', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      // Alpha has a time-off bank and no hours this week: only the gift makes a check for them. Their payout is set
+      // for the week before, which has no final pay run: the run holds every check of theirs until it has one.
+      const alpha = await readyTech('Sample Alpha', { pto_hours_per_year: '80.00' });
+      const bravo = await readyTech('Sample Bravo');
+      const before = addDays(GIFT_WEEK, -7);
+      await trx('technicians').where({ id: alpha }).update({ pto_payout_week_start: before });
+      // Only an EARLIER payout week is waited for. Charlie's payout is set for this run's own week (this run pays it
+      // out) and Delta's for a later week (this run comes before it): their gifts go on this run.
+      const charlie = await readyTech('Sample Charlie', { pto_hours_per_year: '80.00', pto_payout_week_start: GIFT_WEEK });
+      const delta = await readyTech('Sample Delta', { pto_hours_per_year: '80.00', pto_payout_week_start: NEXT_WEEK });
+      await approvedWeek(bravo, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect([checkOf(run, charlie).techRewardsCents, checkOf(run, delta).techRewardsCents]).toEqual([GIFT, GIFT]);
+      expect([checkOf(run, alpha), run.waiting, run.blocked, await linesOf(alpha)]).toEqual([undefined, [], [], []]);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'their time-off bank payout is set for the week of Nov 30, 2026, and that pay run is not final yet')]);
+      // That week's run is final and paid the bank out (it held nothing: a kept decision with no check).
+      await trx('payroll_runs').insert({
+        week_start: before, pay_date: addDays(before, 11), status: 'finalized',
+        bank_payouts: JSON.stringify([{ technicianId: alpha, name: 'Sample Alpha', hours: '0.00' }]),
+      });
+      const again = await recompute(run.id);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(GIFT);
+      expect(await notesOf(run.id)).toEqual([]);
     });
 
     it('waits when no paycheck can be worked out for the technician, so a gift alone never blocks the run', async () => {

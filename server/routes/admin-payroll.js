@@ -59,6 +59,14 @@
  * GET    /time-off/balance?technicianId=&year=   allowance, hours booked, hours paid, holidays.
  * PUT    /technicians/:id/pto-allowance          { hoursPerYear | null } the yearly allowance.
  *                                    The allowance only warns; it never blocks an entry.
+ * PUT    /technicians/:id/pto-payout-week        { weekStart | null, shownWeekStart | null, shownState }
+ *                                    "Pay out the bank": the pay run for that week pays every hour the time-off
+ *                                    bank holds; null takes it back. shownWeekStart and shownState ('none', 'set',
+ *                                    'paid', 'missed') = the payout the page showed: 409 when the payout is
+ *                                    another one now, or in another state (changed in another tab). Owner account
+ *                                    only (403 for any other admin). Setting a week: 409 for an employee with no
+ *                                    bank, and for a week whose pay run is final. Taking back: 409 once a final
+ *                                    pay run has paid it.
  *
  * Pay lines (GATE_PAYROLL_PAY_LINES, also dark; off answers 404 { enabled: false }).
  * GET    /pay-lines?technicianId=&status=   lines, newest week first (status open, paid or voided).
@@ -101,6 +109,7 @@
 const express = require('express');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const {
   payrollLive, payrollFormFiguresLive, payrollTimeOffLive, payrollPayLinesLive, payrollFamilyEmployeeLive,
   payrollMercuryStatusLive, payrollMercuryPayLive,
@@ -187,6 +196,14 @@ router.put('/technicians/:id/pto-allowance', timeOffOnly, async (req, res) => {
   try {
     res.json({ technician: await payrollTimeOff.setPtoAllowance(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set time off allowance', err); }
+});
+
+// A payout decides an employee's last wages (the handbook's two exceptions need the owner's judgment), so it
+// is the owner account's alone: the predicate every owner-only money action uses (ib-access.js).
+router.put('/technicians/:id/pto-payout-week', timeOffOnly, requireFullAccess, async (req, res) => {
+  try {
+    res.json({ technician: await payrollTimeOff.setPtoPayoutWeek(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set time off bank payout', err); }
 });
 
 // GATE_PAYROLL_PAY_LINES off: the same answer the payroll routes give when their gate is off.
@@ -288,7 +305,10 @@ router.post('/checks/:id/paper', mercuryStatusOnly, async (req, res) => {
 
 router.get('/technicians', async (req, res) => {
   try {
-    res.json({ technicians: await payrollSimple.withCurrentSimple(await payrollW4.listPayrollTechnicians()) });
+    // ?formerBank=1 (the Time off panel, behind its gate): also an employee who has left and still has a
+    // time-off bank setting.
+    const formerWithBank = req.query.formerBank === '1' && typeof payrollTimeOffLive === 'function' && payrollTimeOffLive();
+    res.json({ technicians: await payrollSimple.withCurrentSimple(await payrollW4.listPayrollTechnicians(undefined, formerWithBank)) });
   } catch (err) { fail(res, 'list technicians', err); }
 });
 

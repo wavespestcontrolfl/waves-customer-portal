@@ -15,6 +15,8 @@ import { dayLabel } from './payrollFormat';
 // at the straight rate on the pay run for that week. An employee whose yearly hours
 // are set has a time-off bank (owner 2026-11-21): the pay run pays paid time off only
 // from the bank, and this panel shows the bank. A day is never refused here.
+// "Pay out the bank" is the owner's decision when an employee leaves: the pay run of the
+// week on screen then pays every hour the bank holds.
 // With the gate off the server answers 404 and this panel renders nothing.
 
 const KINDS = [{ value: 'pto', label: 'Paid time off' }, { value: 'holiday', label: 'Holiday' }];
@@ -38,6 +40,44 @@ function bankLine(bank, today) {
 }
 
 const isShort = bank => Number(bank.waitingHours) > Math.max(0, Number(bank.balanceHours));
+
+// An employee who has left (inactive) stays on the bank list while they have a yearly-hours setting: the server
+// sends only those (?formerBank=1). An empty bank is no reason to hide them: a last check can still earn hours,
+// also for one who was paid out before, came back and left again.
+const isFormer = tech => tech.employmentStatus === 'inactive';
+// What a line shows of a payout, as the server names it: the page sends it back with each change.
+function payoutStateOf(payout) {
+  if (!payout) return 'none';
+  if (payout.final) return 'paid';
+  return payout.missed ? 'missed' : 'set';
+}
+
+// "Pay out the bank" (handbook, "When you leave"; the owner account only). `payout` is the standing instruction:
+// { weekStart, final, hours, missed }, or nothing. Nothing is paid before that week's pay run is final. Once that
+// run is final and kept the payout (`final`, with the hours it paid out), the payout is decided: only a void of
+// that run changes it, and the button is for another week (the employee leaves a second time). `missed`: that
+// week's pay run is final and did not pay the bank out, so no run will until the owner acts.
+function BankPayout({ name, payout, weekStart, busy, onSet }) {
+  const week = payout ? dayLabel(payout.weekStart) : '';
+  const takeBack = <Button variant="secondary" size="sm" disabled={busy} onClick={() => onSet(null)} aria-label={`Do not pay out the bank of ${name}`}>Do not pay out</Button>;
+  if (payout && payout.missed) {
+    return <span className="inline-flex flex-wrap items-center gap-2 text-warn-fg">
+      Bank payout: set for the week of {week}, but that pay run is final and did not pay the bank out. Void that pay run and make it again, or press &quot;Do not pay out&quot; and pick another week.
+      {takeBack}
+    </span>;
+  }
+  if (payout && !payout.final) {
+    return <span className="inline-flex flex-wrap items-center gap-2">
+      Bank payout: on the pay run for the week of {week}.
+      {takeBack}
+    </span>;
+  }
+  if (payout && payout.weekStart === weekStart) return <span>Bank payout: {payout.hours} h on the pay run for the week of {week}, which is final.</span>;
+  return <Button
+    variant="secondary" size="sm" disabled={busy} onClick={() => onSet(weekStart)}
+    aria-label={`Pay out the bank of ${name} in the week of ${dayLabel(weekStart)}`}
+  >Pay out the bank in the week of {dayLabel(weekStart)}</Button>;
+}
 
 function EntriesTable({ title, entries, onEdit, onRemove, busy }) {
   if (!entries.length) return null;
@@ -97,12 +137,14 @@ export default function TimeOffPanel({ call, weekStart, refreshKey, onChanged })
       setEnabled(true);
       setEntries(list.entries || []);
       setError('');
-      const techs = (await call('/technicians')).technicians || [];
+      // With the employees who have left and still have a bank setting: the owner pays that bank out here.
+      const techs = (await call('/technicians?formerBank=1')).technicians || [];
       if (superseded()) return;
-      setTechnicians(techs);
+      // Time off is recorded for the employees of today only.
+      setTechnicians(techs.filter(tech => !isFormer(tech)));
       const found = await Promise.all(techs.map(async tech => {
         const data = await call(`/time-off/balance?technicianId=${tech.id}&year=${year}`);
-        return { name: tech.name, balance: data.balance };
+        return { name: tech.name, former: isFormer(tech), balance: data.balance };
       }));
       if (superseded()) return;
       setBalances(found);
@@ -156,6 +198,29 @@ export default function TimeOffPanel({ call, weekStart, refreshKey, onChanged })
     setBusy(false);
   }
 
+  // The pay run of `week` pays out the employee's bank; no week takes that back. The open draft is then out
+  // of date: onChanged reads it again, and it asks for a Recompute. `shown` = the payout on this line when the
+  // button was pressed: the server refuses the change when the payout is another one now, or in another state
+  // (changed in another tab, or its pay run was made final or voided).
+  async function setPayout(technicianId, name, week, shown) {
+    setBusy(true); setError(''); setMessage(''); setWarning('');
+    try {
+      await call(`/technicians/${technicianId}/pto-payout-week`, { method: 'PUT', body: { weekStart: week, shownWeekStart: shown ? shown.weekStart : null, shownState: payoutStateOf(shown) } });
+      setMessage(week
+        ? `The pay run for the week of ${dayLabel(week)} pays out the time-off bank of ${name}. Nothing is paid until that pay run is final.`
+        : `The time-off bank of ${name} is not paid out.`);
+      await latestLoad.current();
+      if (onChanged) onChanged();
+    } catch (failure) {
+      // A refusal can mean the payout changed elsewhere: the line shows what the server holds now, then its words.
+      // The open draft is read again too: it was worked out from the payout this page showed, not from that one.
+      await latestLoad.current();
+      if (onChanged) onChanged();
+      setError(failure.message);
+    }
+    setBusy(false);
+  }
+
   function edit(entry) {
     setMessage(''); setWarning(''); setError('');
     setEditing(entry.id);
@@ -173,6 +238,7 @@ export default function TimeOffPanel({ call, weekStart, refreshKey, onChanged })
         Paid time off and holidays are hours not worked. The pay run for that week pays them at the regular rate. They never count toward overtime.
         Once a week's pay run is final, void it before you change a day.
         For an employee with a time-off bank, the pay run pays paid time off only from the bank. Hours past the bank are unpaid.
+        When an employee leaves and Waves owes the unused hours, press &quot;Pay out the bank&quot;: the pay run for that week pays every hour the bank holds.
       </p>
     </header>
     {message && <p role="status" className="m-0 text-ui-caption text-zinc-900">{message}</p>}
@@ -223,12 +289,16 @@ export default function TimeOffPanel({ call, weekStart, refreshKey, onChanged })
     </div>}
 
     {balances.length > 0 && <ul className="m-0 grid list-none gap-1 p-0" aria-label={`Paid time off in ${year}`}>
-      {balances.map(({ name, balance }) => <li key={balance.technicianId} className="text-ui-caption">
-        <strong>{name}</strong>: {balance.bank
+      {balances.map(({ name, former, balance }) => <li key={balance.technicianId} className="text-ui-caption">
+        <strong>{name}</strong>{former && ' (left)'}: {balance.bank
           ? bankLine(balance.bank, etDateString(new Date()))
           : `Paid time off booked in ${year}: ${plainHours(balance.ptoHoursBooked)} hours`}
         {balance.holidayDaysBooked > 0 && `. Holidays booked: ${balance.holidayDaysBooked}`}
         {balance.bank && isShort(balance.bank) && <span className="text-warn-fg"> The bank does not hold all the waiting hours today. A pay run pays only the hours the bank holds then.</span>}
+        {balance.bank && <>{' '}<BankPayout
+          name={name} payout={balance.bank.payout} weekStart={weekStart} busy={busy}
+          onSet={week => setPayout(balance.technicianId, name, week, balance.bank.payout)}
+        /></>}
       </li>)}
     </ul>}
   </section>;
