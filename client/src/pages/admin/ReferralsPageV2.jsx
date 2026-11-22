@@ -690,6 +690,9 @@ function ThankYouNotes({ flash }) {
     try {
       await adminPost(`/admin/referrals/thank-you-notes/${note.referralId}/written`);
       setNotes((rows) => rows.filter((row) => row.referralId !== note.referralId));
+      // The server answers a limited batch, oldest first. Read it again so the notes past the batch come up, and
+      // the card never hides while a note is still owed.
+      setReloadKey((k) => k + 1);
       flash(`Thank-you note for ${note.memberName || "the member"} marked written`);
     } catch (e) {
       flash("Error: " + e.message);

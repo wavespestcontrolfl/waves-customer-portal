@@ -16,11 +16,19 @@ const NOTES = [
 ];
 const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
 
+// The fixture server: `owed` is what it still holds, `batch` how many rows one read answers (the real limit is 200).
+let owed;
+let batch;
 let notesResponse;
 let writtenResponse;
 beforeEach(() => {
-  notesResponse = () => response({ notes: NOTES });
-  writtenResponse = () => response({ success: true, written: true });
+  owed = [...NOTES];
+  batch = 200;
+  notesResponse = () => response({ notes: owed.slice(0, batch) });
+  writtenResponse = (url) => {
+    owed = owed.filter((note) => !url.includes(note.referralId));
+    return response({ success: true, written: true });
+  };
   localStorage.setItem("waves_admin_token", "fixture-token");
   vi.stubGlobal("fetch", vi.fn(async (url) => {
     if (url === "/api/admin/referrals/stats") return response({ activePromoters: 0, totalReferrals: 0, convertedReferrals: 0, pendingReferrals: 0, totalRewardsDollars: 0, totalPaidOutCents: 0, pendingPayouts: 0, programROI: 0 });
@@ -29,7 +37,7 @@ beforeEach(() => {
     if (url === "/api/admin/referrals/payouts") return response({ payouts: [] });
     if (url === "/api/admin/referrals/inbound") return response({ items: [] });
     if (url === "/api/admin/referrals/thank-you-notes") return notesResponse();
-    if (url.endsWith("/written")) return writtenResponse();
+    if (url.endsWith("/written")) return writtenResponse(url);
     throw new Error(`Unexpected fixture request: ${url}`);
   }));
 });
@@ -73,6 +81,23 @@ describe("Referrals queue: thank-you notes to write", () => {
     expect(screen.getByText("Second Member")).toBeInTheDocument();
   });
 
+  it("reads the list again after a mark: a note past the first batch comes up, and the card does not hide while one is owed", async () => {
+    batch = 1;
+    await openQueue();
+    expect(await screen.findByText("Thank-you notes to write (1)")).toBeInTheDocument();
+    expect(screen.queryByText("Second Member")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Mark written" }));
+
+    expect(await screen.findByText("Second Member")).toBeInTheDocument();
+    expect(screen.getByText("Thank-you notes to write (1)")).toBeInTheDocument();
+    expect(screen.queryByText("Fixture Member")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Mark written" }));
+    await waitFor(() => expect(screen.queryByText(/Thank-you notes to write/)).not.toBeInTheDocument());
+    expect(writes()).toHaveLength(2);
+  });
+
   it("a mark the server refused keeps the row and shows the server's reason", async () => {
     writtenResponse = () => response({ error: "This referral has no thank-you note to write" }, 404);
     await openQueue();
@@ -84,7 +109,7 @@ describe("Referrals queue: thank-you notes to write", () => {
   });
 
   it("shows no card when no note is owed", async () => {
-    notesResponse = () => response({ notes: [] });
+    owed = [];
     await openQueue();
 
     await screen.findByText("Submit Referral");
@@ -98,7 +123,7 @@ describe("Referrals queue: thank-you notes to write", () => {
     await openQueue();
 
     expect(await screen.findByText("Could not load thank-you notes to write. This is not an empty list.")).toBeInTheDocument();
-    notesResponse = () => response({ notes: NOTES });
+    notesResponse = () => response({ notes: owed });
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("Thank-you notes to write (2)")).toBeInTheDocument();
     expect(screen.queryByText(/Could not load thank-you notes/)).not.toBeInTheDocument();

@@ -130,17 +130,55 @@ postgres('referral thank-you notes (live Postgres)', () => {
     expect((await listFor(settled, atLimit)).map((n) => n.referralId).sort()).toEqual([settled.id, atLimit.id].sort());
   });
 
-  test('no note is owed for a referral from before Step 2, one that is not booked, one the office rejected, a retired duplicate, or an archived member', async () => {
+  test('no note is owed for a referral booked and settled before Step 2, one that is not booked, one the office rejected, or an archived member', async () => {
     const m = await member();
     const beforeStep2 = await referral(m, { referrer_reward_reason: null, status: 'credited' });
     const notBooked = await referral(m, { status: 'pending', converted_at: null });
     const rejected = await referral(m, { status: 'rejected', referrer_reward_status: 'superseded' });
-    // Another member's referral for the same friend earned; this one stays signed_up and can never pay.
-    const duplicate = await referral(m, { referrer_reward_status: 'superseded' });
     const archived = await referral(await member({ deleted_at: new Date() }));
 
-    expect(await listFor(beforeStep2, notBooked, rejected, duplicate, archived)).toEqual([]);
-    await expect(notes.markThankYouNoteWritten({ referralId: duplicate.id })).rejects.toMatchObject({ code: 'NO_NOTE_OWED' });
+    expect(await listFor(beforeStep2, notBooked, rejected, archived)).toEqual([]);
+  });
+
+  test('a referral booked before Step 2 owes no note while it waits, and owes one once a Step 2 settlement records its reason', async () => {
+    // Booked with the gate off: the conversion wrote no mark.
+    const r = await referral(await member(), { referrer_reward_reason: null, referrer_reward_status: 'pending_service' });
+    expect(await listFor(r)).toEqual([]);
+
+    // The first plan service is settled with the gate on: the settlement pays by the Step 2 rules and records why.
+    await trx('referrals').where({ id: r.id }).update({ status: 'credited', referrer_reward_status: 'earned', referrer_reward_reason: 'standard', referrer_credit_cents: 2500 });
+    expect((await listFor(r)).map((n) => n.referralId)).toEqual([r.id]);
+  });
+
+  test('two members who referred the same friend are each owed a note, also the one whose referral the settlement retired', async () => {
+    const paid = await referral(await member({ last_name: 'Paid' }), { status: 'credited', referrer_reward_status: 'earned', referrer_reward_reason: 'standard' });
+    // The other member's referral for the same friend: retired at the settlement, status still signed_up, no credit.
+    const retired = await referral(await member({ last_name: 'Retired' }), { referrer_reward_status: 'superseded' });
+
+    expect((await listFor(paid, retired)).map((n) => n.memberName).sort()).toEqual(['Fixture Paid', 'Fixture Retired']);
+    await expect(notes.markThankYouNoteWritten({ referralId: retired.id })).resolves.toEqual({ written: true });
+  });
+
+  test('a member archived after the list was read: the mark is refused and nothing is stamped', async () => {
+    const m = await member();
+    const r = await referral(m);
+    expect(await listFor(r)).toHaveLength(1);
+
+    await trx('customers').where({ id: m.id }).update({ deleted_at: new Date() });
+
+    await expect(notes.markThankYouNoteWritten({ referralId: r.id, writtenBy: randomUUID() }))
+      .rejects.toMatchObject({ statusCode: 404, code: 'NO_NOTE_OWED' });
+    expect(await trx('referrals').where({ id: r.id }).first('thank_you_note_at', 'thank_you_note_by'))
+      .toEqual({ thank_you_note_at: null, thank_you_note_by: null });
+    expect(await listFor(r)).toEqual([]);
+  });
+
+  test('a referral the office rejected after the list was read: the mark is refused and nothing is stamped', async () => {
+    const r = await referral(await member());
+    await trx('referrals').where({ id: r.id }).update({ status: 'rejected', referrer_reward_status: 'superseded' });
+
+    await expect(notes.markThankYouNoteWritten({ referralId: r.id })).rejects.toMatchObject({ code: 'NO_NOTE_OWED' });
+    expect((await trx('referrals').where({ id: r.id }).first('thank_you_note_at')).thank_you_note_at).toBeNull();
   });
 
   test('a booked referral that waits for the first plan service (reward status pending_service) owes the note already', async () => {
