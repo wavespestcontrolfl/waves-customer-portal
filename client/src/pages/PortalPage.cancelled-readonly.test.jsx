@@ -110,20 +110,29 @@ describe('BillingTab — add-a-service and refer cards', () => {
     ));
   });
 
-  // The offer's purchase overlay can save a payment method. Billing shows the
-  // Payment Methods list on the same tab, so it must read the list again;
-  // Home has no such list. Driven here by the return from a bank page, the
-  // save the card component runs by itself at mount.
-  it('a payment method saved from the offer reloads the Billing card list', async () => {
+  // The offer's purchase overlay can save a payment method, and a consented
+  // save can enroll Auto Pay on the server. Billing shows the Payment Methods
+  // list and the Auto Pay controls on the same tab, so both must read again;
+  // Home has neither. Driven here by the return from a bank page, the save
+  // the card component runs by itself at mount.
+  it('a payment method saved from the offer reloads the Billing card list and the Auto Pay controls', async () => {
     window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
     try {
+      let saved = false;
       api.getPropertyRecommendations.mockResolvedValue(RECS);
-      api.saveStripeCard.mockResolvedValue({});
+      api.saveStripeCard.mockImplementation(async () => { saved = true; return {}; });
+      api.getAutopay.mockImplementation(async () => (saved
+        ? { state: 'active', autopay_enabled: true, autopay_selected_method_ids: ['pm-1'] }
+        : { state: 'disabled', autopay_enabled: false, autopay_selected_method_ids: [] }));
       api.oneTapGet.mockResolvedValue({ open: false });
       await renderBilling({ ...baseCustomer, cancelled: false }, { onSwitchTab: vi.fn() });
       await waitFor(() => expect(api.saveStripeCard).toHaveBeenCalledWith(null, 'si_1'));
       // Once at mount, once after the save.
       await waitFor(() => expect(api.getCards).toHaveBeenCalledTimes(2));
+      // The Auto Pay controls read the state the save produced: the
+      // "Turn on" button of the off state is gone.
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Turn on Auto Pay' })).not.toBeInTheDocument());
+      expect(screen.getAllByText('Auto Pay is on').length).toBeGreaterThan(0);
     } finally {
       window.history.replaceState({}, '', '/');
     }

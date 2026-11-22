@@ -6642,6 +6642,15 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
       });
   };
 
+  // A payment method saved from the add-a-service offer's purchase overlay.
+  // The same two steps as the add-payment flow below: a consented save can
+  // enroll Auto Pay server-side, so the AutopayCard remounts after the card
+  // list reloads.
+  const handleOfferCardSaved = async () => {
+    await refreshCards();
+    setAutopayRefreshKey((k) => k + 1);
+  };
+
   const loadBilling = useCallback(() => {
     const cardsSeq = ++cardsSeqRef.current;
     setLoading(true);
@@ -8341,8 +8350,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
       )}
 
       {/* A card saved in the offer's purchase overlay is on the account at
-          once, so the Payment Methods list above reloads. */}
-      {!cancelledAccount && <RecommendationsCard data={billingOffers} surface="billing" onCardSaved={refreshCards} />}
+          once: the same refresh as Billing's own add-payment flow. */}
+      {!cancelledAccount && <RecommendationsCard data={billingOffers} surface="billing" onCardSaved={handleOfferCardSaved} />}
       {!cancelledAccount && onSwitchTab && (
         <section data-glass="card" data-section="billing-refer" style={{ ...card, padding: 20, marginTop: 16, textAlign: 'center' }}>
           <h2 style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, margin: '0 0 6px' }}>Know someone who could use Waves?</h2>
