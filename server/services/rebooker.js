@@ -5179,6 +5179,8 @@ module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;
 module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
+// The one month-interval table; auto-dispatch/flex-tier.js reads it for a visit's band radius.
+module.exports.MONTH_RECURRENCE_INTERVALS = MONTH_RECURRENCE_INTERVALS;
 module.exports.leavesOwnRound = leavesOwnRound;
 module.exports.makeSeriesProjector = makeSeriesProjector;
 // Exported for tests: the per-occurrence window derivation (rollback toggle +
