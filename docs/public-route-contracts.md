@@ -6204,7 +6204,9 @@ A shell is a `lead_webhook` draft with the customer row the run resolved
 for itself and the same email, for the same property as the run (same
 street, house number as typed, city, ZIP and unit; one of six name words
 inside the street name, such as Point, may be short on one side and in full
-on the other; an address with no city or ZIP never matches),
+on the other, but only on a run for which the county roll answered: with no
+county answer the two spellings are two streets and the draft blocks; an
+address with no city or ZIP never matches),
 that is older than 30 minutes, was never written since it was made, has no
 office Sold-by action and no logged follow-up, has no monthly, one-time or
 annual total, was never sent, viewed or scheduled, has no auto-send claim

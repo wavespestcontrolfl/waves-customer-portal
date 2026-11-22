@@ -811,13 +811,13 @@ function shouldRefreshWizardDraft(duplicateBlock) {
 // later same-phone run refreshes that draft like every wizard draft (the
 // branch below, owner-hit 2026-06-12). This rule does not change that.
 // It has a gate because the unblocked run texts the person the booking link.
-async function withoutFormShellBlock(trx, duplicateBlock, { phone, address, customerId, email }) {
+async function withoutFormShellBlock(trx, duplicateBlock, { phone, address, customerId, email, rollAnswered }) {
   if (!duplicateBlock || shouldRefreshWizardDraft(duplicateBlock)) return duplicateBlock;
   // Only a web-form draft can be a shell, and the block names the newest
   // open estimate: any other newest estimate blocks without a read.
   if (duplicateBlock.existingSource !== 'lead_webhook' || duplicateBlock.existingStatus !== 'draft') return duplicateBlock;
   if (require('../config/feature-gates').wizardSupersedesFormDraftLive?.() !== true) return duplicateBlock;
-  if (!await onlyUntouchedWebFormShellsOpen(trx, { phone, address, customerId, email })) return duplicateBlock;
+  if (!await onlyUntouchedWebFormShellsOpen(trx, { phone, address, customerId, email, rollAnswered })) return duplicateBlock;
   logger.info(`[public-quote] An untouched web-form draft (${duplicateBlock.existingEstimateId}) did not block the wizard estimate`);
   return null;
 }
@@ -3622,7 +3622,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const duplicateBlock = await withoutFormShellBlock(
             trx,
             await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx }),
-            { phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail },
+            // rollAnswered: a street-name word written short on one side
+            // and in full on the other counts as one street only when the
+            // county roll answered for this run's address (see the rule).
+            { phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail, rollAnswered: !!rollAnsweredThisRun },
           );
           if (duplicateBlock) {
             // A wizard re-run by the same phone lands here with a NEW lead

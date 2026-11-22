@@ -230,11 +230,24 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   test.each([
     ['Point', '12 Sample Pt Dr, Parrish, FL 34219', '12 Sample Point Dr, Parrish, FL 34219'],
     ['Glen', '12 Sample Gln Ct, Parrish, FL 34219', '12 Sample Glen Ct, Parrish, FL 34219'],
-  ])('%s written short on the draft and in full on the run, inside the street name, is the same property', async (_word, onDraft, onRun) => {
+  ])('%s written short on the draft and in full on the run, inside the street name, is the same property when the county roll answered on the run', async (_word, onDraft, onRun) => {
     await estimate({ address: onDraft });
 
-    expect(await shellsOnly({ address: onRun })).toBe(true);
+    expect(await shellsOnly({ address: onRun, rollAnswered: true })).toBe(true);
+    // The draft's own spelling needs no county answer.
     expect(await shellsOnly({ address: onDraft })).toBe(true);
+  });
+
+  // The address hold matches a stored county-roll warning to the run by its
+  // own street key, with no fold. With no county answer on the run, a
+  // warning stored under the draft's spelling could not reach it.
+  test.each([
+    ['no county answer', {}],
+    ['a county answer that is not exactly true', { rollAnswered: 'yes' }],
+  ])('with %s on the run, a name word written two ways keeps the block', async (_label, run) => {
+    await estimate({ address: '12 Sample Pt Dr, Parrish, FL 34219' });
+
+    expect(await shellsOnly({ address: '12 Sample Point Dr, Parrish, FL 34219', ...run })).toBe(false);
   });
 
   test.each([
@@ -245,7 +258,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   ])('a street-type word written two ways does not hide %s: the draft still blocks', async (_label, onRun) => {
     await estimate({ address: '12 Sample Pt Dr, Parrish, FL 34219' });
 
-    expect(await shellsOnly({ address: onRun })).toBe(false);
+    expect(await shellsOnly({ address: onRun, rollAnswered: true })).toBe(false);
   });
 
   // "St" is also Saint, "Dr" is also Doctor, and Island shortens to the
@@ -257,7 +270,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   ])('"%s" inside the street name is not folded: the draft still blocks', async (_word, onDraft, onRun) => {
     await estimate({ address: onDraft });
 
-    expect(await shellsOnly({ address: onRun })).toBe(false);
+    expect(await shellsOnly({ address: onRun, rollAnswered: true })).toBe(false);
   });
 
   test.each([
