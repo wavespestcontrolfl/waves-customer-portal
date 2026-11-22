@@ -1956,6 +1956,12 @@ function callEmailCheckCardPayload(callEmailCheck) {
 // review-state marker so review_status opens. The two copies differed ONLY
 // in their skippedReason string. One helper, called from both sites — never
 // awaited from inside the caller's own db.transaction (this opens its own).
+// A house-number recovery task (the admin-triage settlement) on the same card
+// carries a follow-up and an on-file address of its own. The agreed job's card
+// is a new ask, so both of its writes clear them (its follow-up rides in
+// agreed_one_time_job).
+const AGREED_JOB_CARD_CLEARS = Object.freeze({ follow_up_plan: null, on_file_address: null });
+
 // `agreedOneTimeJob`: the agreed one-time job's own evidence
 // (GATE_CALL_AGREED_ONE_TIME_JOB: the booking slot, the price and its basis, a
 // follow-up), or null. Always written, so a pass for another skip clears an
@@ -1991,6 +1997,7 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
             dispute_customer_id: customerId ? String(customerId) : null,
             retained_service_id: null,
             retained_scheduled_date: null,
+            ...(agreedOneTimeJob ? AGREED_JOB_CARD_CLEARS : {}),
           },
         }))
         .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
@@ -2024,10 +2031,12 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 // GATE_CALL_AGREED_ONE_TIME_JOB: the call has a visit now, so an open office
 // card for the agreed one-time job (an earlier pass held the booking) names it
 // (agreed_one_time_job.visit_id: a pass that refiles the card rewrites the key,
-// so an old visit id never stays). The card keeps its price, so staff check the
-// visit's price instead of booking another. Matches nothing on any other call: one unlocked read finds
+// so an old visit id never stays), with the visit's service and whether that is
+// the service the call priced (the card's price applies only then). The card is
+// re-bound to the visit's customer, as a refile would, so a relinked call's
+// verdict is not refused. Staff check the visit instead of booking another. Matches nothing on any other call: one unlocked read finds
 // no such card, and nothing more runs. Best-effort.
-async function noteAgreedJobCardVisit({ call, procToken, visitId, callSid }) {
+async function noteAgreedJobCardVisit({ call, procToken, customerId, visitId, visitService, callSid }) {
   const agreedJobCard = (conn) => conn('triage_items')
     .where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })
     .whereIn('status', ['open', 'in_progress'])
@@ -2038,16 +2047,24 @@ async function noteAgreedJobCardVisit({ call, procToken, visitId, callSid }) {
       await lockTriageCall(ttrx, call.id);
       const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
       if (!stillOwner) return;
-      await agreedJobCard(ttrx)
-        .update({
+      const { serviceNameKey } = require('./call-one-time-job');
+      const cards = await agreedJobCard(ttrx).select('id', ttrx.raw("payload->>'service' AS card_service"));
+      for (const card of cards) {
+        const visit = {
+          visit_id: String(visitId),
+          visit_service: visitService || null,
+          visit_is_priced_service: !!visitService && !!card.card_service && serviceNameKey(visitService) === serviceNameKey(card.card_service),
+        };
+        await ttrx('triage_items').where({ id: card.id }).update({
           payload: ttrx.raw(
-            "jsonb_set(COALESCE(payload, '{}'::jsonb), '{agreed_one_time_job}', "
+            "jsonb_set(COALESCE(payload, '{}'::jsonb) || ?::jsonb, '{agreed_one_time_job}', "
             + "(CASE WHEN jsonb_typeof(payload->'agreed_one_time_job') = 'object' THEN payload->'agreed_one_time_job' ELSE '{}'::jsonb END) "
-            + "|| jsonb_build_object('visit_id', ?::text))",
-            [String(visitId)],
+            + '|| ?::jsonb)',
+            [JSON.stringify(customerId ? { dispute_customer_id: String(customerId) } : {}), JSON.stringify(visit)],
           ),
           updated_at: new Date(),
         });
+      }
     });
   } catch (err) {
     logger.warn(`[call-proc] agreed one-time job card visit note failed for ${maskSid(callSid)}: ${err.code || err.name || 'db_error'}`);
@@ -22516,7 +22533,9 @@ const CallRecordingProcessor = {
                 // the office's booking card: no visit, no text. A visit this
                 // call already has was found above and is kept.
                 if (agreedJobHeldForOffice) {
-                  return { __held: { reason: 'agreed_one_time_job_office_books' } };
+                  // A street-only address match (the visit would have booked
+                  // pending with an address card) rides on the office card.
+                  return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };
                 }
                 // Make-up move (GATE_CALL_MAKEUP_MOVE, owner 2026-10-22): every
                 // booking guard above passed and this fresh row is about to be
@@ -22712,6 +22731,8 @@ const CallRecordingProcessor = {
                 // for the priced service only, and a promised follow-up visit.
                 if (svc.__held.reason === 'agreed_one_time_job_office_books') {
                   agreedJobCardEvidence = {
+                    // Google matched only the street of this address (or '' for the address on file).
+                    street_level_address: typeof svc.__held.streetLevelAddress === 'string' ? svc.__held.streetLevelAddress : null,
                     // The slot the booker resolved (Eastern date and hour), not the raw timestamp.
                     booking_date: scheduledDate || null,
                     booking_window_start: windowStart || null,
@@ -22791,7 +22812,7 @@ const CallRecordingProcessor = {
               // pass attached, or one this pass booked), so the open card names
               // it: staff check its price and book no second one. Whatever the
               // gate reads now; best-effort, under the call lock and the claim.
-              await noteAgreedJobCardVisit({ call, procToken, visitId: svc.id, callSid });
+              await noteAgreedJobCardVisit({ call, procToken, customerId: svc.customer_id || customerId, visitId: svc.id, visitService: svc.service_type || serviceType, callSid });
               // Street-level address holds only (reused legacy / voice-agent rows keep their
               // prior behavior): the visit is pending with its review card. The review reason is
               // raised now that the booking really became the hold; one live-checked bell.
@@ -24557,6 +24578,7 @@ const CallRecordingProcessor = {
                 extraPayload: {
                   skipped_reason: String(skipReason).slice(0, 300),
                   agreed_one_time_job: skipReason === 'agreed_one_time_job_office_books' ? agreedJobCardEvidence : null,
+                  ...(skipReason === 'agreed_one_time_job_office_books' ? AGREED_JOB_CARD_CLEARS : {}),
                   missing_fields: appointmentResult?.missingFields || null,
                   existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,
                   preferred_date_time: extracted.preferred_date_time || null,

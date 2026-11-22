@@ -348,7 +348,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
   const count = (text) => source.split(text).length - 1;
   const held = 'const agreedJobHeldForOffice = agreedJobAtAdoption\n              && (agreedServiceFields.length > 0 || agreedJobRewriteHeld || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));';
   const txAt = source.indexOf('const svc = await db.transaction(async (trx) => {');
-  const guard = "if (agreedJobHeldForOffice) {\n                  return { __held: { reason: 'agreed_one_time_job_office_books' } };\n                }";
+  const guard = "if (agreedJobHeldForOffice) {\n                  // A street-only address match (the visit would have booked\n                  // pending with an address card) rides on the office card.\n                  return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };\n                }";
 
   test('the visit price call is unchanged, and the processor never reads a price staff only stated', () => {
     expect(at).toBeGreaterThan(-1);
@@ -398,6 +398,9 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(call).toContain("skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,");
     // The slot the booker resolved, the price for the priced service and its basis, a follow-up.
     expect(call).toContain('booking_date: scheduledDate || null,');
+    // A street-only address match rides from the hold onto the card.
+    expect(call).toContain("street_level_address: typeof svc.__held.streetLevelAddress === 'string' ? svc.__held.streetLevelAddress : null,");
+    expect(source).toContain("return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };");
     expect(call).toContain('booking_window_start: windowStart || null,');
     expect(call).toContain('stated_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,');
     expect(call).toContain('price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,');
@@ -411,6 +414,9 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     const writer = source.slice(source.indexOf('async function fileSkippedBookingCard('), source.indexOf('async function noteAgreedJobCardVisit('));
     expect(writer).toContain('extraPayload: {\n            skipped_reason: skippedReason,\n            agreed_one_time_job: agreedOneTimeJob,');
     expect(writer).toContain('agreedOneTimeJob = null }) {');
+    // An agreed-job write clears a house-number recovery task's own follow-up and on-file address.
+    expect(source).toContain('const AGREED_JOB_CARD_CLEARS = Object.freeze({ follow_up_plan: null, on_file_address: null });');
+    expect(writer).toContain('retained_scheduled_date: null,\n            ...(agreedOneTimeJob ? AGREED_JOB_CARD_CLEARS : {}),');
     expect(writer).toContain("flag: 'auto_booking_skipped_after_approval',");
     expect(writer).toContain('.merge({');
     // It says whether this pass wrote the card.
@@ -435,7 +441,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(count("if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');")).toBe(1);
     expect(count('agreedJobCardFiled = ')).toBe(2); // false at the start, the writer's answer
     const fallback = source.slice(source.indexOf('const heldReasons = new Set('));
-    expect(fallback).toContain("skipped_reason: String(skipReason).slice(0, 300),\n                  agreed_one_time_job: skipReason === 'agreed_one_time_job_office_books' ? agreedJobCardEvidence : null,");
+    expect(fallback).toContain("skipped_reason: String(skipReason).slice(0, 300),\n                  agreed_one_time_job: skipReason === 'agreed_one_time_job_office_books' ? agreedJobCardEvidence : null,\n                  ...(skipReason === 'agreed_one_time_job_office_books' ? AGREED_JOB_CARD_CLEARS : {}),");
     const { buildTriageItem } = require('../services/call-routing-gates');
     // No card reason of its own.
     expect(buildTriageItem({ callLogId: 1, flag: 'agreed_one_time_job_office_books', extraction: {} }).category).toBe('service_unknown');
@@ -450,17 +456,19 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(helper).toContain(".where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })");
     // One unlocked read first: on every other call nothing more runs.
     expect(helper).toContain("if (!(await agreedJobCard(db).first('id'))) return;");
-    expect(helper).toContain('await agreedJobCard(ttrx)\n        .update({');
+    // Each card gets the visit, its service, whether that is the priced service, and the visit's customer.
+    expect(helper).toContain("const cards = await agreedJobCard(ttrx).select('id', ttrx.raw(\"payload->>'service' AS card_service\"));");
+    expect(helper).toContain('visit_is_priced_service: !!visitService && !!card.card_service && serviceNameKey(visitService) === serviceNameKey(card.card_service),');
+    expect(helper).toContain("[JSON.stringify(customerId ? { dispute_customer_id: String(customerId) } : {}), JSON.stringify(visit)],");
     expect(helper).toContain(".whereIn('status', ['open', 'in_progress'])");
     expect(helper).toContain(".whereRaw(\"payload->>'skipped_reason' = 'agreed_one_time_job_office_books'\")");
     // Inside the evidence key, so a pass that refiles the card clears an old visit id.
-    expect(helper).toContain(`"jsonb_set(COALESCE(payload, '{}'::jsonb), '{agreed_one_time_job}', "`);
-    expect(helper).toContain(`"|| jsonb_build_object('visit_id', ?::text))",`);
+    expect(helper).toContain(`"jsonb_set(COALESCE(payload, '{}'::jsonb) || ?::jsonb, '{agreed_one_time_job}', "`);
     // Best-effort: a failure never blocks the booking.
     expect(helper).toContain('} catch (err) {');
     // Called once, on the booked path, whatever the gate reads now.
     const site = 'scheduledServiceId = svc.id;';
-    expect(count('await noteAgreedJobCardVisit({ call, procToken, visitId: svc.id, callSid });')).toBe(1);
+    expect(count('await noteAgreedJobCardVisit({ call, procToken, customerId: svc.customer_id || customerId, visitId: svc.id, visitService: svc.service_type || serviceType, callSid });')).toBe(1);
     const at = source.indexOf('await noteAgreedJobCardVisit(');
     expect(source.lastIndexOf(site, at)).toBeGreaterThan(source.lastIndexOf('if (svc && svc.__held) {', at));
     expect(source.slice(source.lastIndexOf(site, at), at)).not.toContain('agreedJobAtAdoption');

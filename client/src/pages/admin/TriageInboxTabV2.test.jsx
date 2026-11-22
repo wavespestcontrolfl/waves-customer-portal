@@ -1593,9 +1593,30 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
   });
 
   it('names the visit once a later pass found or booked one, and stops asking for a booking', () => {
-    show(payload({}, { visit_id: 'visit-42' }));
-    expect(screen.getByText(/The call now has visit visit-42\. Do not book another one/)).toBeInTheDocument();
+    show(payload({}, { visit_id: 'visit-42', visit_service: 'One-Time Pest Control Service', visit_is_priced_service: true, follow_up: { scheduled_date: '2026-12-05', window_start: '10:00', suggested: false } }));
+    expect(screen.getByText(/The call now has visit visit-42 \(One-Time Pest Control Service\)\. Do not book another one/)).toBeInTheDocument();
     expect(screen.queryByText(/so the AI did not book it/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Book:')).not.toBeInTheDocument();
+    expect(screen.getByText(/\$250\.00 one-time\. Check that the visit carries it/)).toBeInTheDocument();
+    // Visit 2 may be booked already: check the schedule, never "book it".
+    expect(screen.getByText(/Visit 2 may already be booked\. Check the schedule/)).toBeInTheDocument();
+    expect(screen.queryByText('Promised follow-up:')).not.toBeInTheDocument();
+  });
+
+  it('says the price does not apply when the visit is another service', () => {
+    show(payload({}, { visit_id: 'visit-42', visit_service: 'Monthly Pest Control Service', visit_is_priced_service: false }));
+    expect(screen.getByText(/\$250\.00 was for One-Time Pest Control Service\. The visit is for another service, so this price does not apply/)).toBeInTheDocument();
+  });
+
+  it('tells staff to confirm the house number when Google matched only the street', () => {
+    show(payload({}, { street_level_address: '100 Example St' }));
+    expect(screen.getByText(/Google matched only the street of 100 Example St\. Confirm the house number/)).toBeInTheDocument();
+    cleanup();
+    show(payload({}, { street_level_address: '' }));
+    expect(screen.getByText(/Google matched only the street of the address on file/)).toBeInTheDocument();
+    cleanup();
+    show(payload());
+    expect(screen.queryByText(/Google matched only the street/)).not.toBeInTheDocument();
   });
 
   it('shows no price row with no price, and none of these rows on another skipped booking', () => {

@@ -135,15 +135,25 @@ function agreedOneTimeJobRows(p) {
   if (p.skipped_reason !== "agreed_one_time_job_office_books") return [];
   const j = p.agreed_one_time_job && typeof p.agreed_one_time_job === "object" ? p.agreed_one_time_job : {};
   const slot = (date, time) => `${String(date).slice(0, 10)}${time ? ` at ${String(time).slice(0, 5)}` : ""}`;
+  const price = typeof j.stated_price === "number" ? fmtMoney(j.stated_price) : null;
+  // A later pass found or booked the call's visit: staff check it, and book nothing from this card.
+  if (j.visit_id) {
+    return [
+      { label: "Visit on file", value: `The call now has visit ${j.visit_id}${j.visit_service ? ` (${j.visit_service})` : ""}. Do not book another one: check the visit, then resolve this card.` },
+      price && (j.visit_is_priced_service === true
+        ? { label: "Price on the call", value: `${price} one-time${j.price_basis === "agreed_total" ? ", the total the caller accepted" : ""}. Check that the visit carries it.` }
+        : { label: "Price on the call", value: `${price} was for ${p.service || "the job priced on the call"}. The visit is for another service, so this price does not apply to it.` }),
+      j.follow_up && j.follow_up.scheduled_date && { label: "Follow-up", value: "Visit 2 may already be booked. Check the schedule before you book one." },
+    ];
+  }
   return [
-    j.visit_id
-      ? { label: "Visit on file", value: `The call now has visit ${j.visit_id}. Do not book another one: check its price, then resolve this card.` }
-      : { label: "Why", value: "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price." },
+    { label: "Why", value: "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price." },
     p.service && { label: "Book", value: p.service },
     j.booking_date && { label: "Agreed time", value: `${slot(j.booking_date, j.booking_window_start)} ET` },
-    typeof j.stated_price === "number" && (j.price_basis === "agreed_total"
-      ? { label: "Agreed price", value: `${fmtMoney(j.stated_price)} one-time, the total the caller accepted on the call.` }
-      : { label: "Staff said", value: `${fmtMoney(j.stated_price)} one-time. Check the terms on the call before you set the visit's price.` }),
+    typeof j.street_level_address === "string" && { label: "Address", value: `Google matched only the street of ${j.street_level_address || "the address on file"}. Confirm the house number with the customer before you book.` },
+    price && (j.price_basis === "agreed_total"
+      ? { label: "Agreed price", value: `${price} one-time, the total the caller accepted on the call.` }
+      : { label: "Staff said", value: `${price} one-time. Check the terms on the call before you set the visit's price.` }),
     j.follow_up && j.follow_up.scheduled_date && (j.follow_up.suggested === true
       ? { label: "Suggested follow-up", value: `Visit 2 around ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. The call did not set this time: confirm it with the customer before you book it.` }
       : { label: "Promised follow-up", value: `Visit 2 was promised for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. Book it with the first visit.` }),
