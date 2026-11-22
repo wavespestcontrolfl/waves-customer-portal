@@ -7203,9 +7203,12 @@ the engine's not-measured marks: a dwelling unit priced from the bedroom count t
 `pricingConfidence`, a heuristic or low-grade turf size, `requiresMeasurement`, `quoteRequired`, a custom quote flag,
 a row priced with no count on record); or a mosquito area taken from a lot-category proxy (`missingAreaData: true`);
 or an engine input flag that says a size is not measured or not verified for this unit (`lotSizeMeasured: false`,
-`buildingSizeMeasured: false`, `measuredTurfUnitVerified: false`, anywhere in the saved estimate data). The rule reads
-marks about a size of the home or yard and marks that a price needs a visit. It does not read a quantity of product the
-office picks (mosquito stations, dunks). Where the engine stores no mark (a home size or a lawn size somebody typed is
+`buildingSizeMeasured: false`, `measuredTurfUnitVerified: false`, anywhere in the saved estimate data). When a lawn
+service is quoted (`lawn_care`, `one_time_lawn`), a heuristic turf mark on any stored object of the saved data, the
+replay or the served price takes the key away too (a V1 save keeps the resolved turf basis in `results.lawnMeta`, not
+on the lawn row); with no lawn service quoted that mark is not read. The rule reads marks about a size of the home or
+yard and marks that a price needs a visit. It does not read a quantity of product the office picks (mosquito stations,
+dunks) or a pricing decision the office makes (a discount, `priceOverridden`). Where the engine stores no mark (a home size or a lawn size somebody typed is
 stored like a measured one), the rule cannot tell and does not try. The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
 its reasons. Only a reason that says a measured size is large keeps the key (`large_lot`,
 `pest_large_lot_manual_review`, `large_pool_cage`, `pest_large_or_oversized_pool_cage`): a reviewed price from measured

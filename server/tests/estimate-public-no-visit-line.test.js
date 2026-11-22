@@ -624,6 +624,34 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured({ ...saved, inputs: { lotSizeMeasured: true, buildingSizeMeasured: true } }, {})).toBe(true);
   });
 
+  test('a lawn estimate whose turf basis is heuristic anywhere in the save or the served price', () => {
+    const lawnPlan = { recurring: { services: [recurringRow('pest_control'), recurringRow('lawn_care')] } };
+    const pestPlan = { recurring: { services: [recurringRow('pest_control')] } };
+    // A V1 save keeps the resolved turf basis beside the rows, with no `service` on it.
+    for (const lawnMeta of [{ turfBasis: 'countyPrior' }, { turfBasis: 'lotFallback' }, { turfBasis: 'measuredTurfSf', turfConfidence: 'LOW' }]) {
+      const label = JSON.stringify(lawnMeta);
+      expect([label, estimateIsRemoteMeasured({ result: { ...lawnPlan, results: { lawnMeta } } }, {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured({ result: lawnPlan, engineResult: { property: lawnMeta } }, {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured({ result: lawnPlan }, { lawnMeta })]).toEqual([label, false]);
+      // A one-time lawn service is lawn work too.
+      expect([label, estimateIsRemoteMeasured({ result: { ...pestPlan, oneTime: { items: [{ service: 'one_time_lawn', amount: 150 }] }, results: { lawnMeta } } }, {})]).toEqual([label, false]);
+      // With no lawn service quoted the turf size prices nothing.
+      expect([label, estimateIsRemoteMeasured({ result: { ...pestPlan, results: { lawnMeta } } }, {})]).toEqual([label, true]);
+    }
+    // A measured or confident basis keeps the answer.
+    for (const lawnMeta of [{ turfBasis: 'measuredTurfSf', turfConfidence: 'HIGH' }, { turfBasis: 'estimatedTurfSf', turfConfidence: 'MEDIUM' }, {}]) {
+      const label = JSON.stringify(lawnMeta);
+      expect([label, estimateIsRemoteMeasured({ result: { ...lawnPlan, results: { lawnMeta } } }, {})]).toEqual([label, true]);
+    }
+  });
+
+  test('a pricing decision the office makes is not a measurement of the home: it is not read', () => {
+    // A price the office set by hand on a listed one-time service. The home is measured the same, and no visit is needed.
+    const saved = (marks) => ({ result: { recurring: { services: [recurringRow('pest_control')] }, oneTime: { items: [{ service: 'one_time_pest', amount: 180, ...marks }] } } });
+    expect(estimateIsRemoteMeasured(saved({}), {})).toBe(true);
+    expect(estimateIsRemoteMeasured(saved({ priceOverridden: true }), {})).toBe(true);
+  });
+
   test('a quantity of product the office picks is not a measurement of the home: it is not read', () => {
     // Mosquito stations and dunks raise the price. They are no size of the home or yard, and they need no visit.
     const inputs = (oneTimeMosquito) => ({ homeSqFt: 2000, lotSqFt: 8000, services: { oneTimeMosquito } });

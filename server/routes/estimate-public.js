@@ -24232,10 +24232,11 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // What the rule reads, and what it does not. The sentence makes two claims: Waves measured this home and yard from
 // records and images, and the quote needs no visit. So the rule reads (1) the marks that say a size of the home or yard
 // is not measured or not verified, and (2) the marks that say a price needs a visit, a field measurement or a custom
-// quote. It does not read a quantity of product or work the office picks (mosquito stations, dunks): that is no
-// measurement of the home or yard, and it needs no visit. It does not read a fact the customer states that is no size
-// (a roach type, a grass type). And where the engine stores no mark, the rule cannot tell and does not try: a home
-// size or a lawn size somebody typed is stored like a measured one.
+// quote. It does not read a quantity of product or work the office picks (mosquito stations, dunks), nor a pricing
+// decision the office makes (a discount, a price it sets by hand: `priceOverridden`): neither is a measurement of the
+// home or yard, and neither needs a visit. It does not read a fact the customer states that is no size (a roach type,
+// a grass type). And where the engine stores no mark, the rule cannot tell and does not try: a home size or a lawn
+// size somebody typed is stored like a measured one.
 // Three reads, and each one fails closed (estimateIsRemoteMeasured):
 // 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
 //    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service
@@ -24306,12 +24307,14 @@ function storedRowHasAnUnsureReview(row) {
   return Boolean(row.requiresManualReview) && reasons.length === 0;
 }
 
-// The engine's predicate for a priced row whose price is not exact yet, loaded when first asked.
+// The engine's own predicates (estimator-engine/draft-builder), loaded when first asked.
 let engineDraftBuilder;
-const engineSaysPriceIsNotExact = (row) => {
+const engineChecks = () => {
   engineDraftBuilder = engineDraftBuilder || require('../services/estimator-engine/draft-builder');
-  return engineDraftBuilder.lineNeedsReviewBeforeExactPrice(row);
+  return engineDraftBuilder;
 };
+// Its predicate for a priced row whose price is not exact yet.
+const engineSaysPriceIsNotExact = (row) => engineChecks().lineNeedsReviewBeforeExactPrice(row);
 
 // A priced row: the size marks, the review reasons, and the engine's predicate (asked with the review marks taken off,
 // because the reasons are read above).
@@ -24351,13 +24354,30 @@ function storedRowReader() {
   };
 }
 
-// Every row that stores a `service` or a not-measured size mark, at any depth of a value.
-function rowsThatMustPass(value, found = [], seen = new WeakSet()) {
+// Every stored object, at any depth of a value.
+function storedObjects(value, found = [], seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value)) return found;
   seen.add(value);
-  if (isStoredRow(value) && (serviceIdentity(value.service) || storedRowHasANotMeasuredSize(value))) found.push(value);
-  for (const inner of Object.values(value)) rowsThatMustPass(inner, found, seen);
+  if (isStoredRow(value)) found.push(value);
+  for (const inner of Object.values(value)) storedObjects(inner, found, seen);
   return found;
+}
+// Every row that stores a `service` or a not-measured size mark, at any depth of a value.
+const rowsThatMustPass = (value) => storedObjects(value)
+  .filter((row) => serviceIdentity(row.service) || storedRowHasANotMeasuredSize(row));
+
+// A lawn price is built from the turf size, and the resolved turf basis is not always on the lawn row: a V1 save keeps
+// it beside the rows (`results.lawnMeta`), and the price card reads it from there. So when a lawn service is quoted, a
+// heuristic turf mark on ANY stored object takes the answer away (the engine's lineHasHeuristicTurf). With no lawn
+// service quoted the turf size prices nothing, and the mark is not read: the engine leaves it out the same way for an
+// object that is not a priced row.
+const LAWN_SERVICES = new Set(['lawn_care', 'one_time_lawn']);
+function lawnIsPricedFromAHeuristicTurf(estData, pricingBundle) {
+  const { sendSnapshot: _sentPriceAndScope, ...savedData } = isStoredRow(estData) ? estData : {};
+  const replay = persistedGuaranteeRoots(estData).length ? null : guaranteeReplayForInputsOnly(estData).result;
+  const objects = storedObjects([savedData, replay, pricingBundle]);
+  return objects.some((stored) => LAWN_SERVICES.has(serviceIdentity(stored.service)))
+    && objects.some((stored) => engineChecks().lineHasHeuristicTurf(stored));
 }
 
 function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
@@ -24453,7 +24473,8 @@ function estimateIsRemoteMeasured(estData = {}, pricingBundle = {}) {
     return Boolean(saved)
       && serviceMixIsRemoteMeasured(saved.recurring, saved.oneTime)
       && savedRowsAreAllListed(estData)
-      && servedPriceIsAllListed(pricingBundle);
+      && servedPriceIsAllListed(pricingBundle)
+      && !lawnIsPricedFromAHeuristicTurf(estData, pricingBundle);
   } catch (err) {
     logger.warn(`[estimate-data] no-visit line rule could not read the estimate: ${err.message}`);
     return false;
