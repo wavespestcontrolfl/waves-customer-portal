@@ -104,6 +104,34 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect(row.reader_confirmed_email).toBeNull();
   });
 
+  test('a trusted resubscribe after an opt-out clears the reader proof; the reader\'s next confirm click writes it again', async () => {
+    const email = addr();
+    await signup(email);
+    const pending = await db('newsletter_subscribers').where({ email }).first();
+    await svc.confirmByToken(pending.confirmation_token);
+    expect((await reload(pending.id)).reader_confirmed_at).toBeInstanceOf(Date);
+    // The reader opts out, then a trusted add brings the row back.
+    await db('newsletter_subscribers').where({ id: pending.id }).update({ status: 'unsubscribed', unsubscribed_at: new Date() });
+    const back = await svc.subscribeOrResubscribe({ email, source: 'admin_add', strict: true, requireConfirmation: false, linkCustomer: false });
+    expect(back.action).toBe('resubscribed');
+    const row = await reload(pending.id);
+    expect([row.status, row.unsubscribed_at, row.reader_confirmed_at, row.reader_confirmed_email]).toEqual(['active', null, null, null]);
+
+    // Opt out again, sign up on the public form, click the new link: the proof is the new click.
+    // The stamps are set back so the new link is later than each of them by minutes, not by the
+    // milliseconds between two statements, and the last confirmation is past the 10-minute cooldown.
+    await db('newsletter_subscribers').where({ id: pending.id }).update({
+      status: 'unsubscribed', unsubscribed_at: ago(5 * MIN), confirmed_at: ago(20 * MIN), resubscribed_at: ago(20 * MIN), confirmation_sent_at: ago(30 * MIN),
+    });
+    expect((await signup(email)).action).toBe('confirmation_sent');
+    const armed = await reload(pending.id);
+    expect((await svc.confirmByToken(armed.confirmation_token)).action).toBe('confirmed');
+    const done = await reload(pending.id);
+    expect(done.status).toBe('active');
+    expect(done.reader_confirmed_at.getTime()).toBe(done.confirmed_at.getTime());
+    expect(done.reader_confirmed_email).toBe(email.toLowerCase());
+  });
+
   test('a trusted add after the reader\'s click changes no stamp, and a click after a trusted add writes no proof (accepted)', async () => {
     // The reader clicks first: a later trusted add leaves confirmed_at and the proof as the click wrote them.
     const clickedFirst = addr();

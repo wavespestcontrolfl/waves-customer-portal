@@ -51,9 +51,11 @@ const stampMs = (value) => (value ? new Date(value).getTime() : NaN);
 // fanout moves a row to a new address and keeps both stamps. The rule, all of:
 // - the row is active, and its address is the address mailed, and the address the
 //   reader confirmed (a moved row fails here);
-// - confirmed_at is set and reader_confirmed_at is not before it. This is the trace of
-//   an opt-out that a trusted resubscribe wiped: that write clears unsubscribed_at and
-//   sets a later confirmed_at, so a click from before the opt-out no longer counts;
+// - confirmed_at is set and reader_confirmed_at is not before it. A trusted resubscribe
+//   after an opt-out clears unsubscribed_at; it also clears both reader stamps in that
+//   same write (newsletter-subscribers.js), so a click from before the opt-out is gone
+//   from the row. This order check is the second line: such a write also sets a later
+//   confirmed_at;
 // - no opt-out or sunset stamp (unsubscribed_at, deactivated_at) is at or after the
 //   click (an unreadable stamp fails closed).
 // Nothing is backfilled: history cannot tell a click from a trusted add, so a row has

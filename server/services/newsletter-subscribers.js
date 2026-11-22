@@ -232,6 +232,14 @@ async function subscribeOrResubscribeOnce({
         last_name: lastName !== null ? lastName : existing.last_name,
         resubscribed_at: new Date(),
         unsubscribed_at: null,
+        // This comeback is not the reader's click, so it drops the reader's earlier proof
+        // (confirmByToken). The opt-out it overrides came after that click, and this same
+        // write clears unsubscribed_at: with the proof left on the row, only a timestamp
+        // order would still say the click is void (pest-insider/tool-block.js optedIn), and
+        // this write's timestamps are taken before it lands. The reader's next confirm
+        // click writes the proof again.
+        reader_confirmed_at: null,
+        reader_confirmed_email: null,
         updated_at: new Date(),
       };
       // Sunset hygiene markers (newsletter-sunset.js) are cleared on EVERY
@@ -621,7 +629,8 @@ async function confirmByToken(token) {
   // lookup so the caller sees the current truth (the stale link reads
   // 'not_found'; a concurrent same-token confirm reads 'already_active').
   // The reader's own click also stamps reader_confirmed_at and reader_confirmed_email:
-  // the only writes of those two columns besides confirmResignupToken. A trusted add
+  // the only writes that set those two columns, with confirmResignupToken (a comeback
+  // that subscribeOrResubscribe writes on an opted-out row clears them). A trusted add
   // promotes a pending row without them, so the Waves Pest Insider tool block
   // (pest-insider/tool-block.js) can tell a reader's click from a promotion. The
   // address is LOWER(email) of the row this UPDATE flips, taken in SQL: it is the

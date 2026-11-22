@@ -5155,7 +5155,8 @@ is under 10 minutes old sends no second email and answers exactly the same, and 
 `inactive` address is only changed by the confirm POST, never by the subscribe POST. The confirm
 POST's flip (a `pending` row, or a live re-signup token) also records the reader's own click on the
 row it flips: `reader_confirmed_at` and `reader_confirmed_email` (the row's address, lowercased in
-SQL). No other route or writer sets those columns; the confirm GET stays read-only; a link on a row
+SQL). No other route or writer sets those columns (a comeback that is not the reader's click clears
+them); the confirm GET stays read-only; a link on a row
 that is already `active` still answers `already_active` and writes nothing; the responses are
 unchanged; and a failed confirm POST logs an error code, never the failed query's text. An unsubscribe
 (one-click POST or a SendGrid unsubscribe event) that lands on an already-`unsubscribed` row holding

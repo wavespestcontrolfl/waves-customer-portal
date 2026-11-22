@@ -342,7 +342,7 @@ describe('the reader-confirmed stamps are written by the confirm click only', ()
     expect(Object.values(flip.update).map((v) => String(v).toLowerCase())).not.toContain('mixed.case@example.com');
   });
 
-  test('a trusted add of a pending row, a trusted resubscribe and a waitlist promotion write neither', async () => {
+  test('a trusted add of a pending row and a waitlist promotion write neither; a trusted resubscribe after an opt-out clears both', async () => {
     let queries = useRecordingDb({ firsts: [{ ...PENDING_ROW }, { ...PENDING_ROW, status: 'active' }] });
     expect((await subscribeOrResubscribe({ email: 'mixed.case@example.com', source: 'admin_add', requireConfirmation: false, linkCustomer: false })).action).toBe('confirmed');
     let write = queries.find((r) => r.update);
@@ -354,7 +354,18 @@ describe('the reader-confirmed stamps are written by the confirm click only', ()
     expect((await subscribeOrResubscribe({ email: 'reader@example.com', source: 'admin_add', requireConfirmation: false, linkCustomer: false })).action).toBe('resubscribed');
     write = queries.find((r) => r.update);
     expect(write.update.status).toBe('active');
-    expect(stamps(write.update)).toEqual([]);
+    // The comeback is not the reader's click. It clears unsubscribed_at, and in the same write the
+    // reader's earlier proof: a click from before the opt-out is gone from the row, whatever
+    // order this write and a later click or opt-out land in.
+    expect(write.update.unsubscribed_at).toBeNull();
+    expect(write.update).toMatchObject({ reader_confirmed_at: null, reader_confirmed_email: null });
+
+    // The same for a comeback that waits for a new confirm click (a non-public double-opt-in caller).
+    queries = useRecordingDb({ firsts: [{ ...UNSUB_ROW }, { ...UNSUB_ROW, status: 'pending' }] });
+    expect((await subscribeOrResubscribe({ email: 'reader@example.com', source: 'call_recording', requireConfirmation: true, linkCustomer: false })).action).toBe('confirmation_sent');
+    write = queries.find((r) => r.update);
+    expect(write.update.status).toBe('pending');
+    expect(write.update).toMatchObject({ reader_confirmed_at: null, reader_confirmed_email: null });
 
     queries = useRecordingDb({ firsts: [{ ...WAITLIST_ROW }, { ...WAITLIST_ROW, status: 'active' }] });
     expect((await subscribeOrResubscribe({ email: 'pat@example.com', source: 'admin_manual', requireConfirmation: false, linkCustomer: false, promoteWaitlist: true })).action).toBe('resubscribed');
