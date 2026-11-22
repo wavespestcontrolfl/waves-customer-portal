@@ -7423,7 +7423,9 @@ on `unauthenticatedAuthLimitKey` with production-only limiters;
 password hash (the timing comparison against the fixed stand-in hash still
 runs for a row with none, and a match there is refused);
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
-bearer. Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
+bearer; `/register` (like every Team tab writer of a staff email) refuses an
+address that is another staff row's email or linked Google address (409).
+Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
 `/login` returns `{ mfaRequired, challengeToken }` (a 5-minute signed JWT of
 type `staff_mfa_challenge`, never an access token) instead of a session, and
 the public `POST /login/mfa` (a generic 404 while the gate is dark, answered in

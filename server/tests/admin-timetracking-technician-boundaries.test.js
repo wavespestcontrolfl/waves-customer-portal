@@ -222,9 +222,10 @@ describe('admin timetracking technician data/auth boundaries', () => {
       body: { name: ' Casey Tech ', email: '  CASEY@Example.COM  ', payRate: '42.50' },
     });
     expect(created.statusCode).toBe(200);
+    // One mailbox, one staff row: the probe reads the staff email and the linked Google address of every row.
     expect(noConflict.whereRaw).toHaveBeenCalledWith(
-      'LOWER(BTRIM(email)) = ?',
-      ['casey@example.com'],
+      '(LOWER(BTRIM(email)) = ? OR LOWER(google_email) = ?)',
+      ['casey@example.com', 'casey@example.com'],
     );
     expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({
       name: 'Casey Tech',
@@ -509,8 +510,8 @@ describe('admin timetracking technician data/auth boundaries', () => {
     expect(result.statusCode).toBe(409);
     expect(result.body).toEqual({ error: 'Email already in use' });
     expect(collision.whereRaw).toHaveBeenCalledWith(
-      'LOWER(BTRIM(email)) = ?',
-      ['other@example.com'],
+      '(LOWER(BTRIM(email)) = ? OR LOWER(google_email) = ?)',
+      ['other@example.com', 'other@example.com'],
     );
     expect(tx.remaining()).toHaveLength(0);
     expect(collision.update).not.toHaveBeenCalled();

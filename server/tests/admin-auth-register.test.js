@@ -50,12 +50,14 @@ async function invoke(req) {
 // email duplicate probe (builder chain ending in .first), and the insert.
 function installDb({ existing = null } = {}) {
   const inserts = [];
+  // The raw conditions of the duplicate probe, as register sent them.
+  inserts.probes = [];
   db.fn = { now: jest.fn(() => 'NOW') };
   db.mockImplementation(() => {
     const builder = {
       where: jest.fn(() => builder),
       whereNotNull: jest.fn(() => builder),
-      whereRaw: jest.fn(() => builder),
+      whereRaw: jest.fn((text, bindings) => { inserts.probes.push({ text, bindings }); return builder; }),
       whereIn: jest.fn(() => builder),
       first: jest.fn(async () => existing),
       insert: jest.fn((values) => {
@@ -158,6 +160,19 @@ describe('register provisioning hardening', () => {
     const res = await invoke({ body: baseBody() });
     expect(res.statusCode).toBe(409);
     expect(inserts).toHaveLength(0);
+  });
+
+  test("the duplicate probe covers every row's staff email and linked Google address", async () => {
+    // One mailbox, one staff row: a new account's email may not be a mailbox another staff member signs in with
+    // (staff-hire-packet-postgres.test.js proves the read on PostgreSQL through the Team tab writers).
+    const inserts = installDb({ existing: { id: 'tech-google' } });
+    const res = await invoke({ body: baseBody({ email: ' NewTech@Example.test ' }) });
+    expect(res.statusCode).toBe(409);
+    expect(inserts).toHaveLength(0);
+    expect(inserts.probes).toContainEqual({
+      text: '(LOWER(BTRIM(email)) = ? OR LOWER(google_email) = ?)',
+      bindings: ['newtech@example.test', 'newtech@example.test'],
+    });
   });
 
   test('rejects roles outside admin/technician', async () => {

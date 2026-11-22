@@ -23,13 +23,18 @@ async function findStaffByCanonicalEmail(connection, email, excludeId) {
   return query.first('id');
 }
 
-// The staff row a sign-in address belongs to: its staff email (password sign-in), or its linked Google address
-// (staff-google-signin.js reads that column the same way). For a caller that must not give a new row an address
-// some staff member already signs in with.
-async function findStaffByLoginEmail(connection, email) {
+// One read for both columns (a NULL email or link matches nothing).
+const STAFF_MAILBOX_SQL = '(LOWER(BTRIM(email)) = ? OR LOWER(google_email) = ?)';
+
+// The staff row a mailbox belongs to: its staff email (password sign-in and password reset mail), or its linked
+// Google address (staff-google-signin.js reads that column the same way). One mailbox belongs to one staff row:
+// every writer of either column asks here first, under the staff identity lock, so no row's reset mail and no
+// row's Google sign-in lands with another staff member. `excludeId` leaves one row out (the row being edited).
+async function findStaffByLoginEmail(connection, email, excludeId) {
   if (!email) return null;
-  return (await findStaffByCanonicalEmail(connection, email))
-    || connection('technicians').whereRaw('LOWER(google_email) = ?', [email]).first('id');
+  let query = connection('technicians').whereRaw(STAFF_MAILBOX_SQL, [email, email]);
+  if (excludeId) query = query.whereNot('id', excludeId);
+  return query.first('id');
 }
 
 // The staff table is small and identity mutations are rare. Serialize them to
@@ -40,6 +45,7 @@ async function lockStaffIdentityWrites(trx) {
 
 module.exports = {
   MAX_STAFF_EMAIL_LENGTH,
+  STAFF_MAILBOX_SQL,
   canonicalStaffEmail,
   findStaffByCanonicalEmail,
   findStaffByLoginEmail,
