@@ -773,7 +773,10 @@ postgres('Hired button on migrated PostgreSQL', () => {
       expect((await put(second, '', { employmentStatus: 'active', email: secondEmail })).status).toBe(200);
       await expect(authHandlers.issuePasswordReset(secondEmail)).resolves.toEqual({ issued: true });
       const { token } = tokenFromLastEmail();
+      expect(await listed(second)).toMatchObject({ hire_action: 'resend', hire_link_pending: true });
       expect((await put(second, '/google-signin', { googleEmail: address() })).status).toBe(200);
+      // The Team tab does not call that link pending: the redeem refuses it (below).
+      expect(await listed(second)).toMatchObject({ hire_action: 'resend', hire_link_pending: false });
       // No request issues a link for either row, and the link that was stored before the Google address was linked
       // (as a link stored by an older build would be) sets no password.
       for (const mailbox of [firstEmail, secondEmail]) {
@@ -795,6 +798,7 @@ postgres('Hired button on migrated PostgreSQL', () => {
       await call(`/technicians/${hired}/hire`, { body: hiredBody });
       const sent = tokenFromLastEmail();
       expect((await put(hired, '/google-signin', { googleEmail: address() })).status).toBe(200);
+      expect(await listed(hired)).toMatchObject({ hire_action: 'resend', hire_link_pending: true });
       await pastCooldown(hired);
       await expect(authHandlers.issuePasswordReset(hiredBody.email)).resolves.toEqual({ issued: false });
       expect((await row(hired)).password_reset_token_hash).toBe(hashResetToken(sent.token));
