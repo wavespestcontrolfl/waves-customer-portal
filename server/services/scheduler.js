@@ -1848,26 +1848,34 @@ function initScheduledJobs() {
   // every cron.schedule in this repo; the only named :51 jobs run at 11 PM).
   // Only the every-minute and every-N-minute pollers share it.
   // =========================================================================
-  // A skip with no connection (no pool connection, no lock slot in time, a
-  // lost session) is a missed tick: the outer lease keeps no health row, so
-  // the tick records it on mail-home-price itself. Not on a deploy-kill
-  // retry: that row's dead-run mark must stay so the retry can run again.
+  // A tick whose price body never started, for any reason but a held lease
+  // (no pool connection, no lock slot in time, a lost session, a lock query
+  // that threw), is a missed tick: the outer lease keeps no health row, so
+  // the tick records it on mail-home-price itself. Once the body starts, the
+  // inner lease records the run. Not on a deploy-kill retry: that row's
+  // dead-run mark must stay so the retry can run again.
   const runMailHomePriceTick = async ({ retry = false } = {}) => {
     const tickStartedAt = Date.now();
+    let bodyStarted = false;
+    const priceRun = () => {
+      bodyStarted = true;
+      return require('./mail/home-price').runHomePrices();
+    };
+    let missed = null;
     try {
-      const out = await runExclusive(
-        'permit-sync',
-        () => runExclusive('mail-home-price', () => require('./mail/home-price').runHomePrices()),
-        { recordHealth: false },
-      );
+      const out = await runExclusive('permit-sync', () => runExclusive('mail-home-price', priceRun), { recordHealth: false });
       if (out && out.skipped === true && out.reason === 'lease_held') {
         logger.info('Mail home prices: not run, the permit sync or another instance holds a lease');
       } else if (out && out.skipped === true) {
-        if (!retry) await recordMissedTick('mail-home-price', tickStartedAt, `tick skipped: ${out.reason || 'no_connection'}`).catch(() => {});
-        throw new Error(`tick skipped: ${out.reason || 'no_connection'}`);
+        missed = `tick skipped: ${out.reason || 'no_connection'}`;
       }
     } catch (err) {
-      logger.error(`Mail home prices failed: ${err.message}`);
+      if (!bodyStarted) missed = `tick skipped: ${err.message}`;
+      else logger.error(`Mail home prices failed: ${err.message}`);
+    }
+    if (missed && !bodyStarted) {
+      logger.error(`Mail home prices failed: ${missed}`);
+      if (!retry) await recordMissedTick('mail-home-price', tickStartedAt, missed).catch(() => {});
     }
   };
   cron.schedule('51 21 * * *', () => runMailHomePriceTick(), { timezone: 'America/New_York' });

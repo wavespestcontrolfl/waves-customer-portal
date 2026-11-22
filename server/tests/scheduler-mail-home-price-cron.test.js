@@ -146,3 +146,27 @@ test('a deploy-kill retry with no connection records nothing, so the dead-run ma
   expect(recordMissedTick).not.toHaveBeenCalled();
   expect(runHomePrices).not.toHaveBeenCalled();
 });
+
+test('a lock query that throws before the body starts records a missed run', async () => {
+  runExclusive.mockImplementationOnce(async () => { throw new Error('Connection terminated'); });
+  await expect(registered('51 21 * * *')()).resolves.toBeUndefined();
+  expect(runHomePrices).not.toHaveBeenCalled();
+  expect(recordMissedTick).toHaveBeenCalledWith('mail-home-price', expect.any(Number), 'tick skipped: Connection terminated');
+  expect(logger.error).toHaveBeenCalledWith('Mail home prices failed: tick skipped: Connection terminated');
+});
+
+test('a body that started and failed is left to the inner lease: no missed run on top', async () => {
+  runHomePrices.mockRejectedValueOnce(new Error('price engine away'));
+  await registered('51 21 * * *')();
+  expect(recordMissedTick).not.toHaveBeenCalled();
+  expect(logger.error).toHaveBeenCalledWith('Mail home prices failed: price engine away');
+});
+
+test('a deploy-kill retry whose lock query throws records nothing', async () => {
+  isEnabled.mockImplementation((name) => name === 'cronJobs');
+  initScheduledJobs();
+  const call = registerDeployKillRetry.mock.calls.find(([name]) => name === 'mail-home-price');
+  runExclusive.mockImplementationOnce(async () => { throw new Error('Connection terminated'); });
+  await expect(call[1]()).resolves.toBeUndefined();
+  expect(recordMissedTick).not.toHaveBeenCalled();
+});
