@@ -566,6 +566,7 @@ jobs:
             tests/billing-email-detail-rows-migration-postgres.test.js \
             tests/billing-receipt-notice-migration-postgres.test.js \
             tests/billing-retry-email-postgres.test.js \
+            tests/estimate-delivery-no-visit-line-migration-postgres.test.js \
             tests/estimate-email-pdf-note-fixture-copy-migration-postgres.test.js \
             tests/estimate-email-pdf-note-migration-postgres.test.js \
             tests/estimate-email-pdf-note-paragraph-migration-postgres.test.js \
