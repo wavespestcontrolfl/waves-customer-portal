@@ -4,9 +4,9 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import OfferTimeline from "./OfferTimeline";
-import { fetchSignedCopy, reviseOffer, withdrawOffer } from "./offerApi";
+import { fetchSignedCopy, reviseOffer, setChecklistItem, withdrawOffer } from "./offerApi";
 
-vi.mock("./offerApi", () => ({ fetchSignedCopy: vi.fn(), reviseOffer: vi.fn(), withdrawOffer: vi.fn() }));
+vi.mock("./offerApi", () => ({ fetchSignedCopy: vi.fn(), reviseOffer: vi.fn(), setChecklistItem: vi.fn(), withdrawOffer: vi.fn() }));
 
 const TERMS = {
   jobTitle: "Pest Control Technician",
@@ -45,6 +45,7 @@ beforeEach(() => {
   withdrawOffer.mockReset();
   reviseOffer.mockReset();
   fetchSignedCopy.mockReset();
+  setChecklistItem.mockReset();
 });
 
 afterEach(() => {
@@ -193,5 +194,70 @@ describe("OfferTimeline", () => {
     const ask = await screen.findByRole("dialog", { name: "Withdraw offer" });
     fireEvent.click(within(ask).getByRole("button", { name: "Withdraw" }));
     await waitFor(() => expect(withdrawOffer).toHaveBeenCalledWith("app-1", "offer-1", { expectedStatus: "sent" }));
+  });
+
+  // The first-days checklist of a signed offer: the server's labels and due lines, one button for each item.
+  describe("the first-days checklist", () => {
+    const signed = () => record({ status: "accepted", signedAt: "2026-12-12T15:00:00Z" });
+    const firstDays = (over = {}) => ({
+      offerId: "offer-1",
+      firstDay: "2027-01-04",
+      items: [
+        { key: "driving_record", label: "Driving record copy", due: "Due before the first day, Mon, Jan 4, 2027", doneAt: "2026-12-14T15:00:00Z", doneByName: "Sam Carter" },
+        { key: "i9", label: "Form I-9", due: "Due Thu, Jan 7, 2027, 3 business days after the first day", doneAt: null, doneByName: null },
+      ],
+      ...over,
+    });
+    const rowOf = (label) => screen.getByText(label).closest("li");
+
+    it("marks an open item done and a done item not done, then re-reads the card", async () => {
+      setChecklistItem.mockResolvedValue({ firstDays: firstDays() });
+      const onChanged = vi.fn(async () => null);
+      render(card({ offer: signed(), firstDays: firstDays(), onChanged }));
+      // An open item shows its due line; a done one shows when and by whom, in Eastern time.
+      expect(within(rowOf("Form I-9")).getByText("Due Thu, Jan 7, 2027, 3 business days after the first day")).toBeInTheDocument();
+      expect(within(rowOf("Driving record copy")).getByText(/^Done .*Dec 14.* by Sam Carter$/)).toBeInTheDocument();
+      expect(within(rowOf("Driving record copy")).queryByText(/Due before/)).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Mark done: Form I-9" }));
+      await waitFor(() => expect(setChecklistItem).toHaveBeenCalledWith("app-1", "offer-1", "i9", true, null));
+      await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+      fireEvent.click(screen.getByRole("button", { name: "Undo: Driving record copy" }));
+      // An undo names the mark the card shows.
+      await waitFor(() => expect(setChecklistItem).toHaveBeenLastCalledWith("app-1", "offer-1", "driving_record", false, "2026-12-14T15:00:00Z"));
+      await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(2));
+    });
+
+    it("a refused write shows why and re-reads the card", async () => {
+      setChecklistItem.mockRejectedValueOnce(Object.assign(new Error("This checklist is closed."), { status: 409, body: { code: "CHECKLIST_CLOSED" } }));
+      const onChanged = vi.fn(async () => null);
+      render(card({ offer: signed(), firstDays: firstDays(), onChanged }));
+      fireEvent.click(screen.getByRole("button", { name: "Mark done: Form I-9" }));
+      expect(await screen.findByText("This checklist is closed.")).toBeInTheDocument();
+      expect(onChanged).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["an admin who is not the owner account", { ownerActions: false }],
+      ["a card whose last read failed", { stale: true }],
+    ])("shows the list with no buttons to %s", (_label, change) => {
+      render(card({ offer: signed(), firstDays: firstDays(), ...change }));
+      expect(screen.getByTestId("offer-first-days")).toBeInTheDocument();
+      expect(screen.getByText("Form I-9")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /^(Mark done|Undo):/ })).toBeNull();
+    });
+
+    it("shows no checklist when the read has none", () => {
+      render(card({ offer: signed(), firstDays: null }));
+      expect(screen.queryByTestId("offer-first-days")).toBeNull();
+    });
+
+    // A later offer that was withdrawn can be the card's offer while the application is Hired on an earlier signature.
+    it("shows the hire's checklist on a card whose offer is not the signed one, and a write names the checklist's offer", async () => {
+      setChecklistItem.mockResolvedValue({ firstDays: firstDays({ offerId: "offer-9" }) });
+      render(card({ offer: record({ status: "withdrawn" }), firstDays: firstDays({ offerId: "offer-9" }) }));
+      fireEvent.click(screen.getByRole("button", { name: "Mark done: Form I-9" }));
+      await waitFor(() => expect(setChecklistItem).toHaveBeenCalledWith("app-1", "offer-9", "i9", true, null));
+    });
   });
 });

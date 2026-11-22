@@ -33,6 +33,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { FAMILY_LABELS } = require('./templates');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
+const { holdLockSlot } = require('../../utils/cron-lock');
 
 const SOURCE = 'plan_restart';
 const HAND_PRICED_RESTART = 'This restart needs to be set up by hand — please call or text us and we will take care of it.';
@@ -1227,6 +1228,63 @@ async function retireLineage({
   }
 }
 
+// lineageOrderStamp: the created_at of a quote the mint publishes, as a value
+// for its INSERT (#8245 pre-push r1, r2). The lineage's order is the stored
+// (created_at, id). The column's default is the transaction's start, and
+// that is not the order the mints ran in: of two mints for one customer, the
+// one that began first can take the customer-comms lock second. Its quote,
+// the live one, was then the OLDER row, and "which quote replaced which" read
+// backwards once staff archived it. So a new quote is stamped after every
+// stored quote of its lineage (customer + source), in any status. The mint
+// holds the customer-comms lock, so no other mint of the lineage is in
+// flight and this read sees every earlier one. With no later row stored,
+// the stamp is the transaction's start, as the default was.
+const lineageOrderStamp = (trx, customerId, source) => trx.raw(
+  `GREATEST(now(), (SELECT max(prior.created_at) + interval '1 microsecond'
+    FROM estimates prior WHERE prior.customer_id = ? AND prior.source = ?))`,
+  [customerId, source],
+);
+
+// The readers of that lineage for staff Unarchive (admin-estimates.js POST
+// /:id/unarchive; #8132 pre-push r40). retireLineage archives the quotes a
+// new one replaces and stamps nothing else, so "was this quote replaced" is
+// read from the lineage itself.
+// retiresWithLineage: is this a quote retireLineage would retire: one of this
+// module's two mints, for a customer, not accepted (an accepted quote is
+// history and is never replaced).
+function retiresWithLineage(estimate) {
+  return !!estimate?.customer_id
+    && [SOURCE, PLAN_START_SOURCE].includes(String(estimate.source || ''))
+    && estimate.status !== 'accepted';
+}
+
+// lineageUnarchiveBlock: why this quote must stay archived, or null. Called
+// under the customer-comms lock of the quote's pre-read owner.
+//   'moved'    - the row no longer has that owner and source (a customer
+//                merge moved it), so the lock held is not its lineage's.
+//   'replaced' - the customer holds another quote of the lineage (customer +
+//                source) that is newer, in any status, archived or not; or
+//                one that is still open (not archived, not accepted).
+// "Newer" is the stored (created_at, id), compared inside the database so no
+// timestamp loses its microseconds in JavaScript. The mint assigns that order
+// (lineageOrderStamp), so the newest row is the last mint's, also after
+// staff archive it. The second test covers a lineage that a customer merge
+// joined: the open quote that moved in can be the older row.
+const LINEAGE_REPLACES_SQL = `((other.created_at, other.id) > (old.created_at, old.id)
+  OR (other.archived_at IS NULL AND other.status <> 'accepted'))`;
+async function lineageUnarchiveBlock(dbh, estimate) {
+  const current = await dbh('estimates').where({ id: estimate.id }).first('customer_id', 'source');
+  if (!current || current.customer_id !== estimate.customer_id || current.source !== estimate.source) return 'moved';
+  const other = await dbh('estimates as other')
+    .join('estimates as old', function sameLineage() {
+      this.on('old.customer_id', 'other.customer_id').andOn('old.source', 'other.source').andOn('old.id', '<>', 'other.id');
+    })
+    .where('old.id', estimate.id)
+    .whereRaw(LINEAGE_REPLACES_SQL)
+    .first('other.id');
+  return other ? 'replaced' : null;
+}
+
 // Publish the priced quote: insert the row, freeze its send snapshot, write the
 // timeline note. Returns { estimateId, token, url, reused: false }.
 async function publishMintedEstimate(mint, { offer, estimateData }) {
@@ -1260,6 +1318,8 @@ async function publishMintedEstimate(mint, { offer, estimateData }) {
     followup_final_sent: true,
     followup_expiring_sent: true,
     source,
+    // The quote's place in its lineage, assigned under the mint's lock.
+    created_at: lineageOrderStamp(trx, fresh.id, source),
     service_interest: families.map((f) => FAMILY_LABELS[f] || f).join(' + '),
     category: fresh.property_type === 'commercial' ? 'COMMERCIAL' : 'RESIDENTIAL',
     pricing_authority: 'SERVER',
@@ -1305,13 +1365,68 @@ async function publishMintedEstimate(mint, { offer, estimateData }) {
   return { estimateId: created.id, token, url: `/estimate/${token}`, reused: false };
 }
 
+// mintTransaction: the transaction both mints run in, with a cap on how many
+// run at once in this process (#8132 pre-push r26, r40). A mint holds its
+// transaction's connection from its first lock to the commit, and some of
+// its reads take a second one from the pool (the cached property lookup,
+// the verified-correction probe, the send snapshot's pricing bundle). With
+// no cap, as many mints as the pool has connections can each hold one and
+// wait for a second that no one can give. Every one of them fails when the
+// pool's wait ends, and until then no other request gets a connection.
+// One mint for every MINT_POOL_SHARE pool connections runs at once (5 on
+// the default 20), so the mints together use at most half of the pool.
+// A tap beyond that does not wait (#8256 pre-push r1, r3). It is refused at
+// once with a coded answer, which both cards show and neither turns into a
+// request: nothing was read, minted or archived, and the customer taps
+// again. cron-lock.js has the same rule for every request-scoped lock: a
+// request parked in a line does its work after its client gave up, and here
+// that work archives a quote and frees its slot hold. The words are the
+// ones this module's failed-read refusals already use.
+// A pool under four connections has no quarter to give (#8256 pre-push r2).
+// The cron locks (utils/cron-lock.js) may pin half of any pool, and at least
+// one connection: a mint beside one lock holder would pin both connections
+// of a pool of two, the floor in knexfile.js. There the mint takes one of
+// the lock holders' slots, so one holder of either kind runs at a time. On
+// four connections or more the two caps together leave a quarter of the
+// pool free, and the cron jobs, which do reach their cap in production,
+// never cost a mint its slot.
+const MINT_POOL_SHARE = 4;
+const MINT_SLOTS_UNKNOWN_POOL = 5;
+const MINT_BUSY_MESSAGE = 'We could not verify your services just now. Please try again in a moment.';
+let mintsRunning = 0;
+function mintSlotLimit(dbh) {
+  const poolMax = Number(dbh?.client?.pool?.max);
+  if (!Number.isFinite(poolMax) || poolMax <= 0) return MINT_SLOTS_UNKNOWN_POOL;
+  return Math.floor(poolMax / MINT_POOL_SHARE);
+}
+function giveBackMintSlot() {
+  mintsRunning -= 1;
+}
+// Answers the function that gives the slot back, or null when none is free.
+function takeMintSlot(dbh) {
+  const limit = mintSlotLimit(dbh);
+  if (limit === 0) return holdLockSlot();
+  if (mintsRunning >= limit) return null;
+  mintsRunning += 1;
+  return giveBackMintSlot;
+}
+async function mintTransaction(dbh, work) {
+  const giveBack = takeMintSlot(dbh);
+  if (!giveBack) throw new RestartUnavailableError('busy', MINT_BUSY_MESSAGE);
+  try {
+    return await dbh.transaction(work);
+  } finally {
+    giveBack();
+  }
+}
+
 async function mintRestartEstimate({ customer, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {} }) {
   if (!customer || !customer.id) throw new Error('mintRestartEstimate requires a customer row');
   const mintDeps = resolveMintDeps(deps);
   const dbh = deps.db || db;
   const nowDate = now();
 
-  return dbh.transaction(async (trx) => {
+  return mintTransaction(dbh, async (trx) => {
     // Customer-comms advisory lock FIRST (lock-order contract §1,
     // utils/customer-comms-lock.js — before this txn's own customers row
     // lock). It is also the FIRST lock the public accept transaction takes
@@ -1441,7 +1556,7 @@ async function mintPlanStartEstimate({
   const dbh = deps.db || db;
   const nowDate = now();
 
-  return dbh.transaction(async (trx) => {
+  return mintTransaction(dbh, async (trx) => {
     // Same lock order as the restart mint and the public accept (contract §1).
     await lockCustomerComms(trx, customer.id);
     const fresh = await trx('customers').where({ id: customer.id }).whereNull('deleted_at').forUpdate().first();
@@ -1741,6 +1856,7 @@ module.exports = {
   RestartUnavailableError,
   cancelledFamiliesFor,
   mintRestartEstimate,
+  mintTransaction,
   assertRestartAcceptEligible,
   PLAN_START_SOURCE,
   PLAN_START_SERVICE_KEYS,
@@ -1757,5 +1873,8 @@ module.exports = {
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
   staffChangedQuoteRefusal,
+  lineageOrderStamp,
+  retiresWithLineage,
+  lineageUnarchiveBlock,
   _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },
 };

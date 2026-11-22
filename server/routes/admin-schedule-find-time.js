@@ -511,7 +511,7 @@ router.post('/', trackRoadLimit, async (req, res) => {
       // Only a strip that shows the rows asks for them; any other skips the
       // rain and road-time work (Codex #6045 r2).
       bestRows: bestRows === true,
-      // Rain ranking (GATE_BOOKING_RAIN_RANK) reads what is being booked.
+      // Rain ranking reads what is being booked.
       // Each name carries its catalog key when the catalog holds it, so the
       // ranking reads the service's identity, not the words in its name.
       // An existing visit's own rows say what moves, and how far a shared

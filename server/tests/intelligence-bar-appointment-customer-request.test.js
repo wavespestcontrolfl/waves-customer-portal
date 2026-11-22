@@ -6,9 +6,8 @@
  * the visit note, or nowhere). These pin:
  *   - customer_request on a pest/lawn re-service is stamped on the insert,
  *     trimmed and capped, with source 'office' (relayed words, never a quote)
- *   - the same gate as the Schedule screen's "Customer's words" box
- *     (GATE_RESERVICE_OFFICE_REQUEST) and the same two catalog rows
- *   - a reason on any other visit, or with the gate off, is REFUSED before
+ *   - the same two catalog rows as the Schedule screen's "Customer's words" box
+ *   - a reason on any other visit is REFUSED before
  *     any write — never dropped after the card showed it
  *   - no reason = the insert carries neither column (unchanged behaviour)
  *   - ibBookingProposal answers the same verdict, so the card and the commit
@@ -21,14 +20,6 @@ jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue({ id: 'rem-1' }),
   sendConfirmation: jest.fn().mockResolvedValue(true),
 }));
-const mockGateState = { reserviceOfficeRequest: true };
-jest.mock('../config/feature-gates', () => {
-  const actual = jest.requireActual('../config/feature-gates');
-  return {
-    ...actual,
-    isEnabled: jest.fn((name) => (name === 'reserviceOfficeRequest' ? mockGateState.reserviceOfficeRequest : actual.isEnabled(name))),
-  };
-});
 
 const db = require('../models/db');
 const { executeTool, ibBookingProposal } = require('../services/intelligence-bar/tools');
@@ -106,7 +97,6 @@ const book = (serviceRow, extra = {}) => executeTool('create_appointment', {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockGateState.reserviceOfficeRequest = true;
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
 });
@@ -151,13 +141,7 @@ describe('create_appointment — why the customer booked a re-service', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  test('gate off: a reason is refused, and a booking without one is unchanged', async () => {
-    mockGateState.reserviceOfficeRequest = false;
-    const refusedInsert = wireBooking([PEST_RE_SERVICE]);
-    const refused = await book(PEST_RE_SERVICE, { customer_request: 'ants in the kitchen' });
-    expect(refused.error).toMatch(/nothing was booked/);
-    expect(refusedInsert.insert).not.toHaveBeenCalled();
-
+  test('a booking without a reason is unchanged', async () => {
     const insertChain = wireBooking([PEST_RE_SERVICE]);
     const result = await book(PEST_RE_SERVICE);
     expect(result.success).toBe(true);

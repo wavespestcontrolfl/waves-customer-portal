@@ -20,7 +20,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { dateOnlyAtNoonUtc, dateOnlyString, formatDateOnly, validDateOnly } = require('../utils/date-only');
-const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
+const { addETBusinessDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 const { portalUrl } = require('../utils/portal-url');
 const { hash: canonicalHash } = require('./staff-document-source');
@@ -409,6 +409,10 @@ function timelineOf(row, { sentByName = null } = {}) {
   const staff = asObject(row.checklist)[STAFF_RECORD_KEY];
   if (staff && staffRecordLabel(staff)) add(staff.at, 'staff_record', staffRecordLabel(staff));
   add(row.activated_at, 'activated', 'Login turned on');
+  for (const item of FIRST_DAYS_ITEMS) {
+    const mark = asObject(row.checklist)[item.key];
+    if (mark) add(mark.at, 'checklist_done', `${item.label} marked done${mark.by_name ? ` by ${mark.by_name}` : ''}`);
+  }
   return items.sort((a, b) => a.at.localeCompare(b.at));
 }
 
@@ -549,10 +553,12 @@ function panelOffers(rows, now) {
 const PANEL_SNAPSHOT = Object.freeze({ isolationLevel: 'repeatable read', readOnly: true });
 
 async function adminPanel(applicationId, actor, now = new Date()) {
-  const { application, rows } = await db.transaction(async (trx) => {
+  const { application, rows, signed, firstDay } = await db.transaction(async (trx) => {
     const app = await loadApplication(trx, applicationId);
     const offers = await trx('job_offers').where({ application_id: applicationId }).orderBy('created_at', 'desc');
-    return { application: app, rows: offers };
+    // The first-days checklist: a Hired application's signed offers, newest signature first, and the first day.
+    const signedOffers = app.status === 'hired' ? newestSignedFirst(offers) : [];
+    return { application: app, rows: offers, signed: signedOffers, firstDay: signedOffers.length ? await firstDayOf(trx, signedOffers) : null };
   }, PANEL_SNAPSHOT);
   const names = await sentByNames(db, rows);
   const { terms, payDayLine, blockers } = await loadIssuedTerms(db, now);
@@ -603,6 +609,8 @@ async function adminPanel(applicationId, actor, now = new Date()) {
       markdown: renderLetterMarkdown(view),
     },
     current: present(current),
+    // The first-days checklist of a Hired application, on its newest signed offer (firstDays.offerId), or null.
+    firstDays: signed.length ? firstDaysOf(signed, firstDaysMarks(signed), firstDay) : null,
     draft: present(revision),
     history: rows.filter((r) => !current || (r.id !== current.id && !(revision && r.id === revision.id))).map(present),
   };
@@ -1546,6 +1554,12 @@ function staffRecordLabel(staff) {
 const staffRecordDue = (application, offer) => application.status === 'hired' && offer.status === 'accepted'
   && !offer.technician_id && !asObject(offer.checklist)[STAFF_RECORD_KEY];
 
+// The signed offers of one application, newest signature first. Read under the application row's lock: a signature
+// takes that lock, so the set cannot change.
+const signedOffersOf = (trx, applicationId) => trx('job_offers').where({ application_id: applicationId, status: 'accepted' })
+  .orderBy([{ column: 'signed_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+  .select('id', 'application_id', 'technician_id', 'start_date', 'signed_at', 'checklist');
+
 // The pay step of the offer, by the payroll rules (payroll-rate-steps.js createStep, in a savepoint of `trx`), in the
 // name of the owner who sent the offer. A step those rules refuse is 'refused'; any other error is the caller's.
 async function addOfferPayStep(trx, technicianId, offer) {
@@ -1600,8 +1614,7 @@ async function makeStaffRecord(offerId) {
       ...more, checklist: JSON.stringify({ ...asObject(offer.checklist), [STAFF_RECORD_KEY]: { at, ...staff } }),
     });
     // The application's signed offers, newest first (the application row is locked, so the set cannot change).
-    const signed = await trx('job_offers').where({ application_id: application.id, status: 'accepted' })
-      .orderBy([{ column: 'signed_at', order: 'desc' }, { column: 'id', order: 'desc' }]).select('id', 'technician_id');
+    const signed = await signedOffersOf(trx, application.id);
     if (signed[0].id !== offer.id) {
       await store({ made: false, reason: 'newer_offer' });
       return null;
@@ -1686,7 +1699,280 @@ async function makeDueStaffRecords() {
   return result;
 }
 
-// ------------------------------------------------------------------ bells
+// ------------------------------------------------ the first-days checklist
+
+// What the owner does by hand after a signature (owner plan 2026-11-19, "build"): three items before the first day,
+// and Form I-9 within 3 business days of it. A mark is job_offers.checklist[<key>] = { at, by, by_name }, kept on the
+// hire's contract: the newest signed offer of the application. An item is done when ANY signed offer of the
+// application holds its mark, so a second signature of a reopened application keeps what was done; a write moves the
+// marks to the newest signed offer.
+// The bell: ONE row for a hire (key job-offer-checklist:<application id>), kept true to the checklist by the
+// standing-row pattern of admin-alert-episodes.js (as referral-inbound-bell.js syncCard). It is raised while an open
+// item is due, rewritten with no ring while that holds, rung again when an item joins the due items, on the due day
+// of Form I-9 and when an item passes its due day, and closed when nothing is due. A row the owner marked done stays
+// done between those rings. No day is stored.
+const FIRST_DAYS_ITEMS = [
+  { key: 'driving_record', label: 'Driving record copy', inBell: 'the driving record copy' },
+  { key: 'license', label: "Driver's license check", inBell: "the driver's license check" },
+  { key: 'workers_comp', label: "Workers' comp in force", inBell: "workers' comp in force" },
+  { key: 'i9', label: 'Form I-9', inBell: 'Form I-9', afterStart: true },
+];
+const I9_BUSINESS_DAYS = 3;
+const FIRST_DAYS_BELL_FROM_ET = 7 * 60;
+// One bell for a hire, whichever signed offer is the contract.
+const checklistBellKey = (applicationId) => bellKey('checklist', applicationId);
+// Monday to Friday, by the shared rule (datetime-et addETBusinessDays); a holiday counts, so the day is never later
+// than the rule's.
+const addBusinessDays = (ymd, days) => etDateString(addETBusinessDays(parseETDateTime(`${ymd}T12:00:00`), days));
+// The newest signature first, as signedOffersOf reads them.
+const newestSignedFirst = (rows) => rows.filter((row) => row.status === 'accepted')
+  .sort((a, b) => (new Date(b.signed_at) - new Date(a.signed_at)) || (a.id < b.id ? 1 : -1));
+const firstDaysMarks = (signed) => Object.fromEntries(FIRST_DAYS_ITEMS
+  .map((item) => [item.key, signed.map((row) => asObject(row.checklist)[item.key]).find(Boolean)])
+  .filter(([, mark]) => mark));
+const withoutFirstDaysMarks = (checklist) => Object.fromEntries(Object.entries(asObject(checklist))
+  .filter(([key]) => !FIRST_DAYS_ITEMS.some((item) => item.key === key)));
+// The first day the checklist counts from: the staff record's (the owner can move it on the Team tab), or the newest
+// signed offer's start date while no signed offer of the application has made a staff record.
+async function firstDayOf(conn, signed) {
+  const withStaff = signed.find((row) => row.technician_id);
+  const staff = withStaff && await conn('technicians').where({ id: withStaff.technician_id }).first('hire_date');
+  return ymdOf((staff && staff.hire_date) || signed[0].start_date);
+}
+
+// Each item with its due day and its mark. `signed`: the hire's signed offers, newest first. The bell names an item
+// from `ringFrom`: the day after the hire's FIRST signature for the three items due before the first day (a
+// replacement offer does not start them again), the first day for Form I-9.
+function firstDaysItems(signed, marks, firstDay) {
+  const i9Due = addBusinessDays(firstDay, I9_BUSINESS_DAYS);
+  const dayAfterSignature = addStaffWorkDays(instantToEtDay(signed[signed.length - 1].signed_at), 1);
+  return FIRST_DAYS_ITEMS.map((item) => {
+    const mark = marks[item.key];
+    return {
+      key: item.key,
+      label: item.label,
+      due: item.afterStart
+        ? `Due ${fmtDay(i9Due, { year: true })}, ${I9_BUSINESS_DAYS} business days after the first day`
+        : `Due before the first day, ${fmtDay(firstDay, { year: true })}`,
+      dueOn: item.afterStart ? i9Due : firstDay,
+      doneAt: mark ? mark.at : null,
+      doneByName: (mark && mark.by_name) || null,
+      ringFrom: item.afterStart ? firstDay : dayAfterSignature,
+      afterStart: Boolean(item.afterStart),
+      inBell: item.inBell,
+    };
+  });
+}
+
+/** The checklist as the offer card shows it. `signed`: the signed offers of a Hired application, newest first. */
+function firstDaysOf(signed, marks, firstDay) {
+  return {
+    offerId: signed[0].id,
+    firstDay,
+    items: firstDaysItems(signed, marks, firstDay).map(({ ringFrom, afterStart, inBell, ...shown }) => shown),
+  };
+}
+
+// The open items the bell asks for on `today`, each with `late` (its due day has passed) and, for Form I-9,
+// `lastDay` (its due day has come).
+const dueFirstDaysItems = (signed, marks, firstDay, today) => firstDaysItems(signed, marks, firstDay)
+  .filter((item) => !item.doneAt && item.ringFrom <= today)
+  .map((item) => ({
+    ...item,
+    lastDay: Boolean(item.afterStart) && today >= item.dueOn,
+    late: item.afterStart ? today > item.dueOn : today >= item.dueOn,
+  }));
+
+// The checklist of an application, for a write: its signed offers (newest first, their rows locked), the marks and
+// the first day. Null when the application has no checklist: it is not Hired, or it has no signed offer. The caller
+// holds the application row's lock.
+async function loadFirstDays(trx, application) {
+  const signed = application.status === 'hired' ? await signedOffersOf(trx, application.id).forUpdate() : [];
+  if (!signed.length) return null;
+  return { signed, marks: firstDaysMarks(signed), firstDay: await firstDayOf(trx, signed) };
+}
+
+// Writes the marks on the newest signed offer and takes them off the older ones, keeping every other key.
+async function storeFirstDaysMarks(trx, signed, marks) {
+  for (const [index, row] of signed.entries()) {
+    const next = index === 0 ? { ...withoutFirstDaysMarks(row.checklist), ...marks } : withoutFirstDaysMarks(row.checklist);
+    if (JSON.stringify(next) !== JSON.stringify(asObject(row.checklist))) {
+      await trx('job_offers').where({ id: row.id }).update({ checklist: JSON.stringify(next) });
+    }
+  }
+}
+
+const closeChecklistBell = (trx, applicationId, now, resolution) => require('./admin-alert-episodes')
+  .closeAdminAlertKeys(trx, [checklistBellKey(applicationId)], 'checklist_done', { now, resolution });
+// The row forgets what it rang for an item that is now done (its ring keys, see checklistRingKeys). An undo is then a
+// new key for the next run, which rings, whether or not a run came between the mark and the undo.
+const forgetChecklistRingKeys = (trx, applicationId, key) => trx('notifications').where({ recipient_type: 'admin' })
+  .whereRaw("metadata->>'dedupeKey' = ?", [checklistBellKey(applicationId)])
+  .whereRaw("jsonb_typeof(metadata->'itemKeys') = 'array'")
+  .update({
+    metadata: trx.raw(
+      "jsonb_set(metadata, '{itemKeys}', COALESCE((SELECT jsonb_agg(k) FROM jsonb_array_elements_text(metadata->'itemKeys') AS k WHERE k NOT IN (?, ?, ?)), '[]'::jsonb))",
+      [key, `${key}:due`, `${key}:late`],
+    ),
+  });
+
+/**
+ * Marks one first-days item done, or not done again (done: false). Owner account only (the route). The write names
+ * the offer the card showed the checklist on: when the application is no longer Hired, or a newer offer was signed
+ * since that read, nothing is written (CHECKLIST_CLOSED). A second mark of a done item keeps the first one. An undo
+ * names the mark the card showed (seenDoneAt): when the item holds another mark (it was undone and marked again in
+ * another tab), nothing is written (CHECKLIST_CHANGED). An undo of an item that is not done changes nothing.
+ *
+ * A mark that leaves no item due that day closes the bell in the same transaction. Any other mark of an open item
+ * takes the item's ring keys off the row. Every other change of the bell (its words after a mark, a ring for an item
+ * due again after an undo) is the next run of ringDueChecklists.
+ * Returns { firstDays } as the write left it.
+ * clock: the time source, for tests. It is read after the locks: a write that waited across Eastern midnight marks
+ * and closes on the day it ran.
+ */
+async function setChecklistItem(applicationId, offerId, key, done, actor, { seenDoneAt = null, clock = () => new Date() } = {}) {
+  if (!FIRST_DAYS_ITEMS.some((item) => item.key === key) || typeof done !== 'boolean') {
+    throw new OfferError(400, 'INVALID_CHECKLIST_ITEM', 'This is not a first-days item.');
+  }
+  return db.transaction(async (trx) => {
+    const application = await loadApplication(trx, applicationId, { lock: true });
+    const held = await loadFirstDays(trx, application);
+    if (!held || held.signed[0].id !== offerId) {
+      throw new OfferError(409, 'CHECKLIST_CLOSED',
+        'This checklist is closed: the application is no longer Hired, or a newer offer was signed. Nothing was changed.');
+    }
+    const now = clock();
+    const marks = { ...held.marks };
+    if (!done && marks[key] && marks[key].at !== seenDoneAt) {
+      throw new OfferError(409, 'CHECKLIST_CHANGED', 'This item was marked done again after this page was loaded. Nothing was changed.');
+    }
+    const newlyDone = done && !marks[key];
+    if (newlyDone) marks[key] = { at: now.toISOString(), by: actor.id, by_name: await actorName(trx, actor) };
+    if (!done) delete marks[key];
+    await storeFirstDaysMarks(trx, held.signed, marks);
+    if (newlyDone && !dueFirstDaysItems(held.signed, marks, held.firstDay, etDateString(now)).length) {
+      const all = FIRST_DAYS_ITEMS.every((item) => marks[item.key]);
+      await closeChecklistBell(trx, application.id, now, all ? 'Every first-days item is marked done' : 'No first-days item is due today');
+    } else if (newlyDone) {
+      await forgetChecklistRingKeys(trx, application.id, key);
+    }
+    return { firstDays: firstDaysOf(held.signed, marks, held.firstDay) };
+  });
+}
+
+// A refresh of the standing row rings only when its ring keys gain one: an item joins the due items, Form I-9
+// comes to its due day, or an item passes its due day. (A comeback after the row closed rings through
+// raiseAdminAlertWithReopen, which ignores this.)
+const ringOnNewChecklistKey = (itemKeys) => (_existing, existingMeta) => {
+  const prior = new Set(Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys.map(String) : []);
+  return itemKeys.some((key) => !prior.has(key));
+};
+const checklistRingKeys = (due) => due
+  .flatMap((item) => [item.key, ...(item.lastDay ? [`${item.key}:due`] : []), ...(item.late ? [`${item.key}:late`] : [])]).sort();
+
+// Raises the hire's row, or rewrites the standing one. `due`: dueFirstDaysItems, not empty.
+async function raiseChecklistBell(trx, application, offer, open, due) {
+  const { composeAdminAlert } = require('./admin-alert-compose');
+  const { fitAction } = require('./admin-alert-names');
+  const next = due.reduce((first, item) => (item.dueOn < first.dueOn ? item : first));
+  const dueWords = `${next.late ? 'was due' : 'due'}${next.afterStart ? '' : ' before'} ${fmtDay(next.dueOn)}`;
+  const compose = (name) => composeAdminAlert({
+    area: 'Leads',
+    action: fitAction('Leads', name, [(n) => `finish ${n}'s first-days checklist`, (n) => `finish ${n}'s checklist`]),
+    why: `${open} of ${FIRST_DAYS_ITEMS.length} items ${open === 1 ? 'is' : 'are'} open; next: ${next.inBell}, ${dueWords}.`,
+    severity: 'needs-you',
+    link: `/admin/recruiting?application=${application.id}`,
+    subject: { type: 'check', id: `job-offer:${offer.id}` },
+    doneWhen: 'checklist_done',
+    who: 'person',
+  });
+  let alert;
+  try {
+    alert = compose(contactOf(application).name || 'An applicant');
+  } catch (err) {
+    // A name the alert copy rules refuse (an emoji, an exclamation mark): the row is written with no name, through
+    // the same helper, so it still closes and comes back.
+    if (err.code !== 'ADMIN_ALERT_RULE') throw err;
+    alert = compose('An applicant');
+  }
+  const itemKeys = checklistRingKeys(due);
+  return require('./admin-alert-episodes').raiseAdminAlertWithReopen('job_application', alert.headline, alert.why, {
+    bell: true,
+    dedupeKey: checklistBellKey(application.id),
+    trx,
+    refreshOnDedupe: true,
+    ringOnRefresh: ringOnNewChecklistKey(itemKeys),
+    // A refresh that rings moves the row to the top of the newest-first bell.
+    bumpOnRefresh: true,
+    // The row follows the hire's contract: a replacement offer with the same words still rewrites it, with no ring.
+    dedupeVersion: offer.id,
+    link: alert.link,
+    metadata: { ...alert.metadata, applicationId: application.id, offerId: offer.id, itemKeys },
+  });
+}
+
+// Makes the bell of one hire true to the checklist. Locks, in this order: the application row, its signed offers,
+// then the row's own lock (raiseAdminAlertWithReopen). The clock is read after the first two.
+// Returns 'rung' (a new row, a comeback, or a refresh that rang) | 'closed' | null.
+async function syncChecklistBell(applicationId, clock) {
+  return db.transaction(async (trx) => {
+    await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(STAFF_LOCK_WAIT_MS)]);
+    const application = await trx('job_applications').where({ id: applicationId }).forUpdate().skipLocked().first();
+    // No row: a write in progress holds it and the next run takes the hire, or the application was deleted.
+    if (!application && await trx('job_applications').where({ id: applicationId }).first('id')) return null;
+    const held = application ? await loadFirstDays(trx, application) : null;
+    const now = clock();
+    const today = etDateString(now);
+    const close = async (resolution) => (await closeChecklistBell(trx, applicationId, now, resolution) ? 'closed' : null);
+    if (!application) return close('The application was deleted');
+    if (!held) return close('The application is no longer Hired');
+    const due = dueFirstDaysItems(held.signed, held.marks, held.firstDay, today);
+    const open = FIRST_DAYS_ITEMS.filter((item) => !held.marks[item.key]).length;
+    if (!due.length) return close(open ? 'No first-days item is due today' : 'Every first-days item is marked done');
+    // Nothing rings at night: the due items change at midnight, and the row follows from 7:00 AM Eastern. The time is
+    // read here, under the locks, so a run that started before midnight does not ring a hire just after it.
+    if (minuteOfDayEt(now) < FIRST_DAYS_BELL_FROM_ET) return null;
+    const raised = await raiseChecklistBell(trx, application, held.signed[0], open, due);
+    if (!raised) throw new Error('the checklist bell was not written');
+    return raised.rang ? 'rung' : null;
+  });
+}
+
+/**
+ * The bell of the first-days checklist (scheduler.js, the 15-minute job offer tick; GATE_JOB_OFFERS). Each run makes
+ * the ONE row of a hire true to the checklist:
+ *  - From 7:00 AM Eastern, while an open item is due: the row says how many items are open and which is next. It
+ *    rings when it is raised (the morning after the signature), when an item joins the due items (Form I-9 on the
+ *    first day), on the due day of Form I-9 and when an item passes its due day. Every other change rewrites it with
+ *    no ring. A row the owner marked done stays done between those rings.
+ *  - In every run, also at night: the row is closed when it has nothing left to ask for (the application is no longer
+ *    Hired or was deleted, every item is done, or no item is due that day). An item that is due again later rings
+ *    again.
+ * It sends no one anything. Returns { rung, closed, failed }; the caller fails the job when failed > 0.
+ * clock: the time source, for tests. The scheduler passes none.
+ */
+async function ringDueChecklists(clock = () => new Date()) {
+  const result = { rung: 0, closed: 0, failed: 0 };
+  const marked = (key) => `EXISTS (SELECT 1 FROM job_offers m WHERE m.application_id = a.id AND m.status = 'accepted' AND m.checklist -> '${key}' IS NOT NULL)`;
+  // A Hired application with a signed offer and an item no signed offer of it holds a mark for.
+  const open = await db('job_applications as a').where('a.status', 'hired')
+    .whereExists(db('job_offers as o').whereRaw('o.application_id = a.id').where('o.status', 'accepted').select(db.raw('1')))
+    .whereRaw(`NOT (${FIRST_DAYS_ITEMS.map((item) => marked(item.key)).join(' AND ')})`)
+    .orderBy('a.created_at').pluck('a.id');
+  // An application whose row is not closed yet (open, or marked done by the owner): it may have to close.
+  const prefix = checklistBellKey('');
+  const standing = (await require('./admin-alert-episodes').openAdminAlertKeys(db, prefix)).map((bellKeyOf) => bellKeyOf.slice(prefix.length));
+  for (const id of new Set([...open, ...standing])) {
+    try {
+      const outcome = await syncChecklistBell(id, clock);
+      if (outcome) result[outcome] += 1;
+    } catch (err) {
+      result.failed += 1;
+      logger.error(`[job-offers] checklist bell failed (application ${id}): ${errTag(err)}`);
+    }
+  }
+  return result;
+}
 
 const BELLS = {
   signed: {
@@ -1792,7 +2078,8 @@ module.exports = {
   // public
   publicView, setTextConsent, acceptOffer, requestDate, declineOffer,
   // scheduled
-  closeExpiredOffers, sendDueReminders, makeDueStaffRecords,
+  closeExpiredOffers, sendDueReminders, makeDueStaffRecords, ringDueChecklists,
   // after signing
+  setChecklistItem,
   makeStaffRecord,
 };

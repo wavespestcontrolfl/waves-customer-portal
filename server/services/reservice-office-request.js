@@ -1,5 +1,5 @@
 /**
- * Office-booked re-service "Customer's words" (GATE_RESERVICE_OFFICE_REQUEST).
+ * Office-booked re-service "Customer's words".
  *
  * The New Appointment modal, on a pest/lawn re-service, suggests what the
  * customer last told us — their latest INBOUND text or call note from the

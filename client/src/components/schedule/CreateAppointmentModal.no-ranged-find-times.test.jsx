@@ -36,7 +36,7 @@ function installFetch() {
     if (url.includes('/admin/services?')) {
       return Promise.resolve(json({ services: [{ id: 'svc-1', service_key: 'pest_control_quarterly', name: 'Quarterly Pest Control', billing_type: 'one_time', base_price: 0, default_duration_minutes: 30 }] }));
     }
-    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [], canChangeAppointmentAddress: false }));
+    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
     if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
@@ -45,7 +45,7 @@ function installFetch() {
     if (url.endsWith('/admin/dispatch/slot-check')) return Promise.resolve(json({ ok: true, results: [{ conflicts: [] }] }));
     if (url.includes('/admin/schedule/find-time')) return Promise.resolve(json({ gated: true }));
     if (url.endsWith('/admin/schedule/preview')) return Promise.resolve(json({ regime: true, results: [] }));
-    if (url.includes('/reservice-request-suggestion')) return Promise.resolve(json({ enabled: false, suggestion: null }));
+    if (url.includes('/reservice-request-suggestion')) return Promise.resolve(json({ suggestion: null }));
     throw new Error(`Unhandled fetch in test: ${url}`);
   });
   vi.stubGlobal('fetch', fetcher);

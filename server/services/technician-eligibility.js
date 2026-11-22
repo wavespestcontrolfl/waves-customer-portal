@@ -220,8 +220,17 @@ function reasonFor(tech) {
  * tech's day, from tech-out's own redistribution or any other writer that
  * threads the destination date through. Omitting it keeps every caller
  * byte-identical to before this check existed.
+ *
+ * `hours` (opt-in, with `date`): the job's own block on that date,
+ * { startMin, endMin } in minutes after midnight Eastern. Also refuses a
+ * technician whose shift that day does not hold the job (shiftExcluding
+ * below; GATE_TECH_SHIFT_HOURS on, owner 2026-11-19, D4: "confirmations allow
+ * only jobs that end by that tech's shift end"). Pass it ONLY at AUTOMATIC
+ * commit points, as `workDays`: office paths warn instead. Omitted, or with
+ * the gate off, nothing more is read. The error then carries
+ * `outsideShift: true` (`offDay: true` for the work-days refusal).
  */
-async function assertAssignableTechnician(technicianId, { conn = db, date, workDays = false } = {}) {
+async function assertAssignableTechnician(technicianId, { conn = db, date, workDays = false, hours } = {}) {
   if (technicianId === null || technicianId === undefined || technicianId === '') return null;
   const checkWorkDays = !!(workDays && date && techWorkDaysLive());
   let query = conn('technicians').where({ id: technicianId });
@@ -237,25 +246,37 @@ async function assertAssignableTechnician(technicianId, { conn = db, date, workD
       .first('id');
     if (absence) reason = `is marked out on ${date}`;
   }
-  let offDay = false;
+  let flag = null;
   if (!reason && checkWorkDays && isOffDay(tech, date)) {
-    offDay = true;
+    flag = 'offDay';
     reason = `does not work on ${DAY_PLURALS[dayOfWeekOfDate(date)]} (${dateOnlyString(date)})`;
   }
-  if (reason) {
-    const err = new Error(`Technician ${tech ? tech.name : technicianId} ${reason} and cannot be assigned work`);
-    // Both shapes: `status` for route handlers that read it, and the
-    // isOperational + statusCode pair the shared error middleware
-    // (middleware/errors.js) needs to surface a 422 instead of a 500.
-    err.status = 422;
-    err.statusCode = 422;
-    err.isOperational = true;
-    err.code = NOT_ASSIGNABLE;
-    err.technicianId = technicianId;
-    if (offDay) err.offDay = true;
-    throw err;
+  // Last, and only for a technician every other rule accepts: the job's own hours against the shift.
+  const shift = reason ? null : await shiftExcluding(conn, technicianId, date, hours);
+  if (shift) {
+    flag = 'outsideShift';
+    reason = `is on shift ${clockOf(shift.startMin)} to ${clockOf(shift.endMin)} on ${dateOnlyString(date)}, not for a job from ${clockOf(hours.startMin)} to ${clockOf(hours.endMin)},`;
   }
+  if (reason) throw notAssignableError(tech, technicianId, reason, flag);
   return tech;
+}
+
+/**
+ * The refusal assertAssignableTechnician throws. `flag` names the dated rule
+ * that refused ('offDay' or 'outsideShift'), for a caller that tells them apart.
+ */
+function notAssignableError(tech, technicianId, reason, flag) {
+  const err = new Error(`Technician ${tech ? tech.name : technicianId} ${reason} and cannot be assigned work`);
+  // Both shapes: `status` for route handlers that read it, and the
+  // isOperational + statusCode pair the shared error middleware
+  // (middleware/errors.js) needs to surface a 422 instead of a 500.
+  err.status = 422;
+  err.statusCode = 422;
+  err.isOperational = true;
+  err.code = NOT_ASSIGNABLE;
+  err.technicianId = technicianId;
+  if (flag) err[flag] = true;
+  return err;
 }
 
 /**
@@ -405,13 +426,14 @@ function clockInShift(at, shift) {
  * caller's transaction stays usable: do not call this from inside another
  * savepointRead on the same transaction, it would wait on its own caller); a
  * failed read of the hours themselves throws, as absentTechDays does.
- * `technicianIds` narrows the reads (an empty list reads every technician).
+ * `technicianIds` narrows the reads. An empty list asks about no technician:
+ * nothing is read (a search whose technician filter matched nobody).
  */
 async function loadTechShifts(conn, { technicianIds = null, now = new Date() } = {}) {
   const none = () => null;
-  if (!techShiftHoursLive()) return none;
+  if (!techShiftHoursLive() || (Array.isArray(technicianIds) && !technicianIds.length)) return none;
   let query = conn('technicians').whereNotNull('shift_start').whereNotNull('shift_end');
-  if (Array.isArray(technicianIds) && technicianIds.length) query = query.whereIn('id', technicianIds);
+  if (Array.isArray(technicianIds)) query = query.whereIn('id', technicianIds);
   const shifts = new Map();
   for (const row of await query.select('id', 'shift_start', 'shift_end')) {
     const shift = storedShift(row);
@@ -457,6 +479,52 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
   };
 }
 
+/**
+ * One technician's day under the shift rule (GATE_TECH_SHIFT_HOURS; owner
+ * 2026-11-19, page item D4: "offers and confirmations allow only jobs that
+ * end by that tech's shift end"): a job starts at or after the shift start
+ * and ends by the shift end. `shift` is shiftOf's answer for the technician
+ * and date; `openMin` and `closeMin` are the caller's own day, in minutes
+ * after midnight Eastern. The shift only narrows that day, and no shift
+ * (null: the gate off, or no set hours) returns it as it is. A job from
+ * `start` to `end` fits when start >= openMin and end <= closeMin. Pure.
+ */
+function shiftBounds(shift, openMin, closeMin) {
+  if (!shift) return { openMin, closeMin };
+  return { openMin: Math.max(openMin, shift.startMin), closeMin: Math.min(closeMin, shift.endMin) };
+}
+
+/** Minutes after midnight as 'HH:MM'. Pure. */
+function clockOf(minutes) {
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+}
+
+/**
+ * The shift a job does not fit, at a commit (GATE_TECH_SHIFT_HOURS; the same
+ * rule the offers use, shiftBounds). `hours` is the job's own block on `date`,
+ * { startMin, endMin } in minutes after midnight Eastern: the block the
+ * commit writes (its start, and its start plus its length).
+ * Returns the technician's shift for that date (loadTechShifts: the set
+ * hours, or today's clock-in) when the job starts before it or ends after it.
+ * Returns null when the job fits, the gate is off (no read), the technician
+ * has no set hours, or there is no technician, no date or no block (numbers,
+ * with the end after the start): such a job is left to the caller's other
+ * checks, as before. A failed read of the hours throws, as it does for the
+ * offers.
+ *
+ * The read is a point in time, and it takes no lock of its own. Nothing
+ * re-checks a booked visit when the hours change later (a Team save, a
+ * clock-in, a time-entry correction). So a change that lands after this
+ * read leaves the same state as one that lands after the caller's commit.
+ */
+async function shiftExcluding(conn, technicianId, date, hours) {
+  const { startMin, endMin } = hours || {};
+  if (!technicianId || !date || !Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return null;
+  const shift = (await loadTechShifts(conn, { technicianIds: [technicianId] }))(technicianId, date);
+  const day = shiftBounds(shift, startMin, endMin);
+  return day.openMin > startMin || day.closeMin < endMin ? shift : null;
+}
+
 module.exports = {
   EMPLOYMENT_STATUSES,
   NOT_ASSIGNABLE,
@@ -468,6 +536,8 @@ module.exports = {
   absentTechDays,
   offDayTechDays,
   loadTechShifts,
+  shiftBounds,
+  shiftExcluding,
   shiftMinutes,
   storedShift,
   normalizeWorkDays,

@@ -151,20 +151,11 @@ describe('POST /admin/customers/:id/properties', () => {
 });
 
 
-describe('appointment address property lookup gate', () => {
-  test('dark appointment editor does not lazily register a primary property', async () => {
+describe('appointment address property lookup', () => {
+  test('appointment editor loads its registered properties', async () => {
     await withServer(async base => {
       const result = await fetch(`${base}/admin/customers/cust-1/properties?context=appointment_address`);
-      expect(await result.json()).toEqual({ properties: [], canChangeAppointmentAddress: false });
-    });
-    expect(mockProps.ensurePrimaryProperty).not.toHaveBeenCalled();
-    expect(mockProps.listProperties).not.toHaveBeenCalled();
-  });
-  test('enabled appointment editor loads its registered properties', async () => {
-    require('../config/feature-gates').isEnabled.mockReturnValueOnce(true);
-    await withServer(async base => {
-      const result = await fetch(`${base}/admin/customers/cust-1/properties?context=appointment_address`);
-      expect((await result.json()).canChangeAppointmentAddress).toBe(true);
+      expect(Array.isArray((await result.json()).properties)).toBe(true);
     });
     expect(mockProps.ensurePrimaryProperty).toHaveBeenCalledWith('cust-1');
     expect(mockProps.listProperties).toHaveBeenCalledWith('cust-1');

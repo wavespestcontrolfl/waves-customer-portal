@@ -120,9 +120,11 @@ it.each([
   expect(api.startPlan).toHaveBeenCalledOnce();
 });
 
-it('a quote staff are sending right now (409 delivery_in_flight) shows the server\'s message and files no request (codex pre-push P1)', async () => {
-  const message = 'This quote is on its way to you right now — give it a moment, then try again.';
-  api.startPlan.mockRejectedValue(Object.assign(new Error(message), { status: 409, code: 'delivery_in_flight' }));
+it.each([
+  ['a quote staff are sending right now (409 delivery_in_flight)', 'delivery_in_flight', 'This quote is on its way to you right now — give it a moment, then try again.'],
+  ['every mint slot taken for a moment (409 busy, #8256)', 'busy', 'We could not verify your services just now. Please try again in a moment.'],
+])('%s shows the server\'s message, files no request and keeps the button for the next tap (codex pre-push P1)', async (_label, code, message) => {
+  api.startPlan.mockRejectedValue(Object.assign(new Error(message), { status: 409, code }));
   const alerts = [];
   const onDialog = (event) => alerts.push(event.detail.message);
   window.addEventListener('waves:customer-dialog', onDialog);
@@ -133,6 +135,7 @@ it('a quote staff are sending right now (409 delivery_in_flight) shows the serve
     expect(api.startPlan).toHaveBeenCalledOnce();
     expect(api.createRequest).not.toHaveBeenCalled();
     expect(screen.queryByText('Request sent')).toBeNull();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'See my price and book' })).not.toBeDisabled());
   } finally {
     window.removeEventListener('waves:customer-dialog', onDialog);
   }

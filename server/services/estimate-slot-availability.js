@@ -28,7 +28,7 @@
  */
 const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
-const { applyAssignable, absentTechDays } = require('./technician-eligibility');
+const { applyAssignable, absentTechDays, loadTechShifts, shiftBounds } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { capacityEnabled, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
@@ -1394,6 +1394,12 @@ function onePerHourOn() {
     && featureGates.estimateSlotOnePerHourLive() === true;
 }
 
+// GATE_TECH_SHIFT_HOURS, read the same way, as its part of the offer cache key (getAvailableSlots).
+function shiftHoursKey() {
+  return typeof featureGates.techShiftHoursLive === 'function' && featureGates.techShiftHoursLive() === true
+    ? 'shift-hours:on' : 'shift-hours:off';
+}
+
 // Gate off returns the very same array, so the output is byte-identical.
 function applyOnePerHour(slots) {
   return onePerHourOn() ? collapseSameStartSlots(slots) : slots;
@@ -1742,11 +1748,24 @@ async function filterCollidingSlots(slots, {
     const inactive = await require('./technician-capabilities').inactiveCapabilitiesForServices(conn, ids, capabilityRowsFor(serviceMix));
     inactiveTechs = new Set(inactive.map((row) => String(row.technician_id)));
   }
+  // GATE_TECH_SHIFT_HOURS (technician-eligibility.js shiftBounds): a window
+  // outside its technician's shift is never offered. The finder holds its own
+  // starts inside the shift; an ASAP hour, and a start this page rounds up to
+  // the hour (classifySlot), are held to it here. Gate off: no read, and
+  // nothing is dropped.
+  const shiftOf = await loadTechShifts(conn);
+  const insideShift = (slot) => {
+    const day = shiftBounds(shiftOf(slot.techId, slot.date), 0, 24 * 60);
+    const startMin = timeToMinutes(slot.windowStart);
+    const endMin = timeToMinutes(slot.windowEnd);
+    // A window with no readable time is left to the checks below, as before.
+    return startMin == null || endMin == null || (startMin >= day.openMin && endMin <= day.closeMin);
+  };
   if (capacityEnabled()) {
     // The complete route already includes its technician's work and unassigned
     // blockers. A global fixed-window pass would erase certified flexibility.
     return dropLiveMakeRoomDestinations(slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
-      && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd)),
+      && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd) && insideShift(slot)),
     { conn, dateFrom, dateTo, ownEstimateId });
   }
   let collisionQuery = conn('scheduled_services')
@@ -1887,7 +1906,7 @@ async function filterCollidingSlots(slots, {
     const slotStart = timeToMinutes(s.windowStart);
     const slotEnd = timeToMinutes(s.windowEnd);
     if (slotStart == null || slotEnd == null) return true;
-    if (!slotWindowFitsDay(s.windowStart, s.windowEnd)) return false;
+    if (!slotWindowFitsDay(s.windowStart, s.windowEnd) || !insideShift(s)) return false;
     const techBusy = s.techId
       ? (byTechDate.get(`${s.techId}|${s.date}`) || [])
       : (allByDate.get(s.date) || []);
@@ -2466,6 +2485,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     ...(lineMapOfferLive() ? ['line-map:live'] : []),
     // A list with a make-room hour (mode on) is never served to a caller in another mode, or the other way round.
     ...(makeRoomOffer ? ['make-room:on'] : []),
+    // A flip of GATE_TECH_SHIFT_HOURS must not serve the other list for the TTL: filterCollidingSlots drops a window
+    // outside its technician's shift only while the gate is on. A change of the hours themselves is TTL-bounded.
+    shiftHoursKey(),
   ].join(':');
   // opts.bypassCache (explicit, off by default): a caller that must act on
   // the CURRENT calendar — the texting AI's send-time recheck of a quoted

@@ -638,7 +638,7 @@ router.patch('/:id/status', async (req, res) => {
 });
 
 // --- Job offers (GATE_JOB_OFFERS) ------------------------------------------
-// Dark: every offer endpoint answers 404 { enabled: false } before any database work. send / withdraw / revise
+// Dark: every offer endpoint answers 404 { enabled: false } before any database work. send / withdraw / revise / checklist
 // belong to the owner account (ibFullAccess, the check requireFullAccess uses); the read, the
 // draft save and the signed copy stay open to any admin. The offer token itself never rides in a response: only
 // the computed offer URL does, and only on the admin shape.
@@ -701,6 +701,12 @@ router.post('/:id/offer/:offerId/withdraw', requireOwnerAccount, offerHandler('w
 router.post('/:id/offer/:offerId/revise', requireOwnerAccount, offerHandler('revise', async (req) => ({
   offer: await JobOffers.reviseOffer(req.params.id, req.params.offerId, req.body && typeof req.body === 'object' ? req.body : {}, offerActor(req)),
 })));
+
+// One first-days item of a Hired application, marked done or not done again ({ done: true | false }).
+router.post('/:id/offer/:offerId/checklist/:item', requireOwnerAccount, offerHandler('checklist', (req) => JobOffers.setChecklistItem(
+  req.params.id, req.params.offerId, req.params.item, req.body && req.body.done, offerActor(req),
+  { seenDoneAt: req.body && req.body.seenDoneAt },
+)));
 
 router.get('/:id/offer/:offerId/signed-copy', offerHandler('signed copy', (req) => JobOffers.signedCopy(req.params.id, req.params.offerId)));
 

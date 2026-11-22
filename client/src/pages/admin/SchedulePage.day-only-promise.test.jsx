@@ -177,7 +177,7 @@ describe('Edit appointment', () => {
       estimatesGate.release = release;
       vi.stubGlobal('fetch', vi.fn(async (url) => {
         const u = String(url);
-        if (u.includes('/properties?context=appointment_address')) return { ok: true, json: async () => ({ properties: PROPERTIES, canChangeAppointmentAddress: true }) };
+        if (u.includes('/properties?context=appointment_address')) return { ok: true, json: async () => ({ properties: PROPERTIES }) };
         if (u.includes('/schedule-estimates')) { await estimatesGate; return { ok: true, json: async () => ({ estimates: [], ...estimates }) }; }
         return { ok: true, json: async () => (u.endsWith('/reschedule-options') ? { options: [] } : u.endsWith('/admin/discounts') ? [] : {}) };
       }));

@@ -4,6 +4,8 @@
  * 20261120220000), the time round trip, the two CHECKs, and loadTechShifts reading
  * the hours and today's clock-in from time_entries on the Staff work date. A mocked
  * knex proves none of the CHECKs, the time type or the Eastern work-date SQL.
+ * The last block runs the booking offers (the slot finders and the estimate page's
+ * filter) over the same rows: each one reads the hours through that reader.
  *
  * Runs in the DB-gated CI step (DATABASE_URL on the migrated waves_test database) or
  * a local scratch Postgres migrated with `knex migrate:latest`; it skips without one.
@@ -28,9 +30,10 @@ postgres('technician shift hours (real Postgres)', () => {
   let db;
   let eligibility;
   let ACTIVE_WRITE_GENERATION;
-  const made = { techIds: [], entryIds: [] };
+  const made = { techIds: [], entryIds: [], serviceIds: [], customerIds: [] };
   let dayTech;
   let lateTech;
+  let earlyTech;
   let noHours;
 
   async function makeTech(name, hours) {
@@ -75,6 +78,7 @@ postgres('technician shift hours (real Postgres)', () => {
     ({ ACTIVE_WRITE_GENERATION } = require('../constants/staff-time'));
     dayTech = await makeTech('Synthetic Shift', ['08:00', '18:00']);
     lateTech = await makeTech('Synthetic Late', ['10:00', '20:00']);
+    earlyTech = await makeTech('Synthetic Early', ['07:00', '13:00']);
     noHours = await makeTech('Synthetic Open', null);
     // dayTech: a completed clock-in at 7:52 AM EST today (out at 8:52), an active one at 9:30 AM, a voided one
     // at 6:00 AM, and a completed one the evening before (01:00Z on 2031-03-04 is 8:00 PM EST on 2031-03-03:
@@ -92,6 +96,8 @@ postgres('technician shift hours (real Postgres)', () => {
 
   afterAll(async () => {
     if (made.entryIds.length) await db('time_entries').whereIn('id', made.entryIds).del();
+    if (made.serviceIds.length) await db('scheduled_services').whereIn('id', made.serviceIds).del();
+    if (made.customerIds.length) await db('customers').whereIn('id', made.customerIds).del();
     if (made.techIds.length) await db('technicians').whereIn('id', made.techIds).del();
     if (db) await db.destroy();
   });
@@ -229,6 +235,141 @@ postgres('technician shift hours (real Postgres)', () => {
       expect(shiftOf(dayTech.id, TODAY)).toEqual({ startMin: 472, endMin: 1072, source: 'clock_in' });
       // By 10:00 PM the 4:00 PM clock-in has happened; ten hours from it would pass midnight.
       expect(shiftOf(lateTech.id, TODAY)).toEqual({ startMin: 960, endMin: 1440, source: 'clock_in' });
+    });
+  });
+
+  // Owner 2026-11-19, page item D4: "offers and confirmations allow only jobs that end by that
+  // tech's shift end". The three technicians have empty days on TOMORROW, so the technician
+  // without set hours shows each path's own day, and a shift may only take hours away from it.
+  describe('the booking offers obey the shift', () => {
+    const PIN = { lat: 27.42, lng: -82.4 };
+    const startsOf = (result, techId) => result.slots
+      .filter((slot) => slot.technician.id === techId && slot.date === TOMORROW)
+      .map((slot) => slot.start_time)
+      .sort();
+    const endsBy = (limit) => (start) => Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5)) + 60 <= limit;
+    const savedArrival = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    // The finders read the clock (which dates are past, and the same-day lead), so it is pinned to NOW:
+    // on the real 2031-03-05 these hours would start to go. Date only: pg keeps its real timers.
+    beforeAll(() => {
+      jest.useFakeTimers({
+        now: NOW,
+        doNotFake: ['setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'nextTick',
+          'queueMicrotask', 'performance', 'hrtime'],
+      });
+    });
+    afterAll(() => { jest.useRealTimers(); });
+    afterEach(() => {
+      if (savedArrival === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+      else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = savedArrival;
+    });
+
+    test('the hour finder (the customer path): 07:00 to 13:00 ends the day at 13:00, 10:00 to 20:00 opens it at 10:00', async () => {
+      const { findAvailableSlots } = require('../services/scheduling/find-time');
+      const everyHour = (technicianId) => findAvailableSlots({
+        ...PIN, durationMinutes: 60, dateFrom: TOMORROW, dateTo: TOMORROW, technicianId, topN: 50, slotStepMinutes: 60, everyStepStart: true, dayEndHour: 18,
+      });
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const open = startsOf(await everyHour(noHours.id), noHours.id);
+      // The path's own day reaches both sides of the two shifts.
+      expect(open[0] < '10:00').toBe(true);
+      expect(open.at(-1) > '12:00').toBe(true);
+      expect(startsOf(await everyHour(earlyTech.id), earlyTech.id)).toEqual(open.filter(endsBy(13 * 60)));
+      expect(startsOf(await everyHour(lateTech.id), lateTech.id)).toEqual(open.filter((start) => start >= '10:00'));
+      // 08:00 to 18:00 is no narrower than the path's own day.
+      expect(startsOf(await everyHour(dayTech.id), dayTech.id)).toEqual(open);
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      expect(startsOf(await everyHour(earlyTech.id), earlyTech.id)).toEqual(open);
+      expect(startsOf(await everyHour(lateTech.id), lateTech.id)).toEqual(open);
+    });
+
+    test('the staff picker (the route engine on real rows): a new visit is offered only inside the shift', async () => {
+      const { findAvailableSlots } = require('../services/scheduling/find-time');
+      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+      const windows = (technicianId) => findAvailableSlots({
+        ...PIN, durationMinutes: 60, dateFrom: TOMORROW, dateTo: TOMORROW, technicianId, topN: 50,
+        arrivalWindow: { prospective: { ...PIN, estimated_duration_minutes: 60, service_type: 'Pest Control' } },
+      });
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const open = startsOf(await windows(noHours.id), noHours.id);
+      expect(open[0] < '10:00').toBe(true);
+      expect(open.at(-1) > '12:00').toBe(true);
+      expect(startsOf(await windows(earlyTech.id), earlyTech.id)).toEqual(open.filter(endsBy(13 * 60)));
+      expect(startsOf(await windows(lateTech.id), lateTech.id)).toEqual(open.filter((start) => start >= '10:00'));
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      expect(startsOf(await windows(earlyTech.id), earlyTech.id)).toEqual(open);
+    });
+
+    test('the staff picker, a late arrival: an hour the route would finish after the shift end is not offered', async () => {
+      const { findAvailableSlots } = require('../services/scheduling/find-time');
+      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+      // One stop on the 07:00 to 13:00 technician's day, 11:00 to 12:00, north of the address searched for
+      // (23 minutes away on the drive model).
+      const customerId = randomUUID();
+      const stopId = randomUUID();
+      made.customerIds.push(customerId);
+      made.serviceIds.push(stopId);
+      await db('customers').insert({
+        id: customerId, first_name: 'Synthetic', last_name: 'Stop', phone: '+19415550142', email: `${customerId}@example.invalid`,
+        latitude: PIN.lat + 0.1, longitude: PIN.lng,
+      });
+      await db('scheduled_services').insert({
+        id: stopId, customer_id: customerId, technician_id: earlyTech.id, scheduled_date: TOMORROW, service_type: 'Pest Control',
+        status: 'confirmed', window_start: '11:00', window_end: '12:00', estimated_duration_minutes: 60, lat: PIN.lat + 0.1, lng: PIN.lng,
+      });
+      const windows = () => findAvailableSlots({
+        ...PIN, durationMinutes: 60, dateFrom: TOMORROW, dateTo: TOMORROW, technicianId: earlyTech.id, topN: 50,
+        arrivalWindow: { prospective: { ...PIN, estimated_duration_minutes: 60, service_type: 'Pest Control' } },
+      });
+      // When the route finishes the visit being placed (the engine's own row for it).
+      const ownEnd = (slot) => slot.route_arrivals.find((row) => row.id === '__candidate__').departure;
+      try {
+        // Gate off: the route certifies 12:00. It leaves the stop at 12:00, so it reaches the visit late
+        // and finishes it after 13:00.
+        const open = await windows();
+        const noon = open.slots.find((slot) => slot.start_time === '12:00');
+        expect(noon.arrival_delay_minutes).toBeGreaterThan(0);
+        expect(ownEnd(noon) > '13:00').toBe(true);
+        // Gate on: 12:00 to 13:00 is inside the hours, but no stop order ends the visit by 13:00.
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const held = await windows();
+        const starts = startsOf(held, earlyTech.id);
+        expect(starts).not.toContain('12:00');
+        expect(starts).toContain('10:00');
+        // Every hour still offered is one the route finishes by 13:00, and the shift added none.
+        expect(held.slots.every((slot) => ownEnd(slot) <= '13:00')).toBe(true);
+        expect(startsOf(open, earlyTech.id).filter(endsBy(13 * 60))).toEqual(expect.arrayContaining(starts));
+        expect(held.rejections_by_date[TOMORROW].shift_end).toBeGreaterThanOrEqual(1);
+      } finally {
+        await db('scheduled_services').where({ id: stopId }).del();
+        await db('customers').where({ id: customerId }).del();
+      }
+    });
+
+    test('the estimate page filter inside a transaction: the hours are read there and the transaction stays usable', async () => {
+      const { filterCollidingSlots } = require('../services/estimate-slot-availability')._internals;
+      const windowAt = (start, techId) => ({
+        slotId: `${TOMORROW}_${start}_${techId}`, date: TOMORROW, windowStart: start,
+        windowEnd: `${String(Number(start.slice(0, 2)) + 1).padStart(2, '0')}:00`, durationMinutes: 60, techId,
+      });
+      const slots = [earlyTech.id, lateTech.id, noHours.id]
+        .flatMap((techId) => ['09:00', '12:00', '13:00', '17:00'].map((start) => windowAt(start, techId)));
+      const keptFor = (kept, techId) => kept.filter((slot) => slot.techId === techId).map((slot) => slot.windowStart);
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const marker = new Error('roll back');
+      await expect(db.transaction(async (trx) => {
+        // Hours set inside this transaction only: the filter must read them on the caller's connection.
+        await trx('technicians').where({ id: noHours.id }).update({ shift_start: '09:00', shift_end: '10:00' });
+        const kept = await filterCollidingSlots(slots, { dateFrom: TOMORROW, dateTo: TOMORROW, conn: trx });
+        expect(keptFor(kept, earlyTech.id)).toEqual(['09:00', '12:00']);
+        expect(keptFor(kept, lateTech.id)).toEqual(['12:00', '13:00', '17:00']);
+        expect(keptFor(kept, noHours.id)).toEqual(['09:00']);
+        // The clock-in read ran in a savepoint of this transaction, which still answers.
+        expect((await trx.raw('select 1 as ok')).rows).toEqual([{ ok: 1 }]);
+        throw marker;
+      })).rejects.toBe(marker);
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      expect(await filterCollidingSlots(slots, { dateFrom: TOMORROW, dateTo: TOMORROW })).toHaveLength(12);
     });
   });
 });

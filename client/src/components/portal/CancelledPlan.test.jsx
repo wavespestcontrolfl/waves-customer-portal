@@ -82,6 +82,25 @@ describe('CancelledPlanPanel', () => {
     expect(screen.queryByRole('button', { name: 'Restart my plan' })).not.toBeInTheDocument();
   });
 
+  it('a 409 busy (every mint slot taken for a moment) keeps the button and shows the server\'s message; the next tap opens the estimate', async () => {
+    const err = new Error('We could not verify your services just now. Please try again in a moment.');
+    err.status = 409;
+    err.code = 'busy';
+    api.restartPlan.mockRejectedValueOnce(err).mockResolvedValueOnce({ ok: true, url: '/estimate/abc123', estimateId: 'est-1' });
+    render(<CancelledPlanPanel customer={customer} compact={false} styles={styles} navigate={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Restart my plan' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(err.message));
+    // Not the priced-by-hand state: no office number in place of the button.
+    expect(screen.queryByText('We will price this one by hand.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: `Call or text ${WAVES_PHONE_DISPLAY}` })).not.toBeInTheDocument();
+    const button = screen.getByRole('button', { name: 'Restart my plan' });
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Your estimate is ready.'));
+    expect(api.restartPlan).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('link', { name: 'Review and approve my estimate' })).toHaveAttribute('href', '/estimate/abc123');
+  });
+
   it('a transient failure keeps the button and shows the error', async () => {
     api.restartPlan.mockRejectedValueOnce(new Error('Unable to reach the server. Check your connection and try again.'));
     render(<CancelledPlanPanel customer={customer} compact={false} styles={styles} navigate={vi.fn()} />);

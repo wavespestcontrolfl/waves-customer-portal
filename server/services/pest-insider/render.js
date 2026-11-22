@@ -1,10 +1,10 @@
 /**
  * Pest Insider renderer: a checked issue -> { subject, preview, html_body, text_body }.
  *
- * html_body is the BODY only, the same shape the old Pest Insider stores in
- * newsletter_sends.html_body (assemblePestInsiderNewsletter): wrapNewsletter
- * adds the Waves chrome and unsubscribe footer at send time. It carries the
- * dm-* hooks the dark-mode stylesheet keys on, so bodyIsDarkAware() is true.
+ * html_body is the BODY only, the shape newsletter_sends.html_body stores:
+ * wrapNewsletter adds the Waves chrome and unsubscribe footer at send time. It
+ * carries the dm-* hooks the dark-mode stylesheet keys on, so
+ * bodyIsDarkAware() is true.
  *
  * The body is one email for every subscriber, and the public archive serves
  * it as stored. So it holds only reviewed copy (the fact's lead and title,
@@ -17,8 +17,11 @@
  * recipient, never to the shared body: "A tool we'd use" (withToolBlock,
  * opted-in readers only: its Amazon link may reach neither the archive nor
  * a reader who never opted in), and in PR 4 "Active near you" from area
- * counts and "Your home". A per-reader block goes in before the sign-off
- * (addReaderBlock).
+ * counts. A per-reader block goes in before the sign-off (addReaderBlock).
+ * "Your home" (a customer's own last visit and member-since month) is per
+ * reader too, but it is filled by the sender, not added: the shared body
+ * holds two tokens that stand alone just before the sign-off ({{pi-home}},
+ * {{pi-home-text}}, home.js), and every surface without a reader strips them.
  *
  * The look follows the weekly newsletter (owner 2026-11-19: "boring, no
  * visuals, look at what we do for the local newsletter"; then "more
@@ -59,14 +62,17 @@ const { partPictureForFact, partPictureForSpecies, PART_WIDTH, PART_HEIGHT } = r
 const { SERVICE_EMOJI } = require('./claim-check');
 const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
 const { isPestInsiderPoll } = require('../newsletter-quiz');
+const { validateNewsletterDraft } = require('../newsletter-validator');
+const { PEST_INSIDER_TYPE } = require('../../config/newsletter-types');
+const { etDateString } = require('../../utils/datetime-et');
+const { HOME_TOKEN, HOME_TEXT_TOKEN, hasHomeToken, neutralizeHomeTokens } = require('./home');
 
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const POST_LINK_TEXT = 'Read the full story on the Waves blog';
 const PHOTO_ID_TEXT = 'Send us a photo for a free ID';
 
-// The weekly newsletter's divider (newsletter-draft.js WAVES_DIVIDER_GIF):
-// the Waves mascot badge on our own CDN. Not a link, so it is no stray tap
-// target.
+// The divider: the Waves mascot badge on our own CDN. Not a link, so it is no
+// stray tap target.
 const DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif';
 
 const GREETING = 'Hey there!';
@@ -74,11 +80,12 @@ const INTRO = "Here's one thing we learned about Southwest Florida homes and yar
 const SIGNOFF_LINE = 'Catch you next time.';
 const SIGNOFF_NAME = '— The Waves Team';
 
-const SECTIONS = Object.freeze({ lead: 'Today I learned', id: "What's this?", tool: "A tool we'd use", poll: 'Quick poll' });
+const SECTIONS = Object.freeze({ lead: 'Today I learned', id: "What's this?", tool: "A tool we'd use", poll: 'Quick poll', home: 'Your home' });
 const LEAD_EMOJI = '💡';
 const ID_EMOJI = '🔍';
 const TOOL_EMOJI = '🧰';
 const POLL_EMOJI = '🗳️';
+const HOME_EMOJI = '🏠';
 
 // The species card's tile: the species' own emoji where its category's would
 // show another animal, else its category's, else the magnifier. "Biting"
@@ -346,6 +353,97 @@ function pollBlock(pollQuizId) {
   };
 }
 
+// "Your home" (owner-approved plan): a customer's own last visit and the month
+// they became a member (no visit count: the Waves app's records begin in August
+// 2025, so a count would be too low for a long-time customer). It is built per reader at send time from
+// structured facts (home.js loadHomeFacts) and never enters the shared body,
+// the archive or the FYI copy. It prints fixed words and values this code
+// formats itself: never a word read from the database (a service name the
+// office typed can hold a gate code, a name or a note), so the service line
+// is a key into the fixed label map below. There is no next-visit line on
+// purpose: the night planner can still move an untold visit's day, so a day
+// named here could be wrong by the time the email is read.
+// A label names the service line of the visit, never a result: an inspection-only visit
+// is on the termite or rodent line too, so those two say "service", not "protection" or "control".
+const HOME_LINE_LABELS = Object.freeze({
+  pest: 'pest control',
+  lawn: 'lawn care',
+  mosquito: 'mosquito control',
+  termite: 'termite service',
+  rodent: 'rodent service',
+  tree_shrub: 'tree and shrub care',
+});
+
+const realDay = (value, today) => (validDateOnly(value) && value <= today ? value : null);
+
+function homeLines(home, today) {
+  const last = realDay(home?.lastVisit?.date, today);
+  // A block never stands on its "since" line alone.
+  if (!last) return [];
+  const label = own(HOME_LINE_LABELS, home.lastVisit.line);
+  // A visit from an earlier year names its year: a December visit read in November
+  // would look like a coming date without it.
+  const day = formatDateOnly(last, { month: 'long', day: 'numeric', year: last.slice(0, 4) === today.slice(0, 4) ? undefined : 'numeric' });
+  const lines = [{ emoji: '📅', text: `Last visit: ${day}${label ? ` (${label})` : ''}.` }];
+  // "Member since" (the Waves app's own date): left out when it is missing, not a real
+  // day, still to come, or after the last visit, where the two lines would contradict.
+  const since = realDay(home.sinceDate, today);
+  if (since && since <= last) {
+    lines.push({ emoji: '🌊', text: `With Waves since ${formatDateOnly(since, { month: 'long', year: 'numeric', day: undefined })}.` });
+  }
+  return lines;
+}
+
+/**
+ * One reader's "Your home" block as { html, text }, or null when no line
+ * holds. html is the whole per-reader value of {{pi-home}} (the Waves badge,
+ * then the block, and a newline); text is the value of {{pi-home-text}} (it
+ * carries its own trailing blank line, so an empty value leaves the issue as
+ * it reads without the block).
+ * @param {{ lastVisit?: { date: string, line: string|null }, sinceDate?: string|null }} home
+ * @param {Date} [now]  a visit dated after today (Eastern) drops its line
+ */
+function homeBlock(home, now = new Date()) {
+  const lines = homeLines(home, etDateString(now));
+  if (!lines.length) return null;
+  const block = {
+    html: [
+      sectionHead(4, null, HOME_EMOJI, SECTIONS.home),
+      metaBox(lines.map((l) => `${l.emoji} ${escapeHtml(l.text)}`)),
+    ].join('\n'),
+    text: [SECTIONS.home.toUpperCase(), ...lines.map((l) => l.text)].join('\n'),
+  };
+  return { html: `${DIVIDER_HTML}\n${wrapBlock(block)}\n`, text: `${block.text}\n\n` };
+}
+
+// The send validator on one reader's block, as the issue passes it
+// (pest-insider/index.js sendGateErrors). The block alone has no subject:
+// the fixed one stands in for it.
+function homeBlockErrors(block) {
+  return validateNewsletterDraft({
+    subject: 'Waves Pest Insider',
+    preview_text: 'Your home',
+    html_body: block.html,
+    text_body: block.text,
+    newsletter_type: PEST_INSIDER_TYPE,
+  }).errors;
+}
+
+/**
+ * The substitutions for {{pi-home}} and {{pi-home-text}}: always both keys
+ * (a missing key would deliver the raw token), '' for a reader with no block.
+ * { substitutions, rejected }: rejected is true when the block was built but
+ * the send check refused it (its reader gets '' like any reader with none).
+ * @param {object|null|undefined} home  a loadHomeFacts entry
+ * @param {{ now?: Date, errorsOf?: (block: object) => string[] }} [opts]
+ */
+function homeSubstitutions(home, { now = new Date(), errorsOf = homeBlockErrors } = {}) {
+  const block = home ? homeBlock(home, now) : null;
+  if (!block) return { substitutions: { [HOME_TOKEN]: '', [HOME_TEXT_TOKEN]: '' }, rejected: false };
+  if (errorsOf(block).length) return { substitutions: { [HOME_TOKEN]: '', [HOME_TEXT_TOKEN]: '' }, rejected: true };
+  return { substitutions: { [HOME_TOKEN]: block.html, [HOME_TEXT_TOKEN]: block.text }, rejected: false };
+}
+
 /**
  * @param {{ subject: string, preview: string, sendDate?: string,
  *   lead: { headline: string, sentences: {text:string}[], postUrl: string, factId?: string },
@@ -366,8 +464,10 @@ function renderIssue(issue) {
   const minutes = readMinutes([GREETING, INTRO, ...sections, SIGNOFF_TEXT].join(' '));
   const opening = openingBlock(issue, minutes);
   const pollHtml = poll ? [DIVIDER_HTML, wrapBlock(poll)] : [];
-  const html = [wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), ...pollHtml, SIGNOFF_HTML].join('\n');
-  const text = [opening.text, ...sections, ...(poll ? [poll.text] : []), SIGNOFF_TEXT].join('\n\n');
+  // The "Your home" tokens stand alone, glued to the sign-off by no join of
+  // their own: a reader whose value is '' gets exactly the issue without the block.
+  const html = `${[wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), ...pollHtml].join('\n')}\n${HOME_TOKEN}${SIGNOFF_HTML}`;
+  const text = `${[opening.text, ...sections, ...(poll ? [poll.text] : [])].join('\n\n')}\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`;
   return { subject: issue.subject, preview: issue.preview, html_body: html, text_body: text };
 }
 
@@ -430,5 +530,6 @@ function withToolBlock(issue, picked) {
 
 module.exports = {
   renderIssue, withToolBlock, addReaderBlock, wrapIssueHtml, escapeHtml, speciesEmoji,
+  homeBlock, homeBlockErrors, homeSubstitutions, hasHomeToken, neutralizeHomeTokens, HOME_LINE_LABELS, HOME_TOKEN, HOME_TEXT_TOKEN,
   IDENTIFIER_URL, POST_LINK_TEXT, PHOTO_ID_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
 };

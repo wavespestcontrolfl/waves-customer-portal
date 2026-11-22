@@ -1,9 +1,8 @@
 /**
- * GATE_CALL_CANCEL_GUARD through PostgreSQL (owner 2026-10-30). A new lead agreed a visit on a 12:52 AM call that did
+ * The call cancel guard through PostgreSQL (owner 2026-10-30). A new lead agreed a visit on a 12:52 AM call that did
  * not book, canceled on a 7:08 AM call while nothing was booked, and the office booked her at 11:22 from New
  * Appointment, which showed nothing about the cancel. Pinned here, with real queries inside a rolled-back transaction:
- * the notice answers the customer's latest real conversation when its newest cancel card still stands, and the route
- * answers {enabled:false} with the gate off. Synthetic names and numbers only. Skips without DATABASE_URL.
+ * the notice answers the customer's latest real conversation when its newest cancel card still stands. Synthetic names and numbers only. Skips without DATABASE_URL.
  */
 const SKIP = !process.env.DATABASE_URL;
 
@@ -31,14 +30,12 @@ const express = require('express');
 const { randomUUID } = require('crypto');
 const { latestCancelCall } = require('../services/call-cancel-guard');
 
-const GATE = 'GATE_CALL_CANCEL_GUARD';
 const describeDb = SKIP ? describe.skip : describe;
 const NOW = new Date('2026-10-30T15:30:00Z');
 const at = (iso) => new Date(iso);
 
 describeDb('call cancel guard (PostgreSQL)', () => {
   let database; let trx; let server; let base;
-  const savedGate = process.env[GATE];
 
   beforeAll(async () => {
     const url = new URL(process.env.DATABASE_URL);
@@ -55,10 +52,8 @@ describeDb('call cancel guard (PostgreSQL)', () => {
   afterAll(async () => {
     await new Promise((resolve) => server.close(resolve));
     await database.destroy();
-    if (savedGate === undefined) delete process.env[GATE]; else process.env[GATE] = savedGate;
   });
   beforeEach(async () => {
-    process.env[GATE] = 'true';
     trx = await database.transaction();
     mockConn = trx;
   });
@@ -140,17 +135,15 @@ describeDb('call cancel guard (PostgreSQL)', () => {
       expect(await latestCancelCall(plain, { now: NOW })).toBeNull();
     });
 
-    test('route: gate on answers the call, gate off answers {enabled:false}, a bad id is a 400', async () => {
+    test('route: answers the call, a bad id is a 400', async () => {
       const customerId = await customer();
       const cancelCall = await call(customerId, new Date(Date.now() - 3600 * 1000).toISOString());
       await card(cancelCall, 'cancellation_request');
       const get = async (q) => { const r = await fetch(`${base}/admin/schedule/cancel-call-notice${q}`); return { status: r.status, body: await r.json() }; };
       const on = await get(`?customerId=${customerId}`);
       expect(on.status).toBe(200);
-      expect(on.body).toMatchObject({ enabled: true, call: { callId: cancelCall } });
+      expect(on.body).toMatchObject({ call: { callId: cancelCall } });
       expect((await get('?customerId=nope')).status).toBe(400);
-      delete process.env[GATE];
-      expect((await get(`?customerId=${customerId}`)).body).toEqual({ enabled: false, call: null });
     });
   });
 

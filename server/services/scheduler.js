@@ -2783,6 +2783,17 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`[job-offers] staff record pass failed: ${err.message}`);
     }
+    // The bell of the first-days checklist (job-offers.js ringDueChecklists): each run keeps the one bell row of a
+    // hire true to the checklist. It rings from 7:00 AM Eastern only. Its own job. It sends no one anything.
+    try {
+      await runExclusive('job-offer-checklist', async () => {
+        const { rung, closed, failed } = await require('./job-offers').ringDueChecklists();
+        if (rung + closed > 0) logger.info(`[job-offers] checklist pass: rung=${rung} closed=${closed}`);
+        if (failed > 0) throw new Error(`${failed} checklist bell(s) failed`);
+      });
+    } catch (err) {
+      logger.error(`[job-offers] checklist pass failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // Job offers, the 2-day reminder (job-offers.js sendDueReminders; GATE_JOB_OFFER_REMINDER, and GATE_JOB_OFFERS): every
@@ -5973,15 +5984,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 7:37AM — Emailed invoices not linked to Spark (GATE_INVOICE_NOT_ON_SPARK;
-  // returns before any read when off). Owner 2026-11-05: one standing Tax bell
+  // DAILY 7:37AM — Emailed invoices not linked to Spark. Owner 2026-11-05: one standing Tax bell
   // lists, by vendor, the emailed vendor invoices dated 3 to 14 days ago whose
   // paying bank or card line is on an account outside INVOICE_OK_ACCOUNT_LABELS,
   // or was not found. Rings only when a vendor joins and closes itself when the
   // list is empty. Reads expenses and bank lines; sends nothing to a customer.
   // =========================================================================
   cron.schedule('37 7 * * *', async () => {
-    if (!require('../config/feature-gates').invoiceNotOnSparkLive()) return;
     try {
       await runExclusive('invoice-not-on-spark', async () => {
         const result = await require('./invoice-not-on-spark').runInvoiceNotOnSpark();
@@ -5993,15 +6002,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 7:43AM — Cash forecast low week (GATE_CASH_FORECAST; returns before any
-  // read when off). Owner 2026-11-04 D4 A: one standing owner-only bell when a week
+  // DAILY 7:43AM — Cash forecast low week. Owner 2026-11-04 D4 A: one standing owner-only bell when a week
   // of the next 13 ends below the owner's floor on the expected line. Rings only when
   // a low week first appears and closes itself when no week is below the floor.
   // Reads the forecast (Plaid's free /accounts/get, Stripe's balance, the portal's
   // own data); sends nothing to a customer.
   // =========================================================================
   cron.schedule('43 7 * * *', async () => {
-    if (!require('../config/feature-gates').cashForecastLive()) return;
     try {
       await runExclusive('cash-forecast-low-week', async () => {
         const result = await require('./cash-forecast/low-week-bell').runCashForecastLowWeek();
@@ -8403,6 +8410,15 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Ad route-areas record failed: ${err.message}`);
     }
+    // Ads follow the route, step 2 (record only, $0): for each campaign marked with a route line, what the route rule
+    // would do (base or stop, and the change to its location list). Its own try and its own job_health row, after
+    // the budget run, so it can never delay or fail a budget change. It reads Google Ads and changes nothing. With
+    // no marked campaign it is one read of ad_campaigns. See ads/route-fill.js.
+    try {
+      await runExclusive('ads-route-fill', () => require('./ads/route-fill').recordRouteFill());
+    } catch (err) {
+      logger.error(`Ad route-fill record failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -10287,6 +10303,28 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[moving-auto-send] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 10:13AM — One-time job to plan offer, shadow step (owner 2026-11-19
+  // "build"): prices the Quarterly Pest Control Service plan for each
+  // one-time pest or cockroach job whose service was done 3 to 14 days ago,
+  // for a customer the offer is for, and emails one sample of the offer and of its
+  // reminder to the office inbox. No customer message and no estimate. A
+  // missed morning costs nothing: the next one reads the same jobs. Gate read
+  // per tick (GATE_ONETIME_PLAN_OFFER=shadow).
+  // =========================================================================
+  // 10:13: off the busy five-minute marks of the hour.
+  cron.schedule('13 10 * * *', async () => {
+    if (require('../config/feature-gates').onetimePlanOfferMode?.() !== 'shadow') return;
+    try {
+      await runExclusive('onetime-plan-offer', async () => {
+        const result = await require('./onetime-plan-offer').runOnetimePlanOfferJob();
+        logger.info(`[onetime-plan-offer] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[onetime-plan-offer] run failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

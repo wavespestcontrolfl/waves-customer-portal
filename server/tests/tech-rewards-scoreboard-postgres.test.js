@@ -41,6 +41,11 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.string('name').notNullable();
       t.date('hire_date');
       t.boolean('active').notNullable().defaultTo(true);
+      // who gets a Tech Rewards pay line (tech-rewards-pay-lines.js recipients)
+      t.text('employment_type');
+      t.text('role');
+      t.text('employment_status');
+      t.boolean('field_dispatchable');
     });
     await s.createTable('payroll_runs', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
@@ -219,6 +224,22 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.stayBonus).toMatchObject({ dueDate: '2028-04-01', years: 3, estimateCents: null, earningsStart: '2027-04-01' });
   });
 
+  test('a stay bonus milestone a pay run has settled is not the next one, whatever the hire date on file says now', async () => {
+    await seed();
+    // Alpha's hire date on file puts the 1 year anniversary on Dec 1, 2026, ahead of today. An open line and a row that is not
+    // the pay run's own settle nothing.
+    const line = { technician_id: alpha, kind: 'stay_bonus', source_type: 'tech_rewards', earned_week_start: '2026-11-02', amount_cents: 5280 };
+    await db('payroll_pay_lines').insert([
+      { ...line, status: 'open', source_id: `stay_bonus:${alpha}:1` },
+      { ...line, status: 'paid', source_id: `stay_bonus:${beta}:1` },
+    ]);
+    expect((await service.getScoreboard(alpha, { now: NOW })).stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1 });
+    // the pay run paid the 1 year bonus (from an earlier hire date on file): the board shows the 3 year one
+    await db('payroll_pay_lines').where({ technician_id: alpha, status: 'open' }).update({ status: 'paid' });
+    expect((await service.getScoreboard(alpha, { now: NOW })).stayBonus)
+      .toMatchObject({ dueDate: '2028-12-01', years: 3, rateBps: 400, estimateCents: null, earningsStart: '2027-12-01' });
+  });
+
   test('catch-up pay: lines paid in a later week count on the day they were earned, wages by work week', async () => {
     await seed();
     const [sept] = await db('payroll_checks').where({ technician_id: alpha, week_start: '2026-09-07' }).select('id');
@@ -303,7 +324,11 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
 
   test('the stay bonus window ends the day before the anniversary and prorates a check that spans that day', async () => {
     await seed();
-    const [delta] = await db('technicians').insert({ name: 'Sample Delta', hire_date: '2025-12-01' }).returning('id');
+    const fieldTech = { employment_type: 'w2', role: 'technician', employment_status: 'active', field_dispatchable: true };
+    const [delta, office] = await db('technicians').insert([
+      { name: 'Sample Delta', hire_date: '2025-12-01', ...fieldTech },
+      { name: 'Sample Office', hire_date: '2025-12-01', ...fieldTech, role: 'admin' }, // payroll writes an office account no line
+    ]).returning('id');
     const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-11-30', pay_date: '2026-12-11' }).returning('id');
     await insertChecks([{ run_id: run.id, technician_id: delta.id, status: 'finalized', week_start: '2026-11-30', gross_cents: 70000 }]);
     await db('time_entry_daily_summary').insert([
@@ -312,6 +337,47 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     ]);
     const board = await service.getScoreboard(delta.id, { now: new Date('2026-12-01T15:00:00Z') });
     expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01', earningsStart: '2025-12-01', estimateCents: Math.round(35000 * 0.02) });
+    // the anniversary day is the first day a pay run can carry the bonus, so payroll answers for it: an office account sees
+    // the milestone the day before (it is ahead, and shows for everyone) and the next one from the day itself
+    expect((await service.getScoreboard(office.id, { now: new Date('2026-11-30T15:00:00Z') })).stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1 });
+    expect((await service.getScoreboard(office.id, { now: new Date('2026-12-01T15:00:00Z') })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+  });
+
+  test('after the anniversary the stay bonus stays on the board until it is paid, worked out from the 12 months that ended', async () => {
+    await seed();
+    const fieldTech = { employment_type: 'w2', role: 'technician', employment_status: 'active', field_dispatchable: true };
+    const [delta, office] = await db('technicians').insert([
+      { name: 'Sample Delta', hire_date: '2025-12-01', ...fieldTech },
+      { name: 'Sample Office', hire_date: '2025-12-01', ...fieldTech, role: 'admin' }, // payroll writes an office account no line
+    ]).returning('id');
+    const [inside, after] = await db('payroll_runs').insert([
+      { status: 'finalized', week_start: '2026-11-16', pay_date: '2026-11-27' },
+      { status: 'finalized', week_start: '2026-12-07', pay_date: '2026-12-18' },
+    ]).returning('id');
+    await insertChecks([
+      { run_id: inside.id, technician_id: delta.id, status: 'finalized', week_start: '2026-11-16', gross_cents: 70000 }, // a week of the 12 months
+      { run_id: after.id, technician_id: delta.id, status: 'finalized', week_start: '2026-12-07', gross_cents: 90000 }, // after them: never counts
+    ]);
+    const today = new Date('2026-12-20T15:00:00Z');
+    expect((await service.getScoreboard(delta.id, { now: today })).stayBonus)
+      .toMatchObject({ dueDate: '2026-12-01', years: 1, earningsStart: '2025-12-01', earningsEnd: '2026-11-30', estimateCents: Math.round(70000 * 0.02) });
+    // the 60 days are over (Jan 31), or payroll would write this account no line: the next milestone ahead, as before
+    expect((await service.getScoreboard(delta.id, { now: new Date('2027-01-31T15:00:00Z') })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+    expect((await service.getScoreboard(office.id, { now: today })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+    // payroll pays it: the board shows the 3 year bonus
+    await db('payroll_pay_lines').insert({
+      technician_id: delta.id, kind: 'stay_bonus', source_type: 'tech_rewards', source_id: `stay_bonus:${delta.id}:1`, status: 'paid', earned_week_start: '2026-12-07', amount_cents: 1400,
+    });
+    expect((await service.getScoreboard(delta.id, { now: today })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+  });
+
+  // PostgreSQL prints a date BC with no era in YYYY-MM-DD, and holds years past 9999: payroll reads neither, so the board does not
+  test.each(['2025-12-01 BC', '20251-12-01', '0099-12-01', 'infinity'])('a hire date on file that payroll cannot read (%s) is none on the board', async (hireDate) => {
+    await seed();
+    const [odd] = await db('technicians').insert({ name: 'Sample Odd', hire_date: hireDate }).returning('id');
+    const board = await service.getScoreboard(odd.id, { now: new Date('2026-12-20T15:00:00Z') });
+    expect(board.stayBonus).toBeNull();
+    expect(board.multiplier).toEqual({ reason: 'no_hire_date' });
   });
 
   test('commission is recorded through the end of the pay week of the newest ledger line, never a run date', async () => {
@@ -363,7 +429,8 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     const [rho] = await db('technicians').insert({ name: 'Sample Rho', hire_date: '2024-01-15' }).returning('id');
     const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-06-01', pay_date: '2026-06-12' }).returning('id');
     // 70,000 of wages, a 10,000 commission and a 30,000 stay bonus both earned in the week of May 4 (50 hours, 10 of them
-    // overtime), and the 4,000 of overtime the two lines caused together: 1,000 from the commission, 3,000 from the bonus
+    // overtime), and the 4,000 of overtime the two lines caused together: 1,000 from the commission, 3,000 from the bonus.
+    // The row is an older one with no stored split and no earlier pay: the commission is priced alone from the row's hours.
     const [check] = await insertChecks([{
       run_id: run.id, technician_id: rho.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 114000, regular_pay_cents: 70000, tech_rewards_cents: 30000,
       calc_snapshot: { lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 3000, overtimeMinutes: 600, premiumCents: 4000 }] },
@@ -374,6 +441,36 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     ]);
     const board = await service.getScoreboard(rho.id, { now: NOW });
     expect(board.seasonBonus.grossCents).toBe(70000 + 10000 + 1000);
+  });
+
+  test('a week paid on two checks: a stay bonus on the second check never moves the season base', async () => {
+    const [tau, twin] = await db('technicians').insert([{ name: 'Sample Tau', hire_date: '2024-01-15' }, { name: 'Sample Twin', hire_date: '2024-01-15' }]).returning('id');
+    // inserted newest first: each check is read from its own rows, so the order they are stored or dated in changes nothing
+    const [later, own] = await db('payroll_runs').insert([
+      { status: 'finalized', week_start: '2026-06-01', pay_date: '2026-06-12' },
+      { status: 'finalized', week_start: '2026-05-04', pay_date: '2026-05-15' },
+    ]).returning('id');
+    // The week of May 4: 45 hours, 5 of them overtime. Its own check paid a 600 commission and 33 of premium (33.33).
+    // The later check paid another 600 commission for that week. Alone that commission pays 34 (the twin). With a 600 stay
+    // bonus for the same week beside it the check paid 67 (Tau), and the pay run stored the commission's 34 with the week.
+    const week = (premiumCents, extra = {}) => ({ lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 2700, overtimeMinutes: 300, premiumCents, ...extra }] });
+    const earlierPay = { earlierAllocatedCents: 600, earlierPremiumCents: 33 };
+    const [tauLater, tauOwn, twinLater, twinOwn] = await insertChecks([
+      { run_id: later.id, technician_id: tau.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 70000 + 600 + 600 + 67, regular_pay_cents: 70000, tech_rewards_cents: 600, calc_snapshot: week(67, { ...earlierPay, ordinaryPremiumCents: 34 }) },
+      { run_id: own.id, technician_id: tau.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 70000 + 600 + 33, regular_pay_cents: 70000, calc_snapshot: week(33) },
+      { run_id: later.id, technician_id: twin.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 70000 + 600 + 34, regular_pay_cents: 70000, calc_snapshot: week(34, earlierPay) },
+      { run_id: own.id, technician_id: twin.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 70000 + 600 + 33, regular_pay_cents: 70000, calc_snapshot: week(33) },
+    ]).returning('id');
+    const commissionOn = (technician, check) => ({ technician_id: technician.id, check_id: check.id, kind: 'commission', status: 'paid', earned_week_start: '2026-05-04', amount_cents: 600 });
+    await db('payroll_pay_lines').insert([
+      commissionOn(tau, tauOwn), commissionOn(tau, tauLater), commissionOn(twin, twinOwn), commissionOn(twin, twinLater),
+      { technician_id: tau.id, check_id: tauLater.id, kind: 'stay_bonus', status: 'paid', earned_week_start: '2026-06-01', covers_from: '2026-05-04', covers_to: '2026-05-10', amount_cents: 600 },
+    ]);
+    // both weeks' wages, both commissions, and the 67 the commissions were paid in overtime (33, then 34)
+    const base = 140000 + 1200 + 67;
+    expect((await service.getScoreboard(twin.id, { now: NOW })).seasonBonus.grossCents).toBe(base);
+    // Tau: the same, with the stay bonus and the other 33 of the second check's 67 left out
+    expect((await service.getScoreboard(tau.id, { now: NOW })).seasonBonus.grossCents).toBe(base);
   });
 
   test('review asks are counted in SQL on each send time: an initial ask outside the season does not drag its in-season follow-up out', async () => {

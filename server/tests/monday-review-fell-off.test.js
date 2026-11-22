@@ -1,7 +1,7 @@
 /**
- * Monday review bell, list 1 as "customer alerts that fell off with no reply" (GATE_MONDAY_FELL_OFF_LINE; owner
- * 2026-11-05, decision D3). Unit proof of the assembly (buildLists / composeReview with the new list under the real
- * composer rules), of which gate state picks the list, and of the reply judgement. The SQL and the witnesses run
+ * Monday review bell, list 1 as "customer alerts that fell off with no reply" (owner 2026-11-05, decision D3).
+ * Unit proof of the assembly (buildLists / composeReview with the list under the real composer rules), of the
+ * list-1 loader and of the reply judgement. The SQL and the witnesses run
  * against Postgres in monday-review-fell-off-db.test.js.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -122,13 +122,6 @@ describe('buildLists with the fell-off list', () => {
     const lists = buildLists({ alerts: fellOffOf(2), promises: PROMISES });
     expect(lists.map((l) => l.key)).toEqual(['fellOff', 'promises']);
   });
-
-  test('the old list still builds from the old shape (no kind)', () => {
-    const [list] = buildLists({ alerts: { count: 3, headlines: [{ headline: 'Comms — answer a customer text', at: new Date('2026-10-12T15:00:00Z') }] } });
-    expect(list.key).toBe('alerts');
-    expect(list.phrase).toBe('3 unread alerts');
-    expect(list.detail).toContain('Needs-you alerts nobody read for 14+ days: 3.');
-  });
 });
 
 describe('composeReview with the fell-off list', () => {
@@ -151,19 +144,15 @@ describe('composeReview with the fell-off list', () => {
   });
 });
 
-describe('which loader the gate picks for list 1', () => {
-  const SAVED = process.env.GATE_MONDAY_FELL_OFF_LINE;
+describe('the loader for list 1', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     episodes.openAdminAlertKeys.mockResolvedValue([]);
     episodes.closeAdminAlertKeys.mockResolvedValue(0);
     notifyAdmin.mockResolvedValue({ id: 'n1' });
   });
-  afterEach(() => {
-    if (SAVED === undefined) delete process.env.GATE_MONDAY_FELL_OFF_LINE; else process.env.GATE_MONDAY_FELL_OFF_LINE = SAVED;
-  });
 
-  // The 14-day reader is handed a database that returns no rows; the other three lists are replaced.
+  // The other three lists are replaced; the database returns no rows.
   const rest = { promises: async () => ({ count: 0 }), drafts: async () => ({ count: 0, total: 0 }), visits: async () => ({ count: 0, priced: 0 }) };
   const emptyDatabase = () => {
     const chain = new Proxy(function chain() {}, { get: (_t, name) => (name === 'then' ? undefined : (name === 'select' ? () => Promise.resolve([]) : () => chain)) });
@@ -172,8 +161,7 @@ describe('which loader the gate picks for list 1', () => {
     return database;
   };
 
-  test('on: the fell-off reader runs, and its list is what the Monday row names', async () => {
-    process.env.GATE_MONDAY_FELL_OFF_LINE = 'true';
+  test('the fell-off reader runs, and its list is what the Monday row names', async () => {
     fellOff.loadFellOffAlerts.mockResolvedValue(fellOffOf(2));
     const out = await review.runMondayReview({ now: MONDAY, database: emptyDatabase(), loaders: rest });
     expect(fellOff.loadFellOffAlerts).toHaveBeenCalledTimes(1);
@@ -183,17 +171,7 @@ describe('which loader the gate picks for list 1', () => {
     expect(opts.detail).toContain('1. Customer alerts that fell off the bell after 3 quiet days with no reply: 2.');
   });
 
-  test('off, unset or not exactly true: the 14-day reader runs and the fell-off reader never does', async () => {
-    for (const value of [undefined, 'false', '1', 'TRUE', 'yes']) {
-      if (value === undefined) delete process.env.GATE_MONDAY_FELL_OFF_LINE; else process.env.GATE_MONDAY_FELL_OFF_LINE = value;
-      const out = await review.runMondayReview({ now: MONDAY, database: emptyDatabase(), loaders: rest });
-      expect(out).toEqual({ count: 0, outcome: 'clear' });
-    }
-    expect(fellOff.loadFellOffAlerts).not.toHaveBeenCalled();
-  });
-
-  test('on, and the fell-off list cannot be read at all: the other lists still go out, with one warning', async () => {
-    process.env.GATE_MONDAY_FELL_OFF_LINE = 'true';
+  test('the fell-off list cannot be read at all: the other lists still go out, with one warning', async () => {
     fellOff.loadFellOffAlerts.mockRejectedValue(new Error('connection reset'));
     const out = await review.runMondayReview({
       now: MONDAY, database: emptyDatabase(), loaders: { ...rest, promises: async () => PROMISES },
@@ -204,22 +182,13 @@ describe('which loader the gate picks for list 1', () => {
     expect(require('../services/logger').warn.mock.calls[0][0]).toContain('without it');
   });
 
-  test('on, the fell-off list cannot be read and no other list has work: not a zero, so nothing is raised or closed', async () => {
-    process.env.GATE_MONDAY_FELL_OFF_LINE = 'true';
+  test('the fell-off list cannot be read and no other list has work: not a zero, so nothing is raised or closed', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue(['monday-review:2026-11-02']);
     fellOff.loadFellOffAlerts.mockRejectedValue(new Error('connection reset'));
     const out = await review.runMondayReview({ now: MONDAY, database: emptyDatabase(), loaders: rest });
     expect(out).toEqual({ count: 0, outcome: 'unknown' });
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
     expect(notifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('a test that mocks feature-gates without the reader reads the gate as off', () => {
-    jest.isolateModules(() => {
-      jest.doMock('../config/feature-gates', () => ({}));
-      const isolated = require('../services/monday-review-bell');
-      expect(isolated.runMondayReview).toBeDefined();
-    });
   });
 });
 

@@ -782,6 +782,8 @@ function syncBedBugPricingConfig(bedBugConfig) {
 
 let _lastSync = 0;
 const SYNC_INTERVAL = 60_000; // 1 minute cache
+// Counted for withSettingsForUnattendedPrice (near the end of this file).
+let _invalidations = 0; // every invalidatePricingConfigCache()
 
 // Are the rows of the standard pest price complete?
 // A sync keeps what the engine had for a row or a field that is missing: the
@@ -2503,6 +2505,73 @@ function needsSync() {
 
 function invalidatePricingConfigCache() {
   _lastSync = 0;
+  _invalidations += 1;
+}
+
+// ── The settings for a price nobody watches ─────────────────────────────
+// (customer-pricing-ai's strictPriceSettings: the plan offer after a
+// one-time job.)
+// The engine prices from this process's constants, and they are shared:
+// callers wait for one refresh, which reads on the handle of whoever asked
+// first, and the constants then stay for a minute. An edit marks them stale
+// only in the process that made it, and a refresh that ends after an edit
+// overwrites that mark. For a card a person reads, that is fine. A caller
+// that prices with nobody watching must know that the constants the engine
+// read are the committed rows, loaded for its own call. This function is
+// that one answer; such a caller asks nothing else of the cache.
+//
+// withSettingsForUnattendedPrice(price) is ONE operation in the queue of
+// refreshes:
+//   1. a refresh of its own. It is never shared with another caller's
+//      refresh, and it reads on the app's connection, never on the caller's
+//      handle: a transaction can hold an edit of the settings that never
+//      commits, and what a refresh reads goes into the constants every
+//      caller prices from. (So the caller must hold no transaction while it
+//      waits here: its connection is one of the pool this read needs.)
+//      The shared settings read stale while it runs;
+//   2. three questions: did the refresh succeed; was an edit of the settings
+//      signaled in this process since the moment before the refresh read
+//      the rows (_invalidations); did the rows carry every input of the
+//      standard pest price (standardPestPriceRowsAreComplete);
+//   3. price(), called at once and synchronously. The next refresh in the
+//      queue starts after this operation ends, so price() reads the
+//      constants of step 1 and nothing else.
+// It answers { priced: true, value } or { priced: false, reason }
+// ('not_loaded', 'edited', 'rows'): "price again", never a price. Callers
+// that overlap wait in the queue; none of them refuses another.
+// On 'edited' it also marks the shared settings stale again: the end of its
+// refresh marked them fresh, and the edit is not in them.
+// price() must not return a promise: the queue would wait for it, and with
+// it every refresh of the process. What price() throws, the caller gets.
+//
+// Not covered, by design: an edit that another process commits after the
+// refresh read the rows. The price is the one that was true at that read.
+function withSettingsForUnattendedPrice(price) {
+  const run = _syncQueue.then(async () => {
+    const invalidations = _invalidations;
+    // While this refresh runs, the shared settings read stale, as they do during any shared refresh. A caller
+    // of the shared refresh then waits in the queue. It does not price from constants that this refresh has
+    // begun to change and may still put back. A refresh that succeeds marks them fresh at its end.
+    _lastSync = 0;
+    const loaded = await _syncConstantsFromDBUnserialized();
+    if (loaded !== true) return { priced: false, reason: 'not_loaded' };
+    if (invalidations !== _invalidations) {
+      // The end of the refresh marked the settings fresh. The edit's mark goes back, so that the next caller
+      // of the shared refresh reads the rows again.
+      _lastSync = 0;
+      return { priced: false, reason: 'edited' };
+    }
+    if (!standardPestPriceRowsAreComplete()) return { priced: false, reason: 'rows' };
+    const value = price();
+    if (value && typeof value.then === 'function') {
+      // The mistake is thrown below. The promise itself may still reject, and nobody else will hear it.
+      value.then(undefined, () => {});
+      throw new Error('withSettingsForUnattendedPrice: price() must be synchronous');
+    }
+    return { priced: true, value };
+  });
+  _syncQueue = run.catch(() => {});
+  return run;
 }
 
 module.exports = {
@@ -2513,6 +2582,7 @@ module.exports = {
   needsSync,
   invalidatePricingConfigCache,
   standardPestPriceRowsAreComplete,
+  withSettingsForUnattendedPrice,
   validatePestPricingConfig,
   assertValidPestPricingConfig,
 };

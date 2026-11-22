@@ -259,7 +259,10 @@ function builder(table) {
   };
   b.insert = (row) => {
     const list = (tables[table] ||= []);
-    const inserted = { id: `${table}-${list.length + 1}`, created_at: new Date().toISOString(), ...row };
+    // A database-side value (the mint's order stamp) is stored as a timestamp: keep what was sent beside it.
+    const stamped = row.created_at?.sql
+      ? { created_at: new Date().toISOString(), created_at_sent: { sql: row.created_at.sql, bindings: row.created_at.bindings } } : {};
+    const inserted = { id: `${table}-${list.length + 1}`, created_at: new Date().toISOString(), ...row, ...stamped };
     list.push(inserted);
     return Object.assign(Promise.resolve([inserted]), { returning: async () => [inserted] });
   };
@@ -285,10 +288,14 @@ function fakeTrx(ops = null, tableFactory = builder) {
     }
     return b;
   };
-  t.raw = async (sql, bindings) => {
-    if (ops) ops.push(`raw:${String(sql)}:${JSON.stringify(bindings)}`);
+  t.raw = (sql, bindings) => {
+    // A knex raw is a statement when awaited and a value when a query carries it (the mint's order
+    // stamp). Only a statement is logged.
+    const value = String(sql).startsWith('GREATEST(');
+    if (ops && !value) ops.push(`raw:${String(sql)}:${JSON.stringify(bindings)}`);
     // A try-lock answers one row, as Postgres does; a key named in t.busy is another transaction's.
-    return String(sql).includes('pg_try_advisory_xact_lock') ? { rows: [{ acquired: !t.busy.includes(bindings?.[0]) }] } : {};
+    const answer = String(sql).includes('pg_try_advisory_xact_lock') ? { rows: [{ acquired: !t.busy.includes(bindings?.[0]) }] } : {};
+    return Object.assign(Promise.resolve(answer), { sql: String(sql), bindings });
   };
   t.busy = [];
   // Savepoint stand-in: the mint nests best-effort lookups (seed) so their
@@ -475,6 +482,12 @@ describe('mintPlanStartEstimate', () => {
       customer_id: 'cust-1', source: 'plan_start', status: 'sent', pricing_authority: 'SERVER',
       followup_unviewed_sent: true, followup_viewed_sent: true, followup_final_sent: true, followup_expiring_sent: true,
       monthly_total: 31.67, service_interest: 'Pest Control',
+    });
+    // The quote's place in its lineage is assigned in the database, after every stored quote of this
+    // customer and source (plan-quote-lineage.db.test.js proves the SQL).
+    expect(row.created_at_sent).toEqual({
+      sql: expect.stringContaining("GREATEST(now(), (SELECT max(prior.created_at) + interval '1 microsecond'"),
+      bindings: ['cust-1', 'plan_start'],
     });
     const stored = JSON.parse(row.estimate_data);
     expect(stored.planStart).toEqual({ families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly', mintedAt: '2026-11-19T12:00:00.000Z', premisesKey: HOME_KEY });
@@ -1053,6 +1066,37 @@ describe('mintPlanStartEstimate', () => {
       await mint();
       expect(tables.estimates.find((r) => r.id === 'est-claimed').archived_at).toBeTruthy();
     });
+  });
+});
+
+// The plan-start mint shares the restart mint's capped transaction (plan-restart.test.js pins the cap's rules).
+describe('mintPlanStartEstimate and the mint cap', () => {
+  test('on a pool of four, a tap beside a running mint is refused and opens no transaction', async () => {
+    tables.customers = [{ ...LEAD }];
+    tables.cancellation_cases = [];
+    recompute.mockResolvedValue(pricedAs(PEST_LINE));
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    let opened = 0;
+    const pooled = {
+      client: { pool: { max: 4 } },
+      transaction: async (fn) => {
+        opened += 1;
+        await tick();
+        return fn(fakeTrx());
+      },
+    };
+    const tap = () => mint({}, { db: pooled });
+    const taps = await Promise.allSettled([tap(), tap(), tap()]);
+    expect(taps.map((outcome) => [outcome.status, outcome.value?.reused, outcome.reason?.code])).toEqual([
+      ['fulfilled', false, undefined], ['rejected', undefined, 'busy'], ['rejected', undefined, 'busy'],
+    ]);
+    expect(taps[1].reason).toMatchObject({
+      restartUnavailable: true, message: 'We could not verify your services just now. Please try again in a moment.',
+    });
+    expect(opened).toBe(1);
+    // The slot is free again: the next tap gets the quote the first one made.
+    await expect(tap()).resolves.toMatchObject({ reused: true });
+    expect(opened).toBe(2);
   });
 });
 

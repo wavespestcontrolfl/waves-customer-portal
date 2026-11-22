@@ -31,6 +31,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const llmCost = require('./llm-cost');
 const { isMergeRetiredRow } = require('./merge-retired');
+const { customerCopyViolations } = require('./service-report/technician-report-copy');
 
 const TABLE = 'roof_entry_reads';
 const REUSE_DAYS = 90;
@@ -100,8 +101,16 @@ const PIN_LABELS = Object.freeze({
   tile_eave_open_ends: 'Open tile end',
   other: 'Entry point',
 });
-// What the exclusion does at each point, printed after the label ("Roof return, front left: seal").
-const PIN_ACTIONS = Object.freeze({ trees_touching_roof: 'trim back' });
+// What the exclusion does at each point, printed after the label ("Roof return, front left: seal"). Owner ruling
+// 2026-11-21 (choice A): an opening that must keep its airflow (a roof vent, a gable vent, a chimney or flue) gets a
+// screen, a vent pipe is sealed around, a branch is trimmed back, and every other point is sealed.
+const PIN_ACTIONS = Object.freeze({
+  roof_vents_or_turbines: 'screen',
+  gable_vents: 'screen',
+  chimney_or_flue: 'screen',
+  plumbing_vent_stacks: 'seal around',
+  trees_touching_roof: 'trim back',
+});
 const pinAction = (type) => PIN_ACTIONS[type] || 'seal';
 const MAX_TECH_PINS = 20;
 const MAX_PIN_NOTE = 40;
@@ -315,6 +324,9 @@ function publicRead(row) {
     tech_final_count: row.tech_final_count ?? null,
     tech_final_flags: row.tech_final_flags == null ? null : parseJson(row.tech_final_flags),
     tech_pins: row.tech_pins == null ? null : parseJson(row.tech_pins),
+    // The address the points were saved for. Null on a list saved before it was recorded: the panel then asks staff to
+    // save the list once more, because a send copies points only with their address (estimate-roof-points.js).
+    points_address: row.points_address || null,
     hide_on_estimate: Boolean(row.hide_on_estimate),
     created_at: row.created_at,
   };
@@ -375,6 +387,17 @@ async function reuseCandidates(key) {
 }
 
 /**
+ * Staff hide or show an estimate's roof points as ONE choice for the estimate: saveTechCount writes it to every read of
+ * the estimate, and each new read of the estimate starts with it (true when any read of the estimate is hidden). A fresh
+ * read can therefore never bring back points staff hid. `conn` is writeOwned's transaction, which holds the estimate
+ * row's lock, so the choice cannot change between this read and the insert.
+ */
+async function pointsHiddenFor(conn, estimateId) {
+  if (!estimateId) return false;
+  return Boolean(await conn(TABLE).where({ estimate_id: estimateId, hide_on_estimate: true }).first('id'));
+}
+
+/**
  * The row to hand this request: the source itself when it belongs to the same (estimate, customer) context, else a
  * NEW row for this context that copies the paid AI result with cost 0 and empty technician fields. One row per
  * context keeps the technician's count for estimate B from overwriting estimate A's. The copy names its paid source
@@ -384,10 +407,11 @@ async function reuseCandidates(key) {
 async function answerFor(source, ctx) {
   if (matchesContext(source, ctx)) return publicRead(source);
   let writtenKey;
-  const [inserted] = await writeOwned(ctx, (conn, key) => conn(TABLE).insert({
+  const [inserted] = await writeOwned(ctx, async (conn, key) => conn(TABLE).insert({
     source_id: source.id,
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
+    hide_on_estimate: await pointsHiddenFor(conn, ctx.estimateId),
     context_key: (writtenKey = key),
     lookup_key: source.lookup_key,
     county: source.county,
@@ -426,16 +450,20 @@ async function assertReferencesExist({ estimateId, customerId }) {
 }
 
 /**
- * Runs `write(conn, contextKey)` that inserts a row for this context. When the context names both an estimate and a customer, the
- * write runs in a SHORT transaction that first locks the estimate row (FOR SHARE: a customer merge cannot change it
- * until we commit), rechecks that its customer is still the one supplied, writes, and commits. The check and the insert
- * are therefore atomic. This is the only transaction in the flow, and it holds no lock during any network I/O.
+ * Runs `write(conn, contextKey)` that inserts a row for this context. When the context names an estimate, the write
+ * runs in a SHORT transaction that first locks the estimate row FOR SHARE, writes, and commits. The lock does two jobs:
+ *   - a hide-or-show save for the estimate (FOR UPDATE on the same row, saveUnderEstimate) never overlaps the insert,
+ *     so the new read starts with the estimate's choice as it stands and the save's write to every read never misses it;
+ *   - with a customer supplied too, a customer merge cannot change the estimate until we commit: its customer is
+ *     rechecked under the lock, so the check and the insert are atomic.
+ * These are the only transactions in the read flow, and they hold no lock during any network I/O.
  */
 async function writeOwned(ctx, write) {
-  if (!(ctx.estimateId && ctx.customerId)) return write(db, contextKey(ctx));
+  if (!ctx.estimateId) return write(db, contextKey(ctx));
   return db.transaction(async (trx) => {
     const estimate = await trx('estimates').where({ id: ctx.estimateId }).forShare().first('customer_id');
     if (!estimate) throw referenceError('unknown_reference', 'unknown estimates reference');
+    if (!ctx.customerId) return write(trx, contextKey(ctx));
     if (ownerMismatch(estimate.customer_id, ctx)) throw referenceError('reference_mismatch', 'the estimate belongs to another customer');
     // The key is derived from the estimate as locked here, so it can never disagree with who owns it at write time.
     return write(trx, contextKey({ ...ctx, estimateOwned: !!estimate.customer_id }));
@@ -488,9 +516,10 @@ function settleOutcome(outcome) {
 // to every other request before the image fetch starts, and no connection stays open afterwards.
 async function insertClaim(key, county, ctx) {
   const src = IMAGE_SOURCES[county];
-  const rows = await writeOwned(ctx, (conn, contextKeyToWrite) => conn(TABLE).insert({
+  const rows = await writeOwned(ctx, async (conn, contextKeyToWrite) => conn(TABLE).insert({
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
+    hide_on_estimate: await pointsHiddenFor(conn, ctx.estimateId),
     context_key: contextKeyToWrite,
     lookup_key: key,
     county,
@@ -695,26 +724,112 @@ function validateTechPins(pins) {
   return out;
 }
 
+// The longest address a points save may name (the estimate's own address column is far shorter in practice).
+const MAX_POINTS_ADDRESS = 300;
+
+// The home a points save names: trimmed text of 1 to MAX_POINTS_ADDRESS characters, else code 'address_missing'.
+function pointsAddressFrom(address) {
+  const text = typeof address === 'string' ? address.trim() : '';
+  if (!text || text.length > MAX_POINTS_ADDRESS) throw Object.assign(new Error('These points name no address'), { code: 'address_missing' });
+  return text;
+}
+
+// A technician's note is free text that the customer estimate prints. It passes the complete customer-copy screen
+// (AGENTS.md: access codes, "safe", "toxic", "poison", "infestation" and the other banned wording) where it is stored
+// and again where it is shown.
+const noteAllowed = (note) => !note || customerCopyViolations(note).length === 0;
+const standardLabel = (type) => PIN_LABELS[type] || PIN_LABELS.other;
+/** A stored customer label as it may be shown now: itself while it passes the screen, else the point's standard label. */
+const shownPinLabel = (type, label) => (label && customerCopyViolations(label).length === 0 ? String(label) : standardLabel(type));
+
+/**
+ * The staff answer for a read, plus `estimate_customer_id`: the customer who holds the read's estimate now (null for
+ * none; absent when the read has no estimate). The panel sends it back with a points save (expected_holder), so a save
+ * edited while another customer held the estimate is refused (pointsCustomer).
+ */
+async function withHolder(read) {
+  if (!read?.estimate_id) return read;
+  const estimate = await db('estimates').where({ id: read.estimate_id }).first('customer_id');
+  return { ...read, estimate_customer_id: estimate?.customer_id || null };
+}
+
 const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && Number.isFinite(c.lng)
   && Math.abs(c.lat) <= 90 && Math.abs(c.lng) <= 180;
 
 /**
+ * A save that needs the read's estimate: a points list or clear, or the hide-or-show choice. In ONE transaction it locks
+ * the read's estimate row (FOR UPDATE) first, then saves.
+ *  - Points are confirmed for the customer who holds the estimate now (pointsCustomer, checked under the lock): the
+ *    editor, the estimate and the read must agree on that customer, or the save is refused and writes nothing. A read
+ *    made with the estimate alone names no customer, so a points save (a list or a clear) writes the estimate's
+ *    customer on it. The customer estimate shows a read's points only while the estimate has that same customer
+ *    (estimate-roof-points.js ownRead). An estimate with no customer leaves the read as it is.
+ *  - Hide or show is the estimate's choice, not one photo's: it is written to every other read of the estimate.
+ * The lock comes first, so two saves on two reads of one estimate run one after the other (no deadlock on each other's
+ * rows), and a read being created for the estimate (FOR SHARE in writeOwned) is either committed before the write to
+ * every read or starts after it with the new choice. A read with no estimate is saved as it is.
+ */
+const idOf = (v) => (v ? String(v).toLowerCase() : null);
+
+/**
+ * What a points save writes about the customer, decided while the estimate row is locked. Three parties must agree:
+ *  - the editor: `expectedHolder` is the customer the server named as the estimate's holder when the panel loaded the
+ *    read (withHolder). If the estimate has another holder now, the points on screen were edited for someone else:
+ *    code 'holder_changed', and staff load the read again.
+ *  - the read: one that names another customer than the estimate's holder is that customer's. Its points are not
+ *    changed for this holder: code 'read_other_customer'.
+ *  - the estimate: its holder is written on a read that names none.
+ * Both codes write nothing.
+ */
+function pointsCustomer(read, estimate, expectedHolder) {
+  const named = idOf(read.customer_id);
+  const holder = idOf(estimate.customer_id);
+  if (idOf(expectedHolder) !== holder) throw Object.assign(new Error("The estimate's customer changed since the points were loaded"), { code: 'holder_changed' });
+  if (named && holder && named !== holder) throw Object.assign(new Error('This roof read was saved for another customer'), { code: 'read_other_customer' });
+  return named || !holder ? {} : { customer_id: estimate.customer_id };
+}
+
+function saveUnderEstimate(id, save, { points, hidden, expectedHolder }) {
+  return db.transaction(async (trx) => {
+    const target = await trx(TABLE).where({ id }).first('estimate_id');
+    const estimate = target?.estimate_id ? await trx('estimates').where({ id: target.estimate_id }).forUpdate().first('id', 'customer_id') : null;
+    // Read after the lock: another points save may have named the read's customer while this one waited for it.
+    const own = points && estimate ? await trx(TABLE).where({ id }).first('customer_id') : null;
+    const saved = await save(trx, own ? pointsCustomer(own, estimate, expectedHolder) : {});
+    if (hidden !== undefined && saved?.estimate_id) {
+      await trx(TABLE).where({ estimate_id: saved.estimate_id }).whereNot({ id: saved.id }).update({ hide_on_estimate: hidden });
+    }
+    return saved;
+  });
+}
+
+/**
  * Save the technician's answer. count / flags as before (flags merged in SQL, so two tabs keep both). hideOnEstimate:
- * staff hid the points from this estimate's customer page. pins: the confirmed points (validateTechPins output), saved
+ * staff hid the points from this estimate's customer page (the choice is the estimate's: it is written to every read
+ * of the estimate, see saveUnderEstimate). pins: the confirmed points (validateTechPins output), saved
  * whole (null clears them). Pins are drawn on the read's crop, so the caller also names the crop centre it drew on
  * ({ lat, lng }, the panel's map point): it must hash to this row's lookup_key, so no other roof's photo can carry these
  * pins, and the rounded centre is stored so the estimate can rebuild the same county crop. A centre that does not match
- * throws code 'crop_mismatch' and writes nothing. Returns the public read, or null for an unknown id.
+ * throws code 'crop_mismatch' and writes nothing. The caller names the home too: `address`, the address the staff
+ * lookup that gave that map point ran for. It is stored with the points (points_address), and the customer estimate
+ * shows them only while the estimate has that address. It is never read from the estimate row here: the estimate may
+ * have moved to another home while this photo was open. No address throws code 'address_missing' and writes nothing.
+ * Returns the public read, or null for an unknown id.
  */
-async function saveTechCount(id, { count, flags, pins, crop, expectedPins, hideOnEstimate } = {}) {
+async function saveTechCount(id, { count, flags, pins, crop, address, expectedPins, expectedHolder, hideOnEstimate } = {}) {
   const patch = {};
   if (count !== undefined) patch.tech_final_count = count;
   // Merged in SQL in one statement, so two saves of different types (or two tabs) keep both; a type sent again is replaced.
   if (flags !== undefined) patch.tech_final_flags = db.raw("COALESCE(tech_final_flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify(flags)]);
   if (hideOnEstimate !== undefined) patch.hide_on_estimate = Boolean(hideOnEstimate);
   const where = { id };
+  // A clear leaves crop_lat / crop_lng in place: they mark the read as one whose points the technician set, so the clear
+  // stands at the next send and an older read's points do not come back (estimate-roof-points.js newestPointsRead).
   if (pins === null) patch.tech_pins = null;
   else if (pins !== undefined) {
+    const pointsAddress = pointsAddressFrom(address);
+    // The notes go on the customer estimate, so each passes the complete customer-copy screen before it is stored.
+    if (pins.some((p) => !noteAllowed(p.note))) throw Object.assign(new Error('A point note cannot go on the customer estimate'), { code: 'note_not_allowed' });
     const row = await db(TABLE).where({ id }).first('id', 'image_source', 'lookup_key', 'status', 'ai_tier');
     if (!row) return null;
     // Only a finished, readable read can carry points: the customer estimate shows points from those rows only, and a
@@ -728,16 +843,24 @@ async function saveTechCount(id, { count, flags, pins, crop, expectedPins, hideO
     patch.tech_pins = JSON.stringify(pins);
     patch.crop_lat = roundCentre(crop.lat);
     patch.crop_lng = roundCentre(crop.lng);
+    // The home this photo is of, from the same lookup as the centre just checked. A send freezes the points only while
+    // the estimate has this address (estimate-roof-points.js), so an estimate moved to another home never shows this roof.
+    patch.points_address = pointsAddress;
     // lookup_key never changes, so this also proves the row still names the crop that was checked.
     where.lookup_key = row.lookup_key;
   }
-  let query = db(TABLE).where(where);
   // A points save or clear names the list it was edited from (expectedPins, the list the panel last loaded; null = none
   // saved). The UPDATE only lands while the row still holds exactly that list, so a stale tab cannot erase points another
   // tab saved in between: it throws code 'points_changed' and writes nothing.
   const checked = pins !== undefined && expectedPins !== undefined;
-  if (checked) query = query.whereRaw('tech_pins IS NOT DISTINCT FROM ?::jsonb', [expectedPins === null ? null : JSON.stringify(expectedPins)]);
-  const [row] = await query.update(patch).returning('*');
+  const save = async (conn, more = {}) => {
+    let query = conn(TABLE).where(where);
+    if (checked) query = query.whereRaw('tech_pins IS NOT DISTINCT FROM ?::jsonb', [expectedPins === null ? null : JSON.stringify(expectedPins)]);
+    const [saved] = await query.update({ ...patch, ...more }).returning('*');
+    return saved;
+  };
+  const points = pins !== undefined;
+  const row = points || hideOnEstimate !== undefined ? await saveUnderEstimate(id, save, { points, hidden: patch.hide_on_estimate, expectedHolder }) : await save(db);
   if (row) return publicRead(row);
   if (checked && await db(TABLE).where({ id }).first('id')) {
     throw Object.assign(new Error('The points changed since they were loaded'), { code: 'points_changed' });
@@ -758,8 +881,10 @@ function cropImageUrl(row) {
 /**
  * What the customer estimate may show from one read row (choice 4A), or null: only a finished read with at least one
  * confirmed point, a stored crop centre, and not hidden by staff. Points are numbered in the order the technician saved
- * them; each carries its customer-facing label (PIN_LABELS, plus ", <note>" when the technician typed one) and its
- * action ('seal', or 'trim back' for a branch).
+ * them; each carries its customer-facing label (PIN_LABELS, plus ", <note>" when the technician typed one and the note
+ * passes the customer-copy screen: a stored note that fails it is left out, and the point keeps its standard label) and
+ * its action (PIN_ACTIONS: 'screen' for a roof vent, a gable vent and a chimney or flue, 'seal around' for a vent pipe,
+ * 'trim back' for a branch, 'seal' for the rest).
  */
 function customerPointsFromRow(row) {
   if (!row || row.status !== STATUS_DONE || row.ai_tier === TIER_UNKNOWN || row.hide_on_estimate) return null;
@@ -775,7 +900,7 @@ function customerPointsFromRow(row) {
       x: p.x,
       y: p.y,
       type: p.type,
-      label: p.note ? `${PIN_LABELS[p.type] || PIN_LABELS.other}, ${p.note}` : (PIN_LABELS[p.type] || PIN_LABELS.other),
+      label: p.note && noteAllowed(p.note) ? `${standardLabel(p.type)}, ${p.note}` : standardLabel(p.type),
       action: pinAction(p.type),
     })),
   };
@@ -788,6 +913,7 @@ module.exports = {
   REUSE_DAYS,
   FALLBACK_COST_CENTS,
   contextKey,
+  matchesContext,
   cropBounds,
   exportRequestUrl,
   fetchAerial,
@@ -804,4 +930,6 @@ module.exports = {
   isPlainObject,
   cropImageUrl,
   customerPointsFromRow,
+  shownPinLabel,
+  withHolder,
 };
