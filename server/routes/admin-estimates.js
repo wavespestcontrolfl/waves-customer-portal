@@ -6002,17 +6002,39 @@ async function followUpRefusal(estimate) {
 
 const followUpLongUrl = (estimate) => `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
 
-// The ready text says "your estimate is here: <link>", so the link must open the estimate for the customer.
-function followUpLinkOpens(estimate, now = Date.now()) {
-  if (!estimate.token || !['sent', 'viewed'].includes(estimate.status)) return false;
-  return !estimate.expires_at || new Date(estimate.expires_at).getTime() > now;
+// Does this estimate's link open the estimate for the customer? Judged as the proposal PDF route judges it: the public
+// page's own predicate, then the call-side verdict (a pending linkage invalidation, a call-side block).
+async function followUpLinkViewable(estimate) {
+  if (!estimate.token || !isEstimateCustomerViewable(estimate)) return false;
+  const data = parseEstimateData(estimate.estimate_data);
+  return !(await callSideBlockForEstimateData(db, data, { estimateStatus: estimate.status }));
+}
+
+// The ready text says "your estimate is here: <link>": only for an open sent estimate (sent or viewed, where the Follow
+// Up button shows) whose expiry date, when it has one, is readable and still ahead.
+async function followUpDraftOffersLink(estimate, now = Date.now()) {
+  if (!['sent', 'viewed'].includes(estimate.status)) return false;
+  if (estimate.expires_at && !(new Date(estimate.expires_at).getTime() > now)) return false;
+  return followUpLinkViewable(estimate);
+}
+
+// The send: a text that carries this estimate's link is refused when the link no longer opens (the estimate expired or
+// was pulled while the box was open). A text without the link is not judged here.
+async function followUpDeadLinkRefusal(estimate, message) {
+  if (typeof message !== 'string' || !estimate.token || !message.includes(followUpLongUrl(estimate))) return null;
+  if (await followUpLinkViewable(estimate)) return null;
+  return {
+    status: 409,
+    body: {
+      error: 'The estimate link in this text no longer opens for the customer. Remove the link, or send the estimate again first.',
+      code: 'ESTIMATE_LINK_NOT_VIEWABLE',
+    },
+  };
 }
 
 // GET /api/admin/estimates/:id/follow-up-draft — the ready text for the Follow Up button. Read only: it sends nothing,
 // mints no short link and writes no row. { message: null } = the box keeps its own default words, which carry no link:
-// the send would be refused, the estimate has no link, it is not an open sent estimate (sent or viewed, where the
-// Follow Up button shows), or its expiry date has passed (the nightly sweep may not have marked it expired yet, and the
-// link would open the expired page: the public page's own rule, estimate-public.js).
+// the send would be refused, or the link would not open the estimate for the customer (followUpDraftOffersLink).
 router.get('/:id/follow-up-draft', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
@@ -6024,7 +6046,7 @@ router.get('/:id/follow-up-draft', async (req, res, next) => {
       if (!err.statusCode) throw err;
       refused = true;
     }
-    if (refused || !followUpLinkOpens(estimate)) return res.json({ message: null });
+    if (refused || !(await followUpDraftOffersLink(estimate))) return res.json({ message: null });
     const [firstName, serviceName] = await Promise.all([
       estimateGreetingFirstName(db, estimate),
       followUpServiceNameFor(estimate),
@@ -6038,7 +6060,7 @@ router.post('/:id/follow-up', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    const refusal = await followUpRefusal(estimate);
+    const refusal = (await followUpRefusal(estimate)) || (await followUpDeadLinkRefusal(estimate, req.body.message));
     if (refusal) return res.status(refusal.status).json(refusal.body);
 
     const longUrl = followUpLongUrl(estimate);

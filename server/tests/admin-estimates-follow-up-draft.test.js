@@ -47,6 +47,11 @@ jest.mock('../services/admin-estimate-persistence', () => ({
 jest.mock('../routes/estimate-public', () => ({
   acceptanceServiceLists: jest.fn(),
   bookingServiceFor: jest.fn(),
+  isEstimateCustomerViewable: jest.fn(),
+}));
+jest.mock('../utils/estimate-claim-sql', () => ({
+  ...jest.requireActual('../utils/estimate-claim-sql'),
+  callSideBlockForEstimateData: jest.fn(),
 }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({
@@ -78,6 +83,8 @@ const { estimateGreetingFirstName } = require('../utils/greeting-first-name');
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { emailedServiceName } = require('../services/estimate-emailed-service-name');
 const { followupEmailVars } = require('../services/estimate-followup-copy');
+const { isEstimateCustomerViewable } = require('../routes/estimate-public');
+const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 
 function routeHandler(path, method = 'post') {
   const layer = router.stack.find((entry) => (
@@ -140,6 +147,8 @@ describe('GET /:id/follow-up-draft', () => {
     db.fn = { now: jest.fn() };
     db.raw = jest.fn();
     estimateDeliverableUnderGate.mockResolvedValue(true);
+    isEstimateCustomerViewable.mockReturnValue(true);
+    callSideBlockForEstimateData.mockResolvedValue(null);
     estimateGreetingFirstName.mockResolvedValue('Dana');
     followupEmailVars.mockReturnValue({ service_label: 'home protection' });
     emailedServiceName.mockResolvedValue(null);
@@ -195,6 +204,19 @@ describe('GET /:id/follow-up-draft', () => {
     });
   });
 
+  test('message is null when the public page would refuse the link', async () => {
+    isEstimateCustomerViewable.mockReturnValue(false);
+    const { res } = await draft(estimateRow());
+    expect(res.json).toHaveBeenCalledWith({ message: null });
+  });
+
+  test('message is null when the call-side verdict blocks the link', async () => {
+    callSideBlockForEstimateData.mockResolvedValue('call_linkage_stale');
+    const { res } = await draft(estimateRow({ status: 'viewed' }));
+    expect(res.json).toHaveBeenCalledWith({ message: null });
+    expect(callSideBlockForEstimateData).toHaveBeenCalledWith(db, expect.anything(), { estimateStatus: 'viewed' });
+  });
+
   test('a viewed estimate with an expiry date still ahead gets the ready text', async () => {
     const { res } = await draft(estimateRow({ status: 'viewed', expires_at: new Date(Date.now() + 86400000).toISOString() }));
     expect(res.json).toHaveBeenCalledWith({
@@ -247,6 +269,8 @@ describe('POST /:id/follow-up', () => {
     db.fn = { now: jest.fn().mockReturnValue('now') };
     db.raw = jest.fn().mockReturnValue('raw');
     estimateDeliverableUnderGate.mockResolvedValue(true);
+    isEstimateCustomerViewable.mockReturnValue(true);
+    callSideBlockForEstimateData.mockResolvedValue(null);
     estimateGreetingFirstName.mockResolvedValue('Dana');
     leadIdForEstimate.mockResolvedValue(null);
     shortenOrPassthrough.mockResolvedValue(SHORT);
@@ -261,6 +285,26 @@ describe('POST /:id/follow-up', () => {
       estimateId: 'estimate-fixture',
     }));
     expect(res.json).toHaveBeenCalledWith({ success: true });
+  });
+
+  test.each([
+    ['the public page would refuse the link', () => isEstimateCustomerViewable.mockReturnValue(false)],
+    ['the call-side verdict blocks the link', () => callSideBlockForEstimateData.mockResolvedValue('call_linkage_stale')],
+  ])('a text that carries the link is refused (409) and nothing is sent when %s', async (_label, arrange) => {
+    arrange();
+    const { res, query } = await send(estimateRow(), { message: `Hi Dana, here it is: ${LONG} Any questions?` });
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'ESTIMATE_LINK_NOT_VIEWABLE' }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+    expect(query.update).not.toHaveBeenCalled();
+  });
+
+  test('a text without the link is not judged by the link check', async () => {
+    isEstimateCustomerViewable.mockReturnValue(false);
+    const { res } = await send(estimateRow(), { message: 'Hi Dana, any questions?' });
+    expect(res.status).not.toHaveBeenCalledWith(409);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
   test('a typed message without the link is sent as typed', async () => {

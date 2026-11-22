@@ -428,9 +428,11 @@ export function useCallOutcomes({ setEstimates, refresh, onNotInterested }) {
     },
     [setEstimates, refresh, onNotInterested],
   );
+  // A follow-up text sent from the row is the contact: the hold ends, as it does on an outcome tap.
+  const release = useCallback((id) => setHeld((prev) => withoutKey(prev, id)), []);
   return useMemo(
-    () => ({ hold, onCallToday, save, saving }),
-    [hold, onCallToday, save, saving],
+    () => ({ hold, onCallToday, release, save, saving }),
+    [hold, onCallToday, release, save, saving],
   );
 }
 // The list filter, with Call today widened to the rows a call from the list still holds.
@@ -2568,6 +2570,7 @@ function EstimatePipelineViewV2({
           estimate={followUpTarget}
           onClose={() => setFollowUpTarget(null)}
           onSent={() => {
+            callOutcomes.release(followUpTarget.id);
             setFollowUpTarget(null);
             refreshEstimates();
           }}
@@ -4927,12 +4930,14 @@ function EstimatesMobileListView({
           }}
         />
       )}
-      {/* Opened by a Call today row's "Follow up" tap. A sent text stamps the estimate, which takes the row off Call today. */}
+      {/* Opened by a Call today row's "Follow up" tap. A sent text stamps the estimate, which takes the row off Call today
+          (a row a call from the list was holding too). */}
       {followUpTarget && (
         <FollowUpModalV2
           estimate={followUpTarget}
           onClose={() => setFollowUpTarget(null)}
           onSent={() => {
+            callOutcomes.release(followUpTarget.id);
             setFollowUpTarget(null);
             refreshEstimates();
           }}
