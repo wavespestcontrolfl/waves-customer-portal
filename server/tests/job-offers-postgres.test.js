@@ -1953,6 +1953,12 @@ jest.setTimeout(120000);
           return offer;
         }
 
+        // The checklist has four items while staff Google sign-in is off: these tests run that way whatever the
+        // environment holds, and the nested suite at the end turns it on.
+        let signinGate;
+        beforeAll(() => { signinGate = process.env.GATE_STAFF_GOOGLE_SIGNIN; process.env.GATE_STAFF_GOOGLE_SIGNIN = 'false'; });
+        afterAll(() => { if (signinGate === undefined) delete process.env.GATE_STAFF_GOOGLE_SIGNIN; else process.env.GATE_STAFF_GOOGLE_SIGNIN = signinGate; });
+
         beforeEach(async () => {
           // The suite keeps its rows (one root transaction): the hires of earlier tests are not this test's. Their
           // items are done and their bells are closed. Only rows of the suite's own applications are written.
