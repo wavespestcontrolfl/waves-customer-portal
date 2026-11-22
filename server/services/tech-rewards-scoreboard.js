@@ -379,6 +379,8 @@ const GROSS_LINE_KINDS = ['review_bonus', 'commission', 'health_allowance'];
  * not readable from today's rows, whatever order they are put in (a check with an earlier pay date can be finalized later,
  * across a tax year), so it is never rebuilt from other checks. A row with no stored figure (a check priced before the pay
  * run stored one) is read by what the row itself proves:
+ * - Nothing to split: the week paid no premium, or no ordinary line of the check covers it (without its Tech Rewards lines
+ *   the check would have paid nothing for that week, whatever it made up). The ordinary part is exactly nothing.
  * - The row shows no earlier pay (no earlierAllocatedCents, no earlierPremiumCents: the pay run writes them whenever a
  *   finalized check had paid line pay or premium for the week, and before it wrote them it priced every check from its own
  *   lines alone). The check priced its lines for the week alone, so its ordinary lines priced alone, from the hours the row
@@ -391,17 +393,23 @@ function ordinaryPremium(lines, storedWeeks) {
   const techKinds = new Set(TECH_REWARD_KINDS);
   const spanOf = (line) => ({ amountCents: line.cents, weekStart: line.weekStart, coversFrom: line.coversFrom || null, coversTo: line.coversTo || null });
   const rewardWeeks = new Set(lines.filter((line) => techKinds.has(line.kind)).flatMap((line) => weeksOfLine(spanOf(line))));
+  // a check with no Tech Rewards line keeps every week as it stored it: none of its lines is read any further
+  if (!rewardWeeks.size) return { weeks: storedWeeks.map((w) => ({ weekStart: w.weekStart, premiumCents: w.premiumCents })), excludedCents: 0, unsplitWeeks: [] };
   const noFigure = (w) => rewardWeeks.has(w.weekStart) && w.ordinaryPremiumCents == null;
+  // the check's other lines and the weeks they cover: read only for a row with no stored figure
+  const ordinaryLines = storedWeeks.some(noFigure) ? lines.filter((line) => !techKinds.has(line.kind) && line.cents > 0).map(spanOf) : [];
+  const ordinaryWeeks = new Set(ordinaryLines.flatMap((line) => weeksOfLine(line)));
+  const nothingToSplit = (w) => w.premiumCents === 0 || !ordinaryWeeks.has(w.weekStart);
   const paidBefore = (w) => w.earlierAllocatedCents != null || w.earlierPremiumCents != null;
   // the rows with no stored figure that show no earlier pay: the check's ordinary lines, priced alone from the row's hours
-  const alone = storedWeeks.filter((w) => noFigure(w) && !paidBefore(w));
+  const alone = storedWeeks.filter((w) => noFigure(w) && !nothingToSplit(w) && !paidBefore(w));
   const pricedAlone = new Map((alone.length ? lineOvertimePremium({
     weeks: alone.map((w) => ({
       weekStart: w.weekStart,
       regularMinutes: (Number(w.workedMinutes || 0) - Number(w.overtimeMinutes || 0)).toFixed(2),
       overtimeMinutes: Number(w.overtimeMinutes || 0).toFixed(2),
     })),
-    lines: lines.filter((line) => !techKinds.has(line.kind) && line.cents > 0).map(spanOf),
+    lines: ordinaryLines,
   }).weeks : []).map((w) => [w.weekStart, w.premiumCents]));
   const weeks = [];
   const unsplitWeeks = [];
@@ -410,6 +418,7 @@ function ordinaryPremium(lines, storedWeeks) {
     const covered = rewardWeeks.has(w.weekStart);
     let ordinary = w.premiumCents;
     if (covered && !noFigure(w)) ordinary = Math.max(0, toCents(w.ordinaryPremiumCents));
+    else if (covered && nothingToSplit(w)) ordinary = 0;
     else if (covered && !paidBefore(w)) ordinary = pricedAlone.get(w.weekStart) || 0;
     else if (covered) {
       ordinary = 0;

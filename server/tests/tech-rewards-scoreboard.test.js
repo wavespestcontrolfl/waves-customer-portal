@@ -114,6 +114,16 @@ describe('ordinaryPremium: the overtime a check paid for its ordinary lines only
         .toEqual({ weeks: [{ weekStart: '2026-05-04', premiumCents: 1000 }], excludedCents: 3000, unsplitWeeks: [] });
       expect(ordinaryPremium([commission], [row])).toEqual({ weeks: [{ weekStart: '2026-05-04', premiumCents: 4000 }], excludedCents: 0, unsplitWeeks: [] });
     });
+
+    test('nothing to split is proven nothing, with earlier pay on the row too: the bonus is the check\'s only line for the week, or the week paid no premium', () => {
+      const row = { ...stored[0], earlierAllocatedCents: 600, earlierPremiumCents: 33 };
+      // without the bonus the check would have paid nothing for the week
+      expect(ordinaryPremium([reward], [row])).toEqual({ weeks: [], excludedCents: 4000, unsplitWeeks: [] });
+      // its commission is for another week
+      expect(ordinaryPremium([{ ...commission, weekStart: '2026-04-27' }, reward], [row])).toEqual({ weeks: [], excludedCents: 4000, unsplitWeeks: [] });
+      // a week with no overtime paid no premium: there is nothing to split
+      expect(ordinaryPremium([commission, reward], [{ ...row, premiumCents: 0 }])).toEqual({ weeks: [], excludedCents: 0, unsplitWeeks: [] });
+    });
   });
 
   describe('one rule: the ordinary part is what the check would have paid without its Tech Rewards lines, stored when the pay run prices the check', () => {

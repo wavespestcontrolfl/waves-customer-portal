@@ -1507,7 +1507,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await notesOf(run.id)).toEqual([stayWaits('Sample Alpha', 'no finalized paycheck holds pay of theirs for the 12 months it is worked out from')]);
     });
 
-    it('never pays from an overtime split it cannot prove: an older paycheck with a bonus line, other line pay and earlier pay for the week makes the bonus wait for review, and one with no earlier pay is read from its own row', async () => {
+    it('never pays from an overtime split it cannot prove: an older paycheck with a bonus line, other line pay and earlier pay for the week makes the bonus wait for review; one with no earlier pay, or with the bonus line alone, is read from its own row', async () => {
       const WEEK = '2026-11-09';
       // An older check, for the week of Nov 16, with no stored split: it paid a 6.00 commission and a 6.00 gift line for WEEK
       // (45 h worked, 5 of them overtime) and 67 of premium for the two. `earlier`: what its week row says earlier checks paid.
@@ -1533,6 +1533,23 @@ postgres('tech rewards pay lines: the December gift', () => {
       await mixedCheck(alpha, { earlierAllocatedCents: 600, earlierPremiumCents: 33 });
       // Bravo's row shows none: the check priced its lines for the week alone, so the commission alone earned 33.33 -> 33
       await mixedCheck(bravo, {});
+      // Charlie: WEEK's own check paid the 6.00 commission and its 33. The older check that followed holds ONLY the gift line
+      // for WEEK, with that earlier pay on its row and 34 of premium. Without the gift it would have paid nothing for the
+      // week, so there is nothing to split and nothing to review.
+      const charlie = await stayTech('Sample Charlie');
+      await paidWeek(charlie, '2026-11-02');
+      await paidLine(charlie, WEEK, 600, WEEK, 33, { gross_cents: 88000 + 600 + 33 });
+      await approvedWeek(charlie, EARLY_WEEK);
+      const giftRun = await paidWeek(charlie, '2026-11-16', {
+        gross_cents: 88000 + 600 + 34,
+        tech_rewards_cents: 600,
+        line_overtime_premium_cents: 34,
+        calc_snapshot: JSON.stringify({ lineOvertimeWeeks: [{ weekStart: WEEK, workedMinutes: 2700, overtimeMinutes: 300, allocatedCents: 600, premiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33 }] }),
+      });
+      const giftCheck = await trx('payroll_checks').where({ run_id: giftRun, technician_id: charlie }).first('id');
+      await trx('payroll_pay_lines').insert({
+        technician_id: charlie, kind: 'december_gift', amount_cents: 600, earned_week_start: '2026-11-16', covers_from: WEEK, covers_to: '2026-11-15', status: 'paid', check_id: giftCheck.id,
+      });
       const run = await draft(EARLY_WEEK);
       expect(await linesOf(alpha)).toHaveLength(0);
       expect(checkOf(run, alpha)).not.toHaveProperty('techRewardsCents');
@@ -1540,6 +1557,8 @@ postgres('tech rewards pay lines: the December gift', () => {
         'an older paycheck paid a bonus line and other line pay for the week of Nov 9, 2026 and kept no split of that week\'s overtime between them, so work this bonus out by hand')]);
       // Bravo: three weeks of wages, the 6.00 commission and its 33; not the gift line and not its 34. 2% of 2,646.33 = 52.93
       expect(await lineOf(bravo)).toMatchObject({ status: 'open', amount_cents: 5293, note: `2% of $2,646.33, ${PERIOD}` });
+      // Charlie: three weeks of wages, the commission and its 33 from WEEK's own check; none of the gift's 34. The same base.
+      expect(await lineOf(charlie)).toMatchObject({ status: 'open', amount_cents: 5293, note: `2% of $2,646.33, ${PERIOD}` });
       // the bonus that waits never holds the run
       await finalize(run.id);
       expect(await linesOf(alpha)).toHaveLength(0);
