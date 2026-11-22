@@ -222,13 +222,10 @@ router.post('/inbound/:customerId/dismiss', async (req, res, next) => {
 // =========================================================================
 router.get('/thank-you-notes', async (req, res, next) => {
   try {
-    // ?limit= asks for a longer list than the first batch ("Show more"). Absent: the service's batch size.
-    const { limit } = req.query;
-    if (limit !== undefined && !/^[1-9]\d{0,8}$/.test(String(limit))) {
-      return res.status(400).json({ error: 'limit must be a whole number, 1 or more' });
-    }
-    res.json(await thankYouNotes.listThankYouNotes(limit === undefined ? {} : { limit: Number(limit) }));
-  } catch (err) { next(err); }
+    // One page of 200. ?after= is the nextCursor of the page before ("Show more"); absent or empty: the first
+    // page. The service refuses a value that is not one of its cursors (400).
+    res.json(await thankYouNotes.listThankYouNotes({ after: req.query.after || null }));
+  } catch (err) { sendInboundError(res, err, next); }
 });
 
 // POST /thank-you-notes/:referralId/written — the office wrote the note; it leaves the list.

@@ -365,7 +365,8 @@ function adminPost(path, body) {
     body: JSON.stringify(body || {}),
   }).then(async (r) => {
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    // The server's reason code rides on the error, for a caller that acts on one (the thank-you note card).
+    if (!r.ok) throw Object.assign(new Error(data.error || `HTTP ${r.status}`), { code: data.code });
     return data;
   });
 }
@@ -661,25 +662,27 @@ function InboundReferralCard({ item, step2, onDone, flash }) {
 // Step 2: one handwritten thank-you note to the member for every friend who books. The card lists the member and
 // the mailing address only: the note never names the friend, so the friend is not on this card or in its data.
 // It reads its own list when the Queue opens and shows nothing when no note is owed.
-const THANK_YOU_NOTES_BATCH = 200; // the first read asks for this many notes; "Show more" asks for this many more
+// One page of the list (200 notes, oldest first). `after` is the nextCursor of the page before; none: the first.
+const thankYouNotesPage = (after = "") => af(`/admin/referrals/thank-you-notes?after=${encodeURIComponent(after)}`);
+
 function ThankYouNotes({ flash }) {
   const isMobile = useIsMobile();
   const [notes, setNotes] = useState([]);
-  const [total, setTotal] = useState(0);
-  const [limit, setLimit] = useState(THANK_YOU_NOTES_BATCH);
+  const [total, setTotal] = useState(0); // every note owed, not only the rows on screen
+  const [nextCursor, setNextCursor] = useState(null); // set while the server holds a page after the rows on screen
   const [failed, setFailed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [busyId, setBusyId] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     let current = true;
-    af(`/admin/referrals/thank-you-notes?limit=${limit}`)
-      .then((r) => {
+    thankYouNotesPage()
+      .then((page) => {
         if (!current) return;
-        const rows = r.notes || [];
-        setNotes(rows);
-        // The count of every note owed, not of the rows on screen.
-        setTotal(Math.max(Number(r.total) || 0, rows.length));
+        setNotes(page.notes || []);
+        setTotal(Number(page.total) || 0);
+        setNextCursor(page.nextCursor || null);
         setFailed(false);
       })
       .catch(() => {
@@ -688,31 +691,56 @@ function ThankYouNotes({ flash }) {
     return () => {
       current = false;
     };
-  }, [reloadKey, limit]);
+  }, [reloadKey]);
+
+  // The next page goes below the rows on screen; the rows already there keep their place.
+  const showMore = async () => {
+    if (loadingMore || !nextCursor) return;
+    setLoadingMore(true);
+    try {
+      const page = await thankYouNotesPage(nextCursor);
+      setNotes((rows) => {
+        const onScreen = new Set(rows.map((row) => row.referralId));
+        return [...rows, ...(page.notes || []).filter((row) => !onScreen.has(row.referralId))];
+      });
+      setTotal(Number(page.total) || 0);
+      setNextCursor(page.nextCursor || null);
+    } catch (e) {
+      flash("Error: " + e.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  // The note leaves the card and the count. If it was the last row on screen and the server holds more, the next
+  // page comes up, so the card never stands empty while a note is owed.
+  const drop = (note) => {
+    setNotes((rows) => rows.filter((row) => row.referralId !== note.referralId));
+    setTotal((count) => Math.max(0, count - 1));
+    if (notes.length === 1) showMore();
+  };
 
   const markWritten = async (note) => {
     if (busyId) return;
     setBusyId(note.referralId);
     try {
       await adminPost(`/admin/referrals/thank-you-notes/${note.referralId}/written`);
-      setNotes((rows) => rows.filter((row) => row.referralId !== note.referralId));
-      setTotal((count) => Math.max(0, count - 1));
+      drop(note);
       flash(`Thank-you note for ${note.memberName || "the member"} marked written`);
     } catch (e) {
       flash("Error: " + e.message);
+      // The server says this note is no longer owed (the referral was rejected, the member archived): it leaves
+      // the card. Any other failure keeps the row for another try.
+      if (e.code === "NO_NOTE_OWED") drop(note);
     } finally {
       setBusyId(null);
-      // Read the list again after every answer, so the card and its count follow the server. After a refusal: a
-      // note that is no longer owed (the referral was rejected, the member archived) leaves the card, and one
-      // that only failed to save stays for another try.
-      setReloadKey((k) => k + 1);
     }
   };
 
   if (failed) {
     return <ErrorRow what="thank-you notes to write" onRetry={() => setReloadKey((k) => k + 1)} />;
   }
-  if (total === 0) return null;
+  if (total === 0 && notes.length === 0) return null;
   return (
     <div
       style={{
@@ -727,7 +755,7 @@ function ThankYouNotes({ flash }) {
     >
       <div>
         <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
-          Thank-you notes to write ({total})
+          Thank-you notes to write ({Math.max(total, notes.length)})
         </div>
         <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
           Write one note by hand to each member below. Each row is one friend who booked. Do not name the friend in
@@ -778,16 +806,17 @@ function ThankYouNotes({ flash }) {
           </button>
         </div>
       ))}
-      {total > notes.length && (
+      {nextCursor && (
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, fontSize: 14, color: D.text }}>
           <span>
-            Showing the oldest {notes.length} of {total}.
+            Showing the oldest {notes.length} of {Math.max(total, notes.length)}.
           </span>
           <button
-            onClick={() => setLimit((count) => count + THANK_YOU_NOTES_BATCH)}
+            onClick={showMore}
+            disabled={loadingMore}
             style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
           >
-            Show more
+            {loadingMore ? "Loading..." : "Show more"}
           </button>
         </div>
       )}

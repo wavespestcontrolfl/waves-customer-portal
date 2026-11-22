@@ -100,8 +100,20 @@ postgres('referral thank-you notes (live Postgres)', () => {
   // Only this test's rows: the database may hold other rows.
   const listFor = async (...referrals) => {
     const ids = new Set(referrals.map((r) => r.id));
-    return (await notes.listThankYouNotes({ limit: 100000 })).notes.filter((n) => ids.has(n.referralId));
+    return (await everyNote()).filter((n) => ids.has(n.referralId));
   };
+
+  // Every page, as the card reads them: the first, then each nextCursor until the server says there is no more.
+  async function everyNote() {
+    const all = [];
+    let after = null;
+    do {
+      const page = await notes.listThankYouNotes({ after });
+      all.push(...page.notes);
+      after = page.nextCursor;
+    } while (after);
+    return all;
+  }
 
   test('a referral converted under Step 2 puts the member on the list, with the mailing lines and the day the note became owed', async () => {
     const m = await member({ last_name: 'Listed', address_line2: 'Unit 4' });
@@ -191,43 +203,82 @@ postgres('referral thank-you notes (live Postgres)', () => {
     expect((await listFor(later, first)).map((n) => n.referralId)).toEqual([first.id, later.id]);
   });
 
-  test('one read answers the oldest `limit` notes and the count of all of them; a longer read reaches a later note with no mark', async () => {
-    const before = (await notes.listThankYouNotes({ limit: 1 })).total;
-    const m = await member();
-    // Older than any other row the database may hold.
-    const [a, b, c] = [
-      await referral(m, { thank_you_note_due_at: new Date('1990-01-01T15:00:00.000Z') }),
-      await referral(m, { thank_you_note_due_at: new Date('1990-01-02T15:00:00.000Z') }),
-      await referral(m, { thank_you_note_due_at: new Date('1990-01-03T15:00:00.000Z') }),
-    ];
-    const ids = (list) => list.notes.map((n) => n.referralId);
+  describe('pages', () => {
+    // 203 notes older than any other row the database may hold, one microsecond apart: the positions a JS Date
+    // (milliseconds) cannot tell apart. Notes 200 and 201 (the page boundary) share one stamp, so only the id
+    // orders them.
+    const stampSql = (n) => trx.raw("timestamptz '1990-01-01 00:00:00+00' + (? * interval '1 microsecond')", [n]);
+    async function seed() {
+      const m = await member({ last_name: 'Paged' });
+      const rows = [];
+      for (let n = 1; n <= 203; n += 1) rows.push(await referral(m, { thank_you_note_due_at: stampSql(n === 201 ? 200 : n) }));
+      const boundary = [rows[199], rows[200]].sort((a, b) => (a.id < b.id ? -1 : 1));
+      return { ordered: [...rows.slice(0, 199), ...boundary, ...rows.slice(201)].map((r) => r.id) };
+    }
+    const ids = (page) => page.notes.map((n) => n.referralId);
 
-    const short = await notes.listThankYouNotes({ limit: 2 });
-    expect(ids(short)).toEqual([a.id, b.id]);
-    expect(short.total).toBe(before + 3);
+    test('a page is 200 notes with the count of all of them; the next position reaches every later note once, with no mark', async () => {
+      const before = (await notes.listThankYouNotes()).total;
+      const { ordered } = await seed();
+      expect(notes.PAGE_SIZE).toBe(200);
 
-    const longer = await notes.listThankYouNotes({ limit: 3 });
-    expect(ids(longer)).toEqual([a.id, b.id, c.id]);
-    expect(longer.total).toBe(before + 3);
+      const first = await notes.listThankYouNotes();
+      expect(ids(first)).toEqual(ordered.slice(0, 200));
+      expect(first.total).toBe(before + 203);
+      expect(first.nextCursor).toMatch(/^1990-01-01T00:00:00\.000200Z,[0-9a-f-]{36}$/);
 
-    // A mark takes the note off the list and off the count.
-    await notes.markThankYouNoteWritten({ referralId: a.id });
-    const after = await notes.listThankYouNotes({ limit: 2 });
-    expect(ids(after)).toEqual([b.id, c.id]);
-    expect(after.total).toBe(before + 2);
+      // The next page starts after the boundary row: the row with the same stamp and the higher id comes first.
+      const second = await notes.listThankYouNotes({ after: first.nextCursor });
+      expect(ids(second).slice(0, 3)).toEqual(ordered.slice(200));
+      expect(second.total).toBe(before + 203);
+      if (before === 0) expect(second).toMatchObject({ nextCursor: null, notes: { length: 3 } });
 
-    // No limit named: the first batch.
-    expect(notes.PAGE_SIZE).toBe(200);
-    expect(ids(await notes.listThankYouNotes()).slice(0, 2)).toEqual([b.id, c.id]);
+      // Read to the end: every seeded note exactly once, in order.
+      const seen = (await everyNote()).map((n) => n.referralId).filter((id) => ordered.includes(id));
+      expect(seen).toEqual(ordered);
+    });
+
+    test('a mark takes a note off its page and off the count; the position of a written note still works', async () => {
+      const before = (await notes.listThankYouNotes()).total;
+      const { ordered } = await seed();
+      const first = await notes.listThankYouNotes();
+
+      // The office writes the last note of page 1: the row the position names.
+      await notes.markThankYouNoteWritten({ referralId: ordered[199] });
+      const second = await notes.listThankYouNotes({ after: first.nextCursor });
+      expect(ids(second).slice(0, 3)).toEqual(ordered.slice(200));
+      expect(second.total).toBe(before + 202);
+
+      // Page 1 read again: the note after it moves up, nothing is lost.
+      const again = await notes.listThankYouNotes();
+      expect(ids(again)).toEqual([...ordered.slice(0, 199), ordered[200]]);
+    });
+
+    test.each([
+      'nonsense', '2027-02-03T15:00:00.000Z,00000000-0000-4000-8000-000000000001', '2027-02-03T15:00:00.000000Z',
+      '2027-02-30T15:00:00.000000Z,00000000-0000-4000-8000-000000000001',
+      '0000-01-01T00:00:00.000000Z,00000000-0000-4000-8000-000000000001',
+      '2027-02-03T25:00:00.000000Z,00000000-0000-4000-8000-000000000001',
+      "2027-02-03T15:00:00.000000Z,00000000-0000-4000-8000-000000000001'; --",
+      '2027-02-03t15:00:00.000000z,00000000-0000-4000-8000-000000000001', '[object Object]',
+    ])('a position the server did not write is refused before any query: %s', async (after) => {
+      await expect(notes.listThankYouNotes({ after })).rejects.toMatchObject({ statusCode: 400, code: 'BAD_CURSOR' });
+      // The transaction is still usable: nothing reached PostgreSQL.
+      expect((await notes.listThankYouNotes()).total).toBeGreaterThanOrEqual(0);
+    });
+
+    test('a well-formed position past the end answers an empty last page', async () => {
+      const page = await notes.listThankYouNotes({ after: '9999-12-31T23:59:59.999999Z,ffffffff-ffff-4fff-8fff-ffffffffffff' });
+      expect(page).toMatchObject({ notes: [], nextCursor: null });
+    });
   });
 
-  test('no note owed: an empty list and a count of 0 for these rows', async () => {
-    const before = await notes.listThankYouNotes({ limit: 100000 });
+  test('no note owed for a row adds nothing to the list or the count', async () => {
+    const before = await notes.listThankYouNotes();
     await referral(await member(), { thank_you_note_due_at: null });
-    const after = await notes.listThankYouNotes({ limit: 100000 });
+    const after = await notes.listThankYouNotes();
     expect(after.total).toBe(before.total);
     expect(after.notes).toHaveLength(before.notes.length);
-    expect(after.total).toBe(after.notes.length);
   });
 
   test('a missing address part leaves no empty line and no stray comma, and the row says the address is not complete', async () => {

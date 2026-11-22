@@ -26,9 +26,31 @@
 const db = require('../models/db');
 
 const BOOKED_STATUSES = ['signed_up', 'credited'];
-// The list is a to-do for one person with a pen. One read answers the oldest PAGE_SIZE notes and the total; the
-// page asks for a longer list ("Show more"), so a later note is reachable without a mark on an earlier one.
+// The list is a to-do for one person with a pen. One read answers one page, oldest first, with the count of every
+// note owed and the position of the next page; the page asks for the next one ("Show more"), so a later note is
+// reachable without a mark on an earlier one, and no request reads the whole list.
 const PAGE_SIZE = 200;
+
+// A page's cursor is the position of its last row in the list's order: the owed-since stamp at the database's full
+// precision (microseconds: a JS Date would cut it to milliseconds, and a page could repeat or skip a row), then
+// the referral id. The server writes it (nextCursor) and reads it back (?after=).
+const CURSOR_STAMP_SQL = `to_char(referrals.thank_you_note_due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+const CURSOR_RE = /^((?!0000)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{6})Z,([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
+// The cursor's two parts as PostgreSQL takes them. Anything else is a 400: a hand-made value never reaches a cast.
+function readCursor(after) {
+  const match = CURSOR_RE.exec(String(after));
+  const second = match ? `${match[1]}.000Z` : '';
+  const time = new Date(second);
+  // A real calendar second: "Feb 30" parses in JS and rolls over, and PostgreSQL refuses it.
+  if (!match || Number.isNaN(time.getTime()) || time.toISOString() !== second) {
+    const err = new Error('after is not a position in this list');
+    err.statusCode = 400;
+    err.code = 'BAD_CURSOR';
+    throw err;
+  }
+  return { stamp: `${match[1]}.${match[2]}Z`, id: match[3].toLowerCase() };
+}
 
 function owedNotes(conn) {
   return conn('referrals')
@@ -54,28 +76,40 @@ function addressLines(row) {
 // (the column defaults to FL), so "some line is present" does not mean the note can be mailed.
 const addressComplete = (row) => ['address_line1', 'city', 'state', 'zip'].every((part) => clean(row[part]));
 
-// Oldest first, at most `limit` rows, with the count of every note owed (one statement, so the two agree).
-async function listThankYouNotes({ limit = PAGE_SIZE } = {}, conn = db) {
-  const rows = await owedNotes(conn)
+// One page, oldest first: at most PAGE_SIZE notes, the count of every note owed, and nextCursor when more follow
+// (null on the last page). `after` is the nextCursor of the page before.
+async function listThankYouNotes({ after = null } = {}, conn = db) {
+  const cursor = after ? readCursor(after) : null;
+  const page = owedNotes(conn)
     .join('customers', 'customers.id', 'referrals.referrer_customer_id')
     .orderBy('referrals.thank_you_note_due_at', 'asc')
     .orderBy('referrals.id', 'asc')
-    .limit(limit)
+    .limit(PAGE_SIZE + 1) // one more row than a page: it only says that a next page exists
     .select(
       'referrals.id', 'referrals.thank_you_note_due_at',
       'customers.id as member_customer_id', 'customers.first_name', 'customers.last_name',
       'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
-      conn.raw('count(*) OVER () AS owed_total'),
+      conn.raw(`${CURSOR_STAMP_SQL} AS cursor_stamp`),
     );
-  const notes = rows.map((row) => ({
-    referralId: row.id,
-    owedSince: row.thank_you_note_due_at,
-    memberCustomerId: row.member_customer_id,
-    memberName: [clean(row.first_name), clean(row.last_name)].filter(Boolean).join(' '),
-    addressLines: addressLines(row),
-    addressComplete: addressComplete(row),
-  }));
-  return { notes, total: rows.length ? Number(rows[0].owed_total) : 0 };
+  if (cursor) {
+    page.whereRaw('(referrals.thank_you_note_due_at, referrals.id) > (?::timestamptz, ?::uuid)', [cursor.stamp, cursor.id]);
+  }
+  const rows = await page;
+  const [{ total }] = await owedNotes(conn).count('* as total');
+  const shown = rows.slice(0, PAGE_SIZE);
+  const last = shown[shown.length - 1];
+  return {
+    notes: shown.map((row) => ({
+      referralId: row.id,
+      owedSince: row.thank_you_note_due_at,
+      memberCustomerId: row.member_customer_id,
+      memberName: [clean(row.first_name), clean(row.last_name)].filter(Boolean).join(' '),
+      addressLines: addressLines(row),
+      addressComplete: addressComplete(row),
+    })),
+    total: Number(total),
+    nextCursor: rows.length > PAGE_SIZE ? `${last.cursor_stamp},${last.id}` : null,
+  };
 }
 
 // The office wrote the note. One UPDATE tests and stamps, so a referral that stopped owing a note after the list

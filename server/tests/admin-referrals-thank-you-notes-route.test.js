@@ -36,6 +36,7 @@ const router = require('../routes/admin-referrals-v2');
 
 const STAFF = '00000000-0000-4000-8000-0000000000a1';
 const REFERRAL = '00000000-0000-4000-8000-0000000000b2';
+const CURSOR = '2027-02-03T15:00:00.000000Z,00000000-0000-4000-8000-0000000000b2';
 const NOTE = {
   referralId: REFERRAL, owedSince: '2027-02-03T15:00:00.000Z', memberCustomerId: '00000000-0000-4000-8000-0000000000c3',
   memberName: 'Fixture Member', addressLines: ['12 Sample Way', 'Parrish, FL 34219'], addressComplete: true,
@@ -60,26 +61,32 @@ async function request(method, path) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockStaff = { role: 'admin', id: STAFF };
-  notes.listThankYouNotes.mockResolvedValue({ notes: [NOTE], total: 1 });
+  notes.listThankYouNotes.mockResolvedValue({ notes: [NOTE], total: 1, nextCursor: null });
   notes.markThankYouNoteWritten.mockResolvedValue({ written: true });
 });
 
 describe('thank-you note list routes', () => {
-  test('GET answers the list and the total as the service built them, at the service\'s own batch size', async () => {
-    await expect(request('GET', '/thank-you-notes')).resolves.toEqual({ status: 200, body: { notes: [NOTE], total: 1 } });
-    expect(notes.listThankYouNotes).toHaveBeenCalledWith({});
-  });
-
-  test('GET ?limit= asks the service for a longer list ("Show more")', async () => {
-    expect((await request('GET', '/thank-you-notes?limit=400')).status).toBe(200);
-    expect(notes.listThankYouNotes).toHaveBeenCalledWith({ limit: 400 });
-  });
-
-  test.each(['0', '-5', '1.5', 'abc', '', '1e3', '0400', '4000000000', '5&limit=6'])('GET ?limit=%s is refused and never reaches the service', async (limit) => {
-    await expect(request('GET', `/thank-you-notes?limit=${limit}`)).resolves.toEqual({
-      status: 400, body: { error: 'limit must be a whole number, 1 or more' },
+  test('GET answers the first page as the service built it: the notes, the total and the next position', async () => {
+    notes.listThankYouNotes.mockResolvedValue({ notes: [NOTE], total: 201, nextCursor: CURSOR });
+    await expect(request('GET', '/thank-you-notes')).resolves.toEqual({
+      status: 200, body: { notes: [NOTE], total: 201, nextCursor: CURSOR },
     });
-    expect(notes.listThankYouNotes).not.toHaveBeenCalled();
+    expect(notes.listThankYouNotes).toHaveBeenCalledWith({ after: null });
+  });
+
+  test('GET ?after= hands the position to the service ("Show more"); an empty one is the first page', async () => {
+    expect((await request('GET', `/thank-you-notes?after=${encodeURIComponent(CURSOR)}`)).status).toBe(200);
+    expect(notes.listThankYouNotes).toHaveBeenLastCalledWith({ after: CURSOR });
+
+    expect((await request('GET', '/thank-you-notes?after=')).status).toBe(200);
+    expect(notes.listThankYouNotes).toHaveBeenLastCalledWith({ after: null });
+  });
+
+  test('GET answers the service\'s refusal of a position as its own 400, not a 500', async () => {
+    notes.listThankYouNotes.mockRejectedValue(Object.assign(new Error('after is not a position in this list'), { statusCode: 400, code: 'BAD_CURSOR' }));
+    await expect(request('GET', '/thank-you-notes?after=nonsense')).resolves.toEqual({
+      status: 400, body: { error: 'after is not a position in this list', code: 'BAD_CURSOR' },
+    });
   });
 
   test('POST marks that referral with the staff login', async () => {
