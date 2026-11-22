@@ -199,9 +199,13 @@ function namingTier(raw, base, savings, { estimateTier, credited, serviceKey }) 
     && !rowRateConflicts(raw, estimateTier.amount)
     && require('../routes/estimate-public').recurringServiceReceivesTierDiscount({ ...raw, service: raw.service || serviceKey || undefined });
   if (lineTier || !inferable) return lineTier || null;
+  // A row with its own per-application net must be billed at that net, or the row records another price.
+  const ownNet = money(raw.priceAfterDiscount);
+  if (ownNet !== null && ownNet !== money(base - savings)) return null;
   const tierSavings = tierSavingsOn(base, Number(estimateTier.amount));
-  // The rounding allowance is for a net derived from the annual; a row with its own per-application net is exact.
-  const allowance = money(raw.priceAfterDiscount) !== null ? 0 : TIER_ROUNDING_CENTS;
+  // The rounding allowance is for a net derived from the annual. A row's own net has none: it may differ by the one
+  // cent a half-cent rounds either way (the engine and applyDiscount round a half cent in opposite directions).
+  const allowance = ownNet !== null ? 1 : TIER_ROUNDING_CENTS;
   return tierSavings !== null && Math.abs(Math.round((savings - tierSavings) * 100)) <= allowance ? estimateTier : null;
 }
 
