@@ -139,10 +139,12 @@ describe('what a visit and the reading of its call say about the price', () => {
     // The visit's own facts need no catalog row: a schedule edit can clear the row and make the visit a callback,
     // an appointment or a recurring visit.
     const noRow = { row_name: null, row_service_key: null, row_billing_type: null };
-    for (const over of [{ is_callback: true }, { service_type: 'Waves Pest Control Appointment Service' }, { is_recurring: true }]) {
+    for (const over of [{ is_callback: true }, { service_type: 'Waves Pest Control Appointment Service' }, { is_recurring: true }, { service_type: 'Waves Assessment' }, { service_type: 'Pest Re-Service' }]) {
       expect(verdict(unpriced({ ...noRow, ...over }))).toBe('agrees');
       expect(closeKeyFor('price', unpriced({ ...noRow, ...over }), BILLING)).toBe('noPriceNeeded');
     }
+    // The label alone was changed to a Waves Assessment, and the one-time catalog row stayed.
+    expect(verdict(unpriced({ service_type: 'Waves Assessment' }))).toBe('agrees');
     // A visit with a price agrees whatever became of the reading, and when its catalog row is gone.
     expect(verdict(unpriced({ estimated_price: 250, v2_extraction_status: 'schema_failed', ai_extraction_enriched: null }))).toBe('agrees');
     expect(verdict(unpriced({ estimated_price: 250, row_name: null, row_service_key: null, row_billing_type: null }))).toBe('agrees');

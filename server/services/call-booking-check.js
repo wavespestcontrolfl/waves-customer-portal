@@ -118,20 +118,21 @@ const catalogRowOf = (visit) => ({ name: visit.row_name, service_key: visit.row_
 
 // A visit that takes no price from the call, by the visit's own facts (no catalog row needed): a free callback,
 // a visit whose label completion billing always treats as free (isAlwaysFreeServiceType: an appointment, an
-// estimate, a follow-up), where a price would be skipped at completion, and a visit the office made recurring
-// (the schedule editor keeps the one-time catalog row): it is a plan's visit now, not the call's one-time job.
+// estimate, a follow-up, a re-service), where a price would be skipped at completion, a visit the office made
+// recurring (the schedule editor keeps the one-time catalog row): it is a plan's visit now, not the call's
+// one-time job. Also a Waves Assessment, the free look-before-quote visit, by its label or by its catalog row
+// (a treatment price said on the same call is the quote, not this visit's charge).
 function visitTakesNoCallPrice(visit) {
+  const { isAssessmentServiceType, isAssessmentServiceRow } = require('./assessment-booking');
   return Boolean(visit.is_callback) || Boolean(visit.is_recurring) || visit.recurring_parent_id != null
-    || require('./no-cost-visit-types').isAlwaysFreeServiceType(visit.service_type);
+    || require('./no-cost-visit-types').isAlwaysFreeServiceType(visit.service_type)
+    || isAssessmentServiceType(visit.service_type) || isAssessmentServiceRow(catalogRowOf(visit));
 }
 
 // A catalog row a call booking never prices, whatever the call said (resolveCallBookingPrice refuses each): a
-// service that is not one-time, a free re-service, and a Waves Assessment, the free look-before-quote visit (a
-// treatment price said on the same call is the quote, not this visit's charge).
+// service that is not one-time, and a free re-service.
 function rowTakesNoCallPrice(row) {
-  return row.billing_type !== 'one_time'
-    || require('./call-booking-catalog').isReServiceCatalogRow(row)
-    || require('./assessment-booking').isAssessmentServiceRow(row);
+  return row.billing_type !== 'one_time' || require('./call-booking-catalog').isReServiceCatalogRow(row);
 }
 
 // The intents of a call about a one-time job.
