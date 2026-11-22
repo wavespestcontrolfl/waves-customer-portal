@@ -524,7 +524,7 @@ describe('extendReservation revalidates technician and blackout', () => {
   test('the held technician must still be assignable, with the commit error code', () => {
     expect(fn).toContain("await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate, workDays: true,");
     // The hold's own block, against the technician's shift (GATE_TECH_SHIFT_HOURS). Behavior: tech-shift-hours-commit-postgres.test.js.
-    expect(fn).toContain('hours: holdBlock(row) });');
+    expect(fn).toContain("hours: require('./scheduling/window-rules').rowBlockMinutes(row) });");
     const at = fn.indexOf('assertAssignableTechnician');
     expect(fn.slice(at, at + 420)).toContain("err.code = 'SLOT_UNAVAILABLE';");
   });

@@ -1,7 +1,6 @@
 'use strict';
 
-// Customer alerts that fell off the bell with no reply: list 1 of the Monday review bell while
-// GATE_MONDAY_FELL_OFF_LINE is on (owner 2026-11-05, "go" on the admin-bell plan, decision D3).
+// Customer alerts that fell off the bell with no reply: list 1 of the Monday review bell (owner 2026-11-05, "go" on the admin-bell plan, decision D3).
 //
 // Why: the quiet fall-off (admin-alert-retention.js) marks a bell row done after 72 hours
 // with no new activity, so the old list 1 ("needs-you alerts nobody read for 14+ days") can never fire. A customer who

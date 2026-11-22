@@ -6,15 +6,10 @@
 //
 // Five lists get old without any bell ringing for them. Each is computed fresh
 // on every run, and a line appears only when its count is above zero:
-//   1. Needs-you alerts nobody has read for 14+ days. The retention sweep marks
-//      a bell row done after 30 idle days (admin-alert-retention.js), so this is
-//      the last look before they expire. Judged the way needs-me judges them
-//      (needs-me.js mapAlertRow): known needs-you severity only, never an
-//      "unsorted" row, never an Activity-only row, never Claude's queue.
-//      With GATE_MONDAY_FELL_OFF_LINE on, list 1 is instead the customer alerts that
-//      fell off the bell after 3 quiet days with no reply, by name (the quiet
-//      fall-off closes a row after 72 hours, so the unread list above can no longer
-//      fire; monday-review-fell-off.js).
+//   1. Customer alerts that fell off the bell after 3 quiet days with no
+//      reply, by name (the quiet fall-off closes a row after 72 hours, so a
+//      "needs-you alerts unread 14+ days" list can no longer fire;
+//      monday-review-fell-off.js).
 //   2. Overdue promises Waves made to callers: the watchdog's own selection
 //      (call-commitments selectOverdue, then the internal-test filter and the
 //      still-open fence). Past 5 of them the watchdog's daily row is
@@ -41,8 +36,6 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-// GATE_MONDAY_FELL_OFF_LINE, read at call time and guarded: a test that mocks feature-gates without the reader reads off.
-const fellOffLineLive = () => require('../config/feature-gates').mondayFellOffLineLive?.() === true;
 const { etDateString } = require('../utils/datetime-et');
 const { MAX_HEADLINE_CHARS, MAX_WHY_CHARS, cutAtWord, raiseAdminAlert } = require('./admin-alert-compose');
 
@@ -51,14 +44,7 @@ const CATEGORY = 'system';
 const SUBJECT_ID = 'monday-review';
 const AREA = 'System';
 const DAY_MS = 24 * 60 * 60 * 1000;
-const UNREAD_DAYS = 14;
 const DRAFT_FLOOR_DAYS = 3;
-// Candidates are paged (keyset on created_at, id) because the needs-you test runs in JS after the SQL filter: a
-// fixed LIMIT could leave every qualifying row behind older ineligible ones. The cap only bounds a runaway table.
-const ALERT_PAGE = 1000;
-const ALERT_MAX_PAGES = 50;
-const ALERT_HEADLINES = 5;
-const HEADLINE_CHARS = 90;
 const PROMISE_PAGE = 200;
 const PROMISE_MAX_PAGES = 25;
 const ID_CHUNK = 500;
@@ -80,62 +66,9 @@ function shortDate(value) {
   return date.toLocaleDateString('en-US', { timeZone: ET, month: 'short', day: 'numeric' });
 }
 
-function parseMeta(metadata) {
-  if (metadata && typeof metadata === 'object') return metadata;
-  if (typeof metadata !== 'string') return {};
-  try { const parsed = JSON.parse(metadata); return parsed && typeof parsed === 'object' ? parsed : {}; } catch { return {}; }
-}
-
 // ---------------------------------------------------------------------------
 // The five loaders. Each returns { count, ... } and reads only.
 // ---------------------------------------------------------------------------
-
-// List 1. A needs-you row (needs-me's reading) that is not done, was never
-// read, and has shown no sign of life for UNREAD_DAYS (created_at or a later
-// ring stamp, the way the retention sweep computes it).
-async function loadUnreadAlerts({ now = new Date(), database = db, pageSize = ALERT_PAGE, maxPages = ALERT_MAX_PAGES } = {}) {
-  const { mapAlertRow } = require('./needs-me');
-  const { lastActivityMs } = require('./admin-alert-retention');
-  const nowMs = now.getTime();
-  const cutoff = new Date(nowMs - UNREAD_DAYS * DAY_MS);
-  const kept = [];
-  let after = null;
-  let capped = false;
-  for (let page = 0; ; page += 1) {
-    if (page >= maxPages) { capped = true; break; }
-    const query = database('notifications')
-      .where({ recipient_type: 'admin' }).whereNull('done_at').whereNull('read_at')
-      .where('created_at', '<', cutoff)
-      .whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'")
-      .whereRaw("COALESCE(metadata->>'claudeQueue', '') = ''")
-      .whereRaw("COALESCE(metadata->>'who', '') <> 'claude'")
-      .whereRaw("COALESCE(metadata->>'triggerKey', '') <> 'dashboard_alert'")
-      .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
-      .whereRaw("COALESCE(metadata->>'dedupeKey', '') NOT LIKE 'monday-review:%'");
-    // The cursor carries the database's own text timestamp: a JS Date drops the microseconds Postgres keeps, which
-    // would move the cursor back and re-read the boundary row (Codex r2).
-    if (after) query.whereRaw('(created_at, id) > (?::timestamptz, ?)', [after.cursorAt, after.id]);
-    const rows = await query.orderByRaw('created_at ASC, id ASC').limit(pageSize)
-      .select('id', 'category', 'title', 'link', 'metadata', 'created_at', 'read_at', database.raw('created_at::text AS cursor_at'));
-    for (const row of rows) {
-      const item = mapAlertRow(row);
-      if (item.severity !== 'needs-you' || item.unsorted || item.activityOnly || item.who === 'claude') continue;
-      const idleSince = lastActivityMs(row, parseMeta(row.metadata), nowMs);
-      if (idleSince < cutoff.getTime()) kept.push({ headline: String(row.title || '').trim(), idleSince });
-    }
-    if (rows.length < pageSize) break;
-    const last = rows[rows.length - 1];
-    after = { cursorAt: last.cursor_at, id: last.id };
-  }
-  if (capped) logger.warn(`[monday-review] unread alert scan stopped after ${maxPages} pages; the count is a floor`);
-  kept.sort((a, b) => a.idleSince - b.idleSince);
-  return {
-    count: kept.length,
-    capped,
-    oldestAt: kept[0] ? new Date(kept[0].idleSince) : null,
-    headlines: kept.slice(0, ALERT_HEADLINES).map((k) => ({ headline: k.headline, at: new Date(k.idleSince) })),
-  };
-}
 
 // List 2. The watchdog's selection, read only (prepare stays false: this bell
 // must not initialize callback cards).
@@ -258,7 +191,7 @@ function uncheckedNote(alerts) {
   return [`   The reply check could not run for ${n} of these, so ${n === 1 ? 'that one may have been' : 'those may have been'} answered.`];
 }
 
-// List 1 with GATE_MONDAY_FELL_OFF_LINE on: the customer alerts the quiet rule closed that no person answered, by name.
+// List 1: the customer alerts the quiet rule closed that no person answered, by name.
 // The first ENTRY_SHOWN, newest first, then "+N more". Page: the bell's Recently done list, which offers Reopen for
 // exactly these rows for 7 days.
 function fellOffList(alerts) {
@@ -311,21 +244,7 @@ function parkedReviewsList(parked) {
 // phrase for the "why" and the detail text.
 function buildLists({ alerts, promises, drafts, visits, parked }) {
   const lists = [];
-  if (alerts?.kind === 'fell-off') {
-    if (alerts.count > 0) lists.push(fellOffList(alerts));
-  } else if (alerts?.count > 0) {
-    const lines = (alerts.headlines || []).map((h) => `   - ${cutAtWord(h.headline, HEADLINE_CHARS)} (idle since ${shortDate(h.at)})`);
-    lists.push({
-      key: 'alerts',
-      count: alerts.count,
-      phrase: `${alerts.count}${alerts.capped ? '+' : ''} unread ${plural(alerts.count, 'alert', 'alerts')}`,
-      detail: [
-        `Needs-you alerts nobody read for ${UNREAD_DAYS}+ days: ${alerts.count}. A row expires after 30 idle days. Page: the bell.`,
-        ...(lines.length ? [`   Oldest ${lines.length}:`, ...lines] : []),
-      ].join('\n'),
-      link: '/admin/dashboard',
-    });
-  }
+  if (alerts?.count > 0) lists.push(fellOffList(alerts));
   if (promises?.count > 0) {
     lists.push({
       key: 'promises',
@@ -396,11 +315,9 @@ async function closeReviewRows({ database = db, now = new Date(), keepKey = null
   return Number(await episodes.closeAdminAlertKeys(database, keys, reason, { now, resolution })) || 0;
 }
 
-// List 1: the 14-day unread list, or (GATE_MONDAY_FELL_OFF_LINE) the customer alerts that fell off with no reply.
-// The fell-off list fails open: if it cannot be read at all, the week goes out with the other three lists and a warning
-// (the 14-day list keeps the module's stance that a read failure throws).
+// List 1: the customer alerts that fell off with no reply.
+// The fell-off list fails open: if it cannot be read at all, the week goes out with the other three lists and a warning.
 async function loadFirstList(ctx) {
-  if (!fellOffLineLive()) return loadUnreadAlerts(ctx);
   try {
     return await require('./monday-review-fell-off').loadFellOffAlerts(ctx);
   } catch (err) {
@@ -465,8 +382,8 @@ module.exports = {
   runMondayReview,
   KEY_PREFIX,
   _private: {
-    loadUnreadAlerts, loadOverduePromises, loadDraftOnlyVisits, loadOpenPastVisits, loadParkedReviews,
+    loadOverduePromises, loadDraftOnlyVisits, loadOpenPastVisits, loadParkedReviews,
     reviewerLabel, buildLists, composeReview, closeReviewRows, shortDate,
-    UNREAD_DAYS, DRAFT_FLOOR_DAYS, REPLACED, NOTHING,
+    DRAFT_FLOOR_DAYS, REPLACED, NOTHING,
   },
 };

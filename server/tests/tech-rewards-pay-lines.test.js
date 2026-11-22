@@ -1,5 +1,5 @@
-// Tech Rewards Plan D5-5: the pure parts of the December gift pay line sync (which pay date it is due on, what it covers, its
-// source key) and the gate behavior that needs no database. Synthetic fixtures only.
+// Tech Rewards Plan D5-5: the pure parts of the December gift and stay bonus pay line sync (which pay date each is due on,
+// what it covers, its source key) and the gate behavior that needs no database. Synthetic fixtures only.
 // The sync against Postgres is in tech-rewards-pay-lines-postgres.test.js.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => 'audit-1') }));
@@ -7,6 +7,7 @@ const { recordAuditEvent } = require('../services/audit-log');
 
 const {
   decemberGiftDate, dueInRun, lastPayDate, spanOf, sourceIdOf, syncTechRewardLines, DECEMBER_GIFT_CENTS, SOURCE_TYPE,
+  FIRST_STAY_DATE, stayDueInRun, staySpanOf,
 } = require('../services/tech-rewards-pay-lines');
 const { weeksOfLine } = require('../services/payroll-regular-rate');
 const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
@@ -103,6 +104,55 @@ describe('spanOf: what the gift covers (one period per technician and year, whic
   });
 });
 
+describe('stayDueInRun: the stay bonus a run dated that day may write, by the hire date', () => {
+  const keys = (payDate, hireDate) => stayDueInRun(payDate, hireDate).map((d) => `${d.kind}:${d.key}`);
+
+  test('due from the anniversary to 60 days after it, and its key is the years of service', () => {
+    const hired = '2027-01-12';
+    expect(keys('2028-01-11', hired)).toEqual([]); // the day before the 1 year anniversary
+    expect(keys('2028-01-12', hired)).toEqual(['stay_bonus:1']);
+    expect(keys('2028-03-12', hired)).toEqual(['stay_bonus:1']); // 60 days after
+    expect(keys('2028-03-13', hired)).toEqual([]);
+    expect(keys('2030-01-18', hired)).toEqual(['stay_bonus:3']);
+    expect(keys('2032-02-01', hired)).toEqual(['stay_bonus:5']);
+    expect(keys('2029-01-12', hired)).toEqual([]); // 2 years is no milestone
+    expect(keys('2034-01-12', hired)).toEqual([]); // none after 5 years
+  });
+
+  test('a Feb 29 hire has its anniversary on Mar 1 in a year with no Feb 29, as the calculator dates it', () => {
+    expect(keys('2029-02-28', '2028-02-29')).toEqual([]);
+    expect(keys('2029-03-01', '2028-02-29')).toEqual(['stay_bonus:1']);
+  });
+
+  test('no hire date, no anniversary: nothing is due', () => {
+    expect(stayDueInRun('2028-01-12', null)).toEqual([]);
+    expect(stayDueInRun('2028-01-12', undefined)).toEqual([]);
+  });
+
+  test('no anniversary before the plan was approved has a bonus', () => {
+    expect(FIRST_STAY_DATE).toBe('2026-11-20');
+    expect(keys('2026-11-27', '2025-11-19')).toEqual([]); // 1 year on Nov 19, 2026, the day before the plan
+    expect(keys('2026-11-27', '2025-11-20')).toEqual(['stay_bonus:1']);
+    expect(keys('2026-11-27', '2021-11-19')).toEqual([]); // 5 years, the day before the plan
+  });
+});
+
+describe('staySpanOf: what the stay bonus covers (the 12 months before the anniversary, whichever run pays it)', () => {
+  test('the same day a year before, to the day before the anniversary: the board\'s own period', () => {
+    expect(staySpanOf('2028-01-12', '2028-01-17')).toEqual({ earnedWeekStart: '2028-01-17', coversFrom: '2027-01-12', coversTo: '2028-01-11' });
+    expect(staySpanOf('2028-01-12', '2028-02-14')).toEqual({ earnedWeekStart: '2028-02-14', coversFrom: '2027-01-12', coversTo: '2028-01-11' });
+    // a Feb 29 hire: due Mar 1, 2029, counted from Mar 1, 2028
+    expect(staySpanOf('2029-03-01', '2029-03-05')).toEqual({ earnedWeekStart: '2029-03-05', coversFrom: '2028-03-01', coversTo: '2029-02-28' });
+  });
+
+  test('the period spreads over its whole workweeks, and a run for a later week can carry it', () => {
+    const span = staySpanOf('2028-01-12', '2028-01-17');
+    // Jan 12, 2027 is a Tuesday (the week of Jan 11) and Jan 11, 2028 a Tuesday (the week of Jan 10): 53 weeks
+    expect(weeksOfLine({ coversFrom: span.coversFrom, coversTo: span.coversTo, weekStart: span.earnedWeekStart })).toHaveLength(53);
+    expect(staffWeekStartForWorkDate(span.coversTo) < span.earnedWeekStart).toBe(true);
+  });
+});
+
 describe('source key', () => {
   test('is december_gift:<technician>:<year>', () => {
     expect(sourceIdOf('december_gift', 'abc', '2026')).toBe('december_gift:abc:2026');
@@ -116,9 +166,30 @@ describe('ownership: the sync owns a line only by its whole source key, compared
   const OTHER = '9a8b7c6d-5e4f-4d3c-2b1a-0f9e8d7c6b5a';
   const row = (patch) => ({ technician_id: TECH, kind: 'december_gift', source_type: 'tech_rewards', source_id: `december_gift:${TECH}:2026`, ...patch });
 
+  const stay = (key, patch) => row({ kind: 'stay_bonus', source_id: `stay_bonus:${TECH}:${key}`, ...patch });
+
   test('the line the sync writes is its own', () => {
-    expect(techRewardsOwnKey(row())).toEqual({ kind: 'december_gift', year: '2026' });
-    expect(techRewardsOwnKey(row({ source_id: sourceIdOf('december_gift', TECH, '2031') }))).toEqual({ kind: 'december_gift', year: '2031' });
+    expect(techRewardsOwnKey(row())).toEqual({ kind: 'december_gift', key: '2026' });
+    expect(techRewardsOwnKey(row({ source_id: sourceIdOf('december_gift', TECH, '2031') }))).toEqual({ kind: 'december_gift', key: '2031' });
+  });
+
+  test('a stay bonus line is keyed by its years of service: 1, 3 or 5', () => {
+    for (const key of ['1', '3', '5']) expect(techRewardsOwnKey(stay(key))).toEqual({ kind: 'stay_bonus', key });
+    expect(techRewardsOwnKey(row({ kind: 'stay_bonus', source_id: sourceIdOf('stay_bonus', TECH, '3') }))).toEqual({ kind: 'stay_bonus', key: '3' });
+  });
+
+  test.each([
+    ['2 years, which is no milestone', stay('2')],
+    ['a year in place of the years of service', stay('2028')],
+    ['two digits', stay('11')],
+    ['an anniversary date', stay('2028-01-12')],
+    ['text after the key', stay('1 ')],
+    ['another technician\'s id', stay('1', { source_id: `stay_bonus:${OTHER}:1` })],
+    ['the gift\'s kind in the id', stay('1', { source_id: `december_gift:${TECH}:1` })],
+    ['no source', stay('1', { source_type: null, source_id: null })],
+    ['another source type', stay('1', { source_type: 'commission_payment' })],
+  ])('a stay bonus row with %s is not the sync\'s', (_, line) => {
+    expect(techRewardsOwnKey(line)).toBeNull();
   });
 
   test.each([
@@ -133,7 +204,7 @@ describe('ownership: the sync owns a line only by its whole source key, compared
     ['text after the year', { source_id: `december_gift:${TECH}:2026 ` }],
     ['text before the kind', { source_id: ` december_gift:${TECH}:2026` }],
     ['another kind in the id', { source_id: `stay_bonus:${TECH}:2026` }],
-    ['a kind the sync does not write', { kind: 'stay_bonus', source_id: `stay_bonus:${TECH}:2026` }],
+    ['a kind the sync does not write', { kind: 'season_bonus', source_id: `season_bonus:${TECH}:2026` }],
     ['a manual kind', { kind: 'commission', source_id: `commission:${TECH}:2026` }],
     ['an empty id', { source_id: '' }],
   ])('a row with %s is not the sync\'s', (_, patch) => {
@@ -141,18 +212,23 @@ describe('ownership: the sync owns a line only by its whole source key, compared
   });
 
   test('the SQL form names only constants and columns, and is never null for a row with no source', () => {
-    expect(techRewardsOwnedSql()).toBe("(source_type IS NOT NULL AND source_type = 'tech_rewards' AND kind IN ('december_gift')"
-      + " AND right(source_id, 4) ~ '^[0-9]{4}$' AND source_id = kind || ':' || technician_id::text || ':' || right(source_id, 4))");
+    expect(techRewardsOwnedSql()).toBe("(source_type IS NOT NULL AND source_type = 'tech_rewards' AND ("
+      + "(kind = 'december_gift' AND right(source_id, 4) ~ '^[0-9]{4}$' AND source_id = kind || ':' || technician_id::text || ':' || right(source_id, 4))"
+      + " OR (kind = 'stay_bonus' AND right(source_id, 1) ~ '^[135]$' AND source_id = kind || ':' || technician_id::text || ':' || right(source_id, 1))))");
     expect(techRewardsOwnedSql('l')).toContain("l.source_id = l.kind || ':' || l.technician_id::text || ':' || right(l.source_id, 4)");
+    expect(techRewardsOwnedSql('l')).toContain("l.kind = 'stay_bonus' AND right(l.source_id, 1) ~ '^[135]$'");
     expect(techRewardsOwnedSql()).not.toContain('?');
   });
 });
 
 describe('the gates', () => {
-  const OLD = { pay: process.env.GATE_PAYROLL_PAY_LINES, rewards: process.env.GATE_TECH_REWARDS_PAY_LINES };
-  beforeEach(() => recordAuditEvent.mockClear());
+  const OLD = { pay: process.env.GATE_PAYROLL_PAY_LINES, rewards: process.env.GATE_TECH_REWARDS_PAY_LINES, stay: process.env.GATE_TECH_REWARDS_STAY_BONUS };
+  beforeEach(() => {
+    recordAuditEvent.mockClear();
+    delete process.env.GATE_TECH_REWARDS_STAY_BONUS;
+  });
   afterEach(() => {
-    for (const [name, value] of [['GATE_PAYROLL_PAY_LINES', OLD.pay], ['GATE_TECH_REWARDS_PAY_LINES', OLD.rewards]]) {
+    for (const [name, value] of [['GATE_PAYROLL_PAY_LINES', OLD.pay], ['GATE_TECH_REWARDS_PAY_LINES', OLD.rewards], ['GATE_TECH_REWARDS_STAY_BONUS', OLD.stay]]) {
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
     }
   });
@@ -200,6 +276,7 @@ describe('the gates', () => {
     expect(result.removed).toBe(1);
     expect(calls.slice(0, 3)).toEqual(CLEAR_WAITS);
     expect(calls).toContainEqual(['where', 'payroll_pay_lines', { source_type: 'tech_rewards', status: 'open' }]);
+    expect(calls).toContainEqual(['whereIn', 'payroll_pay_lines', ['december_gift', 'stay_bonus']]); // every kind's gate is off
     expect(calls).toContainEqual(['whereRaw', 'payroll_pay_lines', techRewardsOwnedSql()]); // only the lines the sync owns
     expect(calls).toContainEqual(['del', 'payroll_pay_lines']);
     expect(calls.filter(([method, table]) => method === 'update' && table !== 'payroll_runs')).toEqual([]);
