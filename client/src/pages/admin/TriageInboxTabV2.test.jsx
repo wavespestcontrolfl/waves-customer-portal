@@ -1553,44 +1553,58 @@ describe('call_phone_yes card tap', () => {
 });
 
 // GATE_CALL_AGREED_ONE_TIME_JOB: the AI booked no visit for a one-time job staff priced on the call; the office
-// books it from the card, so the card shows the service, the agreed time in Eastern time, and the stated price.
+// books it from the approved-but-unbooked card, so the card shows why, the service, the slot the booker resolved
+// (Eastern), the price and its basis, and a follow-up (promised or only suggested).
 describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
-  const payload = {
+  const job = (over = {}) => ({ booking_date: '2026-11-21', booking_window_start: '17:00', stated_price: 250, price_basis: 'stated', follow_up: null, ...over });
+  const payload = (over = {}, jobOver = {}) => ({
     flag: 'auto_booking_skipped_after_approval',
     skipped_reason: 'agreed_one_time_job_office_books',
     service: 'One-Time Pest Control Service',
-    scheduling_window: { status: 'confirmed', confirmed_start_at: '2026-11-21T22:00:00.000Z' },
-    stated_one_time_price: 250,
-    stated_one_time_price_basis: 'stated',
-  };
-  it('shows why, what to book, when, and the price staff stated', () => {
-    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={payload} />);
+    agreed_one_time_job: job(jobOver),
+    ...over,
+  });
+  const show = (p) => render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={p} />);
+
+  it('shows why, what to book, the slot the booker resolved, and the price staff stated', () => {
+    show(payload());
     expect(screen.getByText(/so the AI did not book it/)).toBeInTheDocument();
     expect(screen.getByText('One-Time Pest Control Service')).toBeInTheDocument();
-    expect(screen.getByText('Sat, Nov 21, 5:00 PM ET')).toBeInTheDocument();
+    // The booker's own Eastern date and hour, never a re-read of a timestamp.
+    expect(screen.getByText('2026-11-21 at 17:00 ET')).toBeInTheDocument();
     expect(screen.getByText('Staff said:')).toBeInTheDocument();
     expect(screen.getByText(/\$250\.00 one-time\. Check the terms on the call/)).toBeInTheDocument();
   });
-  it('shows a follow-up the call did not set as a suggestion, and a set one as promised', () => {
-    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, follow_up_plan: { scheduled_date: '2026-12-05', window_start: '17:00', suggested: true } }} />);
-    expect(screen.getByText('Suggested follow-up:')).toBeInTheDocument();
-    expect(screen.getByText(/Visit 2 around 2026-12-05 at 17:00\. The call did not set this time/)).toBeInTheDocument();
-    expect(screen.queryByText('Promised follow-up:')).not.toBeInTheDocument();
-    cleanup();
-    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, follow_up_plan: { scheduled_date: '2026-12-05', window_start: '10:00', suggested: false } }} />);
-    expect(screen.getByText('Promised follow-up:')).toBeInTheDocument();
-  });
+
   it('labels a total the caller accepted as agreed, without asking staff to change it', () => {
-    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, stated_one_time_price_basis: 'agreed_total' }} />);
+    show(payload({}, { price_basis: 'agreed_total' }));
     expect(screen.getByText('Agreed price:')).toBeInTheDocument();
     expect(screen.getByText(/\$250\.00 one-time, the total the caller accepted/)).toBeInTheDocument();
     expect(screen.queryByText(/Check the terms/)).not.toBeInTheDocument();
   });
-  it('shows no price row when the card holds no price, and the rows stay off other skipped bookings', () => {
-    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, stated_one_time_price: null }} />);
+
+  it('shows a follow-up the call did not set as a suggestion, and a set one as promised', () => {
+    show(payload({}, { follow_up: { scheduled_date: '2026-12-05', window_start: '17:00', suggested: true } }));
+    expect(screen.getByText('Suggested follow-up:')).toBeInTheDocument();
+    expect(screen.getByText(/Visit 2 around 2026-12-05 at 17:00\. The call did not set this time/)).toBeInTheDocument();
+    cleanup();
+    show(payload({}, { follow_up: { scheduled_date: '2026-12-05', window_start: '10:00', suggested: false } }));
+    expect(screen.getByText('Promised follow-up:')).toBeInTheDocument();
+  });
+
+  it('names the visit once a later pass found or booked one, and stops asking for a booking', () => {
+    show(payload({}, { visit_id: 'visit-42' }));
+    expect(screen.getByText(/The call now has visit visit-42\. Do not book another one/)).toBeInTheDocument();
+    expect(screen.queryByText(/so the AI did not book it/)).not.toBeInTheDocument();
+  });
+
+  it('shows no price row with no price, and none of these rows on another skipped booking', () => {
+    show(payload({}, { stated_price: null }));
     expect(screen.queryByText(/\$250\.00 one-time/)).not.toBeInTheDocument();
     cleanup();
-    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, skipped_reason: 'start_before_call' }} />);
-    expect(screen.queryByText('Sat, Nov 21, 5:00 PM ET')).not.toBeInTheDocument();
+    // An older pass's evidence on a card now held for another reason never shows.
+    show(payload({ skipped_reason: 'start_before_call' }));
+    expect(screen.queryByText('2026-11-21 at 17:00 ET')).not.toBeInTheDocument();
+    expect(screen.queryByText(/one-time/)).not.toBeInTheDocument();
   });
 });

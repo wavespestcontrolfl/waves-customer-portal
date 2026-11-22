@@ -396,17 +396,21 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(count(site)).toBe(1);
     const call = source.slice(source.indexOf(site), source.indexOf("} else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')"));
     expect(call).toContain("skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,");
-    // A refresh with no price clears an older price: the keys are always written.
-    expect(call).toContain('stated_one_time_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,');
-    expect(call).toContain('stated_one_time_price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,');
+    // The slot the booker resolved, the price for the priced service and its basis, a follow-up.
+    expect(call).toContain('booking_date: scheduledDate || null,');
+    expect(call).toContain('booking_window_start: windowStart || null,');
+    expect(call).toContain('stated_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,');
+    expect(call).toContain('price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,');
     expect(call).toContain('? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,');
     // A follow-up time the call did not set is a suggestion on the card, not a promise.
     expect(call).toContain('suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true }');
     expect(call).toContain('agreedJobCardFiled = await fileSkippedBookingCard({');
-    expect(call).toContain('extraPayload: agreedJobCardEvidence,');
-    // The card writer: the skip's own evidence first, so it can never replace a shared field.
-    const writer = source.slice(source.indexOf('async function fileSkippedBookingCard('), source.indexOf('function agreedOneTimeJobCardPrice('));
-    expect(writer).toContain("extraPayload: {\n            ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {}),\n            skipped_reason: skippedReason,");
+    expect(call).toContain('agreedOneTimeJob: agreedJobCardEvidence,');
+    // The card writer: the evidence is ONE key, written on every pass (null for another skip), so an older
+    // pass's evidence never stays on a card a later pass refreshed.
+    const writer = source.slice(source.indexOf('async function fileSkippedBookingCard('), source.indexOf('async function noteAgreedJobCardVisit('));
+    expect(writer).toContain('extraPayload: {\n            skipped_reason: skippedReason,\n            agreed_one_time_job: agreedOneTimeJob,');
+    expect(writer).toContain('agreedOneTimeJob = null }) {');
     expect(writer).toContain("flag: 'auto_booking_skipped_after_approval',");
     expect(writer).toContain('.merge({');
     // It says whether this pass wrote the card.
@@ -431,10 +435,35 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(count("if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');")).toBe(1);
     expect(count('agreedJobCardFiled = ')).toBe(2); // false at the start, the writer's answer
     const fallback = source.slice(source.indexOf('const heldReasons = new Set('));
-    expect(fallback).toContain("...(skipReason === 'agreed_one_time_job_office_books' && agreedJobCardEvidence ? agreedJobCardEvidence : {}),\n                  skipped_reason: String(skipReason).slice(0, 300),");
+    expect(fallback).toContain("skipped_reason: String(skipReason).slice(0, 300),\n                  agreed_one_time_job: skipReason === 'agreed_one_time_job_office_books' ? agreedJobCardEvidence : null,");
     const { buildTriageItem } = require('../services/call-routing-gates');
     // No card reason of its own.
     expect(buildTriageItem({ callLogId: 1, flag: 'agreed_one_time_job_office_books', extraction: {} }).category).toBe('service_unknown');
+  });
+
+  // A later pass that finds or books the visit (staff booked it by hand, or the gate is off now) tells the open
+  // card, so staff check the visit's price and never book a second one.
+  test('a later booking names its visit on the open agreed-job card, under the call lock and the claim', () => {
+    const helper = source.slice(source.indexOf('async function noteAgreedJobCardVisit('), source.indexOf('function agreedOneTimeJobCardPrice('));
+    expect(helper).toContain('await lockTriageCall(ttrx, call.id);');
+    expect(helper).toContain("const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');");
+    expect(helper).toContain(".where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })");
+    // One unlocked read first: on every other call nothing more runs.
+    expect(helper).toContain("if (!(await agreedJobCard(db).first('id'))) return;");
+    expect(helper).toContain('await agreedJobCard(ttrx)\n        .update({');
+    expect(helper).toContain(".whereIn('status', ['open', 'in_progress'])");
+    expect(helper).toContain(".whereRaw(\"payload->>'skipped_reason' = 'agreed_one_time_job_office_books'\")");
+    // Inside the evidence key, so a pass that refiles the card clears an old visit id.
+    expect(helper).toContain(`"jsonb_set(COALESCE(payload, '{}'::jsonb), '{agreed_one_time_job}', "`);
+    expect(helper).toContain(`"|| jsonb_build_object('visit_id', ?::text))",`);
+    // Best-effort: a failure never blocks the booking.
+    expect(helper).toContain('} catch (err) {');
+    // Called once, on the booked path, whatever the gate reads now.
+    const site = 'scheduledServiceId = svc.id;';
+    expect(count('await noteAgreedJobCardVisit({ call, procToken, visitId: svc.id, callSid });')).toBe(1);
+    const at = source.indexOf('await noteAgreedJobCardVisit(');
+    expect(source.lastIndexOf(site, at)).toBeGreaterThan(source.lastIndexOf('if (svc && svc.__held) {', at));
+    expect(source.slice(source.lastIndexOf(site, at), at)).not.toContain('agreedJobAtAdoption');
   });
 
   // The card's price belongs to the service the call priced, with what kind of price it is.

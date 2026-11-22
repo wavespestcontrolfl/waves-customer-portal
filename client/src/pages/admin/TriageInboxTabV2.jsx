@@ -17,7 +17,6 @@ import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudi
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import HeldLinesPanel, { HeldLinesChip, useHeldLines } from "./HeldLinesPanel";
 import { fmtMoney } from "../../lib/money";
-import { formatETDateTime } from "../../lib/timezone";
 
 const STATUS_TABS = [
   { key: "open", label: "Open" },
@@ -127,6 +126,27 @@ function textNumberRows(p, livePhone) {
     { label: "Texts go to", value: p.text_phone || "no number given — ask for one" },
     { label: "Account phone now", value: livePhone || "no primary phone" },
     atCall && { label: "Account phone at the call", value: atCall },
+  ];
+}
+
+// GATE_CALL_AGREED_ONE_TIME_JOB: the rows of an approved-but-unbooked card the AI held for a one-time job staff
+// priced on the call. Its evidence is one key (agreed_one_time_job), written on every pass, so old details never stay.
+function agreedOneTimeJobRows(p) {
+  if (p.skipped_reason !== "agreed_one_time_job_office_books") return [];
+  const j = p.agreed_one_time_job && typeof p.agreed_one_time_job === "object" ? p.agreed_one_time_job : {};
+  const slot = (date, time) => `${String(date).slice(0, 10)}${time ? ` at ${String(time).slice(0, 5)}` : ""}`;
+  return [
+    j.visit_id
+      ? { label: "Visit on file", value: `The call now has visit ${j.visit_id}. Do not book another one: check its price, then resolve this card.` }
+      : { label: "Why", value: "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price." },
+    p.service && { label: "Book", value: p.service },
+    j.booking_date && { label: "Agreed time", value: `${slot(j.booking_date, j.booking_window_start)} ET` },
+    typeof j.stated_price === "number" && (j.price_basis === "agreed_total"
+      ? { label: "Agreed price", value: `${fmtMoney(j.stated_price)} one-time, the total the caller accepted on the call.` }
+      : { label: "Staff said", value: `${fmtMoney(j.stated_price)} one-time. Check the terms on the call before you set the visit's price.` }),
+    j.follow_up && j.follow_up.scheduled_date && (j.follow_up.suggested === true
+      ? { label: "Suggested follow-up", value: `Visit 2 around ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. The call did not set this time: confirm it with the customer before you book it.` }
+      : { label: "Promised follow-up", value: `Visit 2 was promised for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. Book it with the first visit.` }),
   ];
 }
 
@@ -252,16 +272,8 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     // differs from the primary on file (a cleared dispute whose stated
     // address is a saved secondary property) — codex r36 P1.
     // GATE_CALL_AGREED_ONE_TIME_JOB: the AI booked no visit for a one-time job staff priced on the call. The
-    // office books it from here: the service, the time the caller agreed, and the price staff stated.
-    p.skipped_reason === "agreed_one_time_job_office_books" && { label: "Why", value: "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price." },
-    p.skipped_reason === "agreed_one_time_job_office_books" && p.service && { label: "Book", value: p.service },
-    p.skipped_reason === "agreed_one_time_job_office_books" && p.scheduling_window?.confirmed_start_at && {
-      label: "Agreed time",
-      value: `${formatETDateTime(p.scheduling_window.confirmed_start_at, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET`,
-    },
-    p.skipped_reason === "agreed_one_time_job_office_books" && typeof p.stated_one_time_price === "number" && (p.stated_one_time_price_basis === "agreed_total"
-      ? { label: "Agreed price", value: `${fmtMoney(p.stated_one_time_price)} one-time, the total the caller accepted on the call.` }
-      : { label: "Staff said", value: `${fmtMoney(p.stated_one_time_price)} one-time. Check the terms on the call before you set the visit's price.` }),
+    // office books it from here: the service, the slot the booker resolved (Eastern), the price and a follow-up.
+    ...agreedOneTimeJobRows(p),
     p.skipped_reason && p.scheduling_window?.requested_address?.street_line_1 && {
       label: "Book at",
       value: [p.scheduling_window.requested_address.street_line_1, p.scheduling_window.requested_address.street_line_2, p.scheduling_window.requested_address.city, p.scheduling_window.requested_address.postal_code].filter((v) => String(v || "").trim()).join(", "),
@@ -279,17 +291,10 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
       : "Accept = the address on file is correct. Accept judges the WHOLE call — every other open card on it resolves too, so review those first. If the caller's number is right, edit the customer's address to it; the card closes once the record matches." },
     // A promised follow-up (visit 2) the dispute hold kept from being
     // booked with the primary — book both, not just the recovered primary.
-    p.follow_up_plan && (p.follow_up_plan.scheduled_date || p.follow_up_plan.window_start) && (p.follow_up_plan.suggested === true
-      // GATE_CALL_AGREED_ONE_TIME_JOB: the call did not set this visit's time (the catalog interval, visit 1's
-      // hour, or a two-treatment package), so it is a suggestion to confirm, not a promise.
-      ? {
-        label: "Suggested follow-up",
-        value: `Visit 2${p.follow_up_plan.scheduled_date ? ` around ${String(p.follow_up_plan.scheduled_date).slice(0, 10)}` : ""}${p.follow_up_plan.window_start ? ` at ${String(p.follow_up_plan.window_start).slice(0, 5)}` : ""}. The call did not set this time: confirm it with the customer before you book it.`,
-      }
-      : {
-        label: "Promised follow-up",
-        value: `Visit 2 was promised${p.follow_up_plan.scheduled_date ? ` for ${String(p.follow_up_plan.scheduled_date).slice(0, 10)}` : ""}${p.follow_up_plan.window_start ? ` at ${String(p.follow_up_plan.window_start).slice(0, 5)}` : ""} — book it with the primary appointment.`,
-      }),
+    p.follow_up_plan && (p.follow_up_plan.scheduled_date || p.follow_up_plan.window_start) && {
+      label: "Promised follow-up",
+      value: `Visit 2 was promised${p.follow_up_plan.scheduled_date ? ` for ${String(p.follow_up_plan.scheduled_date).slice(0, 10)}` : ""}${p.follow_up_plan.window_start ? ` at ${String(p.follow_up_plan.window_start).slice(0, 5)}` : ""} — book it with the primary appointment.`,
+    },
     // Street-level address hold: the visit is booked pending on the address the
     // lead typed into their web form (Google matched only the street). It is
     // settled by the visit itself, so the card shows what to confirm and where.

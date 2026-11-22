@@ -1956,11 +1956,13 @@ function callEmailCheckCardPayload(callEmailCheck) {
 // review-state marker so review_status opens. The two copies differed ONLY
 // in their skippedReason string. One helper, called from both sites — never
 // awaited from inside the caller's own db.transaction (this opens its own).
-// `extraPayload`: the skip's own evidence, merged under the shared fields (the
-// agreed one-time job's price and promised follow-up, for one).
+// `agreedOneTimeJob`: the agreed one-time job's own evidence
+// (GATE_CALL_AGREED_ONE_TIME_JOB: the booking slot, the price and its basis, a
+// follow-up), or null. Always written, so a pass for another skip clears an
+// older pass's evidence on the same card.
 // Returns true when this pass wrote the card (false: a superseded worker, or a
 // failed write).
-async function fileSkippedBookingCard({ call, procToken, customerId, extraction, skippedReason, preferredDateTime, serviceType, bridgeNeedsConfirmation, callSid, extraPayload = null }) {
+async function fileSkippedBookingCard({ call, procToken, customerId, extraction, skippedReason, preferredDateTime, serviceType, bridgeNeedsConfirmation, callSid, agreedOneTimeJob = null }) {
   let filed = false;
   try {
     filed = await db.transaction(async (ttrx) => {
@@ -1976,8 +1978,8 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
           flag: 'auto_booking_skipped_after_approval',
           extraction: extraction || undefined,
           extraPayload: {
-            ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {}),
             skipped_reason: skippedReason,
+            agreed_one_time_job: agreedOneTimeJob,
             preferred_date_time: preferredDateTime || null,
             service: serviceType,
             // A refresh re-binds the task to the call's CURRENT customer and
@@ -2016,6 +2018,39 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
     // superseded worker's marker never lands.
     if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
     return false;
+  }
+}
+
+// GATE_CALL_AGREED_ONE_TIME_JOB: the call has a visit now, so an open office
+// card for the agreed one-time job (an earlier pass held the booking) names it
+// (agreed_one_time_job.visit_id: a pass that refiles the card rewrites the key,
+// so an old visit id never stays). The card keeps its price, so staff check the
+// visit's price instead of booking another. Matches nothing on any other call: one unlocked read finds
+// no such card, and nothing more runs. Best-effort.
+async function noteAgreedJobCardVisit({ call, procToken, visitId, callSid }) {
+  const agreedJobCard = (conn) => conn('triage_items')
+    .where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })
+    .whereIn('status', ['open', 'in_progress'])
+    .whereRaw("payload->>'skipped_reason' = 'agreed_one_time_job_office_books'");
+  try {
+    if (!(await agreedJobCard(db).first('id'))) return;
+    await db.transaction(async (ttrx) => {
+      await lockTriageCall(ttrx, call.id);
+      const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
+      if (!stillOwner) return;
+      await agreedJobCard(ttrx)
+        .update({
+          payload: ttrx.raw(
+            "jsonb_set(COALESCE(payload, '{}'::jsonb), '{agreed_one_time_job}', "
+            + "(CASE WHEN jsonb_typeof(payload->'agreed_one_time_job') = 'object' THEN payload->'agreed_one_time_job' ELSE '{}'::jsonb END) "
+            + "|| jsonb_build_object('visit_id', ?::text))",
+            [String(visitId)],
+          ),
+          updated_at: new Date(),
+        });
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] agreed one-time job card visit note failed for ${maskSid(callSid)}: ${err.code || err.name || 'db_error'}`);
   }
 }
 
@@ -22677,11 +22712,14 @@ const CallRecordingProcessor = {
                 // for the priced service only, and a promised follow-up visit.
                 if (svc.__held.reason === 'agreed_one_time_job_office_books') {
                   agreedJobCardEvidence = {
-                    stated_one_time_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,
-                    stated_one_time_price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,
+                    // The slot the booker resolved (Eastern date and hour), not the raw timestamp.
+                    booking_date: scheduledDate || null,
+                    booking_window_start: windowStart || null,
+                    stated_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,
+                    price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,
                     // A follow-up the call did not set (the catalog interval, visit 1's
                     // hour, or a two-treatment package nobody discussed) is a suggestion.
-                    follow_up_plan: callFollowUpPlan
+                    follow_up: callFollowUpPlan
                       ? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,
                         suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true }
                       : null,
@@ -22689,7 +22727,7 @@ const CallRecordingProcessor = {
                   agreedJobCardFiled = await fileSkippedBookingCard({
                     call, procToken, customerId, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
                     skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,
-                    serviceType, bridgeNeedsConfirmation, callSid, extraPayload: agreedJobCardEvidence,
+                    serviceType, bridgeNeedsConfirmation, callSid, agreedOneTimeJob: agreedJobCardEvidence,
                   });
                 } else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')
                   .insert(buildTriageItem({
@@ -22748,6 +22786,12 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
+              // GATE_CALL_AGREED_ONE_TIME_JOB: an earlier pass held this call for
+              // the office. Now the call has a visit (one staff booked and this
+              // pass attached, or one this pass booked), so the open card names
+              // it: staff check its price and book no second one. Whatever the
+              // gate reads now; best-effort, under the call lock and the claim.
+              await noteAgreedJobCardVisit({ call, procToken, visitId: svc.id, callSid });
               // Street-level address holds only (reused legacy / voice-agent rows keep their
               // prior behavior): the visit is pending with its review card. The review reason is
               // raised now that the booking really became the hold; one live-checked bell.
@@ -24511,8 +24555,8 @@ const CallRecordingProcessor = {
                 flag: 'auto_booking_skipped_after_approval',
                 extraction: v2ApprovedExtraction,
                 extraPayload: {
-                  ...(skipReason === 'agreed_one_time_job_office_books' && agreedJobCardEvidence ? agreedJobCardEvidence : {}),
                   skipped_reason: String(skipReason).slice(0, 300),
+                  agreed_one_time_job: skipReason === 'agreed_one_time_job_office_books' ? agreedJobCardEvidence : null,
                   missing_fields: appointmentResult?.missingFields || null,
                   existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,
                   preferred_date_time: extracted.preferred_date_time || null,
