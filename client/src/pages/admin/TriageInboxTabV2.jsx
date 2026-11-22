@@ -259,10 +259,9 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
       label: "Agreed time",
       value: `${formatETDateTime(p.scheduling_window.confirmed_start_at, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET`,
     },
-    p.flag === "agreed_one_time_job_office_books" && typeof p.stated_one_time_price === "number" && {
-      label: "Staff said",
-      value: `${fmtMoney(p.stated_one_time_price)} one-time, and it can vary. Set the visit's price when you book it.`,
-    },
+    p.flag === "agreed_one_time_job_office_books" && typeof p.stated_one_time_price === "number" && (p.stated_one_time_price_basis === "agreed_total"
+      ? { label: "Agreed price", value: `${fmtMoney(p.stated_one_time_price)} one-time, the total the caller accepted on the call.` }
+      : { label: "Staff said", value: `${fmtMoney(p.stated_one_time_price)} one-time. Check the terms on the call before you set the visit's price.` }),
     p.skipped_reason && p.scheduling_window?.requested_address?.street_line_1 && {
       label: "Book at",
       value: [p.scheduling_window.requested_address.street_line_1, p.scheduling_window.requested_address.street_line_2, p.scheduling_window.requested_address.city, p.scheduling_window.requested_address.postal_code].filter((v) => String(v || "").trim()).join(", "),

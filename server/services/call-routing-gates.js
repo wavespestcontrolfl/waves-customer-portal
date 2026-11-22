@@ -900,10 +900,6 @@ const FLAG_PAYLOAD_STAMPS = [
   // address before the card closes (codex r17 P1). Same snapshot as the
   // scheduling cards, under its own key — quote cards carry no window.
   { flags: new Set(['quote_promised']), stamp: ({ extraction }) => ({ quote_scope: askSnapshot(extraction) }) },
-  // GATE_CALL_AGREED_ONE_TIME_JOB: the AI booked no visit for a one-time job staff priced on the call. The office
-  // books it from the card, so the card shows the price staff stated (it may vary; the office sets the visit's).
-  { flags: new Set(['agreed_one_time_job_office_books']),
-    stamp: ({ extraction }) => ({ stated_one_time_price: require('../utils/call-agreed-price').resolveAgreedOneTimeJobPrice(extraction) }) },
   // The surname card's provenance evidence: the names THIS call heard, at
   // filing (codex r18 P1). The merged V1 names the surname backfill writes
   // from arrive as extraPayload.heard_name_v1 from the processor.

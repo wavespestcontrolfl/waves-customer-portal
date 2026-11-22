@@ -1560,16 +1560,24 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
     service: 'One-Time Pest Control Service',
     scheduling_window: { status: 'confirmed', confirmed_start_at: '2026-11-21T22:00:00.000Z' },
     stated_one_time_price: 250,
+    stated_one_time_price_basis: 'stated',
   };
   it('shows what to book, when, and the price staff stated', () => {
     render(<ConfirmEvidence reasonCode="agreed_one_time_job_office_books" payload={payload} />);
     expect(screen.getByText('One-Time Pest Control Service')).toBeInTheDocument();
     expect(screen.getByText('Sat, Nov 21, 5:00 PM ET')).toBeInTheDocument();
-    expect(screen.getByText(/\$250\.00 one-time, and it can vary/)).toBeInTheDocument();
+    expect(screen.getByText('Staff said:')).toBeInTheDocument();
+    expect(screen.getByText(/\$250\.00 one-time\. Check the terms on the call/)).toBeInTheDocument();
+  });
+  it('labels a total the caller accepted as agreed, without asking staff to change it', () => {
+    render(<ConfirmEvidence reasonCode="agreed_one_time_job_office_books" payload={{ ...payload, stated_one_time_price_basis: 'agreed_total' }} />);
+    expect(screen.getByText('Agreed price:')).toBeInTheDocument();
+    expect(screen.getByText(/\$250\.00 one-time, the total the caller accepted/)).toBeInTheDocument();
+    expect(screen.queryByText(/Check the terms/)).not.toBeInTheDocument();
   });
   it('shows no price row when the card holds no price, and the rows stay off other cards', () => {
     render(<ConfirmEvidence reasonCode="agreed_one_time_job_office_books" payload={{ ...payload, stated_one_time_price: null }} />);
-    expect(screen.queryByText(/one-time, and it can vary/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$250\.00 one-time/)).not.toBeInTheDocument();
     cleanup();
     render(<ConfirmEvidence reasonCode="ambiguous_scheduling" payload={{ ...payload, flag: 'ambiguous_scheduling' }} />);
     expect(screen.queryByText('Sat, Nov 21, 5:00 PM ET')).not.toBeInTheDocument();

@@ -2011,6 +2011,61 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
   }
 }
 
+// GATE_CALL_AGREED_ONE_TIME_JOB: the review card for an agreed one-time job the
+// AI did not book. Like fileSkippedBookingCard: the call is locked, the claim is
+// checked, and a standing card is refreshed, not kept, so a reprocess that
+// corrects the time, the service or the price never leaves the office booking
+// from old details (its workflow status stays). `cardPrice`: { amount, basis }
+// (agreedOneTimeJobCardPrice) or null; null clears a price an older pass wrote.
+// Returns true when the card is on file. Never awaited inside the caller's own
+// db.transaction (this opens its own).
+async function fileAgreedOneTimeJobCard({ call, procToken, extraction, preferredDateTime, serviceType, cardPrice, callSid }) {
+  try {
+    return await db.transaction(async (ttrx) => {
+      await lockTriageCall(ttrx, call.id);
+      const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
+      if (!stillOwner) return false;
+      await ttrx('triage_items')
+        .insert(buildTriageItem({
+          callLogId: call.id,
+          flag: 'agreed_one_time_job_office_books',
+          extraction: extraction || undefined,
+          extraPayload: {
+            preferred_date_time: preferredDateTime || null,
+            service: serviceType || null,
+            stated_one_time_price: cardPrice ? cardPrice.amount : null,
+            stated_one_time_price_basis: cardPrice ? cardPrice.basis : null,
+          },
+        }))
+        .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+        .merge({
+          payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+          summary: ttrx.raw('EXCLUDED.summary'),
+          updated_at: new Date(),
+        });
+      return true;
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] agreed one-time job card failed for ${maskSid(callSid)}: ${err.code || err.name || 'db_error'}`);
+    return false;
+  }
+}
+
+// The price the office card shows for an agreed one-time job the AI did not
+// book: { amount, basis } or null. Only for the service the call priced: when
+// the booking resolved to another catalog row (a plan customer's free
+// re-service, say), the card names that row and shows no price, so staff never
+// book one service at another's price. `basis`: 'agreed_total' when the
+// reading's strict total is that amount (the caller accepted it), else
+// 'stated' (staff stated it; the terms are for staff to check on the call).
+function agreedOneTimeJobCardPrice(v2Extraction, bookedService) {
+  const request = v2Extraction?.service_request;
+  const amount = resolveAgreedOneTimeJobPrice(v2Extraction);
+  const { serviceNameKey } = require('./call-one-time-job');
+  if (amount == null || !request || serviceNameKey(bookedService) !== serviceNameKey(request.specific_service_name)) return null;
+  return { amount, basis: request.quoted_price_usd === amount ? 'agreed_total' : 'stated' };
+}
+
 // Geographic hard veto for the LEGACY (non-enforce) booking path. The V2
 // enforce gate already vetoes out_of_service_area, but with
 // CALL_EXTRACTION_V2_ENABLED off, or V2 in shadow with
@@ -13816,8 +13871,8 @@ const CallRecordingProcessor = {
     // do-not-contact beside it): that hold keeps the call's promises, label and one alert.
     let v2OutOfAreaOnlyHold = false;
     let v2ApprovedExtraction = null;
-    // GATE_CALL_AGREED_ONE_TIME_JOB: the held booking's own review card landed
-    // (inserted, or an open one stood). Until then the approved-but-unbooked
+    // GATE_CALL_AGREED_ONE_TIME_JOB: the held booking's own review card is on
+    // file (fileAgreedOneTimeJobCard). Until then the approved-but-unbooked
     // fallback card still files, so a held call never ends with no card.
     let agreedJobCardFiled = false;
     let v2UsesOnFileAddress = false;
@@ -20540,6 +20595,7 @@ const CallRecordingProcessor = {
             // books as before.
             const agreedJobHeldForOffice = agreedJobAtAdoption
               && (agreedServiceFields.length > 0 || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));
+            const agreedJobCardPrice = agreedJobHeldForOffice ? agreedOneTimeJobCardPrice(v2Result?.extraction, serviceType) : null;
             const smsPhone = customerValidation.details.phone;
             // Implied-consent recipient scope: implied consent is PERSONAL to
             // the caller. When it is the only clearance and the resolved
@@ -22627,7 +22683,12 @@ const CallRecordingProcessor = {
                 // operator resolved it, nor outside those locks; when that
                 // writer could not persist its card, the approved-but-
                 // unbooked fallback below files instead (pre-push audit P1).
-                if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')
+                if (svc.__held.reason === 'agreed_one_time_job_office_books') {
+                  agreedJobCardFiled = await fileAgreedOneTimeJobCard({
+                    call, procToken, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
+                    preferredDateTime: extracted.preferred_date_time, serviceType, cardPrice: agreedJobCardPrice, callSid,
+                  });
+                } else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')
                   .insert(buildTriageItem({
                     callLogId: call.id,
                     flag: svc.__held.reason,
@@ -22645,7 +22706,6 @@ const CallRecordingProcessor = {
                   }))
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                   .ignore()
-                  .then(() => { if (svc.__held.reason === 'agreed_one_time_job_office_books') agreedJobCardFiled = true; })
                   .catch((triageErr) => logger.warn(`[call-proc] held-booking triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
                 // codex #4919 round-8 P2: this generic handler files a
                 // review card for every __held reason it sees (or, for
@@ -26941,6 +27001,7 @@ CallRecordingProcessor._test = {
   callAgreedOneTimeJob,
   agreedJobHoldChangesService,
   adoptAgreedOneTimeService,
+  agreedOneTimeJobCardPrice,
   callBookingTimeSanityFlags,
 };
 

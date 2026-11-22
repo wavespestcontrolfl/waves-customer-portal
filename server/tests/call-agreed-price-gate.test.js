@@ -397,25 +397,50 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     });
     expect(item.category).toBe('time_ambiguous');
     expect(JSON.parse(item.payload).scheduling_window).toEqual(expect.objectContaining({ status: 'confirmed', confirmed_start_at: '2026-11-21T17:00:00-05:00' }));
-    // The card shows the price staff stated (the office sets the visit's).
-    const priced = buildTriageItem({ callLogId: 42, flag: 'agreed_one_time_job_office_books', extraction: {
-      meta: { schema_version: '1.13.0' },
-      service_request: { quoted_price_usd: null, price: { amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent' }, prices: [] },
-    } });
-    expect(JSON.parse(priced.payload).stated_one_time_price).toBe(250);
-    expect(JSON.parse(item.payload).stated_one_time_price).toBeNull();
   });
 
-  // The generic held-booking handler files the card. The approved-but-unbooked fallback skips this reason only
-  // when that card landed: a failed insert leaves the fallback card as the call's one scheduling trace.
-  test('the fallback card is skipped only after the hold\'s own card landed', () => {
+  // The card is filed by its own writer: the call locked, the claim checked, a standing card REFRESHED (a
+  // reprocess that corrects the time, service or price must reach the office), its status kept.
+  test('the held booking files its card through the refresh-safe writer, never the generic insert-or-ignore', () => {
+    const filer = source.slice(source.indexOf('async function fileAgreedOneTimeJobCard('), source.indexOf('function agreedOneTimeJobCardPrice('));
+    expect(filer).toContain('await lockTriageCall(ttrx, call.id);');
+    expect(filer).toContain("const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');");
+    expect(filer).toContain('if (!stillOwner) return false;');
+    expect(filer).toContain(".merge({\n          payload: ttrx.raw(\"COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload\"),");
+    expect(filer).not.toContain('status:');
+    // A refresh with no price clears an older price: the keys are always written.
+    expect(filer).toContain('stated_one_time_price: cardPrice ? cardPrice.amount : null,');
+    expect(filer).toContain('stated_one_time_price_basis: cardPrice ? cardPrice.basis : null,');
+    const site = "if (svc.__held.reason === 'agreed_one_time_job_office_books') {\n                  agreedJobCardFiled = await fileAgreedOneTimeJobCard({";
+    expect(count(site)).toBe(1);
+    expect(source.slice(source.indexOf(site)).split('\n')[5].trim()).toBe("} else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')");
+  });
+
+  // The approved-but-unbooked fallback skips this reason only when that card is on file: a failed write leaves
+  // the fallback card as the call's one scheduling trace.
+  test('the fallback card is skipped only after the hold\'s own card is on file', () => {
     const heldReasons = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/);
     expect(heldReasons).not.toBeNull();
     expect(heldReasons[0]).not.toContain("'agreed_one_time_job_office_books'");
     expect(count("if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');")).toBe(1);
-    const landed = ".ignore()\n                  .then(() => { if (svc.__held.reason === 'agreed_one_time_job_office_books') agreedJobCardFiled = true; })\n                  .catch((triageErr) =>";
-    expect(count(landed)).toBe(1);
-    expect(count('agreedJobCardFiled = true')).toBe(1);
-    expect(source.indexOf(landed)).toBeLessThan(source.indexOf('const heldReasons = new Set('));
+    expect(count('agreedJobCardFiled = ')).toBe(2); // false at the start, the writer's answer
+  });
+
+  // The card's price belongs to the service the call priced, with what kind of price it is.
+  test('agreedOneTimeJobCardPrice: the price only for the priced service, and its basis', () => {
+    const { agreedOneTimeJobCardPrice } = require('../services/call-recording-processor')._test;
+    const price = { amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent' };
+    const reading = (over = {}) => ({ service_request: { specific_service_name: 'One-Time Pest Control Service', quoted_price_usd: null, price, prices: [price], ...over } });
+    expect(agreedOneTimeJobCardPrice(reading(), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });
+    expect(agreedOneTimeJobCardPrice(reading(), ' one-time pest control service ')).toEqual({ amount: 250, basis: 'stated' });
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250 }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
+    // The booking resolved to another row (a free re-service): no price on the card.
+    expect(agreedOneTimeJobCardPrice(reading(), 'Pest Control Re-Service')).toBeNull();
+    expect(agreedOneTimeJobCardPrice(reading(), null)).toBeNull();
+    // No agreed one-time price, or no reading.
+    expect(agreedOneTimeJobCardPrice(reading({ price: null, prices: [] }), 'One-Time Pest Control Service')).toBeNull();
+    expect(agreedOneTimeJobCardPrice(null, 'One-Time Pest Control Service')).toBeNull();
+    // Computed only for a held booking, next to the hold.
+    expect(count('const agreedJobCardPrice = agreedJobHeldForOffice ? agreedOneTimeJobCardPrice(v2Result?.extraction, serviceType) : null;')).toBe(1);
   });
 });
