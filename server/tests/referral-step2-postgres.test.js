@@ -1137,7 +1137,7 @@ const DAY = 86400000;
   // The handwritten thank-you note (owner 2026-11-20: one to the member for every friend who books). The REAL
   // conversion and settlement with the REAL list: the note follows the booking under Step 2, never the settlement.
   describe('thank-you notes: the booking under Step 2 decides', () => {
-    const noteList = () => require('../services/referral-thank-you-notes').listThankYouNotes();
+    const noteList = async () => (await require('../services/referral-thank-you-notes').listThankYouNotes()).notes;
     const owed = async (...refs) => {
       const ids = new Set((await noteList()).map((n) => n.referralId));
       return refs.map((ref) => ids.has(ref.id));

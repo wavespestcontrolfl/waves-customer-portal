@@ -17,15 +17,21 @@ const NOTES = [
 ];
 const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
 
-// The fixture server: `owed` is what it still holds, `batch` how many rows one read answers (the real limit is 200).
+// The fixture server: `owed` is what it still holds. The page asks for 200 notes, then 200 more for each "Show
+// more". The fixture answers `batch` rows for each 200 asked (so a test needs no 200 rows), and the count of all.
 let owed;
 let batch;
 let notesResponse;
 let writtenResponse;
+const LIST = "/api/admin/referrals/thank-you-notes";
+const listReads = () => fetch.mock.calls.map(([url]) => url).filter((url) => url.split("?")[0] === LIST);
 beforeEach(() => {
   owed = [...NOTES];
   batch = 200;
-  notesResponse = () => response({ notes: owed.slice(0, batch) });
+  notesResponse = (url) => {
+    const asked = Number(new URL(url, "http://fixture").searchParams.get("limit"));
+    return response({ notes: owed.slice(0, (asked / 200) * batch), total: owed.length });
+  };
   writtenResponse = (url) => {
     owed = owed.filter((note) => !url.includes(note.referralId));
     return response({ success: true, written: true });
@@ -37,7 +43,7 @@ beforeEach(() => {
     if (url === "/api/admin/referrals/queue") return response({ referrals: [] });
     if (url === "/api/admin/referrals/payouts") return response({ payouts: [] });
     if (url === "/api/admin/referrals/inbound") return response({ items: [] });
-    if (url === "/api/admin/referrals/thank-you-notes") return notesResponse();
+    if (url.split("?")[0] === LIST) return notesResponse(url);
     if (url.endsWith("/written")) return writtenResponse(url);
     throw new Error(`Unexpected fixture request: ${url}`);
   }));
@@ -100,7 +106,9 @@ describe("Referrals queue: thank-you notes to write", () => {
   it("reads the list again after a mark: a note past the first batch comes up, and the card does not hide while one is owed", async () => {
     batch = 1;
     await openQueue();
-    expect(await screen.findByText("Thank-you notes to write (1)")).toBeInTheDocument();
+    // The count is every note owed, not the rows on screen.
+    expect(await screen.findByText("Thank-you notes to write (2)")).toBeInTheDocument();
+    expect(screen.getByText("Showing the oldest 1 of 2.")).toBeInTheDocument();
     expect(screen.queryByText("Second Member")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Mark written" }));
@@ -108,10 +116,36 @@ describe("Referrals queue: thank-you notes to write", () => {
     expect(await screen.findByText("Second Member")).toBeInTheDocument();
     expect(screen.getByText("Thank-you notes to write (1)")).toBeInTheDocument();
     expect(screen.queryByText("Fixture Member")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Showing the oldest/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Mark written" }));
     await waitFor(() => expect(screen.queryByText(/Thank-you notes to write/)).not.toBeInTheDocument());
     expect(writes()).toHaveLength(2);
+  });
+
+  it("Show more reaches a note past the first batch with no mark on an earlier one", async () => {
+    // The first batch is one row that waits for an address; the note behind it can be written today.
+    batch = 1;
+    owed = [{ ...NOTES[0], addressLines: ["FL"], addressComplete: false }, { ...NOTES[1], addressLines: ["8 Sample Court", "Palmetto, FL 34221"], addressComplete: true }];
+    await openQueue();
+    expect(await screen.findByText("Showing the oldest 1 of 2.")).toBeInTheDocument();
+    expect(screen.queryByText("Second Member")).not.toBeInTheDocument();
+    expect(listReads()).toEqual([`${LIST}?limit=200`]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+
+    expect(await screen.findByText("Second Member")).toBeInTheDocument();
+    expect(screen.getByText("Fixture Member")).toBeInTheDocument();
+    expect(screen.getByText("Thank-you notes to write (2)")).toBeInTheDocument();
+    expect(listReads()).toEqual([`${LIST}?limit=200`, `${LIST}?limit=400`]);
+    expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+    expect(writes()).toHaveLength(0);
+
+    // A mark keeps the longer list.
+    fireEvent.click(screen.getAllByRole("button", { name: "Mark written" })[1]);
+    await waitFor(() => expect(screen.queryByText("Second Member")).not.toBeInTheDocument());
+    expect(screen.getByText("Fixture Member")).toBeInTheDocument();
+    expect(listReads().at(-1)).toBe(`${LIST}?limit=400`);
   });
 
   it("a note the server says is no longer owed leaves the card after the refusal, and the reason is shown", async () => {
@@ -136,7 +170,7 @@ describe("Referrals queue: thank-you notes to write", () => {
 
     expect(await screen.findByText("Error: down")).toBeInTheDocument();
     // The list was read again and the server still holds the note.
-    await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url === "/api/admin/referrals/thank-you-notes")).toHaveLength(2));
+    await waitFor(() => expect(listReads()).toHaveLength(2));
     expect(screen.getByText("Fixture Member")).toBeInTheDocument();
     expect(screen.getByText("Thank-you notes to write (2)")).toBeInTheDocument();
   });
@@ -146,7 +180,7 @@ describe("Referrals queue: thank-you notes to write", () => {
     await openQueue();
 
     await screen.findByText("Submit Referral");
-    await waitFor(() => expect(fetch.mock.calls.some(([url]) => url === "/api/admin/referrals/thank-you-notes")).toBe(true));
+    await waitFor(() => expect(listReads()).toHaveLength(1));
     expect(screen.queryByText(/Thank-you notes to write/)).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -156,7 +190,7 @@ describe("Referrals queue: thank-you notes to write", () => {
     await openQueue();
 
     expect(await screen.findByText("Could not load thank-you notes to write. This is not an empty list.")).toBeInTheDocument();
-    notesResponse = () => response({ notes: owed });
+    notesResponse = () => response({ notes: owed, total: owed.length });
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("Thank-you notes to write (2)")).toBeInTheDocument();
     expect(screen.queryByText(/Could not load thank-you notes/)).not.toBeInTheDocument();

@@ -26,8 +26,9 @@
 const db = require('../models/db');
 
 const BOOKED_STATUSES = ['signed_up', 'credited'];
-// The list is a to-do for one person with a pen; a longer backlog than this is read oldest first, in parts.
-const LIST_LIMIT = 200;
+// The list is a to-do for one person with a pen. One read answers the oldest PAGE_SIZE notes and the total; the
+// page asks for a longer list ("Show more"), so a later note is reachable without a mark on an earlier one.
+const PAGE_SIZE = 200;
 
 function owedNotes(conn) {
   return conn('referrals')
@@ -53,20 +54,20 @@ function addressLines(row) {
 // (the column defaults to FL), so "some line is present" does not mean the note can be mailed.
 const addressComplete = (row) => ['address_line1', 'city', 'state', 'zip'].every((part) => clean(row[part]));
 
-// Oldest first, at most LIST_LIMIT rows: the page reads the list again after every answer to a mark, so
-// the rows past the limit come up as the first ones are written.
-async function listThankYouNotes(conn = db) {
+// Oldest first, at most `limit` rows, with the count of every note owed (one statement, so the two agree).
+async function listThankYouNotes({ limit = PAGE_SIZE } = {}, conn = db) {
   const rows = await owedNotes(conn)
     .join('customers', 'customers.id', 'referrals.referrer_customer_id')
     .orderBy('referrals.thank_you_note_due_at', 'asc')
     .orderBy('referrals.id', 'asc')
-    .limit(LIST_LIMIT)
+    .limit(limit)
     .select(
       'referrals.id', 'referrals.thank_you_note_due_at',
       'customers.id as member_customer_id', 'customers.first_name', 'customers.last_name',
       'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
+      conn.raw('count(*) OVER () AS owed_total'),
     );
-  return rows.map((row) => ({
+  const notes = rows.map((row) => ({
     referralId: row.id,
     owedSince: row.thank_you_note_due_at,
     memberCustomerId: row.member_customer_id,
@@ -74,6 +75,7 @@ async function listThankYouNotes(conn = db) {
     addressLines: addressLines(row),
     addressComplete: addressComplete(row),
   }));
+  return { notes, total: rows.length ? Number(rows[0].owed_total) : 0 };
 }
 
 // The office wrote the note. One UPDATE tests and stamps, so a referral that stopped owing a note after the list
@@ -91,4 +93,4 @@ async function markThankYouNoteWritten({ referralId, writtenBy = null }, conn = 
   throw err;
 }
 
-module.exports = { listThankYouNotes, markThankYouNoteWritten, BOOKED_STATUSES, LIST_LIMIT };
+module.exports = { listThankYouNotes, markThankYouNoteWritten, BOOKED_STATUSES, PAGE_SIZE };

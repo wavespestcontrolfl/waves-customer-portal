@@ -60,13 +60,26 @@ async function request(method, path) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockStaff = { role: 'admin', id: STAFF };
-  notes.listThankYouNotes.mockResolvedValue([NOTE]);
+  notes.listThankYouNotes.mockResolvedValue({ notes: [NOTE], total: 1 });
   notes.markThankYouNoteWritten.mockResolvedValue({ written: true });
 });
 
 describe('thank-you note list routes', () => {
-  test('GET answers the list as the service built it', async () => {
-    await expect(request('GET', '/thank-you-notes')).resolves.toEqual({ status: 200, body: { notes: [NOTE] } });
+  test('GET answers the list and the total as the service built them, at the service\'s own batch size', async () => {
+    await expect(request('GET', '/thank-you-notes')).resolves.toEqual({ status: 200, body: { notes: [NOTE], total: 1 } });
+    expect(notes.listThankYouNotes).toHaveBeenCalledWith({});
+  });
+
+  test('GET ?limit= asks the service for a longer list ("Show more")', async () => {
+    expect((await request('GET', '/thank-you-notes?limit=400')).status).toBe(200);
+    expect(notes.listThankYouNotes).toHaveBeenCalledWith({ limit: 400 });
+  });
+
+  test.each(['0', '-5', '1.5', 'abc', '', '1e3', '0400', '4000000000', '5&limit=6'])('GET ?limit=%s is refused and never reaches the service', async (limit) => {
+    await expect(request('GET', `/thank-you-notes?limit=${limit}`)).resolves.toEqual({
+      status: 400, body: { error: 'limit must be a whole number, 1 or more' },
+    });
+    expect(notes.listThankYouNotes).not.toHaveBeenCalled();
   });
 
   test('POST marks that referral with the staff login', async () => {

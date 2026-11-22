@@ -661,19 +661,25 @@ function InboundReferralCard({ item, step2, onDone, flash }) {
 // Step 2: one handwritten thank-you note to the member for every friend who books. The card lists the member and
 // the mailing address only: the note never names the friend, so the friend is not on this card or in its data.
 // It reads its own list when the Queue opens and shows nothing when no note is owed.
+const THANK_YOU_NOTES_BATCH = 200; // the first read asks for this many notes; "Show more" asks for this many more
 function ThankYouNotes({ flash }) {
   const isMobile = useIsMobile();
   const [notes, setNotes] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [limit, setLimit] = useState(THANK_YOU_NOTES_BATCH);
   const [failed, setFailed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [busyId, setBusyId] = useState(null);
 
   useEffect(() => {
     let current = true;
-    af("/admin/referrals/thank-you-notes")
+    af(`/admin/referrals/thank-you-notes?limit=${limit}`)
       .then((r) => {
         if (!current) return;
-        setNotes(r.notes || []);
+        const rows = r.notes || [];
+        setNotes(rows);
+        // The count of every note owed, not of the rows on screen.
+        setTotal(Math.max(Number(r.total) || 0, rows.length));
         setFailed(false);
       })
       .catch(() => {
@@ -682,7 +688,7 @@ function ThankYouNotes({ flash }) {
     return () => {
       current = false;
     };
-  }, [reloadKey]);
+  }, [reloadKey, limit]);
 
   const markWritten = async (note) => {
     if (busyId) return;
@@ -690,15 +696,15 @@ function ThankYouNotes({ flash }) {
     try {
       await adminPost(`/admin/referrals/thank-you-notes/${note.referralId}/written`);
       setNotes((rows) => rows.filter((row) => row.referralId !== note.referralId));
+      setTotal((count) => Math.max(0, count - 1));
       flash(`Thank-you note for ${note.memberName || "the member"} marked written`);
     } catch (e) {
       flash("Error: " + e.message);
     } finally {
       setBusyId(null);
-      // Read the list again after every answer. After a mark: the server answers a limited batch, oldest first,
-      // so the notes past the batch come up and the card never hides while one is owed. After a refusal: a note
-      // that is no longer owed (the referral was rejected, the member archived) leaves the card, and one that
-      // only failed to save stays for another try.
+      // Read the list again after every answer, so the card and its count follow the server. After a refusal: a
+      // note that is no longer owed (the referral was rejected, the member archived) leaves the card, and one
+      // that only failed to save stays for another try.
       setReloadKey((k) => k + 1);
     }
   };
@@ -706,7 +712,7 @@ function ThankYouNotes({ flash }) {
   if (failed) {
     return <ErrorRow what="thank-you notes to write" onRetry={() => setReloadKey((k) => k + 1)} />;
   }
-  if (notes.length === 0) return null;
+  if (total === 0) return null;
   return (
     <div
       style={{
@@ -721,7 +727,7 @@ function ThankYouNotes({ flash }) {
     >
       <div>
         <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
-          Thank-you notes to write ({notes.length})
+          Thank-you notes to write ({total})
         </div>
         <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
           Write one note by hand to each member below. Each row is one friend who booked. Do not name the friend in
@@ -772,6 +778,19 @@ function ThankYouNotes({ flash }) {
           </button>
         </div>
       ))}
+      {total > notes.length && (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, fontSize: 14, color: D.text }}>
+          <span>
+            Showing the oldest {notes.length} of {total}.
+          </span>
+          <button
+            onClick={() => setLimit((count) => count + THANK_YOU_NOTES_BATCH)}
+            style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
+          >
+            Show more
+          </button>
+        </div>
+      )}
     </div>
   );
 }

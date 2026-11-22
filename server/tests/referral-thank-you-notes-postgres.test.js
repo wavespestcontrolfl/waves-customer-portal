@@ -100,7 +100,7 @@ postgres('referral thank-you notes (live Postgres)', () => {
   // Only this test's rows: the database may hold other rows.
   const listFor = async (...referrals) => {
     const ids = new Set(referrals.map((r) => r.id));
-    return (await notes.listThankYouNotes()).filter((n) => ids.has(n.referralId));
+    return (await notes.listThankYouNotes({ limit: 100000 })).notes.filter((n) => ids.has(n.referralId));
   };
 
   test('a referral converted under Step 2 puts the member on the list, with the mailing lines and the day the note became owed', async () => {
@@ -183,12 +183,51 @@ postgres('referral thank-you notes (live Postgres)', () => {
     expect((await listFor(r)).map((n) => n.referralId)).toEqual([r.id]);
   });
 
-  test('oldest booking first', async () => {
+  test('oldest first', async () => {
     const m = await member();
     const later = await referral(m, { thank_you_note_due_at: new Date('2027-02-09T15:00:00.000Z') });
     const first = await referral(m, { thank_you_note_due_at: new Date('2027-02-01T15:00:00.000Z') });
 
     expect((await listFor(later, first)).map((n) => n.referralId)).toEqual([first.id, later.id]);
+  });
+
+  test('one read answers the oldest `limit` notes and the count of all of them; a longer read reaches a later note with no mark', async () => {
+    const before = (await notes.listThankYouNotes({ limit: 1 })).total;
+    const m = await member();
+    // Older than any other row the database may hold.
+    const [a, b, c] = [
+      await referral(m, { thank_you_note_due_at: new Date('1990-01-01T15:00:00.000Z') }),
+      await referral(m, { thank_you_note_due_at: new Date('1990-01-02T15:00:00.000Z') }),
+      await referral(m, { thank_you_note_due_at: new Date('1990-01-03T15:00:00.000Z') }),
+    ];
+    const ids = (list) => list.notes.map((n) => n.referralId);
+
+    const short = await notes.listThankYouNotes({ limit: 2 });
+    expect(ids(short)).toEqual([a.id, b.id]);
+    expect(short.total).toBe(before + 3);
+
+    const longer = await notes.listThankYouNotes({ limit: 3 });
+    expect(ids(longer)).toEqual([a.id, b.id, c.id]);
+    expect(longer.total).toBe(before + 3);
+
+    // A mark takes the note off the list and off the count.
+    await notes.markThankYouNoteWritten({ referralId: a.id });
+    const after = await notes.listThankYouNotes({ limit: 2 });
+    expect(ids(after)).toEqual([b.id, c.id]);
+    expect(after.total).toBe(before + 2);
+
+    // No limit named: the first batch.
+    expect(notes.PAGE_SIZE).toBe(200);
+    expect(ids(await notes.listThankYouNotes()).slice(0, 2)).toEqual([b.id, c.id]);
+  });
+
+  test('no note owed: an empty list and a count of 0 for these rows', async () => {
+    const before = await notes.listThankYouNotes({ limit: 100000 });
+    await referral(await member(), { thank_you_note_due_at: null });
+    const after = await notes.listThankYouNotes({ limit: 100000 });
+    expect(after.total).toBe(before.total);
+    expect(after.notes).toHaveLength(before.notes.length);
+    expect(after.total).toBe(after.notes.length);
   });
 
   test('a missing address part leaves no empty line and no stray comma, and the row says the address is not complete', async () => {
