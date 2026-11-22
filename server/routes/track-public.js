@@ -1040,10 +1040,11 @@ async function loadTrackCardContext(token, database = db) {
   if (await visitInvoiceBillsThirdParty(database, row.id, records.map((r) => r.id))) return null;
   // A complaint-driven visit gets neither card (owner 2026-08-30, the
   // report's rule): no upsell and no referral ask after a callback. The
-  // flag sits on the job and on the service record; a completed visit can
-  // have no service record.
+  // flag sits on the job and on the service records (any of them, not only
+  // the newest); a completed visit can have no service record.
   const { reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
-  if (reserviceReportCopyGateOn() && (row.is_callback === true || record?.is_callback === true)) return null;
+  const callback = row.is_callback === true || records.some((r) => r.is_callback === true);
+  if (reserviceReportCopyGateOn() && callback) return null;
   // Same rule as the summary above: a visit whose report never reaches the
   // customer gets no report-derived offer either. The record must be this
   // visit's own customer's: the tap files its request for the record's
@@ -1096,6 +1097,9 @@ router.post('/:token/cross-sell', trackCardRouteOpen, trackCardActionLimiter, as
       serviceRecordId: context.serviceRecordId,
       metadata,
       surface: TRACK_CARD_SURFACE,
+      // The request is recomputed, locked and written for this visit's own
+      // customer only.
+      linkCustomerId: context.customerId,
       stillEligible: (trx) => trackContextStillHolds(req.params.token, context, trx, { offer: true }),
     });
     return res.status(status).json(body);

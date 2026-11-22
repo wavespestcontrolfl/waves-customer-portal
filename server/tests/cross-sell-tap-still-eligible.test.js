@@ -7,6 +7,10 @@
 //     nothing (no request row, no office bell);
 //   - a second read that says yes records the request as before;
 //   - the report passes no second read and is unchanged;
+//   - the tap is bound to the link's customer: a service record that now
+//     belongs to someone else is the 404 before any lock or write;
+//   - a second read that throws never puts its error text (Knex binds the
+//     link's token into it) in a log;
 //   - the referral tap enrolls only after the lock and a yes.
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/service-report/cross-sell', () => ({ buildReportCrossSell: jest.fn() }));
@@ -14,6 +18,7 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 jest.mock('../services/referral-share', () => ({ buildReferralShareForCustomer: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 
+const logger = require('../services/logger');
 const { buildReportCrossSell } = require('../services/service-report/cross-sell');
 const { triggerNotification } = require('../services/notification-triggers');
 const referralShare = require('../services/referral-share');
@@ -97,15 +102,47 @@ describe('handleCrossSellTap with a second eligibility read', () => {
     expect(triggerNotification).toHaveBeenCalledWith('bundle_quote_requested', expect.objectContaining({ customerId: 'cust-1' }));
   });
 
-  test('a second read that fails is "try again", never a recorded request', async () => {
+  test.each([
+    ['a database error with a code', { code: '08006' }, '08006'],
+    ['an error with no code', {}, 'recheck_failed'],
+  ])('a second read that fails (%s) is "try again": nothing recorded, no token in the log', async (_label, extra, logged) => {
     const { db, log } = fakeDb();
+    const TOKEN = 'a'.repeat(64);
     const answer = await handleCrossSellTap({
       db, serviceRecordId: 'sr-1', metadata: METADATA, surface: RECEIPT,
-      stillEligible: async () => { throw Object.assign(new Error('db blip'), { code: '08006' }); },
+      stillEligible: async () => { throw Object.assign(new Error(`select ... where "i"."token" = '${TOKEN}' - failed`), extra); },
     });
     expect(answer.status).toBe(503);
     expect(log).not.toContain('trx:insert:service_requests');
     expect(triggerNotification).not.toHaveBeenCalled();
+    const text = logger.warn.mock.calls.flat().join(' ');
+    expect(text).toContain(logged);
+    expect(text).not.toContain(TOKEN);
+  });
+
+  // Pre-push audit P0 (2026-11-22): the route read the link for one
+  // customer; the record the offer is recomputed from must still be theirs.
+  test('the service record now belongs to another customer → the 404, before any offer, lock or write', async () => {
+    const { db, log } = fakeDb();
+    const stillEligible = jest.fn(async () => true);
+    const answer = await handleCrossSellTap({
+      db, serviceRecordId: 'sr-1', metadata: METADATA, surface: RECEIPT, stillEligible, linkCustomerId: 'cust-other',
+    });
+    expect(answer).toEqual({ status: 404, body: { error: 'Receipt not found' } });
+    expect(buildReportCrossSell).not.toHaveBeenCalled();
+    expect(stillEligible).not.toHaveBeenCalled();
+    expect(log.some((step) => step.startsWith('trx:'))).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('the link\'s own customer taps → recorded, and the locked customer is the link\'s', async () => {
+    const { db, log } = fakeDb();
+    const answer = await handleCrossSellTap({
+      db, serviceRecordId: 'sr-1', metadata: METADATA, surface: RECEIPT, stillEligible: async () => true, linkCustomerId: 'cust-1',
+    });
+    expect(answer.status).toBe(200);
+    expect(log).toContain('trx:lock:customers');
+    expect(triggerNotification).toHaveBeenCalledWith('bundle_quote_requested', expect.objectContaining({ customerId: 'cust-1' }));
   });
 
   test('the report passes no second read and records as before', async () => {

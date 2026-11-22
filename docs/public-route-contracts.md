@@ -3528,7 +3528,22 @@ receipt reads its invoice, the account, and the job by both links an invoice
 carries (`invoices.scheduled_service_id` and the service record's); the
 tracker reads the job, the account, and any invoice of the visit (by
 `scheduled_service_id` or by ANY service record of the visit, not only the
-newest). A receipt with no
+newest). A receipt also carries no cards once its invoice's link has a
+recorded send to anyone but the account holder (the invoice email takes a
+one-off recipient and CC addresses; each holds the same token, and the paid
+pay page sends its holder on to the receipt): a `short_codes` row of the
+invoice with the third-party marker `purpose = 'payer_invoice'`
+(`invoice-email.js#payerCodeMarker`), or an `email_messages` row
+`invoice_sent:<id>` / `invoice_receipt:<id>` with a `cc_email_snapshot` or a
+`recipient_email_snapshot` that is not the account holder's email on file
+now (`THIRD_PARTY_SEND_COLUMNS` in `services/receipt-cards.js`; fail closed:
+a row counts whether or not its send reached the provider, and a customer
+whose email changed after the send reads as another address). Invoice
+follow-up emails take no one-off recipient or CC; they go where the billing
+resolver sends them, which the billing-email rule above already reads.
+Production, read-only, 2026-11-22: of 142 invoices paid in the last 30
+days, 2 carry the marker (payer-billed) and 5 have such an email row; 31 of
+the 32 paid in the last 7 days pass every rule. A receipt with no
 `service_record_id`, or (receipt and tracker alike) a visit whose report is
 not customer-deliverable (`structured_notes.typedReportDelivery` other than
 `auto_send`; `reportSuppressedForCustomer`), or whose service record belongs
@@ -3559,7 +3574,8 @@ complaint-driven (callback) visit carries neither card and its taps 404 while
 `GATE_RESERVICE_REPORT_COPY` is on (the report's rule); the flag is read on
 the service record AND on the job (`scheduled_services.is_callback`: the
 receipt by both job links, the tracker on its own visit row), so a callback
-with no service record is covered;
+with no service record is covered, and on ANY service record of the job, not
+only the newest or the invoice's own;
 a receipt tap never records a receipt view. The receipt page shows the
 per-application price; the report card stays price-free (owner 2026-10-05).
 
@@ -3598,6 +3614,19 @@ no estimate, no office bell, no promoter row. The seams are
 `referralShareIfStillEligible` (the customer lock, the second read, then
 `buildReferralShareForCustomer(customerId, { conn: trx })`). The service
 report's own tap passes no second read and is unchanged.
+One customer end to end: the route passes the customer it read the link for
+as `linkCustomerId`. `handleCrossSellTap` answers the 404 before it
+recomputes anything when the offer's service record is no longer that
+customer's, so the row it locks and writes for is the link's own customer;
+the second read then requires the link (the invoice, or the visit) to still
+belong to that same customer, and its visit record to be that customer's.
+An invoice and its visit that move to another customer together are a 404,
+not a request for the former customer.
+No token in a log: a failed read or write on any of the four taps answers a
+generic 503 from the route itself and logs `err.code` only (Knex puts bound
+values in its error text, and the receipt token is permanent). A tap never
+passes its error to the global error handler, and a second read that throws
+is re-raised with its code and no message.
 Recorded exception, deliberate: the second read takes NO row lock on the
 invoice or the visit. Invoice settlement holds the invoice and takes the
 visit `FOR UPDATE NOWAIT` (`invoice-helpers.js#lockVisitForSettlement`), so

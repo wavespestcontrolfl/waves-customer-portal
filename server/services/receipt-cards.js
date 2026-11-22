@@ -12,7 +12,9 @@
  * contact on the account — linkReachesOnlyAccountHolder; and the receipt email's own
  * recipient resolver, getReceiptEmailRecipients, picks the account holder —
  * a distinct notification_prefs.billing_email means the receipt goes to
- * someone else), and not for a complaint-driven
+ * someone else; and no recorded send of this invoice's link to anyone else:
+ * a one-off recipient or a CC on the invoice email — THIRD_PARTY_SEND_COLUMNS),
+ * and not for a complaint-driven
  * visit (owner 2026-08-30, the report's rule: no upsell or referral ask after
  * a callback). The offer is the service report's
  * own composer over the visit the invoice is for; an invoice with no visit,
@@ -34,6 +36,37 @@ function withinReceiptCardWindow(paidAt, now = Date.now()) {
   const paid = new Date(paidAt).getTime();
   return Number.isFinite(paid) && now - paid <= RECEIPT_CARD_WINDOW_MS;
 }
+
+// Has this invoice's link already gone to someone other than the account
+// holder? The invoice email takes a one-off recipient (an operator naming a
+// bookkeeper or a realtor) and CC addresses; each gets the same token, and
+// the paid pay page sends its holder on to this receipt. Two records, either
+// one closes the cards (pre-push audit 2026-11-22):
+//   - the short link invoice-email.js minted for that send carries the
+//     third-party marker (payerCodeMarker: purpose 'payer_invoice' for a
+//     payer, a recipient that is not the customer's own, or a CC'd copy);
+//   - an invoice or receipt email of this invoice has a CC, or went to an
+//     address that is not the account holder's email on file now.
+// Fail closed: a row counts whether or not its send reached the provider, and
+// a customer who changed their email after the invoice went out reads as
+// another address. Both lookups use an index (short_codes entity_type +
+// entity_id; email_messages trigger_event_id).
+const THIRD_PARTY_SEND_COLUMNS = [
+  `EXISTS (SELECT 1 FROM short_codes sc
+     WHERE sc.entity_type = 'invoices' AND sc.entity_id = i.id AND sc.purpose = 'payer_invoice'
+   ) as link_marked_third_party`,
+  `EXISTS (SELECT 1 FROM email_messages em
+     WHERE em.trigger_event_id IN ('invoice_sent:' || i.id::text, 'invoice_receipt:' || i.id::text)
+       AND (em.cc_email_snapshot IS NOT NULL
+         OR lower(btrim(em.recipient_email_snapshot)) IS DISTINCT FROM lower(btrim(c.email)))
+   ) as link_emailed_to_other_address`,
+];
+
+// A callback flagged on ANY service record of the invoice's job (by either
+// job link), not only the record the invoice points at.
+const JOB_CALLBACK_RECORD_COLUMN = `EXISTS (SELECT 1 FROM service_records x
+     WHERE x.is_callback IS TRUE AND x.scheduled_service_id IN (i.scheduled_service_id, sr.scheduled_service_id)
+   ) as job_record_is_callback`;
 
 // What eligibility needs, and nothing more. Never InvoiceService.getByToken,
 // whose default records a view (a tap is not a view).
@@ -61,6 +94,8 @@ function loadReceiptCardRow(where, database = db) {
       // receipt can reach its job with no service record at all.
       'sr.is_callback as visit_is_callback',
       'ij.is_callback as invoice_job_is_callback', 'rj.is_callback as record_job_is_callback',
+      database.raw(JOB_CALLBACK_RECORD_COLUMN),
+      ...THIRD_PARTY_SEND_COLUMNS.map((sql) => database.raw(sql)),
       ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
     );
 }
@@ -74,9 +109,11 @@ function receiptCardsEligible(row) {
   if (!isEnabled('docCrossSell') || !row?.customer_id || row.status !== 'paid') return false;
   if (!withinReceiptCardWindow(row.paid_at)) return false;
   const { reserviceReportCopyGateOn } = require('./service-report/reservice-report');
-  const callback = row.visit_is_callback === true
+  const callback = row.visit_is_callback === true || row.job_record_is_callback === true
     || row.invoice_job_is_callback === true || row.record_job_is_callback === true;
   if (reserviceReportCopyGateOn() && callback) return false;
+  // The link already went to someone else (a one-off recipient, a CC).
+  if (row.link_marked_third_party === true || row.link_emailed_to_other_address === true) return false;
   // The receipt goes where the receipt email goes: the account holder, or a
   // distinct billing contact (who must not start the plan or enroll as the
   // homeowner's promoter). Same resolver as resolveReceiptEmailRecipient.

@@ -132,6 +132,8 @@ test('a completed visit reached only by the account holder taps through the repo
   expect(res.statusCode).toBe(200);
   expect(tap.handleCrossSellTap).toHaveBeenCalledWith(expect.objectContaining({
     serviceRecordId: 'sr-1', metadata, surface: expect.objectContaining({ source: 'tracker' }),
+    // The tap recomputes, locks and writes for this visit's customer only.
+    linkCustomerId: 'cust-1',
   }));
 });
 
@@ -296,6 +298,8 @@ test.each([
   ['flagged on the service record', { record: { ...RECORD, is_callback: true } }],
   ['flagged on the job, with a service record', { visit: { ...VISIT, is_callback: true } }],
   ['flagged on the job, with no service record', { visit: { ...VISIT, is_callback: true }, record: null }],
+  // A visit can have more than one record; the flag can sit on an older one.
+  ['flagged on an older service record only', { records: [RECORD, { ...RECORD, id: 'sr-0', is_callback: true }] }],
 ])('a callback visit gets neither card (the report\'s rule, with the re-service copy gate on): %s', async (_label, fixture) => {
   const prior = process.env.GATE_RESERVICE_REPORT_COPY;
   process.env.GATE_RESERVICE_REPORT_COPY = 'true';

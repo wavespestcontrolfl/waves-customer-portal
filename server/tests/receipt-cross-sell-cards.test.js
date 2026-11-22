@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
   // customers chain can be row-locked: a lock on an invoice or a visit row
   // fails a payment (settlement takes the visit FOR UPDATE NOWAIT), so a
   // route that asks for one throws here.
-  const handle = (first) => jest.fn((table) => {
+  const handle = (first) => Object.assign(jest.fn((table) => {
     const query = {};
     for (const method of ['where', 'whereIn', 'orderBy', 'whereRaw', 'leftJoin']) query[method] = () => query;
     if (String(table) === 'customers') {
@@ -23,7 +23,7 @@ jest.mock('../models/db', () => {
     }
     query.first = (...args) => first(...args);
     return query;
-  });
+  }), { raw: (sql) => sql });
   const db = handle((...args) => mockFirst(...args));
   // The tap's transaction: its own handle, answering from mockLaterFirst.
   db.mockTrx = handle((...args) => mockLaterFirst(...args));
@@ -35,6 +35,7 @@ jest.mock('../services/payer', () => ({ attachToInvoice: jest.fn(async () => {})
 jest.mock('../services/invoice-email', () => ({ inspectionCreditMemoForInvoice: jest.fn(async () => null) }));
 jest.mock('../services/pdf/invoice-pdf', () => ({ generateReceiptPDF: jest.fn() }));
 jest.mock('../services/logger', () => ({ warn: jest.fn() }));
+const logger = require('../services/logger');
 jest.mock('../services/receipt-payment', () => ({ loadPaymentForInvoice: jest.fn(async () => null) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../services/service-report/cross-sell-tap', () => ({
@@ -130,6 +131,14 @@ describe('GET /:token — the cards ride the receipt payload', () => {
       process.env.GATE_RESERVICE_REPORT_COPY = 'true';
       mockFirst.mockResolvedValue({ ...INVOICE, record_job_is_callback: true });
     }],
+    ['a callback flagged on another service record of the job', () => {
+      process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+      mockFirst.mockResolvedValue({ ...INVOICE, job_record_is_callback: true });
+    }],
+    // Pre-push audit P0 (2026-11-22): the invoice email takes a one-off
+    // recipient and CCs; each holds this same link.
+    ['the invoice link went out under the third-party marker (one-off recipient or CC)', () => mockFirst.mockResolvedValue({ ...INVOICE, link_marked_third_party: true })],
+    ['an invoice email went to another address or carried a CC', () => mockFirst.mockResolvedValue({ ...INVOICE, link_emailed_to_other_address: true })],
   ])('%s → no cards', async (_label, arrange) => {
     arrange();
     const { res } = await call('get', '/:token');
@@ -163,6 +172,18 @@ describe('GET /:token — the cards ride the receipt payload', () => {
   test('the referral card is built for the receipt\'s own customer', async () => {
     await call('get', '/:token');
     expect(referralShare.composeReferralCard).toHaveBeenCalledWith({ customerId: 'cust-1' });
+  });
+
+  // The two third-party-send flags and the job callback flag are computed
+  // by the row read itself. The rows above are fakes, so this pins what the
+  // read asks the database (the SQL ran read-only on production 2026-11-22).
+  test('the row read asks for recorded third-party sends and a callback on any record of the job', async () => {
+    await call('get', '/:token');
+    const columns = mockFirst.mock.calls[0].filter((c) => typeof c === 'string').join('\n');
+    expect(columns).toMatch(/FROM short_codes sc\s+WHERE sc\.entity_type = 'invoices' AND sc\.entity_id = i\.id AND sc\.purpose = 'payer_invoice'\s+\) as link_marked_third_party/);
+    expect(columns).toMatch(/FROM email_messages em\s+WHERE em\.trigger_event_id IN \('invoice_sent:' \|\| i\.id::text, 'invoice_receipt:' \|\| i\.id::text\)/);
+    expect(columns).toMatch(/em\.cc_email_snapshot IS NOT NULL\s+OR lower\(btrim\(em\.recipient_email_snapshot\)\) IS DISTINCT FROM lower\(btrim\(c\.email\)\)\)\s+\) as link_emailed_to_other_address/);
+    expect(columns).toMatch(/FROM service_records x\s+WHERE x\.is_callback IS TRUE AND x\.scheduled_service_id IN \(i\.scheduled_service_id, sr\.scheduled_service_id\)\s+\) as job_record_is_callback/);
   });
 });
 
@@ -207,6 +228,8 @@ describe('POST /:token/cross-sell — the report tap, on the receipt', () => {
       serviceRecordId: 'sr-1',
       metadata,
       surface: expect.objectContaining({ source: 'invoice_receipt' }),
+      // The tap recomputes, locks and writes for this receipt's customer only.
+      linkCustomerId: 'cust-1',
     }));
     expect(res.statusCode).toBe(200);
     expect(res.json).toHaveBeenCalledWith({ ok: true, estimateUrl: '/estimate/x' });
@@ -221,12 +244,44 @@ describe('POST /:token/cross-sell — the report tap, on the receipt', () => {
     ['paid more than 7 days ago', () => mockFirst.mockResolvedValue({ ...INVOICE, paid_at: paidAgo(8 * DAY_MS) })],
     ['no visit on the invoice', () => mockFirst.mockResolvedValue({ ...INVOICE, service_record_id: null })],
     ['a visit that belongs to another customer', () => mockFirst.mockResolvedValue({ ...INVOICE, record_customer_id: 'cust-other' })],
+    ['the invoice link went to a one-off recipient or a CC', () => mockFirst.mockResolvedValue({ ...INVOICE, link_marked_third_party: true })],
+    ['an invoice email went to another address', () => mockFirst.mockResolvedValue({ ...INVOICE, link_emailed_to_other_address: true })],
     ['unknown token', () => mockFirst.mockResolvedValue(undefined)],
   ])('%s → 404, nothing recorded', async (_label, arrange) => {
     arrange();
     const { res } = await call('post', '/:token/cross-sell', { body: { metadata: {} } });
     expect(res.statusCode).toBe(404);
     expect(tap.handleCrossSellTap).not.toHaveBeenCalled();
+  });
+});
+
+// Pre-push audit P0 (2026-11-22): Knex puts bound values in its error text,
+// and the receipt token is a permanent bearer link. A failed tap answers
+// "try again" itself, logs a code only, and never reaches the global error
+// handler (which logs the message and the stack).
+describe('a failed tap never logs the receipt token', () => {
+  const TOKEN = 'a'.repeat(64);
+  const boom = () => Object.assign(new Error(`select * from "invoices" where "token" = '${TOKEN}' - connection lost`), { code: '08006' });
+
+  test.each([
+    ['the first read fails', () => mockFirst.mockRejectedValue(boom())],
+    ['the shared tap throws', () => tap.handleCrossSellTap.mockRejectedValue(boom())],
+  ])('offer tap, %s → 503, a code-only log, no global handler', async (_label, arrange) => {
+    arrange();
+    const { res, next } = await call('post', '/:token/cross-sell', { body: { metadata: {} } });
+    expect(res.statusCode).toBe(503);
+    expect(next).not.toHaveBeenCalled();
+    const logged = logger.warn.mock.calls.flat().join(' ');
+    expect(logged).toContain('code=08006');
+    expect(logged).not.toContain(TOKEN);
+  });
+
+  test('referral tap, the first read fails → 503, a code-only log', async () => {
+    mockFirst.mockRejectedValue(boom());
+    const { res, next } = await call('post', '/:token/referral-link');
+    expect(res.statusCode).toBe(503);
+    expect(next).not.toHaveBeenCalled();
+    expect(logger.warn.mock.calls.flat().join(' ')).not.toContain(TOKEN);
   });
 });
 
@@ -242,6 +297,8 @@ describe('POST /:token/referral-link — enrolls on the tap only', () => {
   test.each([
     ['a payer-billed receipt', { payer_id: 'payer-1' }],
     ['a receipt paid more than 7 days ago', { paid_at: paidAgo(8 * DAY_MS) }],
+    ['a receipt whose invoice link went to a one-off recipient or a CC', { link_marked_third_party: true }],
+    ['a receipt whose invoice email went to another address', { link_emailed_to_other_address: true }],
   ])('%s never enrolls anyone', async (_label, change) => {
     mockFirst.mockResolvedValue({ ...INVOICE, ...change });
     const { res } = await call('post', '/:token/referral-link');
@@ -259,6 +316,7 @@ describe('the tap reads its eligibility again inside the write', () => {
     ['the invoice now bills a third party', { payer_id: 'payer-1' }],
     ['a service contact was added to the account', { service_contact_name: 'Tenant Tina', service_contact_email: 't@example.com' }],
     ['a distinct billing email was added', { customer_email: 'pat@example.com', billing_email: 'books@example.com' }],
+    ['the invoice was emailed to a second address', { link_emailed_to_other_address: true }],
   ];
 
   async function stillEligibleOf() {
@@ -281,6 +339,9 @@ describe('the tap reads its eligibility again inside the write', () => {
     ...CHANGES,
     ['the invoice now points at another visit', { service_record_id: 'sr-2' }],
     ['the report stopped reaching the customer', { visit_structured_notes: { typedReportDelivery: 'internal_only' } }],
+    // Pre-push audit P0 (2026-11-22): the record id alone still matches
+    // when the invoice and its visit move to another customer together.
+    ['the invoice and its visit moved to another customer together', { customer_id: 'cust-2', record_customer_id: 'cust-2' }],
     ['the token no longer finds an invoice', null],
   ])('offer tap: %s → no longer eligible', async (_label, change) => {
     const { stillEligible } = await stillEligibleOf();

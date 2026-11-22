@@ -16,13 +16,18 @@
  * `title` (the page named in the staff-facing subject and description).
  * Returns { status, body } for the route to send.
  *
- * A link surface (receipt, tracker) also passes `stillEligible(trx)` and
- * `surface.notFoundBody`. The route reads the link's eligibility before the
- * tap; `stillEligible` reads it again inside the write, with the customer
- * row locked (AGENTS.md, public routes: the commit path re-checks the
- * preflight read): the live gate, the token's own row, the time window and
- * who the link reaches, all on current rows. False = the route's own 404
- * and nothing written. The report passes neither and behaves as before.
+ * A link surface (receipt, tracker) also passes `linkCustomerId`,
+ * `stillEligible(trx)` and `surface.notFoundBody`. The route reads the
+ * link's eligibility before the tap; `stillEligible` reads it again inside
+ * the write, with the customer row locked (AGENTS.md, public routes: the
+ * commit path re-checks the preflight read): the live gate, the token's own
+ * row, the time window and who the link reaches, all on current rows. False
+ * = the route's own 404 and nothing written. `linkCustomerId` is the
+ * customer the route read the link for: the service record the offer is
+ * recomputed from must be that customer's, so the row the tap locks and
+ * writes for is the link's own customer, and `stillEligible` confirms the
+ * link still belongs to that customer. The report passes none of the three
+ * and behaves as before.
  */
 const logger = require('../logger');
 const { stampedLine2Sql } = require('../stamped-address');
@@ -100,10 +105,15 @@ async function buildCrossSellForServiceRecord(db, serviceRecordId) {
 }
 
 async function handleCrossSellTap({
-  db, serviceRecordId, metadata = {}, surface, recordEvent = null, stillEligible = null,
+  db, serviceRecordId, metadata = {}, surface, recordEvent = null, stillEligible = null, linkCustomerId = null,
 }) {
   try {
     const joined = await loadCrossSellService(db, serviceRecordId);
+    // The record moved to another customer after the route read the link:
+    // nothing is recomputed, locked or written for anyone else.
+    if (linkCustomerId && joined?.customer_id !== linkCustomerId) {
+      return { status: 404, body: surface.notFoundBody };
+    }
     const { buildReportCrossSell } = require('./cross-sell');
     // Click-to-estimate (GATE_REPORT_CLICK_TO_ESTIMATE, inert without the
     // parent card gate that already guarded this event): a priced tap
@@ -209,7 +219,15 @@ async function handleCrossSellTap({
         revisionSnapshot,
         ...(stillEligible ? {
           afterLock: async (trx) => {
-            if (!(await stillEligible(trx))) {
+            let eligible;
+            try {
+              eligible = await stillEligible(trx);
+            } catch (err) {
+              // Code only: the read is bound to the link's token, and Knex
+              // puts bound values in its error text.
+              throw Object.assign(new Error('eligibility recheck failed'), { code: err?.code || 'recheck_failed' });
+            }
+            if (!eligible) {
               throw Object.assign(new Error('tap no longer eligible'), { tapIneligible: true });
             }
           },

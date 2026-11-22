@@ -242,7 +242,7 @@ router.get('/:token/pdf', async (req, res, next) => {
 // GATE_REPORT_CLICK_TO_ESTIMATE on and a priced offer — an estimate URL to
 // open. 404 covers a dark gate, an ineligible receipt and an unknown token
 // alike, so the gate is not probeable.
-router.post('/:token/cross-sell', receiptCardRouteOpen, receiptCardActionLimiter, async (req, res, next) => {
+router.post('/:token/cross-sell', receiptCardRouteOpen, receiptCardActionLimiter, async (req, res) => {
   try {
     const data = await loadReceiptCardInvoice(req.params.token);
     // The same answer the page used to show (or not show) the offer.
@@ -257,15 +257,23 @@ router.post('/:token/cross-sell', receiptCardRouteOpen, receiptCardActionLimiter
       serviceRecordId: offerRecordId,
       metadata,
       surface: RECEIPT_SURFACE,
-      // Read again inside the write: the gate, this token's invoice, the
-      // 7 days and who the receipt reaches, on current rows.
-      stillEligible: async (trx) => (
-        receiptOfferRecordId(await loadReceiptCardInvoice(req.params.token, trx)) === offerRecordId
-      ),
+      // The request is recomputed, locked and written for this receipt's
+      // own customer only.
+      linkCustomerId: data.customer_id,
+      // Read again inside the write: the gate, this token's invoice and its
+      // customer, the 7 days and who the receipt reaches, on current rows.
+      stillEligible: async (trx) => {
+        const current = await loadReceiptCardInvoice(req.params.token, trx);
+        return current?.customer_id === data.customer_id && receiptOfferRecordId(current) === offerRecordId;
+      },
     });
     return res.status(status).json(body);
   } catch (err) {
-    return next(err);
+    // Code only, and never the global handler (it logs the message and the
+    // stack): Knex error text can carry the bound receipt token, which is a
+    // permanent bearer link.
+    logger.warn(`[receipt-v2] cross-sell tap failed (code=${err?.code || 'none'})`);
+    return res.status(503).json({ error: 'Could not record the request — please try again' });
   }
 });
 
