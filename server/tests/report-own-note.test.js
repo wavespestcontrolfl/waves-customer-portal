@@ -272,6 +272,8 @@ describe('the stored text and the fixed sentence', () => {
     expect(await refusal('treating outside, pest free on March 4', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
     expect(await refusal('gate opens tomorrow. treating outside', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
     await expect(refusal('gate opens tomorrow. treating outside', 'Treating outside.')).resolves.toBeNull();
+    // A word in "-ing" that names a thing sets no tense.
+    await expect(refusal('ants active in building. back tomorrow', 'Ants were active in the building.')).resolves.toBeNull();
     // A note with no time.
     await expect(refusal('seeing ants in the kitchen', 'I\'m seeing ants in the kitchen.')).resolves.toBeNull();
     expect(await refusal('treated outside', 'I am treated outside.')).toEqual({ reason: 'not_in_note', words: ['am'] });

@@ -203,6 +203,11 @@ describe('the text is refused', () => {
     expect(orderRejection('I was treating outside.', 'tomorrow, treating outside', dated)).toEqual(added('was'));
     expect(orderRejection('Ants were trailing in kitchen.', 'ants trailing in kitchen. back in 2 weeks', dated)).toEqual(added('were'));
     expect(orderRejection('Ants trailing in kitchen.', 'ants trailing in kitchen. back in 2 weeks', dated)).toBeNull();
+    // A word in "-ing" after an article or a place word names a thing, and "nothing" is no verb form.
+    expect(orderRejection('Ants were active in the building.', 'ants active in building. back in 2 weeks', dated)).toBeNull();
+    expect(orderRejection('Ants were active in building.', 'ants active in building. back in 2 weeks', dated)).toBeNull();
+    expect(orderRejection('Ants were all over the ceiling.', 'ants all over ceiling. back in 2 weeks', dated)).toBeNull();
+    expect(orderRejection('There was nothing in the kitchen.', 'nothing in kitchen. back in 2 weeks', dated)).toBeNull();
     // A form of "is" before another word is no tense of the word in "-ing".
     expect(orderRejection('Ants were bad. Treating outside.', 'ants bad. treating outside tomorrow', dated)).toBeNull();
     // A note with no time: the small word may be added, and "I'm" where "I" may.
