@@ -3243,6 +3243,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Record-only check for the after-call estimate text: for each call whose caller said yes to an
+  // estimate Waves had sent, writes whether that text WOULD go (call_log.metadata.call_estimate_link_shadow).
+  // Sends nothing, no gate. Same 5-minute cadence as the booking-link text above. Loaded inside the tick:
+  // unlike call-booking-link-text it keeps no boot-time anchor, so nothing needs it at process start.
+  cron.schedule('0 */5 * * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const result = await runExclusive('call-estimate-link-shadow', () => require('./call-estimate-link-shadow').sweep());
+      if (result?.skipped && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Estimate-link check tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('call-estimate-link-shadow').catch(() => {});
+        await recordJobEnd('call-estimate-link-shadow', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[call-estimate-link-shadow] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // While the follow-up pager is live, the overdue watchdog takes each
   // promise over once it ages off the pager's 24-hour list. With callback
   // cards on it already runs every 5 minutes; with cards off its cadence is
