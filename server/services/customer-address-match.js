@@ -26,7 +26,7 @@
 // best-effort (environments without the table skip it); the primary leg's
 // errors propagate so callers choose fail-soft or fail-loud.
 const logger = require('./logger');
-const { sameStreetAddress, addressPremiseKey, addressUnitKey, canonicalizeLeadingUnit } = require('./estimator-engine/address-compare');
+const { sameStreetAddress, addressPremiseKey, addressUnitKey, canonicalizeLeadingUnit, addressCompletesGatheredStreet } = require('./estimator-engine/address-compare');
 
 const PER_LEG_LIMIT = 50;
 // strict: a far higher cap, and a leg that fills it throws (the search did
@@ -131,12 +131,17 @@ function strictPlan(address, houseNumber, zip, membersOnly) {
     // A row with the street only in line 2 is still compared.
     hasLine: (row) => !!(row.address_line1 || row.address_line2),
     // A near row names the same leading house digits (its zip the home's or none), or has no house number the
-    // search can read but has the home's zip on file and names the home's street word. A row with neither (a PO box
-    // with no zip) links nothing to this home: not near.
+    // search can read but has the home's zip on file and names the home's street (the shared completion test, or
+    // the street word in its street lines). A row with neither (a PO box) links nothing to this home: not near.
     isNear: (row) => {
       const own = ownDigits(row);
       if (own) return own === leadingDigits && [nearZip, ''].includes(zip5(row.zip));
-      return zip5(row.zip) === nearZip && streetWord !== '' && streetWordRe.test(candidateAddressString(row));
+      if (zip5(row.zip) !== nearZip) return false;
+      // The shared test first (it reads route spellings: "SR 64" for "State Road 64"), then the street word, read
+      // in the street lines only (a city named like the street proves nothing).
+      if (addressCompletesGatheredStreet(address, candidateAddressString(row))) return true;
+      const lines = [row.address_line1, row.address_line2].filter(Boolean).join(' ');
+      return streetWord !== '' && streetWordRe.test(lines);
     },
   };
 }

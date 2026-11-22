@@ -203,6 +203,17 @@ describe('findCustomersAtAddress', () => {
     expect(rows.map((r) => r.id)).toEqual(['same']);
   });
 
+  it('strict: a numberless row is near by the shared route reading or a street word in its street lines, never by its city', async () => {
+    const db = fakeDb({ properties: [
+      ROW('route', 'SR 64'),
+      ROW('po-box-in-palmetto', 'PO Box 7', null, { city: 'Palmetto' }),
+    ] });
+    const route = await findCustomersAtAddress(db, '123 State Road 64, Venice, FL 34285', { strict: true, zip: '34285' });
+    expect(route.map((r) => [r.id, r.exactMatch])).toEqual([['route', false]]);
+    const city = await findCustomersAtAddress(db, '123 Palmetto Ave, Palmetto, FL 34285', { strict: true, zip: '34285' });
+    expect(city.map((r) => r.id)).not.toContain('po-box-in-palmetto');
+  });
+
   it('a failing property leg is skipped, not fatal', async () => {
     const db = fakeDb({ customers: [ROW('a', '123 Palm Ave')], propertyError: new Error('relation "customer_properties" does not exist') });
     const ids = (await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285')).map((r) => r.id);
