@@ -19,9 +19,10 @@
  * kept. The template row is locked first, ONE new active version is published by compare-and-swap on the active
  * version, and only the version it replaces is archived. Older versions are never edited: a reviewed send pins a
  * version's content (email-template-reviewed-content.test.js), and an in-place edit would make that send refuse.
- * A template that already carries the sentence, has no active version, or has a custom plain-text body (the
- * renderer's generated text would not carry the line) is left whole and logged, never half-patched. No variable is
- * added, so allowed/optional/required variables and the preview fixtures stay as they are.
+ * A template that already carries the sentence in any block (a paragraph, a note, a list item, a details row), has
+ * no active version, or has a custom plain-text body (the renderer's generated text would not carry the line) is left
+ * whole and logged, never half-patched. "Price rows" means the details block that shows {{price_summary}}. No
+ * variable is added, so allowed/optional/required variables and the preview fixtures stay as they are.
  *
  * `down` is a documented no-op: a blanket revert would erase admin edits made after this published. To take the
  * line out, republish the prior version from the admin template library.
@@ -40,16 +41,22 @@ function json(value, fallback) {
   return value;
 }
 
-const carriesLine = (blocks) => blocks.some((b) => typeof b?.content === 'string' && b.content.includes(LINE));
+// The sentence anywhere the email shows text: a paragraph, a note, a list item, a details row. The sentence holds no
+// character that JSON escapes, so one search of the serialized blocks covers every field.
+const carriesLine = (blocks) => JSON.stringify(blocks).includes(LINE);
 
-// Directly under the price rows (the first details block). A template an admin rebuilt without price rows gets the
-// line above its first button, and one with no button gets it at the end.
+// Directly under the price rows: the details block that shows {{price_summary}}, never just the first details block
+// (an admin can put property rows or a question list above the price). A template rebuilt without price rows gets
+// the line above its first button, and one with no button gets it at the end.
+const PRICE_VARIABLE = /\{\{\s*price_summary\s*\}\}/;
+const showsPrice = (block) => block?.type === 'details' && PRICE_VARIABLE.test(JSON.stringify(block));
+
 function insertLine(blocksIn) {
   const blocks = blocksIn.map((b) => ({ ...b }));
-  const details = blocks.findIndex((b) => b?.type === 'details');
+  const priceRows = blocks.findIndex(showsPrice);
   const button = blocks.findIndex((b) => b?.type === 'cta');
   let at = blocks.length;
-  if (details >= 0) at = details + 1;
+  if (priceRows >= 0) at = priceRows + 1;
   else if (button >= 0) at = button;
   blocks.splice(at, 0, { type: 'paragraph', content: LINE });
   return blocks;
@@ -149,4 +156,4 @@ exports.down = async function down() {
   // Staff can republish the prior version from the template library.
 };
 
-exports._private = { TEMPLATE_KEY, LINE, insertLine };
+exports._private = { TEMPLATE_KEY, LINE, insertLine, carriesLine };

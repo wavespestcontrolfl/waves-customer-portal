@@ -4,7 +4,7 @@
 const migration = require('../models/migrations/20261122030000_estimate_delivery_no_visit_line');
 const { NO_VISIT_QUOTE_LINE } = require('../services/csr/weekly-call-outcomes');
 
-const { LINE, insertLine } = migration._private;
+const { LINE, insertLine, carriesLine } = migration._private;
 const PARAGRAPH = { type: 'paragraph', content: LINE };
 
 describe('estimate email "no visit needed" line migration plan', () => {
@@ -22,9 +22,30 @@ describe('estimate email "no visit needed" line migration plan', () => {
     expect(blocks).toHaveLength(4);
   });
 
+  test('it follows the details block that shows the price, not an earlier details block', () => {
+    const blocks = [
+      { type: 'details', rows: [{ label: 'Property', value: '{{property_address}}' }] },
+      { type: 'paragraph', content: 'Here is your price.' },
+      { type: 'details', rows: [{ label: 'Service', value: '{{service_summary}}' }, { label: 'Estimated price', value: '{{price_summary}}' }] },
+      { type: 'cta', label: 'View estimate', url_variable: 'estimate_url' },
+    ];
+    const out = insertLine(blocks);
+    expect(out.map((b) => b.type)).toEqual(['details', 'paragraph', 'details', 'paragraph', 'cta']);
+    expect(out[3]).toEqual(PARAGRAPH);
+  });
+
   test('with no price rows it goes above the first button, and with no button at the end', () => {
     expect(insertLine([{ type: 'paragraph', content: 'Hi' }, { type: 'cta', label: 'View' }, { type: 'small_note', content: 'z' }])[1]).toEqual(PARAGRAPH);
+    // A details block with no price in it is not "the price rows".
+    expect(insertLine([{ type: 'details', rows: [{ label: 'Property', value: '{{property_address}}' }] }, { type: 'paragraph', content: 'Hi' }, { type: 'cta', label: 'View' }])[2]).toEqual(PARAGRAPH);
     expect(insertLine([{ type: 'paragraph', content: 'Hi' }]).at(-1)).toEqual(PARAGRAPH);
+  });
+
+  test('the sentence counts as already there in any block that shows text', () => {
+    expect(carriesLine([{ type: 'paragraph', content: `Good to know. ${LINE}` }])).toBe(true);
+    expect(carriesLine([{ type: 'list', items: ['First point.', LINE] }])).toBe(true);
+    expect(carriesLine([{ type: 'details', rows: [{ label: 'Does someone come out?', value: LINE }] }])).toBe(true);
+    expect(carriesLine([{ type: 'paragraph', content: 'We measure your home.' }, { type: 'cta', label: 'View' }])).toBe(false);
   });
 
   test('the estimate email and the call script carry the same sentence, the one the owner picked', () => {

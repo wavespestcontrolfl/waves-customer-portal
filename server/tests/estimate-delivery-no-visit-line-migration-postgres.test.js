@@ -103,7 +103,7 @@ postgres('estimate email "no visit needed" line migration (PostgreSQL)', () => {
   });
 
   test('the shipped estimate email has price rows and does not carry the line yet', () => {
-    expect(pre.version.blocks.some((b) => b.type === 'details')).toBe(true);
+    expect(pre.version.blocks.some((b) => b.type === 'details' && JSON.stringify(b).includes('{{price_summary}}'))).toBe(true);
     expect(JSON.stringify(pre.version.blocks)).not.toContain(LINE);
   });
 
@@ -142,7 +142,9 @@ postgres('estimate email "no visit needed" line migration (PostgreSQL)', () => {
     const after = (await active()).version.blocks;
     expect(after.filter((b) => b.content === LINE)).toEqual([PARAGRAPH]);
     expect(after.filter((b) => b.content !== LINE)).toEqual(before);
-    expect(after[before.findIndex((b) => b.type === 'details') + 1]).toEqual(PARAGRAPH);
+    const priceAt = before.findIndex((b) => b.type === 'details' && JSON.stringify(b).includes('{{price_summary}}'));
+    expect(priceAt).toBeGreaterThanOrEqual(0);
+    expect(after[priceAt + 1]).toEqual(PARAGRAPH);
   });
 
   test('the line renders once in the html and in the plain text, between the price rows and the button', async () => {
@@ -196,6 +198,27 @@ postgres('estimate email "no visit needed" line migration (PostgreSQL)', () => {
     expect(version.version_number).toBe(pre.version.version_number);
     expect(version.status).toBe('active');
     expect((await db('audit_log').where({ action: `${MARKER}:publish` }))[0].metadata).toEqual({ results: { [KEY]: 'already' }, from_version: null, to_version: null, added_paragraph: null });
+  });
+
+  test('a template whose admin already answered it in a details row is left whole, not doubled', async () => {
+    await cloneTemplate({ blocksOf: [...pre.version.blocks, { type: 'details', rows: [{ label: 'Does someone come out to quote?', value: LINE }] }] });
+    await migration.up(db);
+    const { template, version } = await active();
+    expect(version.version_number).toBe(pre.version.version_number);
+    expect(await db('email_template_versions').where({ template_id: template.id })).toHaveLength(1);
+    const out = library.renderTemplate({ template, version, payload: PAYLOAD });
+    expect(out.text.split(LINE)).toHaveLength(2);
+  });
+
+  test('admin rows above the price do not pull the line up: it stays under the block that shows the price', async () => {
+    const propertyFirst = [pre.version.blocks[0], { type: 'details', rows: [{ label: 'Property', value: '{{property_address}}' }] }, ...pre.version.blocks.slice(1)];
+    await cloneTemplate({ blocksOf: propertyFirst });
+    await migration.up(db);
+    const after = (await active()).version.blocks;
+    const priceAt = after.findIndex((b) => b.type === 'details' && JSON.stringify(b).includes('{{price_summary}}'));
+    expect(priceAt).toBeGreaterThan(1);
+    expect(after[priceAt + 1]).toEqual(PARAGRAPH);
+    expect(after.filter((b) => b.content === LINE)).toHaveLength(1);
   });
 
   test('a custom plain-text body is left whole and logged, never half-patched', async () => {
