@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../../models/db');
 const logger = require('../../services/logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { dateOnlyString } = require('../../utils/date-only');
 const { hasCredentials, errorText } = require('./google-ads-config');
 
 // ---------------------------------------------------------------------------
@@ -176,8 +177,8 @@ function emptyLeadDay() {
 // true on a lead Google later credits back, so a credited lead counts in
 // `credited` and `total`, not in `charged`.
 function leadDay(lead) {
-  const day = String(lead.creation_date_time || '').slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+  const createdAt = lead.creation_date_time;
+  return typeof createdAt === 'string' ? dateOnlyString(createdAt) : null;
 }
 
 function tallyLeadsByDay(leadRows) {
