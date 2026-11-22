@@ -259,7 +259,7 @@ describe('submitReferral sends the stored invite (column), swapped only while th
     expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Get a free quote: \S+$/);
   });
 
-  test('gate on, a hand-edited stored text: sent as stored, with no amount', async () => {
+  test('gate on, a hand-edited stored text: sent exactly as stored', async () => {
     gates.referralStep2 = true;
     settingsRow.invite_sms_template = 'Hi {referee_name}, {referrer_name} thinks you will love Waves: {referral_link}';
     await send();
