@@ -102,12 +102,14 @@ function sampleKey(templateKey, jobId) {
 // The day the service of a visit was done: the service day of the visit's service record that says the service
 // was performed (status completed, and an outcome that is not one of the shared "nothing was performed" outcomes
 // of pest-pressure/first-visit.js: inspection only, declined by the customer, incomplete). The newest one, if a
-// visit has two. A visit with no such record has no day, so it is never due: the offer says "that job is plan
-// visit one", and only a record of the service proves there was one.
+// visit has two. The record must be of the visit's own customer, as in visit-completion-packets.js: a record of
+// another customer that names this visit proves nothing here. A visit with no such record has no day, so it is
+// never due: the offer says "that job is plan visit one", and only a record of the service proves there was one.
 const PERFORMED_DAY_JOIN = `JOIN LATERAL (
     SELECT MAX(r.service_date) AS service_day
     FROM service_records r
     WHERE r.scheduled_service_id = s.id
+      AND r.customer_id = s.customer_id
       AND r.status = 'completed'
       AND COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
   ) AS done ON TRUE`;
@@ -255,12 +257,27 @@ async function sampleVersionId(database, templateKey) {
   return row.id;
 }
 
+// The values of the offer sample that this job sent on an earlier morning, if it sent one. A morning can send
+// the offer and fail on the reminder. The morning after prices the home again, and a price setting can change in
+// between. The reminder then repeats the values of the offer the office already has, so the two samples of one
+// job never show two prices.
+async function sentOfferValues(database, jobId) {
+  const row = await database('email_messages')
+    .where({ idempotency_key: sampleKey(OFFER_TEMPLATE, jobId) })
+    .whereNotNull('sent_at')
+    .first('payload_snapshot');
+  return row?.payload_snapshot || {};
+}
+
 // Both emails as TEST sends to the office inbox. The idempotency key makes each one a once-per-job send.
 // The footer's unsubscribe link is a dead test link, as in the template editor's test send: a click on a
 // sample must not unsubscribe the office inbox from Waves marketing email.
 async function sendSamples(ctx, option) {
   assertInternalEmailRecipient(SAMPLE_RECIPIENT);
-  const payload = offerPayload({ customer: ctx.customer, jobDate: ctx.jobDate, option });
+  const payload = {
+    ...offerPayload({ customer: ctx.customer, jobDate: ctx.jobDate, option }),
+    ...await sentOfferValues(ctx.deps.db, ctx.job.id),
+  };
   const note = 'Sample only. No estimate was saved and the customer got no email. This step does not check the account'
     + ` (open balance, other visits, review asks), so this customer may not get the offer. Job ${ctx.job.id}.`;
   for (const templateKey of [OFFER_TEMPLATE, REMINDER_TEMPLATE]) {

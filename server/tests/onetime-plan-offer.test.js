@@ -185,6 +185,8 @@ describe("a job in the offer's audience that prices", () => {
     const [, joinSql, joinBindings] = due.calls.find(([method]) => method === 'joinRaw');
     expect(joinSql).toContain('SELECT MAX(r.service_date) AS service_day');
     expect(joinSql).toContain("r.status = 'completed'");
+    // A record of another customer that names this visit is not this visit's record.
+    expect(joinSql).toContain('r.scheduled_service_id = s.id\n      AND r.customer_id = s.customer_id');
     expect(joinSql).toContain("COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN (?, ?, ?)");
     expect(joinBindings).toEqual(require('../services/pest-pressure/first-visit').NON_PERFORMED_VISIT_OUTCOMES);
     // March 12 in ET (March 13 in UTC): 14 days back is February 26, 3 days back is March 9.
@@ -323,6 +325,33 @@ describe('once per job, and one bad job never stops the others', () => {
     expect(deps.db.queriesOf('customers')).toHaveLength(0);
     expect(deps.buildStartOffer).not.toHaveBeenCalled();
     expect(deps.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  // An earlier morning sent the offer and failed on the reminder. The home is priced again today, and a price
+  // setting changed in between: the reminder repeats the values of the offer the office already has.
+  test('a morning after a partial send: the reminder carries the values of the offer already sent, not the new price', async () => {
+    const offerKey = `onetime-plan-offer:sample:${OFFER_TEMPLATE}:job-1`;
+    const isOfferRead = (query) => called(query, 'where', { idempotency_key: offerKey });
+    const sent = { first_name: 'Jordan', price_per_application: '$104.50', offer_end_date: 'April 4', estimate_url: 'https://first.test/e' };
+    const deps = world({
+      tables: { email_messages: (query) => (isOfferRead(query) ? [{ payload_snapshot: { ...sent, setup_fee: '$99' } }] : []) },
+      buildStartOffer: jest.fn(async () => ({ option: { ...OPTION, perVisit: 131 }, reason: null })),
+    });
+    expect(counts(await run(deps))).toEqual({ ...NONE, sample: 1 });
+    const [offer, reminder] = deps.sendTemplate.mock.calls.map(([send]) => send);
+    expect(reminder.idempotencyKey).toBe(`onetime-plan-offer:sample:${REMINDER_TEMPLATE}:job-1`);
+    expect(reminder.payload).toEqual(sent);
+    // The library answers the offer's key with the first send. Its values here are the stored ones too.
+    expect(offer.payload).toMatchObject({ price_per_application: '$104.50', setup_fee: '$99' });
+    // Only an offer that WAS sent fixes the values.
+    const stored = deps.db.queriesOf('email_messages').find(isOfferRead);
+    expect(called(stored, 'whereNotNull', 'sent_at')).toBe(true);
+  });
+
+  test('no offer sent before: both samples carry the price of this morning', async () => {
+    const deps = world({ buildStartOffer: jest.fn(async () => ({ option: { ...OPTION, perVisit: 131 }, reason: null })) });
+    await run(deps);
+    expect(deps.sendTemplate.mock.calls.map(([send]) => send.payload.price_per_application)).toEqual(['$131', '$131']);
   });
 
   test('a job that throws is counted and logged by id and code only; the next job is still sampled', async () => {

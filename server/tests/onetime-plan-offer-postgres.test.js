@@ -253,6 +253,46 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     expect(offer.text_snapshot).toContain(`we serviced your home on ${formatDateOnly(day(-4), { year: undefined, month: 'short' })}.`);
   });
 
+  // A service record names its visit and its customer. Only a record of the visit's own customer counts.
+  test('a record of another customer that names the visit neither makes the job due nor moves its day', async () => {
+    const other = await seedCustomer();
+    // No record of its own; another customer's performed record names it, inside the window.
+    const bare = await seedJob({ record: false });
+    await seedRecord(bare.job, { customer_id: other.id, service_date: day(-5) });
+    // Its own service was done 6 days ago; another customer's record names it with a newer day.
+    const own = await seedJob({ daysAgo: 6 });
+    await seedRecord(own.job, { customer_id: other.id, service_date: day(-4) });
+    expect(await run()).toMatchObject({ jobs: 1, sample: 1, failed: 0 });
+    expect(await sampledJobIds([bare.job, own.job])).toEqual([own.job.id]);
+    const [offer] = await sampleRows(own.job.id);
+    expect(offer.text_snapshot).toContain(`we serviced your home on ${formatDateOnly(day(-6), { year: undefined, month: 'short' })}.`);
+  });
+
+  // The provider can take the offer and refuse the reminder. The morning after prices the home again. The
+  // refusal is a definite one (HTTP 429): the library lets a later send try that message again. After an error
+  // with no answer it holds the message, because the first try may have gone out.
+  test('a reminder sent on a later morning repeats the price of the offer already sent, after a price change', async () => {
+    const { job } = await seedJob();
+    const pricedAt = (perVisit) => ({ buildStartOffer: jest.fn(async () => ({ option: { id: 'pest-quarterly', perVisit, setupFee: 99 }, reason: null })) });
+    Sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-sample' })
+      .mockRejectedValueOnce(Object.assign(new Error('too many requests'), { status: 429 }));
+    expect(await run(pricedAt(104.5))).toMatchObject({ jobs: 1, sample: 0, failed: 1 });
+    const [first, refused] = await sampleRows(job.id);
+    expect(first).toMatchObject({ template_key: OFFER, status: 'sent' });
+    expect(first.text_snapshot).toContain('$104.50 per application');
+    expect(refused).toMatchObject({ template_key: REMINDER, status: 'failed', sent_at: null });
+
+    // The price setting changed overnight. The offer is not sent again, and the reminder shows the first price.
+    expect(await run(pricedAt(131))).toMatchObject({ jobs: 1, sample: 1, failed: 0 });
+    const [offer, reminder] = await sampleRows(job.id);
+    expect(offer.id).toBe(first.id);
+    expect(reminder).toMatchObject({ template_key: REMINDER, status: 'sent' });
+    expect(reminder.text_snapshot).toContain('$104.50');
+    expect(reminder.text_snapshot).not.toContain('$131');
+    expect(Sendgrid.sendOne).toHaveBeenCalledTimes(3);
+    expect(await run(pricedAt(131))).toMatchObject({ sample: 0, done: 1, failed: 0 });
+  });
+
   // A live customer is active, not deleted and in a customer stage (whereLiveCustomer in customer-stages.js).
   // `customers.active` is also true for a lead row and for a former customer, so the stage decides here.
   test.each([
