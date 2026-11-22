@@ -1559,9 +1559,28 @@ the booking transaction with the lead row held (`FOR UPDATE`); the estimate
 page first resolves the estimate's linked lead again on that transaction. A
 lead whose service interest changed in between, or an estimate linked to
 another lead with another line, answers the existing `409 SLOT_TAKEN` with
-fresh times for the line as it is now. While the map is in shadow no request
-reads a lead: the shadow recorder reads the estimate's linked lead after the
-booking, best-effort. No response shape changes.
+fresh times for the line as it is now (the estimate page resolves the
+estimate and its link again for that list). While the map is in shadow no
+request reads a lead: the shadow recorder reads the estimate's linked lead
+after the booking, best-effort. No response shape changes.
+
+**Recorded exceptions to the commit re-check for the assessment line.** The
+line ranks technicians (who does the visit); it is not eligibility (whether
+the customer may book), and the office can reassign a visit. So outside the
+two booking pages' own re-check above, the line is an offer input, as the map
+is (the sentence on `/confirm` above):
+- *A lead linked to the estimate for the first time while its booking
+  transaction runs.* The re-check holds the lead rows that point at the
+  estimate when it reads them. The staff link writers take no per-estimate
+  lock, so a first link written after that read is not seen, as a link written
+  just after the save is not.
+- *Public reschedule of an assessment with no technician (or one who can no
+  longer take work).* It reads the customer's newest lead with a service
+  interest when it builds its offers; the mover's guard re-reads the visit's
+  technician on the locked row, not the lead.
+- *The phone agent's booking request.* It reads the line at its slot re-check
+  for the call's own lead, and again when the call's lead id arrived in
+  between; it does not read the lead inside the save.
 
 **Territory routing (`GATE_TERRITORY_ROUTING=true`, owner 2026-10-30; ships dark:
 unset, and every value other than exactly `true`, leaves these routes as described

@@ -369,8 +369,13 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         const visit = await inspection().findOpenVisit(db, resolved.customer.id, { assessmentOnly: true });
         if (visit) return res.json(await alreadyBookedBody(visit, resolved.lead));
       }
-      // A slot race, or the customer's pin moved under the booking fence: fresh times at the current pin.
-      if (result.status === 409) return sendSlotTaken(res, await bookingSetup(resolved.customer, resolved.lead, resolved.leadId), result.error);
+      // A slot race, the customer's pin moved under the booking fence, or the line changed (a relink, a changed
+      // service interest): fresh times at the current pin, for the estimate and its linked lead as they are NOW.
+      if (result.status === 409) {
+        const again = await resolveRequest(req.params.token);
+        if (again.body) return send(res, again);
+        return sendSlotTaken(res, await bookingSetup(again.customer, again.lead, again.leadId), result.error);
+      }
       return res.status(result.status || 500).json({ error: result.error || 'Booking is temporarily unavailable — please text or call us.' });
     }
     return res.json(await inspection().finishCommittedBooking({

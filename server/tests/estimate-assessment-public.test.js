@@ -428,6 +428,19 @@ describe('the assessment line reads the estimate\'s own lead', () => {
     for (const [, opts] of calls) expect(opts).toMatchObject({ customer: expect.objectContaining({ id: 'cust-1' }), leadId: 'lead-9' });
   });
 
+  test('map live, the booking refuses the slot after a relink: the fresh times are for the lead linked now', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    mockInspection.bookAssessmentVisit.mockImplementation(async () => {
+      linked.mockResolvedValue('lead-new'); // staff linked the estimate to another lead while the booking ran
+      return { ok: false, status: 409, code: 'SLOT_TAKEN', error: 'That time was just taken.' };
+    });
+    const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '09:00' } });
+    expect(res).toMatchObject({ status: 409, body: { code: 'SLOT_TAKEN' } });
+    const calls = mockInspection.buildAvailabilityForLead.mock.calls;
+    expect(calls[0][1]).toMatchObject({ leadId: 'lead-9' });
+    expect(calls[calls.length - 1][1]).toMatchObject({ leadId: 'lead-new' });
+  });
+
   test('map live, no unambiguous lead for the estimate: no lead id, so the customer is read', async () => {
     process.env.GATE_SERVICE_LINE_MAP = 'live';
     linked.mockResolvedValue(null);
