@@ -521,7 +521,7 @@ describe('8. November pre-emergent move: a 2027 note only; the 2026 visits do no
     expect([january, bag].map((n) => Math.round(n * 100) / 100)).toEqual([0.68, 0.65]);
     expect(january + bag).toBeCloseTo(1.33, 2);
     expect(january + bag).toBeLessThan(1.5);
-    // The bag alone is 43.4% of its yearly cap row (9.3068 lb per 1,000 sq ft), and under the label's top rate of 9.3 lb.
+    // The bag alone is 43.4% of its yearly cap row (9.3 lb per 1,000 sq ft, the label maximum).
     expect(Math.round((4.04 / octoberStonewall.CAP_VALUE) * 1000) / 10).toBe(43.4);
     expect(4.04).toBeLessThan(octoberStonewall.CATALOG_ROW.max_label_rate_per_1000);
   });
