@@ -78,25 +78,36 @@ const addressComplete = (row) => ['address_line1', 'city', 'state', 'zip'].every
 
 // One page, oldest first: at most PAGE_SIZE notes, the count of every note owed, and nextCursor when more follow
 // (null on the last page). `after` is the nextCursor of the page before.
+//
+// ONE statement reads the page and the count from one set (the CTE `owed`), so they are one snapshot: a note that
+// becomes owed while the read runs is in both or in neither, never counted and not listed. The count comes on
+// every row, and a page with no rows still answers one row that carries only the count.
 async function listThankYouNotes({ after = null } = {}, conn = db) {
   const cursor = after ? readCursor(after) : null;
-  const page = owedNotes(conn)
+  const owed = owedNotes(conn)
     .join('customers', 'customers.id', 'referrals.referrer_customer_id')
-    .orderBy('referrals.thank_you_note_due_at', 'asc')
-    .orderBy('referrals.id', 'asc')
-    .limit(PAGE_SIZE + 1) // one more row than a page: it only says that a next page exists
     .select(
       'referrals.id', 'referrals.thank_you_note_due_at',
       'customers.id as member_customer_id', 'customers.first_name', 'customers.last_name',
       'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
       conn.raw(`${CURSOR_STAMP_SQL} AS cursor_stamp`),
     );
+  const page = conn.select('*').from('owed')
+    .orderBy('thank_you_note_due_at', 'asc')
+    .orderBy('id', 'asc')
+    .limit(PAGE_SIZE + 1); // one more row than a page: it only says that a next page exists
   if (cursor) {
-    page.whereRaw('(referrals.thank_you_note_due_at, referrals.id) > (?::timestamptz, ?::uuid)', [cursor.stamp, cursor.id]);
+    page.whereRaw('(owed.thank_you_note_due_at, owed.id) > (?::timestamptz, ?::uuid)', [cursor.stamp, cursor.id]);
   }
-  const rows = await page;
-  const [{ total }] = await owedNotes(conn).count('* as total');
-  const shown = rows.slice(0, PAGE_SIZE);
+  const rows = await conn
+    .with('owed', owed)
+    .select('counted.total', 'page.*')
+    .from(conn.raw('(SELECT count(*) AS total FROM owed) AS counted'))
+    .joinRaw('LEFT JOIN LATERAL (?) AS page ON true', [page])
+    .orderBy('page.thank_you_note_due_at', 'asc')
+    .orderBy('page.id', 'asc');
+  const found = rows.filter((row) => row.id); // the count-only row of an empty page has no id
+  const shown = found.slice(0, PAGE_SIZE);
   const last = shown[shown.length - 1];
   return {
     notes: shown.map((row) => ({
@@ -107,8 +118,8 @@ async function listThankYouNotes({ after = null } = {}, conn = db) {
       addressLines: addressLines(row),
       addressComplete: addressComplete(row),
     })),
-    total: Number(total),
-    nextCursor: rows.length > PAGE_SIZE ? `${last.cursor_stamp},${last.id}` : null,
+    total: Number(rows[0].total),
+    nextCursor: found.length > PAGE_SIZE ? `${last.cursor_stamp},${last.id}` : null,
   };
 }
 

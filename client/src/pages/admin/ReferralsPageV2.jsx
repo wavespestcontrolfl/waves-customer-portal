@@ -672,11 +672,15 @@ function ThankYouNotes({ flash }) {
   const [nextCursor, setNextCursor] = useState(null); // set while the server holds a page after the rows on screen
   const [failed, setFailed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [busyId, setBusyId] = useState(null);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [busyId, setBusyId] = useState(null); // the note a mark is being saved for
+  const [loading, setLoading] = useState(true); // a page is being read
+  // One action at a time: a page read and a mark never overlap, so an answer that was read before a mark can
+  // never put the old count or a written row back on the card.
+  const idle = busyId === null && !loading;
 
   useEffect(() => {
     let current = true;
+    setLoading(true);
     thankYouNotesPage()
       .then((page) => {
         if (!current) return;
@@ -687,6 +691,9 @@ function ThankYouNotes({ flash }) {
       })
       .catch(() => {
         if (current) setFailed(true);
+      })
+      .finally(() => {
+        if (current) setLoading(false);
       });
     return () => {
       current = false;
@@ -694,9 +701,8 @@ function ThankYouNotes({ flash }) {
   }, [reloadKey]);
 
   // The next page goes below the rows on screen; the rows already there keep their place.
-  const showMore = async () => {
-    if (loadingMore || !nextCursor) return;
-    setLoadingMore(true);
+  const readNextPage = async () => {
+    setLoading(true);
     try {
       const page = await thankYouNotesPage(nextCursor);
       setNotes((rows) => {
@@ -708,33 +714,40 @@ function ThankYouNotes({ flash }) {
     } catch (e) {
       flash("Error: " + e.message);
     } finally {
-      setLoadingMore(false);
+      setLoading(false);
     }
   };
 
-  // The note leaves the card and the count. If it was the last row on screen and the server holds more, the next
-  // page comes up, so the card never stands empty while a note is owed.
-  const drop = (note) => {
-    setNotes((rows) => rows.filter((row) => row.referralId !== note.referralId));
-    setTotal((count) => Math.max(0, count - 1));
-    if (notes.length === 1) showMore();
+  // More notes are owed than the card shows: the next page when the server named one, else the list from its
+  // start (the count and the rows went apart, e.g. another login worked the list).
+  const showMore = () => {
+    if (!idle) return;
+    if (nextCursor) readNextPage();
+    else setReloadKey((k) => k + 1);
   };
 
   const markWritten = async (note) => {
-    if (busyId) return;
+    if (!idle) return;
     setBusyId(note.referralId);
+    let left = false;
     try {
       await adminPost(`/admin/referrals/thank-you-notes/${note.referralId}/written`);
-      drop(note);
+      left = true;
       flash(`Thank-you note for ${note.memberName || "the member"} marked written`);
     } catch (e) {
       flash("Error: " + e.message);
       // The server says this note is no longer owed (the referral was rejected, the member archived): it leaves
       // the card. Any other failure keeps the row for another try.
-      if (e.code === "NO_NOTE_OWED") drop(note);
-    } finally {
-      setBusyId(null);
+      left = e.code === "NO_NOTE_OWED";
     }
+    if (left) {
+      setNotes((rows) => rows.filter((row) => row.referralId !== note.referralId));
+      setTotal((count) => Math.max(0, count - 1));
+    }
+    setBusyId(null);
+    // That was the last row on screen and the server holds more: bring the next page, so the card never stands
+    // empty while a note is owed.
+    if (left && notes.length === 1 && nextCursor) await readNextPage();
   };
 
   if (failed) {
@@ -799,24 +812,24 @@ function ThankYouNotes({ flash }) {
           </div>
           <button
             onClick={() => markWritten(note)}
-            disabled={busyId !== null}
+            disabled={!idle}
             style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
           >
             {busyId === note.referralId ? "Saving..." : "Mark written"}
           </button>
         </div>
       ))}
-      {nextCursor && (
+      {(nextCursor || total > notes.length) && (
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, fontSize: 14, color: D.text }}>
           <span>
             Showing the oldest {notes.length} of {Math.max(total, notes.length)}.
           </span>
           <button
             onClick={showMore}
-            disabled={loadingMore}
+            disabled={!idle}
             style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
           >
-            {loadingMore ? "Loading..." : "Show more"}
+            {loading ? "Loading..." : nextCursor ? "Show more" : "Refresh list"}
           </button>
         </div>
       )}

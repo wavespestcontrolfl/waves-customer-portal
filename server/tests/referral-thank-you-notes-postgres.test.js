@@ -267,9 +267,28 @@ postgres('referral thank-you notes (live Postgres)', () => {
       expect((await notes.listThankYouNotes()).total).toBeGreaterThanOrEqual(0);
     });
 
-    test('a well-formed position past the end answers an empty last page', async () => {
+    test('a well-formed position past the end answers an empty last page, still with the count of every note owed', async () => {
+      const r = await referral(await member());
+      const { total } = await notes.listThankYouNotes();
+      expect(total).toBeGreaterThanOrEqual(1);
+
       const page = await notes.listThankYouNotes({ after: '9999-12-31T23:59:59.999999Z,ffffffff-ffff-4fff-8fff-ffffffffffff' });
-      expect(page).toMatchObject({ notes: [], nextCursor: null });
+      expect(page).toEqual({ notes: [], total, nextCursor: null });
+      expect(await listFor(r)).toHaveLength(1);
+    });
+
+    test('the page and the count are one statement (one snapshot)', async () => {
+      const statements = [];
+      const listen = (query) => statements.push(query.sql);
+      trx.on('query', listen);
+      try {
+        await notes.listThankYouNotes();
+      } finally {
+        trx.removeListener('query', listen);
+      }
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).toMatch(/^with "owed" as \(/);
+      expect(statements[0]).toMatch(/count\(\*\) AS total FROM owed/);
     });
   });
 
