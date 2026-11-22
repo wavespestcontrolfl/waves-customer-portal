@@ -15,7 +15,7 @@ const TRACKS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 // The v13 program has no bahia track (owner 2026-10-06): its KB set is these three.
 const V13_TRACKS = Object.keys(v13);
 // The corpus marker of the v13 program names its track set, so a track change marks a corpus stale.
-const V13_MARKER = `v13:${[...V13_TRACKS].sort().join(',')}`;
+const V13_MARKER = `v13:${[...V13_TRACKS].sort().join(',')}+reclaimed`;
 const slugOf = (track) => `protocol-${track.replace(/_/g, '-')}`;
 
 function withGate(value, fn) {
@@ -66,10 +66,10 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
     const tables = { knowledge_base: [] };
     makeDb(tables);
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
-    tables.knowledge_base.push({ slug: slugOf('bermuda'), tags: JSON.stringify(['lawn', 'bermuda', 'lawn-v13']) });
+    tables.knowledge_base.push({ slug: slugOf('bermuda'), tags: JSON.stringify(['lawn', 'bermuda', 'lawn-v13', 'lawn-reclaimed-half-n']) });
     // A partial set (one of the program's tracks) is stale either way: the next sync completes it.
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
-    for (const track of V13_TRACKS.filter((t) => t !== 'bermuda')) tables.knowledge_base.push({ slug: slugOf(track), tags: JSON.stringify(['lawn', track, 'lawn-v13']) });
+    for (const track of V13_TRACKS.filter((t) => t !== 'bermuda')) tables.knowledge_base.push({ slug: slugOf(track), tags: JSON.stringify(['lawn', track, 'lawn-v13', 'lawn-reclaimed-half-n']) });
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
     // The old program has a bahia entry too, so three v13 entries are a partial set to it.
     expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(true);
@@ -78,7 +78,7 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
     expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(false);
     // With v13 live the old bahia entry is the other program's: stale until a sync removes it.
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
-    for (const row of tables.knowledge_base) row.tags = JSON.stringify(['lawn', 'lawn-v13']);
+    for (const row of tables.knowledge_base) row.tags = JSON.stringify(['lawn', 'lawn-v13', 'lawn-reclaimed-half-n']);
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
     tables.knowledge_base = tables.knowledge_base.filter((row) => row.slug !== slugOf('bahia'));
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
@@ -119,47 +119,6 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
     // The old bahia entry the gate-off sync filed is gone again.
     expect(kbRow(tables, slugOf('bahia'))).toBeUndefined();
     expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
-  });
-
-  test('GATE_LAWN_RECLAIMED_HALF_N flipped alone (v13 on): the reconcile rewrites the entries and both corpora at once, both ways', async () => {
-    const tables = {
-      knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'protocol', source_id: 'x', chunk_index: 0, content_hash: 'h' }, { id: 'seed-kb', source: 'kb', source_id: 'y', chunk_index: 0, content_hash: 'h' }],
-    };
-    makeDb(tables);
-    const savedReclaimed = process.env.GATE_LAWN_RECLAIMED_HALF_N;
-    try {
-      delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-      await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
-      expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
-      for (const track of V13_TRACKS) {
-        expect(tagsOf(kbRow(tables, slugOf(track)))).not.toContain('lawn-reclaimed-half-n');
-        expect(kbRow(tables, slugOf(track)).content).toContain('the app does not adjust it yet');
-      }
-      expect(await KB.lawnCorpusProgram('protocol')).toBe('legacy');
-      // The reclaimed gate on: stale on the very next tick, not at the nightly; the entries now say the app halves.
-      process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
-      expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
-      expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(true);
-      for (const track of V13_TRACKS) {
-        expect(tagsOf(kbRow(tables, slugOf(track)))).toContain('lawn-reclaimed-half-n');
-        expect(kbRow(tables, slugOf(track)).content).toContain('Reclaimed water: half nitrogen today');
-        expect(kbRow(tables, slugOf(track)).content).not.toContain('the app does not adjust it yet');
-      }
-      expect(await withGate('true', () => KB.lawnCorpusProgram('protocol'))).toBe(`${V13_MARKER}+reclaimed`);
-      expect(await withGate('true', () => KB.lawnCorpusProgram('kb'))).toBe(`${V13_MARKER}+reclaimed`);
-      expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
-      // And back off: stale again at once, the original wording returns.
-      delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-      expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(true);
-      for (const track of V13_TRACKS) expect(tagsOf(kbRow(tables, slugOf(track)))).not.toContain('lawn-reclaimed-half-n');
-      expect(await withGate('true', () => KB.lawnCorpusProgram('protocol'))).toBe(V13_MARKER);
-      expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
-      // The reclaimed gate means nothing without v13: the old program's marker and tags are unchanged.
-      process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
-      expect(await withGate(undefined, () => KB.lawnCorpusProgram('protocol'))).toBe('legacy');
-    } finally {
-      if (savedReclaimed === undefined) delete process.env.GATE_LAWN_RECLAIMED_HALF_N; else process.env.GATE_LAWN_RECLAIMED_HALF_N = savedReclaimed;
-    }
   });
 
   test('the index protocol corpus is rebuilt from lawnProtocols() each run: gate off drops the v13 chunks', async () => {
@@ -348,7 +307,7 @@ describe('a corpus failure after the entries were rewritten is retried, not forg
     const fourTrack = ({ withBahiaEntry = true } = {}) => ({
       knowledge_base: OLD_TRACKS.filter((t) => withBahiaEntry || t !== 'bahia').map((track, i) => ({
         id: `kb-${i}`, slug: slugOf(track), title: `v13 ${track}`, content: 'old v13 text', category: 'protocols',
-        tags: JSON.stringify(['lawn', track, 'lawn-v13']), source: 'auto-sync', status: 'active',
+        tags: JSON.stringify(['lawn', track, 'lawn-v13', 'lawn-reclaimed-half-n']), source: 'auto-sync', status: 'active',
       })),
       knowledge_embeddings: [
         ...OLD_TRACKS.map((t, i) => ({ id: `p-${i}`, source: 'protocol', source_id: `lawn.${t}`, chunk_index: 0, content_hash: 'old' })),

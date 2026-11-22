@@ -89,10 +89,20 @@ describe('serviceLineFor', () => {
 
   test.each([
     ['pest_control', 'general'], ['mosquito', 'mosquito'], ['lawn_care', 'lawn'],
-    ['tree_shrub', 'lawn'], ['rodent', 'rodent'], ['termite', 'termite'],
+    ['tree_shrub', 'lawn'], ['termite', 'termite'],
   ])('catalog category %s reads %s', async (category, line) => {
     const db = fakeDb({ services: [{ id: 's1', service_key: 'k1', category }] });
     expect(await serviceLineFor(db, { serviceId: 's1', serviceType: 'Unrelated Name' })).toEqual({ line, lineFrom: 'catalog' });
+  });
+
+  test('catalog category rodent with a key nobody listed: the rodent line only when the catalog name says trapping or bait', async () => {
+    const row = (name) => fakeDb({ services: [{ id: 's1', service_key: 'k1', category: 'rodent', ...(name ? { name } : {}) }] });
+    const read = (db) => serviceLineFor(db, { serviceId: 's1', serviceType: 'Unrelated Name' });
+    expect(await read(row('Monthly Rodent Trap Plan'))).toEqual({ line: 'rodent', lineFrom: 'catalog' });
+    expect(await read(row('Rodent Bait Station Refill'))).toEqual({ line: 'rodent', lineFrom: 'catalog' });
+    // Anything else, a row with no name too, is the exclusion line (the first visit), never trapping by default.
+    expect(await read(row('Rodent Service'))).toEqual({ line: 'exclusion', lineFrom: 'catalog' });
+    expect(await read(row(null))).toEqual({ line: 'exclusion', lineFrom: 'catalog' });
   });
 
   test('inspection / specialty / other catalog rows fall back to the name', async () => {
@@ -103,7 +113,58 @@ describe('serviceLineFor', () => {
     ] });
     expect(await serviceLineFor(db, { serviceId: 'i1', serviceType: 'WDO Inspection' })).toEqual({ line: 'termite', lineFrom: 'name' });
     expect(await serviceLineFor(db, { serviceId: 'i2', serviceType: 'Lawn Inspection' })).toEqual({ line: 'lawn', lineFrom: 'name' });
-    expect(await serviceLineFor(db, { serviceId: 'i3', serviceType: 'Rodent Exclusion' })).toEqual({ line: 'rodent', lineFrom: 'name' });
+    expect(await serviceLineFor(db, { serviceId: 'i3', serviceType: 'Rodent Exclusion' })).toEqual({ line: 'exclusion', lineFrom: 'name' });
+  });
+
+  test('rodent exclusion is its own line: the service key decides inside the one rodent category (owner 2026-11-21)', async () => {
+    const db = fakeDb({ services: [
+      { id: 'x1', service_key: 'rodent_exclusion', category: 'rodent', name: 'Rodent Exclusion & Trapping Service' },
+      { id: 'x2', service_key: 'rodent_trapping_followup', category: 'rodent', name: 'Rodent Trapping Follow-Up Visit Service' },
+      { id: 'x3', service_key: 'rodent_inspection', category: 'inspection', name: 'Rodent Inspection Service' },
+      { id: 'x4', service_key: 'rodent_sanitation_heavy', category: 'rodent', name: 'Rodent Sanitation Service — Heavy' },
+    ] });
+    // The job sold with trapping and exclusion together is the exclusion line (the owner's first visit)...
+    expect(await serviceLineFor(db, { serviceId: 'x1', serviceType: 'Rodent Exclusion & Trapping Service' })).toEqual({ line: 'exclusion', lineFrom: 'catalog' });
+    // ...and its trap check is the rodent line, whatever the visit was named.
+    expect(await serviceLineFor(db, { serviceKey: 'rodent_trapping_followup', serviceType: 'Exclusion job: trap check' })).toEqual({ line: 'rodent', lineFrom: 'catalog' });
+    expect(await serviceLineFor(db, { serviceKey: 'rodent_inspection', serviceType: 'Inspection' })).toEqual({ line: 'exclusion', lineFrom: 'catalog' });
+    expect(await serviceLineFor(db, { serviceId: 'x4' })).toEqual({ line: 'exclusion', lineFrom: 'catalog' });
+  });
+
+  test('an estimate line with no catalog row reads its label: the guarantee bundle and plugging are exclusion; a listed trapping key keeps the rodent line under any name', async () => {
+    // The estimate picker passes each held program's label (estimate-slot-availability heldVisitLines), and the
+    // bundle (exclusion + bait stations) has no catalog row on purpose, so the saved visit carries the label too.
+    const db = fakeDb({ services: [{ id: 'g1', service_key: 'rodent_trapping_followup', category: 'rodent', name: 'Rodent Control' }] });
+    expect(await serviceLineFor(db, { serviceType: 'Rodent Guarantee Combo (12 mo)' })).toEqual({ line: 'exclusion', lineFrom: 'name' });
+    expect(await serviceLineFor(db, { serviceType: 'Rodent Guarantee' })).toEqual({ line: 'exclusion', lineFrom: 'name' });
+    expect(await serviceLineFor(db, { serviceType: 'Rodent Entry-Point Plugging' })).toEqual({ line: 'exclusion', lineFrom: 'name' });
+    // Staff renamed the trap check's catalog row to a general name: the key still decides.
+    expect(await serviceLineFor(db, { serviceKey: 'rodent_trapping_followup', serviceType: 'Rodent Control' })).toEqual({ line: 'rodent', lineFrom: 'catalog' });
+    expect(await serviceLineFor(db, { serviceType: 'Rodent Control' })).toEqual({ line: 'exclusion', lineFrom: 'name' });
+  });
+
+  test('live: an exclusion visit goes to the exclusion line technician, a trap check to the rodent line technician', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    const db = fakeDb({
+      services: [
+        { id: 'x1', service_key: 'rodent_exclusion_only', category: 'rodent', name: 'Rodent Exclusion Service' },
+        { id: 'x2', service_key: 'rodent_trapping', category: 'rodent', name: 'Rodent Trapping Service' },
+      ],
+      lines: [
+        { service_category: 'rodent', home_technician_id: HIRE.id, gap_technician_id: OWNER.id },
+        { service_category: 'exclusion', home_technician_id: OWNER.id, gap_technician_id: null },
+      ],
+      // The hire is switched Off for exclusion, as the plan sets him up.
+      caps: [{ technician_id: HIRE.id, service_category: 'exclusion', capability_level: 'review_required', active: false }],
+    });
+    expect(await pickLineTechnician(db, { serviceId: 'x1', date: MONDAY })).toMatchObject({ mapped: true, line: 'exclusion', technicianId: OWNER.id, reason: 'home' });
+    expect(await pickLineTechnician(db, { serviceId: 'x2', date: MONDAY })).toMatchObject({ mapped: true, line: 'rodent', technicianId: HIRE.id, reason: 'home' });
+    // His day off: the trap check goes to the cover; the exclusion job never goes to him.
+    expect(await pickLineTechnician(db, { serviceId: 'x2', date: FRIDAY })).toMatchObject({ line: 'rodent', technicianId: OWNER.id, reason: 'gap_off_day' });
+    const ranking = await lineOfferRanking(db, { lines: ['exclusion'] });
+    expect(ranking.lines).toEqual(['exclusion']);
+    expect([ranking.rankOf(OWNER.id), ranking.rankOf(HIRE.id)]).toEqual([0, null]);
   });
 
   test('service id first, then service key; no id, key, or name = no line', async () => {

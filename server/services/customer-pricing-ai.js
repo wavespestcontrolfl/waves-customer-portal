@@ -425,12 +425,60 @@ const SEED_FILLABLE_FIELDS = [
 const {
   lookupBedAreaIsTrustworthy, lookupBedAreaReadIsFlagged,
   lookupFeatureReadIsFlagged, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
+  lookupLawnAreaIsTheOnlyFeatureDoubt,
+  lookupDisputedPhotoFields,
   lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
   lookupTurfEstimateIsTrustworthy, lookupTurfReadIsTrustworthy,
   lookupTurfZeroIsObserved, lookupTreeCountIsTrustworthy,
   structuralFactIsTrustworthy,
   poolFeaturesAreRecordBacked, poolCageIsRecordBacked,
 } = require('./lookup-confidence');
+
+// GATE_PEST_PRICE_PHOTO_FACTS (owner 2026-11-21, "1, 2"): the three photo facts
+// a pest price reads, for a flagged feature read whose only doubt is the lawn
+// area. In the engine's own words, as the trusted branch of
+// resolvePropertyContext would adopt them. A new consumption, so each fact
+// fails closed. It counts only when:
+//   - the photo actually read it (_observed): the lookup fills an unread
+//     density with 'MODERATE' and unread water with 'NONE', and a filled-in
+//     value is not a fact. A profile with no _observed bits keeps none;
+//   - the vision providers did not disagree on it (lookupDisputedPhotoFields,
+//     read off the lookup's aiAnalysis). No aiAnalysis to check keeps none.
+// Undefined when the gate is off, the doubt is wider than the lawn area, or no
+// fact passes.
+// Each fact maps the lookup's own values (the enums of
+// normalizeSatelliteAnalysis in routes/property-lookup-v2.js) to the engine's.
+// A value outside the map is not a read, and the fact is left out: an old
+// cached analysis can carry 'NO' for no water (turfRiskReasons reads it as a
+// negative too) or a word this map has never seen.
+const PEST_PHOTO_FACT_READS = [
+  ['shrubs', 'shrubDensity', { LIGHT: 'light', MODERATE: 'moderate', HEAVY: 'heavy' }],
+  ['complexity', 'landscapeComplexity', { SIMPLE: 'simple', MODERATE: 'moderate', COMPLEX: 'complex' }],
+  ['nearWater', 'nearWater', {
+    NONE: false,
+    NO: false,
+    CANAL_ADJACENT: true,
+    POND_ON_PROPERTY: true,
+    RETENTION_NEARBY: true,
+    LAKE_ADJACENT: true,
+    WETLAND_ADJACENT: true,
+  }],
+];
+function pestPhotoFactsFor(p, lookup) {
+  // Optional call: hundreds of suites mock feature-gates whole.
+  if (require('../config/feature-gates').pestPricePhotoFactsLive?.() !== true) return undefined;
+  if (!lookupLawnAreaIsTheOnlyFeatureDoubt(p)) return undefined;
+  const observed = p._observed;
+  const aiAnalysis = lookup?.aiAnalysis;
+  if (!observed || typeof observed !== 'object' || !aiAnalysis || typeof aiAnalysis !== 'object') return undefined;
+  const disputed = lookupDisputedPhotoFields(aiAnalysis);
+  const facts = {};
+  for (const [fact, field, known] of PEST_PHOTO_FACT_READS) {
+    const word = String(p[field] ?? '').trim().toUpperCase();
+    if (Object.hasOwn(known, word) && observed[field] === true && !disputed.has(field)) facts[fact] = known[word];
+  }
+  return Object.keys(facts).length ? facts : undefined;
+}
 
 async function resolvePropertyContext({ customer, turfProfile, propertyLookup, propertySeed = null }) {
   let source = 'customer_profile';
@@ -514,6 +562,14 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   // the seed path consults this — a rejected dimension with no seed already
   // fails closed to the pricer's own missing-property handling.
   const lookupRejectedFields = new Set();
+  // GATE_PEST_PRICE_PHOTO_FACTS: the photo's shrubs, complexity and near-water
+  // facts for the PEST line alone, set below when the lookup's only doubt is
+  // the lawn area. They ride beside `features` (propertyInput.pestPhotoFacts),
+  // never in it: every other line, and the accepted-estimate seed, keep the
+  // facts the flagged read leaves them. The engine's recurring pest step is
+  // the one reader, so the offer, the card, the plan start and the one-tap
+  // purchase all price the same pest line from this one resolver.
+  let pestPhotoFacts;
   let lookupFootprintUnknown = false;
   let lookupHomeSqFtAdopted = false;
   let lookupStoriesSource = null;
@@ -802,6 +858,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
             if (!lookupFeatureKeys.has(key)) lookupRejectedFields.add(key);
           }
         }
+        pestPhotoFacts = pestPhotoFactsFor(p, lookup);
       } else {
         // A field is lookup-backed only when the trusted payload actually
         // carried a value for it — a silent field keeps its default here
@@ -1006,6 +1063,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     storiesSource: resolvedStoriesSource,
     propertyType,
     features,
+    pestPhotoFacts,
     bedArea: bedArea || undefined,
     bedAreaSource: bedArea ? bedAreaSource : undefined,
     // A seeded homeSqFt is only as trusted for the Tree & Shrub open-parcel
@@ -1709,5 +1767,5 @@ module.exports = {
   missingPropertyFor,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
-  _private: { resolvePropertyContext, missingPropertyFor },
+  _private: { resolvePropertyContext, missingPropertyFor, PEST_PHOTO_FACT_READS },
 };

@@ -67,4 +67,39 @@ function ruleTerms(settings, atCap = false) {
   return { atCap: false, text: `Member: ${std}; friend: ${friend} credit`, short: `member ${std}; friend ${friend}`, conditional };
 }
 
-module.exports = { STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars };
+
+// The friend's words, gate on (owner 2026-11-21, "visit" + "flat"): every referred friend gets an account credit after
+// the first plan service, no deadline, the amount the Referee Discount setting holds. Each line takes cents and the
+// caller decides the gate and reads the settings; every Step 2 customer line lives here.
+
+// The invitation email's offer line (referral.friend_invite).
+// It keeps the instruction to book through the link: a friend who books another way is not tied to the member.
+const friendInviteOfferLine = (refereeCents) => `Start a Waves plan through their referral link and get a ${dollars(refereeCents)} credit on your Waves account after your first service. Our way of saying welcome.`;
+
+// The share text's clause, inside "We use Waves and ..." (SMS) and "We use Waves Pest Control and ..." (email).
+const friendShareClause = (refereeCents, code) => `they'll give you a ${dollars(refereeCents)} credit after your first plan service with my code ${code}`;
+
+// The friend's part of the member invitation email's reward line (referral.invite), after "you get a $25 referral reward and ".
+const memberInviteFriendClause = (refereeCents) => `they get a ${dollars(refereeCents)} credit after their first plan service`;
+
+// The share card's offer line (service report + accepted-estimate screens), gate on: "They get a $50 credit after their
+// first plan service. You get $25." Each sentence stands alone and drops when its amount is 0; the member sentence also
+// drops at the yearly limit (never promise a credit that will not post). '' when neither is left: the card keeps its
+// static words. The caller reads the live amounts and the limit (referralOfferDecision).
+const shareCardOffer = ({ refereeCents, memberCents, atLimit = false }) => [
+  Number(refereeCents) > 0 ? `They get a ${dollars(refereeCents)} credit after their first plan service.` : '',
+  !atLimit && Number(memberCents) > 0 ? `You get ${dollars(memberCents)}.` : '',
+].filter(Boolean).join(' ');
+
+// The member's credit email, account-credit destination (the same line with the gate on or off). Account credit is used
+// only after the customer turns the switch on, so the line says how. It names no invoice: even with the switch on, an
+// invoice another payer is billed for or one on a payment plan takes no credit. The caller passes true only for a
+// member who can see that switch and has it off (active account, credit balance above 0, switch off): any other reader
+// gets the credit sentence alone, never an instruction they cannot follow or do not need.
+const memberCreditEmailLine = (rewardDollars, { canTurnOnAutomaticCredit = false } = {}) => `Your ${formatDollars(rewardDollars)} referral reward has been added to your Waves account as a credit.${
+  canTurnOnAutomaticCredit ? ' To use it, turn on "Apply my credit to invoices automatically" in the Waves app.' : ''}`;
+
+module.exports = {
+  STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars,
+  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, shareCardOffer, memberCreditEmailLine,
+};
