@@ -323,9 +323,24 @@ describe('Refer tab Step 2 words', () => {
     render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
 
     expect(await screen.findByRole('heading', { name: 'Friends & Neighbors' })).toBeInTheDocument();
-    expect(screen.getByText('You earned 10 credits this year, the most we give. Thank you! Credits start again January 1.')).toBeInTheDocument();
+    // The whole approved line (owner 2026-11-21 "words ok"): the note is still promised at the limit.
+    expect(screen.getByText('You earned 10 credits this year, the most we give. Thank you! Credits start again January 1. We still send a thank-you note for every friend who books.')).toBeInTheDocument();
     expect(screen.queryByText(/You earn a/)).not.toBeInTheDocument();
     expect(screen.queryByText(/credit is applied after/)).not.toBeInTheDocument();
+  });
+
+  it('a paused program promises nothing to a member at the yearly limit: no limit line, no note, no January restart', async () => {
+    // The server's paused answer keeps capReached and creditsThisYear, with every amount at 0.
+    api.getReferrals.mockResolvedValue(step2({
+      rewardPerReferral: 0, standardReward: 0, friendReward: 0, programPaused: true, capReached: true, creditsThisYear: 10,
+    }));
+    render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
+
+    expect(await screen.findByText('Share your Waves link with neighbors who could use a hand with pest or lawn care.')).toBeInTheDocument();
+    expect(screen.queryByText(/the most we give/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/thank-you note/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/January 1/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$\d+ credit/)).not.toBeInTheDocument();
   });
 
   it('a paused program names no amount', async () => {
