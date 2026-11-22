@@ -59,6 +59,9 @@ const lettersOf = (text) => text.replace(/[^A-Z0-9]/g, '');
 // A deed's name must leave a key of three characters at least, and the key may not end with SUBDIVISION: the map
 // adds that word to some plat names and leaves it out of others, so parseLegal drops it from the end of the name.
 const usableKey = (name) => lettersOf(name).length >= 3 && !lettersOf(name).endsWith('SUBDIVISION');
+// A deed has a block or it has none (null, or left out). Every other value must be a valid block number: 0 or ''
+// is not "no block", so it cannot drop the block from the question.
+const hasBlock = (legal) => legal.block !== null && legal.block !== undefined;
 
 /**
  * Lot, block and subdivision words from a deed description, or null when it is not one plain lot (a condo unit,
@@ -97,7 +100,7 @@ const sameNumber = (mapValue, deedValue) => typeof mapValue === 'string' && mapF
 //   subdivision  the deed's letters and digits in order, with anything between and after them:
 //                LIKE 'R%Y%E%R%A%N%C%H%'. That returns every name with this key at its start, however the map
 //                spaces or punctuates it (2,004 parcels have two spaces together in the name, 650 an apostrophe),
-//                and some names with other letters, which are set aside locally.
+//                and some names with other letters. Those stay in the answer too, as unknown plats.
 // Shapes: field IN ('..', ...) and one LIKE, joined by AND. No OR, no function. The county's firewall answers these
 // shapes (measured 2026-11-22 on the lots of 69 real deeds: no rejection, about 0.5 s each, the same parcels as an
 // exact prefix) and rejects others with an HTML "Request Rejected" page (two UPPER(...) calls joined by AND or OR;
@@ -112,11 +115,11 @@ function parcelWhere(legal) {
   const plain = (value, max) => typeof value === 'string' && value.length <= max && ONE_NUMBER.test(value);
   const named = typeof legal.subdivision === 'string' && /^[A-Z0-9][A-Z0-9 &'.-]{2,}$/.test(legal.subdivision)
     && !namesPlatPart(legal.subdivision) && usableKey(legal.subdivision);
-  if (!plain(legal.lot, 6) || !named || (legal.block && !plain(legal.block, 4))) throw new TypeError('parcelWhere needs the lot, block and subdivision of a parsed deed');
+  if (!plain(legal.lot, 6) || !named || (hasBlock(legal) && !plain(legal.block, 4))) throw new TypeError('parcelWhere needs the lot, block and subdivision of a parsed deed');
   const letters = lettersOf(legal.subdivision);
   const inList = (value) => mapForms(value).map((form) => `'${form}'`).join(', ');
   let where = `PAR_SUBDIV_LOT IN (${inList(legal.lot)}) AND PAR_SUBDIV_NAME LIKE '${letters.split('').join('%')}%'`;
-  if (legal.block) where += ` AND PAR_SUBDIV_BLOCK IN (${inList(legal.block)})`;
+  if (hasBlock(legal)) where += ` AND PAR_SUBDIV_BLOCK IN (${inList(legal.block)})`;
   return where;
 }
 
@@ -132,10 +135,10 @@ function hasDeedLetters(name, letters) {
   return letters.length > 0;
 }
 
-// The rest of the map's name after the deed's words, comparing letters and digits only. null when the name's
-// letters and digits do not start with the deed's: other words, another name ("RYE CREEK RANCH" for "RYE RANCH"),
-// which the query returns only because its pattern is wide.
-function restAfterDeedWords(name, deedWords) {
+// The map's name split where the deed's letters and digits end, comparing capitals and digits only: the part the
+// deed's words cover, and the rest. null when the name's capitals and digits do not start with the deed's: other
+// words ("RYE CREEK RANCH" for "RYE RANCH"), which the query returns because its pattern is wide.
+function splitAtDeedWords(name, deedWords) {
   const key = lettersOf(deedWords);
   let matched = 0;
   let at = 0;
@@ -147,7 +150,7 @@ function restAfterDeedWords(name, deedWords) {
     }
     at += 1;
   }
-  return matched === key.length ? name.slice(at) : null;
+  return matched === key.length ? { covered: name.slice(0, at), rest: name.slice(at) } : null;
 }
 
 // The map's plat name is the deed's subdivision words, or those words and then a phase and plat-book part: "SAMPLE
@@ -195,16 +198,21 @@ function platRestKnown(rest) {
   return i > 0 && i === tokens.length;
 }
 
-// How the map's plat name relates to the deed's subdivision words:
-//   'known'    the deed's words, or those words and then a rest that fits the grammar.
-//   'unknown'  the deed's words and then something else ("... ESTATES", "RYE RANCHES"): maybe the same land.
-//   'other'    other words: another name.
-function platRelation(mapName, deedWords) {
-  const rest = restAfterDeedWords(String(mapName || ''), deedWords);
-  if (rest === null) return 'other';
-  if (/^[A-Z0-9]/.test(rest)) return 'unknown'; // the deed's words end inside a word of the map's name
-  const tail = rest.replace(/ +/g, ' ').trim();
-  return tail === '' || platRestKnown(tail) ? 'known' : 'unknown';
+// True when the map's plat name is the deed's subdivision: the deed's words, or those words and then a rest that
+// fits the grammar. False for every other name of the answer:
+//   - other words ("RYE CREEK RANCH" for "RYE RANCH", "SAINT JOHNS" for "ST JOHNS");
+//   - the deed's words and then something else ("... ESTATES", "RYE RANCHES");
+//   - the deed's letters cover a plat-part word of the map ("PH" under a deed written "P.H."): the deed-side guard
+//     reads words, and this reads the map's words, so a marker split by marks on the deed is caught here.
+// Such a parcel may be the same land under another spelling. It is never set aside: it stays in the answer, and
+// chooseParcel matches nothing while one is there.
+function platNameKnown(mapName, deedWords) {
+  const split = splitAtDeedWords(String(mapName || ''), deedWords);
+  if (split === null) return false;
+  if (/^[A-Z0-9]/.test(split.rest)) return false; // the deed's words end inside a word of the map's name
+  if (namesPlatPart(split.covered)) return false;
+  const tail = split.rest.replace(/ +/g, ' ').trim();
+  return tail === '' || platRestKnown(tail);
 }
 
 const positiveOrNull = (value) => {
@@ -254,10 +262,9 @@ function toParcel(attrs, legal) {
   const sent = (key) => (typeof attrs[key] === 'string' ? attrs[key] : null);
   const asked = sameNumber(sent('PAR_SUBDIV_LOT'), legal.lot)
     && hasDeedLetters(sent('PAR_SUBDIV_NAME') || '', lettersOf(legal.subdivision))
-    && (!legal.block || sameNumber(sent('PAR_SUBDIV_BLOCK'), legal.block));
+    && (!hasBlock(legal) || sameNumber(sent('PAR_SUBDIV_BLOCK'), legal.block));
   if (!asked) throw new Error('parcel map sent a parcel that is not the lot asked for');
-  const relation = platRelation(parcel.subdivision, legal.subdivision);
-  parcel.platKnown = relation === 'other' ? null : relation === 'known';
+  parcel.platKnown = platNameKnown(parcel.subdivision, legal.subdivision);
   return parcel;
 }
 
@@ -326,9 +333,8 @@ async function queryParcels(legal, { fetchImpl = fetch, timeoutMs = DEFAULT_TIME
   if (body.exceededTransferLimit || body.features.length >= RESULT_LIMIT) throw new Error('parcel map answer was cut off (too many parcels)');
   const parcels = body.features.map((f) => toParcel(f?.attributes || {}, legal));
   if (new Set(parcels.map((p) => p.parid)).size !== parcels.length) throw new Error('parcel map sent one parcel twice');
-  // A parcel under other words is not a candidate. Every parcel whose letters and digits start with the deed's
-  // stays in the list, known plat name or not.
-  return parcels.filter((p) => p.platKnown !== null);
+  // No parcel of the answer is set aside. One whose name is not the deed's plat (platKnown false) stops the match.
+  return parcels;
 }
 
 // A name's compare key: accents folded (GARCÍA = GARCIA), "&" read as AND, then capitals and digits only (the map

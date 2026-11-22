@@ -93,6 +93,11 @@ describe('parcelWhere', () => {
     expect(where('123456')).toBe(`PAR_SUBDIV_LOT IN ('123456') AND ${LIKE}`);
     expect(where('0')).toBe(`PAR_SUBDIV_LOT IN ('0', '00', '000', '0000', '00000', '000000') AND ${LIKE}`);
   });
+  test('no block is null or left out, and only that', () => {
+    expect(parcelWhere({ lot: '171', subdivision: 'RYE RANCH' })).toBe(where('171'));
+    expect(parcelWhere({ lot: '171', block: undefined, subdivision: 'RYE RANCH' })).toBe(where('171'));
+    expect(where('171', '0')).toContain("PAR_SUBDIV_BLOCK IN ('0', '00', '000', '0000', '00000', '000000')");
+  });
   test('two spellings of one number ask the same question', () => {
     for (const [one, other] of [['5', '05'], ['5', '000005'], ['12A', '012A'], ['A', '0A'], ['A1', '00A1'], ['0', '000']]) {
       expect(where(one)).toBe(where(other));
@@ -121,6 +126,9 @@ describe('parcelWhere', () => {
       { lot: '171', block: null, subdivision: 'RYE RANCH PHN1A' }, { lot: '171', block: null, subdivision: 'RYE RANCH SECB' },
       { lot: '171', block: null, subdivision: 'RYE RANCH SUBDIVISION' }, { lot: '171', block: null, subdivision: 'RY' },
       { lot: '171', block: null, subdivision: 'RYE RANCH SUBDIVISION.' }, { lot: '171', block: null, subdivision: 'RYE RANCH RESUBDIVISION' }, { lot: '171', block: null, subdivision: 'A.-' },
+      // A block that is not a block number is not "no block".
+      { lot: '171', block: 0, subdivision: 'RYE RANCH' }, { lot: '171', block: '', subdivision: 'RYE RANCH' }, { lot: '171', block: false, subdivision: 'RYE RANCH' },
+      { lot: '171', block: 48, subdivision: 'RYE RANCH' },
       // Two letters in a number: the forms would not cover every mix of capitals and lower case.
       { lot: '12AB', block: null, subdivision: 'RYE RANCH' }, { lot: '171', block: 'AB', subdivision: 'RYE RANCH' }];
     for (const legal of bad) expect(() => parcelWhere(legal)).toThrow(TypeError);
@@ -299,6 +307,8 @@ describe('queryParcels', () => {
       for (const subdivision of ['RYE RANCH PH I', 'RYE RANCH PHASE I', 'RYE RANCH PH I SUBPH A', 'RYE RANCH UNIT 3', 'RYE RANCH SEC 2', 'RYE RANCH PH2', 'RYE RANCH UNIT3', 'RYE RANCH PHIIA', 'RYE RANCH PHN1A']) {
         await expect(queryParcels({ lot: '171', block: null, subdivision }, { fetchImpl })).rejects.toThrow(TypeError);
       }
+      // A block that is not a block number is refused too: it cannot drop the block from the question.
+      await expect(queryParcels({ lot: '171', block: 0, subdivision: 'RYE RANCH' }, { fetchImpl })).rejects.toThrow(TypeError);
       expect(fetchImpl).not.toHaveBeenCalled();
     });
     test('a deed that ends with SUBDIVISION asks for the base name, so the plat with and without that word are both in the answer', async () => {
@@ -345,7 +355,7 @@ describe('queryParcels', () => {
       expect(zeros.map((p) => p.lot)).toEqual(['12A', '012A', '12a']);
       expect(chooseParcel({ sellerNames: [], parcels: zeros, permitsByParid: { 513309059: { permit_no: 'A' } } })).toEqual({ status: 'ambiguous' });
     });
-    test('a parcel under other words is not a candidate; every other parcel stays', async () => {
+    test('a parcel under other words is never set aside: it stays in the answer as an unknown plat', async () => {
       const features = [
         feature(),
         feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'RYE CREEK RANCH PH I PB81/1' }),
@@ -353,7 +363,25 @@ describe('queryParcels', () => {
         feature({ PARID: '513309062', PAR_SUBDIV_NAME: 'RYE  RANCH PH IV PB81/1' }),
       ];
       const parcels = await queryParcels(legal, { fetchImpl: answer({ features }) });
-      expect(parcels.map((p) => [p.parid, p.platKnown])).toEqual([['513309059', true], ['513309061', false], ['513309062', true]]);
+      expect(parcels.map((p) => [p.parid, p.platKnown])).toEqual([['513309059', true], ['513309060', false], ['513309061', false], ['513309062', true]]);
+      // One parcel of the deed's plat and one under other words (maybe the same land, spelled another way): no match.
+      const two = await queryParcels(legal, { fetchImpl: answer({ features: features.slice(0, 2) }) });
+      expect(chooseParcel({ sellerNames: [], parcels: two, permitsByParid: { 513309059: { permit_no: 'A' } } })).toEqual({ status: 'unknown_plat' });
+      expect(await flags({ lot: '171', block: null, subdivision: 'ST JOHNS' }, ['SAINT JOHNS', 'SAINT JOHNS PH I PB81/1', 'ST JOHNS'])).toEqual([false, false, true]);
+    });
+    test('a deed whose letters cover a plat-part word of the map is not that plat: both spellings stay, no match', async () => {
+      // The deed-side guard reads words, so it does not see a marker split by marks ("P.H."). The map's words do.
+      const dotted = parseLegal('LOT 171 RYE RANCH P.H. II');
+      expect(dotted).toEqual({ lot: '171', block: null, subdivision: 'RYE RANCH P.H. II' });
+      const parcels = await queryParcels(dotted, { fetchImpl: answer({ features: [
+        feature({ PAR_SUBDIV_NAME: 'RYE RANCH PH II' }),
+        feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'RYE RANCH PHASE II' }),
+      ] }) });
+      expect(parcels.map((p) => p.platKnown)).toEqual([false, false]);
+      expect(chooseParcel({ sellerNames: [], parcels, permitsByParid: { 513309059: { permit_no: 'A' } } })).toEqual({ status: 'unknown_plat' });
+      expect(await flags(dotted, ['RYE RANCH PHII', 'RYE RANCH PH. II PB81/1', 'RYE RANCH PH II SUBPH A'])).toEqual([false, false, false]);
+      const spaced = { lot: '171', block: null, subdivision: 'RYE RANCH S E C 2' };
+      expect(await flags(spaced, ['RYE RANCH SEC 2', 'RYE RANCH SEC2', 'RYE RANCH SECTION 2'])).toEqual([false, false, false]);
     });
     test('the lot and the block may have another form on the map; the map\'s own text is kept', async () => {
       const [padded] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_SUBDIV_LOT: '0171' })] }) });
