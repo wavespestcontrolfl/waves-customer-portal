@@ -65,7 +65,7 @@
     },
     "bond_term_options": {
       "label": "Bond terms: 1, 5 or 10 years",
-      "pattern": "(?:(?<=\\b(?:terms?|renew\\w*|bonds?|warrant(?:y|ies)|agreements?|coverage|contracts?|options?)\\b[^.;!?]{0,80}?)|(?=[^.;!?\\n]{0,100}?\\b(?:terms?|renew\\w*|bonds?|warrant(?:y|ies)|agreements?|coverage|contracts?|options?)\\b))\\b(?:1|one)(?![\\d.])(?:[- ]?(?:years?|yrs?)|-)?[\\s,/]+(?:(?:and|or|&)\\s+)?\\b(?:5|five)(?![\\d.])(?:[- ]?(?:years?|yrs?)|-)?[\\s,/]+(?:(?:and|or|&)\\s+)?\\b(?:10|ten)(?![\\d.])[- ]?(?:years?|yrs?)\\b"
+      "pattern": "(?<!\\b(?:financ\\w*|loans?|installments?|leas(?:e|es|ing)|mortgages?)\\b[^.;!?]{0,80})(?:(?<=\\b(?:terms?|renew\\w*|bonds?|warrant(?:y|ies)|agreements?|coverage|contracts?)\\b[^.;!?]{0,80}?)|(?=[^.;!?\\n]{0,100}?\\b(?:terms?|renew\\w*|bonds?|warrant(?:y|ies)|agreements?|coverage|contracts?)\\b))(?=(?:\\b(?:10|ten|1|one|5|five)(?![\\d.])(?:[- ]?(?:years?|yrs?)|-)?[\\s,/]+(?:(?:and|or|&)\\s+)?){0,2}\\b(?:1|one)(?![\\d.]))(?=(?:\\b(?:10|ten|1|one|5|five)(?![\\d.])(?:[- ]?(?:years?|yrs?)|-)?[\\s,/]+(?:(?:and|or|&)\\s+)?){0,2}\\b(?:5|five)(?![\\d.]))(?=(?:\\b(?:10|ten|1|one|5|five)(?![\\d.])(?:[- ]?(?:years?|yrs?)|-)?[\\s,/]+(?:(?:and|or|&)\\s+)?){0,2}\\b(?:10|ten)(?![\\d.]))\\b(?:10|ten|1|one|5|five)(?![\\d.])(?:[- ]?(?:years?|yrs?)|-)?[\\s,/]+(?:(?:and|or|&)\\s+)?\\b(?:10|ten|1|one|5|five)(?![\\d.])(?:[- ]?(?:years?|yrs?)|-)?[\\s,/]+(?:(?:and|or|&)\\s+)?\\b(?:10|ten|1|one|5|five)(?![\\d.])[- ]?(?:years?|yrs?)\\b(?![^.;!?\\n]{0,60}\\b(?:financ\\w*|loans?|installments?|leas(?:e|es|ing)|mortgages?)\\b)"
     },
     "independent": {
       "label": "Independently or family owned",
