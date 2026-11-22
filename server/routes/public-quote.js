@@ -3749,7 +3749,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // property-lookup stage), not a repeat filed as a duplicate, nor a voicemail or inbound-call lead the prefill
         // token attached this form to. The new-lead re-alert (new-lead-reminder.js intakeMarked) then counts a person's
         // contact from the lead's creation, not only from this bell, and only within 15 minutes of that creation.
-        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : { createdLead: lead.lead_type === 'quote_wizard' }) } }
+        // bannerKind: a row that rings also sends ONE phone banner, at any hour, like a web form lead (bell-banners.js
+        // kind new_lead_quote). The option is never stored, so the bell row is written exactly as without it.
+        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, bannerKind: 'new_lead_quote', metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : { createdLead: lead.lead_type === 'quote_wizard' }) } }
       );
     } catch (e) {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);

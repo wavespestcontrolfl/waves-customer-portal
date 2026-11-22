@@ -18,15 +18,15 @@ const episodes = require('../services/admin-alert-episodes');
 const { composeAdminAlert, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('../services/admin-alert-compose');
 const review = require('../services/monday-review-bell');
 
-const { buildLists, composeReview, loadUnreadAlerts, loadOpenPastVisits, reviewerLabel, shortDate, REPLACED, NOTHING } = review._private;
+const { buildLists, composeReview, loadOpenPastVisits, reviewerLabel, shortDate, REPLACED, NOTHING } = review._private;
 
 // Monday 2026-11-02, 9:20 AM EST (the clocks went back on Nov 1).
 const MONDAY = new Date('2026-11-02T14:20:00Z');
 const TODAY_KEY = 'monday-review:2026-11-02';
 
-const ALERTS = { count: 3, oldestAt: new Date('2026-10-10T15:00:00Z'), headlines: [
-  { headline: 'Billing — follow up on 1 quiet overdue invoice', at: new Date('2026-10-10T15:00:00Z') },
-  { headline: 'Comms — answer a customer text', at: new Date('2026-10-12T15:00:00Z') },
+const ALERTS = { kind: 'fell-off', count: 3, capped: false, unchecked: false, entries: [
+  { name: 'Customer One', title: 'Comms — answer a customer text', at: new Date('2026-10-30T15:00:00Z') },
+  { name: 'Customer Two', title: 'Comms — answer a customer call', at: new Date('2026-10-29T15:00:00Z') },
 ] };
 const PROMISES = { count: 37, oldestAt: new Date('2026-10-03T20:00:00Z') };
 const DRAFTS = { count: 22, total: 2442, oldestId: 'inv-1', oldestNumber: 'WPC-1042' };
@@ -40,7 +40,7 @@ const loaders = (over = {}) => ({
   ...over,
 });
 const ZERO = {
-  alerts: async () => ({ count: 0, headlines: [] }),
+  alerts: async () => ({ kind: 'fell-off', count: 0, entries: [] }),
   promises: async () => ({ count: 0 }),
   drafts: async () => ({ count: 0, total: 0 }),
   visits: async () => ({ count: 0, priced: 0 }),
@@ -57,12 +57,12 @@ beforeEach(() => {
 describe('one alert for a busy week', () => {
   test('raises one needs-you row that rings, with a line and a page per list', async () => {
     const out = await review.runMondayReview({ now: MONDAY, loaders: loaders() });
-    expect(out).toMatchObject({ count: 4, outcome: 'raised', counts: { alerts: 3, promises: 37, drafts: 22, visits: 38 } });
+    expect(out).toMatchObject({ count: 4, outcome: 'raised', counts: { fellOff: 3, promises: 37, drafts: 22, visits: 38 } });
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = notifyAdmin.mock.calls[0];
     expect(category).toBe('system');
     expect(title).toBe('System — review 4 lists that sit');
-    expect(body).toBe('Waiting for you: 3 unread alerts, 37 late promises, 22 unsent drafts, 38 open past visits.');
+    expect(body).toBe('Waiting for you: 3 customer alerts fell off with no reply, 37 late promises, 22 unsent drafts, 38 open past….');
     expect(opts).toMatchObject({
       bell: true,
       dedupeKey: TODAY_KEY,
@@ -72,8 +72,8 @@ describe('one alert for a busy week', () => {
     // The detail names every list with its count and the page that opens it.
     const lines = opts.detail.split('\n');
     expect(opts.detail).toContain('4 lists have work that sits.');
-    expect(opts.detail).toContain('1. Needs-you alerts nobody read for 14+ days: 3.');
-    expect(opts.detail).toContain('Billing — follow up on 1 quiet overdue invoice (idle since Oct 10)');
+    expect(opts.detail).toContain('1. Customer alerts that fell off the bell after 3 quiet days with no reply: 3.');
+    expect(opts.detail).toContain('Customer One: Comms — answer a customer text (Oct 30)');
     expect(opts.detail).toContain('2. Promises to callers that are overdue: 37. Oldest due Oct 3. Page: /admin/communications#tab=owed');
     expect(opts.detail).toContain('3. Completed visits whose only invoice is an unsent draft: 22, $2,442.00. Oldest: WPC-1042. Page: /admin/invoices?invoice=inv-1');
     expect(opts.detail).toContain('4. Past-dated visits still open: 38, $3,617 priced. Oldest Sep 12. Page: /admin/dashboard');
@@ -96,7 +96,7 @@ describe('one alert for a busy week', () => {
 
   test('the composer accepts the alert at worst-case lengths (headline <= 60, why <= 110, one sentence)', () => {
     const { spec } = composeReview(buildLists({
-      alerts: { count: 99999, headlines: [] }, promises: { count: 99999 },
+      alerts: { kind: 'fell-off', count: 99999, entries: [] }, promises: { count: 99999 },
       drafts: { count: 99999, total: 1234567.89 }, visits: { count: 99999, priced: 9999999 },
     }));
     const alert = composeAdminAlert(spec);
@@ -108,7 +108,7 @@ describe('one alert for a busy week', () => {
 
   test('a bell with one list opens that list\'s page: parked reviews only opens Reviews', () => {
     const { spec } = composeReview(buildLists({
-      alerts: { count: 0, headlines: [] }, promises: { count: 0 }, drafts: { count: 0, total: 0 }, visits: { count: 0, priced: 0 },
+      alerts: { kind: 'fell-off', count: 0, entries: [] }, promises: { count: 0 }, drafts: { count: 0, total: 0 }, visits: { count: 0, priced: 0 },
       parked: { count: 2, entries: [{ name: 'Dana Whitfield', at: new Date('2026-11-13T15:00:00Z'), location: 'Lakewood Ranch', checkGoogle: false }, { name: 'Lee Park', at: new Date('2026-11-14T15:00:00Z'), location: 'Venice', checkGoogle: false }] },
     }));
     expect(composeAdminAlert(spec).link).toBe('/admin/reviews');
@@ -166,10 +166,10 @@ describe('last week, zero weeks, and the same day', () => {
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('a capped alert scan that found no row is not a zero: with every other list empty nothing is raised and nothing is closed', async () => {
+  test('a capped fell-off scan that found no row is not a zero: with every other list empty nothing is raised and nothing is closed', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue(['monday-review:2026-11-02']);
     const out = await review.runMondayReview({
-      now: MONDAY, loaders: { ...ZERO, alerts: async () => ({ count: 0, capped: true, headlines: [] }) },
+      now: MONDAY, loaders: { ...ZERO, alerts: async () => ({ kind: 'fell-off', count: 0, capped: true, entries: [] }) },
     });
     expect(out).toEqual({ count: 0, outcome: 'unknown' });
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
@@ -212,74 +212,6 @@ describe('last week, zero weeks, and the same day', () => {
   test('a write that failed throws', async () => {
     notifyAdmin.mockResolvedValue(null);
     await expect(review.runMondayReview({ now: MONDAY, loaders: loaders() })).rejects.toThrow('not written');
-  });
-});
-
-// A knex builder stand-in: every chain method returns itself; `select` resolves the rows.
-function fakeKnex(rows) {
-  const calls = [];
-  const chain = new Proxy(function chain() {}, {
-    get(_t, name) {
-      if (name === 'then') return undefined;
-      return (...args) => {
-        calls.push([name, args]);
-        if (name === 'select') return Promise.resolve(rows);
-        return chain;
-      };
-    },
-  });
-  const database = jest.fn(() => chain);
-  // The cursor column is a raw select (created_at::text); the fake hands the SQL back as the column marker.
-  database.raw = jest.fn((sql) => sql);
-  database.calls = calls;
-  return database;
-}
-const DAY = 24 * 60 * 60 * 1000;
-const aged = (days) => new Date(MONDAY.getTime() - days * DAY).toISOString();
-const row = (id, over = {}) => ({
-  id, category: 'billing', title: `Row ${id}`, link: '/admin/invoices', created_at: aged(20), read_at: null,
-  metadata: { severity: 'needs-you', who: 'person' }, ...over,
-});
-
-describe('list 1: needs-you alerts unread 14+ days', () => {
-  test('keeps known needs-you rows; drops Activity, Claude, unsorted, fyi and recently refreshed rows', async () => {
-    const database = fakeKnex([
-      row('a-old', { created_at: aged(25), title: 'Oldest needs-you' }),
-      row('b-activity', { metadata: { severity: 'needs-you', feed: 'activity' } }),
-      row('c-claude-queue', { metadata: { severity: 'needs-you', claudeQueue: 'ib-fault', who: 'claude', feed: 'activity' } }),
-      row('d-who-claude', { metadata: { severity: 'needs-you', who: 'claude' } }),
-      row('e-unsorted', { metadata: {} }),
-      row('f-fyi', { metadata: { severity: 'fyi' } }),
-      row('g-rung-recently', { created_at: aged(40), metadata: { severity: 'needs-you', rungAt: aged(3) } }),
-      row('h-rung-long-ago', { created_at: aged(40), title: 'Rung 16 days ago', metadata: { severity: 'needs-you', rungAt: aged(16) } }),
-      row('i-string-meta', { title: 'Meta as text', created_at: aged(18), metadata: JSON.stringify({ severity: 'needs-you' }) }),
-    ]);
-    const out = await loadUnreadAlerts({ now: MONDAY, database });
-    expect(out.count).toBe(3);
-    // Oldest last activity first: 25 days, 18 days, then the row rung 16 days ago.
-    expect(out.headlines.map((h) => h.headline)).toEqual(['Oldest needs-you', 'Meta as text', 'Rung 16 days ago']);
-    expect(out.oldestAt.toISOString()).toBe(aged(25));
-  });
-
-  test('the headline list stops at five, oldest first, and the count is the whole list', async () => {
-    const rows = Array.from({ length: 8 }, (_v, i) => row(`r${i}`, { title: `Alert ${i}`, created_at: aged(15 + i) }));
-    const out = await loadUnreadAlerts({ now: MONDAY, database: fakeKnex(rows) });
-    expect(out.count).toBe(8);
-    expect(out.headlines).toHaveLength(5);
-    expect(out.headlines[0].headline).toBe('Alert 7');
-    expect(out.oldestAt.toISOString()).toBe(aged(22));
-  });
-
-  test('the query reads only unread, not-done admin rows older than 14 days and skips its own key', async () => {
-    const database = fakeKnex([]);
-    await loadUnreadAlerts({ now: MONDAY, database });
-    const calls = database.calls.map(([name, args]) => [name, args]);
-    expect(calls).toContainEqual(['where', [{ recipient_type: 'admin' }]]);
-    expect(calls).toContainEqual(['whereNull', ['done_at']]);
-    expect(calls).toContainEqual(['whereNull', ['read_at']]);
-    const cutoff = calls.find(([name, args]) => name === 'where' && args[0] === 'created_at')[1][2];
-    expect(MONDAY.getTime() - cutoff.getTime()).toBe(14 * DAY);
-    expect(calls.some(([name, args]) => name === 'whereRaw' && String(args[0]).includes("NOT LIKE 'monday-review:%'"))).toBe(true);
   });
 });
 
@@ -343,9 +275,9 @@ describe('list 4: open past visits', () => {
 });
 
 describe('assembly', () => {
-  test('a capped unread-alert scan reads as a floor', () => {
-    const [list] = buildLists({ alerts: { count: 3, capped: true, headlines: [] } });
-    expect(list.phrase).toBe('3+ unread alerts');
+  test('a capped fell-off scan reads as a floor', () => {
+    const [list] = buildLists({ alerts: { kind: 'fell-off', count: 3, capped: true, entries: [] } });
+    expect(list.phrase).toBe('3+ customer alerts fell off with no reply');
   });
 
   test('drafts link opens the oldest draft; without an id it opens the Invoices page', () => {
@@ -371,7 +303,7 @@ describe('assembly', () => {
       { name: 'Sam Ortiz', at: '2026-11-15T15:00:00Z', location: 'Venice', checkGoogle: true },
     ];
     const lists = buildLists({ ...four, parked: { count: 3, entries } });
-    expect(lists.map((l) => l.key)).toEqual(['alerts', 'promises', 'drafts', 'visits', 'parkedReviews']);
+    expect(lists.map((l) => l.key)).toEqual(['fellOff', 'promises', 'drafts', 'visits', 'parkedReviews']);
     expect(lists[4]).toMatchObject({ count: 3, phrase: '3 Google reviews with no reply', link: '/admin/reviews' });
     expect(lists[4].detail.split('\n')).toEqual([
       'Google reviews the auto-reply agent handed to a person that still have no reply: 3. Page: /admin/reviews',

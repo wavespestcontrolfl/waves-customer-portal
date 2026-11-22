@@ -1,10 +1,10 @@
 /**
  * Pest Insider renderer: a checked issue -> { subject, preview, html_body, text_body }.
  *
- * html_body is the BODY only, the same shape the old Pest Insider stores in
- * newsletter_sends.html_body (assemblePestInsiderNewsletter): wrapNewsletter
- * adds the Waves chrome and unsubscribe footer at send time. It carries the
- * dm-* hooks the dark-mode stylesheet keys on, so bodyIsDarkAware() is true.
+ * html_body is the BODY only, the shape newsletter_sends.html_body stores:
+ * wrapNewsletter adds the Waves chrome and unsubscribe footer at send time. It
+ * carries the dm-* hooks the dark-mode stylesheet keys on, so
+ * bodyIsDarkAware() is true.
  *
  * The body is one email for every subscriber, and the public archive serves
  * it as stored. So it holds only reviewed copy (the fact's lead and title,
@@ -71,9 +71,8 @@ const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const POST_LINK_TEXT = 'Read the full story on the Waves blog';
 const PHOTO_ID_TEXT = 'Send us a photo for a free ID';
 
-// The weekly newsletter's divider (newsletter-draft.js WAVES_DIVIDER_GIF):
-// the Waves mascot badge on our own CDN. Not a link, so it is no stray tap
-// target.
+// The divider: the Waves mascot badge on our own CDN. Not a link, so it is no
+// stray tap target.
 const DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif';
 
 const GREETING = 'Hey there!';

@@ -2,6 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const {
   loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates, PROSPECT_OUTCOMES, STAFF_NEW_LEAD_TAGS,
+  FIRST_VISIT_SCRIPT_LINE,
 } = require('../services/csr/weekly-call-outcomes');
 const { callStartedAtSql } = require('../services/sms-pending-conversations');
 
@@ -162,7 +163,7 @@ describe('loadWeeklyCallOutcomes', () => {
     const out = await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn: fakeConn({ total: 12, known: 0, booked: 0, estimates: 3 }) });
     expect(out.bookedPct).toBeNull();
     expect(out.estimateRequestedOrPromised).toBe(3);
-    expect(formatWeeklyCallOutcomes(out)).toBe('New-customer callers: 12. No call outcomes recorded yet, so no booking rate. Estimate requested or promised, no booking recorded: 3.');
+    expect(formatWeeklyCallOutcomes(out)).toBe(`New-customer callers: 12. No call outcomes recorded yet, so no booking rate. Estimate requested or promised, no booking recorded: 3. ${FIRST_VISIT_SCRIPT_LINE}`);
   });
 
   test('a caller with no disposition on any call (booked NULL, not false) still counts toward the estimate figure', async () => {
@@ -175,8 +176,16 @@ describe('loadWeeklyCallOutcomes', () => {
 });
 
 describe('formatWeeklyCallOutcomes', () => {
-  test('reads as the one-line summary the Friday tip and the overview show', () => {
+  test('reads as the one-line summary the Friday tip and the overview show, then the call script line', () => {
+    expect(FIRST_VISIT_SCRIPT_LINE).toBe('Call script: offer the first open visit before you offer to send an estimate.');
     expect(formatWeeklyCallOutcomes({ newCustomerCallers: 40, callersWithOutcome: 30, bookedOnCall: 6, bookedPct: 20, estimateRequestedOrPromised: 20 }))
-      .toBe('New-customer callers: 40. Outcome known for 30. Booked on the call: 6 of 30 (20%). Estimate requested or promised, no booking recorded: 20.');
+      .toBe(`New-customer callers: 40. Outcome known for 30. Booked on the call: 6 of 30 (20%). Estimate requested or promised, no booking recorded: 20. ${FIRST_VISIT_SCRIPT_LINE}`);
+  });
+
+  test('a week where no caller was left with only an estimate shows no script line', () => {
+    expect(formatWeeklyCallOutcomes({ newCustomerCallers: 5, callersWithOutcome: 5, bookedOnCall: 5, bookedPct: 100, estimateRequestedOrPromised: 0 }))
+      .toBe('New-customer callers: 5. Outcome known for 5. Booked on the call: 5 of 5 (100%). Estimate requested or promised, no booking recorded: 0.');
+    expect(formatWeeklyCallOutcomes({ newCustomerCallers: 4, callersWithOutcome: 0, bookedOnCall: 0, bookedPct: null, estimateRequestedOrPromised: 0 }))
+      .toBe('New-customer callers: 4. No call outcomes recorded yet, so no booking rate. Estimate requested or promised, no booking recorded: 0.');
   });
 });
