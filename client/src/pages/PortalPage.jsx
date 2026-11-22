@@ -11253,8 +11253,19 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
   // out, or put it in another family (pre-push audit 2026-11-22).
   const scheduleVisitIds = new Set(upcomingServices.map((row) => row?.id).filter((id) => id != null).map(String));
   const nextIsOnSchedule = nextService?.id != null && scheduleVisitIds.has(String(nextService.id));
-  const coverageRows = nextIsOnSchedule ? upcomingServices : [nextService, ...upcomingServices];
-  coverageRows.filter(isPlanCoverageRow).forEach(addDetectedService);
+  const scheduleCoverageRows = upcomingServices.filter(isPlanCoverageRow);
+  const coverageRows = nextIsOnSchedule || !isPlanCoverageRow(nextService)
+    ? scheduleCoverageRows
+    : [nextService, ...scheduleCoverageRows];
+  coverageRows.forEach(addDetectedService);
+  // What the SCHEDULE confirms, by family, with the schedule row's name. A
+  // next visit the schedule does not list (more than a year out) has only its
+  // label, with no server verdict, so it never confirms a service.
+  const scheduleConfirmedNames = new Map();
+  scheduleCoverageRows.forEach((row) => {
+    const id = detectCatalogServiceId(row);
+    if (id && !scheduleConfirmedNames.has(id)) scheduleConfirmedNames.set(id, planRowName(row));
+  });
   // The pest card names the plan as it goes on: its LAST upcoming visit (the
   // schedule read is in date order). After a frequency change the next visit
   // can be one that stays as booked on the old plan
@@ -11290,12 +11301,19 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
       ...svc,
       displayName: (svc.id === 'pest_control' && pestPlanName) || detectedServiceNames[svc.id] || svc.name,
     }));
-  // My Plan's list without the tier placeholders: only the services a plan
-  // visit on the schedule confirms. A tier gives a count, never which service
-  // is missing, so a surface that NAMES what the member pays for (Billing's
-  // Plan Charges, the Learn sentence) reads this list. A lawn-only Bronze
-  // member with no coming visit is named no service, not "Pest Control".
-  const confirmedServices = includedServices.filter(svc => detectedServiceIds.includes(svc.id));
+  // My Plan's list without the tier placeholders and without a label-only
+  // next visit: only the services a plan visit ON THE SCHEDULE confirms (its
+  // rows carry the server's coverage verdict and family). A tier gives a
+  // count, never which service is missing, so a surface that NAMES what the
+  // member pays for (Billing's Plan Charges, the Learn sentence) reads this
+  // list. A lawn-only Bronze member with no coming visit is named no
+  // service, not "Pest Control".
+  const confirmedServices = includedServices
+    .filter(svc => scheduleConfirmedNames.has(svc.id))
+    .map(svc => ({
+      ...svc,
+      displayName: (svc.id === 'pest_control' && pestPlanName) || scheduleConfirmedNames.get(svc.id) || svc.name,
+    }));
   return { includedServices, confirmedServices, pestPlanName };
 }
 

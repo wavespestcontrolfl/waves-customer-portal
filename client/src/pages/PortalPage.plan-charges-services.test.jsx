@@ -128,9 +128,21 @@ describe('resolvePlanServices — one service list for My Plan and Billing', () 
       expect(confirmedServices[0].displayName).toBe('Lawn Care Program');
     });
 
-    it('a next visit the schedule does not list still counts, by its own label', () => {
-      expect(confirmedIds(bronze, thinNext, [])).toEqual(['pest_control']);
-      expect(confirmedIds({ ...bronze, tier: 'Silver' }, thinNext, [LAWN])).toEqual(['pest_control', 'lawn_care']);
+    // /schedule/next has no upper date bound; the schedule read ends at 365
+    // days. A next visit past that has only its label, with no server
+    // verdict: My Plan still shows its card, Billing and Learn do not name it.
+    it('a next visit the schedule does not list counts for My Plan and confirms nothing', () => {
+      expect(ids(bronze, thinNext, [])).toEqual(['pest_control']);
+      expect(confirmedIds(bronze, thinNext, [])).toEqual([]);
+      const silver = { ...bronze, tier: 'Silver' };
+      expect(ids(silver, thinNext, [LAWN])).toEqual(['pest_control', 'lawn_care']);
+      expect(confirmedIds(silver, thinNext, [LAWN])).toEqual(['lawn_care']);
+    });
+
+    it('a confirmed service is named by its schedule row, not by an unlisted next visit', () => {
+      const farNext = { ...thinNext, id: 'v-far', serviceType: 'Lawn Care' };
+      const { confirmedServices } = resolvePlanServices(bronze, farNext, [LAWN]);
+      expect(confirmedServices.map((s) => s.displayName)).toEqual(['Lawn Care Program']);
     });
   });
 
@@ -194,6 +206,16 @@ describe('BillingTab — Plan Charges', () => {
     const box = await renderPlanCharges(bronze);
     expect(await within(box).findByText('Lawn Care Program')).toBeInTheDocument();
     expect(within(box).queryByText(/Pest Control/)).not.toBeInTheDocument();
+  });
+
+  it('a next visit past the schedule\'s 365 days names no service', async () => {
+    api.getNextService.mockResolvedValue({ coverageOnly: true, next: { id: 'v-far', serviceType: 'Pest Control', date: '2028-01-10', status: 'pending', isRecurring: true, isCallback: false } });
+    api.getSchedule.mockResolvedValue({ upcoming: [] });
+    const box = await renderPlanCharges(bronze);
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(within(box).getByText('WaveGuard Bronze')).toBeInTheDocument();
+    expect(within(box).queryByText(/Pest Control|Lawn Care/)).not.toBeInTheDocument();
   });
 
   it('names no service when the schedule read fails; the plan line stays', async () => {
