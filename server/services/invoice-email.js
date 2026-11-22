@@ -1174,12 +1174,17 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   let offerLine = null;
   if (require('../config/feature-gates').isEnabled('docCrossSellEmail')) {
     try {
-      const { embeddedPitchAllowed } = require('./email-division/eligibility');
+      const { embeddedPitchAllowed, embeddedReferralAskAllowed } = require('./email-division/eligibility');
       const toHolder = Boolean(cleanEmail(recipient.email)) && cleanEmail(recipient.email) === cleanEmail(customer.email);
-      if (toHolder && await embeddedPitchAllowed({ customerId: invoice.customer_id, email: recipient.email })) {
+      const who = { customerId: invoice.customer_id, email: recipient.email };
+      if (toHolder && await embeddedPitchAllowed(who)) {
         const cards = await require('./receipt-cards').receiptCardsForInvoiceId(invoice.id);
+        // The referral part is a referral ask too: the customer's referral
+        // email choice decides it, apart from the service offer.
+        const referral = cards.referral && await embeddedReferralAskAllowed(who) ? cards.referral : null;
         offerLine = require('./doc-offer-email-line').docOfferEmailLine({
-          ...cards, appUrls: { offer: `${domain}/?tab=billing`, referral: `${domain}/?tab=refer` },
+          crossSell: cards.crossSell, referral,
+          appUrls: { offer: `${domain}/?tab=billing`, referral: `${domain}/?tab=refer` },
         });
       }
     } catch (err) {

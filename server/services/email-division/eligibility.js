@@ -290,6 +290,23 @@ async function embeddedPitchAllowed({ customerId, email, conn } = {}) {
   return (await activeSuppressionsFor(null, email, 'marketing_newsletter', database)).length === 0;
 }
 
+// The referral part of that line is also a referral ask by email, so it
+// answers to the rules the referral email ('lc.referral*') answers to as
+// well: referral nudges not turned off, a referral channel that includes
+// email (the column's schema default is 'sms') and no referral unsubscribe.
+// Asked after embeddedPitchAllowed said yes; a no here drops the referral
+// part only, so an allowed service offer still rides the line.
+const REFERRAL_ASK_KEY = 'lc.referral';
+async function embeddedReferralAskAllowed({ customerId, email, conn } = {}) {
+  if (!customerId || !email) return false;
+  const database = conn || db;
+  const prefs = await database('notification_prefs').where({ customer_id: customerId }).first();
+  if (!streamFlagOk('lifecycle', REFERRAL_ASK_KEY, prefs)) return false;
+  if (streamChannelBlocksEmail('lifecycle', REFERRAL_ASK_KEY, prefs)) return false;
+  const group = groupKeyFor('lifecycle', REFERRAL_ASK_KEY);
+  return (await activeSuppressionsFor(null, email, group, database)).length === 0;
+}
+
 async function checkEmailSwitchStreamFlagAndChannel(ctx) {
   const { customerId, stream, emailKey, database, checks } = ctx;
   const prefs = await database('notification_prefs').where({ customer_id: customerId }).first();
@@ -438,7 +455,7 @@ async function eligibleForEmail({
 }
 
 module.exports = {
-  eligibleForEmail, resolveMarketingClass, REASONS, groupKeyFor, embeddedPitchAllowed,
+  eligibleForEmail, resolveMarketingClass, REASONS, groupKeyFor, embeddedPitchAllowed, embeddedReferralAskAllowed,
   // Exported for callers outside the eligibility pipeline that need the
   // SAME channel-resolution semantics against a notification_prefs row
   // they've already read (e.g. newsletter-list-reconcile.js's SMS-only

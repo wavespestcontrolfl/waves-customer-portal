@@ -57,6 +57,7 @@ function loadReceiptCardRow(where, database = db) {
     .first(
       'i.id', 'i.customer_id', 'i.status', 'i.paid_at', 'i.payer_id',
       'c.payer_id as customer_payer_id',
+      'c.active as customer_active', 'c.deleted_at as customer_deleted_at',
       'ij.payer_id as invoice_job_payer_id', 'rj.payer_id as record_job_payer_id',
       'c.email as customer_email', 'c.phone as customer_phone',
       'c.first_name as customer_first_name', 'c.company_name as customer_company_name',
@@ -78,6 +79,9 @@ function loadReceiptCardInvoice(token, database = db) {
 function receiptCardsEligible(row) {
   if (!isEnabled('docCrossSell') || !row?.customer_id || row.status !== 'paid') return false;
   if (!withinReceiptCardWindow(row.paid_at)) return false;
+  // A paid receipt can belong to a customer who has since cancelled.
+  const { linkReachesOnlyAccountHolder, appOpensForCustomer } = require('./app-link-cards');
+  if (!appOpensForCustomer(row)) return false;
   const { reserviceReportCopyGateOn } = require('./service-report/reservice-report');
   const callback = row.visit_is_callback === true || row.job_record_is_callback === true
     || row.invoice_job_is_callback === true || row.record_job_is_callback === true;
@@ -91,7 +95,6 @@ function receiptCardsEligible(row) {
   };
   const prefs = { billing_email: row.billing_email, billing_contact_name: row.billing_contact_name };
   if (getReceiptEmailRecipients(holder, prefs).some((r) => r.role !== 'primary')) return false;
-  const { linkReachesOnlyAccountHolder } = require('./app-link-cards');
   return linkReachesOnlyAccountHolder(row, [
     row.payer_id, row.customer_payer_id, row.invoice_job_payer_id, row.record_job_payer_id,
   ]);

@@ -13,7 +13,9 @@
  *
  * So what is here are DISPLAY rules, not an authorization boundary. A page
  * shows no card when its link goes to other people by the account's own
- * setup (linkReachesOnlyAccountHolder); a forwarded link is not tracked.
+ * setup (linkReachesOnlyAccountHolder), or when the app would not open the
+ * card's tab for the customer (appOpensForCustomer); a forwarded link is not
+ * tracked.
  *
  * The offer is the app's own (appOfferForCustomer): the page names an offer
  * only when the app's Billing tab shows one, and the same one. A card carries
@@ -29,6 +31,16 @@ function linkReachesOnlyAccountHolder(row, payerIds = []) {
   if (!row || payerIds.some(Boolean)) return false;
   const { getServiceContactSlots } = require('./customer-contact');
   return !getServiceContactSlots(row).some((slot) => slot.phone || slot.email);
+}
+
+// The cards open the Waves app, so a page shows them only to a customer the
+// app opens those tabs for: an ACTIVE customer. A cancelled customer signs in
+// to a read-only app with no Refer tab and no offer (middleware/auth.js
+// sessionCustomerAdmitted; the app's CANCELLED_TABS), and any other inactive
+// or removed customer cannot sign in at all. `row` carries customers.active
+// as customer_active and customers.deleted_at as customer_deleted_at.
+function appOpensForCustomer(row) {
+  return row?.customer_active === true && !row.customer_deleted_at;
 }
 
 // What the link page prints of the app's offer: the service, start or add,
@@ -59,4 +71,4 @@ async function appLinkCardsForCustomer(customerId, database = db) {
   return cards;
 }
 
-module.exports = { linkReachesOnlyAccountHolder, publicOfferCard, appLinkCardsForCustomer };
+module.exports = { linkReachesOnlyAccountHolder, appOpensForCustomer, publicOfferCard, appLinkCardsForCustomer };

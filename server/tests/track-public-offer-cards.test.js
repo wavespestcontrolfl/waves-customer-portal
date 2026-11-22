@@ -35,6 +35,8 @@ const VISIT = {
   track_token_expires_at: new Date(Date.now() + 86400000).toISOString(),
   job_payer_id: null,
   customer_payer_id: null,
+  customer_active: true,
+  customer_deleted_at: null,
 };
 const RECORD = { id: 'sr-1', is_callback: false };
 const APP_OFFER = {
@@ -110,6 +112,11 @@ test.each([
   ['expired link', { visit: { ...VISIT, track_token_expires_at: new Date(Date.now() - 1000).toISOString() } }, null],
   // The tracker page itself stays up for such a link; the cards do not.
   ['a link with no expiry on record', { visit: { ...VISIT, track_token_expires_at: null } }, null],
+  // The cards open the Waves app. A cancelled customer's app has no Refer tab
+  // and no offer, and any other inactive customer cannot sign in.
+  ['a customer who has since cancelled', { visit: { ...VISIT, customer_active: false } }, null],
+  ['a customer with no active flag on record', { visit: { ...VISIT, customer_active: null } }, null],
+  ['a removed customer', { visit: { ...VISIT, customer_deleted_at: '2026-11-01T00:00:00Z' } }, null],
   ['a service contact also gets this link', { visit: { ...VISIT, service_contact_name: 'Tenant Tina', service_contact_phone: '+19415550100' } }, null],
   ['third-party payer on the job', { visit: { ...VISIT, job_payer_id: 7 } }, null],
   ['third-party payer on the account', { visit: { ...VISIT, customer_payer_id: 7 } }, null],

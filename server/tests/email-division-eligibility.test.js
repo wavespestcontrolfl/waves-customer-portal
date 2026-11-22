@@ -15,7 +15,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const db = require('../models/db');
 const {
-  eligibleForEmail, resolveMarketingClass, REASONS, embeddedPitchAllowed,
+  eligibleForEmail, resolveMarketingClass, REASONS, embeddedPitchAllowed, embeddedReferralAskAllowed,
 } = require('../services/email-division/eligibility');
 
 const NOW = new Date('2026-09-28T15:00:00Z'); // Mon Sep 28, 11:00 ET
@@ -484,6 +484,67 @@ describe('email-division eligibility', () => {
       const pipeline = await evalWith(world, { emailKey: 'lc.welcome' });
       const prefs = world.prefs || { email_enabled: true, marketing_offers: true };
       expect(await allowed({ ...world, prefs })).toBe(pipeline.checks.allowPitch);
+    });
+  });
+
+  // The referral part of that line is a referral ask by email (pre-push audit
+  // P1 2026-11-22): a customer who takes marketing email but turned referral
+  // nudges off, or takes them by text only, must not get it. It answers to
+  // the referral email's own rules, apart from the service offer.
+  describe('embeddedReferralAskAllowed: the referral part of that line', () => {
+    const REFERRAL_UNSUBSCRIBE = {
+      email: 'sandy@example.test', group_key: 'marketing_referral', suppression_type: 'unsubscribe', status: 'active',
+    };
+    const BOUNCE = { email: 'sandy@example.test', group_key: 'service_operational', suppression_type: 'bounce', status: 'active' };
+    const NEWSLETTER_UNSUBSCRIBE = {
+      email: 'sandy@example.test', group_key: 'marketing_newsletter', suppression_type: 'unsubscribe', status: 'active',
+    };
+    const allowed = ({
+      prefs = { referral_channel: 'email' }, suppressions = [], email = 'sandy@example.test', customerId = 'cust-1',
+    } = {}) => {
+      db.mockImplementation((table) => {
+        const map = {
+          notification_prefs: chain({ first: prefs }),
+          email_suppressions: chain({ result: suppressions }),
+        };
+        if (!map[table]) throw new Error(`Unexpected db table ${table}`);
+        return map[table];
+      });
+      return embeddedReferralAskAllowed({ customerId, email });
+    };
+
+    test('referral nudges on and a referral channel that includes email: yes', async () => {
+      expect(await allowed()).toBe(true);
+      expect(await allowed({ prefs: { referral_nudge: true, referral_channel: 'both' } })).toBe(true);
+      // Another stream's unsubscribe is not a referral unsubscribe.
+      expect(await allowed({ suppressions: [NEWSLETTER_UNSUBSCRIBE] })).toBe(true);
+    });
+
+    test.each([
+      ['referral nudges turned off', { prefs: { referral_nudge: false, referral_channel: 'email' } }],
+      ['referral asks by text only', { prefs: { referral_nudge: true, referral_channel: 'sms' } }],
+      // The column's schema default is text, and the app shows it that way.
+      ['no referral channel chosen', { prefs: { referral_nudge: true } }],
+      ['no prefs row', { prefs: null }],
+      ['a referral unsubscribe on the address', { suppressions: [REFERRAL_UNSUBSCRIBE] }],
+      ['a bounce on the address', { suppressions: [BOUNCE] }],
+      ['no address', { email: '' }],
+      ['no customer', { customerId: null }],
+    ])('%s: no', async (_label, world) => {
+      expect(await allowed(world)).toBe(false);
+    });
+
+    test.each([
+      ['a channel with email', {}],
+      ['nudges off', { prefs: { email_enabled: true, referral_nudge: false, referral_channel: 'email' } }],
+      ['text only', { prefs: { email_enabled: true, referral_nudge: true, referral_channel: 'sms' } }],
+      ['unsubscribed', { suppressions: [REFERRAL_UNSUBSCRIBE] }],
+    ])('it is the referral email\'s own answer (%s)', async (_label, world) => {
+      const prefs = world.prefs || { email_enabled: true, referral_nudge: true, referral_channel: 'email' };
+      // An empty send ledger: the comparison is about the customer's referral
+      // choice, not the pipeline's send caps.
+      const pipeline = await evalWith({ ...world, prefs, ledger: [chain({ result: [] })] }, { emailKey: 'lc.referral_ask' });
+      expect(await allowed({ ...world, prefs })).toBe(pipeline.ok);
     });
   });
 

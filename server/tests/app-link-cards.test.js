@@ -16,7 +16,7 @@ const db = require('../models/db');
 const { buildPortalOffer } = require('../services/service-report/cross-sell');
 const referralShare = require('../services/referral-share');
 const { appOfferForCustomer } = require('../services/property-recommendations');
-const { linkReachesOnlyAccountHolder, publicOfferCard, appLinkCardsForCustomer } = require('../services/app-link-cards');
+const { linkReachesOnlyAccountHolder, appOpensForCustomer, publicOfferCard, appLinkCardsForCustomer } = require('../services/app-link-cards');
 
 const APP_OFFER = {
   serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', relationship: 'add',
@@ -115,5 +115,25 @@ describe('linkReachesOnlyAccountHolder', () => {
 
   test('a service contact name with no phone and no email gets no link', () => {
     expect(linkReachesOnlyAccountHolder({ ...HOLDER, service_contact_name: 'Tenant' }, [])).toBe(true);
+  });
+});
+
+// The cards open the Waves app, so they are for a customer the app opens
+// those tabs for. A cancelled customer signs in to a read-only app with no
+// Refer tab (the app's CANCELLED_TABS) and no offer; any other inactive or
+// removed customer cannot sign in.
+describe('appOpensForCustomer — the app opens the cards\' tabs for an active customer only', () => {
+  test('an active customer: yes', () => {
+    expect(appOpensForCustomer({ customer_active: true, customer_deleted_at: null })).toBe(true);
+  });
+
+  test.each([
+    ['a cancelled customer', { customer_active: false }],
+    ['no active flag on record', { customer_active: null }],
+    ['a row that does not carry the flag', {}],
+    ['a removed customer', { customer_active: true, customer_deleted_at: '2026-11-01T00:00:00Z' }],
+    ['no row', null],
+  ])('%s: no', (_label, row) => {
+    expect(appOpensForCustomer(row)).toBe(false);
   });
 });

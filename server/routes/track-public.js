@@ -989,6 +989,7 @@ async function trackCardCustomerId(token) {
     .first(
       's.id', 's.customer_id', 's.status', 's.track_token_expires_at', 's.is_callback',
       's.payer_id as job_payer_id', 'c.payer_id as customer_payer_id',
+      'c.active as customer_active', 'c.deleted_at as customer_deleted_at',
       ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
     );
   if (!row?.customer_id || !isTrackTokenLive(row.track_token_expires_at)) return null;
@@ -998,7 +999,9 @@ async function trackCardCustomerId(token) {
   // "week": no card on a link months later).
   if (!row.track_token_expires_at) return null;
   if (row.status !== 'completed') return null;
-  const { linkReachesOnlyAccountHolder } = require('../services/app-link-cards');
+  const { linkReachesOnlyAccountHolder, appOpensForCustomer } = require('../services/app-link-cards');
+  // A customer who has since cancelled: the app would not open the cards' tabs.
+  if (!appOpensForCustomer(row)) return null;
   if (!linkReachesOnlyAccountHolder(row, [row.job_payer_id, row.customer_payer_id])) return null;
   const records = await db('service_records')
     .where({ scheduled_service_id: row.id })

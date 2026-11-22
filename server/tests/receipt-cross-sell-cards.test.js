@@ -47,6 +47,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const paidAgo = (ms) => new Date(Date.now() - ms).toISOString();
 const INVOICE = {
   id: 'inv-1', customer_id: 'cust-1', status: 'paid', paid_at: paidAgo(60 * 1000), payer_id: null, total: 85, invoice_number: 'QA-1',
+  customer_active: true, customer_deleted_at: null,
 };
 
 async function getReceipt() {
@@ -112,6 +113,11 @@ describe('GET /:token — the cards ride the receipt payload', () => {
       process.env.GATE_RESERVICE_REPORT_COPY = 'true';
       mockFirst.mockResolvedValue({ ...INVOICE, job_record_is_callback: true });
     }],
+    // The cards open the Waves app. A cancelled customer's app has no Refer
+    // tab and no offer, and any other inactive customer cannot sign in.
+    ['a customer who has since cancelled', () => mockFirst.mockResolvedValue({ ...INVOICE, customer_active: false })],
+    ['a customer with no active flag on record', () => mockFirst.mockResolvedValue({ ...INVOICE, customer_active: null })],
+    ['a removed customer', () => mockFirst.mockResolvedValue({ ...INVOICE, customer_deleted_at: '2026-11-01T00:00:00Z' })],
     ['no invoice for the token', () => mockFirst.mockResolvedValue(undefined)],
   ])('%s → no cards, and the offer is never built', async (_label, arrange) => {
     arrange();

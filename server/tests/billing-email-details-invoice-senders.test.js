@@ -308,6 +308,7 @@ describe('invoice.receipt: the add-a-service line follows the marketing email ch
     referral: { headline: 'Know someone?', cta: 'Send My Referral Link' },
   };
   let pitchSpy;
+  let referralAskSpy;
   let cardsSpy;
   const sendPaidReceipt = async () => {
     mockTables({
@@ -321,11 +322,13 @@ describe('invoice.receipt: the add-a-service line follows the marketing email ch
   beforeEach(() => {
     process.env.GATE_DOC_CROSS_SELL_EMAIL = 'true';
     pitchSpy = jest.spyOn(require('../services/email-division/eligibility'), 'embeddedPitchAllowed');
+    referralAskSpy = jest.spyOn(require('../services/email-division/eligibility'), 'embeddedReferralAskAllowed').mockResolvedValue(true);
     cardsSpy = jest.spyOn(require('../services/receipt-cards'), 'receiptCardsForInvoiceId').mockResolvedValue(CARDS);
   });
   afterEach(() => {
     delete process.env.GATE_DOC_CROSS_SELL_EMAIL;
     pitchSpy.mockRestore();
+    referralAskSpy.mockRestore();
     cardsSpy.mockRestore();
   });
 
@@ -338,6 +341,36 @@ describe('invoice.receipt: the add-a-service line follows the marketing email ch
     // token and no price in the line.
     expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing\nTo refer a friend, get your referral link: https?:\/\/[^\s/]+\/\?tab=refer$/);
     expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/\/receipt\/|\$|62/);
+    expect(referralAskSpy).toHaveBeenCalledWith({ customerId: 'cust-1', email: 'customer@example.com' });
+  });
+
+  // The referral part is a referral ask by email: a customer who turned
+  // referral nudges off, or takes them by text only, gets the service offer
+  // without it (pre-push audit P1 2026-11-22).
+  test('the referral email choice says no: the line keeps the offer and drops the referral part', async () => {
+    pitchSpy.mockResolvedValue(true);
+    referralAskSpy.mockResolvedValue(false);
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing$/);
+    expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/refer|tab=refer/i);
+  });
+
+  test('the referral email choice says no and the receipt shows no offer: no line', async () => {
+    pitchSpy.mockResolvedValue(true);
+    referralAskSpy.mockResolvedValue(false);
+    cardsSpy.mockResolvedValue({ referral: CARDS.referral });
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.bodyAppend?.text || '').not.toMatch(/lawn care|refer|Waves app/i);
+  });
+
+  test('a receipt with no referral card never asks the referral choice', async () => {
+    pitchSpy.mockResolvedValue(true);
+    cardsSpy.mockResolvedValue({ crossSell: CARDS.crossSell });
+    const { result } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(referralAskSpy).not.toHaveBeenCalled();
   });
 
   // The receipt can go to an address that is not the account holder's (a
