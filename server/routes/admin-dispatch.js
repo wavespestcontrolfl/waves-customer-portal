@@ -4034,13 +4034,15 @@ router.post('/:reportNoteServiceId/pest-recap/report-note', reportOwnNoteGate, r
     }
     req.params.serviceId = id;
     if (!(await assertRecapOwnership(req, res))) return;
-    const visit = await PestRecap.resolveEligibility(req.params.serviceId);
-    const refusal = reportNoteVisitRefusal(visit);
-    if (refusal) return res.status(recapStatusForReason(refusal)).json({ error: refusal, code: refusal });
-    // The row the writer reads is judged again: a visit reassigned since the ownership read is refused.
-    if (!technicianVisitRowInScope(req, visit.svc)) {
+    // Strict: a failed profile probe refuses (500), never a synthesized pest profile that reaches the paid call.
+    const visit = await PestRecap.resolveEligibility(req.params.serviceId, db, { strict: true });
+    // The row the writer reads is judged again, before any refusal names the visit: a visit reassigned since the
+    // ownership read is refused.
+    if (visit.ok && !technicianVisitRowInScope(req, visit.svc)) {
       return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
     }
+    const refusal = reportNoteVisitRefusal(visit);
+    if (refusal) return res.status(recapStatusForReason(refusal)).json({ error: refusal, code: refusal });
     const { note } = req.body || {};
     // The codes on the customer's file are read for this customer before any model reads the note.
     const { text, source, reason } = await require('../services/service-report/report-own-note-writer').cleanReportNote({

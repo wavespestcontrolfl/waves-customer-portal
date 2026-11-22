@@ -80,7 +80,7 @@ describe('POST pest-recap/report-note', () => {
     const res = await invoke({ note: 'treated shed', areasServiced: ['Borlux room'] });
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ ok: true, text: 'I treated the shed. — Sam', source: 'cleaned' });
-    expect(PestRecap.resolveEligibility).toHaveBeenCalledWith(VISIT_ID);
+    expect(PestRecap.resolveEligibility).toHaveBeenCalledWith(VISIT_ID, db, { strict: true });
     expect(cleanReportNote.mock.calls).toEqual([[{
       note: 'treated shed', serviceType: 'Quarterly Pest Control', db, customerId: 'customer-1',
     }]]);
@@ -131,6 +131,9 @@ describe('POST pest-recap/report-note', () => {
     PestRecap.resolveEligibility.mockResolvedValue({ ...PEST_VISIT, svc: { ...PEST_VISIT.svc, technician_id: 'tech-2' } });
     const res = await invoke({ note: 'treated shed' });
     expect([res.statusCode, res.body.code]).toEqual([403, 'service_not_assigned']);
+    // Refused before the visit's own refusals can name it (no customer, not a pest visit).
+    PestRecap.resolveEligibility.mockResolvedValue({ ...PEST_VISIT, eligible: false, svc: { ...PEST_VISIT.svc, technician_id: 'tech-2', customer_id: null } });
+    expect((await invoke({ note: 'treated shed' })).statusCode).toBe(403);
     expect(cleanReportNote).not.toHaveBeenCalled();
   });
 
