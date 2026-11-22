@@ -143,13 +143,14 @@ function maskAccessSentences(note) {
 // are codes, and each link in them (a visitor pass is a link, filed with no
 // code; the link counts with or without its "https://"). Of a neighbor's
 // pass only the link is a code here: the card shows the technician nothing
-// else of it. Directions of one word are no sentence: the word is a code
-// (the gate directory files "bluebird" as directions when a customer's
-// gate-code field holds it). A word code inside a sentence of directions
-// ("Tell the guard Bluebird") is not found: which word of a sentence is the
-// code has no rule that holds, and with every word a code, every customer
-// of a guarded neighborhood would get the fixed sentence. A code in another
-// free-text field of the file (the access notes) is not on this list.
+// else of it. Directions as a whole are a code too: the gate directory
+// files "bluebird" or "Blue Heron" as directions when a customer's
+// gate-code field holds it. A word code inside a sentence of directions
+// ("Tell the guard Bluebird") is found only with its sentence: which word
+// of a sentence is the code has no rule that holds, and with every word a
+// code, every customer of a guarded neighborhood would get the fixed
+// sentence. A code in another free-text field of the file (the access
+// notes) is not on this list.
 const STORED_CODE_COLUMNS = ['neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code'];
 const squeezed = (text) => oneForm(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
 // From a code field: the field as a whole, each run of letters, figures and
@@ -162,14 +163,11 @@ const codeFieldForms = (field) => [squeezed(field), ...withFigureGroups(runsOf(f
 // access-code-capture.js): at a space, an angle bracket or a quote.
 const LINK_RE = /https?:\/\/(?:www\.)?([^\s<>"']+)/giu;
 const linkForms = (directions) => [...oneForm(directions).matchAll(LINK_RE)].map((link) => squeezed(link[1]));
-function directionForms(directions) {
-  const runs = runsOf(directions);
-  return [
-    ...(runs.length === 1 ? runs : []),
-    ...withFigureGroups(runs).filter((form) => form.length >= 3 && /\p{Nd}/u.test(form)),
-    ...linkForms(directions),
-  ];
-}
+const directionForms = (directions) => [
+  squeezed(directions),
+  ...withFigureGroups(runsOf(directions)).filter((form) => form.length >= 3 && /\p{Nd}/u.test(form)),
+  ...linkForms(directions),
+];
 // `prefs` is the profile row; `filed` are rows of the access codes section
 // and of the gate directory ({ code, instructions }); `neighborPasses` are
 // the pass rows of the customer's neighborhoods ({ instructions }).

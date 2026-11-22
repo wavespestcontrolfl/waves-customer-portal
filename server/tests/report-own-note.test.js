@@ -147,26 +147,30 @@ describe('a code on the customer\'s file is found by its value, in any wording',
     expect(storedCodesOf({ garage_code: '  ' })).toEqual([]);
     expect(storedCodesOf(undefined)).toEqual([]);
     // The access codes section and the gate directory: the code as a code
-    // field, and of the directions beside it only a run with a figure.
+    // field; of the directions beside it, the whole and each run with a figure.
     expect(storedCodesOf(undefined, [{ code: 'Rose 77', instructions: 'dial 4471 then press 2. Ask for Sam' }]).sort())
-      .toEqual(['4471', '77', 'rose', 'rose77']);
+      .toEqual(['4471', '77', 'dial4471thenpress2askforsam', 'rose', 'rose77']);
     expect(storedCodesOf(undefined, [{ code: null, instructions: null }])).toEqual([]);
     // A visitor pass is a link, filed with no code: the link is the code,
     // with or without its "https://".
     const pass = storedCodesOf(undefined, [{ code: null, instructions: 'Visitor pass: https://www.passes.example/p/abcdef.' }]);
-    expect(pass).toEqual(['passesexamplepabcdef']);
+    expect(pass).toEqual(['visitorpasshttpswwwpassesexamplepabcdef', 'passesexamplepabcdef']);
     expect(noteAsRead('treated shed. pass is https://passes.example/p/abcdef', pass)).toBe('[redacted]');
     expect(noteAsRead('treated shed. passes.example/p/abcdef', pass)).toBe('[redacted]');
     expect(noteAsRead('treated shed. passes checked', pass)).toBe('treated shed. passes checked');
     // The link ends where the visit card's pass link ends.
     expect(storedCodesOf(undefined, [{ code: null, instructions: 'https://passes.example/p/abcdef<br>Show it' }]))
-      .toEqual(['passesexamplepabcdef']);
-    // Directions of one word are a code. The words of a sentence are not:
-    // the other notes of the neighborhood are read as before.
+      .toContain('passesexamplepabcdef');
+    // Directions as a whole are a code: a word, or a pass phrase of two.
     expect(storedCodesOf(undefined, [{ code: null, instructions: ' Bluebird. ' }])).toEqual(['bluebird']);
-    expect(storedCodesOf(undefined, [{ code: '6612', instructions: 'Bluebird lane side' }])).toEqual(['6612']);
+    const phrase = storedCodesOf(undefined, [{ code: null, instructions: 'Blue Heron' }]);
+    expect(phrase).toEqual(['blueheron']);
+    expect(noteAsRead('treated shed. blue heron', phrase)).toBe('[redacted]');
+    expect(noteAsRead('saw a heron by the blue shed', phrase)).toBe('saw a heron by the blue shed');
+    // The words of a sentence are not: the other notes of the neighborhood
+    // are read as before.
     const prose = storedCodesOf(undefined, [{ code: null, instructions: 'Use the side entrance' }]);
-    expect(prose).toEqual([]);
+    expect(prose).toEqual(['usethesideentrance']);
     expect(noteAsRead('treated the shed', prose)).toBe('treated the shed');
     // Of a neighbor's pass only the link is a code: its words and figures are not this customer's.
     expect(storedCodesOf(undefined, [], [{ instructions: 'Show this at gate 4471: https://passes.example/p/qrstuv' }]))
@@ -251,7 +255,7 @@ describe('a code on the customer\'s file is found by its value, in any wording',
       ],
       'customer_access_codes as pass': [{ instructions: 'Gate 5150. https://passes.example/p/qrstuv' }],
     });
-    expect((await readStoredCodes(db, 'customer-1')).sort()).toEqual(['2040', '6612', '9031', 'bluebird', 'kingfisher', 'passesexamplepqrstuv']);
+    expect((await readStoredCodes(db, 'customer-1')).sort()).toEqual(['2040', '6612', '9031', 'bluebird', 'callboxdial2040', 'guardonweekends', 'kingfisher', 'passesexamplepqrstuv']);
     expect(asked).toEqual([
       {
         table: 'property_preferences',
