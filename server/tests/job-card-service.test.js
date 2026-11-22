@@ -116,6 +116,19 @@ describe('buildSprayCheck forecast', () => {
     expect(out.verdicts[0].verdict).toBe('unknown');
   });
 
+  test('rainfast_minutes is the canonical interval; rain_free_hours only fills a gap (Codex r5 P1)', () => {
+    const wet = hourly.map((h, i) => (i === 4 ? { ...h, rainChance: 90 } : h));
+    const judge = (fields) => jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', ...fields }], hourly: wet, now }).verdicts[0];
+    // Minutes only: 120 min = 2 h, the hour-5 rain is outside it.
+    expect(judge({ rainfast_minutes: 120 }).verdict).toBe('ok');
+    // Conflicting values: minutes win over a stale 6 h legacy value.
+    expect(judge({ rainfast_minutes: 120, rain_free_hours: 6 }).verdict).toBe('ok');
+    // Legacy hours alone still judge (6 h reaches the hour-5 rain).
+    expect(judge({ rain_free_hours: 6 })).toMatchObject({ verdict: 'caution', level: 'warning', reason: 'rain 90% inside 6 h' });
+    // A zero interval is no rain limit at all.
+    expect(judge({ rain_free_hours: 0 })).toEqual({ productId: 'p1', verdict: 'ok', reason: null });
+  });
+
   test('no forecast → unknown with reason', () => {
     const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90 }], hourly: null, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No forecast', forecastGap: true });

@@ -102,6 +102,13 @@ describe('Customer\'s words section', () => {
     expect(box.value).toBe('Ants are back in the kitchen');
   });
 
+  it('is absent when an older server answers {enabled:false}', async () => {
+    installFetch({ probe: { enabled: false, suggestion: null } });
+    await mountWithService();
+    await waitFor(() => expect(screen.queryByText("Customer's words")).toBeNull());
+    expect(document.getElementById('customer-words-input')).toBeNull();
+  });
+
   it('is absent when the probe fails', async () => {
     const fetcher = installFetch({ probeFails: true });
     await mountWithService();

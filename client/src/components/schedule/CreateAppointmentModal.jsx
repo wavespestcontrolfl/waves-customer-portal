@@ -2283,7 +2283,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     adminFetch(`/admin/schedule/reservice-request-suggestion?customerId=${encodeURIComponent(reserviceProbeCustomerId)}`)
       .then((r) => {
         if (cancelled) return;
-        setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, loaded: true, suggestion: r?.suggestion || null });
+        // An older server (after a rollback) answers {enabled:false} and ignores the saved words: show no box then.
+        setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, loaded: r?.enabled !== false, suggestion: r?.suggestion || null });
       })
       .catch(() => {
         if (!cancelled) setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, loaded: false, suggestion: null });
