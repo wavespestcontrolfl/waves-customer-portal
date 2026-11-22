@@ -158,25 +158,39 @@ function isFeatureReadField(field) {
 // owner's final value agreed with the photo on 87% of those three facts with
 // or without the flag.
 //
-// Read from machine fields only, never a flag's prose. Still refused:
-//   - a low grade or a whole-lookup flag (weak photo, wrong premise);
+// A NEW consumption, so it fails closed, and it reads machine fields only,
+// never a flag's prose. Still refused:
+//   - no grade, a low grade, or a whole-lookup flag (unscored or weak photo,
+//     wrong premise);
 //   - turfObservation 'unobservable': the photo conflicts with county records
 //     (an old photo of bare land), so every read off it is of the wrong scene;
-//   - countyTurfPriorSf: the photo gave no lawn number at all;
+//   - turfSource other than 'vision': the photo gave no lawn number of its
+//     own (a county prior, or no basis), so nothing shows it read the yard;
 //   - a flag on a pool, shrub, tree or landscape read.
 // Every flag the lookup raises on estimatedTurfSf is one of those cases or a
 // doubt about the lawn number alone; a new kind of estimatedTurfSf flag must
-// be sorted here (lookup-confidence-lawn-area-doubt.test.js counts them).
+// be sorted here (pest-price-photo-facts.test.js counts them).
+// One fact can still be in doubt by itself: see lookupDisputedPhotoFields.
 function lookupLawnAreaIsTheOnlyFeatureDoubt(enriched) {
   if (!enriched) return false;
-  if (!lookupConfidenceIsAdequate(enriched)) return false;
+  if (!lookupConfidenceIsAdequate(enriched, { requireExplicitScore: true })) return false;
   if (hasGlobalVerifyFlag(enriched)) return false;
   if (String(enriched.turfObservation || '').trim().toLowerCase() === 'unobservable') return false;
-  if (Number(enriched.countyTurfPriorSf) > 0) return false;
+  if (String(enriched.turfSource || '').trim().toLowerCase() !== 'vision') return false;
   const fields = (Array.isArray(enriched.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [])
     .map((flag) => String(flag?.field || '').toLowerCase());
   if (fields.some(isFeatureReadField)) return false;
   return fields.some((field) => field.includes('estimatedturf'));
+}
+
+// The fields the vision providers DISAGREED on. mergeAiAnalyses
+// (routes/property-lookup-v2.js) records each as an aiDivergences entry on the
+// lookup's aiAnalysis, beside the enriched profile; they raise no verify flag,
+// so no predicate above sees them. A disputed value is one provider's word
+// against another's on the same photo.
+function lookupDisputedPhotoFields(aiAnalysis) {
+  const list = Array.isArray(aiAnalysis?.aiDivergences) ? aiAnalysis.aiDivergences : [];
+  return new Set(list.map((entry) => String(entry?.field || '')).filter(Boolean));
 }
 
 // Vision-derived FEATURE modifiers (pool, cage, shrub/tree density,
@@ -353,6 +367,7 @@ module.exports = {
   lookupBedAreaReadIsFlagged,
   lookupFeatureReadIsFlagged,
   lookupLawnAreaIsTheOnlyFeatureDoubt,
+  lookupDisputedPhotoFields,
   lookupFeaturesAreTrustworthy,
   lookupPropertyTypeIsTrustworthy,
   lookupDimensionIsTrustworthy,

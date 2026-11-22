@@ -3476,7 +3476,8 @@ offer's per-application price (`crossSell.option.perVisit`, and the same
 price on the portal offer card, the portal pricing card, the plan start and
 the one-tap purchase) is computed with the photo's shrubs, complexity and
 near-water facts when the property lookup's only doubt is the lawn area,
-in place of the neutral defaults. It can also add the engine's hand-check
+in place of the neutral defaults (a fact the vision providers disputed
+keeps its default). It can also add the engine's hand-check
 mark to a pest line (heavy shrubs with a complex landscape), and such an
 offer degrades to the quote CTA as any held price does. Off or unset: the
 price of today.

@@ -7,8 +7,9 @@
  *
  * Regression this guards: (1) the facts reach a line other than pest (a
  * mosquito price would move by a whole tier); (2) a photo that conflicts with
- * county records, a weak photo or a flagged feature read starts to price;
- * (3) the gate off changes any price.
+ * county records, a weak or unscored photo, a photo with no lawn number of
+ * its own, a flagged feature read, or a fact the vision providers disputed
+ * starts to price; (3) the gate off changes any price.
  *
  * Gap in existing proof: customer-pricing-ai.test.js proves a flagged read
  * drops every feature; nothing covered a per-line exception.
@@ -16,17 +17,20 @@
 const fs = require('fs');
 const path = require('path');
 
-const { lookupLawnAreaIsTheOnlyFeatureDoubt } = require('../services/lookup-confidence');
+const { lookupLawnAreaIsTheOnlyFeatureDoubt, lookupDisputedPhotoFields } = require('../services/lookup-confidence');
 const { buildCustomerPricingResponse, _private } = require('../services/customer-pricing-ai');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
 
 const GATE = 'GATE_PEST_PRICE_PHOTO_FACTS';
 const LAWN_FLAG = { field: 'estimatedTurfSf', reason: 'AI turf estimate needs review', priority: 'HIGH' };
 
-// A lookup the photo read in full: light shrubs, simple landscape, a canal.
+// A lookup the photo read in full: its own lawn number, light shrubs, simple
+// landscape, a canal.
 const photoRead = (extra = {}) => ({
   homeSqFt: 2200,
   aiConfidence: 88,
+  estimatedTurfSf: 4200,
+  turfSource: 'vision',
   shrubDensity: 'LIGHT',
   treeDensity: 'LIGHT',
   landscapeComplexity: 'SIMPLE',
@@ -44,8 +48,11 @@ const customer = {
   zip: '34236',
 };
 
-const resolve = (enriched) => _private.resolvePropertyContext({
-  customer, turfProfile: null, propertyLookup: async () => ({ enriched }),
+// The lookup hands back the merged vision analysis beside the profile; its
+// aiDivergences list names the fields the providers disagreed on.
+const AGREED = { confidenceScore: 88 };
+const resolve = (enriched, aiAnalysis = AGREED) => _private.resolvePropertyContext({
+  customer, turfProfile: null, propertyLookup: async () => ({ enriched, aiAnalysis }),
 });
 
 afterEach(() => { delete process.env[GATE]; });
@@ -58,8 +65,15 @@ describe('lookupLawnAreaIsTheOnlyFeatureDoubt', () => {
   test.each([
     ['no flag at all (the read is trusted, nothing to except)', photoRead()],
     ['a weak photo (grade under 60)', photoRead({ aiConfidence: 52, fieldVerifyFlags: [LAWN_FLAG] })],
+    ['a photo with no grade', photoRead({ aiConfidence: undefined, fieldVerifyFlags: [LAWN_FLAG] })],
     ['a photo that conflicts with county records', photoRead({ turfObservation: 'unobservable', fieldVerifyFlags: [LAWN_FLAG] })],
-    ['no lawn number from the photo (county prior)', photoRead({ countyTurfPriorSf: 4100, fieldVerifyFlags: [LAWN_FLAG] })],
+    ['a lawn number seeded from the county, not the photo', photoRead({
+      turfSource: 'county_prior', countyTurfPriorSf: 4100, fieldVerifyFlags: [LAWN_FLAG],
+    })],
+    ['no lawn number at all', photoRead({ turfSource: 'none', estimatedTurfSf: 0, fieldVerifyFlags: [LAWN_FLAG] })],
+    ['a profile that does not say where its lawn number came from', photoRead({
+      turfSource: undefined, fieldVerifyFlags: [LAWN_FLAG],
+    })],
     ['a wrong-premise flag', photoRead({ fieldVerifyFlags: [LAWN_FLAG, { field: 'address', reason: 'x' }] })],
     ['a flag on the shrub read', photoRead({ fieldVerifyFlags: [LAWN_FLAG, { field: 'shrubDensity', reason: 'x' }] })],
     ['a flag on the pool read', photoRead({ fieldVerifyFlags: [LAWN_FLAG, { field: 'poolCage', reason: 'x' }] })],
@@ -101,6 +115,44 @@ describe('resolvePropertyContext: pestPhotoFacts', () => {
       fieldVerifyFlags: [LAWN_FLAG],
     }));
     expect(ctx.propertyInput.pestPhotoFacts).toEqual({ complexity: 'simple', nearWater: false });
+  });
+
+  test('gate on: a fact the vision providers disputed is not kept; the agreed ones are', async () => {
+    process.env[GATE] = 'true';
+    const ctx = await resolve(photoRead({ fieldVerifyFlags: [LAWN_FLAG] }), {
+      confidenceScore: 88,
+      aiDivergences: [{ field: 'shrubDensity', primary: 'a', a: 'LIGHT', b: 'HEAVY' }],
+    });
+    expect(ctx.propertyInput.pestPhotoFacts).toEqual({ complexity: 'simple', nearWater: true });
+  });
+
+  test('gate on: all three disputed keeps nothing', async () => {
+    process.env[GATE] = 'true';
+    const ctx = await resolve(photoRead({ fieldVerifyFlags: [LAWN_FLAG] }), {
+      aiDivergences: ['shrubDensity', 'landscapeComplexity', 'nearWater'].map((field) => ({ field })),
+    });
+    expect(ctx.propertyInput.pestPhotoFacts).toBeUndefined();
+  });
+
+  test.each([
+    ['no vision analysis to check for a dispute', photoRead({ fieldVerifyFlags: [LAWN_FLAG] }), null],
+    ['a profile with no record of what the photo read', photoRead({ _observed: undefined, fieldVerifyFlags: [LAWN_FLAG] }), AGREED],
+  ])('gate on: no pest facts for %s', async (_label, enriched, aiAnalysis) => {
+    process.env[GATE] = 'true';
+    const ctx = await resolve(enriched, aiAnalysis);
+    expect(ctx.propertyInput.pestPhotoFacts).toBeUndefined();
+  });
+
+  // The dispute list is read by field name. The lookup must keep recording
+  // these three under the names the profile uses.
+  test('the lookup records a dispute on each of the three facts by these names', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/property-lookup-v2.js'), 'utf8');
+    const tracked = source.match(/const fieldsToValidate = \[([^\]]+)\]/)[1];
+    for (const field of ['shrubDensity', 'landscapeComplexity', 'nearWater']) {
+      expect(tracked).toContain(`'${field}'`);
+    }
+    expect([...lookupDisputedPhotoFields({ aiDivergences: [{ field: 'nearWater' }, null, {}] })]).toEqual(['nearWater']);
+    expect(lookupDisputedPhotoFields(null).size).toBe(0);
   });
 
   test.each([
@@ -154,7 +206,7 @@ describe('the customer price path, end to end', () => {
       db: null,
       customer,
       prompt: 'pest control',
-      propertyLookup: async () => ({ enriched: photoRead({ fieldVerifyFlags: [LAWN_FLAG] }) }),
+      propertyLookup: async () => ({ enriched: photoRead({ fieldVerifyFlags: [LAWN_FLAG] }), aiAnalysis: AGREED }),
     });
     return result.options.find((option) => option.id === 'pest-quarterly').perVisit;
   };

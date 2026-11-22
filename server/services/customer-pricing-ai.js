@@ -426,6 +426,7 @@ const {
   lookupBedAreaIsTrustworthy, lookupBedAreaReadIsFlagged,
   lookupFeatureReadIsFlagged, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
   lookupLawnAreaIsTheOnlyFeatureDoubt,
+  lookupDisputedPhotoFields,
   lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
   lookupTurfEstimateIsTrustworthy, lookupTurfReadIsTrustworthy,
   lookupTurfZeroIsObserved, lookupTreeCountIsTrustworthy,
@@ -436,22 +437,32 @@ const {
 // GATE_PEST_PRICE_PHOTO_FACTS (owner 2026-11-21, "1, 2"): the three photo facts
 // a pest price reads, for a flagged feature read whose only doubt is the lawn
 // area. In the engine's own words, as the trusted branch of
-// resolvePropertyContext would adopt them. Only a read the photo actually made
-// counts (_observed; a legacy profile without it keeps presence semantics):
-// the lookup fills an unread density with 'MODERATE' and unread water with
-// 'NONE', and a filled-in value is not a fact. Undefined when the gate is off,
-// the doubt is wider than the lawn area, or the photo read none of the three.
-function pestPhotoFactsFor(p) {
+// resolvePropertyContext would adopt them. A new consumption, so each fact
+// fails closed. It counts only when:
+//   - the photo actually read it (_observed): the lookup fills an unread
+//     density with 'MODERATE' and unread water with 'NONE', and a filled-in
+//     value is not a fact. A profile with no _observed bits keeps none;
+//   - the vision providers did not disagree on it (lookupDisputedPhotoFields,
+//     read off the lookup's aiAnalysis). No aiAnalysis to check keeps none.
+// Undefined when the gate is off, the doubt is wider than the lawn area, or no
+// fact passes.
+const PEST_PHOTO_FACT_READS = [
+  ['shrubs', 'shrubDensity', (value) => String(value).toLowerCase()],
+  ['complexity', 'landscapeComplexity', (value) => String(value).toLowerCase()],
+  ['nearWater', 'nearWater', (value) => value !== 'NONE'],
+];
+function pestPhotoFactsFor(p, lookup) {
   // Optional call: hundreds of suites mock feature-gates whole.
   if (require('../config/feature-gates').pestPricePhotoFactsLive?.() !== true) return undefined;
   if (!lookupLawnAreaIsTheOnlyFeatureDoubt(p)) return undefined;
-  const obs = (p._observed && typeof p._observed === 'object') ? p._observed : null;
+  const observed = p._observed;
+  const aiAnalysis = lookup?.aiAnalysis;
+  if (!observed || typeof observed !== 'object' || !aiAnalysis || typeof aiAnalysis !== 'object') return undefined;
+  const disputed = lookupDisputedPhotoFields(aiAnalysis);
   const facts = {};
-  if (p.shrubDensity && (obs ? obs.shrubDensity : true)) facts.shrubs = String(p.shrubDensity).toLowerCase();
-  if (p.landscapeComplexity && (obs ? obs.landscapeComplexity : true)) {
-    facts.complexity = String(p.landscapeComplexity).toLowerCase();
+  for (const [fact, field, read] of PEST_PHOTO_FACT_READS) {
+    if (p[field] && observed[field] === true && !disputed.has(field)) facts[fact] = read(p[field]);
   }
-  if (p.nearWater && (obs ? obs.nearWater : true)) facts.nearWater = p.nearWater !== 'NONE';
   return Object.keys(facts).length ? facts : undefined;
 }
 
@@ -833,7 +844,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
             if (!lookupFeatureKeys.has(key)) lookupRejectedFields.add(key);
           }
         }
-        pestPhotoFacts = pestPhotoFactsFor(p);
+        pestPhotoFacts = pestPhotoFactsFor(p, lookup);
       } else {
         // A field is lookup-backed only when the trusted payload actually
         // carried a value for it — a silent field keeps its default here
