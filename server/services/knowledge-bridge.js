@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { loadCustomerGrassContext } = require('./lawn-grass-context');
+const { etParts } = require('../utils/datetime-et');
 const { TRUSTED_STATUSES } = require('./agronomic-wiki');
 
 let Anthropic;
@@ -665,15 +666,14 @@ async function loadRecommendationContext(assessment) {
   return { customer, grassType, grassTrack, protocolEntries, outcomeEntries };
 }
 
-// The recommendation prompt. `visitKey` is a hash of its visit part: everything
-// the visit itself decides (the customer, the grass, the month, the scores, the
-// observations and the applied products). Two prompts with one visitKey ask
-// about the same visit facts; only the reference pages under them can differ
-// (their read has no order, so they cannot be part of a key). The key reads
-// each applied product once, in name order, so one set of products has one key
-// whatever the order and the number of its rows; the prompt lists the rows as
-// they came.
-function recommendationPrompt({ assessment, appliedProducts }, context) {
+// The recommendation prompt. `promptKey` is a hash of that prompt with its lists
+// in a fixed order: each applied product once, in name order, and the reference
+// lines in text order (their reads have no order). Two prompts with one key ask
+// the same question from the same facts and the same reference pages, whatever
+// the order and the number of their rows. The prompt itself lists the rows as
+// they came. The month is the Eastern one (the business day), so an evening
+// run on a month's last day names that month.
+function recommendationPrompt({ assessment, appliedProducts }, context, now = new Date()) {
   const { customer, grassType, grassTrack, protocolEntries, outcomeEntries } = context;
 
   // Build scores context
@@ -692,7 +692,7 @@ function recommendationPrompt({ assessment, appliedProducts }, context) {
     season: assessment.season,
   };
 
-  const month = new Date().getMonth() + 1;
+  const { month } = etParts(now);
   const monthName = ['January','February','March','April','May','June','July','August','September','October','November','December'][month - 1];
   const appliedLines = appliedProducts.map((p) => `- ${p.product_name}${p.product_category ? ` (${p.product_category})` : ''}`);
 
@@ -718,13 +718,15 @@ Applied TODAY on this visit (already done — authoritative):
 ${lines.join('\n')}
 HARD RULE: these applications have already been made. Never recommend against, question, or defer a product class applied today (no "before making a fungicide application" when a fungicide was applied) — frame follow-up as monitoring the lawn's response to today's treatment.` : ''}`;
 
-  const userPrompt = `${visitPart(appliedLines)}
+  const protocolLines = protocolEntries.map(e => `[${e.category}] ${e.title}: ${(e.content || '').substring(0, 300)}`);
+  const outcomeLines = outcomeEntries.map(e => `${e.title} (${e.data_point_count} data points, ${e.confidence} confidence): ${e.summary || 'No summary'}`);
+  const promptOf = (applied, protocols, outcomes) => `${visitPart(applied)}
 
 Protocol References (from Claudeopedia):
-${protocolEntries.map(e => `[${e.category}] ${e.title}: ${(e.content || '').substring(0, 300)}`).join('\n')}
+${protocols.join('\n')}
 
 Real Outcome Data (from Agronomic Wiki):
-${outcomeEntries.map(e => `${e.title} (${e.data_point_count} data points, ${e.confidence} confidence): ${e.summary || 'No summary'}`).join('\n')}
+${outcomes.join('\n')}
 
 Return a JSON object with:
 {
@@ -736,8 +738,10 @@ Return a JSON object with:
   "customerTip": "<one simple thing the customer can do between visits>"
 }`;
 
-  const visitKey = crypto.createHash('sha256').update(visitPart([...new Set(appliedLines)].sort())).digest('hex');
-  return { systemPrompt, userPrompt, visitKey };
+  const userPrompt = promptOf(appliedLines, protocolLines, outcomeLines);
+  const keyed = promptOf([...new Set(appliedLines)].sort(), [...protocolLines].sort(), [...outcomeLines].sort());
+  const promptKey = crypto.createHash('sha256').update(`${systemPrompt}\n${keyed}`).digest('hex');
+  return { systemPrompt, userPrompt, promptKey };
 }
 
 // The answer made before the Complete tap (report speed plan step 4, owner
@@ -745,15 +749,16 @@ Return a JSON object with:
 // recommendation call, and that call cannot start earlier, because it reads
 // the visit's saved product rows. prepareAssessmentRecommendations asks the
 // same prompt early, with the products the sheet is about to record, and keeps
-// the answer IN THIS PROCESS only, under the prompt's visitKey. It is stored
+// the answer IN THIS PROCESS only, under the prompt's promptKey. It is stored
 // nowhere, so no report, send or reader can see it. The completion's grounded
-// run takes it only when its own prompt, built from the saved rows, has that
-// same visitKey. A restart, another instance, a changed score, a changed
-// product list or an answer older than 30 minutes all end in an ordinary call.
+// run takes it only when its own prompt, built from the saved rows and the
+// reference pages as they are then, has that same promptKey. A restart, another
+// instance, a changed score, a changed product list, a reference page changed
+// or withdrawn, or an answer older than 30 minutes all end in an ordinary call.
 const PREPARED_ANSWER_TTL_MS = 30 * 60 * 1000;
 const PREPARED_ANSWER_MAX = 100;
 const PREPARED_CALLS_MAX = 5;
-const _preparedAnswers = new Map(); // assessmentId -> { visitKey, at, calls, answer: Promise<string|null> }
+const _preparedAnswers = new Map(); // assessmentId -> { promptKey, at, calls, answer: Promise<string|null> }
 
 function heldPreparedAnswer(assessmentId) {
   const held = _preparedAnswers.get(assessmentId);
@@ -765,22 +770,33 @@ function heldPreparedAnswer(assessmentId) {
 }
 
 // The grounded run's read. It always empties the slot: the visit's rows are
-// saved, so an answer made for other facts can serve no later run, and one that
-// fits is used once (a later regeneration asks the model again).
-async function preparedAnswer(assessmentId, visitKey) {
+// saved, so an answer made for another prompt can serve no later run, and one
+// that fits is used once (a later regeneration asks the model again).
+async function preparedAnswer(assessmentId, promptKey) {
   const held = heldPreparedAnswer(assessmentId);
   _preparedAnswers.delete(assessmentId);
-  if (!held || held.visitKey !== visitKey) return null;
+  if (!held || held.promptKey !== promptKey) return null;
   const answer = await held.answer;
   if (answer) logger.info(`[knowledge-bridge] grounded recommendations for ${assessmentId} use the answer prepared before completion`);
   return answer;
 }
 
+const everyString = (value) => {
+  if (typeof value === 'string') return [value];
+  return value && typeof value === 'object' ? Object.values(value).flatMap(everyString) : [];
+};
+
 // Only an answer the grounded run would accept is held (callClaude's own rule
 // for its primary leg): an unusable one would fail that run, where a new call
-// could still succeed.
+// could still succeed. An early answer is also a new source of report copy, so
+// every string in it passes the complete report copy screen
+// (customerCopyViolations) or the answer is not held.
 function usablePreparedAnswer(text) {
-  try { return !objectAnswerProblem(JSON.parse(String(text).replace(/```json|```/g, '').trim())); } catch { return false; }
+  let parsed;
+  try { parsed = JSON.parse(String(text).replace(/```json|```/g, '').trim()); } catch { return false; }
+  if (objectAnswerProblem(parsed)) return false;
+  const { customerCopyViolations } = require('./service-report/technician-report-copy');
+  return everyString(parsed).every((line) => customerCopyViolations(line).length === 0);
 }
 
 const KnowledgeBridge = {
@@ -1220,16 +1236,16 @@ const KnowledgeBridge = {
   // The early call (see _preparedAnswers). `plannedProducts` are the rows the
   // sheet is about to record, as the completion will save them:
   // { product_name, product_category }. Returns as soon as the call is running.
-  // The same visit facts are asked once (answered, running or failed), and one
+  // The same prompt is asked once (answered, running or failed), and one
   // assessment gets at most PREPARED_CALLS_MAX calls in a row. Writes nothing.
   async prepareAssessmentRecommendations(assessmentId, plannedProducts) {
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     // A linked assessment's grounded run has started or finished.
     if (!assessment || assessment.service_record_id) return { started: false };
     const context = await loadRecommendationContext(assessment);
-    const { systemPrompt, userPrompt, visitKey } = recommendationPrompt({ assessment, appliedProducts: plannedProducts }, context);
+    const { systemPrompt, userPrompt, promptKey } = recommendationPrompt({ assessment, appliedProducts: plannedProducts }, context);
     const held = heldPreparedAnswer(assessmentId);
-    if (held?.visitKey === visitKey) return { started: true };
+    if (held?.promptKey === promptKey) return { started: true };
     const calls = (held?.calls || 0) + 1;
     if (calls > PREPARED_CALLS_MAX) return { started: false };
     const answer = callClaude(systemPrompt, userPrompt, 1500)
@@ -1237,7 +1253,7 @@ const KnowledgeBridge = {
       .then((text) => (text && usablePreparedAnswer(text) ? text : null));
     // Deleted first so the newest request is also the newest key of the map.
     _preparedAnswers.delete(assessmentId);
-    _preparedAnswers.set(assessmentId, { visitKey, at: Date.now(), calls, answer });
+    _preparedAnswers.set(assessmentId, { promptKey, at: Date.now(), calls, answer });
     while (_preparedAnswers.size > PREPARED_ANSWER_MAX) _preparedAnswers.delete(_preparedAnswers.keys().next().value);
     return { started: true };
   },
@@ -1365,12 +1381,12 @@ const KnowledgeBridge = {
       // appliedProducts came from the locked Phase A read — the visit's
       // ACTUAL applications (product rows only; raw technician notes are NOT
       // parser-approved copy and must not feed customer-facing prompts).
-      const { systemPrompt, userPrompt, visitKey } = recommendationPrompt({ assessment, appliedProducts }, context);
+      const { systemPrompt, userPrompt, promptKey } = recommendationPrompt({ assessment, appliedProducts }, context);
       // Only the grounded run takes an answer made before the Complete tap: its
       // application set was read from the visit's own rows, and the answer was
-      // made from that same set (preparedAnswer). Every check and the locked
+      // made for this same prompt (preparedAnswer). Every check and the locked
       // write below then run on it as on a new answer.
-      const prepared = applicationsVerified ? await preparedAnswer(assessmentId, visitKey) : null;
+      const prepared = applicationsVerified ? await preparedAnswer(assessmentId, promptKey) : null;
       const result = prepared || await callClaude(systemPrompt, userPrompt, 1500);
       if (!result) return null;
 

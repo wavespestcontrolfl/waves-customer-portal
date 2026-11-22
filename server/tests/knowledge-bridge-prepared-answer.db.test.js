@@ -1,9 +1,10 @@
 // Report speed plan step 4 (owner 2026-11-19): the lawn recommendation answer made before the Complete tap.
 // Behavior: the completion's grounded run (generateAssessmentRecommendations on a linked assessment) makes no
-// model call when prepareAssessmentRecommendations already asked about the same scores and products, and it
-// makes its own call in every other case.
-// Regression this guards: a prepared answer used for a visit whose saved rows differ from the planned ones, or
-// shown before the visit's rows are saved; and a prepared answer that skips the checks a new answer gets.
+// model call when prepareAssessmentRecommendations already asked the same prompt (the same scores, products and
+// reference pages), and it makes its own call in every other case.
+// Regression this guards: a prepared answer used for a visit whose saved rows differ from the planned ones, used
+// after a reference page it read was withdrawn, or shown before the visit's rows are saved; and a prepared answer
+// that skips the checks a new answer gets.
 // Gap in existing proof: no suite runs the real generator's read, checks and locked write against PostgreSQL.
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
@@ -45,10 +46,11 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     KnowledgeBridge = require('../services/knowledge-bridge');
   }, 60000);
   afterAll(async () => { if (db) await db.dispose(); });
-  beforeEach(() => {
+  beforeEach(async () => {
     dispatch.mockReset();
     mockCreate.mockReset();
     KnowledgeBridge._test.preparedAnswers.clear();
+    await db.knex('knowledge_base').del();
   });
 
   async function seedAssessment() {
@@ -165,6 +167,38 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await stored(assessment.id)).summary).toBe('Prepared summary.');
   });
 
+  test('a reference page withdrawn after the early call: the grounded run makes its own call, without that page', async () => {
+    const assessment = await seedAssessment();
+    const [page] = await db.knex('knowledge_base')
+      .insert({ path: `fixture/${randomUUID()}`, title: 'Fixture fall watering page', category: 'seasonal', content: 'Water twice a week in fall.', status: 'active' })
+      .returning('id');
+    answersWith('Prepared summary.', 'Completion summary.');
+    await KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER]);
+    expect(dispatch.mock.calls[0][1].text).toContain('Fixture fall watering page');
+
+    await db.knex('knowledge_base').where({ id: page.id }).update({ active: false });
+    await saveVisitRows(assessment.id, [FERTILIZER]);
+    await KnowledgeBridge.generateAssessmentRecommendations(assessment.id);
+
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(dispatch.mock.calls[1][1].text).not.toContain('Fixture fall watering page');
+    expect((await stored(assessment.id)).summary).toBe('Completion summary.');
+  });
+
+  test('an early answer the report copy screen refuses is not held: the grounded run asks again', async () => {
+    const assessment = await seedAssessment();
+    dispatch.mockResolvedValueOnce({ ok: true, json: answer('Prepared summary.', { customerTip: 'This treatment is safe for pets.' }) });
+    dispatch.mockResolvedValueOnce({ ok: true, json: answer('Completion summary.') });
+    await KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER]);
+    await expect(KnowledgeBridge._test.preparedAnswers.get(assessment.id).answer).resolves.toBeNull();
+    await saveVisitRows(assessment.id, [FERTILIZER]);
+
+    await KnowledgeBridge.generateAssessmentRecommendations(assessment.id);
+
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect((await stored(assessment.id)).summary).toBe('Completion summary.');
+  });
+
   test('one answer is used once: a later regeneration asks the model again', async () => {
     const assessment = await seedAssessment();
     answersWith('Prepared summary.', 'Regenerated summary.');
@@ -225,23 +259,40 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(dispatch).toHaveBeenCalledTimes(5);
   });
 
-  test('one set of products has one key whatever its row order; the prompt lists the rows as they came', async () => {
+  test('one prompt has one key whatever the order of its rows; the prompt lists the rows as they came', async () => {
     const assessment = await seedAssessment();
-    const context = { customer: { first_name: 'Prepared', last_name: 'Fixture' }, grassType: 'St. Augustine', grassTrack: null, protocolEntries: [], outcomeEntries: [] };
-    const prompt = (appliedProducts, row = assessment) => KnowledgeBridge._test.recommendationPrompt({ assessment: row, appliedProducts }, context);
+    const PAGE_A = { category: 'seasonal', title: 'Fixture page A', content: 'Water twice a week in fall.' };
+    const PAGE_B = { category: 'protocol', title: 'Fixture page B', content: 'Feed in October.' };
+    const OUTCOME = { title: 'Fixture outcome', data_point_count: 12, confidence: 'high', summary: 'Color improved.' };
+    const pages = (protocolEntries = [PAGE_A, PAGE_B], outcomeEntries = [OUTCOME]) => ({
+      customer: { first_name: 'Prepared', last_name: 'Fixture' }, grassType: 'St. Augustine', grassTrack: null, protocolEntries, outcomeEntries,
+    });
+    const NOON = new Date('2026-11-21T17:00:00Z');
+    const prompt = (appliedProducts, { row = assessment, context = pages(), now = NOON } = {}) => KnowledgeBridge._test.recommendationPrompt({ assessment: row, appliedProducts }, context, now);
 
     const saved = prompt([FUNGICIDE, FERTILIZER, FUNGICIDE]);
     expect(saved.userPrompt).toContain('- Fixture Azoxy 2SC (fungicide)\n- Fixture 24-0-11 (fertilizer)\n- Fixture Azoxy 2SC (fungicide)\nHARD RULE');
-    expect(prompt([FERTILIZER, FUNGICIDE]).visitKey).toBe(saved.visitKey);
+    expect(saved.userPrompt).toContain('[seasonal] Fixture page A: Water twice a week in fall.\n[protocol] Fixture page B: Feed in October.');
+    expect(prompt([FERTILIZER, FUNGICIDE]).promptKey).toBe(saved.promptKey);
+    expect(prompt([FERTILIZER, FUNGICIDE], { context: pages([PAGE_B, PAGE_A]) }).promptKey).toBe(saved.promptKey);
 
     const others = [
       prompt([FERTILIZER]),
       prompt([]),
       prompt([FUNGICIDE, { ...FERTILIZER, product_category: null }]),
-      prompt([FUNGICIDE, FERTILIZER], { ...assessment, weed_suppression: 81 }),
-      prompt([FUNGICIDE, FERTILIZER], { ...assessment, observations: 'Dry spots near the drive.' }),
+      prompt([FUNGICIDE, FERTILIZER], { row: { ...assessment, weed_suppression: 81 } }),
+      prompt([FUNGICIDE, FERTILIZER], { row: { ...assessment, observations: 'Dry spots near the drive.' } }),
+      prompt([FUNGICIDE, FERTILIZER], { context: pages([PAGE_A]) }),
+      prompt([FUNGICIDE, FERTILIZER], { context: pages([PAGE_A, { ...PAGE_B, content: 'Feed in November.' }]) }),
+      prompt([FUNGICIDE, FERTILIZER], { context: pages([PAGE_A, PAGE_B], []) }),
+      prompt([FUNGICIDE, FERTILIZER], { now: new Date('2026-12-01T17:00:00Z') }),
     ];
-    expect(new Set([saved.visitKey, ...others.map((other) => other.visitKey)]).size).toBe(others.length + 1);
+    expect(new Set([saved.promptKey, ...others.map((other) => other.promptKey)]).size).toBe(others.length + 1);
+
+    // The month is the Eastern one: 02:00 UTC on December 1 is the evening of November 30 in Florida.
+    const evening = prompt([FUNGICIDE, FERTILIZER], { now: new Date('2026-12-01T02:00:00Z') });
+    expect(evening.userPrompt).toContain('Month: November (Season: fall)');
+    expect(evening.promptKey).toBe(saved.promptKey);
   });
 
   test('an assessment whose visit rows are saved gets no early call', async () => {
