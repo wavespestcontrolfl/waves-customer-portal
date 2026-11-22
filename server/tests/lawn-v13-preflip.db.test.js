@@ -962,8 +962,8 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     const shape = (rows) => rows.map((r) => [r.limit_type, r.match_type, r.match_value, Number(r.limit_value), r.limit_unit, r.severity]);
     const ours = () => knex('lawn_protocol_audit_log').whereIn('action', [stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION]).orderBy('id');
     const catalogRow = () => knex('products_catalog').where({ id: stonewallId() }).first();
-    // Every catalog column but the one the migration may fill (hrac_group, only where empty) and the stamp.
-    const catalogJson = async () => { const { hrac_group: _g, updated_at: _u, ...rest } = await catalogRow(); return JSON.stringify(rest); };
+    // Every catalog column, the stamp included: the migration never updates a catalog row that exists.
+    const catalogJson = async () => JSON.stringify(await catalogRow());
     const otherRows = () => knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
       .whereNot({ 'w.window_key': 'oct_v13_spreader_fall' }).orderBy('p.id').select('p.id', 'p.product_name', 'p.product_id', 'p.rate_per_1000', 'p.rate_unit', 'p.gates', 'p.annual_counter');
     const DIMENSION_OCTOBER = {
@@ -1024,7 +1024,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       const audits = await ours();
       expect(audits.map((log) => log.action).sort()).toEqual([stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION].sort());
       expect(audits.find((log) => log.action === stonewallMigration.ACTION).after_snapshot.rows[0].columns.product_name).toEqual({ before: DIMENSION, after: STW_037 });
-      expect(audits.find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ insertedProductId: null, hracFilled: true, caps: [expect.objectContaining({ limit_value: 9.3068 })] });
+      expect(audits.find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ insertedProductId: null, caps: [expect.objectContaining({ limit_value: 9.3068 })] });
     });
 
     test('a second up changes nothing', async () => {
@@ -1158,9 +1158,8 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
           await stonewallMigration.up(knex);
           expect((await limitRows(stonewallId())).map((r) => JSON.stringify(r))).toEqual(before);
           expect(await catalogJson()).toBe(catalogBefore);
-          // The protocol audit row, and a catalog audit row for the hrac_group fill alone (no cap inserted).
-          expect((await ours()).map((log) => log.action).sort()).toEqual([stonewallMigration.CATALOG_ACTION, stonewallMigration.ACTION].sort());
-          expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ caps: [], hracFilled: true, insertedProductId: null });
+          // The protocol audit row only: nothing was inserted, so there is no catalog audit row.
+          expect((await ours()).map((log) => log.action)).toEqual([stonewallMigration.ACTION]);
           await stonewallMigration.down(knex);
           expect((await limitRows(stonewallId())).map((r) => JSON.stringify(r))).toEqual(before);
           expect(await octoberRow()).toMatchObject({ product_name: DIMENSION });
@@ -1231,27 +1230,14 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         });
       });
 
-      test('a catalog row that exists is never updated: not one column of it moves, but an empty hrac_group is filled with 3 (the pre-emergent Group 3 rotation exemption reads it)', async () => {
+      test('a catalog row that exists is never updated: not one column of it moves, the chemical group columns and the stamp included, up or down', async () => {
         await withReset(async () => {
-          const before = await catalogRow();
+          const before = await catalogJson();
+          expect(await catalogRow()).toMatchObject({ hrac_group: null });
           await stonewallMigration.up(knex);
-          const after = await catalogRow();
-          expect(after.hrac_group).toBe('3');
-          const strip = ({ hrac_group: _g, updated_at: _u, ...rest }) => JSON.stringify(rest);
-          expect(strip(after)).toBe(strip(before));
-          expect(after.moa_group).toBe(before.moa_group);
+          expect(await catalogJson()).toBe(before);
           await stonewallMigration.down(knex);
-          expect((await catalogRow()).hrac_group).toBeNull();
-        });
-      });
-
-      test('an hrac_group an administrator wrote is never overwritten, and down leaves it', async () => {
-        await withReset(async () => {
-          await knex('products_catalog').where({ id: stonewallId() }).update({ hrac_group: '3 + 11' });
-          await stonewallMigration.up(knex);
-          expect((await catalogRow()).hrac_group).toBe('3 + 11');
-          await stonewallMigration.down(knex);
-          expect((await catalogRow()).hrac_group).toBe('3 + 11');
+          expect(await catalogJson()).toBe(before);
         });
       });
     });

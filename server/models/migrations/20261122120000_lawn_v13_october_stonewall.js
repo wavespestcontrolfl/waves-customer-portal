@@ -47,24 +47,20 @@
  *      copy): where neither a name nor an alias matches, the catalog row is INSERTED with the
  *      production values (the insert style of 20261005130000), so every database ends on the
  *      same October product. Customer-copy and approval columns keep their defaults (the owner
- *      approves them). A catalog row that exists is NEVER updated, with one exception, item 5.
+ *      approves them). A catalog row that exists is NEVER updated.
  *      No row to swap = no lookup and no write.
  *   4. The yearly prodiamine cap row (annual_max_rate, active_ingredient prodiamine, 1.5 lb ai
  *      per acre written as 9.3068 lb of this bag per 1,000 sq ft) is inserted only where the
  *      Stonewall product has none. Production has it; a database that lacks it gets it. The
  *      4FL cap and every other limit row are never changed.
- *   5. Chemical group. waveguard-approval-engine productGroups() reads moa_group, frac_group,
- *      irac_group, hrac_group and hrac_group_secondary, and its pre_emergent_group_3 rotation
- *      exemption fires only for hrac_group '3' (20261009176000 wrote that on the Dimension
- *      granular). The production Stonewall row holds the group as moa_group 'Group 3' with
- *      hrac_group NULL, so a Group 3 repeat would not be exempt. hrac_group is filled with '3'
- *      by one guarded UPDATE only where it is NULL or blank (moa_group is not touched, and a
- *      value an administrator wrote is never overwritten). product_type stays as it is: no
- *      rotation or limit code reads it.
+ * Chemical group: no write. The production Stonewall row holds its group in the older free-text
+ * column (moa_group 'Group 3', hrac_group NULL), as the liquid pre-emergents do. The rotation
+ * check's pre_emergent_group_3 exemption (waveguard-approval-engine) reads the group from either
+ * column, so the October bag after a Group 3 pre-emergent raises no approval block.
  *
  * Idempotent: a second run finds no Dimension row to swap and writes nothing. One
  * 'v13_october_stonewall' audit row per protocol records each value before and after; one
- * 'v13_october_stonewall_catalog' row records the inserted catalog row, the filled group and the inserted cap row.
+ * 'v13_october_stonewall_catalog' row records the inserted catalog row and the inserted cap row.
  *
  * down(), exact-equality guarded:
  *   - a row goes back only while it is still the Stonewall row this wrote (name and product id),
@@ -74,8 +70,7 @@
  *     migration's guard): the rollback logs and leaves it, its audit row and the cap row;
  *   - when no protocol was left: an inserted cap row goes only while every field still equals
  *     what was inserted; a catalog row this migration INSERTED is deleted only while nothing
- *     references it (no foreign key, no protocol row, no application); the hrac_group it filled
- *     goes back to NULL only while it still reads '3'.
+ *     references it (no foreign key, no protocol row, no application).
  */
 
 const crypto = require('crypto');
@@ -145,7 +140,6 @@ const CATALOG_ROW = {
   }),
   active: true,
 };
-const HRAC_GROUP = '3';
 
 const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
@@ -268,16 +262,6 @@ async function insertCatalogRow(knex) {
   return made && typeof made === 'object' ? made.id : made;
 }
 
-// hrac_group '3' by ONE guarded UPDATE, only where the column is empty. Returns true when it wrote.
-async function fillHracGroup(knex, productId) {
-  const columns = await knex('products_catalog').columnInfo();
-  if (!('hrac_group' in columns)) return false;
-  const changed = await knex('products_catalog').where({ id: productId })
-    .where(function empty() { this.whereNull('hrac_group').orWhereRaw("btrim(hrac_group) = ''"); })
-    .update({ hrac_group: HRAC_GROUP, updated_at: knex.fn.now() });
-  return changed === 1;
-}
-
 const REQUIRED_TABLES = [
   'products_catalog', 'product_limits', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_audit_log',
 ];
@@ -322,8 +306,7 @@ exports.up = async function up(knex) {
   }
 
   const caps = await insertCapIfMissing(knex, stonewallId);
-  const hracFilled = await fillHracGroup(knex, stonewallId);
-  if (caps.length || insertedProductId || hracFilled) {
+  if (caps.length || insertedProductId) {
     await knex('lawn_protocol_audit_log').insert({
       lawn_protocol_id: null,
       actor_name: 'migration 20261122120000',
@@ -332,7 +315,7 @@ exports.up = async function up(knex) {
       action: CATALOG_ACTION,
       changed_fields: JSON.stringify(['catalog', 'limits']),
       before_snapshot: JSON.stringify({}),
-      after_snapshot: JSON.stringify({ productId: stonewallId, insertedProductId, hracFilled, caps }),
+      after_snapshot: JSON.stringify({ productId: stonewallId, insertedProductId, caps }),
       metadata: JSON.stringify({ migration: '20261122120000_lawn_v13_october_stonewall' }),
     });
   }
@@ -398,13 +381,11 @@ async function productReferenced(knex, productId) {
 async function revertCatalog(knex) {
   const logs = await knex('lawn_protocol_audit_log').where({ action: CATALOG_ACTION }).select('id', 'after_snapshot');
   for (const log of logs) {
-    const { productId, insertedProductId, hracFilled, caps = [] } = asObject(log.after_snapshot);
+    const { insertedProductId, caps = [] } = asObject(log.after_snapshot);
     for (const written of caps) await removeInsertedLimit(knex, written);
     if (insertedProductId) {
       const row = await knex('products_catalog').where({ id: insertedProductId }).first('id', 'name');
       if (row && row.name === NEW_NAME && !(await productReferenced(knex, insertedProductId))) await knex('products_catalog').where({ id: insertedProductId }).del();
-    } else if (hracFilled) {
-      await knex('products_catalog').where({ id: productId, hrac_group: HRAC_GROUP }).update({ hrac_group: null, updated_at: knex.fn.now() });
     }
     await knex('lawn_protocol_audit_log').where({ id: log.id }).del();
   }
@@ -416,7 +397,7 @@ exports.down = async function down(knex) {
   let kept = 0;
   for (const log of logs) if (await revertProtocol(knex, log)) kept += 1;
   if (kept) {
-    console.log('[lawn-v13-october-stonewall] catalog row, group and cap row kept: a protocol still uses the Stonewall row');
+    console.log('[lawn-v13-october-stonewall] catalog row and cap row kept: a protocol still uses the Stonewall row');
     return;
   }
   await revertCatalog(knex);
@@ -434,5 +415,4 @@ exports.NEW_COUNTER_KEY = NEW_COUNTER_KEY;
 exports.NEW_GATES = NEW_GATES;
 exports.CAP_SPEC = CAP_SPEC;
 exports.CATALOG_ROW = CATALOG_ROW;
-exports.HRAC_GROUP = HRAC_GROUP;
 exports.CAP_VALUE = CAP_VALUE;
