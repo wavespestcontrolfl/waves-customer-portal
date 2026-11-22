@@ -528,6 +528,52 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     }
   });
 
+  test('a row the engine marks as low confidence, or as needing a field measurement or a custom quote, is not measured', () => {
+    const lawnLine = (marks) => ({ result: { ...plan('lawn_care'), lineItems: [{ service: 'lawn_care', monthly: 60, annual: 720, ...marks }] } });
+    const pestLine = (marks) => ({ result: { ...plan('pest_control'), lineItems: [{ service: 'pest_control', monthly: 40, annual: 480, ...marks }] } });
+    // A turf size the engine did not measure: a fallback from the lot, a cap, a low grade.
+    for (const marks of [
+      { turfBasis: 'lotFallback', turfConfidence: 'medium' }, { turfBasis: 'plausibleMaxTurfCap', turfConfidence: 'medium' },
+      { turfBasis: 'legacyHardscapeEstimate' }, { turfBasis: 'countyPrior' }, { turfBasis: 'measuredTurfSf', turfConfidence: 'low' }, { turfConfidence: 'LOW' },
+    ]) {
+      const label = JSON.stringify(marks);
+      expect([label, estimateIsRemoteMeasured(lawnLine(marks), {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured({ result: { recurring: { services: [{ ...recurringRow('lawn_care'), ...marks }] } } }, {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured({ result: plan('lawn_care') }, { frequencies: [{ key: 'premium', perServiceTreatments: [{ service: 'lawn_care', ...marks }] }] })]).toEqual([label, false]);
+    }
+    // The real engine, given a lawn with no turf size: the line says the turf is a fallback, and the rule reads the replay.
+    const lawnInputs = (property) => ({ homeSqFt: 2000, ...property, services: { pest: { frequency: 'quarterly' }, lawn: { frequency: 'premium' } } });
+    const engineLawn = (property) => generateEstimate(lawnInputs(property)).lineItems.find((line) => line.service === 'lawn_care');
+    expect([engineLawn({}).turfBasis, engineLawn({}).turfConfidence]).toEqual(['lotFallback', 'LOW']);
+    expect(estimateIsRemoteMeasured({ engineInputs: lawnInputs({}) }, {})).toBe(false);
+    expect([engineLawn({ lotSqFt: 8000, lawnSqFt: 3500 }).turfBasis, engineLawn({ lotSqFt: 8000, lawnSqFt: 3500 }).turfConfidence]).toEqual(['lawnSqFt', 'HIGH']);
+    expect(estimateIsRemoteMeasured({ engineInputs: lawnInputs({ lotSqFt: 8000, lawnSqFt: 3500 }) }, {})).toBe(true);
+    // A measured or supplied turf size keeps the answer.
+    for (const marks of [{ turfBasis: 'measuredTurfSf', turfConfidence: 'high' }, { turfBasis: 'lawnSqFt' }, { turfBasis: 'estimatedTurfSf', turfConfidence: 'medium' }, {}]) {
+      const label = JSON.stringify(marks);
+      expect([label, estimateIsRemoteMeasured(lawnLine(marks), {})]).toEqual([label, true]);
+    }
+    // A low pricing confidence, and the engine's marks that a price needs a field measurement or a custom quote.
+    for (const marks of [
+      { pricingConfidence: 'low' }, { pricingConfidence: 'LOW' }, { requiresMeasurement: true }, { quoteRequired: true },
+      { customQuoteFlag: true }, { requiresCustomQuote: true },
+    ]) {
+      const label = JSON.stringify(marks);
+      expect([label, estimateIsRemoteMeasured(pestLine(marks), {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured({ result: plan('pest_control') }, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', ...marks }] }] })]).toEqual([label, false]);
+    }
+    // Tree and shrub priced with no tree count and no density data.
+    expect(estimateIsRemoteMeasured({ result: { ...plan('tree_shrub'), lineItems: [{ service: 'tree_shrub', monthly: 50, treeCountSource: 'default_zero' }] } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: { ...plan('tree_shrub'), lineItems: [{ service: 'tree_shrub', monthly: 50, treeCountSource: 'property_density' }] } }, {})).toBe(true);
+    // The office's own review of a price is not a missing measurement: a large lot, a large pool cage, an office measurement.
+    for (const manualReviewReasons of [['large_lot', 'pest_large_lot_manual_review'], ['large_pool_cage'], ['stories_estimated'], ['termite_measurement_manual_override_used']]) {
+      const label = manualReviewReasons.join('|');
+      expect([label, estimateIsRemoteMeasured(pestLine({ requiresManualReview: true, manualReviewReasons, pricingConfidence: 'medium' }), {})]).toEqual([label, true]);
+    }
+    // A review mark does not hide another mark on the same row.
+    expect(estimateIsRemoteMeasured(pestLine({ requiresManualReview: true, manualReviewReasons: ['missing_lot_size'], pricingConfidence: 'low' }), {})).toBe(false);
+  });
+
   test('a saved amount is not a service row: the saved estimate must store one', () => {
     // The page's reader makes a termite bait install row from a saved amount. Alone, it grants nothing.
     expect(estimateIsRemoteMeasured({ result: { oneTime: { tmInstall: 1200 } } }, {})).toBe(false);
@@ -707,6 +753,22 @@ describe('GET /:token/data: noVisitLine', () => {
     expect(bedroomBand.status).toBe(200);
     expect(bedroomBand.body.cta.terminalState).toBeNull();
     expect(bedroomBand.body).not.toHaveProperty('noVisitLine');
+
+    // A lawn plan the real engine prices from a turf size it was given keeps the line. With no turf size and no lot the
+    // engine falls back, and the page carries none (the estimate is saved as inputs: the page prices it by a replay).
+    const lawnInputs = (property) => estimateRow({
+      estimateData: {
+        result: {}, sendSnapshot: undefined,
+        engineInputs: { homeSqFt: 2000, ...property, services: { pest: { frequency: 'quarterly' }, lawn: { frequency: 'premium' } } },
+      },
+    });
+    const measuredLawn = await pageLoad(lawnInputs({ lotSqFt: 8000, lawnSqFt: 3500 }));
+    expect(measuredLawn.status).toBe(200);
+    expect(measuredLawn.body.cta.terminalState).toBeNull();
+    expect(measuredLawn.body.noVisitLine).toBe(NO_VISIT_QUOTE_LINE);
+    const fallbackLawn = await pageLoad(lawnInputs({}));
+    expect(fallbackLawn.status).toBe(200);
+    expect(fallbackLawn.body).not.toHaveProperty('noVisitLine');
 
     // A stored service nobody can read, in a field no reader lists: the page still loads, with no line.
     const unreadable = await pageLoad(estimateRow({ estimateData: { laterWork: [{ detail: { service: { toString: null } } }] } }));

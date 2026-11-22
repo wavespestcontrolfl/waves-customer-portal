@@ -24217,10 +24217,14 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // `service` is a row nobody can identify.
 // Stored pricing data nobody can read is no ground for the sentence either (storedRowReader): a row container that is
 // there and is not a list, or an entry that is there and is not a row.
-// A listed identity is not enough when the row itself says its price did not come from a measurement
-// (storedRowIsNotMeasured): a dwelling unit priced from the bedroom count the caller gave (unit-band-pricing.js) stores
-// `pest_control` or `one_time_pest` too, and so does a home the engine priced from its fallback footprint because it
-// found no usable one (resolvePestFootprint).
+// A listed identity is not enough when the row itself says its price did not come from a sure measurement
+// (storedRowIsNotMeasured). A dwelling unit priced from the bedroom count the caller gave (unit-band-pricing.js) stores
+// `pest_control` or `one_time_pest` too. So does a row with one of the engine's low-confidence markers (AGENTS.md,
+// "Estimator engine authority": a fallback footprint, a low pricing confidence, a turf basis fallback), and a row the
+// engine says needs a measurement in the field or a custom quote. The engine has one predicate for a priced row whose
+// price is not exact yet (draft-builder lineNeedsReviewBeforeExactPrice); this rule asks it.
+// One mark is left out on purpose: `requiresManualReview` with its reasons. That is the office's review of a price (a
+// large lot, a large pool cage), and a sent estimate has had it. A reviewed price from measured sizes is still measured.
 // Three reads, and each one fails closed (estimateIsRemoteMeasured):
 // 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
 //    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service
@@ -24266,13 +24270,24 @@ function storedRowIsNotAService(row) {
   return Object.values(row).every((value) => value == null || value === '');
 }
 
-// The engine's own marks on a row whose price did not come from a measurement:
-// - a unit priced from the bedroom count a caller gave, and the unit-scope audit of such a quote;
-// - a home priced from the fallback footprint (`footprintWasDefaulted`, and the sources resolvePestFootprint gives it).
-const FALLBACK_FOOTPRINT_SOURCES = new Set(['fallback_2000', 'footprint_unknown_fallback', 'invalid_or_zero_footprint_fallback']);
-const storedRowIsNotMeasured = (row) => row.pricingBasis === UNIT_BAND_PRICING_BASIS
+// The size marks, on any stored object (a priced row, a pricer's result, the unit-scope audit):
+// - a unit priced from the bedroom count a caller gave;
+// - a home priced from a fallback footprint (`footprintWasDefaulted`, a *fallback `footprintSource` or `fpSource`).
+const storedRowHasANotMeasuredSize = (row) => row.pricingBasis === UNIT_BAND_PRICING_BASIS
   || row.footprintSource === UNIT_BAND_SIZE_BASIS || row.sizeBasis === UNIT_BAND_SIZE_BASIS
-  || row.footprintWasDefaulted === true || FALLBACK_FOOTPRINT_SOURCES.has(row.footprintSource);
+  || row.footprintWasDefaulted === true
+  || [row.footprintSource, row.fpSource].some((source) => typeof source === 'string' && /fallback/i.test(source));
+
+// The engine's predicate for a priced row whose price is not exact yet, loaded when first asked.
+let engineDraftBuilder;
+const engineSaysPriceIsNotExact = (row) => {
+  engineDraftBuilder = engineDraftBuilder || require('../services/estimator-engine/draft-builder');
+  return engineDraftBuilder.lineNeedsReviewBeforeExactPrice(row);
+};
+
+// A priced row: the size marks, and the engine's predicate with the office's own review marks left out.
+const storedRowIsNotMeasured = (row) => storedRowHasANotMeasuredSize(row)
+  || engineSaysPriceIsNotExact({ ...row, requiresManualReview: false, manualReviewReasons: null });
 
 // A stored row passes when it is not a service, or when its stored `service` is on one of the given lists. A commercial
 // row never passes (the engine marks it, and the page's normalized one-time rows drop the mark), and neither does a
@@ -24306,11 +24321,11 @@ function storedRowReader() {
   };
 }
 
-// Every row that stores a `service` or a not-measured mark, at any depth of a value.
+// Every row that stores a `service` or a not-measured size mark, at any depth of a value.
 function rowsThatMustPass(value, found = [], seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value)) return found;
   seen.add(value);
-  if (isStoredRow(value) && (serviceIdentity(value.service) || storedRowIsNotMeasured(value))) found.push(value);
+  if (isStoredRow(value) && (serviceIdentity(value.service) || storedRowHasANotMeasuredSize(value))) found.push(value);
   for (const inner of Object.values(value)) rowsThatMustPass(inner, found, seen);
   return found;
 }
