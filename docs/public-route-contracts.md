@@ -3516,6 +3516,58 @@ above (production 2026-11-20, read-only: 3 of 654 completed visits lose a line
 from that PDF, none from the last 30 days; no visit has `ai_report` lists; no
 stored form value fails the screen).
 
+Receipt and tracker add-a-service + referral cards (owner 2026-11-21,
+`GATE_DOC_CROSS_SELL`, dark; owner 2026-11-22: the cards open the Waves app):
+`GET /api/receipt/:token` (a PAID invoice) and `GET /api/public/track/:token`
+(a COMPLETED visit) may carry two additive keys. `crossSell` is
+`{ label, relationship: 'add' | 'start', perApplication?, href }`: the plan
+offer the Waves app shows that customer now
+(`services/property-recommendations.js#appOfferForCustomer`: the app route's
+own gate, `GATE_PROPERTY_RECOMMENDATIONS`, then the app's composer), cut to
+what the page prints (`services/app-link-cards.js#publicOfferCard`; no option
+id, no fingerprint). `perApplication` is present only for a priced offer the
+app sells that customer in one tap
+(`services/one-tap-purchase.js#oneTapShownTo`, the same answer as the app
+route's `oneTap` field): without one-tap the app's card asks for an estimate
+and names no price, so the page's card is a quote request too.
+`referral` is `composeReferralCard({ customerId })`'s `{ headline, cta,
+offer? }`, as on the report, plus `href`. With the gate off, or for a link
+that may not show them, both keys are absent and the payload is unchanged.
+Each `href` is the card's tab in the app with the customer profile named
+(`services/app-link-cards.js#appLinksForCustomer`, through
+`qualifyNotificationLink`: `/?tab=billing&notificationProperty=<customer
+id>`, `/?tab=refer&notificationProperty=<customer id>`). One login can hold
+more than one profile and the app opens on the profile last used; the app's
+route guard switches to the named profile and `/auth/select-property`
+refuses a profile the signed-in account does not own. The customer id is no
+credential: nothing answers to it without a session. The page falls back to
+the bare tab for any other `href` (`appCardHref`).
+Both receipt routes gate the token format before any read
+(`routes/receipt-v2.js` `TOKEN_RE`, the pay router's range: the receipt token
+is the invoice's pay token; every token on record passes, production
+2026-11-22): a malformed token gets the unknown token's own 404.
+NO WRITE ROUTE: the receipt and the tracker have no card tap. Each card is a
+plain link into the Waves app (the Billing tab for the offer, the Refer tab
+for the referral) with no token, so nothing on a link page files a request,
+mints an estimate or enrolls a promoter, and the app's sign-in decides who may
+act. A receipt link is the pay link and a tracker link is texted to the
+visit's contacts; a person who holds one sees the card and can do nothing with
+it (owner-accepted 2026-11-22). Do not add a card tap to either router.
+When a page shows the cards (display rules, not an authorization boundary):
+the receipt for 7 days after `invoices.paid_at` (owner 2026-11-22, "week";
+`RECEIPT_CARD_WINDOW_MS`; no `paid_at` = no cards), the tracker while its
+`track_token_expires_at` is in the future (a link with no expiry on record
+carries none); never for a complaint-driven (callback) visit while
+`GATE_RESERVICE_REPORT_COPY` is on (the flag is read on the job and on any
+service record of the job); and only on an account whose links go to the
+account holder by its own setup (`linkReachesOnlyAccountHolder`: no
+third-party payer on the invoice, the job or the account, no service contact
+on the account; for the receipt also no distinct
+`notification_prefs.billing_email`, via `getReceiptEmailRecipients`; for the
+tracker also no payer on any invoice of the visit). A forwarded or CC'd link
+is not tracked. Both builders are best-effort: any failure renders the page
+without cards. The service report's own card and its tap are unchanged.
+
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
 report payload's `crossSell` object offers the ONE next family the
