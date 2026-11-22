@@ -1537,20 +1537,27 @@ signed offer named, with no second line check at confirm: an offer minted before
 a map edit stays redeemable for its 45-minute lifetime, as for any other offer
 input. The capture-intent revalidation passes the same lines as the offer, so
 offer and recheck agree. Fail-open: an unreadable map, or a map with no
-technician set for the asked lines, offers what today's code offers. Public
-reschedule and re-service offers do not pass lines and are unchanged. Every
-Waves Assessment offer list and commit rebuild (`GET`, `/availability` and
-`/find-slots` of `/api/public/inspection/:token` and of
-`/api/public/estimate-assessment/:token`) passes one line while
-`GATE_SERVICE_LINE_MAP=live` (owner 2026-11-21: the line the page's own lead
-asked for, where the estimate page's own lead is the one lead linked to the
-estimate; that lead decides alone, and its blank interest is the owner's line.
-With no such lead, the customer's newest lead with a service interest is read,
-`line-technician assessmentLineFor`;
-lawn, tree & shrub, rodent and wildlife go to the owner's line, pest-only,
-termite and mosquito to that line, no lead to the owner), so offers come from
-that line's home or gap technician; not live, no lead is read and any active
-field technician is offered. No response shape changes.
+technician set for the asked lines, offers what today's code offers. Re-service
+offers do not pass lines and are unchanged. Public reschedule passes the
+visit's line only for a visit with no technician, or one whose technician can
+no longer take work (above). Every Waves Assessment offer list and commit
+rebuild passes one line while `GATE_SERVICE_LINE_MAP=live`:
+`GET /:token`, `POST /:token/availability`, `POST /:token/find-slots` and
+`POST /:token` of `/api/public/inspection/:token`; `GET /:token`,
+`POST /:token/find-slots` and `POST /:token` of
+`/api/public/estimate-assessment/:token` (it has no `/availability`). Owner
+2026-11-21: the line the page's own lead asked for, where the estimate page's
+own lead is the one lead linked to the estimate; that lead decides alone, and
+its blank interest is the owner's line. With no such lead, the customer's
+newest lead with a service interest is read (`line-technician
+assessmentLineFor`). Lawn, tree & shrub, rodent and wildlife go to the owner's
+line, pest-only, termite and mosquito to that line, no lead to the owner. So
+offers come from that line's home or gap technician; not live, no line is
+read and any active field technician is offered. Each commit reads its line
+once, finds its slot in a build for that line, and reads the line again inside
+the booking transaction: a lead whose service interest changed in between
+answers the existing `409 SLOT_TAKEN` with fresh times for the line as it is
+now. No response shape changes.
 
 **Territory routing (`GATE_TERRITORY_ROUTING=true`, owner 2026-10-30; ships dark:
 unset, and every value other than exactly `true`, leaves these routes as described

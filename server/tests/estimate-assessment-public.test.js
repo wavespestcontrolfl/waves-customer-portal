@@ -13,6 +13,8 @@ const mockInspection = {
   searchParseOpts: jest.fn(() => ({})),
   loadAssessmentCatalog: jest.fn(),
   buildAvailabilityForLead: jest.fn(),
+  assessmentServiceLines: jest.fn(),
+  assessmentLineUnchanged: jest.fn(),
   shapeAvailability: jest.fn((built, range) => ({ ...built, rangeFrom: range.rangeFrom, rangeTo: range.rangeTo })),
   findSlotIn: jest.fn(),
   commitWindowFailure: jest.fn(() => null),
@@ -99,6 +101,8 @@ beforeEach(() => {
   for (const fn of Object.values(mockInspection)) if (jest.isMockFunction(fn)) fn.mockClear();
   mockInspection.loadAssessmentCatalog.mockResolvedValue({ serviceId: 'svc-assessment', serviceType: 'Waves Assessment', durationMinutes: 45 });
   mockInspection.buildAvailabilityForLead.mockResolvedValue({ days: [{ date: '2026-11-03', slots: [{ start_time: '09:00', end_time: '09:45' }] }], slots: [], nearby: false });
+  mockInspection.assessmentServiceLines.mockResolvedValue({});
+  mockInspection.assessmentLineUnchanged.mockResolvedValue(true);
   mockInspection.findSlotIn.mockImplementation((day, date, time) => day?.days?.find((d) => d.date === date)?.slots?.find((s) => s.start_time === time) || null);
   mockInspection.findOpenVisit.mockResolvedValue(null);
   mockInspection.serviceAreaFailure.mockReset().mockResolvedValue(null);
@@ -354,11 +358,38 @@ describe('the assessment line reads the estimate\'s own lead', () => {
   beforeEach(() => { linked = jest.spyOn(offer, 'linkedLeadIdFor').mockResolvedValue('lead-9'); });
   afterEach(() => { linked.mockRestore(); delete process.env.GATE_SERVICE_LINE_MAP; });
 
-  test.each([undefined, 'shadow'])('map %s: the lead is not read and no lead id is passed', async (mode) => {
-    if (mode) process.env.GATE_SERVICE_LINE_MAP = mode;
+  test('map off: the lead is not read and no lead id is passed', async () => {
     await call(TOKEN);
     expect(linked).not.toHaveBeenCalled();
     expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ customer: expect.objectContaining({ id: 'cust-1' }), leadId: null });
+  });
+
+  test('map in shadow: the lead is read so the booking\'s shadow row compares with it (no line is passed until live: the builder decides)', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '09:00' } });
+    expect(res.status).toBe(200);
+    expect(linked).toHaveBeenCalledWith('est-1', expect.anything());
+    expect(mockInspection.bookAssessmentVisit.mock.calls[0][0]).toMatchObject({ lineLeadId: 'lead-9' });
+  });
+
+  test('the commit reads its line once and re-checks it on the booking transaction', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    const scope = { serviceLines: ['general'] };
+    mockInspection.assessmentServiceLines.mockResolvedValue(scope);
+    const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '09:00' } });
+    expect(res.status).toBe(200);
+    expect(mockInspection.assessmentServiceLines).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }), 'lead-9');
+    // The slot is found in a build for that scope.
+    expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ lineScope: scope, leadId: 'lead-9' });
+    // The booking gets a slot guard that reads the same scope, lead and customer on ITS transaction.
+    const args = mockInspection.bookAssessmentVisit.mock.calls[0][0];
+    expect(args).toMatchObject({ lineLeadId: 'lead-9', slotGuard: expect.any(Function) });
+    const trx = { the: 'booking transaction' };
+    await expect(args.slotGuard(trx)).resolves.toBe(true);
+    expect(mockInspection.assessmentLineUnchanged).toHaveBeenCalledWith(trx, { lineScope: scope, customer: expect.objectContaining({ id: 'cust-1' }), leadId: 'lead-9' });
+    // The lead's interest changed since the build: the guard refuses, and createSelfBooking answers SLOT_TAKEN.
+    mockInspection.assessmentLineUnchanged.mockResolvedValue(false);
+    await expect(args.slotGuard(trx)).resolves.toBe(false);
   });
 
   test('map live: the offer, the search, the commit check and the 409 refresh all pass the linked lead', async () => {

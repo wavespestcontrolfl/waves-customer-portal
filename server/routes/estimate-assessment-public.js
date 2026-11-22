@@ -142,9 +142,10 @@ async function bookingLocationFor(customer) {
 
 // The estimate's OWN lead, for the assessment's service line (owner 2026-11-21, line-technician assessmentLineFor):
 // the one unambiguous lead linked to it (linkedLeadIdFor), else null and the customer's newest lead is read. A
-// customer with a newer inquiry for another service keeps this estimate's line. Read only while the line map is live.
+// customer with a newer inquiry for another service keeps this estimate's line. Read only while the line map records
+// (shadow: the shadow row of a booking compares with this lead) or is live (the offers and the commit route by it).
 async function lineLeadIdFor(estimate, data) {
-  if (!require('../services/scheduling/line-technician').lineMapLive()) return null;
+  if (!require('../services/scheduling/line-technician').lineMapRecords()) return null;
   return require('../services/estimate-consultation-offer').linkedLeadIdFor(estimate.id, data);
 }
 
@@ -312,9 +313,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const windowFailure = inspection().commitWindowFailure(date, setup.range, setup.catalog);
     if (windowFailure) return res.status(windowFailure.status).json({ error: windowFailure.error });
 
-    // Anti-forgery: the slot must be in a fresh single-day build at the catalog duration.
+    // Anti-forgery: the slot must be in a fresh single-day build at the catalog duration. The line this commit books
+    // on is read once: the build and the booking transaction's re-check (slotGuard) use it.
+    const lineScope = await inspection().assessmentServiceLines(setup.customer, setup.leadId);
     const day = await inspection().buildAvailabilityForLead(setup.location, {
-      rangeFrom: date, rangeTo: date, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer, leadId: setup.leadId,
+      rangeFrom: date, rangeTo: date, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer, leadId: setup.leadId, lineScope,
     });
     const slot = inspection().findSlotIn(day, date, time);
     if (!slot) return sendSlotTaken(res, setup);
@@ -329,6 +332,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       source: SOURCE,
       alertLabel: ALERT_LABEL,
       estimateGuard: estimateGuardFor(resolved.estimate, resolved.customer.id),
+      // The line this slot was built for, read again on the booking transaction: a lead whose service interest
+      // changed since refuses the slot (409 SLOT_TAKEN, fresh times below).
+      slotGuard: (conn) => inspection().assessmentLineUnchanged(conn, { lineScope, customer: resolved.customer, leadId: setup.leadId }),
+      lineLeadId: setup.leadId,
     });
     if (!result.ok) {
       if (result.code === 'ESTIMATE_CHANGED') {

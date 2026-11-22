@@ -190,14 +190,17 @@ async function assessmentInterestText(db, { leadId, customerId }) {
  *   its commit read one row and agree, also when the commit links or creates the customer in between.
  *   Without it, or when that lead is gone: the customer's newest lead with an interest (leads.service_interest by
  *   `customerId`), else the customer row's lead_service_interest.
- * No lead and no customer, nothing recorded or an unreadable read gives lawn (the read failure is logged).
+ * No lead and no customer, nothing recorded or an unreadable read gives lawn (the read failure is logged; `strict`
+ * rethrows it instead).
  */
-async function assessmentLineFor(conn, { customerId = null, leadId = null } = {}) {
+async function assessmentLineFor(conn, { customerId = null, leadId = null, strict = false } = {}) {
   const db = conn || defaultDb;
   let text = null;
   try {
     text = await assessmentInterestText(db, { leadId, customerId });
   } catch (err) {
+    // `strict`: a caller inside a write transaction (the booking's own re-check) must see the failure, not a default.
+    if (strict) throw err;
     logger.warn(`[line-technician] assessment lead read failed (read as no service recorded): ${err.message}`);
   }
   return { line: assessmentLineForInterest(text), lineFrom: 'lead' };
@@ -254,9 +257,9 @@ async function shadowLineEntry(db, line, place) {
  * off-day tests are skipped. A Waves Assessment resolves by its lead's line (lineFrom 'lead',
  * assessmentLineFor), which reads `customerId`. Reads only; throws only on an unreadable database.
  */
-async function resolveLineTechnician(conn, { serviceId = null, serviceKey = null, serviceType = null, customerId = null, date = null, place = null } = {}) {
+async function resolveLineTechnician(conn, { serviceId = null, serviceKey = null, serviceType = null, customerId = null, leadId = null, date = null, place = null } = {}) {
   const db = conn || defaultDb;
-  const { line, lineFrom } = await visitLineFor(db, { serviceId, serviceKey, serviceType, customerId });
+  const { line, lineFrom } = await visitLineFor(db, { serviceId, serviceKey, serviceType, customerId, leadId });
   const base = { line, lineFrom, homeId: null, gapId: null, technicianId: null, reason: 'no_map' };
   if (!line || !LINES.includes(line)) return base;
   const entry = await shadowLineEntry(db, line, place);
@@ -401,7 +404,7 @@ async function pickLineTechnician(conn, opts = {}) {
   if (!lineMapLive()) return { mapped: false, line: null, technicianId: null, reason: 'off' };
   const db = conn || defaultDb;
   const line = await liveServiceLine(db, {
-    serviceId: opts.serviceId, serviceKey: opts.serviceKey, serviceType: opts.serviceType, customerId: opts.customerId,
+    serviceId: opts.serviceId, serviceKey: opts.serviceKey, serviceType: opts.serviceType, customerId: opts.customerId, leadId: opts.leadId,
   });
   const mapEntry = line ? (await loadLineMap(db, [line])).get(line) || null : null;
   const entry = line ? withTerritory(mapEntry, line, await territoryTechnicianOf(db, placeOf(opts))) : null;
@@ -454,7 +457,8 @@ async function visitLineFor(db, identity) {
 
 /**
  * LIVE: the line a booked service routes by, or null (no line): visitLineFor.
- * `identity` is { serviceId, serviceKey, serviceType, customerId }.
+ * `identity` is { serviceId, serviceKey, serviceType, customerId, leadId }: `leadId` is the lead a Waves Assessment
+ * is booked for, when the caller has it (assessmentLineFor).
  * A Waves Assessment has a line only while the map is live. Until then it has none, as before 2026-11-21: the one
  * reader that is not behind the map's gate, the territory night run (GATE_TERRITORY_NIGHT_RUN), keeps it exempt.
  */
@@ -542,7 +546,9 @@ async function writeShadowRow(row) {
   let pick = null;
   try {
     pick = await resolveLineTechnician(db, {
-      serviceId: row.serviceId, serviceKey: row.serviceKey, serviceType: row.serviceType, customerId: row.customerId, date,
+      serviceId: row.serviceId, serviceKey: row.serviceKey, serviceType: row.serviceType, customerId: row.customerId,
+      // The booking's own lead, when its caller had one: the row then compares with the inquiry that booked.
+      leadId: row.leadId || null, date,
       place: await shadowPlace(db, row),
     });
   } catch (err) {
@@ -625,6 +631,7 @@ module.exports = {
   resolveLineTechnician,
   recordLinePickShadow,
   lineMapLive,
+  lineMapRecords: shadowOn,
   lineOfferRanking,
   pickLineTechnician,
   liveServiceLine,

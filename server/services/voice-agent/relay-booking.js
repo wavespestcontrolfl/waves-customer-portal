@@ -212,11 +212,11 @@ async function revalidateSlot({ offer, durationMinutes = null, serviceLines }) {
 // The booked service's line as `serviceLines` for the recheck: [line] while the
 // service-line map is LIVE and the catalog row has a line, else undefined (no read at
 // all with the gate off). A Waves Assessment takes the line its lead asked for (liveServiceLine).
-async function bookingServiceLines(db, catalogRow, customerId = null) {
+async function bookingServiceLines(db, catalogRow, customerId = null, leadId = null) {
   const { lineMapLive, liveServiceLine } = require('../scheduling/line-technician');
   if (!lineMapLive() || !catalogRow) return undefined;
   const line = await liveServiceLine(db, {
-    serviceId: catalogRow.id || null, serviceKey: catalogRow.service_key || null, serviceType: catalogRow.name || null, customerId,
+    serviceId: catalogRow.id || null, serviceKey: catalogRow.service_key || null, serviceType: catalogRow.name || null, customerId, leadId,
   });
   return line ? [line] : undefined;
 }
@@ -581,6 +581,7 @@ const REFUSE_NO_CUSTOMER =
  * time (the row is pending office review).
  */
 async function requestBookingText(input = {}, ctx = {}) {
+  const readSessionLeadId = () => (typeof ctx.leadId === 'function' ? ctx.leadId() : (ctx.leadId || null));
   // Double gate, fail closed (defense in depth vs. a stale registered tool list).
   if (!isBookingEnabled()) return REFUSE_GATE_OFF;
 
@@ -754,7 +755,8 @@ async function requestBookingText(input = {}, ctx = {}) {
   const recheck = await revalidateSlot({
     offer: { ...offer, lat: bookingCoords.lat, lng: bookingCoords.lng },
     durationMinutes: bookingDurationMinutes,
-    serviceLines: await bookingServiceLines(db, catalogRow, customerId),
+    // This call's own lead, when it has one: an assessment goes by the inquiry on the line now.
+    serviceLines: await bookingServiceLines(db, catalogRow, customerId, readSessionLeadId()),
   });
   if (recheck.status === 'engine_unavailable') {
     return 'Live scheduling is not available right now, so no booking request can be placed. '
@@ -938,7 +940,6 @@ async function requestBookingText(input = {}, ctx = {}) {
     } : {}),
   };
 
-  const readSessionLeadId = () => (typeof ctx.leadId === 'function' ? ctx.leadId() : (ctx.leadId || null));
   const leadIdAtCommit = readSessionLeadId();
   const commit = await commitVoiceBooking({
     db, customerId, dateStr, windowStart, windowEnd: insertData.window_end,
@@ -982,7 +983,7 @@ async function requestBookingText(input = {}, ctx = {}) {
   void require('../scheduling/line-technician').recordLinePickShadow({
     source: 'phone_live', scheduledServiceId: commit.scheduledServiceId, customerId, date: dateStr, windowStart,
     windowEnd: insertData.window_end, serviceId: catalogRow.id, serviceType: catalogRow.name,
-    durationMinutes: bookingDurationMinutes, actualTechnicianId: insertData.technician_id,
+    durationMinutes: bookingDurationMinutes, actualTechnicianId: insertData.technician_id, leadId: leadIdAtCommit,
   });
   // THE OTHER HALF OF THE LEAD BACK-FILL, for the slow-commit race.
   //

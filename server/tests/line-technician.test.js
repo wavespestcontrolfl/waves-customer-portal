@@ -582,6 +582,8 @@ describe('assessmentLineFor (owner 2026-11-21, choice 4 = A)', () => {
     const broken = jest.fn(() => { throw new Error('boom'); });
     expect(await assessmentLineFor(broken, { customerId: 'c1' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
     expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('assessment lead read failed'));
+    // strict (the booking transaction's re-check): the failure is the caller's, never a default line.
+    await expect(assessmentLineFor(broken, { customerId: 'c1', strict: true })).rejects.toThrow('boom');
   });
 });
 
@@ -633,6 +635,21 @@ describe('recordLinePickShadow', () => {
     defaultDb.mockImplementation(db);
     await recordLinePickShadow({ ...base, serviceType: 'Waves Assessment' });
     expect(db.inserts[0].row).toMatchObject({ service_type: 'Waves Assessment', service_line: 'general', line_from: 'lead', would_technician_id: HIRE.id });
+  });
+
+  test('a Waves Assessment row compares with the lead that booked it, not the customer\'s newest inquiry', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    // Booked from an older pest lead; the customer's newest lead asks for lawn.
+    const db = fakeDb({ lines: LINES, leads: [
+      { id: 'lead-pest', customer_id: 'cust-1', service_interest: 'Pest Control Service', created_at: '2026-10-01' },
+      { id: 'lead-lawn', customer_id: 'cust-1', service_interest: 'Lawn Care Service', created_at: '2026-11-10' },
+    ] });
+    defaultDb.mockImplementation(db);
+    await recordLinePickShadow({ ...base, serviceType: 'Waves Assessment', leadId: 'lead-pest' });
+    expect(db.inserts[0].row).toMatchObject({ service_line: 'general', line_from: 'lead', would_technician_id: HIRE.id });
+    // Without the booking's lead the newest inquiry is read.
+    await recordLinePickShadow({ ...base, serviceType: 'Waves Assessment' });
+    expect(db.inserts[1].row).toMatchObject({ service_line: 'lawn', line_from: 'lead', would_technician_id: OWNER.id });
   });
 
   test('a Date value for the visit date is written as the calendar date', async () => {
