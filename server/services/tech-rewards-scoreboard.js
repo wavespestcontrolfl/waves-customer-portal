@@ -30,7 +30,7 @@ const scores = require('./tech-rewards-scores');
 const { countDeliveredAsksForTechnician } = require('./review-ask-history');
 const { weeksOfLine, lineOvertimePremium } = require('./payroll-regular-rate');
 const { TECH_REWARD_KINDS } = require('./payroll-pay-lines');
-const { HIRE_DATE_SQL, stayBonusStatus } = require('./tech-rewards-pay-lines');
+const { HIRE_DATE_SQL, stayBonusStatus, seasonBonusPaidCents } = require('./tech-rewards-pay-lines');
 const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
 const { SOURCE_TYPE: COMMISSION_SOURCE_TYPE } = require('./payroll-commission');
 const { SOURCE_TYPE: REVIEW_BONUS_SOURCE_TYPE } = require('./payroll-review-bonuses');
@@ -66,15 +66,19 @@ function yearBefore(dateStr) {
  */
 function pickSeason(today) {
   const [year, month] = today.split('-').map(Number);
-  const seasonYear = month >= 3 ? year : year - 1;
-  const { start, end } = calc.seasonWindow(seasonYear);
-  const running = today >= start && today <= end;
-  return {
-    year: seasonYear, start, end,
-    status: running ? 'running' : 'final',
-    asOf: running ? today : end, // the calculator takes the season year from this date
-    payDate: calc.seasonBonusPayDate(seasonYear),
-  };
+  const season = closedSeason(month >= 3 ? year : year - 1);
+  const running = today >= season.start && today <= season.end;
+  // asOf: the calculator takes the season year from this date
+  return running ? { ...season, status: 'running', asOf: today } : season;
+}
+
+/**
+ * A season that is over, read as of its last day: what the pay line asks (tech-rewards-pay-lines.js priceSeason), and what
+ * pickSeason gives the board once the season has ended. Pure.
+ */
+function closedSeason(year) {
+  const { start, end } = calc.seasonWindow(year);
+  return { year, start, end, status: 'final', asOf: end, payDate: calc.seasonBonusPayDate(year) };
 }
 
 // Reviews / asks in basis points, 0..10000, or null when no ask went out (no rate to measure).
@@ -107,7 +111,10 @@ function multiplierBlock(hireDate, season, rateBps) {
   return { multiplierE4: m.multiplierE4, parts: m.parts, tenureYears: m.tenureYears, level: ENTRY_LEVEL, levelSource: 'entry_default' };
 }
 
-function seasonBonusBlock(score, multiplier, grossCents) {
+// paidCents: what payroll has paid for the season (tech-rewards-pay-lines.js seasonBonusPaidCents), or null. A paid bonus is
+// shown as paid, with no estimate beside it: the paid line never changes, and the figures behind an estimate can.
+function seasonBonusBlock(score, multiplier, grossCents, paidCents = null) {
+  if (paidCents != null) return { grossCents, estimate: false, estimateCents: null, paidCents };
   const base = { grossCents, estimate: true };
   if (score.unavailable) return { ...base, estimateCents: null, reason: score.unavailable };
   if (!score.complete) return { ...base, estimateCents: null, reason: 'score_incomplete' };
@@ -148,16 +155,26 @@ function stayBonusBlock(hireDate, today, priorPayCents, { settledKeys = [], paya
 }
 
 /**
+ * A season's bonus from figures that are already read (readSeasonFigures): { rateBps, score, multiplier, seasonBonus }. Pure.
+ * The board (composeScoreboard) and the pay line (tech-rewards-pay-lines.js priceSeason) both take it from here, so the line
+ * payroll writes is the figure the board shows for the closed season.
+ */
+function seasonBonusOf(hireDate, season, figures) {
+  const rateBps = reviewRateBps(figures.reviews, figures.asks);
+  const score = scoreBlock(figures.seasonScore, figures.settings);
+  const multiplier = multiplierBlock(hireDate, season, rateBps);
+  return { rateBps, score, multiplier, seasonBonus: seasonBonusBlock(score, multiplier, figures.grossSeasonCents, figures.seasonBonusPaidCents) };
+}
+
+/**
  * The scoreboard from the already-read inputs. Pure: no database, no clock.
  * inputs: { technician: { id, name, hireDate }, today, season, seasonScore, settings, reviews, asks,
- *           grossSeasonCents, priorYearGrossCents, stay: { settledKeys, payableKeys }, commission: { paidCents, unpaidCents },
- *           commissionRecordedThrough: { weekEnd } | null }
+ *           grossSeasonCents, seasonBonusPaidCents, priorYearGrossCents, stay: { settledKeys, payableKeys },
+ *           commission: { paidCents, unpaidCents }, commissionRecordedThrough: { weekEnd } | null }
  */
 function composeScoreboard(inputs) {
-  const { technician, today, season, seasonScore, settings } = inputs;
-  const rateBps = reviewRateBps(inputs.reviews, inputs.asks);
-  const score = scoreBlock(seasonScore, settings);
-  const multiplier = multiplierBlock(technician.hireDate, season, rateBps);
+  const { technician, today, season } = inputs;
+  const { rateBps, score, multiplier, seasonBonus } = seasonBonusOf(technician.hireDate, season, inputs);
   return {
     technician: { id: technician.id, name: technician.name },
     asOf: today,
@@ -175,7 +192,7 @@ function composeScoreboard(inputs) {
       recordedThrough: inputs.commissionRecordedThrough || null,
     },
     multiplier,
-    seasonBonus: seasonBonusBlock(score, multiplier, inputs.grossSeasonCents),
+    seasonBonus,
     stayBonus: stayBonusBlock(technician.hireDate, today, inputs.priorYearGrossCents, inputs.stay),
   };
 }
@@ -327,9 +344,9 @@ function componentShareCents(component, checkWeekStart, fromDay, toDay) {
  * weekly pay means August work is paid in September; a catch-up line or premium paid later counts when it was
  * earned). It is the sum, over every finalized check, of the components (see checkComponents, which holds the
  * component table and each one's earning date rule) whose earning dates fall in the window; a component that
- * straddles an edge counts its in-window share. D5-5 pay lines MUST use this helper for the season bonus base
- * (with readGross) and the stay bonus's prior 12 months (with readStayPay, which also fixes which checks count), so
- * the board and the pay line can never differ.
+ * straddles an edge counts its in-window share. The D5-5 pay lines use this helper for the season bonus base and the stay
+ * bonus's prior 12 months (both through readBonusPay, which also fixes which checks count), so the board and the pay line
+ * can never differ.
  */
 function earnedGrossCents(checks, from, to) {
   const fromDay = dayNumber(from);
@@ -449,7 +466,7 @@ function ordinaryPremium(lines, storedWeeks) {
  * The technician's finalized checks that can hold pay earned in [from, to] (every check whose pay week ends on or
  * after `from`: a catch-up line or premium can be paid long after it was earned), with their dated parts, then
  * earnedGrossCents. Day records are read only for a week that straddles a window edge.
- * `throughWeek` (a Monday) leaves out every check for a later pay week (readStayPay).
+ * `throughWeek` (a Monday) leaves out every check for a later pay week (readBonusPay).
  * Returns { cents, checkIds, unsplitWeeks }: the figure, and the ids, sorted, of the checks that put pay into it. Each check
  * is read from its own rows only (its columns, its paid lines, its stored week rows, its week's day records), so the figure
  * is a plain sum over the checks and the order they are read in changes nothing. A check that adds nothing (one of an edge
@@ -511,23 +528,32 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
   return { cents, checkIds: checkIds.sort(), unsplitWeeks: [...unsplit].sort() };
 }
 
-const readGross = async (conn, technicianId, from, to) => (await readGrossAndChecks(conn, technicianId, from, to)).cents;
+/**
+ * The pay a bonus is worked out from, and the checks that hold it: { cents, checkIds, unsplitWeeks } (readGrossAndChecks;
+ * with an unsplit week the pay line waits and the board shows the figure as its estimate). One read for both bonuses: the
+ * 12 months of a stay bonus (stayWindow) and a season (its start to the board's as-of date: today while it runs, its last
+ * day after). It is the pay earned from `from` to `to`, dated by the day it was earned (earnedGrossCents), on the finalized
+ * checks for the pay weeks up to `throughWeek`: THE PAY WEEKS BEFORE THE FIRST ONE WHOSE RUN CAN CARRY THE BONUS.
+ *   a stay bonus    the week `to` falls in, the last week of its 12 months (the default): the run of the next week can carry it
+ *   a season bonus  seasonLastPayWeek: no run dated before the last Friday of September carries it
+ * A check for a later pay week never counts, whatever it pays (a commission recorded late, the overtime a later commission
+ * adds to an old week). The cut is fixed on purpose. A commission line reaches back to the week its sale was accepted and
+ * keeps coming for 12 months (payroll-commission.js), so the overtime it adds to old weeks never stops arriving: a base that
+ * waited for it would never be complete, and one that took whatever was paid so far would depend on the day the bonus was
+ * worked out. With the cut the figure is the same on every pay run that works it out, and the board and the pay line
+ * (tech-rewards-pay-lines.js) take it from here, so they never differ.
+ */
+const readBonusPay = (conn, technicianId, from, to, throughWeek = staffWeekStartForWorkDate(to)) => readGrossAndChecks(conn, technicianId, from, to, { throughWeek });
 
 /**
- * The pay a stay bonus is worked out from, and the checks that hold it: { cents, checkIds, unsplitWeeks } (readGrossAndChecks;
- * with an unsplit week the pay line waits and the board shows the figure as its estimate). It is the pay earned from
- * `earningsStart` to `earningsEnd` (stayWindow), dated as readGross dates it, on the finalized checks OF THOSE PAY WEEKS: the
- * weeks up to the one the 12 months end in. A check for a later pay week never counts, whatever it pays (a commission
- * recorded late, the overtime a later commission adds to an old week). The cut is fixed on purpose. A commission line
- * reaches back to the week its sale was accepted and keeps coming for 12 months (payroll-commission.js), so the overtime it
- * adds to old weeks never stops arriving: a base that waited for it would never be complete, and one that took whatever was
- * paid so far would depend on the day the bonus was worked out. With the cut, every check read holds a week of the 12 months,
- * the figure is the same on every pay run that works it out, and the board and the pay line (tech-rewards-pay-lines.js) take
- * it from here, so they never differ.
+ * The last pay week (a Monday) whose check can put pay into a season's bonus base: the week before the one that a pay run
+ * dated the season's pay date pays. A run is dated the Friday after its week ends (payroll-runs.js defaultPayDate), so the run
+ * dated the last Friday of September pays the week before that Friday's week, and the base ends one week earlier: for 2027,
+ * pay date Sep 24, that run's week Sep 13, base through the week of Sep 6. So pay earned in the season that one of the first
+ * September paychecks pays (August's monthly allowance, a review bonus brought in late) counts, and a paycheck for a later
+ * week never does. Pure.
  */
-const readStayPay = (conn, technicianId, earningsStart, earningsEnd) => readGrossAndChecks(conn, technicianId, earningsStart, earningsEnd, {
-  throughWeek: staffWeekStartForWorkDate(earningsEnd),
-});
+const seasonLastPayWeek = (year) => addStaffWorkDays(staffWeekStartForWorkDate(calc.seasonBonusPayDate(year)), -14);
 
 // Commission pay lines earned from Jan 1 to today: 'paid' on a finalized check, 'open' on a run not finalized yet,
 // dated by LINE_EARNED_ON_SQL.
@@ -558,6 +584,44 @@ async function readScore(conn, technicianId, season) {
   }
 }
 
+/**
+ * The score figures of a season, read as of `season.asOf` on one connection: the score and its settings, the review asks and
+ * the credited reviews. No pay.
+ */
+async function readSeasonScoreFigures(conn, technicianId, season) {
+  const { seasonScore, settings } = await readScore(conn, technicianId, season);
+  const asks = await readAskCount(conn, technicianId, season);
+  const reviews = await readReviewCount(conn, technicianId, season);
+  return { seasonScore, settings, asks, reviews };
+}
+
+/** The pay a season's bonus is worked out from, with the checks that hold it (readBonusPay, cut at seasonLastPayWeek). */
+const readSeasonPay = (conn, technicianId, season) => readBonusPay(conn, technicianId, season.start, season.asOf, seasonLastPayWeek(season.year));
+
+/**
+ * Every figure a season's bonus is worked out from, on one connection: the score figures and the pay (seasonPay).
+ * seasonBonusOf turns them into the bonus. The board reads them here, inside its own snapshot (getScoreboard). The pay line
+ * reads the same two parts for a closed season (closedSeason): readSeasonScoreSnapshot and readSeasonPay.
+ */
+async function readSeasonFigures(conn, technicianId, season) {
+  const scored = await readSeasonScoreFigures(conn, technicianId, season);
+  const seasonPay = await readSeasonPay(conn, technicianId, season);
+  return { ...scored, grossSeasonCents: seasonPay.cents, seasonPay };
+}
+
+/**
+ * readSeasonScoreFigures in ONE read-only REPEATABLE READ snapshot of its own, for a caller that is not in one: the pay run
+ * (tech-rewards-pay-lines.js priceSeason), whose transaction is READ COMMITTED. The five score parts, the settings and the
+ * review counts are then one moment's data, as on the board: a closeout that commits between two parts cannot count in one
+ * and not in the other and move the score across a band. It runs on its own connection. The field records it reads are not
+ * rows a pay run writes or locks, so the payroll lock and the pay run's own transaction are not touched, and an error in a
+ * score reader cannot abort that transaction.
+ */
+const readSeasonScoreSnapshot = (technicianId, season) => db.transaction(
+  (snapshot) => readSeasonScoreFigures(snapshot, technicianId, season),
+  { isolationLevel: 'repeatable read', readOnly: true },
+);
+
 // The day before a date (ET calendar).
 const dayBefore = (dateStr) => addStaffWorkDays(dateStr, -1);
 
@@ -578,18 +642,17 @@ async function readAll(conn, technicianId, today) {
   const technician = await readTechnician(conn, technicianId);
   const season = pickSeason(today);
   // the score and its settings are cut at the board's as-of date: a running season never reads a later change
-  const { seasonScore, settings } = await readScore(conn, technicianId, season);
+  const figures = await readSeasonFigures(conn, technicianId, season);
   // the stay bonus the board shows (stayBonusBlock) is worked out from the 12 months before ITS anniversary, up to the day
   // before it or today, whichever comes first: the pay recorded so far in that window
   const stay = technician.hireDate ? await stayBonusStatus(conn, technicianId, technician.hireDate, today) : undefined;
   const due = stayBonusBlock(technician.hireDate, today, 0, stay);
   const stayEnd = due ? (due.dueDate <= today ? dayBefore(due.dueDate) : today) : null;
   return {
-    technician, today, season, seasonScore, settings,
-    asks: await readAskCount(conn, technicianId, season),
-    reviews: await readReviewCount(conn, technicianId, season),
-    grossSeasonCents: await readGross(conn, technicianId, season.start, season.asOf),
-    priorYearGrossCents: due && due.estimateCents !== null ? (await readStayPay(conn, technicianId, due.earningsStart, stayEnd)).cents : 0,
+    technician, today, season, ...figures,
+    // a closed season payroll has paid shows the paid amount (seasonBonusBlock)
+    seasonBonusPaidCents: season.status === 'final' ? await seasonBonusPaidCents(conn, technicianId, season.year) : null,
+    priorYearGrossCents: due && due.estimateCents !== null ? (await readBonusPay(conn, technicianId, due.earningsStart, stayEnd)).cents : 0,
     stay,
     commission: await readCommission(conn, technicianId, today),
     commissionRecordedThrough: await readCommissionRecordedThrough(conn, technicianId),
@@ -616,5 +679,6 @@ async function listTechnicians(conn = db) {
 
 module.exports = {
   ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents,
-  ordinaryPremium, readGross, stayWindow, readStayPay,
+  ordinaryPremium, stayWindow, readBonusPay, closedSeason, seasonLastPayWeek, seasonBonusOf, readSeasonFigures, readSeasonScoreFigures,
+  readSeasonScoreSnapshot, readSeasonPay,
 };

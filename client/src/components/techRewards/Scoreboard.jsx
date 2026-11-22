@@ -70,6 +70,18 @@ function ScoreCard({ score }) {
   </Card>;
 }
 
+// A season bonus payroll has paid shows the paid amount (paidCents), with no estimate beside it.
+function seasonBonusValue(seasonBonus) {
+  if (seasonBonus.paidCents != null) return centsToDollars(seasonBonus.paidCents);
+  return seasonBonus.estimateCents === null ? 'Not estimated yet' : centsToDollars(seasonBonus.estimateCents);
+}
+
+function seasonBonusNote(seasonBonus) {
+  if (seasonBonus.paidCents != null) return 'Paid. This is the amount payroll put on your paycheck.';
+  if (seasonBonus.estimateCents === null) return NO_BONUS_REASONS[seasonBonus.reason] || ESTIMATE_NOTE;
+  return `${ESTIMATE_NOTE} ${bpsPercent(seasonBonus.rateBps)} of ${centsToDollars(seasonBonus.grossCents)} pay x ${times(seasonBonus.multiplierE4)} multiplier.`;
+}
+
 function BonusCard({ scoreboard }) {
   const { seasonBonus, multiplier, stayBonus } = scoreboard;
   return <Card className="grid gap-3 p-4" aria-label="Bonus estimates">
@@ -77,10 +89,8 @@ function BonusCard({ scoreboard }) {
     <div className="grid gap-4 sm:grid-cols-2">
       <Stat
         label="Season bonus (paid the last Friday of September)"
-        value={seasonBonus.estimateCents === null ? 'Not estimated yet' : centsToDollars(seasonBonus.estimateCents)}
-        note={seasonBonus.estimateCents === null
-          ? NO_BONUS_REASONS[seasonBonus.reason] || ESTIMATE_NOTE
-          : `${ESTIMATE_NOTE} ${bpsPercent(seasonBonus.rateBps)} of ${centsToDollars(seasonBonus.grossCents)} pay x ${times(seasonBonus.multiplierE4)} multiplier.`}
+        value={seasonBonusValue(seasonBonus)}
+        note={seasonBonusNote(seasonBonus)}
       />
       <Stat
         label="Next stay bonus"
