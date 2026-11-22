@@ -7585,7 +7585,12 @@ runs for a row with none, and a match there is refused);
 `/forgot-password` sends nothing and stores no token for a Google-only
 account (`technicians.google_only_login_at`, set by the Team tab's Hired
 press on a row with a linked company Google address; same generic answer),
-and a table CHECK refuses a password or a reset token on such a row;
+and a table CHECK refuses a password or a reset token on such a row; it
+also sends nothing for any row that has a linked Google address and no
+password, and `POST /reset-password` refuses a reset request's link on such
+a row (a reset request never creates that row's first password; only a link
+an admin sent with the Team tab's Hired press or Resend link does: a
+stored link whose lifetime is exactly the Hired link's 7 days);
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
 bearer; `/register` (like every Team tab writer of a staff email) refuses an
 address that is another staff row's email or linked Google address (409).

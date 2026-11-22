@@ -43,7 +43,7 @@ const googleSignin = require('../services/staff-google-signin');
 const analyticsMath = require('../services/time-tracking-analytics');
 const { validDateOnly } = require('../utils/date-only');
 const { recordAuditEvent } = require('../services/audit-log');
-const { mintResetToken } = require('../services/staff-reset-token');
+const { mintResetToken, redeemClosed } = require('../services/staff-reset-token');
 const { HIRE_LINK_TTL_MS, sendStaffWelcomeEmail } = require('../services/staff-welcome-email');
 
 const STAFF_ENTRY_WORK_DATE_SQL = staffWorkDateSql('time_entries.clock_in');
@@ -870,8 +870,10 @@ function hireLinkState(tech, now = new Date()) {
   const passwordUnset = status === 'active' && tech.active === true && !googleOnly
     && !tech.password_hash && !tech.password_changed_at;
   const expires = tech.password_reset_expires_at ? new Date(tech.password_reset_expires_at) : null;
+  // A reset request's link on a row with a linked Google address sets no
+  // password (staff-reset-token redeemClosed), so it is not "pending".
   const pending = passwordUnset && Boolean(tech.password_reset_token_hash)
-    && expires !== null && expires > now;
+    && expires !== null && expires > now && !redeemClosed(tech);
   return {
     // The one action the Team tab offers on this row: hire a prospective
     // placeholder, or resend the link to a hire who has no password yet.

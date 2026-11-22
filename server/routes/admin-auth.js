@@ -24,7 +24,9 @@ const {
 } = require('../utils/staff-password-policy');
 const { validDateOnly } = require('../utils/date-only');
 const { canonicalStaffEmail, findStaffByLoginEmail } = require('../utils/staff-identity');
-const { hashResetToken, mintResetToken } = require('../services/staff-reset-token');
+const {
+  hashResetToken, mintResetToken, resetClosed, redeemClosed, REDEEM_CLOSED_SQL, REDEEM_CLOSED_BINDINGS,
+} = require('../services/staff-reset-token');
 const { employmentPatch } = require('../services/technician-eligibility');
 const { seedNewHireCapabilities } = require('../services/technician-capabilities');
 const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
@@ -627,7 +629,7 @@ async function issuePasswordReset(email) {
     const matches = await canonicalStaffEmailQuery(trx, normalizedEmail)
       .where({ active: true })
       .whereIn('role', ['admin', 'technician'])
-      .select('id', 'email', 'google_only_login_at');
+      .select('id', 'email', 'google_only_login_at', 'google_email', 'password_hash');
     if (matches.length !== 1) {
       if (matches.length > 1) {
         logger.error(`[staff-auth] Password reset blocked by canonical email collision (matches=${matches.length})`);
@@ -638,6 +640,9 @@ async function issuePasswordReset(email) {
     // password by design. The email on that row can be one typed on a job application, which nobody proved, so a
     // reset request sends it nothing. The table's CHECK refuses a token on such a row as well.
     if (matches[0].google_only_login_at) return null;
+    // The same for any row that has a linked Google address and no password (staff-reset-token resetClosed). An admin who
+    // wants this person on a password presses Resend link, or clears the Google sign-in.
+    if (resetClosed(matches[0])) return null;
 
     const [updated] = await trx('technicians')
       .where({ id: matches[0].id, active: true })
@@ -717,7 +722,7 @@ async function resetPassword(req, res, next) {
       .whereIn('role', ['admin', 'technician'])
       .where('password_reset_expires_at', '>', db.fn.now())
       .first();
-    if (!tech) return res.status(400).json({ error: 'Reset link is invalid or expired' });
+    if (!tech || redeemClosed(tech)) return res.status(400).json({ error: 'Reset link is invalid or expired' });
     if (tech.password_hash && await bcrypt.compare(newPassword, tech.password_hash)) {
       return res.status(400).json({ error: 'New password must be different from the current password' });
     }
@@ -733,6 +738,8 @@ async function resetPassword(req, res, next) {
           password_reset_token_hash: tokenHash,
         })
         .where('password_reset_expires_at', '>', trx.fn.now())
+        // The Google address can be linked between the read above and this write.
+        .whereRaw(`NOT ${REDEEM_CLOSED_SQL}`, REDEEM_CLOSED_BINDINGS)
         .update({
           password_hash: passwordHash,
           auth_token_version: currentVersion + 1,
