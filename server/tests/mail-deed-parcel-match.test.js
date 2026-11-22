@@ -58,6 +58,14 @@ describe('parseLegal', () => {
     'LOT 12 SAMPLE GROVE UNITA',
     'LOT 12 SAMPLE GROVE SECB',
     'LOT 12 SAMPLE GROVE SECTIONIV',
+    // A marker split by marks or by spaces.
+    'LOT 12 SAMPLE GROVE P.H. II',
+    'LOT 12 SAMPLE GROVE P.H.II',
+    'LOT 12 SAMPLE GROVE P H 2',
+    'LOT 12 SAMPLE GROVE PH.2',
+    'LOT 12 SAMPLE GROVE P.H.A.S.E. II',
+    'LOT 12 SAMPLE GROVE S E C 2',
+    'LOT 12 SAMPLE GROVE U-N-I-T 3',
     // Plain words that read as a marker and an id are refused too: a refused deed is only not matched.
     'LOT 12 PHIL ESTATES',
     'LOT 12 UNITY GROVE',
@@ -294,6 +302,10 @@ describe('queryParcels', () => {
       await expect(flags(legal, ['rye ranch'])).rejects.toThrow(/not the lot asked for/);
       // Lower case after the deed's words is a form the grammar does not know: the parcel stays, the plat is unknown.
       expect(await flags(legal, ['RYE RANCH Ph I PB81/1', 'RYE RANCH ph ii', 'RYE RANCHo'])).toEqual([false, false, false]);
+      // The pattern lets anything stand between two letters. Only a mark of a plat name is passed over locally: a
+      // lower-case word or a sign never seen between the deed's letters is other words.
+      expect(await flags(legal, ['RYE east RANCH', 'RYEe RANCH', 'RYE_RANCH', 'RYE (RANCH)', 'RYE/RANCH', 'RYE, RANCH', 'RYE & RANCH']))
+        .toEqual([false, false, false, false, false, true, true]);
     });
     test('another subdivision, another piece of land, or a form that was never seen', async () => {
       const names = ['RYE RANCH ESTATES', 'RYE RANCH ESTATES PH I PB81/1', 'RYE RANCH WEST PB81/1', 'RYE RANCH VILLAS PH VA-1 PB81/1', 'RYE RANCH IA PB81/1',
@@ -370,9 +382,9 @@ describe('queryParcels', () => {
       expect(await flags({ lot: '171', block: null, subdivision: 'ST JOHNS' }, ['SAINT JOHNS', 'SAINT JOHNS PH I PB81/1', 'ST JOHNS'])).toEqual([false, false, true]);
     });
     test('a deed whose letters cover a plat-part word of the map is not that plat: both spellings stay, no match', async () => {
-      // The deed-side guard reads words, so it does not see a marker split by marks ("P.H."). The map's words do.
-      const dotted = parseLegal('LOT 171 RYE RANCH P.H. II');
-      expect(dotted).toEqual({ lot: '171', block: null, subdivision: 'RYE RANCH P.H. II' });
+      // The deed-side guard reads the deed's words. A marker hidden across two of them is seen in the map's words.
+      const dotted = parseLegal('LOT 171 RYE RANCHP HII');
+      expect(dotted).toEqual({ lot: '171', block: null, subdivision: 'RYE RANCHP HII' });
       const parcels = await queryParcels(dotted, { fetchImpl: answer({ features: [
         feature({ PAR_SUBDIV_NAME: 'RYE RANCH PH II' }),
         feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'RYE RANCH PHASE II' }),
@@ -380,8 +392,14 @@ describe('queryParcels', () => {
       expect(parcels.map((p) => p.platKnown)).toEqual([false, false]);
       expect(chooseParcel({ sellerNames: [], parcels, permitsByParid: { 513309059: { permit_no: 'A' } } })).toEqual({ status: 'unknown_plat' });
       expect(await flags(dotted, ['RYE RANCH PHII', 'RYE RANCH PH. II PB81/1', 'RYE RANCH PH II SUBPH A'])).toEqual([false, false, false]);
-      const spaced = { lot: '171', block: null, subdivision: 'RYE RANCH S E C 2' };
-      expect(await flags(spaced, ['RYE RANCH SEC 2', 'RYE RANCH SEC2', 'RYE RANCH SECTION 2'])).toEqual([false, false, false]);
+      const hidden = { lot: '171', block: null, subdivision: 'RYE RANCHS EC2' };
+      expect(await flags(hidden, ['RYE RANCH SEC 2', 'RYE RANCH SEC2', 'RYE RANCH SECTION 2'])).toEqual([false, false, false]);
+      // A marker split by marks or spaces on the deed is refused before any request.
+      const fetchImpl = jest.fn(answer({ features: [feature()] }));
+      for (const subdivision of ['RYE RANCH P.H. II', 'RYE RANCH P H 2', 'RYE RANCH S E C 2']) {
+        await expect(queryParcels({ lot: '171', block: null, subdivision }, { fetchImpl })).rejects.toThrow(TypeError);
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
     });
     test('the lot and the block may have another form on the map; the map\'s own text is kept', async () => {
       const [padded] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_SUBDIV_LOT: '0171' })] }) });

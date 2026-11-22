@@ -48,7 +48,27 @@ const isPhaseId = (token) => typeof token === 'string' && token.length <= 12 && 
 const PLAT_PART_MARKERS = ['SUBPHASE', 'SUBPH', 'PHASE', 'PH', 'SECTION', 'SEC', 'UNIT'];
 const isPlatPartWord = (word) => /^PB\d*$/.test(word)
   || PLAT_PART_MARKERS.some((marker) => word.startsWith(marker) && (word.length === marker.length || isPhaseId(word.slice(marker.length))));
-const namesPlatPart = (words) => words.split(/[^A-Z0-9]+/).some(isPlatPartWord);
+// The words are read three ways, so a marker split by marks or by spaces is seen too: split at every mark
+// ("P.H. II" = P, H, II), split at spaces with the marks taken out (PH, II), and with single characters in a row
+// joined ("S E C 2" = SEC2).
+function platPartReadings(words) {
+  const byMark = words.split(/[^A-Z0-9]+/).filter(Boolean);
+  const bySpace = words.split(' ').map((word) => word.replace(/[^A-Z0-9]/g, '')).filter(Boolean);
+  const joined = [];
+  let run = '';
+  for (const word of byMark) {
+    if (word.length === 1) {
+      run += word;
+    } else {
+      if (run) joined.push(run);
+      run = '';
+      joined.push(word);
+    }
+  }
+  if (run) joined.push(run);
+  return [byMark, bySpace, joined];
+}
+const namesPlatPart = (words) => platPartReadings(words).some((list) => list.some(isPlatPartWord));
 // A lot or block number has one letter at most ("12A", "B"). The map writes a letter in either case, and the list
 // of forms (mapForms) covers both cases of one letter, not every mix of two ("12Ab"): such a deed is not handled.
 const ONE_NUMBER = /^(?=.)[0-9]*[A-Z]?[0-9]*$/;
@@ -135,9 +155,15 @@ function hasDeedLetters(name, letters) {
   return letters.length > 0;
 }
 
+// The marks a plat name has between its letters and digits (a deed's name has the same ones, LEGAL_PATTERN). Only
+// these are passed over in the comparison. The query's pattern lets anything stand between two letters, so the map
+// can send "RYE east RANCH" for "RYE RANCH": that is other words, not the deed's name with marks.
+const NAME_MARKS = " &'.,-";
+
 // The map's name split where the deed's letters and digits end, comparing capitals and digits only: the part the
-// deed's words cover, and the rest. null when the name's capitals and digits do not start with the deed's: other
-// words ("RYE CREEK RANCH" for "RYE RANCH"), which the query returns because its pattern is wide.
+// deed's words cover, and the rest. null when the name's capitals and digits do not start with the deed's, or
+// something that is not a mark stands between them: other words ("RYE CREEK RANCH" for "RYE RANCH"), which the
+// query returns because its pattern is wide.
 function splitAtDeedWords(name, deedWords) {
   const key = lettersOf(deedWords);
   let matched = 0;
@@ -147,6 +173,8 @@ function splitAtDeedWords(name, deedWords) {
     if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) {
       if (ch !== key[matched]) return null;
       matched += 1;
+    } else if (!NAME_MARKS.includes(ch)) {
+      return null; // a lower-case letter or a sign never seen between the deed's letters: not the deed's name
     }
     at += 1;
   }
@@ -202,8 +230,8 @@ function platRestKnown(rest) {
 // fits the grammar. False for every other name of the answer:
 //   - other words ("RYE CREEK RANCH" for "RYE RANCH", "SAINT JOHNS" for "ST JOHNS");
 //   - the deed's words and then something else ("... ESTATES", "RYE RANCHES");
-//   - the deed's letters cover a plat-part word of the map ("PH" under a deed written "P.H."): the deed-side guard
-//     reads words, and this reads the map's words, so a marker split by marks on the deed is caught here.
+//   - the deed's letters cover a plat-part word of the map ("PH" under a deed written "RANCHP HII"): the
+//     deed-side guard reads the deed's words, and this reads the map's words.
 // Such a parcel may be the same land under another spelling. It is never set aside: it stays in the answer, and
 // chooseParcel matches nothing while one is there.
 function platNameKnown(mapName, deedWords) {
