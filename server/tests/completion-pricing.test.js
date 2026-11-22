@@ -84,6 +84,9 @@ describe('completion estimate evidence', () => {
     expect(names(acceptedPricing(row(108), platinum))).toEqual(unnamed(12));
     expect(names(acceptedPricing(row(90), platinum))).toEqual(unnamed(30));
     expect(names(acceptedPricing(row(96, { serviceSpecificDiscounts: [{ amount: 24 }] }), platinum))).toEqual(unnamed(24));
+    // A row flagged out of percentage discounts never takes the tier, whatever its numbers.
+    expect(names(acceptedPricing(row(96, { excludeFromPctDiscount: true }), platinum))).toEqual(unnamed(24));
+    expect(names(acceptedPricing(row(96, { discountEligible: false }), platinum))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96), { tierDiscounted: true, estimateTier: null }))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96), { tierDiscounted: true, estimateTier: { tier: 'platinum', amount: 0 } }))).toEqual(unnamed(24));
     // The line's own record still wins over the estimate's.
@@ -135,10 +138,15 @@ describe('completion estimate evidence', () => {
       const read = (estimateRow) => acceptedVisitBreakdown(billed, { database: fakeDb({ estimateRow }) });
       expect(await read(platinum({ tier: 'Platinum', discount: 0.2 }))).toEqual({ breakdown: {
         base: 110, amount: 88, discounts: [{ name: 'WaveGuard Platinum', dollars: 22 }] } });
-      // The rate saved at accept decides, not today's tier table.
+      // An empty tier column reads the saved recurring block, as the accept does.
+      expect((await read({ ...platinum({ waveGuardTier: 'Platinum', discount: 0.2 }), waveguard_tier: null })).breakdown.discounts)
+        .toEqual([{ name: 'WaveGuard Platinum', dollars: 22 }]);
+      // The rate the estimate saved decides, never today's tier table: another rate, or none saved, keeps one line.
       expect((await read(platinum({ tier: 'Platinum', discount: 0.1 }))).reason).toBe('discount_unnamed');
-      // A staff discount on recurring work shares the saving; Bronze has no tier saving.
+      expect((await read(platinum({ tier: 'Platinum' }))).reason).toBe('discount_unnamed');
+      // A staff discount on recurring work, in either saved shape, shares the saving; Bronze has no tier saving.
       expect((await read(platinum({ tier: 'Platinum', discount: 0.2 }, { summary: estimate.estimate_data.summary }))).reason).toBe('discount_unnamed');
+      expect((await read(platinum({ tier: 'Platinum', discount: 0.2, manualDiscount: { amount: 5 } }))).reason).toBe('discount_unnamed');
       expect((await read({ ...platinum({ tier: 'Platinum', discount: 0.2 }), waveguard_tier: 'Bronze' })).reason).toBe('discount_unnamed');
     });
 

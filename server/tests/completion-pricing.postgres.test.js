@@ -308,6 +308,9 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       const { lineItems } = await Invoice.buildLineItemsForScheduledService(jobId, { database: trx, fallbackAmount: 85 });
       expect(lineItems.map((row) => [row.description, Number(row.amount)])).toEqual([['Pest Control', 100], ['WaveGuard Gold', -15]]);
     } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
+    // An empty tier column reads the saved recurring block, as the accept does.
+    await trx('estimates').where({ id: estimateId }).update({ waveguard_tier: null });
+    expect((await pricing.acceptedVisitBreakdown(job, { database: trx })).breakdown.discounts).toEqual([{ name: 'WaveGuard Gold', dollars: 15 }]);
   }));
 
 });
