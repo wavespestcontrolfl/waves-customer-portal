@@ -142,6 +142,12 @@ describe('a model reads the masked note only', () => {
     }
   });
 
+  test('a code list that is not a list is read as unread: the outcome-only sentence', async () => {
+    await expect(clean('treated the patio', { storedCodes: 'bluebird' }))
+      .resolves.toEqual({ text: fixedReportNote({}), source: 'fixed', reason: 'screen_unavailable' });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
   test('a note that gets no call reads no catalog', async () => {
     const read = jest.spyOn(CompletionRecap, 'readCatalogScreenRows');
     try {

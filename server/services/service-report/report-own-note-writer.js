@@ -223,7 +223,7 @@ function noteToSend(note, storedCodes) {
 async function cleanReportNote({
   note, serviceType, areasServiced, visitOutcome, catalogRows = null, db = null, storedCodes = null, customerId = null,
 } = {}) {
-  let codes = storedCodes;
+  let codes = Array.isArray(storedCodes) ? storedCodes : null;
   // The fixed sentence names the service and the areas only when the codes on
   // file were read and neither holds one; else it names the outcome alone.
   const factsShown = () => (codes && !holdsAccess([serviceType, ...[].concat(areasServiced || [])].map(String).join('. '), codes)
