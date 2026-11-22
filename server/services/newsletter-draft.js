@@ -433,7 +433,7 @@ function stripPersonalizationTokens(content) {
   const { resolveEvclickDirect } = require('./newsletter-event-clicks');
   // A Waves Pest Insider issue's tokens (pest-insider/referral-line.js, a leaf
   // module): the "Your home" tokens go, since that block is per reader and
-  // never shows here, and the referral line ends in its form with no amount.
+  // never shows here, and the referral line stands in its form with no amount.
   const { neutralizeIssueTokens } = require('./pest-insider/referral-line');
   return resolveEvclickDirect(neutralizeFeedbackTokens(neutralizeQuizTokens(
     neutralizeIssueTokens(stripGreetingNameToken(content))

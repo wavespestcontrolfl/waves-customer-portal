@@ -1206,7 +1206,7 @@ router.get('/sends/:id/blog-export', async (req, res, next) => {
 
     // Strip HTML to markdown-ish content (basic conversion)
     // A Pest Insider issue's per-reader "Your home" tokens are no part of an export, and its
-    // referral line ends in its form with no amount.
+    // referral line stands in its form with no amount.
     const bodyHtml = neutralizeIssueTokens(send.html_body || '');
     const bodyText = bodyHtml
       .replace(/<h1[^>]*>(.*?)<\/h1>/gi, '# $1\n\n')

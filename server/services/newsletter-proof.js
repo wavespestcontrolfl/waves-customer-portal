@@ -518,9 +518,10 @@ async function renderSendPreview(send, toEmail) {
   // of a hand-composed campaign shows the footer the broadcast will carry
   // (neutralized to inert chips below — no per-recipient token here).
   const { ensureFeedbackToken } = require('./newsletter-feedback');
-  // The end of a Waves Pest Insider issue's referral line ({{pi-referral-tail}}) reads as a
-  // reader would get it now: the stored body names no amount, and the send fills the token
-  // from the live setting by the same rule.
+  // A Waves Pest Insider issue's referral line ({{pi-referral}} / {{pi-referral-text}}) reads
+  // as a reader would get it now: the stored body holds only the tokens, and the send fills
+  // them from the referral program's live state by the same rule (an amount, the first form,
+  // or no line while the program is paused).
   const { referralLineAsOfNow } = require('./pest-insider/referral-line');
   const ensured = await referralLineAsOfNow(send, ensureFeedbackToken({ html: send.html_body || '', text: send.text_body }));
   // Event click-tracking tokens resolve to the DIRECT event URLs in

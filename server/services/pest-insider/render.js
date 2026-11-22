@@ -67,7 +67,8 @@ const { validateNewsletterDraft } = require('../newsletter-validator');
 const { PEST_INSIDER_TYPE } = require('../../config/newsletter-types');
 const { etDateString } = require('../../utils/datetime-et');
 const { HOME_TOKEN, HOME_TEXT_TOKEN, hasHomeToken, neutralizeHomeTokens } = require('./home');
-const { REFERRAL_URL, REFERRAL_ASK, REFERRAL_LINK_TEXT, REFERRAL_TAIL_TOKEN } = require('./referral-line');
+const { REFERRAL_TOKEN, REFERRAL_TEXT_TOKEN } = require('./referral-line');
+const { escapeHtml, paragraph, link, wrapBlock } = require('./markup');
 
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const POST_LINK_TEXT = 'Read the full story on the Waves blog';
@@ -132,10 +133,6 @@ const VERDICTS = Object.freeze({
   call: Object.freeze({ label: 'Worth a pro look', background: '#FEF2F2', text: '#991B1B' }),
 });
 
-const escapeHtml = (text) => String(text ?? '')
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
 const own = (map, key) => (typeof key === 'string' && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : null);
 const speciesUrl = (slug) => (/^[a-z0-9-]+$/.test(String(slug)) ? `${IDENTIFIER_URL}${slug}/` : null);
 
@@ -153,8 +150,6 @@ function sectionHead(index, label, emoji, title) {
   ].join('\n');
 }
 
-const paragraph = (html) => `<p style="margin:0 0 14px 0;font-size:16px;line-height:1.6;">${html}</p>`;
-const link = (href, label) => `<a class="dm-link" href="${escapeHtml(href)}" style="color:${newsletterPalette().blue};text-decoration:underline;font-weight:600;">${escapeHtml(label)}</a>`;
 // The newsletter's event box: one emoji row per line.
 const metaBox = (rows) => `<div class="dm-box" style="margin:0 0 14px 0;padding:12px 16px;background:${newsletterPalette().cardBg};border-radius:10px;font-size:15px;line-height:2;">\n${rows.join('<br/>\n')}\n</div>`;
 
@@ -166,14 +161,14 @@ const SIGNOFF_HTML = `<div class="dm-text">
 </div>`;
 const SIGNOFF_TEXT = `${SIGNOFF_LINE}\n${SIGNOFF_NAME}\n`;
 
-// The referral line (referral-line.js has its words). Its end is a token in
-// both parts: the stored body never names an amount, and each surface gives
-// the token its value.
-const REFERRAL_HTML = `<div class="dm-text">\n${paragraph(`${escapeHtml(REFERRAL_ASK)} ${link(REFERRAL_URL, REFERRAL_LINK_TEXT)}${REFERRAL_TAIL_TOKEN}`)}\n</div>\n`;
-const REFERRAL_TEXT = `${REFERRAL_ASK} ${REFERRAL_LINK_TEXT}${REFERRAL_TAIL_TOKEN}\n${REFERRAL_URL}\n\n`;
-// What closes every issue: a reader's own block goes in before it.
-const CLOSING_HTML = `${REFERRAL_HTML}${SIGNOFF_HTML}`;
-const CLOSING_TEXT = `${REFERRAL_TEXT}${SIGNOFF_TEXT}`;
+// What closes every issue: the referral line, then the sign-off. A reader's
+// own block goes in before it. The line is a token in each part
+// (referral-line.js has its words and gives the tokens their value on every
+// surface): the stored body never names an amount, and a paused referral
+// program gets no line. Like the "Your home" tokens, each stands alone, so a
+// value of '' gives exactly the issue without the line.
+const CLOSING_HTML = `${REFERRAL_TOKEN}${SIGNOFF_HTML}`;
+const CLOSING_TEXT = `${REFERRAL_TEXT_TOKEN}${SIGNOFF_TEXT}`;
 
 // A Waves picture as wide as the column on a desktop screen (582px in
 // wrapNewsletter's card), with its size in the tag. A picture that moves
@@ -350,7 +345,6 @@ function toolBlock(tool) {
   return { html, text };
 }
 
-const wrapBlock = (b) => `<div class="dm-text">\n${b.html}\n</div>`;
 
 // The issue's poll: a Waves Pest Insider poll's token (newsletter-quiz.js),
 // written here from the poll id, never taken from the caller. The sender
