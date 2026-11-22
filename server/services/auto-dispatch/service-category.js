@@ -115,8 +115,23 @@ function lineForCatalogRow(row) {
   return line;
 }
 
+// The estimate engine's own keys for exclusion work that has no catalog row (pricing-engine/
+// service-pricing.js): entry-point plugging, and the guarantee bundle (exclusion + bait stations).
+// "rodent_guarantee" is the payment-only rider and is not here.
+const ENGINE_KEY_LINES = Object.freeze({
+  rodent_plugging: 'exclusion',
+  rodent_guarantee_combo: 'exclusion',
+});
+
 function classifyServiceCategory(serviceType) {
   const s = String(serviceType || '').toLowerCase();
+  // A caller with no visit name passes the service KEY as the name (a key-only slot search), and
+  // the name patterns do not read every key ("rodent_wire_mesh", "rodent_plugging"). So an exact
+  // exclusion key decides first: a technician set Off for exclusion is never offered a sealing job.
+  const key = s.trim();
+  for (const keyLines of [CATALOG_KEY_LINES, ENGINE_KEY_LINES]) {
+    if (Object.prototype.hasOwnProperty.call(keyLines, key)) return keyLines[key];
+  }
   for (const [cat, re] of CATEGORY_PATTERNS) {
     if (re.test(s)) return cat;
   }

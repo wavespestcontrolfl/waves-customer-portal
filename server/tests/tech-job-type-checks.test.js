@@ -156,6 +156,15 @@ describe('categoriesForServices', () => {
     expect(conn).not.toHaveBeenCalled();
   });
 
+  test('gate off: a key-only slot search (the key stands in for the name) reads the exclusion keys as exclusion', async () => {
+    // The capacity finder has no visit name for a key-only request and passes the key as service_type.
+    // A technician set Off for exclusion and On for trapping must not be offered a sealing job.
+    const conn = fakeConn({ catalog: CATALOG });
+    const rows = ['rodent_inspection', 'rodent_wire_mesh', 'rodent_bird_box', 'rodent_trapping'].map((key) => ({ service_type: key }));
+    expect(await capabilities.categoriesForServices(conn, rows)).toEqual(['exclusion', 'exclusion', 'exclusion', 'rodent']);
+    expect(conn).not.toHaveBeenCalled();
+  });
+
   test('gate on: an exclusion job reads exclusion and its trap check reads rodent, by service key', async () => {
     process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
     const conn = fakeConn({ catalog: [

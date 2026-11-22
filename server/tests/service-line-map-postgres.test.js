@@ -182,6 +182,30 @@ describeDb('service-line map shadow on PostgreSQL', () => {
       await db('service_line_techs').insert(lineRow('exclusion', null, null));
     });
 
+    // Migration 20261121231000: a card that already places the rodent line keeps placing exclusion work
+    // the same way until staff split the two lines.
+    test('the card copy migration gives exclusion the rodent line\'s home and gap technician, and never overwrites a set row', async () => {
+      const copy = require('../models/migrations/20261121231000_exclusion_line_card_copy');
+      const exclusionRow = () => db('service_line_techs').where({ service_category: 'exclusion' }).first();
+      // An empty card (production on 2026-11-21): nothing is written.
+      await copy.up(db);
+      expect(await db('service_line_techs').count({ n: '*' }).first()).toMatchObject({ n: '0' });
+      // A rodent row: exclusion gets the same two technicians. A second run changes nothing.
+      await db('service_line_techs').insert(lineRow('rodent', hireId, ownerId));
+      await copy.up(db);
+      expect(await exclusionRow()).toMatchObject({ home_technician_id: hireId, gap_technician_id: ownerId });
+      await copy.up(db);
+      expect(await db('service_line_techs').count({ n: '*' }).first()).toMatchObject({ n: '2' });
+      // Staff split the lines; a later run keeps their choice.
+      await db('service_line_techs').where({ service_category: 'exclusion' }).update({ home_technician_id: ownerId, gap_technician_id: null });
+      await copy.up(db);
+      expect(await exclusionRow()).toMatchObject({ home_technician_id: ownerId, gap_technician_id: null });
+      // With the card copied, the map still restricts an exclusion job (the rule the rodent row gave it).
+      await db('service_line_techs').where({ service_category: 'exclusion' }).del();
+      await copy.up(db);
+      expect(await exclusionRow()).toMatchObject({ home_technician_id: hireId, gap_technician_id: ownerId });
+    });
+
     test('service_line_pick_shadow: the six sources and the two line_from values only; ids carry no foreign keys', async () => {
       for (const source of ['book', 'phone_live', 'after_call', 'estimate_accept', 'office_auto', 'night_run']) {
         await db('service_line_pick_shadow').insert({ source, run_id: run });

@@ -32,6 +32,22 @@ describe('service category classification', () => {
     ['Lawn Plugging', 'lawn'],
     // The public booking page's rodent option (the bait-station program).
     ['Rodent Control', 'rodent'],
+    // A key-only slot search passes the service KEY as the name: an exclusion key reads exclusion,
+    // a trapping or bait key stays rodent.
+    ['rodent_inspection', 'exclusion'],
+    ['rodent_wire_mesh', 'exclusion'],
+    ['rodent_bird_box', 'exclusion'],
+    ['rodent_sanitation_heavy', 'exclusion'],
+    ['rodent_trapping_exclusion', 'exclusion'],
+    // The estimate engine's keys (no catalog row), and its payment-only guarantee rider.
+    ['rodent_plugging', 'exclusion'],
+    ['rodent_guarantee_combo', 'exclusion'],
+    ['rodent_sanitation', 'exclusion'],
+    ['exclusion_v2', 'exclusion'],
+    ['rodent_guarantee', 'rodent'],
+    ['rodent_trapping', 'rodent'],
+    ['rodent_trapping_followup', 'rodent'],
+    ['rodent_bait_quarterly', 'rodent'],
     ['Rodent Trapping Service', 'rodent'],
     ['Rodent Trapping Follow-Up Visit Service', 'rodent'],
     ['Rodent Trap Check - Additional', 'rodent'],
