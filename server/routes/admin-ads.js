@@ -55,17 +55,28 @@ const SYNCED_STATUS_REFUSALS = new Map([
   ['google_ads', "Use /pause or /enable to change a Google campaign's status — they sync Google Ads."],
   ['facebook', "A Meta campaign's status comes from Meta Ads Manager. Change it there; the daily Meta sync brings it in."],
 ]);
-// A Local Services campaign the daily sync brought in carries Google's campaign
-// id, and its status comes from Google. One entered by hand has no id and stays
-// editable here.
+// A Local Services campaign the daily sync owns (it carries the sync's account
+// mark, see ads/google-lsa.js ownsCampaign) takes its status from Google. One
+// entered by hand has no mark and stays editable here. google-lsa.js loads the
+// Google Ads SDK only when a sync runs, so the require is cheap.
 const LSA_SYNCED_STATUS_REFUSAL = "A synced Local Services campaign's status comes from Google. Change it there; the daily Local Services sync brings it in.";
 function syncedStatusRefusal(campaign) {
-  if (campaign.platform === 'google_lsa') return campaign.platform_campaign_id ? LSA_SYNCED_STATUS_REFUSAL : undefined;
+  if (campaign.platform === 'google_lsa') {
+    return require('../services/ads/google-lsa').ownsCampaign(campaign) ? LSA_SYNCED_STATUS_REFUSAL : undefined;
+  }
   return SYNCED_STATUS_REFUSALS.get(campaign.platform);
 }
-// Campaign metadata keys only the hold routes write: the owner's hold and its
-// release record. Generic campaign writes refuse them and keep the stored ones.
-const HOLD_METADATA_KEYS = ['budget_hold', 'budget_hold_cleared'];
+// Campaign metadata keys that generic campaign writes refuse and keep as stored,
+// each with where it is written instead. budget_hold / budget_hold_cleared: the
+// owner's hold and its release record. lsa_customer_id: the Local Services
+// sync's mark on a row it owns (ads/google-lsa.js ACCOUNT_KEY); a generic write
+// that set or erased it would change whether the row counts as synced.
+const HOLD_SWITCH = 'use the hold switch (POST/DELETE /campaigns/:id/hold)';
+const RESERVED_METADATA_KEYS = new Map([
+  ['budget_hold', HOLD_SWITCH],
+  ['budget_hold_cleared', HOLD_SWITCH],
+  ['lsa_customer_id', 'the daily Local Services sync writes it'],
+]);
 // Managed by /budget, /mode, /pause, /enable, /sync — never the generic writes.
 const CAMPAIGN_MANAGED_FIELDS = ['budget_mode', 'daily_budget_base', 'daily_budget_current'];
 // Identity — settable at creation, never repointed on update.
@@ -119,11 +130,12 @@ function sanitizeCampaignWrite(body, isUpdate) {
   }
   // metadata.budget_hold is the owner's budget switch, and budget_hold_cleared is
   // its release record. Only the hold routes write them: they push the held
-  // budget, check the end date and stamp the release.
+  // budget, check the end date and stamp the release. lsa_customer_id is the
+  // Local Services sync's mark.
   if (out.metadata != null) {
     const meta = metadataObject(out.metadata);
-    const key = HOLD_METADATA_KEYS.find((k) => Object.prototype.hasOwnProperty.call(meta, k));
-    if (key) return { ok: false, error: `${key} can't be set here — use the hold switch (POST/DELETE /campaigns/:id/hold).` };
+    const key = [...RESERVED_METADATA_KEYS.keys()].find((k) => Object.prototype.hasOwnProperty.call(meta, k));
+    if (key) return { ok: false, error: `${key} can't be set here — ${RESERVED_METADATA_KEYS.get(key)}.` };
   }
 
   if (out.monthly_budget !== undefined && out.monthly_budget !== null) {
@@ -257,14 +269,15 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
         .update({ ...clean.value, updated_at: new Date() })
         .returning('*');
     } else {
-      // A metadata replacement keeps the owner's hold and its release record:
-      // read them under the row lock so a hold saved meanwhile is not erased.
+      // A metadata replacement keeps the reserved keys (the owner's hold, its
+      // release record, the Local Services sync's mark): read them under the
+      // row lock so a hold saved meanwhile is not erased.
       campaign = await db.transaction(async (trx) => {
         const locked = await trx('ad_campaigns').where({ id: req.params.id }).forUpdate().first();
         if (!locked) return null;
         const patch = { ...clean.value, updated_at: new Date() };
         const lockedMeta = metadataObject(locked.metadata);
-        const kept = Object.fromEntries(HOLD_METADATA_KEYS.filter((k) => lockedMeta[k] !== undefined).map((k) => [k, lockedMeta[k]]));
+        const kept = Object.fromEntries([...RESERVED_METADATA_KEYS.keys()].filter((k) => lockedMeta[k] !== undefined).map((k) => [k, lockedMeta[k]]));
         if (Object.keys(kept).length) patch.metadata = JSON.stringify({ ...metadataObject(patch.metadata), ...kept });
         const [row] = await trx('ad_campaigns').where({ id: req.params.id }).update(patch).returning('*');
         return row;

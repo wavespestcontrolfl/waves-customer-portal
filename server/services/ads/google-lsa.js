@@ -2,7 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../../models/db');
 const logger = require('../../services/logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
-const { isConfigured: googleAdsConfigured } = require('./google-ads-config');
+const { hasCredentials } = require('./google-ads-config');
 
 // ---------------------------------------------------------------------------
 // Google Local Services Ads: read-only ingestion (owner 2026-11-21, "lead sync").
@@ -15,13 +15,19 @@ const { isConfigured: googleAdsConfigured } = require('./google-ads-config');
 // page's "Local Service Ads" card filters on).
 //
 // Google charges Local Services by the lead, not by the click, so a day's
-// `conversions` here is its number of CHARGED leads (local_services_lead),
-// and the day's lead mix is kept in ad_performance_daily.metadata.lsa_leads.
-// Google's own conversions number for the day is kept beside it.
+// `conversions` here is its number of leads Google charged and did not credit
+// back (local_services_lead), and the day's lead mix is kept in
+// ad_performance_daily.metadata.lsa_leads. Google's own conversions number for
+// the day is kept beside it.
 //
 // It only reads Google and writes these two tables. It creates no lead, changes
 // no call attribution and messages no one. Budget and status stay with Google:
 // the budget loop only acts on platform 'google_ads'.
+//
+// A row this sync owns carries metadata.lsa_customer_id = the account it came
+// from. The mark scopes every read of "this account's campaigns" below and the
+// status rule in routes/admin-ads.js, so a campaign entered by hand, or one
+// from an account the sync no longer reads, is never treated as synced.
 // ---------------------------------------------------------------------------
 
 const PLATFORM = 'google_lsa';
@@ -31,6 +37,7 @@ const CAMPAIGN_TYPE = 'google_lsa';
 // (GOOGLE_LSA_CUSTOMER_ID=off) turns the sync off.
 const DEFAULT_CUSTOMER_ID = '7636809139';
 const DEFAULT_DAYS = 30;
+const ACCOUNT_KEY = 'lsa_customer_id'; // also reserved in routes/admin-ads.js RESERVED_METADATA_KEYS
 
 function customerId() {
   const raw = process.env.GOOGLE_LSA_CUSTOMER_ID;
@@ -38,8 +45,22 @@ function customerId() {
   return digits.length === 10 ? digits : null;
 }
 
+// The OAuth credentials are shared with the Search sync; the account id is this
+// sync's own, so it does not need GOOGLE_ADS_CUSTOMER_ID.
 function isConfigured() {
-  return googleAdsConfigured() && !!customerId();
+  return hasCredentials() && !!customerId();
+}
+
+// True for a campaign row this sync owns: it carries the mark of the account the
+// sync reads now.
+function ownsCampaign(campaign) {
+  const account = customerId();
+  if (!account || campaign?.platform !== PLATFORM) return false;
+  let meta = campaign.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  return String(meta?.[ACCOUNT_KEY] || '') === account;
 }
 
 let _customer = null;
@@ -76,6 +97,8 @@ function mapStatus(googleStatus) {
 }
 
 const LEAD_TYPE = { 2: 'messages', 3: 'calls', 4: 'bookings', MESSAGE: 'messages', PHONE_CALL: 'calls', BOOKING: 'bookings' };
+// LocalServicesCreditState: Google gave the charge for the lead back.
+const CREDITED = new Set([3, 'CREDITED']);
 
 // Google names the campaign it makes for a Local Services account
 // "LocalServicesCampaign:SystemGenerated:<hex>". That name means nothing on the
@@ -103,12 +126,14 @@ function mapCampaign(row) {
 }
 
 function emptyLeadDay() {
-  return { total: 0, charged: 0, calls: 0, messages: 0, bookings: 0 };
+  return { total: 0, charged: 0, credited: 0, calls: 0, messages: 0, bookings: 0 };
 }
 
 // Leads per account-local day ('YYYY-MM-DD' = the first 10 characters of
 // creation_date_time, which Google gives in the account's time zone, like
-// segments.date). A lead with no readable date is left out.
+// segments.date). A lead with no readable date is left out. lead_charged stays
+// true on a lead Google later credits back, so a credited lead counts in
+// `credited` and `total`, not in `charged`.
 function tallyLeadsByDay(leadRows) {
   const byDay = new Map();
   for (const row of leadRows) {
@@ -117,7 +142,8 @@ function tallyLeadsByDay(leadRows) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
     const t = byDay.get(day) || emptyLeadDay();
     t.total += 1;
-    if (lead.lead_charged === true) t.charged += 1;
+    if (CREDITED.has(lead.credit_details?.credit_state)) t.credited += 1;
+    else if (lead.lead_charged === true) t.charged += 1;
     const kind = LEAD_TYPE[lead.lead_type];
     if (kind) t[kind] += 1;
     byDay.set(day, t);
@@ -156,22 +182,35 @@ function dateRange(days, now = new Date()) {
 }
 
 // ---------------------------------------------------------------------------
-// syncCampaigns: upsert the account's campaigns into ad_campaigns.
+// syncCampaigns: upsert the account's Local Services campaigns into
+// ad_campaigns, each marked with the account id.
+//
+// The query has no status filter: Google keeps answering a removed campaign
+// with status REMOVED, so its row follows to 'removed' through the same upsert
+// and no "not returned any more" pass is needed. The channel filter keeps any
+// other campaign type in the account (Search, Display) out of google_lsa.
 // ---------------------------------------------------------------------------
-async function syncCampaigns(customer) {
+const CHANNEL_FILTER = "campaign.advertising_channel_type = 'LOCAL_SERVICES'";
+
+// metadata with the mark merged in; a metadata value that is not an object is replaced.
+const MERGE_MARK_SQL = "(CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END) || ?::jsonb";
+
+// This account's campaign rows, removed ones included.
+function accountCampaigns(account) {
+  return db('ad_campaigns')
+    .where({ platform: PLATFORM })
+    .whereRaw(`metadata ->> '${ACCOUNT_KEY}' = ?`, [account]);
+}
+
+async function syncCampaigns(customer, account) {
   logger.info('[google-lsa] Syncing campaigns');
-  // A row a local writer touches after this instant is fresher than this
-  // snapshot: the removal pass leaves it for the next sync (the same fence as
-  // the Google and Meta syncs).
-  const fetchStartedAt = new Date();
-  // No metrics selected, so this is the complete list: Google leaves a campaign
-  // out of a metrics query when all its selected metrics are zero.
   const rows = await customer.query(`
     SELECT campaign.id, campaign.name, campaign.status, campaign_budget.amount_micros
     FROM campaign
-    WHERE campaign.status != 'REMOVED'
+    WHERE ${CHANNEL_FILTER}
   `);
 
+  const mark = JSON.stringify({ [ACCOUNT_KEY]: account });
   const results = [];
   for (const row of rows) {
     const data = mapCampaign(row);
@@ -179,28 +218,18 @@ async function syncCampaigns(customer) {
       .where({ platform: PLATFORM, platform_campaign_id: data.platform_campaign_id })
       .first();
     if (existing) {
-      await db('ad_campaigns').where({ id: existing.id }).update(data);
+      // Merge the mark in SQL: every other metadata key stays, and a metadata
+      // write that lands between the read and this update is not erased.
+      await db('ad_campaigns').where({ id: existing.id })
+        .update({ ...data, metadata: db.raw(MERGE_MARK_SQL, [mark]) });
       results.push({ ...existing, ...data });
     } else {
       const [inserted] = await db('ad_campaigns')
-        .insert({ id: uuidv4(), ...data, created_at: new Date() })
+        .insert({ id: uuidv4(), ...data, metadata: mark, created_at: new Date() })
         .returning('*');
       results.push(inserted);
     }
   }
-
-  // A campaign removed in Google never comes back to be flipped by the upsert.
-  // Rows entered by hand (NULL platform_campaign_id) are left alone; the
-  // explicit whereNotNull matters because knex compiles an empty NOT IN list to
-  // always-true.
-  const removed = await db('ad_campaigns')
-    .where({ platform: PLATFORM })
-    .whereNotNull('platform_campaign_id')
-    .whereNotIn('platform_campaign_id', results.map((r) => r.platform_campaign_id))
-    .whereNot('status', 'removed')
-    .where('updated_at', '<', fetchStartedAt)
-    .update({ status: 'removed', updated_at: new Date() });
-  if (Number(removed) > 0) logger.info(`[google-lsa] Marked ${removed} campaign(s) removed (no longer returned by Google)`);
 
   logger.info(`[google-lsa] Synced ${results.length} campaigns`);
   return results;
@@ -212,6 +241,17 @@ async function syncCampaigns(customer) {
 // Google credits a disputed lead back days later, and the day's charged count
 // and cost then change.
 // ---------------------------------------------------------------------------
+
+// A lead names no campaign. The leads in the window belong to a campaign only
+// when it is the one campaign in play there: every campaign of the account that
+// is not removed, plus every campaign with a metrics row in the window (a
+// removed one included, so its earlier leads never move to the campaign that
+// replaced it). Any other count = unknown = null. Pure.
+function leadOwner(campaigns, metricRows) {
+  const inPlay = new Set(campaigns.filter((c) => c.status !== 'removed').map((c) => String(c.platform_campaign_id)));
+  for (const row of metricRows) inPlay.add(String(row.campaign.id));
+  return inPlay.size === 1 ? [...inPlay][0] : null;
+}
 
 // Which campaign-days to write (pure): each Google metrics row for a campaign
 // the portal holds, plus a day in the window that has a lead and no metrics row
@@ -243,7 +283,7 @@ async function upsertPerformanceDay(data) {
   }
 }
 
-async function syncDailyPerformance(customer, days = DEFAULT_DAYS) {
+async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
   logger.info(`[google-lsa] Syncing daily performance (last ${days} days)`);
   const { since, until } = dateRange(days);
 
@@ -260,32 +300,31 @@ async function syncDailyPerformance(customer, days = DEFAULT_DAYS) {
       metrics.average_cpc
     FROM campaign
     WHERE segments.date BETWEEN '${since}' AND '${until}'
-      AND campaign.status != 'REMOVED'
+      AND ${CHANNEL_FILTER}
   `);
   const leadRows = await customer.query(`
     SELECT
       local_services_lead.id,
       local_services_lead.lead_type,
       local_services_lead.creation_date_time,
-      local_services_lead.lead_charged
+      local_services_lead.lead_charged,
+      local_services_lead.credit_details.credit_state
     FROM local_services_lead
     WHERE local_services_lead.creation_date_time >= '${since} 00:00:00'
   `);
 
-  const campaigns = await db('ad_campaigns')
-    .where({ platform: PLATFORM })
-    .whereNotNull('platform_campaign_id')
-    .whereNot('status', 'removed')
-    .select('id', 'platform_campaign_id');
+  // Removed campaigns stay in the lookup: the metrics query has no status
+  // filter, so a campaign removed since the last run still gets its last days
+  // of cost and any later correction.
+  const campaigns = await accountCampaigns(account).select('id', 'platform_campaign_id', 'status');
   const localId = new Map(campaigns.map((c) => [String(c.platform_campaign_id), c.id]));
 
-  // A lead names no campaign. With one live campaign in the account (the normal
-  // Local Services setup) every lead is that campaign's. With more than one the
-  // split is unknown, so the lead counts are left out and each row keeps
+  // With the owner unknown the lead counts are left out, and each row keeps
   // Google's own conversions number.
-  const leadCampaign = campaigns.length === 1 ? String(campaigns[0].platform_campaign_id) : null;
+  const owner = leadOwner(campaigns, metricRows);
+  const leadCampaign = owner && localId.has(owner) ? owner : null;
   if (!leadCampaign && leadRows.length) {
-    logger.warn(`[google-lsa] ${leadRows.length} lead(s) not counted: the account has ${campaigns.length} live campaigns, so a lead's campaign is unknown`);
+    logger.warn(`[google-lsa] ${leadRows.length} lead(s) not counted: no single campaign owns the leads in the window`);
   }
 
   const planned = planPerformanceDays({
@@ -315,16 +354,17 @@ async function syncDailyPerformance(customer, days = DEFAULT_DAYS) {
 async function runDailySync({ days = DEFAULT_DAYS } = {}) {
   const customer = getCustomer();
   if (!customer) return { configured: false, synced: {} };
+  const account = customerId();
   const synced = { campaigns: 0, performanceRows: 0 };
   let firstErr = null;
   try {
-    synced.campaigns = (await syncCampaigns(customer)).length;
+    synced.campaigns = (await syncCampaigns(customer, account)).length;
   } catch (err) {
     logger.error(`[google-lsa] syncCampaigns failed: ${err.message}`);
     firstErr = err;
   }
   try {
-    synced.performanceRows = (await syncDailyPerformance(customer, days)).length;
+    synced.performanceRows = (await syncDailyPerformance(customer, account, days)).length;
   } catch (err) {
     logger.error(`[google-lsa] syncDailyPerformance failed: ${err.message}`);
     firstErr = firstErr || err;
@@ -336,6 +376,7 @@ async function runDailySync({ days = DEFAULT_DAYS } = {}) {
 module.exports = {
   PLATFORM,
   isConfigured,
+  ownsCampaign,
   runDailySync,
   _private: {
     customerId,
@@ -343,6 +384,7 @@ module.exports = {
     mapCampaign,
     mapPerformanceRow,
     tallyLeadsByDay,
+    leadOwner,
     planPerformanceDays,
     dateRange,
     syncCampaigns,

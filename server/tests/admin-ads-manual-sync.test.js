@@ -8,7 +8,7 @@
  *   step answers 502, a lock another sync holds answers 409.
  * - PUT /campaigns/:id refuses a status change on a synced Meta campaign, as it
  *   already does on a Google one, and on a Local Services campaign the daily
- *   sync brought in (it carries Google's id); a campaign entered by hand keeps it.
+ *   sync owns (it carries the sync's account mark); one entered by hand keeps it.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -256,21 +256,42 @@ describe('PUT /campaigns/:id status on synced platforms', () => {
     ]);
   });
 
-  test('a google_lsa campaign entered by hand can still be retired through PUT', async () => {
+  test('a google_lsa campaign entered by hand can still be retired through PUT, with or without a Google id', async () => {
     campaignRow = { id: 'c-2', platform: 'google_lsa', status: 'active', campaign_name: 'LSA' };
-    const res = await call('PUT', '/campaigns/c-2', { status: 'removed' });
+    let res = await call('PUT', '/campaigns/c-2', { status: 'removed' });
     expect(res.status).toBe(200);
     expect(res.body.campaign.status).toBe('removed');
+    // An id typed at creation is not the sync's mark: the row is still hand-entered.
+    campaignRow = { id: 'c-5', platform: 'google_lsa', platform_campaign_id: '777', status: 'active', campaign_name: 'LSA', metadata: { note: 'typed in' } };
+    res = await call('PUT', '/campaigns/c-5', { status: 'removed' });
+    expect(res.status).toBe(200);
   });
 
-  test('a synced Local Services campaign refuses a status change but takes other edits', async () => {
-    campaignRow = { id: 'c-4', platform: 'google_lsa', platform_campaign_id: '555', status: 'active', campaign_name: 'Local Service Ads' };
+  test('a Local Services campaign the sync owns refuses a status change but takes other edits', async () => {
+    campaignRow = {
+      id: 'c-4', platform: 'google_lsa', platform_campaign_id: '555', status: 'active', campaign_name: 'Local Service Ads',
+      metadata: { lsa_customer_id: '7636809139' },
+    };
     let res = await call('PUT', '/campaigns/c-4', { status: 'paused' });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/comes from Google/);
     expect(updates).toEqual([]);
     res = await call('PUT', '/campaigns/c-4', { target_area: 'Bradenton' });
     expect(res.status).toBe(200);
+  });
+
+  test('a campaign marked by an account the sync no longer reads is editable again', async () => {
+    campaignRow = { id: 'c-6', platform: 'google_lsa', platform_campaign_id: '888', status: 'active', campaign_name: 'Old account', metadata: { lsa_customer_id: '1112223333' } };
+    const res = await call('PUT', '/campaigns/c-6', { status: 'removed' });
+    expect(res.status).toBe(200);
+  });
+
+  test('a generic write cannot set the sync mark', async () => {
+    campaignRow = { id: 'c-4', platform: 'google_lsa', platform_campaign_id: '555', status: 'active', campaign_name: 'Local Service Ads', metadata: { lsa_customer_id: '7636809139' } };
+    const res = await call('PUT', '/campaigns/c-4', { metadata: { lsa_customer_id: '1112223333' } });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/lsa_customer_id can't be set here/);
+    expect(updates).toEqual([]);
   });
 
   test('a Google campaign still points to /pause and /enable', async () => {
