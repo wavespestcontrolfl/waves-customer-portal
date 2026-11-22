@@ -31,7 +31,7 @@
 const { redactAccessCodes } = require('../context-aggregator');
 const CompletionRecap = require('../completion-recap');
 const {
-  noteRecordCopyViolations, heldAccessCode, CODE_SHAPED_NUMBER_RE, REPORT_NOTE_LINE_BREAK,
+  noteRecordCopyViolations, heldAccessCode, CODE_SHAPED_NUMBER_RE, REPORT_NOTE_LINE_BREAK, MAX_REPORT_NOTE_CHARS,
 } = require('./technician-report-copy');
 const { writerRulesRejectionDetail, lowercaseGermanRoach } = require('./report-writer-rules');
 const {
@@ -146,8 +146,11 @@ const DAY_SRC = '\\d{1,2}(?:st|nd|rd|th)?';
 const DATE_RE = new RegExp(`\\b(?:${MONTH_SRC}|may)\\.?\\s+${DAY_SRC}\\b|\\b${DAY_SRC}\\s+(?:of\\s+)?${MONTH_SRC}\\b|\\b${DAY_SRC}\\s+of\\s+may\\b`, 'i');
 // A date in figures: with its year anywhere ("11/22/26"), else a month and
 // a day after a word that leads to a day ("on 11/22", "on 3/4"). Figures
-// with a measure after them are a fraction ("mesh on 1/4 inch gaps").
-const MEASURE_SRC = '["\'″′]|(?:inch(?:es)?|in|ft|foot|feet|oz|ounces?|gal(?:lons?)?|cups?|lbs?|pounds?|acres?|yards?|of)\\b';
+// with a measure after them are a fraction ("mesh on 1/4 inch gaps"). "In"
+// is a measure only before what it measures ("on 1/4 in gaps"): "on 11/22
+// in the yard" is a date.
+const MEASURE_SRC = '["\'″′]|(?:inch(?:es)?|ft|foot|feet|oz|ounces?|gal(?:lons?)?|cups?|lbs?|pounds?|acres?|yards?|of)\\b'
+  + '|in\\.?\\s+(?:gaps?|holes?|cracks?|openings?|mesh|wide|long|deep|thick)\\b';
 const FIGURE_DATE_RE = new RegExp('\\b\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}\\b'
   + `|\\b(?:on|by|until|till|after|before|since)\\s+(?:the\\s+)?\\d{1,2}\\/\\d{1,2}\\b(?![\\s-]*(?:${MEASURE_SRC}))`, 'i');
 const timeIn = (text) => TIME_WORD_RE.exec(text) || DATE_RE.exec(text) || FIGURE_DATE_RE.exec(text);
@@ -221,7 +224,12 @@ function whatMayGo(screens, names) {
   const reasonOf = (fragment) => wordRejection(fragment, screens)?.reason || null;
   const figure = (word) => word.replace('point', '.').replace(/mark(\d+)mark/g, (_, code) => String.fromCodePoint(Number(code)));
   return {
-    wordGoes: (word) => word === 'redacted' || GOES_ALONE.has(reasonOf(word)),
+    // The reason is the answer: 'time' tells the order check that the word
+    // carried the tense of its part.
+    wordGoes: (word) => {
+      const reason = word === 'redacted' ? word : reasonOf(word);
+      return (reason === 'redacted' || GOES_ALONE.has(reason)) && reason;
+    },
     pairGoes: (first, second) => REFUSED_PAIRS.includes(`${first} ${second}`)
       || (isCount(first) && !isCount(second) && (PERIOD_RE.test(second) || reasonOf(`${figure(first)} ${second}`) === 'amount')),
     partGoes: (part) => {
@@ -261,13 +269,16 @@ async function reportNoteRejection({ note, text, catalogRows = null, db = null }
 // A sentence of the recap the reader's screen refuses is left out, so the
 // reader shows the rest ("We checked the accessible areas": "accessible"
 // reads as a word of access).
-// When no sentence is left (a service name the reader refuses: "Gate
-// inspection"), the recap is written with no service name and no areas.
+// The reader shows at most MAX_REPORT_NOTE_CHARS, and nothing of a longer
+// note: a recap that many long area names make longer is written with no
+// areas. When no sentence is left (a service name the reader refuses: "Gate
+// inspection"), it is written with no service name either.
 function fixedReportNote({ serviceType, areasServiced, visitOutcome } = {}) {
   const shown = (text) => !noteRecordCopyViolations(text).length;
   const kept = (recap) => (shown(recap) ? recap : recap.split(/(?<=\.)\s+/).filter(shown).join(' '));
-  return kept(CompletionRecap.deterministicRecap({ serviceType, areasTreated: areasServiced, visitOutcome }))
-    || kept(CompletionRecap.deterministicRecap({ visitOutcome }));
+  return [{ serviceType, areasTreated: areasServiced, visitOutcome }, { serviceType, visitOutcome }, { visitOutcome }]
+    .map((facts) => kept(CompletionRecap.deterministicRecap(facts)))
+    .find((text) => text && text.length <= MAX_REPORT_NOTE_CHARS) || '';
 }
 
 module.exports = {

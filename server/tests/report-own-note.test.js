@@ -102,6 +102,7 @@ describe('the wordings the reader lets stand are refused where the note is writt
     'Foot traffic can resume on Fri.',
     'Foot traffic can resume on 11/22.',
     'Foot traffic can resume on 3/4.',
+    'Foot traffic can resume on 11/22 in the yard.',
     'I treated the patio on 11/22/26.',
     'Do not enter the yard.',
     'Use rose at the back.',
@@ -208,6 +209,13 @@ describe('the stored text and the fixed sentence', () => {
       expect(reportNoteCustomerCopy({ reportNote: { v: 1, text, source: 'fixed' } }).body).toBe(text);
     }));
     expect(fixedReportNote({ serviceType: 'Pest Control', areasServiced: [], visitOutcome: 'inspection_only' })).not.toMatch(/accessible/);
+    // Area names that make the recap longer than the reader shows: no areas.
+    const longAreas = Array.from({ length: 12 }, (_, n) => `the long covered walkway number ${n + 1} beside the east side of the main building`);
+    outcomes.forEach((visitOutcome) => {
+      const text = fixedReportNote({ serviceType: 'Pest Control', areasServiced: longAreas, visitOutcome });
+      expect(text).not.toBe('');
+      expect(reportNoteCustomerCopy({ reportNote: { v: 1, text, source: 'fixed' } }).body).toBe(text);
+    });
     // A service name and an area the reader refuses: still a sentence it shows.
     outcomes.forEach((visitOutcome) => {
       const text = fixedReportNote({ serviceType: 'Gate inspection', areasServiced: ['side gate'], visitOutcome });
@@ -238,5 +246,11 @@ describe('the stored text and the fixed sentence', () => {
     await expect(refusal('do not see activity in the attic', 'I do not see activity in the attic.')).resolves.toBeNull();
     await expect(refusal('put mesh on 1/4 inch gaps', 'I put mesh on 1/4 inch gaps.')).resolves.toBeNull();
     await expect(refusal('put mesh on 3/4" gaps', 'I put mesh on 3/4" gaps.')).resolves.toBeNull();
+    await expect(refusal('put mesh on 1/4 in gaps', 'I put mesh on 1/4 in gaps.')).resolves.toBeNull();
+  });
+
+  test('a plan stays a plan when its word of time goes', async () => {
+    expect(await refusal('treating outside tomorrow', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
+    await expect(refusal('treating outside tomorrow', 'Treating outside.')).resolves.toBeNull();
   });
 });

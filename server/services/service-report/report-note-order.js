@@ -12,7 +12,9 @@
  *     refuse: a word, two words together, or a whole part of the note.
  * It reads the two strings and nothing else about the visit, and it holds no
  * list of what a report may not say. That is the caller's `screen`:
- *   wordGoes(word)           may this one word of the note go?
+ *   wordGoes(word)           may this one word of the note go? The answer
+ *                            'time' means a word of time: it carried the
+ *                            tense of its part (addedTenseRejection).
  *   pairGoes(first, second)  do these two words go together, or not at all
  *                            ("no issues", a figure and its unit)?
  *   partGoes(part)           may this whole part of the note go?
@@ -250,6 +252,7 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
     return samePart(i, before) && isActor(note[before]) && note.some((word, j) => j > i && samePart(i, j) && TREATMENTS.has(word));
   };
   const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word) && !saysWhoWasTreated(i)));
+  const timed = note.map((word) => wordGoes(word) === 'time');
   const [whole, conditional] = [new Set(), new Set()];
   parts.forEach((raw, id) => {
     const partWords = words.filter((entry) => entry.part === id).map((entry) => entry.word);
@@ -261,7 +264,7 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
   // word before it: see placeInNote.
   const follows = new Map(groups.filter((group) => group.length > 1).map((group) => [group[0], group[1]]));
   const continues = new Map(groups.flatMap((group) => group.slice(1).map((at, n) => [at, group[n]])));
-  return { single, leans, groups, follows, continues, whole, conditional };
+  return { single, leans, groups, follows, continues, whole, conditional, timed };
 }
 
 // ── Same order ─────────────────────────────────────────────────────────
@@ -439,7 +442,7 @@ function walkNote(textWords, read, rules, hidden) {
   // you."), and a sentence made of added and small words, say what the note
   // did not.
   const empty = Math.max(added.i, added.you, textWords.findIndex((entry) => !saysSomething.has(entry.id)));
-  return empty >= 0 ? stop('not_in_note', empty) : { usedIn };
+  return empty >= 0 ? stop('not_in_note', empty) : { usedIn, placedAt };
 }
 
 // What the text left out and may not: some of the words that go together,
@@ -460,6 +463,17 @@ function leftOutRejection(usedIn, out, read, rules) {
   const missing = noteList.findIndex((word, i) => !used(i) && !rules.single[i] && !leansOnGone(i) && !partGoes(read.words[i]));
   if (missing < 0) return null;
   return { reason: out.some((word) => sameWord(word, noteList[missing])) ? 'out_of_order' : 'left_out', words: [noteList[missing]] };
+}
+
+// A word of time carries the tense of its part: "treating outside tomorrow"
+// is a plan. Where one went, the text adds no form of "is" right before a
+// word in "-ing" of that part: "I was treating outside." is past work.
+function addedTenseRejection(textWords, placedAt, read, rules) {
+  const taken = new Set(placedAt);
+  const lostTime = new Set(read.words.filter((_, i) => rules.timed[i] && placedAt[i] < 0).map((entry) => entry.part));
+  const added = (at) => at >= 0 && !taken.has(at) && FORMS_OF_IS.has(textWords[at].word);
+  const wrong = read.words.findIndex((entry, i) => lostTime.has(entry.part) && entry.word.endsWith('ing') && added(placedAt[i] - 1));
+  return wrong < 0 ? null : { reason: 'not_in_note', words: [textWords[placedAt[wrong] - 1].word] };
 }
 
 /**
@@ -483,8 +497,8 @@ function orderRejection(text, note, { wordGoes = NOTHING_GOES, pairGoes = NOTHIN
   const textWords = readText(text);
   const out = textWords.map((entry) => entry.word);
   const check = (hidden) => {
-    const { usedIn, rejection } = walkNote(textWords, read, rules, hidden);
-    return rejection || leftOutRejection(usedIn, out, read, rules);
+    const { usedIn, placedAt, rejection } = walkNote(textWords, read, rules, hidden);
+    return rejection || leftOutRejection(usedIn, out, read, rules) || addedTenseRejection(textWords, placedAt, read, rules);
   };
   // A part that goes may share a word with a part that stays ("no activity
   // inside. no ants in the kitchen"), and the walk takes the first place it
