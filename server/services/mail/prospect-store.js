@@ -85,6 +85,15 @@ function permitNamesParcelAddress(addressRaw, parcel) {
   return false;
 }
 
+// The last issue date that counts for a permit: the sale day when the caller gives one, else today.
+function lastIssueDay(options, today) {
+  // The connection is the last argument, as in the other store functions. A handle in the options' place would be
+  // ignored, and the read would run on the default handle: refuse it.
+  if (typeof options === 'function') throw new TypeError('newHomePermitsForParcels: the connection is the third argument');
+  const soldOn = String(options?.soldOn || '');
+  return /^\d{4}-\d{2}-\d{2}$/.test(soldOn) && soldOn < today ? soldOn : today;
+}
+
 /**
  * The newest new-home permit of each parcel, as `{ [parid]: permit row }`. `parcels` are the county map's parcels:
  * `{ parid, addressLine1, city, zip }`.
@@ -110,8 +119,12 @@ function permitNamesParcelAddress(addressRaw, parcel) {
  *     status for ever; it must not count for ever.
  * Months count back from today in Eastern time (monthsAgoIso), not from the database session's date. A certificate
  * or an issue date after today is a mistake in the county's data, not a new home: both dates stop at today.
+ * With options.soldOn (the deed's recording date, YYYY-MM-DD) the issue date stops at that day: a deed is read for
+ * several days, and the buyer of a lot can get a permit in those days. That permit is not a home a builder sold.
  */
-async function newHomePermitsForParcels(parcels, conn = db) {
+async function newHomePermitsForParcels(parcels, options, conn = db) {
+  const today = monthsAgoIso(0);
+  const issuedBy = lastIssueDay(options, today);
   const wanted = new Map(); // pin form -> the parcels that could own a permit under it
   for (const parcel of parcels || []) {
     const key = looseAddressKey(parcel?.addressLine1, parcel?.zip);
@@ -122,7 +135,6 @@ async function newHomePermitsForParcels(parcels, conn = db) {
     }
   }
   if (wanted.size === 0) return {};
-  const today = monthsAgoIso(0);
   const coFloor = monthsAgoIso(NEW_HOME_CO_MONTHS);
   const issuedFloor = monthsAgoIso(CONSTRUCTION_ACTIVE_MONTHS);
   const seenAfter = new Date(Date.now() - ACTIVE_SEEN_WITHIN_DAYS * 24 * 60 * 60 * 1000);
@@ -133,6 +145,9 @@ async function newHomePermitsForParcels(parcels, conn = db) {
     .whereRaw("type_of_work NOT ILIKE '%accessory%'")
     .whereRaw("type_of_work NOT ILIKE '%guest%'")
     .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')")
+    // An issue date after today on any permit: the newest-first order below would put it before the parcel's
+    // real permit. A finished home's permit may have no issue date.
+    .where((b) => b.whereNull('issued_date').orWhere('issued_date', '<=', issuedBy))
     .where((b) => b
       .whereBetween('co_date', [coFloor, today])
       .orWhere((open) => open
@@ -187,6 +202,23 @@ function writableFields(row) {
   return out;
 }
 
+// How careful a stored answer is (see saveProspect). `unmatched` is no answer and has no rank.
+const ANSWER_RANK = { eligible: 1, held_back: 1, not_eligible: 2 };
+const KNOWN_STATUSES = ['unmatched', ...Object.keys(ANSWER_RANK)];
+
+// The table's two CHECKs, for a row that is not written because a stored answer is kept: the table never sees
+// that row. The refusal has the code and the constraint name PostgreSQL gives, so a caller sees one kind of
+// refusal whether or not the deed already has an answer.
+function refuseRowTheTableWouldRefuse(row) {
+  const blank = (value) => String(value ?? '').trim() === '';
+  let constraint = null;
+  if (!KNOWN_STATUSES.includes(row.status)) constraint = 'mail_prospects_status_check';
+  else if (ANSWER_RANK[row.status] === ANSWER_RANK.eligible && (blank(row.parcel_pin) || blank(row.permit_no))) {
+    constraint = 'mail_prospects_live_has_parcel_and_permit';
+  }
+  if (constraint) throw Object.assign(new Error(`mail_prospects refuses the row: ${constraint}`), { code: '23514', constraint });
+}
+
 async function upsert(row, conn) {
   const fields = writableFields(row);
   const now = conn.fn.now();
@@ -197,8 +229,8 @@ async function upsert(row, conn) {
     })
     .onConflict(['list_key', 'source', 'source_ref'])
     .merge({ ...fields, last_checked_at: now, updated_at: now }) // first_seen_at and created_at stay as they were
-    .returning('status');
-  return saved.status;
+    .returning(['status', 'reason']);
+  return { status: saved.status, reason: saved.reason, written: true };
 }
 
 /**
@@ -206,16 +238,33 @@ async function upsert(row, conn) {
  * the list under another deed, or its permit already backs another live home, a unique index refuses the write; the
  * row is then kept as not_eligible with the reason duplicate_parcel or duplicate_permit, so the deed is never read
  * again and the run does not fail. Any other refusal (a live row without a parcel or a permit, an unknown status)
- * is the caller's error and is thrown. Returns the status that was saved.
+ * is the caller's error and is thrown. Returns `{ status, reason, written }`: the status and the reason the row
+ * holds after the call, and whether this call wrote them.
  *
  * The write and its fallback are one unit: one transaction (a savepoint inside a caller's transaction) that first
  * takes a lock on the deed's identity. A second save of the same deed waits for the whole first save, so it can
  * never land between the refused write and the fallback and then be overwritten by that fallback. The first write
  * runs in its own savepoint, so a refusal rolls back only that write.
+ *
+ * A save never replaces a stored answer with a less careful one. `unmatched` is "no answer yet"; a live home
+ * (eligible, held_back) is an answer; not_eligible is the most careful answer. A stored answer is replaced only by
+ * a more careful one: a live home by not_eligible, and nothing replaces not_eligible. Else nothing is written and
+ * the stored status and reason are returned with `written: false`; a row the table would refuse is still refused,
+ * with the same code and constraint name. Two runs can judge one deed at the same time. The run that could not reach the
+ * parcel map must not undo the other's result, and a home one run found to be a known address must stay
+ * not_eligible whichever run saves last. The stored row is read under the same lock.
  */
 async function saveProspect(row, conn = db) {
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`mail_prospects:${row.list_key}:${row.source}:${row.source_ref}`]);
+    const stored = await trx('mail_prospects')
+      .where({ list_key: row.list_key, source: row.source, source_ref: row.source_ref })
+      .first('status', 'reason');
+    const storedRank = stored ? ANSWER_RANK[stored.status] : undefined;
+    if (storedRank && !(ANSWER_RANK[row.status] > storedRank)) {
+      refuseRowTheTableWouldRefuse(row);
+      return { status: stored.status, reason: stored.reason, written: false };
+    }
     try {
       return await trx.transaction((attempt) => upsert(row, attempt));
     } catch (err) {
