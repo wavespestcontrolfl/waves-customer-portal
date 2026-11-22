@@ -298,7 +298,7 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
       workflow: 'referral_invite',
       entity_type: 'referral_promoter',
       entity_id: promoter.id,
-    }), await engine.step2FriendCreditCents());
+    }), { step2On: isEnabled('referralStep2'), refereeCents: await engine.step2FriendCreditCents() });
 
     // Cooldown: same promoter+phone within 24 hours = no-op (idempotent
     // double-tap protection). The receipt is reserved ATOMICALLY before the

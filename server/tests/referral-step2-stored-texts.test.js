@@ -41,27 +41,37 @@ describe('the seeded sentences are in the seeds', () => {
 });
 
 describe('inviteSmsWithOffer (the invite text, column and referral_invite row)', () => {
-  test('gate off or no amount: the text is returned exactly as rendered', () => {
-    for (const seed of [COLUMN_SEED, ROW_SEED]) {
-      const body = fillColumn(seed);
-      for (const cents of [0, undefined, null, -5, NaN]) expect(step2.inviteSmsWithOffer(body, cents)).toBe(body);
+  test('gate off: the text is returned exactly as rendered, whatever the amount', () => {
+    for (const body of [fillColumn(COLUMN_SEED), fillRow(ROW_SEED)]) {
+      expect(step2.inviteSmsWithOffer(body)).toBe(body);
+      for (const refereeCents of [0, 5000]) expect(step2.inviteSmsWithOffer(body, { step2On: false, refereeCents })).toBe(body);
+    }
+  });
+
+  test('gate on with no friend credit to state: the seeded "You\'ll both save" becomes the neutral words, never a reward', () => {
+    for (const refereeCents of [0, undefined, null, -5, NaN]) {
+      expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents })).toBe(
+        `Hi Jo! Your neighbor Sam recommended Waves. Get a free quote: ${LINK}`,
+      );
+      // The referral_invite row already names no reward: unchanged.
+      expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), { step2On: true, refereeCents })).toBe(fillRow(ROW_SEED));
     }
   });
 
   test('the column text gets the approved words with the live amount', () => {
-    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), 5000)).toBe(
+    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents: 5000 })).toBe(
       `Hi Jo! Your neighbor Sam recommended Waves. Start a plan and get a $50 credit after your first plan service: ${LINK}`,
     );
   });
 
   test('the referral_invite row gets the approved words and keeps its STOP line', () => {
-    expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), 5000)).toBe(
+    expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), { step2On: true, refereeCents: 5000 })).toBe(
       `Hi Jo, Sam recommended Waves to you. Start a plan and get a $50 credit after your first plan service: ${LINK}\n\nReply STOP to opt out.`,
     );
   });
 
   test('cents are shown to the cent', () => {
-    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), 2550)).toContain('get a $25.50 credit after');
+    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents: 2550 })).toContain('get a $25.50 credit after');
   });
 
   test('a text an admin rewrote is left as it is', () => {
@@ -69,15 +79,15 @@ describe('inviteSmsWithOffer (the invite text, column and referral_invite row)',
       `Hi Jo, Sam says Waves is great: ${LINK}`,
       `Hi Jo! Sam recommended Waves. You'll both save $10 when you sign up: ${LINK}`,
       `Hi Jo! Your neighbor Sam recommended Waves. You'll both save when you sign up, so call us: ${LINK} Thanks!`,
-    ]) expect(step2.inviteSmsWithOffer(edited, 5000)).toBe(edited);
+    ]) for (const refereeCents of [5000, 0]) expect(step2.inviteSmsWithOffer(edited, { step2On: true, refereeCents })).toBe(edited);
   });
 
   test('a name that holds the seeded sentence is not swapped: only the stretch before the link counts', () => {
     const name = "Pat recommended Waves. You'll both save when you sign up: ";
     const rewritten = `Hi Jo, ${name}recommended Waves to you. Call us: ${LINK}`;
-    expect(step2.inviteSmsWithOffer(rewritten, 5000)).toBe(rewritten);
+    expect(step2.inviteSmsWithOffer(rewritten, { step2On: true, refereeCents: 5000 })).toBe(rewritten);
     const seeded = fillColumn(COLUMN_SEED, { referee: 'Jo', referrer: name });
-    expect(step2.inviteSmsWithOffer(seeded, 5000)).toBe(
+    expect(step2.inviteSmsWithOffer(seeded, { step2On: true, refereeCents: 5000 })).toBe(
       `Hi Jo! Your neighbor ${name} recommended Waves. Start a plan and get a $50 credit after your first plan service: ${LINK}`,
     );
   });
@@ -236,17 +246,17 @@ describe('submitReferral sends the stored invite (column), swapped only while th
     expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Start a plan and get a \$50 credit after your first plan service: \S+$/);
   });
 
-  test('gate on, the friend credit is $0 or the program is paused: today\'s words', async () => {
+  test('gate on, the friend credit is $0 or the program is paused: neutral words, never "You\'ll both save"', async () => {
     gates.referralStep2 = true;
     settingsRow.referee_discount_cents = 0;
     await send();
-    expect(sentBody()).toMatch(/You'll both save when you sign up: /);
+    expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Get a free quote: \S+$/);
     sendCustomerMessage.mockClear();
     installDb();
     settingsRow.referee_discount_cents = 5000;
     settingsRow.program_active = false;
     await send();
-    expect(sentBody()).toMatch(/You'll both save when you sign up: /);
+    expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Get a free quote: \S+$/);
   });
 
   test('gate on, a hand-edited stored text: sent as stored, with no amount', async () => {

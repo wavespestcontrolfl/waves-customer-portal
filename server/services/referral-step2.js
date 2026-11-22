@@ -102,8 +102,9 @@ const memberCreditEmailLine = (rewardDollars, { canTurnOnAutomaticCredit = false
 // The stored texts (words: owner 2026-11-21). The texts in the database stay as they are; with the gate on, the SEEDED
 // sentence inside a rendered text is swapped for the approved Step 2 words, so nothing is edited by hand on flip day and
 // the amounts are always the live setting. A text an admin rewrote no longer holds the seeded sentence and is returned
-// as stored. Every swap takes the amount in cents from the caller (0 = say nothing new, body unchanged) and uses
-// string slicing, never a replacement string, because the words hold "$".
+// as stored. Every swap takes the amounts in cents from the caller and states a credit only when it is above 0: with
+// the gate on a seeded reward sentence is never sent as stored. Swaps use string slicing, never a replacement
+// string, because the words hold "$".
 
 // The referral invite text (the Referral Settings column, and the referral_invite row the app does not call today).
 // head = the words before the offer; legacy = the seeded offer. The seeded text ends "<stretch><link>" with an optional
@@ -114,16 +115,20 @@ const SEEDED_INVITE_OFFERS = Object.freeze([
 ]);
 const INVITE_TAIL = /^\S+(?:\n\nReply STOP to opt out\.)?$/;
 const friendInviteSmsOffer = (refereeCents) => `Start a plan and get a ${dollars(refereeCents)} credit after your first plan service`;
+// With the gate on and no friend credit to state (a $0 setting, the program paused, the settings unreadable), a seeded
+// invite promises nothing: the referral_invite row's own words, which name no reward.
+const NEUTRAL_INVITE_OFFER = 'Get a free quote';
 
-// `body` is the RENDERED text (names and link filled in).
-function inviteSmsWithOffer(body, refereeCents) {
+// `body` is the RENDERED text (names and link filled in). step2On false (the gate is off): exactly as rendered.
+function inviteSmsWithOffer(body, { step2On = false, refereeCents = 0 } = {}) {
   const text = String(body ?? '');
-  if (!(Number(refereeCents) > 0)) return text;
+  if (!step2On) return text;
+  const offer = Number(refereeCents) > 0 ? friendInviteSmsOffer(refereeCents) : NEUTRAL_INVITE_OFFER;
   for (const { head, legacy } of SEEDED_INVITE_OFFERS) {
     const seeded = `${head}${legacy}: `;
     const at = text.lastIndexOf(seeded);
     if (at >= 0 && INVITE_TAIL.test(text.slice(at + seeded.length))) {
-      return `${text.slice(0, at)}${head}${friendInviteSmsOffer(refereeCents)}: ${text.slice(at + seeded.length)}`;
+      return `${text.slice(0, at)}${head}${offer}: ${text.slice(at + seeded.length)}`;
     }
   }
   return text;

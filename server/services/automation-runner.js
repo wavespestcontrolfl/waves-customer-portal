@@ -366,11 +366,14 @@ async function referralNudgeDecision({ template, enrollment, testRecipient }) {
   return require('./referral-engine').referralOfferDecision(db, enrollment.customer_id);
 }
 
-// A decision that makes no new promise (gate off, skip, none) leaves the body as stored.
+// Gate off, or no decision: the body as stored. Gate on: the seeded sentence is always swapped. A decision that can
+// promise nothing (skip: the program paused or its settings unreadable) states no credit, so a test send and the
+// preview page never show the seeded reward while a real send is deferred.
 function nudgeOffer(decision) {
-  return decision?.gateOn && !decision.skip
-    ? { refereeCents: decision.refereeCents, memberCents: decision.memberCents, atLimit: decision.atLimit }
-    : null;
+  if (!decision?.gateOn) return null;
+  return decision.skip
+    ? { refereeCents: 0, memberCents: 0, atLimit: false }
+    : { refereeCents: decision.refereeCents, memberCents: decision.memberCents, atLimit: decision.atLimit };
 }
 
 function nudgeBody(body, decision, html) {

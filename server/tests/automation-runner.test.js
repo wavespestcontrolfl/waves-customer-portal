@@ -854,6 +854,16 @@ describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
       expect(sentMail().text).toContain('you each get a $25 account credit');
     });
 
+    test('a test send while the program is paused or unreadable shows no reward (a real send is deferred)', async () => {
+      decide({ gateOn: true, skip: true, atLimit: false, reason: 'program paused' });
+      nudgeQueues({ stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') } });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-test-paused' });
+      await expect(sendStep('enrollment-n', { testRecipient: 'office@example.com' })).resolves.toMatchObject({ sent: true });
+      expect(sentMail().text).toContain('Share your referral link from the Refer tab in your portal. Or reply with their name');
+      expect(sentMail().text).not.toMatch(/account credit/);
+      expect(sentMail().html).not.toMatch(/account credit/);
+    });
+
     test('a test send has no member: it shows what a member under the limit gets (a null member id)', async () => {
       const spy = decide(ON);
       nudgeQueues({ stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') } });

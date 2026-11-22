@@ -580,8 +580,8 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   }
 
   // --- Send invite SMS ---
-  // GATE_REFERRAL_STEP2: the seeded sentence becomes the approved Step 2 words (referral-step2.js); gate off, no read and
-  // the text is exactly as stored.
+  // GATE_REFERRAL_STEP2: the seeded sentence becomes the approved Step 2 words, or neutral words when there is no
+  // friend credit to state (referral-step2.js); gate off, no read and the text is exactly as stored.
   const smsBody = step2.inviteSmsWithOffer(await renderReferralSms('referral_invite', {
     referee_name: firstName,
     referrer_name: referrerName || promoter.first_name || 'your neighbor',
@@ -590,7 +590,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
     workflow: 'referral_invite',
     entity_type: 'referral',
     entity_id: referral.id,
-  }), await step2FriendCreditCents());
+  }), { step2On: isEnabled('referralStep2'), refereeCents: await step2FriendCreditCents() });
   const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody, {
     messageType: 'referral_invite',
     referralId: referral.id,

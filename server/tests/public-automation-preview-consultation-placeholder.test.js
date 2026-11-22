@@ -45,6 +45,16 @@ describe('public automation preview — the referral_nudge words (GATE_REFERRAL_
     expect(shown.html_body).toContain('they get a <strong>$50 account credit</strong> after their first service. After we complete their first service, you get a <strong>$25 account credit</strong>.</p>');
   });
 
+  test('gate on, the program paused or its settings unreadable: no reward is shown, as a real send is deferred', async () => {
+    for (const reason of ['program paused', 'settings unavailable']) {
+      jest.spyOn(engine, 'referralOfferDecision').mockResolvedValue({ gateOn: true, skip: true, atLimit: false, reason });
+      const shown = await preview._test.withNudgeOffer(step());
+      expect(shown.preview_text).toBe('Refer a neighbor.');
+      expect(shown.html_body).toContain('<p>Share your personal referral link — it\'s in the Refer tab of your customer portal.</p>');
+      expect(shown.html_body).not.toMatch(/account credit/);
+    }
+  });
+
   test('any other step is shown as stored, with no read', async () => {
     const spy = jest.spyOn(engine, 'referralOfferDecision');
     const other = { template_key: 'new_lead', subject: 'S', preview_text: 'p', html_body: '<p>x</p>' };
