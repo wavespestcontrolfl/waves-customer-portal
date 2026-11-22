@@ -362,6 +362,15 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(KnowledgeBridge._test.preparedAnswers.has(assessment.id)).toBe(false);
   });
 
+  test('GATE_LAWN_REC_PREPARE off: no early call starts', async () => {
+    const assessment = await seedAssessment();
+    delete process.env.GATE_LAWN_REC_PREPARE;
+
+    await expect(KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER])).resolves.toEqual({ started: false });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(KnowledgeBridge._test.preparedAnswers.has(assessment.id)).toBe(false);
+  });
+
   test('an assessment whose visit rows are saved gets no early call', async () => {
     const assessment = await seedAssessment();
     await saveVisitRows(assessment.id, [FERTILIZER]);
