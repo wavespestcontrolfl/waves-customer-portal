@@ -926,6 +926,13 @@ function payRateError(body) {
   return body[key] != null && body[key] !== '' && !valid(body[key]) ? message : null;
 }
 
+// A hire date must be a calendar date, YYYY-MM-DD. PostgreSQL's date type also takes a year past 9999 (one key too many in
+// the date box) and 'infinity', and no pay code can work an anniversary out from those. Absent, null or '' keeps or clears
+// the column, as for the pay rate.
+function hireDateError(body) {
+  return body.hireDate != null && body.hireDate !== '' && !validDateOnly(body.hireDate) ? 'Hire date must be a valid YYYY-MM-DD date' : null;
+}
+
 // One audit row when a save changes the pay rate (the old and new rate only; no other pay data).
 async function auditPayRateChange(trx, req, target, updates) {
   if (!('pay_rate' in updates)) return;
@@ -1100,6 +1107,8 @@ async function createTechnician(req, res, next) {
     if (workDays.error) return res.status(400).json({ error: workDays.error });
     const shiftHours = normalizeShiftHoursInput(body.shiftHours);
     if (shiftHours.error) return res.status(400).json({ error: shiftHours.error });
+    const badHireDate = hireDateError(body);
+    if (badHireDate) return res.status(400).json({ error: badHireDate });
 
     const insertRow = {
       name: name.trim(),
@@ -1198,6 +1207,8 @@ async function updateTechnician(req, res, next) {
     if (shiftHours.error) return res.status(400).json({ error: shiftHours.error });
     const badPayRate = payRateError(body);
     if (badPayRate) return res.status(400).json({ error: badPayRate });
+    const badHireDate = hireDateError(body);
+    if (badHireDate) return res.status(400).json({ error: badHireDate });
 
     const outcome = await db.transaction(async (trx) => {
       // Every Staff identity writer takes the table lock before a row lock.

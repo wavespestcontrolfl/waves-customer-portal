@@ -165,7 +165,8 @@ function CheckNumberCell({ call, check, onSaved }) {
   </form>;
 }
 
-// A Tech Rewards line (December gift) that is due but not on this run (GATE_TECH_REWARDS_PAY_LINES). It holds nothing.
+// A Tech Rewards line (December gift, stay bonus) that is due but not on this run (GATE_TECH_REWARDS_PAY_LINES,
+// GATE_TECH_REWARDS_STAY_BONUS). It holds nothing.
 function WaitingBonuses({ notes = [] }) {
   if (!notes.length) return null;
   return <div>

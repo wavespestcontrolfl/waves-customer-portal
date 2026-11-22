@@ -130,7 +130,7 @@ const CUSTOMER_UNREAD_INBOUND_SQL = `(
 const REMINDER_STAMP_KEYS = Object.freeze(['leadCallReminderAt', 'newLeadRealertAt', 'newLeadRealertLeads']);
 const VERSIONED_METADATA_SQL = `CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata${REMINDER_STAMP_KEYS.map((key) => ` - '${key}'`).join('')} ELSE metadata END`;
 const NOTIFICATION_VERSION_SQL = `md5(jsonb_build_array(title, body, link, detail, ${VERSIONED_METADATA_SQL})::text)`;
-// GATE_ALERT_BELL_ORDER: where a row sits in the admin bell. 0 = metadata.severity is 'needs-you'; 1 = no severity label
+// Where a row sits in the admin bell. 0 = metadata.severity is 'needs-you'; 1 = no severity label
 // (an older or unconverted alert stays above known FYI rows); 2 = any other severity. Inside a rank: newest first.
 const BELL_RANK_SQL = "(CASE WHEN metadata->>'severity' = 'needs-you' THEN 0 WHEN COALESCE(metadata->>'severity', '') = '' THEN 1 ELSE 2 END)";
 
@@ -1034,25 +1034,25 @@ const NotificationService = {
   // is exact, so rows sharing a millisecond are never skipped or repeated.
   // An owner-only row (metadata.ownerOnly: a Claude plan or copy) is listed for the owner login only (`fullAccess`).
   //
-  // ranked (GATE_ALERT_BELL_ORDER, the route passes it): the feed order becomes BELL_RANK_SQL ASC, created_at DESC,
-  // id DESC, and every row also selects its rank as bell_rank for the route's cursor. The cursor then carries
-  // `before.rank`: "strictly after" is a higher rank, or the same rank and an older (created_at, id). The route only
-  // passes a cursor of the same order (a cursor of the other order restarts at page 1). Offset paging uses the same order.
-  async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null, fullAccess = false, ranked = false } = {}) {
+  // The feed order is BELL_RANK_SQL ASC, created_at DESC, id DESC, and every row also selects its rank as bell_rank
+  // for the route's cursor. The cursor carries `before.rank`: "strictly after" is a higher rank, or the same rank and an
+  // older (created_at, id). The route only passes a cursor of this order (a chronological cursor restarts at page 1).
+  // Offset paging uses the same order.
+  async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null, fullAccess = false } = {}) {
     const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role, technicianId,
     ));
     if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
-    if (before && ranked) {
+    if (before) {
       const { rank } = before;
       query.whereRaw(`(${BELL_RANK_SQL} > ? OR (${BELL_RANK_SQL} = ? AND (created_at, id) < (?::timestamptz, ?::uuid)))`,
         [rank, rank, before.at, before.id]);
-    } else if (before) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
+    }
     const rows = await query
       .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`), db.raw('created_at::text AS created_at_cursor'),
-        ...(ranked ? [db.raw(`${BELL_RANK_SQL} AS bell_rank`)] : []))
-      .orderByRaw(ranked ? `${BELL_RANK_SQL} ASC, created_at DESC, id DESC` : 'created_at DESC, id DESC')
+        db.raw(`${BELL_RANK_SQL} AS bell_rank`))
+      .orderByRaw(`${BELL_RANK_SQL} ASC, created_at DESC, id DESC`)
       .limit(limit).offset(offset);
     if (!role || role === 'admin') return rows;
     // A non-admin reads a technician's copy of a row whose trigger names techOmit keys (call content, owner
