@@ -4,8 +4,11 @@
 // read, ONE portal row stands for the account (found by its mark, never
 // 'removed'), a day's conversions are always its leads charged and not credited
 // back, a lead-only day still gets a row, and a failed step fails the run.
+// Everything is read from Google and checked first; the row and its days are
+// then written in one transaction.
 // Regression guarded: Local Services cost never reaching the Ads page, history
-// lost when Google replaces the campaign, or a failed sync reading as a success.
+// lost when Google replaces the campaign, a stopped run leaving half its rows,
+// or a failed sync reading as a success.
 
 let accountRowInDb; // the row the mark lookup finds (undefined = first run)
 let storedPerfRows = [];
@@ -21,9 +24,9 @@ const mockDb = jest.fn((table) => {
   b.orderBy = jest.fn(() => b);
   b.select = jest.fn(() => Promise.resolve(storedPerfRows));
   b.first = jest.fn(() => Promise.resolve(accountRowInDb));
-  b.update = jest.fn((row) => { updateCalls.push({ table, row }); return Promise.resolve(1); });
+  b.update = jest.fn((row) => { updateCalls.push({ table, row, inTransaction }); return Promise.resolve(1); });
   b.insert = jest.fn((row) => {
-    insertCalls.push({ table, row });
+    insertCalls.push({ table, row, inTransaction });
     return {
       returning: jest.fn(() => Promise.resolve([{ ...row }])),
       then: (res, rej) => Promise.resolve([1]).then(res, rej), // awaited inserts (performance rows)
@@ -32,8 +35,13 @@ const mockDb = jest.fn((table) => {
   return b;
 });
 mockDb.raw = jest.fn((sql, bindings) => ({ rawSql: sql, bindings }));
-// The performance rows are written inside one transaction; the mock runs the body on the same recorder.
-mockDb.transaction = jest.fn(async (body) => body(mockDb));
+// Every write happens inside one transaction; the mock runs the body on the same
+// recorder and marks each write made inside it.
+let inTransaction = false;
+mockDb.transaction = jest.fn(async (body) => {
+  inTransaction = true;
+  try { return await body(mockDb); } finally { inTransaction = false; }
+});
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
@@ -250,7 +258,7 @@ describe('runDailySync', () => {
 
   test('a Performance Max campaign in the account fails the run with nothing written: its Local Services cost cannot be told apart', async () => {
     answerGoogle({ campaigns: [CAMPAIGN_ROW, googleCampaign(901, 2, 40000000, 10)] });
-    await expect(GoogleLsa.runDailySync()).rejects.toThrow('syncAccount: the account has 1 Performance Max campaign(s)');
+    await expect(GoogleLsa.runDailySync()).rejects.toThrow('read: the account has 1 Performance Max campaign(s)');
     expect(insertCalls).toEqual([]);
     expect(updateCalls).toEqual([]);
     expect(mockQuery).toHaveBeenCalledTimes(1);
@@ -261,15 +269,16 @@ describe('runDailySync', () => {
     await expect(GoogleLsa.runDailySync()).resolves.toMatchObject({ synced: { campaigns: 1 } });
   });
 
-  test('a removed Performance Max campaign that ran inside the window fails the run before any day is written', async () => {
+  test('a removed Performance Max campaign that ran inside the window fails the run before anything is written, the account row included', async () => {
     answerGoogle({
       campaigns: [CAMPAIGN_ROW, googleCampaign(901, 4, 40000000, 10)],
       metrics: [metricsRow('2026-11-20', { cost_micros: 31000000 })],
       performanceMaxDays: [metricsRow('2026-11-19', { cost_micros: 9000000 }, 901)],
     });
-    await expect(GoogleLsa.runDailySync()).rejects.toThrow('syncDailyPerformance: a Performance Max campaign ran in the account between');
-    expect(perfInserts()).toEqual([]);
-    expect(perfUpdates()).toEqual([]);
+    await expect(GoogleLsa.runDailySync()).rejects.toThrow('read: a Performance Max campaign ran in the account between');
+    expect(insertCalls).toEqual([]);
+    expect(updateCalls).toEqual([]);
+    expect(mockDb.transaction).not.toHaveBeenCalled();
   });
 
   test('the first run inserts ONE google_lsa row for the account, marked with the account', async () => {
@@ -290,12 +299,18 @@ describe('runDailySync', () => {
     expect(campaignWheres).toEqual([{ platform: 'google_lsa' }, { id: 'local-1' }]); // the mark lookup, then the update by id
   });
 
-  test('on a later run only what Google owns is refreshed: a name the office gave the row stays', async () => {
+  test('on a later run the status, the budget and the type are refreshed: a name the office gave the row stays', async () => {
     accountRowInDb = { ...ACCOUNT_ROW, campaign_name: 'LSA Lakewood Ranch', status: 'paused' };
     await GoogleLsa.runDailySync();
     expect(accountInsert()).toBeUndefined();
-    expect(Object.keys(accountUpdate()).sort()).toEqual(['daily_budget_base', 'daily_budget_current', 'status', 'updated_at']);
+    expect(Object.keys(accountUpdate()).sort()).toEqual(['campaign_type', 'daily_budget_base', 'daily_budget_current', 'status', 'updated_at']);
     expect(accountUpdate()).toMatchObject({ status: 'active', daily_budget_current: 25.5 });
+  });
+
+  test('a type edited while the sync did not own the row is set back, so the row returns to the Local Service Ads card', async () => {
+    accountRowInDb = { ...ACCOUNT_ROW, campaign_type: 'other' };
+    await GoogleLsa.runDailySync();
+    expect(accountUpdate()).toMatchObject({ campaign_type: 'google_lsa' });
   });
 
   test('Google replaced the campaign: the same row goes on, active, with the new campaign\'s budget and both campaigns\' days', async () => {
@@ -396,13 +411,32 @@ describe('runDailySync', () => {
     expect(JSON.parse(perfUpdates()[0].metadata)).toEqual({ google_conversions: 0, lsa_leads: NO_LEADS });
   });
 
-  test('the day rows are written in one transaction', async () => {
+  test('the account row and the day rows are written in one transaction, after every Google read', async () => {
     storedPerfRows = [{ id: 'perf-1', day: '2026-11-19' }];
     answerGoogle({ metrics: [metricsRow('2026-11-20', { cost_micros: 31000000 })] });
+    let readsBeforeWrite = null;
+    mockDb.transaction.mockImplementationOnce(async (body) => {
+      readsBeforeWrite = mockQuery.mock.calls.length;
+      inTransaction = true;
+      try { return await body(mockDb); } finally { inTransaction = false; }
+    });
     await GoogleLsa.runDailySync();
     expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    expect(readsBeforeWrite).toBe(4); // the campaigns, the Performance Max check, the cost, the leads
+    expect(mockQuery).toHaveBeenCalledTimes(4);
     expect(perfInserts()).toHaveLength(1); // 11-20
     expect(perfUpdates()).toHaveLength(1); // 11-19 reset
+    const writes = [...insertCalls, ...updateCalls];
+    expect(writes).toHaveLength(3); // the account row + the two days
+    expect(writes.every((w) => w.inTransaction)).toBe(true);
+  });
+
+  test('the first run writes the new account row and its days in the same transaction', async () => {
+    accountRowInDb = undefined;
+    answerGoogle({ metrics: [metricsRow('2026-11-20', { cost_micros: 31000000 })] });
+    await GoogleLsa.runDailySync();
+    expect(insertCalls.map((c) => [c.table, c.inTransaction])).toEqual([['ad_campaigns', true], ['ad_performance_daily', true]]);
+    expect(perfInserts()[0].campaign_id).toBe(accountInsert().id);
   });
 
   describe('the window', () => {
@@ -415,7 +449,9 @@ describe('runDailySync', () => {
       expect(queries).toHaveLength(4); // the account, the Performance Max check, the cost, the leads
       expect(queries.find((q) => /'PERFORMANCE_MAX'/.test(q))).toContain("BETWEEN '2026-08-01' AND '2026-11-21'");
       expect(queries.find((q) => /'LOCAL_SERVICES'/.test(q))).toContain("BETWEEN '2026-08-01' AND '2026-11-21'");
-      expect(queries.find((q) => /FROM local_services_lead/.test(q))).toContain("creation_date_time >= '2026-08-01 00:00:00'");
+      const leadQuery = queries.find((q) => /FROM local_services_lead/.test(q));
+      expect(leadQuery).toContain("creation_date_time >= '2026-08-01 00:00:00'");
+      expect(leadQuery).toContain("creation_date_time <= '2026-11-21 23:59:59'"); // no lead dated after the cost's last day
     });
 
     test('the stored days are read for the same window', async () => {
@@ -425,27 +461,28 @@ describe('runDailySync', () => {
     });
   });
 
-  test('a failed account step stops the run: no day is read or written', async () => {
+  test('a failed first read stops the run: nothing more is read and nothing is written', async () => {
     mockQuery.mockRejectedValueOnce(new Error('invalid_grant'));
-    await expect(GoogleLsa.runDailySync()).rejects.toThrow('syncAccount: invalid_grant');
+    await expect(GoogleLsa.runDailySync()).rejects.toThrow('read: invalid_grant');
     expect(mockQuery).toHaveBeenCalledTimes(1);
     expect(insertCalls).toEqual([]);
     expect(updateCalls).toEqual([]);
   });
 
-  test('a failed performance step fails the run', async () => {
+  test('a failed cost read fails the run before anything is written, the account row included', async () => {
     mockQuery.mockImplementation(async (gaql) => {
       if (/metrics\.impressions/.test(gaql)) throw new Error('quota');
       if (/'PERFORMANCE_MAX'/.test(gaql)) return [];
       return /FROM local_services_lead/.test(gaql) ? [] : [CAMPAIGN_ROW];
     });
-    await expect(GoogleLsa.runDailySync()).rejects.toThrow('syncDailyPerformance: quota');
-    expect(perfInserts()).toEqual([]);
+    await expect(GoogleLsa.runDailySync()).rejects.toThrow('read: quota');
+    expect(insertCalls).toEqual([]);
+    expect(updateCalls).toEqual([]);
   });
 
   test('a Google Ads SDK failure (an object with errors[], no message) still gives its reason', async () => {
     mockQuery.mockRejectedValueOnce({ errors: [{ message: 'The developer token is not approved.' }], request_id: 'abc' });
-    await expect(GoogleLsa.runDailySync()).rejects.toThrow('syncAccount: The developer token is not approved.');
-    expect(logger.error).toHaveBeenCalledWith('[google-lsa] syncAccount failed: The developer token is not approved.');
+    await expect(GoogleLsa.runDailySync()).rejects.toThrow('read: The developer token is not approved.');
+    expect(logger.error).toHaveBeenCalledWith('[google-lsa] read failed: The developer token is not approved.');
   });
 });
