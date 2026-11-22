@@ -562,11 +562,6 @@ async function sitCandidate({ dbi, patch, runner, lock, now, open, complete, fin
   if (closed) return { skipped: closed };
   let baselineId = open && open.baseline_run_id;
   if (!open) {
-    // A further sitting is drafted under the setup that is live NOW. When the model or the voice profile moved
-    // since the finished sittings, the new pair could never be compared with them: the exam is settled before
-    // another baseline is paid for.
-    const moved = finished ? await liveSetupReason(dbi, finished.candidateSittings[0].run) : null;
-    if (moved) return { refused: { reason: moved, detail: {} } };
     const got = await obtainBaseline({ dbi, patch, runner, lock, now, exclude: complete.map((r) => r.baseline_run_id).filter(Boolean) });
     if (!got.baseline) return got;
     baselineId = got.baseline.id;
@@ -609,8 +604,8 @@ async function loadSittings(dbi, runs) {
  * examSittings() finished runs. A pass that does not finish its sitting ends the tick, and the next tick goes on
  * from the rows it left. Two rules hold at every pass, whatever a crash or a changed setting left behind:
  *  - Before any paid step (a resumed run, a baseline, a candidate sitting) the decision is taken if the finished
- *    sittings already allow it: enough of them for the count as it is set NOW, or sittings the bar refuses for
- *    good (decidePromotion `final`).
+ *    sittings already allow it: enough of them for the count as it is set NOW, sittings the bar refuses for
+ *    good (decidePromotion `final`), or a live setup that moved since they were sat (examMovedReason).
  *  - When it is taken, no run this loop started for the exam is left 'running' (settleExamRuns).
  */
 async function runCandidateExam({ dbi, patch, runner, lock, now }) {
@@ -630,6 +625,11 @@ async function runCandidateExam({ dbi, patch, runner, lock, now }) {
     if (complete.length) {
       if (!finished) return { failed: 'baseline_missing' };
       if (complete.length >= wanted || decidePromotion(finished).final) return decideOn(finished);
+      // Not decided, so a paid step follows (a resumed run, a baseline, a candidate sitting), and it is drafted
+      // under what is live NOW. When that moved since the finished sittings, nothing it adds could be compared
+      // with them: the exam is settled here, before the step.
+      const moved = await examMovedReason(dbi, finished);
+      if (moved) return decideOn({ refused: { reason: moved, detail: {} } });
     }
     const current = pass ? await dbi(PATCHES).where({ id: patch.id }).first() : patch;
     const sat = await sitCandidate({ dbi, patch: current, runner, lock, now, open, complete, finished, firstSitting: !rows.length });
@@ -715,12 +715,22 @@ async function raiseRuleAlert({ notify, patchNo, patchId, kind, reason }) {
 }
 
 // Does this exam run still describe the live setup: the exam leg's model and the effective voice profile?
-// null = it does, else the reason. Read at activation, and before a further sitting of an exam is paid for.
+// null = it does, else the reason. Read at activation, and (examMovedReason) before a further paid step of an exam.
 async function liveSetupReason(dbi, run) {
   const { EXAM_LEG_ROUTES } = require('./sms-sealed-eval');
   if (run.model !== EXAM_LEG_ROUTES[EXAM_LEG].model) return 'exam_model_changed';
   const profile = await require('./sms-shadow-drafter').resolveEffectiveVoiceProfile({ dbi });
   return (run.voice_profile_version ?? null) === (profile?.version ?? null) ? null : 'exam_profile_changed';
+}
+
+// Do an exam's finished sittings still describe what is live: the model and voice profile its newest sitting was
+// drafted under, and the live prompt its newest baseline sat (a rule that went live or was taken off since then
+// changes that prompt and leaves the base identity alone)? null = they do, else the reason a further run would
+// be refused with once it was paid for.
+async function examMovedReason(dbi, finished) {
+  const moved = await liveSetupReason(dbi, finished.candidateSittings[0].run);
+  if (moved) return moved;
+  return finished.baselineSittings[0].run.prompt_version === require('./sms-shadow-drafter').currentPromptVersion() ? null : 'run_mismatch';
 }
 
 // The exam that earned the decision must still describe the live setup: same model and same

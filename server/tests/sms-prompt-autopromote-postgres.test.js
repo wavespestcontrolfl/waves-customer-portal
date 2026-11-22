@@ -1065,6 +1065,39 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         expect(runner).not.toHaveBeenCalled();
       });
 
+      test('a failed sitting is not resumed once the live setup moved since the finished sitting; a run left running is settled', async () => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '2';
+        const items = await seedItems();
+        const patch = await insertPatch();
+        const version = patchLib.stampPatchVersion(baseVersion(), patch.version_tag);
+        const was = { voice_profile_version: 987 };
+        const at = (hours) => ({ started_at: new Date(NOW.getTime() - hours * 3600_000) });
+        const base = await insertRun({ items, version: drafter.currentPromptVersion(), over: { ...was, ...at(5) } });
+        await insertRun({ items, version, patchId: patch.id, baselineId: base.id, overall: 7, actions: 6.5, over: { ...was, ...at(4) } });
+        const secondBase = await insertRun({ items, version: drafter.currentPromptVersion(), over: { ...was, ...at(3) } });
+        const open = await insertRun({ items, version, patchId: patch.id, baselineId: secondBase.id, status: 'running', over: { ...was, ...at(2) } });
+        const { runner } = sittingRunner({ items });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toEqual({ rejected: patch.id, reason: 'exam_profile_changed' });
+        expect(runner).not.toHaveBeenCalled();
+        expect((await trx('sms_sealed_eval_runs').where({ id: open.id }).first('status')).status).toBe('failed');
+      });
+
+      test('a live prompt that changed since the finished baseline (a rule went live or came off) settles the exam before another baseline is paid for', async () => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '2';
+        const items = await seedItems();
+        const patch = await insertPatch();
+        // The first pair sat while another rule (Z) was part of the live prompt: same base identity, another prompt.
+        const thenLive = patchLib.stampPatchVersion(drafter.currentPromptVersion(), 'Z');
+        const base = await insertRun({ items, version: thenLive, over: { started_at: new Date(NOW.getTime() - 5 * 3600_000) } });
+        await insertRun({
+          items, version: patchLib.stampPatchVersion(baseVersion(), patch.version_tag), patchId: patch.id, baselineId: base.id, overall: 7, actions: 6.5,
+          over: { started_at: new Date(NOW.getTime() - 4 * 3600_000) },
+        });
+        const { runner } = sittingRunner({ items });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toEqual({ rejected: patch.id, reason: 'run_mismatch' });
+        expect(runner).not.toHaveBeenCalled();
+      });
+
       test('a baseline the finished sittings may not be compared with settles the exam before its candidate sitting is paid for', async () => {
         process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '3';
         const items = await seedItems();
