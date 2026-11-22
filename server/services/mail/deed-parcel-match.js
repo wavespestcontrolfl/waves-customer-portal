@@ -34,31 +34,36 @@ const OWNER_TEXT = /^[\x20-\x7E\p{L}\p{M}]*$/u;
 const LEGAL_PATTERN = /^LOT ([0-9A-Z]{1,6})(?: (?:BLK|BLOCK) ([0-9A-Z]{1,4}))? ([A-Z0-9][A-Z0-9 &'.-]{2,80})$/;
 // "LOT 1 AND 2 SAMPLE GROVE" and "LOT 3 THRU 5 ..." name several lots: not one home.
 const SEVERAL_LOTS = /^(AND|THRU|THROUGH|TO|&)(\s|$)/;
+// A deed that names a phase, unit, section or plat book itself ("... PH I", "... UNIT 3") is not handled. The map
+// spells such a part in several ways (PH and PHASE), and this module compares names letter by letter: two spellings
+// of one part would count as two names. The Clerk's text leaves these parts out (0 of 69 measured deeds have one).
+const PLAT_PART_WORDS = new Set(['PH', 'PHASE', 'SUBPH', 'SUBPHASE', 'UNIT', 'SEC', 'SECTION']);
+const namesPlatPart = (words) => words.split(/[^A-Z0-9]+/).some((word) => PLAT_PART_WORDS.has(word) || /^PB\d*$/.test(word));
 
 /**
  * Lot, block and subdivision words from a deed description, or null when it is not one plain lot (a condo unit,
- * metes and bounds, several lots). The character set is narrow, and parcelWhere lets only its capitals and digits
+ * metes and bounds, several lots) or names a phase, unit, section or plat book itself. The character set is narrow, and parcelWhere lets only its capitals and digits
  * reach the where string (no quote, no % or _ wildcard, no semicolon or parenthesis).
  */
 function parseLegal(description) {
   const text = String(description || '').toUpperCase().replace(/\s+/g, ' ').trim();
   const m = text.match(LEGAL_PATTERN);
-  if (!m || SEVERAL_LOTS.test(m[3])) return null;
+  if (!m || SEVERAL_LOTS.test(m[3]) || namesPlatPart(m[3])) return null;
   return { lot: m[1], block: m[2] || null, subdivision: m[3] };
 }
 
-// The forms one deed lot or block number can have on the map: itself, without leading zeros, zero-padded up to four
-// characters ("5", "05", "005", "0005"; "12A", "012A"), and each with lower-case letters ("12a"). Measured
-// 2026-11-22: 346 parcels have a lot with a leading zero (91 values, "01" to "0406"), 22 have a lower-case letter in
-// the lot. This list is the query's IN list and the local test of "the same number": one definition for both.
+// The forms one deed lot or block number can have on the map: without leading zeros, zero-padded up to six
+// characters ("5", "05" ... "000005"; "12A", "012A" ...), and each with lower-case letters ("12a"). The list depends
+// only on the number without its zeros, so "5" and "05", or "A" and "0A", give the same list. Measured 2026-11-22:
+// 346 parcels have a lot with a leading zero (91 values, "01" to "0406"), 22 have a lower-case letter in the lot.
+// This list is the query's IN list and the local test of "the same number": one definition for both.
 function mapForms(value) {
   const bare = value.replace(/^0+(?=.)/, '');
-  const forms = new Set([value, bare]);
-  if (/^\d/.test(bare)) for (let width = bare.length + 1; width <= 4; width += 1) forms.add(bare.padStart(width, '0'));
-  for (const form of [...forms]) forms.add(form.toLowerCase());
-  return [...forms];
+  const forms = [];
+  for (let width = bare.length; width <= Math.max(6, bare.length); width += 1) forms.push(bare.padStart(width, '0'));
+  return [...new Set([...forms, ...forms.map((form) => form.toLowerCase())])];
 }
-const sameNumber = (mapValue, deedValue) => mapForms(deedValue).includes(mapValue || '');
+const sameNumber = (mapValue, deedValue) => typeof mapValue === 'string' && mapForms(deedValue).includes(mapValue);
 
 // The letters and digits of the deed's subdivision words ("O'NEIL ESTATES" = ONEILESTATES). Two names are the same
 // name up to this key: spacing and punctuation differ on the map ("RYE  RANCH", "ST. JOHNS", "ST JOHN'S").
@@ -79,7 +84,7 @@ const lettersOf = (text) => text.replace(/[^A-Z0-9]/g, '');
 function parcelWhere(legal) {
   // The values parseLegal gives, and no other: capitals and digits for the numbers, LEGAL_PATTERN's signs in the name.
   const plain = (value, max) => typeof value === 'string' && value.length <= max && /^[0-9A-Z]+$/.test(value);
-  const named = typeof legal.subdivision === 'string' && /^[A-Z0-9][A-Z0-9 &'.-]*$/.test(legal.subdivision);
+  const named = typeof legal.subdivision === 'string' && /^[A-Z0-9][A-Z0-9 &'.-]*$/.test(legal.subdivision) && !namesPlatPart(legal.subdivision);
   if (!plain(legal.lot, 6) || !named || (legal.block && !plain(legal.block, 4))) throw new TypeError('parcelWhere needs the lot, block and subdivision of a parsed deed');
   const letters = lettersOf(legal.subdivision);
   const inList = (value) => mapForms(value).map((form) => `'${form}'`).join(', ');
@@ -134,14 +139,9 @@ const isPhaseWord = (token) => token === 'PH' || token === 'PHASE';
 const isSubphaseWord = (token) => token === 'SUBPH' || token === 'SUBPHASE';
 const platTokens = (text) => text.replace(/,/g, ' , ').split(' ').filter(Boolean);
 
-// How far the deed's own words already go into the grammar: 0 no phase, 1 a phase, 2 a subphase or SUBDIVISION.
-// (The Clerk's text leaves the phase out in all 69 measured deeds; this keeps "... PH I" on a deed from refusing
-// "... PH I SUBPH A PB1/2" on the map.)
-function platStage(deedWords) {
-  const tokens = platTokens(deedWords);
-  if (tokens.some((token) => isSubphaseWord(token) || token === 'SUBDIVISION')) return 2;
-  return tokens.some(isPhaseWord) ? 1 : 0;
-}
+// How far the deed's own words already go into the grammar: 2 when they end the name with SUBDIVISION, else 0.
+// (A deed never names a phase here: parseLegal and parcelWhere refuse one.)
+const platStage = (deedWords) => (platTokens(deedWords).includes('SUBDIVISION') ? 2 : 0);
 
 function platRestKnown(rest, startStage) {
   const tokens = platTokens(rest);
@@ -230,10 +230,13 @@ function toParcel(attrs, legal) {
     yearBuilt: yearBuilt === null ? null : Math.round(yearBuilt),
   };
   // The answer must be the answer to this question: a form of the lot, the subdivision's letters in order and (when
-  // asked) a form of the block.
-  const asked = sameNumber(parcel.lot, legal.lot)
-    && hasDeedLetters((parcel.subdivision || '').toUpperCase(), lettersOf(legal.subdivision))
-    && (!legal.block || sameNumber(parcel.block, legal.block));
+  // asked) a form of the block. The values are read as the map sent them, not trimmed: the query compares them that
+  // way ("5 " is not "5" to it, and a name with a space in front does not start with the deed's first letter; no
+  // parcel has such a name, counted 2026-11-22).
+  const sent = (key) => (typeof attrs[key] === 'string' ? attrs[key] : null);
+  const asked = sameNumber(sent('PAR_SUBDIV_LOT'), legal.lot)
+    && hasDeedLetters((sent('PAR_SUBDIV_NAME') || '').toUpperCase(), lettersOf(legal.subdivision))
+    && (!legal.block || sameNumber(sent('PAR_SUBDIV_BLOCK'), legal.block));
   if (!asked) throw new Error('parcel map sent a parcel that is not the lot asked for');
   const relation = platRelation(parcel.subdivision, legal.subdivision);
   parcel.platKnown = relation === 'other' ? null : relation === 'known';
