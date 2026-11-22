@@ -1599,15 +1599,21 @@ async function getLiveSettings(conn = db) {
   return row ? { ...row, base_url: normalizeReferralBaseUrl(row.base_url) } : null;
 }
 
+// GATE_REFERRAL_STEP2: the friend's credit in cents that a line may state, from ONE live settings row the caller read
+// (getLiveSettings). A text that also follows the program's state (the Waves Pest Insider's referral line) decides
+// both from the same row, so the two cannot disagree. 0 = say nothing new: gate off, program paused, no amount, no row.
+function step2FriendCreditCentsOf(live) {
+  if (!isEnabled('referralStep2') || !live?.program_active) return 0;
+  return Math.max(0, Math.trunc(Number(live.referee_discount_cents) || 0));
+}
+
 // GATE_REFERRAL_STEP2: the friend's credit in cents, from the live settings row only, for a line that must never state
 // a code default (the invitation email). 0 = say nothing new: gate off, program paused, no amount, or the live row
 // unreadable.
 async function step2FriendCreditCents() {
   if (!isEnabled('referralStep2')) return 0;
   try {
-    const live = await getLiveSettings();
-    if (!live?.program_active) return 0;
-    return Math.max(0, Math.trunc(Number(live.referee_discount_cents) || 0));
+    return step2FriendCreditCentsOf(await getLiveSettings());
   } catch {
     return 0;
   }
@@ -1872,6 +1878,7 @@ module.exports = {
   getSettings,
   getLiveSettings,
   step2FriendCreditCents,
+  step2FriendCreditCentsOf,
   updateSettings,
   getPromoterStats,
   getProgramAnalytics,

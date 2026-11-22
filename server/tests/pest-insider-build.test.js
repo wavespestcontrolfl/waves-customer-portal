@@ -334,6 +334,12 @@ describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
       expect(go('--assume-tools')).toBe(0);
       expect(fs.readdirSync(dir).sort()).toEqual(['.html', '.optin.html', '.optin.txt', '.txt'].map((ext) => `pest-insider-2026-12-03${ext}`));
       expect(fs.readFileSync(path.join(dir, 'pest-insider-2026-12-03.optin.txt'), 'utf8')).toContain(AMAZON_DISCLOSURE);
+      // A sample file shows an issue as the archive does: no token of the issue's own is left, and the referral line has no amount.
+      for (const f of fs.readdirSync(dir)) {
+        const file = fs.readFileSync(path.join(dir, f), 'utf8');
+        expect(file).not.toContain('{{pi-');
+        expect(file).toContain('referrals are the nicest compliment we get.');
+      }
       expect(go()).toBe(0);
       expect(fs.readdirSync(dir).sort()).toEqual(['pest-insider-2026-12-03.html', 'pest-insider-2026-12-03.txt']);
       for (const f of fs.readdirSync(dir)) expect(fs.readFileSync(path.join(dir, f), 'utf8')).not.toMatch(/amazon/i);
