@@ -46,7 +46,7 @@ jest.mock('google-ads-api', () => ({
 
 const logger = require('../services/logger');
 const GoogleLsa = require('../services/ads/google-lsa');
-const { customerId, accountState, sumMetricsByDay, mapPerformanceRow, tallyLeadsByDay, dateRange } = GoogleLsa._private;
+const { customerId, accountState, sumMetricsByDay, mapPerformanceRow, tallyLeadsByDay, rebuildWindow } = GoogleLsa._private;
 const NO_LEADS = { total: 0, charged: 0, credited: 0, calls: 0, messages: 0, bookings: 0 };
 const NO_METRICS = { impressions: 0, clicks: 0, costMicros: 0, conversions: 0, conversionValue: 0 };
 const ACCOUNT = '7636809139';
@@ -59,7 +59,11 @@ const GOOGLE_ENV = {
   GOOGLE_ADS_REFRESH_TOKEN: 'refresh',
   GOOGLE_ADS_CUSTOMER_ID: '1112223333',
 };
-const googleCampaign = (id, status, micros) => ({ campaign: { id, status }, campaign_budget: micros == null ? {} : { amount_micros: micros } });
+// channel 11 = LOCAL_SERVICES, 10 = PERFORMANCE_MAX, 2 = SEARCH (AdvertisingChannelType).
+const googleCampaign = (id, status, micros, channel = 11) => ({
+  campaign: { id, status, advertising_channel_type: channel },
+  campaign_budget: micros == null ? {} : { amount_micros: micros },
+});
 const CAMPAIGN_ROW = googleCampaign(555, 2, 25500000);
 const metricsRow = (date, metrics, id = 555) => ({ campaign: { id }, segments: { date }, metrics });
 const lead = (createdAt, type, charged, creditState) => ({
@@ -69,11 +73,9 @@ const lead = (createdAt, type, charged, creditState) => ({
   },
 });
 
-// Answers each GAQL query by the resource it reads. `creditChanges` = the leads
-// whose credit Google changed inside the window (the window-start query).
-function answerGoogle({ campaigns = [CAMPAIGN_ROW], metrics = [], leads = [], creditChanges = [] } = {}) {
+// Answers each GAQL query by the resource it reads.
+function answerGoogle({ campaigns = [CAMPAIGN_ROW], metrics = [], leads = [] } = {}) {
   mockQuery.mockImplementation(async (gaql) => {
-    if (/credit_state_last_update_date_time/.test(gaql)) return creditChanges;
     if (/FROM local_services_lead/.test(gaql)) return leads;
     if (/segments\.date/.test(gaql)) return metrics;
     return campaigns;
@@ -111,6 +113,15 @@ describe('configuration', () => {
       process.env.GOOGLE_LSA_CUSTOMER_ID = bad;
       expect(customerId()).toBeNull();
     }
+  });
+
+  test('the Search sync\'s own account turns the sync off: that sync already imports it, and the spend would count twice', () => {
+    process.env.GOOGLE_LSA_CUSTOMER_ID = '111-222-3333'; // GOOGLE_ADS_CUSTOMER_ID, dashed
+    expect(customerId()).toBeNull();
+    expect(GoogleLsa.isConfigured()).toBe(false);
+    process.env.GOOGLE_ADS_CUSTOMER_ID = '763-680-9139';
+    delete process.env.GOOGLE_LSA_CUSTOMER_ID;
+    expect(customerId()).toBeNull();
   });
 
   test('needs the Google Ads OAuth credentials, not the Search account id', () => {
@@ -211,8 +222,11 @@ describe('pure mappers', () => {
     expect(JSON.parse(row.metadata).google_conversions).toBe(4);
   });
 
-  test('dateRange is a window of Eastern calendar days', () => {
-    expect(dateRange(30, new Date('2026-11-21T15:00:00Z'))).toEqual({ since: '2026-10-22', until: '2026-11-21' });
+  test('rebuildWindow: from the first day of the month of today - 90 days (the cost allocation\'s months), through today, in Eastern days', () => {
+    expect(rebuildWindow(new Date('2026-11-21T15:00:00Z'))).toEqual({ since: '2026-08-01', until: '2026-11-21' });
+    expect(rebuildWindow(new Date('2026-03-01T15:00:00Z'))).toEqual({ since: '2025-12-01', until: '2026-03-01' });
+    // 02:00 UTC is still the evening before in Eastern time.
+    expect(rebuildWindow(new Date('2026-11-22T02:00:00Z')).until).toBe('2026-11-21');
   });
 });
 
@@ -222,14 +236,27 @@ describe('runDailySync', () => {
   const accountUpdate = () => updateCalls.find((c) => c.table === 'ad_campaigns')?.row;
   const accountInsert = () => insertCalls.find((c) => c.table === 'ad_campaigns')?.row;
 
-  test('every campaign query reads the Local Services channel only, with no status filter', async () => {
-    await GoogleLsa.runDailySync();
-    const campaignQueries = mockQuery.mock.calls.map((c) => c[0]).filter((q) => /FROM campaign/.test(q));
-    expect(campaignQueries).toHaveLength(2); // the account step and the metrics
-    for (const q of campaignQueries) {
-      expect(q).toContain("campaign.advertising_channel_type = 'LOCAL_SERVICES'");
-      expect(q).not.toMatch(/campaign\.status\s*(!=|=|IN)/);
-    }
+  test('only Local Services campaigns count: another campaign type in the account adds no status, no budget and no cost', async () => {
+    answerGoogle({ campaigns: [googleCampaign(555, 3, 25500000), googleCampaign(900, 2, 99000000, 2)] }); // a paused LSA + an enabled Search campaign
+    await expect(GoogleLsa.runDailySync()).resolves.toEqual({ configured: true, synced: { campaigns: 1, performanceRows: 0 } });
+    expect(accountUpdate()).toMatchObject({ status: 'paused', daily_budget_current: 25.5 });
+    const metricsQuery = mockQuery.mock.calls.map((c) => c[0]).find((q) => /segments\.date/.test(q));
+    expect(metricsQuery).toContain("campaign.advertising_channel_type = 'LOCAL_SERVICES'");
+    // No status filter anywhere: a removed campaign must still give its last days.
+    for (const [q] of mockQuery.mock.calls) expect(q).not.toMatch(/campaign\.status\s*(!=|=|IN)/);
+  });
+
+  test('a Performance Max campaign in the account fails the run with nothing written: its Local Services cost cannot be told apart', async () => {
+    answerGoogle({ campaigns: [CAMPAIGN_ROW, googleCampaign(901, 2, 40000000, 10)] });
+    await expect(GoogleLsa.runDailySync()).rejects.toThrow('syncAccount: the account has 1 Performance Max campaign(s)');
+    expect(insertCalls).toEqual([]);
+    expect(updateCalls).toEqual([]);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  test('a removed Performance Max campaign does not stop the run', async () => {
+    answerGoogle({ campaigns: [CAMPAIGN_ROW, googleCampaign(901, 'REMOVED', 40000000, 'PERFORMANCE_MAX')] });
+    await expect(GoogleLsa.runDailySync()).resolves.toMatchObject({ synced: { campaigns: 1 } });
   });
 
   test('the first run inserts ONE google_lsa row for the account, marked with the account', async () => {
@@ -368,27 +395,19 @@ describe('runDailySync', () => {
   describe('the window', () => {
     beforeAll(() => { jest.useFakeTimers().setSystemTime(new Date('2026-11-21T15:00:00Z')); });
     afterAll(() => { jest.useRealTimers(); });
-    const windowOf = () => {
-      const metricsQuery = mockQuery.mock.calls.map((c) => c[0]).find((q) => /segments\.date BETWEEN/.test(q));
-      const leadQuery = mockQuery.mock.calls.map((c) => c[0]).find((q) => /creation_date_time >=/.test(q) && !/credit_state_last_update/.test(q));
-      return { metrics: metricsQuery.match(/BETWEEN '(\S+)' AND '(\S+)'/).slice(1), leads: leadQuery.match(/creation_date_time >= '(\S+) /)[1] };
-    };
 
-    test('30 Eastern days, the same for the cost and for the leads', async () => {
+    test('every run reads the cost allocation\'s whole months, the same for the cost and for the leads', async () => {
       await GoogleLsa.runDailySync();
-      expect(windowOf()).toEqual({ metrics: ['2026-10-22', '2026-11-21'], leads: '2026-10-22' });
+      const queries = mockQuery.mock.calls.map((c) => c[0]);
+      expect(queries).toHaveLength(3); // the account, the cost, the leads
+      expect(queries.find((q) => /segments\.date BETWEEN/.test(q))).toContain("BETWEEN '2026-08-01' AND '2026-11-21'");
+      expect(queries.find((q) => /FROM local_services_lead/.test(q))).toContain("creation_date_time >= '2026-08-01 00:00:00'");
     });
 
-    test('a late credit moves the start of the window back to the lead\'s own day', async () => {
-      answerGoogle({ creditChanges: [lead('2026-10-05 10:00:00', 3, true, 3)] });
+    test('the stored days are read for the same window', async () => {
       await GoogleLsa.runDailySync();
-      expect(windowOf()).toEqual({ metrics: ['2026-10-05', '2026-11-21'], leads: '2026-10-05' });
-    });
-
-    test('the window never starts before the 90 days the cost allocation recomputes', async () => {
-      answerGoogle({ creditChanges: [lead('2026-05-01 10:00:00', 3, true, 3)] });
-      await GoogleLsa.runDailySync();
-      expect(windowOf()).toEqual({ metrics: ['2026-08-23', '2026-11-21'], leads: '2026-08-23' });
+      const perfWheres = whereCalls.filter((c) => c.table === 'ad_performance_daily').map((c) => c.args);
+      expect(perfWheres).toEqual([[{ campaign_id: 'local-1' }], ['date', '>=', '2026-08-01'], ['date', '<=', '2026-11-21']]);
     });
   });
 

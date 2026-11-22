@@ -15,9 +15,9 @@ const { hasCredentials, errorText } = require('./google-ads-config');
 // page's "Local Service Ads" card filters on).
 //
 // ONE portal row stands for the account, not one row per Google campaign.
-// Google buys and bills Local Services by the account: a lead names no
-// campaign, and Google makes and replaces the campaign under the account by
-// itself. With one row, the account's history stays in one place when Google
+// Google buys and bills Local Services by the account: in the Google Ads API
+// version the portal uses (v23) a lead names no campaign, and Google makes and
+// replaces the campaign under the account by itself. With one row, the account's history stays in one place when Google
 // replaces the campaign, a day's leads have exactly one row to be counted on,
 // and the row is never 'removed' (the Ads page leaves removed rows out). No
 // reader needs the Google campaigns apart: the Ads page, the spend reads and
@@ -46,19 +46,22 @@ const CAMPAIGN_TYPE = 'google_lsa';
 // can point the sync at another account, and a value that is not an account id
 // (GOOGLE_LSA_CUSTOMER_ID=off, or empty) turns the sync off.
 const DEFAULT_CUSTOMER_ID = '7636809139';
-const DEFAULT_DAYS = 30;
-// How far back a late credit can move the start of the rebuild. It equals the
-// window the 6:25 AM cost allocation recomputes (scheduler.js: today - 90 days),
-// so no day this sync changes is outside the months that job spreads again.
-const MAX_LOOKBACK_DAYS = 90;
+// The 6:25 AM cost allocation spreads again every month from today - 90 days
+// (scheduler.js), starting at the first of that month (allocateAdCosts).
+const ALLOCATION_LOOKBACK_DAYS = 90;
 const ACCOUNT_KEY = 'lsa_customer_id'; // also reserved in routes/admin-ads.js RESERVED_METADATA_KEYS
 
 // The WHOLE value must be an account id, plain or dashed: "off-1234567890" is
-// off, not account 1234567890.
+// off, not account 1234567890. The Search sync's own account is off too: that
+// sync already imports every campaign of its account, so reading the same
+// account here would count its spend twice.
 function customerId() {
   const raw = process.env.GOOGLE_LSA_CUSTOMER_ID;
   const value = String(raw === undefined ? DEFAULT_CUSTOMER_ID : raw).trim();
-  return /^\d{3}-?\d{3}-?\d{4}$/.test(value) ? value.replace(/-/g, '') : null;
+  if (!/^\d{3}-?\d{3}-?\d{4}$/.test(value)) return null;
+  const id = value.replace(/-/g, '');
+  const searchId = String(process.env.GOOGLE_ADS_CUSTOMER_ID || '').replace(/-/g, '').trim();
+  return id === searchId ? null : id;
 }
 
 // The OAuth credentials are shared with the Search sync; the account id is this
@@ -109,6 +112,9 @@ function getCustomer() {
 // ---------------------------------------------------------------------------
 const ENABLED = new Set([2, 'ENABLED']);
 const REMOVED = new Set([4, 'REMOVED']);
+// AdvertisingChannelType.
+const LOCAL_SERVICES = new Set([11, 'LOCAL_SERVICES']);
+const PERFORMANCE_MAX = new Set([10, 'PERFORMANCE_MAX']);
 // Google names the campaign it makes for a Local Services account
 // "LocalServicesCampaign:SystemGenerated:<hex>". That name means nothing on the
 // Ads page, so the row is named with the page's own label for the channel.
@@ -209,22 +215,39 @@ function mapPerformanceRow(metricDay, leads) {
   };
 }
 
-// The window's edges are Eastern calendar days. Each day inside it is keyed by
-// Google's own account-local date (segments.date, the lead's creation day), so
-// an account in another time zone would move only the edges, never a day's data.
-function dateRange(days, now = new Date()) {
-  return { since: etDateString(addETDays(now, -days)), until: etDateString(now) };
+// The days each run rebuilds: every month the cost allocation spreads again,
+// from its first day through today. So that job never reads a month this sync
+// holds only in part (a first run, a late credit), and a credit Google gives
+// back weeks later still reaches the day it belongs to. The edges are Eastern
+// calendar days. Each day inside is keyed by Google's own account-local date
+// (segments.date, the lead's creation day), so an account in another time zone
+// would move only the edges, never a day's data.
+function rebuildWindow(now = new Date()) {
+  const firstMonth = etDateString(addETDays(now, -ALLOCATION_LOOKBACK_DAYS)).slice(0, 7);
+  return { since: `${firstMonth}-01`, until: etDateString(now) };
 }
 
 // ---------------------------------------------------------------------------
 // syncAccount: keep the account's one row in ad_campaigns.
 //
-// The channel filter keeps any other campaign type in the account (Search,
-// Display) out of google_lsa. There is no status filter: a removed campaign
-// must still be seen, so an account whose only campaign Google removed reads
-// paused, not unknown.
+// Only the account's Local Services campaigns count: any other campaign type in
+// the account (Search, Display) stays out of google_lsa. There is no status
+// filter: a removed campaign must still be seen, so an account whose only
+// campaign Google removed reads paused, not unknown.
 // ---------------------------------------------------------------------------
 const CHANNEL_FILTER = "campaign.advertising_channel_type = 'LOCAL_SERVICES'";
+
+// Google can also run Local Services inside a Performance Max campaign. Its
+// leads are in local_services_lead like any other, but API v23 has no field
+// that tells such a campaign from a normal Performance Max one, so its cost
+// cannot be read here. Leads of both kinds against the cost of one would show
+// a cost per lead that is too low, so the run fails before it writes.
+function assertNoPerformanceMax(campaignRows) {
+  const live = campaignRows.filter((r) => PERFORMANCE_MAX.has(r.campaign?.advertising_channel_type) && !REMOVED.has(r.campaign?.status));
+  if (live.length) {
+    throw new Error(`the account has ${live.length} Performance Max campaign(s); this sync reads standalone Local Services campaigns only, so nothing was written`);
+  }
+}
 
 // The row this sync owns for the account: found by the mark only, never by a
 // Google id, so a row entered by hand is never taken for it.
@@ -238,11 +261,12 @@ function accountRow(account) {
 
 async function syncAccount(customer, account) {
   logger.info('[google-lsa] Syncing the account row');
-  const campaigns = await customer.query(`
-    SELECT campaign.id, campaign.status, campaign_budget.amount_micros
+  const allCampaigns = await customer.query(`
+    SELECT campaign.id, campaign.status, campaign.advertising_channel_type, campaign_budget.amount_micros
     FROM campaign
-    WHERE ${CHANNEL_FILTER}
   `);
+  assertNoPerformanceMax(allCampaigns);
+  const campaigns = allCampaigns.filter((r) => LOCAL_SERVICES.has(r.campaign?.advertising_channel_type));
 
   const existing = await accountRow(account);
   // An account that never had a Local Services campaign has nothing to mirror.
@@ -273,28 +297,10 @@ async function syncAccount(customer, account) {
 
 // ---------------------------------------------------------------------------
 // syncDailyPerformance: the account's cost and leads per day into
-// ad_performance_daily. Each run rebuilds a whole window of days, so a day is
-// always the result of the newest read: Google credits a disputed lead back
-// days later, and the day's charged count and cost then change.
+// ad_performance_daily. Each run rebuilds the whole window (rebuildWindow), so
+// a day is always the result of the newest read: Google credits a disputed
+// lead back days later, and the day's charged count and cost then change.
 // ---------------------------------------------------------------------------
-
-// The first day to rebuild: 30 days back, or earlier when Google changed the
-// credit of an older lead inside those 30 days. The window then starts at that
-// lead's creation day, so a late credit still reaches the day it belongs to,
-// but never before `earliest` (MAX_LOOKBACK_DAYS).
-async function windowStart(customer, since, earliest) {
-  const rows = await customer.query(`
-    SELECT local_services_lead.creation_date_time
-    FROM local_services_lead
-    WHERE local_services_lead.credit_details.credit_state_last_update_date_time >= '${since} 00:00:00'
-  `);
-  let start = since;
-  for (const row of rows) {
-    const day = leadDay(row.local_services_lead);
-    if (day && day < start) start = day;
-  }
-  return start < earliest ? earliest : start;
-}
 
 // The days the row already holds in the window: 'YYYY-MM-DD' -> row id.
 async function storedDays(campaignId, since, until) {
@@ -306,10 +312,9 @@ async function storedDays(campaignId, since, until) {
   return new Map(rows.map((r) => [r.day, r.id]));
 }
 
-async function syncDailyPerformance(customer, campaignId, days = DEFAULT_DAYS) {
-  logger.info(`[google-lsa] Syncing daily performance (last ${days} days)`);
-  const { since: normalSince, until } = dateRange(days);
-  const since = await windowStart(customer, normalSince, dateRange(MAX_LOOKBACK_DAYS).since);
+async function syncDailyPerformance(customer, campaignId) {
+  const { since, until } = rebuildWindow();
+  logger.info(`[google-lsa] Syncing daily performance (${since} to ${until})`);
 
   const metricRows = await customer.query(`
     SELECT
@@ -372,7 +377,7 @@ async function syncDailyPerformance(customer, campaignId, days = DEFAULT_DAYS) {
 // step succeeded. A failure throws an Error with Google's reason, so job_health
 // records it instead of a success.
 // ---------------------------------------------------------------------------
-async function runDailySync({ days = DEFAULT_DAYS } = {}) {
+async function runDailySync() {
   const customer = getCustomer();
   if (!customer) return { configured: false, synced: {} };
   const step = async (name, run) => {
@@ -386,7 +391,7 @@ async function runDailySync({ days = DEFAULT_DAYS } = {}) {
   };
   const { row, campaigns } = await step('syncAccount', () => syncAccount(customer, customerId()));
   if (!row) return { configured: true, synced: { campaigns: 0, performanceRows: 0 } };
-  const written = await step('syncDailyPerformance', () => syncDailyPerformance(customer, row.id, days));
+  const written = await step('syncDailyPerformance', () => syncDailyPerformance(customer, row.id));
   return { configured: true, synced: { campaigns, performanceRows: written.length } };
 }
 
@@ -401,8 +406,7 @@ module.exports = {
     sumMetricsByDay,
     tallyLeadsByDay,
     mapPerformanceRow,
-    windowStart,
-    dateRange,
+    rebuildWindow,
     syncAccount,
     syncDailyPerformance,
     DEFAULT_CUSTOMER_ID,
