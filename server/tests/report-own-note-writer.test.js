@@ -99,14 +99,21 @@ describe('a model reads the masked note only', () => {
   });
 
   test('the codes are read from the customer\'s file before any call', async () => {
-    const db = () => ({ where: () => ({ first: async () => ({ lockbox_code: 'bluebird' }) }) });
+    // The customer's file as the reads see it: a profile row, no other code.
+    const fileOf = (profile) => () => {
+      const read = {
+        join: () => read, where: () => read, first: profile, select: async () => [],
+      };
+      return read;
+    };
+    const db = fileOf(async () => ({ lockbox_code: 'bluebird' }));
     await expect(cleanReportNote({
       note: 'bluebird. treated back yard', ...VISIT, catalogRows: CATALOG, db, customerId: 'customer-1',
     })).resolves.toEqual({ text: FIXED, source: 'fixed', reason: 'nothing_for_customer' });
     // No customer to read the codes for, or a read that fails: no call.
     await expect(cleanReportNote({ note: 'treated back yard', ...VISIT, catalogRows: CATALOG }))
       .resolves.toEqual({ text: FIXED, source: 'fixed', reason: 'screen_unavailable' });
-    const broken = () => ({ where: () => ({ first: async () => { throw new Error('read failed'); } }) });
+    const broken = fileOf(async () => { throw new Error('read failed'); });
     await expect(cleanReportNote({
       note: 'treated back yard', ...VISIT, catalogRows: CATALOG, db: broken, customerId: 'customer-1',
     })).resolves.toEqual({ text: FIXED, source: 'fixed', reason: 'screen_unavailable' });
