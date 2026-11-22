@@ -253,6 +253,24 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     expect(offer.text_snapshot).toContain(`we serviced your home on ${formatDateOnly(day(-4), { year: undefined, month: 'short' })}.`);
   });
 
+  // The owner can pause or archive a template in the template editor. Its version stays a draft or active, and
+  // the library does not check the template's status on a test send.
+  test.each([
+    ['the offer template is paused', OFFER, 'paused'],
+    ['the reminder template is paused', REMINDER, 'paused'],
+    ['the offer template is archived', OFFER, 'archived'],
+  ])('%s: the job sends no sample, not the other one either, until the template is a draft again', async (_name, templateKey, status) => {
+    const { job } = await seedJob();
+    await trx('email_templates').where({ template_key: templateKey }).update({ status });
+    expect(await run()).toMatchObject({ jobs: 1, sample: 0, failed: 1 });
+    expect(await sampleRows(job.id)).toEqual([]);
+    expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+
+    await trx('email_templates').where({ template_key: templateKey }).update({ status: 'draft' });
+    expect(await run()).toMatchObject({ jobs: 1, sample: 1, failed: 0 });
+    expect((await sampleRows(job.id)).map((row) => row.status)).toEqual(['sent', 'sent']);
+  });
+
   // A service record names its visit and its customer. Only a record of the visit's own customer counts.
   test('a record of another customer that names the visit neither makes the job due nor moves its day', async () => {
     const other = await seedCustomer();

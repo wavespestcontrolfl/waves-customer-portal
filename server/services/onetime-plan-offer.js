@@ -58,6 +58,8 @@ const PAGE_SIZE = 50;
 
 const OFFER_TEMPLATE = 'nurture.plan_offer';
 const REMINDER_TEMPLATE = 'nurture.plan_offer_reminder';
+// The two samples of a job, in the order they are sent.
+const SAMPLE_TEMPLATES = [OFFER_TEMPLATE, REMINDER_TEMPLATE];
 // The email division's stream for both templates (their unsubscribe group is marketing_nurture).
 const OFFER_STREAM = 'nurture';
 // The variables each template requires. The seed migration's lists are pinned equal to these by the unit test.
@@ -246,11 +248,15 @@ function pick(payload, keys) {
 
 // The words under review: the template's newest version that is not archived. The owner edits the draft in the
 // template editor and the next sample carries it. A customer send (a later PR) uses only the published version.
+// The template itself must be a draft or active too. The owner can pause or archive a template in the editor,
+// and the library does not check that status on a test send, so this read is where a sample honors it.
+const SAMPLED_STATUSES = ['draft', 'active'];
 async function sampleVersionId(database, templateKey) {
   const row = await database('email_template_versions as v')
     .join('email_templates as t', 'v.template_id', 't.id')
     .where('t.template_key', templateKey)
-    .whereIn('v.status', ['draft', 'active'])
+    .whereIn('t.status', SAMPLED_STATUSES)
+    .whereIn('v.status', SAMPLED_STATUSES)
     .orderBy('v.version_number', 'desc')
     .first('v.id');
   if (!row) throw Object.assign(new Error(`${templateKey} has no version to sample`), { code: 'TEMPLATE_MISSING' });
@@ -280,8 +286,12 @@ async function sendSamples(ctx, option) {
   };
   const note = 'Sample only. No estimate was saved and the customer got no email. This step does not check the account'
     + ` (open balance, other visits, review asks), so this customer may not get the offer. Job ${ctx.job.id}.`;
-  for (const templateKey of [OFFER_TEMPLATE, REMINDER_TEMPLATE]) {
-    const versionId = await sampleVersionId(ctx.deps.db, templateKey);
+  // Both versions are read before the first send: a job never gets the offer sample when the reminder's
+  // template has no version to sample.
+  const versionIds = {};
+  for (const templateKey of SAMPLE_TEMPLATES) versionIds[templateKey] = await sampleVersionId(ctx.deps.db, templateKey);
+  for (const templateKey of SAMPLE_TEMPLATES) {
+    const versionId = versionIds[templateKey];
     const result = await ctx.deps.sendTemplate({
       versionId,
       to: SAMPLE_RECIPIENT,

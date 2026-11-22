@@ -226,6 +226,8 @@ describe("a job in the offer's audience that prices", () => {
     expect(reads.map((query) => whereValue(query, 't.template_key'))).toEqual([OFFER_TEMPLATE, REMINDER_TEMPLATE]);
     for (const query of reads) {
       expect(called(query, 'whereIn', 'v.status', ['draft', 'active'])).toBe(true);
+      // A template the owner paused or archived in the editor is not sampled.
+      expect(called(query, 'whereIn', 't.status', ['draft', 'active'])).toBe(true);
       expect(called(query, 'orderBy', 'v.version_number', 'desc')).toBe(true);
     }
   });
@@ -374,6 +376,15 @@ describe('once per job, and one bad job never stops the others', () => {
     expect(deps.sendTemplate.mock.calls.map(([send]) => send.idempotencyKey)).toEqual([
       `onetime-plan-offer:sample:${OFFER_TEMPLATE}:job-2`, `onetime-plan-offer:sample:${REMINDER_TEMPLATE}:job-2`,
     ]);
+  });
+
+  // Both versions are read before the first send, so a job never gets the offer sample alone for this reason.
+  test('the reminder template has no version to sample: the offer sample is not sent either', async () => {
+    const versions = (query) => (whereValue(query, 't.template_key') === REMINDER_TEMPLATE ? [] : [{ id: 'ver:offer' }]);
+    const deps = world({ tables: { 'email_template_versions as v': versions } });
+    expect(counts(await run(deps))).toEqual({ ...NONE, failed: 1 });
+    expect(deps.sendTemplate).not.toHaveBeenCalled();
+    expect(logger.warn.mock.calls[0][0]).toContain('code=TEMPLATE_MISSING');
   });
 
   test.each([
