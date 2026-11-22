@@ -52,9 +52,10 @@
  *     fan-out); an office edit is never overwritten either. The Dimension product id is the one
  *     catalog row with that exact name, else the one product an alias spells that way (the
  *     upgrade path 20261007120500 supports); it is only compared, never written.
- *   - Every v13 protocol holds exactly ONE October window, or none of them holds one. A track
- *     with no window, or two, beside tracks that have one: throws (the other tracks would be
- *     swapped while that track's recipe step has no staged row).
+ *   - Every v13 protocol holds exactly ONE October window. A track with no window, or two:
+ *     throws (the recipe names Stonewall for that track and no staged row would hold it), also
+ *     when every track lacks its window. Only a database with no v13 protocol at all is left
+ *     alone.
  *   - The Stonewall catalog row is the production row (exactly ONE row with this exact name, no
  *     alias that spells the name on another product, active, an active ingredient that BEGINS
  *     with prodiamine as the yearly cap check reads it (ILIKE 'prodiamine%', so a leading space
@@ -68,7 +69,7 @@
  *     1,000 sq ft per year. Two rows (the check would count one application twice), another
  *     unit or a warning-only row (it cannot be compared with the label): throws.
  * Production, read 2026-11-22: four tracks TO SWAP (each whole row equal to a migrations-built
- * one), one catalog row with the production facts, no alias, one hard-block cap row. A database with no v13 October window gets no check and no write.
+ * one), one catalog row with the production facts, no alias, one hard-block cap row. A database with no v13 protocol gets no check and no write.
  * The window, its rows, the catalog row and the cap row are read FOR UPDATE, and each write repeats
  * the values it checked in its WHERE: an edit made while the migration runs waits, or stops the
  * migration; it is never overwritten from an older read.
@@ -85,7 +86,7 @@
  *      20261005130000), so every database ends on the same October product. Customer-copy and
  *      approval columns keep their defaults (the owner approves them).
  * Items 4 to 7 are the bag's catalog facts. They are checked on every database where a track
- * uses the bag, swapped by this run or before it; a database with no v13 October window gets no
+ * uses the bag, swapped by this run or before it; a database with no v13 protocol gets no
  * lookup and no write.
  *   4. Fertilizer analysis. The production row holds no analysis_n/p/k. The new-sod sheet
  *      (lawn-sod-sheet) and two completion checks read analysis_n from the row, so a bag
@@ -368,15 +369,15 @@ function isOctoberBagRow(row, name, productId, counterKey) {
 }
 
 // The October windows of the v13 protocols, read FOR UPDATE, each with its protocol key. Every v13 protocol holds exactly
-// one, or none of them holds one (an empty list); a track with no window or two beside tracks with one stops the migration.
+// one; a track with no window or two stops the migration. No v13 protocol at all: an empty list.
 async function octoberWindows(knex) {
   const protocols = await knex('lawn_protocols').where({ version: V13_VERSION }).select('id', 'protocol_key');
   const known = new Map(protocols.map((protocol) => [String(protocol.id), protocol.protocol_key]));
   const windows = (await knex('lawn_protocol_windows').where({ window_key: OCTOBER_WINDOW }).select('id', 'lawn_protocol_id', 'goal').forUpdate())
     .filter((window) => known.has(String(window.lawn_protocol_id))).map((window) => ({ ...window, protocolKey: known.get(String(window.lawn_protocol_id)) }));
   const uneven = protocols.filter((protocol) => windows.filter((window) => String(window.lawn_protocol_id) === String(protocol.id)).length !== 1);
-  if (windows.length && uneven.length) {
-    stop(`the v13 protocol(s) ${uneven.map((protocol) => protocol.protocol_key).join(', ')} do not hold exactly one ${OCTOBER_WINDOW} window while others do; the swap would leave that track's October step with no staged row`);
+  if (uneven.length) {
+    stop(`the v13 protocol(s) ${uneven.map((protocol) => protocol.protocol_key).join(', ')} do not hold exactly one ${OCTOBER_WINDOW} window; the recipe names ${NEW_NAME} for that track and no staged row would hold it`);
   }
   return windows;
 }
@@ -473,7 +474,7 @@ async function hasAll(knex, tables) {
 }
 
 // THE GATE: everything the swap relies on, read and checked BEFORE any write (see the header). Returns what up() writes
-// from, or null when no v13 October window exists (nothing names the bag here: no check, no write).
+// from, or null when no v13 protocol exists (nothing names the bag here: no check, no write).
 async function readState(knex) {
   const windows = await octoberWindows(knex);
   if (!windows.length) return null;
@@ -599,6 +600,8 @@ exports.down = async function down(knex) {
 
 exports.ACTION = ACTION;
 exports.OCTOBER_WINDOW = OCTOBER_WINDOW;
+exports.ROW_SHAPE = ROW_SHAPE;
+exports.ROW_GATES = ROW_GATES;
 exports.CATALOG_ACTION = CATALOG_ACTION;
 exports.OLD_NAME = OLD_NAME;
 exports.NEW_NAME = NEW_NAME;

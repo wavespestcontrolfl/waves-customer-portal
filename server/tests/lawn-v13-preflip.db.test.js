@@ -1352,7 +1352,19 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       test('a second v13 protocol with no October window: up throws and writes nothing (that track\'s recipe step would have no staged row)', async () => {
         await withReset(async () => {
           const [other] = await knex('lawn_protocols').insert({ protocol_key: 'fixture_v13_no_october', version: LAWN_V13_VERSION, name: 'Fixture v13, no October', status: 'staged', grass_track: 'zoysia', region: 'swfl' }).returning('id');
-          try { await refuses('the v13 protocol(s) fixture_v13_no_october do not hold exactly one oct_v13_spreader_fall window while others do'); } finally { await knex('lawn_protocols').where({ id: other.id ?? other }).del(); }
+          try { await refuses('the v13 protocol(s) fixture_v13_no_october do not hold exactly one oct_v13_spreader_fall window'); } finally { await knex('lawn_protocols').where({ id: other.id ?? other }).del(); }
+        });
+      });
+
+      test('the only v13 protocol has lost its October window (renamed): up throws and writes nothing, so the migration is not recorded as run', async () => {
+        await withReset(async () => {
+          const window = await knex('lawn_protocol_windows').where({ window_key: stonewallMigration.OCTOBER_WINDOW }).first('id');
+          await knex('lawn_protocol_windows').where({ id: window.id }).update({ window_key: 'oct_renamed' });
+          try {
+            await expect(stonewallMigration.up(knex)).rejects.toThrow(`the v13 protocol(s) ${KEY} do not hold exactly one oct_v13_spreader_fall window`);
+            expect(await ours()).toEqual([]);
+            expect(await knex('lawn_protocol_products').where({ lawn_protocol_window_id: window.id, product_name: DIMENSION }).first('product_name')).toEqual({ product_name: DIMENSION });
+          } finally { await knex('lawn_protocol_windows').where({ id: window.id }).update({ window_key: stonewallMigration.OCTOBER_WINDOW }); }
         });
       });
 
@@ -1591,18 +1603,25 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       beforeAll(async () => { await resetToDimension(); await stonewallMigration.up(knex); await stampSwap(); });
       afterAll(async () => { await resetToDimension(); await stonewallMigration.up(knex); });
 
-      const completedVisit = async ({ serviceDate, completedAt = null, recorded = [] }) => {
-        const { scheduled, customerId } = await visit(serviceDate);
-        const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: scheduled.id, service_date: serviceDate, service_type: 'Lawn fixture' }).returning('*');
-        const protocol = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();
-        const window = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id, window_key: stonewallMigration.OCTOBER_WINDOW }).first();
-        await knex('lawn_protocol_service_completions').insert({
-          service_record_id: record.id, scheduled_service_id: scheduled.id, customer_id: customerId, lawn_protocol_id: protocol.id,
-          lawn_protocol_window_id: window.id, protocol_key: KEY, protocol_version: LAWN_V13_VERSION, window_key: stonewallMigration.OCTOBER_WINDOW,
-          ...(completedAt ? { created_at: completedAt } : {}),
-        });
+      // ledger false: no protocol completion row; the visit's own assignment names the protocol and the window, and the service record is the closeout.
+      const completedVisit = async ({ serviceDate, completedAt = null, recorded = [], ledger = true }) => {
+        const pin = ledger ? {} : { lawn_protocol_key: KEY, lawn_protocol_version: LAWN_V13_VERSION, lawn_protocol_window_key: stonewallMigration.OCTOBER_WINDOW };
+        const { scheduled, customerId } = await visit(serviceDate, pin);
+        const [record] = await knex('service_records').insert({
+          customer_id: customerId, scheduled_service_id: scheduled.id, service_date: serviceDate, service_type: 'Lawn fixture',
+          ...(!ledger && completedAt ? { created_at: completedAt } : {}),
+        }).returning('*');
+        if (ledger) {
+          const protocol = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();
+          const window = await knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id, window_key: stonewallMigration.OCTOBER_WINDOW }).first();
+          await knex('lawn_protocol_service_completions').insert({
+            service_record_id: record.id, scheduled_service_id: scheduled.id, customer_id: customerId, lawn_protocol_id: protocol.id,
+            lawn_protocol_window_id: window.id, protocol_key: KEY, protocol_version: LAWN_V13_VERSION, window_key: stonewallMigration.OCTOBER_WINDOW,
+            ...(completedAt ? { created_at: completedAt } : {}),
+          });
+        }
         for (const name of recorded) await knex('service_products').insert({ service_record_id: record.id, product_id: catalog[name].id, product_name: name });
-        return { id: record.id, customer_id: customerId, service_date: serviceDate, scheduled_service_id: scheduled.id };
+        return { id: record.id, customer_id: customerId, service_date: serviceDate, scheduled_service_id: scheduled.id, created_at: record.created_at };
       };
       const card = async (options, db = knex) => {
         const context = await buildLawnProtocolReportContext(await completedVisit(options), db, new Date('2026-12-01T16:00:00Z'));
@@ -1641,7 +1660,23 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         expect(await card({ serviceDate: '2026-11-22', completedAt: '2026-11-22T16:00:00Z' })).toEqual(stonewallCard());
       });
 
-      test('a staged row the office changed after the swap is shown as it is, for an earlier visit too', async () => {
+      test('on the day of the swap, a visit with no protocol completion row is placed by its service record: before the swap the Dimension bag, after it Stonewall', async () => {
+        try {
+          expect(await card({ serviceDate: '2026-11-22', completedAt: '2026-11-22T14:00:00Z', ledger: false })).toEqual(dimensionCard());
+          expect(await card({ serviceDate: '2026-11-22', completedAt: '2026-11-22T16:00:00Z', ledger: false })).toEqual(stonewallCard());
+        } finally { await knex('scheduled_services').where({ lawn_protocol_key: KEY }).update({ lawn_protocol_key: null, lawn_protocol_version: null, lawn_protocol_window_key: null }); }
+      });
+
+      test('a dose the office set for Stonewall after the swap never shows under the Dimension name: an earlier visit keeps 4.04 lb', async () => {
+        const row = await octoberRow();
+        await knex('lawn_protocol_products').where({ id: row.id }).update({ rate_per_1000: 6.2 });
+        try {
+          expect(await card({ serviceDate: '2026-10-12', recorded: [DIMENSION] })).toEqual(dimensionCard());
+          expect(await card({ serviceDate: '2027-10-12' })).toEqual({ ...stonewallCard(), rate: 6.2 });
+        } finally { await knex('lawn_protocol_products').where({ id: row.id }).update({ rate_per_1000: 4.04 }); }
+      });
+
+      test('a staged row the office renamed after the swap is no longer the swapped row: it is shown as it is, for an earlier visit too', async () => {
         const row = await octoberRow();
         await knex('lawn_protocol_products').where({ id: row.id }).update({ product_name: 'Renamed by the office' });
         try {

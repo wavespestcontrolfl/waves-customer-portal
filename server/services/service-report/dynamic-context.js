@@ -343,28 +343,39 @@ function swappedRowRecord(snapshot) {
   return { rowId: recorded.rowId, name: columns.product_name, productId: columns.product_id, counter: columns.annual_counter, gateCounter: (recorded.gates || {}).annualCounter };
 }
 
-// The summary's product row as the staged row read before the swap: the recorded product and counter, and that product's catalog facts.
+// The summary's product row as the staged row read before the swap. The swap acted only on a row it had checked column for column
+// (the migration's ROW_SHAPE, ROW_GATES and rate), so those values and the recorded product and counter are the earlier row; nothing
+// is taken from the row as it reads now but its id (a dose the office set for Stonewall later never shows under the Dimension name).
 function rowBeforeSwap(row, was, catalog) {
+  const { ROW_SHAPE, ROW_GATES, OCT_RATE } = octoberStonewall;
   return {
     ...row,
     productId: was.productId.before,
     productName: catalog.name || was.name.before,
     protocolProductName: was.name.before,
-    gates: was.gateCounter ? { ...parseJson(row.gates, {}), annualCounter: was.gateCounter.before } : row.gates,
+    role: ROW_SHAPE.role,
+    applicationMode: ROW_SHAPE.application_mode,
+    ratePer1000: OCT_RATE,
+    rateUnit: ROW_SHAPE.rate_unit,
+    carrierGalPer1000: ROW_SHAPE.carrier_gal_per_1000,
+    defaultInPlan: ROW_SHAPE.default_in_plan,
+    gates: { ...ROW_GATES, annualCounter: was.gateCounter ? was.gateCounter.before : undefined },
     annualCounter: was.counter ? was.counter.before : row.annualCounter,
     groups: { frac: catalog.frac_group || null, irac: catalog.irac_group || null, hrac: catalog.hrac_group || null, moa: catalog.moa_group || null },
     analysis: { n: catalog.analysis_n ?? null, p: catalog.analysis_p ?? null, k: catalog.analysis_k ?? null },
   };
 }
 
-// Was the visit made before `swappedAt`? Its service day against the swap's day (Eastern); on the swap's own day, only a completion that
-// was recorded before the swap. A visit with no readable service day is not before.
+// Was the visit made before `swappedAt`? Its service day against the swap's day (Eastern); on the swap's own day, only a closeout that
+// was recorded before the swap (the protocol completion row, else the service record itself). A visit with no readable service day is
+// not before.
 function visitWasBefore(swappedAt, { record, completion }) {
   const serviceDay = dateOnlyStamp(record?.service_date);
   if (!serviceDay) return false;
   const swapDay = etDateString(new Date(swappedAt));
   if (serviceDay !== swapDay) return serviceDay < swapDay;
-  return !!completion?.created_at && new Date(completion.created_at) < new Date(swappedAt);
+  const closedAt = completion?.created_at || record.created_at;
+  return !!closedAt && new Date(closedAt) < new Date(swappedAt);
 }
 
 // The catch-up's product (the March Dimension 2EW row the window read added for an eligible visit) is listed on the CUSTOMER report only when
