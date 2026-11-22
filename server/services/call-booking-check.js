@@ -116,17 +116,20 @@ function visitHasPrice(visit) {
 // The visit's catalog row, in the shape the booking's price rule reads.
 const catalogRowOf = (visit) => ({ name: visit.row_name, service_key: visit.row_service_key, billing_type: visit.row_billing_type });
 
-// A visit a call booking never prices, whatever the call said (resolveCallBookingPrice refuses each): a service
-// that is not one-time, a free re-service, and a Waves Assessment, the free look-before-quote visit (a treatment
-// price said on the same call is the quote, not this visit's charge). Also a free callback, and a visit whose
-// label completion billing always treats as free (isAlwaysFreeServiceType: an appointment, an estimate, a
-// follow-up), where a price would be skipped at completion. Also a visit the office made recurring (the
-// schedule editor keeps the one-time catalog row): it is a plan's visit now, not the call's one-time job.
-function takesNoCallPrice(visit) {
-  const row = catalogRowOf(visit);
-  return row.billing_type !== 'one_time' || Boolean(visit.is_callback)
-    || Boolean(visit.is_recurring) || visit.recurring_parent_id != null
-    || require('./no-cost-visit-types').isAlwaysFreeServiceType(visit.service_type)
+// A visit that takes no price from the call, by the visit's own facts (no catalog row needed): a free callback,
+// a visit whose label completion billing always treats as free (isAlwaysFreeServiceType: an appointment, an
+// estimate, a follow-up), where a price would be skipped at completion, and a visit the office made recurring
+// (the schedule editor keeps the one-time catalog row): it is a plan's visit now, not the call's one-time job.
+function visitTakesNoCallPrice(visit) {
+  return Boolean(visit.is_callback) || Boolean(visit.is_recurring) || visit.recurring_parent_id != null
+    || require('./no-cost-visit-types').isAlwaysFreeServiceType(visit.service_type);
+}
+
+// A catalog row a call booking never prices, whatever the call said (resolveCallBookingPrice refuses each): a
+// service that is not one-time, a free re-service, and a Waves Assessment, the free look-before-quote visit (a
+// treatment price said on the same call is the quote, not this visit's charge).
+function rowTakesNoCallPrice(row) {
+  return row.billing_type !== 'one_time'
     || require('./call-booking-catalog').isReServiceCatalogRow(row)
     || require('./assessment-booking').isAssessmentServiceRow(row);
 }
@@ -173,18 +176,18 @@ function statedPriceFor(reading, catalogRow) {
 // What the visit and the reading of its call say about the price, as they stand now:
 //   problem  a one-time visit with no price, and the reading holds a stated price for that same job
 //            ({ verdict, amount });
-//   agrees   the visit needs no price from the call: it has one (visitHasPrice), or a call booking never prices
-//            it (takesNoCallPrice);
+//   agrees   the visit needs no price from the call: it has one (visitHasPrice), its own facts say it takes none
+//            (visitTakesNoCallPrice), or a call booking never prices its catalog row (rowTakesNoCallPrice);
 //   unknown  the visit has no catalog row, the reading cannot be read or holds no stated price, or the price
 //            cannot be tied to this visit as a one-time charge: the reading names another service than the
 //            visit's or a name the catalog holds under two billing types (`billingByName`, as in judgeService),
 //            the visit's label is no longer its catalog row's name (the schedule editor can change the label
 //            alone), or the reading does not read as one one-time job and nothing else (readsAsOneOneTimeJob).
 function judgePrice(visit, billingByName) {
-  // A price settles it, whatever else can be read (a visit whose catalog row is gone, too).
-  if (visitHasPrice(visit)) return { verdict: 'agrees' };
+  // The visit's own facts settle it first, whatever else can be read (a visit whose catalog row is gone, too).
+  if (visitHasPrice(visit) || visitTakesNoCallPrice(visit)) return { verdict: 'agrees' };
   if (!visit.row_billing_type) return { verdict: 'unknown' };
-  if (takesNoCallPrice(visit)) return { verdict: 'agrees' };
+  if (rowTakesNoCallPrice(catalogRowOf(visit))) return { verdict: 'agrees' };
   const reading = visit.v2_extraction_status === 'valid' ? readingOf(visit) : null;
   const request = reading && reading.service_request;
   if (!request || typeof request !== 'object') return { verdict: 'unknown' };
