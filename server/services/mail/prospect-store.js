@@ -190,6 +190,9 @@ function writableFields(row) {
   return out;
 }
 
+// How careful a stored answer is (see saveProspect). `unmatched` is no answer and has no rank.
+const ANSWER_RANK = { eligible: 1, held_back: 1, not_eligible: 2 };
+
 async function upsert(row, conn) {
   const fields = writableFields(row);
   const now = conn.fn.now();
@@ -216,20 +219,21 @@ async function upsert(row, conn) {
  * never land between the refused write and the fallback and then be overwritten by that fallback. The first write
  * runs in its own savepoint, so a refusal rolls back only that write.
  *
- * `unmatched` is "no answer yet", so it never replaces a row that has an answer (eligible, held_back,
- * not_eligible): nothing is written and the stored status is returned. Two runs can judge one deed at the same
- * time, and the one that could not reach the parcel map must not undo the other's result. The stored row is read
- * under the same lock.
+ * A save never replaces a stored answer with a less careful one. `unmatched` is "no answer yet"; a live home
+ * (eligible, held_back) is an answer; not_eligible is the most careful answer. A stored answer is replaced only by
+ * a more careful one: a live home by not_eligible, and nothing replaces not_eligible. Else nothing is written and
+ * the stored status is returned. Two runs can judge one deed at the same time. The run that could not reach the
+ * parcel map must not undo the other's result, and a home one run found to be a known address must stay
+ * not_eligible whichever run saves last. The stored row is read under the same lock.
  */
 async function saveProspect(row, conn = db) {
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`mail_prospects:${row.list_key}:${row.source}:${row.source_ref}`]);
-    if (row.status === 'unmatched') {
-      const stored = await trx('mail_prospects')
-        .where({ list_key: row.list_key, source: row.source, source_ref: row.source_ref })
-        .first('status');
-      if (stored && stored.status !== 'unmatched') return stored.status;
-    }
+    const stored = await trx('mail_prospects')
+      .where({ list_key: row.list_key, source: row.source, source_ref: row.source_ref })
+      .first('status');
+    const storedRank = stored ? ANSWER_RANK[stored.status] : undefined;
+    if (storedRank && !(ANSWER_RANK[row.status] > storedRank)) return stored.status;
     try {
       return await trx.transaction((attempt) => upsert(row, attempt));
     } catch (err) {

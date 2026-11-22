@@ -14,7 +14,9 @@
  * the permit or the parcel may appear later; that goes on while its day is one of the days a run reads.
  *
  * One deed that cannot be judged or saved does not stop the deeds after it: it is counted, and the run throws at
- * its end. The log line and the thrown error hold counts, dates and codes only, never a name or an address.
+ * its end. The run also throws at its end when a day could not be read or the parcel map did not answer, so a
+ * site that is away for days is seen before its deeds leave the read. The log line and the thrown error hold
+ * counts, dates and codes only, never a name or an address.
  */
 
 const crypto = require('node:crypto');
@@ -36,6 +38,7 @@ const MAX_LOOKUP_FAILURES_IN_A_ROW = 5;
 const MAX_ERRORS_IN_A_ROW = 3;
 const HOLD_BACK_ONE_IN = 5;
 const SETTLED_STATUSES = new Set(['eligible', 'held_back', 'not_eligible']);
+const LIVE_STATUSES = new Set(['eligible', 'held_back']);
 
 const COMPANY_WORDS = [
   'LLC', 'L L C', 'LC', 'INC', 'INCORPORATED', 'CORP', 'CORPORATION', 'CO', 'COMPANY', 'LP', 'LLP', 'LLLP', 'LTD',
@@ -46,7 +49,7 @@ const COMPANY_WORDS = [
 ];
 const TRUST_WORDS = ['TRUST', 'TRUSTEE', 'TRUSTEES', 'TR', 'TRS', 'REVOCABLE', 'IRREVOCABLE', 'ESTATE'];
 
-// Whole words only, after punctuation turns into spaces ("L.L.C." reads as "L L C", "M/I HOMES" as "M I HOMES").
+// Whole words only, after punctuation turns into spaces ("M/I HOMES" reads as "M I HOMES").
 const wordMatcher = (words) => new RegExp(`(?:^| )(?:${words.join('|')})(?: |$)`);
 const COMPANY_RE = wordMatcher(COMPANY_WORDS);
 const TRUST_RE = wordMatcher(TRUST_WORDS);
@@ -196,6 +199,12 @@ const bump = (counts, key) => { counts[key] = (counts[key] || 0) + 1; };
 const codeOf = (value) => (typeof value === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(value) ? value : null);
 const errorCode = (err) => codeOf(err?.reason) || codeOf(err?.code) || codeOf(err?.name) || 'error';
 
+// An error that belongs to one deed, not to something every deed needs: PostgreSQL refused the row (SQLSTATE class
+// 22, a value that does not fit; class 23, a constraint), or the code failed on this deed's data (TypeError,
+// RangeError). Any other error can be a dependency that is away (the database, its pool).
+const ROW_ERROR_CLASSES = new Set(['TypeError', 'RangeError']);
+const isRowError = (err) => /^2[23][0-9A-Z]{3}$/.test(String(err?.code || '')) || ROW_ERROR_CLASSES.has(err?.name);
+
 // A day that cannot be read is recorded and the run goes on with the other days.
 async function readDays(days, d, summary) {
   const rows = [];
@@ -260,7 +269,8 @@ async function evaluateAndSave(candidates, d, summary) {
   };
   for (const candidate of candidates) {
     const mapStopped = state.queries >= MAX_PARCEL_QUERIES || state.failStreak >= MAX_LOOKUP_FAILURES_IN_A_ROW;
-    // Several errors in a row are not one bad deed (the database is away): every deed left waits.
+    // Several errors in a row that are not a deed's own (isRowError) mean the database is away: every deed left
+    // waits.
     if (state.errorStreak >= MAX_ERRORS_IN_A_ROW || (mapStopped && needsMapQuery(candidate))) {
       bump(summary.skipped, 'waits_for_next_run'); // not saved: the next run asks again
       continue;
@@ -271,21 +281,27 @@ async function evaluateAndSave(candidates, d, summary) {
       state.errorStreak = 0;
       bump(summary.saved, saved);
       // The store can keep another status than the one asked for. A live home becomes not_eligible when the
-      // home or its permit is already live under another deed (duplicate). An unmatched deed keeps the answer
-      // another run stored for it in the meantime (kept).
+      // home or its permit is already live under another deed (duplicate). Any other difference is an answer
+      // another run stored for this deed in the meantime, which the store kept (kept). A not_eligible answer of
+      // another run for a home this run found live reads as duplicate too; the row's reason has the cause.
       if (saved === row.status) {
         if (row.reason) bump(summary.savedByReason, `${row.status}/${row.reason}`);
       } else {
-        bump(summary.savedByReason, `${saved}/${row.status === 'unmatched' ? 'kept' : 'duplicate'}`);
+        const duplicate = LIVE_STATUSES.has(row.status) && saved === 'not_eligible';
+        bump(summary.savedByReason, `${saved}/${duplicate ? 'duplicate' : 'kept'}`);
       }
     } catch (err) {
       // One deed that cannot be judged or saved must not stop the deeds after it. It is not saved, so the next
-      // run tries it again, and this run throws at its end.
-      state.errorStreak += 1;
+      // run tries it again, and this run throws at its end. Only an error that is not the deed's own counts
+      // toward the stop: three refused rows in a row must not make every deed after them wait.
+      if (!isRowError(err)) state.errorStreak += 1;
       bump(summary.errors, errorCode(err));
     }
   }
   summary.mapQueries = state.queries;
+  // The count at the end of the run: the stop holds it at its limit, and it equals mapQueries when no query of
+  // this run was answered.
+  summary.mapFailuresInARow = state.failStreak;
 }
 
 async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
@@ -294,7 +310,7 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
   const days = daysToRead(mode, nowMs);
   const summary = {
     mode, days: days.length, daysRead: 0, daysFailed: 0, deeds: 0, skipped: {}, saved: {}, savedByReason: {}, errors: {},
-    mapQueries: 0,
+    mapQueries: 0, mapFailuresInARow: 0,
   };
   const { rows, failures } = await readDays(days, d, summary);
   const candidates = collectCandidates(rows, summary);
@@ -321,6 +337,11 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
     const count = errors.reduce((sum, [, n]) => sum + n, 0);
     problems.push(`${count} deeds could not be judged or saved (${errors.map(([code, n]) => `${code}: ${n}`).join('; ')})`);
   }
+  // The parcel map did not answer: the stop tripped, or every query of this run failed. Its deeds are stored as
+  // unmatched / lookup_failed and tried again, but a run that learned nothing from the map is not a good run.
+  const mapAway = summary.mapFailuresInARow >= MAX_LOOKUP_FAILURES_IN_A_ROW
+    || (summary.mapQueries > 0 && summary.mapFailuresInARow === summary.mapQueries);
+  if (mapAway) problems.push(`the parcel map did not answer (${summary.mapFailuresInARow} failures in a row)`);
   if (problems.length) throw new Error(`Mail new-home list: ${problems.join('; ')}`);
   return summary;
 }

@@ -168,6 +168,33 @@ postgres('mail prospect store on PostgreSQL', () => {
     });
   });
 
+  test('a save never replaces a stored answer with a less careful one, in both write orders', async () => {
+    const known = (ref) => prospect(ref, { status: 'not_eligible', reason: 'known_address' });
+    // Two runs judged deed 1 at the same time: one found a known address, the other a live home.
+    expect(await saveProspect(known('202699000001'))).toBe('not_eligible');
+    expect(await saveProspect(live('202699000001', '5133090590'))).toBe('not_eligible');
+    // The other order, deed 2: the live home is saved first, then the known address.
+    expect(await saveProspect(live('202699000002', '6000000060'))).toBe('eligible');
+    expect(await saveProspect(known('202699000002'))).toBe('not_eligible');
+    // A live home keeps its first match (deed 3), and not_eligible keeps its first reason (deed 4).
+    expect(await saveProspect(live('202699000003', '7000000070', { status: 'held_back' }))).toBe('held_back');
+    await conn('mail_prospects').update({ last_checked_at: '2026-11-01T12:00:00Z' });
+    expect(await saveProspect(live('202699000003', '8000000080'))).toBe('held_back');
+    expect(await saveProspect(prospect('202699000004', { status: 'not_eligible', reason: 'company_buyer' }))).toBe('not_eligible');
+    expect(await saveProspect(prospect('202699000004', { status: 'not_eligible', reason: 'trust_buyer' }))).toBe('not_eligible');
+    const rows = await conn('mail_prospects').orderBy('source_ref');
+    expect(rows.map((r) => [r.status, r.reason, r.parcel_pin, r.permit_no])).toEqual([
+      ['not_eligible', 'known_address', null, null],
+      ['not_eligible', 'known_address', null, null],
+      ['held_back', null, '7000000070', 'BLD-7000000070'],
+      ['not_eligible', 'company_buyer', null, null],
+    ]);
+    // The kept live home was not written at all.
+    expect(rows[2].last_checked_at.toISOString()).toBe('2026-11-01T12:00:00.000Z');
+    // The parcel of deed 2 is free again for another deed.
+    expect(await saveProspect(live('202699000005', '6000000060'))).toBe('eligible');
+  });
+
   test('a second live row for the same parcel is saved as not_eligible / duplicate_parcel', async () => {
     expect(await saveProspect(live('202699000001', '5133090590'))).toBe('eligible');
     expect(await saveProspect(live('202699000002', '5133090590', { status: 'held_back' }))).toBe('not_eligible');
@@ -234,19 +261,21 @@ postgres('mail prospect store on PostgreSQL', () => {
     try {
       const first = saveProspect(live('202699000002', '5133090590')); // refused by the parcel index, then falls back
       await until(async () => (await deedLocks(true)) === 1, 'the first save holds the lock on the deed');
-      // A second read of the same deed finds a valid match while the first save is still in its fallback.
+      // A second read of the same deed finds another match while the first save is still in its fallback.
       const second = saveProspect(live('202699000002', '6000000060'));
       await until(async () => (await deedLocks(false)) === 1, 'the second save waits for the lock on the deed');
       expect(await first).toBe('not_eligible');
-      expect(await second).toBe('eligible');
+      // The second save reads the first one's answer under the lock and keeps it: it says what the row holds.
+      expect(await second).toBe('not_eligible');
     } finally {
       await conn.raw('DROP TRIGGER IF EXISTS mail_test_pause_fallback ON mail_prospects');
       await conn.raw('DROP FUNCTION IF EXISTS mail_test_pause_fallback()');
     }
-    // The later, valid match stands. Without the lock the second save would be written during the pause, and the
-    // first save's fallback would then overwrite it with not_eligible.
+    // Without the lock the second save would be written during the pause and answer "eligible"; the first save's
+    // fallback would then overwrite it with not_eligible, so the answer would not be what the row holds.
     const row = await conn('mail_prospects').where({ source_ref: '202699000002' }).first();
-    expect(row).toMatchObject({ status: 'eligible', reason: null, parcel_pin: '6000000060' });
+    expect(row).toMatchObject({ status: 'not_eligible', reason: 'duplicate_parcel' });
+    expect(row.parcel_pin).not.toBe('6000000060');
   });
 
   test('the duplicate fallback works inside a caller transaction', async () => {

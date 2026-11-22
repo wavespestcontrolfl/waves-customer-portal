@@ -233,6 +233,8 @@ describe('runNewHomeList', () => {
     permits: { 513309059: { permit_no: 'BLD9900-0001', co_date: '2026-10-30', issued_date: '2026-01-05' } },
   };
   const LIVE = ['eligible', 'held_back'];
+  // The summary of a run that threw, read from its one log line.
+  const loggedSummary = () => JSON.parse(logger.info.mock.calls[0][0].replace(/^[^{]*/, ''));
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -322,22 +324,37 @@ describe('runNewHomeList', () => {
     expect(summary.skipped.waits_for_next_run).toBe(3);
   });
 
-  test('five map failures in a row stop the queries and leave the rest unsaved', async () => {
-    const deps = makeDeps({ rowsByDay: { '2026-11-17': Array.from({ length: 8 }, (_, i) => person(i + 1)) } });
-    deps.queryParcels.mockRejectedValue(new Error('map is down'));
-    const summary = await run(deps);
+  test('five map failures in a row stop the queries, leave the rest unsaved, and the run throws at its end', async () => {
+    const rows = [...Array.from({ length: 8 }, (_, i) => person(i + 1)), person(900, { to: ['SAMPLE HOLDINGS LLC'] })];
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': rows } });
+    deps.queryParcels.mockRejectedValue(new Error('map is down: TESTER ALEX J'));
+    let thrown;
+    await run(deps).catch((err) => { thrown = err; });
+    expect(thrown.message).toBe(`Mail new-home list: the parcel map did not answer (${MAX_LOOKUP_FAILURES_IN_A_ROW} failures in a row)`);
     expect(deps.queryParcels).toHaveBeenCalledTimes(MAX_LOOKUP_FAILURES_IN_A_ROW);
-    expect(summary.savedByReason).toEqual({ 'unmatched/lookup_failed': MAX_LOOKUP_FAILURES_IN_A_ROW });
+    const summary = loggedSummary();
+    expect(summary.savedByReason).toEqual({ 'unmatched/lookup_failed': MAX_LOOKUP_FAILURES_IN_A_ROW, 'not_eligible/company_buyer': 1 });
     expect(summary.skipped.waits_for_next_run).toBe(3);
-    expect(deps.saveProspect).toHaveBeenCalledTimes(MAX_LOOKUP_FAILURES_IN_A_ROW);
+    // The five are stored as unmatched and tried again; the company buyer needs no map and is still saved.
+    expect(deps.saveProspect).toHaveBeenCalledTimes(MAX_LOOKUP_FAILURES_IN_A_ROW + 1);
+    expect(summary.mapFailuresInARow).toBe(MAX_LOOKUP_FAILURES_IN_A_ROW);
   });
 
-  test('a success resets the failure count', async () => {
+  test('a small run where no map query was answered throws too', async () => {
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(1), person(2)] } });
+    deps.queryParcels.mockRejectedValue(new Error('map is down'));
+    await expect(run(deps)).rejects.toThrow('Mail new-home list: the parcel map did not answer (2 failures in a row)');
+    expect(deps.saveProspect.mock.calls.map(([row]) => `${row.status}/${row.reason}`)).toEqual(['unmatched/lookup_failed', 'unmatched/lookup_failed']);
+  });
+
+  test('a map failure between answers is not an outage: the count starts again and the run does not throw', async () => {
     const deps = makeDeps({ rowsByDay: { '2026-11-17': Array.from({ length: 12 }, (_, i) => person(i + 1)) } });
     let n = 0;
     deps.queryParcels.mockImplementation(async () => { n += 1; if (n % 3 !== 0) throw new Error('flaky'); return []; });
-    await run(deps);
+    const summary = await run(deps);
     expect(deps.queryParcels).toHaveBeenCalledTimes(12);
+    expect(summary.savedByReason).toEqual({ 'unmatched/lookup_failed': 8, 'unmatched/no_parcel': 4 });
+    expect(summary.mapFailuresInARow).toBe(0);
   });
 
   test('a duplicate fallback (the home or its permit is live under another deed) is counted under its own reason', async () => {
@@ -405,6 +422,34 @@ describe('runNewHomeList', () => {
       return { rows: [] };
     });
     await expect(run(deps)).rejects.toThrow('Mail new-home list: 2 of 4 days failed (2026-11-16: Error; 2026-11-13: party_cell)');
+  });
+
+  test('a live home that another run stored first under the other group is counted as kept, not as a duplicate', async () => {
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(12)] }, ...HOME });
+    const asked = holdBack(LIST_KEY, '513309059') ? 'held_back' : 'eligible';
+    const other = asked === 'eligible' ? 'held_back' : 'eligible';
+    deps.saveProspect.mockResolvedValue(other);
+    const summary = await run(deps);
+    expect(deps.saveProspect.mock.calls[0][0].status).toBe(asked);
+    expect(summary.savedByReason).toEqual({ [`${other}/kept`]: 1 });
+  });
+
+  test('errors that belong to one deed never stop the run: the deeds after three refused rows are still saved', async () => {
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': Array.from({ length: 8 }, (_, i) => person(i + 1)) } });
+    deps.saveProspect.mockImplementation(async (row) => {
+      const n = Number(row.source_ref) - 202699100000;
+      if (n <= 3) throw Object.assign(new Error('refused: TESTER ALEX J'), { code: n === 1 ? '22003' : '23514' });
+      return row.status;
+    });
+    deps.newHomePermitsForParcels.mockImplementation(async (parcels) => { if (parcels.length) throw new TypeError('TESTER ALEX J'); return {}; });
+    deps.queryParcels.mockImplementation(async (legal) => (Number(legal.lot) >= 6 ? [{ parid: '513309059' }] : []));
+    let thrown;
+    await run(deps).catch((err) => { thrown = err; });
+    // Deeds 1 to 3: the row is refused. 4 and 5: saved. 6 to 8: a TypeError while the deed is judged.
+    expect(thrown.message).toBe('Mail new-home list: 6 deeds could not be judged or saved (22003: 1; 23514: 2; TypeError: 3)');
+    expect(deps.queryParcels).toHaveBeenCalledTimes(8);
+    expect(loggedSummary().saved).toEqual({ unmatched: 2 });
+    expect(loggedSummary().skipped.waits_for_next_run).toBeUndefined();
   });
 
   test('an unmatched deed that another run settled in the meantime is counted as kept', async () => {
