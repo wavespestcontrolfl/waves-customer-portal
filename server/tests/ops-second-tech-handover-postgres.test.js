@@ -256,6 +256,11 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     const pastKept = await handover.planHandover(knex, { ...pastArgs, lines: NO_TERMITE });
     expect(pastKept.bait_customers_kept).toBe(1);
     expect(pastKept.ids.series).not.toContain(pastPest.id);
+
+    // The same add-on on the series' PARENT row is the template the scheduler copies onto each new visit: the hire
+    // would inherit bait work, so the run is refused while termite is Off.
+    await knex('scheduled_service_addons').insert({ scheduled_service_id: pastPest.id, service_name: 'Termite Bait Station Service', service_key_snapshot: 'termite_bait' });
+    await expect(handover.planHandover(knex, pastArgs)).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
   });
 
   test('termite and WDO series move in every run, bait customers too; lawn stays; --zips limits; --to Off refuses', async () => {

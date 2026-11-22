@@ -115,10 +115,11 @@
 //            moves these customers like any other: their bait series, their pest series, the
 //            combined pest + bait plan, and the pest series whose visits carry a bait add-on;
 //            the plan counts them as bait_customers_moving. A moving series of another line
-//            that hands over bait work (the combined plan, a bait add-on on a visit that
-//            moves) is termite work too: --to set to Off for termite refuses the run
-//            (plan.capability_lines). A bait add-on on a past visit, or on a visit that stays
-//            with --from, asks for nothing. A run that
+//            that hands over bait work (the combined plan, a bait add-on on the series'
+//            parent row, which seeds every new visit, or on a visit that moves) is termite
+//            work too: --to set to Off for termite refuses the run (plan.capability_lines).
+//            A bait add-on on a past child visit, or on a visit that stays with --from, asks
+//            for nothing. A run that
 //            leaves termite out (--lines without termite) skips every series of that customer
 //            (termite_bait_customer), the 2026-10-25 rule, and counts every bait customer it
 //            keeps as bait_customers_kept (a bait-only customer stays as other_line).
@@ -298,16 +299,17 @@ function baitSeriesTest(baitAddonSeriesIds) {
 }
 
 /**
- * Does this moving series hand bait work to --to: a bait plan itself (its template), or a bait add-on on a visit
- * that MOVES in this run. `baitSeriesTest` marks the CUSTOMER (a bait add-on on any visit, past ones too); a
- * one-time add-on on a completed visit, or on a visit that stays with --from, is no work for the hire, so it asks
- * for no termite capability.
+ * Does this moving series hand bait work to --to: a bait plan itself, a bait add-on on the series' PARENT row (the
+ * template: the scheduler copies the parent's due add-ons onto each new visit, admin-schedule.js auto-extend), or
+ * a bait add-on on a visit that MOVES in this run. `baitSeriesTest` marks the CUSTOMER (a bait add-on on any visit,
+ * past ones too); a one-time add-on on a completed child visit, or on a visit that stays with --from, is no work
+ * for the hire, so it asks for no termite capability.
  */
 function baitHandoverTest(visits, baitAddonVisitIds, movedVisitIds) {
   const addonVisits = new Set(baitAddonVisitIds || []);
   const moved = new Set(movedVisitIds);
   const withMovedAddon = new Set(visits.filter((v) => addonVisits.has(v.id) && moved.has(v.id)).map((v) => v.series_id));
-  return (p) => isBaitSeries(p) || withMovedAddon.has(p.id);
+  return (p) => isBaitSeries(p) || addonVisits.has(p.id) || withMovedAddon.has(p.id);
 }
 
 /** The weekdays the target works, and where that came from (no --to = the ruled Mon-Thu). */
@@ -401,7 +403,8 @@ function recordWeekendDecisions(plan, weekend) {
  *   today     YYYY-MM-DD (ET)
  *   liveSeriesIds  series ids with a LIVE row (the reader's whereVisitRowLive query)
  *   baitAddonSeriesIds  series ids with a termite bait add-on on a visit (the reader's add-on query)
- *   baitAddonVisitIds   the visit ids that carry one (the same query); the capability check reads the ones that move
+ *   baitAddonVisitIds   the visit ids that carry one (the same query; a parent row's id = its series id); the
+ *                       capability check reads the parent rows and the visits that move
  *   lines     lines to move (subset of MOVABLE_LINES)
  *   parents   [{ id, status, customer_id, line, catalog_key, service_key_snapshot, service_type, technician_id,
  *               recurring_technician_id, recurring_technician_override, recurring_ongoing }]
@@ -423,8 +426,8 @@ const outsideZips = (zips) => (p) => Array.isArray(zips) && !zips.includes(p.zip
  *                          A --zips run counts its ZIPs only.
  *   capability_lines       the lines --to must be able to take: each line with a series to move, and termite when a
  *                          moving series of another line hands over bait work (`handsOverBait`, baitHandoverTest:
- *                          the combined pest + bait plan, and a pest series with a bait add-on on a visit that
- *                          moves, move as general).
+ *                          the combined pest + bait plan, and a pest series with a bait add-on on its parent
+ *                          row or on a visit that moves, move as general).
  */
 function baitFigures({ onFrom, moving, handsOverBait, baitCustomers, termiteOut, zips, movingLines }) {
   const baitCustomerCount = (rows) => new Set(rows.filter((p) => baitCustomers.has(p.customer_id)).map((p) => p.customer_id)).size;

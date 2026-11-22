@@ -251,6 +251,9 @@ describe('second-tech-handover planner', () => {
       const addon = parent({ customer_id: 'C-addon4' });
       const addonVisit = visit(addon, MON);
       expect(plan([addon], [addonVisit], { baitAddonSeriesIds: [addon.id], baitAddonVisitIds: [addonVisit.id] }).capability_lines).toEqual(['general', 'termite']);
+      // The add-on on the series' PARENT row is the template: the scheduler copies it onto each new visit, so the
+      // hire inherits bait work also when no visit moves today.
+      expect(plan([addon], [], { baitAddonSeriesIds: [addon.id], baitAddonVisitIds: [addon.id] }).capability_lines).toEqual(['general', 'termite']);
       // The add-on on a visit that STAYS with the owner (a Friday after the 13 weeks) hands no bait work over.
       const friday = visit(addon, FRI_LATE);
       expect(plan([addon], [friday], { baitAddonSeriesIds: [addon.id], baitAddonVisitIds: [friday.id] }).capability_lines).toEqual(['general']);
