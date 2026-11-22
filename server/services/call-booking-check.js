@@ -167,10 +167,7 @@ async function loadBillingByName() {
 
 // ------------------------------------------------------------------ passes
 
-// Judge each open bell again, from its visit read by id; close the ones evidence closes. A bell that stays open
-// is raised again, which only rewrites it quietly (raiseBell): its link follows a visit the office moved, at any
-// age (the raise pass reads 7 days) and while the reading cannot be read (the bell's own metadata keeps the
-// service the call named). Returns { closed, failed }.
+// Judge each open bell again, from its visit read by id; close the ones evidence closes. Returns { closed, failed }.
 async function closePass(episodes, billingByName, now) {
   const bells = (await episodes.openAdminAlertMetadata(db, OWN_PREFIX))
     .filter((meta) => meta.scheduledServiceId && KINDS.includes(meta.problem));
@@ -180,15 +177,11 @@ async function closePass(episodes, billingByName, now) {
   const visits = new Map((await visitRows().whereIn('ss.id', ids)).map((visit) => [String(visit.id), visit]));
   for (const meta of bells) {
     try {
-      const visit = visits.get(String(meta.scheduledServiceId));
-      const key = closeKeyFor(meta.problem, visit, billingByName);
+      const key = closeKeyFor(meta.problem, visits.get(String(meta.scheduledServiceId)), billingByName);
       if (key) {
         tally.closed += Number(await episodes.closeAdminAlertKeys(
           db, [`${OWN_PREFIX}${meta.problem}:${meta.scheduledServiceId}`], CLOSED[key].reason, { now, resolution: CLOSED[key].text },
         )) || 0;
-      } else {
-        const heard = judgeService(visit, billingByName).heard || meta.heard;
-        if (heard) await raiseBell(visit, heard);
       }
     } catch (err) {
       tally.failed += 1;
@@ -198,9 +191,8 @@ async function closePass(episodes, billingByName, now) {
   return tally;
 }
 
-// Raise one bell. Returns 1 when a new row rang, 0 when the visit already has a row for this problem. A repeat
-// raise rewrites that row without a ring when its content changed: a visit the office moved keeps a link that
-// opens it on its new day, and the row keeps its read and Done state.
+// Raise one bell. Returns 1 when a new row rang, 0 when the visit already has a row for this problem. The row
+// is never rewritten: like every bell that opens a visit, its link holds the visit's day at the time it rang.
 async function raiseBell(visit, heard) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const { lookupCustomerName } = require('./admin-alert-names');
@@ -208,12 +200,10 @@ async function raiseBell(visit, heard) {
   const result = await raiseAdminAlert('schedule', specFor({ visit, heard, name }), {
     bell: true,
     dedupeKey: `${OWN_PREFIX}service:${visit.id}`,
-    refreshOnDedupe: true,
-    ringOnRefresh: () => false,
     detail: detailFor({ visit, heard, name }),
     metadata: {
       scheduledServiceId: String(visit.id), customerId: visit.customer_id && String(visit.customer_id),
-      callLogId: String(visit.source_call_log_id), problem: 'service', heard: tidy(heard),
+      callLogId: String(visit.source_call_log_id), problem: 'service',
     },
   });
   if (!result) throw new Error('call booking check bell was not written');

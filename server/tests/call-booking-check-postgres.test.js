@@ -125,23 +125,6 @@ maybeDescribe('call booking check (live Postgres)', () => {
     const second = await run();
     expect(second.raised).toBe(0);
     expect(await rowsFor(b.visitId)).toHaveLength(1);
-
-    // The office reads the bell, then moves the visit: the link follows it, with no second row and no new ring.
-    await trx('notifications').where({ id: row.id }).update({ read_at: trx.fn.now() });
-    await trx('scheduled_services').where({ id: b.visitId }).update({ scheduled_date: '2026-11-24' });
-    expect((await run()).raised).toBe(0);
-    const moved = await rowsFor(b.visitId);
-    expect(moved).toHaveLength(1);
-    expect(moved[0].link).toBe(`/admin/dispatch?tab=schedule&date=2026-11-24&appointment=${b.visitId}`);
-    expect(moved[0].read_at).not.toBeNull();
-
-    // The same holds for a bell older than the raise pass reads: the close pass keeps an open bell on its visit.
-    await trx('scheduled_services').where({ id: b.visitId })
-      .update({ scheduled_date: '2026-11-25', created_at: new Date(NOW.getTime() - 9 * 24 * 60 * 60 * 1000) });
-    expect((await run()).raised).toBe(0);
-    const old = await rowsFor(b.visitId);
-    expect(old).toHaveLength(1);
-    expect(old[0].link).toBe(`/admin/dispatch?tab=schedule&date=2026-11-25&appointment=${b.visitId}`);
   });
 
   test('correcting the service closes the bell, and it does not ring again when the problem comes back', async () => {
@@ -165,13 +148,6 @@ maybeDescribe('call booking check (live Postgres)', () => {
     await run();
     // The call is being processed again: its reading is not valid for now.
     await trx('call_log').where({ id: b.callId }).update({ v2_extraction_status: 'schema_failed' });
-    // The office moves the visit meanwhile: the link follows it, and the bell keeps the service the call named.
-    await trx('scheduled_services').where({ id: b.visitId }).update({ scheduled_date: '2026-11-27' });
-    await run(new Date('2026-11-21T22:10:00Z'));
-    const [parked] = await rowsFor(b.visitId);
-    expect(parked.done_at).toBeNull();
-    expect(parked.link).toBe(`/admin/dispatch?tab=schedule&date=2026-11-27&appointment=${b.visitId}`);
-    expect(parked.body).toBe(`Booked as ${plan.name}; the call asked for ${oneTime.name}.`);
     // A reschedule request parks the same visit row until the office books it again.
     await trx('scheduled_services').where({ id: b.visitId }).update({ status: 'rescheduled' });
     await run(new Date('2026-11-21T22:15:00Z'));
