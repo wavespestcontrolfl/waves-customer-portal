@@ -216,13 +216,13 @@ describe('checkMove', () => {
   describe('a kept hold: the same question is not asked again', () => {
     const HOLD = { verdict: 'hold', why: 'quoted_statement', entry_id: 'E1', quote: 'never come on Thursdays', reason: 'Thursday breaks it.' };
     let reads;
-    // The decision log as keptHold reads it: the newest hold row of the visit whose question matches.
+    // The decision log as keptAnswer reads it: the newest hold or unsure row of the visit whose question matches.
     const logConn = (stored, { fail = false } = {}) => (table) => {
       const filters = [];
       let question = null;
       const chain = {
         where: (w) => { filters.push(w); return chain; },
-        whereIn: () => chain,
+        whereIn: (key, values) => { filters.push({ [key]: values }); return chain; },
         orderBy: () => chain,
         whereRaw: (_sql, bindings) => { if (table === 'auto_dispatch_audit_logs') [question] = bindings; return chain; },
         select: async () => [{ id: 't1', name: 'Alex Rivera' }, { id: 't2', name: 'Sam Lee' }],
@@ -255,7 +255,8 @@ describe('checkMove', () => {
       expect(proofreader.proofreadMove).not.toHaveBeenCalled();
       // Not proof the check works tonight: the check-down notice reads `answered`.
       expect(run.proofreader).toMatchObject({ calls: 0, held: 1, answered: 0 });
-      expect(reads[0].filters).toContainEqual({ scheduled_service_id: 's1', reason_code: 'PROOFREADER_HOLD' });
+      expect(reads[0].filters).toContainEqual({ scheduled_service_id: 's1' });
+      expect(reads[0].filters).toContainEqual({ reason_code: ['PROOFREADER_HOLD', 'PROOFREADER_UNSURE'] });
       // The kept row keeps the hold the night after, too.
       expect((await askAgain(got.audit)).got).toMatchObject({ allowed: false, audit: { why: 'kept_hold', question: first.question } });
     });
@@ -271,10 +272,20 @@ describe('checkMove', () => {
       expect(new Set(reads.map((r) => r.question)).size).toBe(2);
     });
 
-    test('only a hold is kept: a stored row that is not a hold asks the model', async () => {
-      const { got, proofreader } = await askAgain({ ...first, verdict: 'unknown', why: 'model_unsure' });
+    test('a stored row that is neither a hold nor an unsure answer asks the model', async () => {
+      const { got, proofreader } = await askAgain({ ...first, verdict: 'allow', why: 'nothing_breaks' });
       expect(proofreader.proofreadMove).toHaveBeenCalledTimes(1);
       expect(got).toMatchObject({ allowed: true });
+    });
+
+    // The holds already in the decision log were stored under this print: it must not change for a complete record.
+    test('a complete record prints its question exactly as before the unread parts joined the print', async () => {
+      const { SYSTEM_PROMPT, PROMPT_VERSION, buildText } = require('../services/auto-dispatch/proofreader/prompt');
+      const { model } = require('../config/models').ROUTES.autoDispatchProofreader;
+      const move = moveFacts(await nightly._internals.plannedMove(conn(), SERVICE, BEST, RECORD));
+      const asBefore = require('crypto').createHash('sha256')
+        .update(`${model}\n${PROMPT_VERSION}\n${SYSTEM_PROMPT}\n${buildText({ move, record: RECORD })}`).digest('hex');
+      expect(first.question).toBe(asBefore);
     });
 
     test('the earlier holds cannot be read: the model is asked, as before', async () => {
@@ -285,7 +296,62 @@ describe('checkMove', () => {
     });
   });
 
-  test.each(['model_unsure', 'hold_without_quote', 'record_incomplete', 'record_too_long', 'model_failed', 'bad_answer'])('unknown (%s): the visit stays and the next run asks again', async (why) => {
+  // Auto-dispatch audit 2026-11-22, finding 1 (owner "build"): one visit was asked the same question on five nights
+  // in a row, one Opus call each, because an old email in its record could not be read.
+  describe('a kept unsure answer: the same question is not asked again', () => {
+    const INCOMPLETE = { ...RECORD, unread: [{ channel: 'email', at: '2026-03-02T10:15:00-05:00', reason: 'recipients_not_captured' }] };
+    // The decision log as keptAnswer reads it: the stored row, when its question matches.
+    const logConn = (stored) => (table) => {
+      let question = null;
+      const chain = {
+        where: () => chain, whereIn: () => chain, orderBy: () => chain,
+        whereRaw: (_sql, bindings) => { if (table === 'auto_dispatch_audit_logs') [question] = bindings; return chain; },
+        select: async () => [{ id: 't1', name: 'Alex Rivera' }, { id: 't2', name: 'Sam Lee' }],
+        first: async () => (table === 'auto_dispatch_audit_logs' && stored && stored.question === question ? { constraints_checked: { proofreader: stored } } : null),
+      };
+      return chain;
+    };
+    const askAgain = (stored, { record = RECORD, best = BEST } = {}) => {
+      const run = runOf();
+      const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }, record);
+      return nightly.checkMove({ service: SERVICE, best, run }, { conn: logConn(stored), proofreader }).then((got) => ({ got, run, proofreader }));
+    };
+    const firstAnswer = async (why, record) => (await check(runOf(), proofreaderOf({ verdict: 'unknown', why }, record))).audit;
+
+    test.each([['model_unsure', RECORD], ['record_incomplete', INCOMPLETE]])('%s: the same question again keeps the answer, asks no model and spends no call', async (why, record) => {
+      const first = await firstAnswer(why, record);
+      // The question it answered, as a print: the key a later run finds the answer by.
+      expect(first).toMatchObject({ verdict: 'unknown', why, question: expect.stringMatching(/^[0-9a-f]{64}$/) });
+      const { got, run, proofreader } = await askAgain(first, { record });
+      expect(got).toMatchObject({
+        allowed: false, reason_code: 'PROOFREADER_UNSURE', broke: false, audit: { verdict: 'unknown', why: 'kept_unsure', question: first.question },
+      });
+      expect(proofreader.proofreadMove).not.toHaveBeenCalled();
+      // Not proof the check works tonight (the check-down notice reads `answered`), and not a broken check.
+      expect(run.proofreader).toMatchObject({ calls: 0, unsure: 1, answered: 0, broke: 0 });
+      // The kept row keeps the answer the night after, too.
+      expect((await askAgain(got.audit, { record })).got).toMatchObject({ allowed: false, audit: { why: 'kept_unsure', question: first.question } });
+    });
+
+    test('the unread part becomes readable while the words in the record stay the same: a new question, the model is asked', async () => {
+      const first = await firstAnswer('record_incomplete', INCOMPLETE);
+      const { got, proofreader } = await askAgain(first, { record: RECORD });
+      expect(proofreader.proofreadMove).toHaveBeenCalledTimes(1);
+      expect(got).toMatchObject({ allowed: true });
+    });
+
+    test('another target slot is a new question: the model is asked', async () => {
+      const first = await firstAnswer('model_unsure', RECORD);
+      const { proofreader } = await askAgain(first, { best: { ...BEST, start_time: '15:00', end_time: '16:00' } });
+      expect(proofreader.proofreadMove).toHaveBeenCalledTimes(1);
+    });
+
+    test.each(['hold_without_quote', 'record_too_long', 'model_failed', 'bad_answer'])('unknown (%s) stores no question, so the next run asks again', async (why) => {
+      expect(await firstAnswer(why, RECORD)).not.toHaveProperty('question');
+    });
+  });
+
+  test.each(['model_unsure', 'hold_without_quote', 'record_incomplete', 'record_too_long', 'model_failed', 'bad_answer'])('unknown (%s): the visit stays', async (why) => {
     const run = runOf();
     const got = await check(run, proofreaderOf({ verdict: 'unknown', why }));
     expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', audit: { verdict: 'unknown', why } });
@@ -413,6 +479,8 @@ describe('checkMove', () => {
       expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', broke: false });
       expect(got.audit).toEqual({
         verdict: 'unknown', why: 'record_incomplete', entry_id: null, model: 'claude-opus-5-5', prompt_version: 'move-proofreader-v1',
+        // The print of the question (kept for the next run): a hash, never a word of the record.
+        question: expect.stringMatching(/^[0-9a-f]{64}$/),
         unread: [
           { channel: 'call', reason: 'not_transcribed' }, { channel: 'text', reason: 'revised_later' }, { channel: 'note', reason: 'time_masked' },
         ],
