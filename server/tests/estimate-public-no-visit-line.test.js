@@ -79,10 +79,12 @@ const { serviceMixIsRemoteMeasured, estimateIsRemoteMeasured } = estimatePublicR
 
 const SENT = '2026-11-20T16:00:00.000Z';
 const recurringRow = (service) => ({ service, name: service, visitsPerYear: 6 });
-// A sent home estimate. `services` are its recurring service keys; `oneTime` its one-time rows. Each row gets its own id:
-// the route keeps per-estimate memos, so two fixtures under one id would read each other's price state.
+// A sent home estimate. `services` are its recurring service keys; `oneTime` its one-time rows; `servedServices` are the
+// recurring services of the price the customer is served (the send snapshot), the saved ones unless a test says otherwise.
+// Each row gets its own id: the route keeps per-estimate memos, so two fixtures under one id would read each other's
+// price state.
 let rowSeq = 0;
-function estimateRow({ services = ['pest_control'], oneTime = [], estimateData = {}, ...overrides } = {}) {
+function estimateRow({ services = ['pest_control'], servedServices = services, oneTime = [], estimateData = {}, ...overrides } = {}) {
   rowSeq += 1;
   return {
     id: `est-no-visit-line-${rowSeq}`, token: 'novisitlinetoken', status: 'sent', sent_at: null, viewed_at: null,
@@ -101,7 +103,7 @@ function estimateRow({ services = ['pest_control'], oneTime = [], estimateData =
       },
       sendSnapshot: { pricingBundle: {
         combinedRecurring: { waveGuardDiscountPct: 0 },
-        frequencies: [{ key: 'quarterly', monthly: 42.3, annual: 507.6, perServiceTreatments: services.map((service) => ({ label: service, service, displayPrice: 56.4, visitsPerYear: 6, monthly: 42.3, annual: 507.6 })) }],
+        frequencies: [{ key: 'quarterly', monthly: 42.3, annual: 507.6, perServiceTreatments: servedServices.map((service) => ({ label: service, service, displayPrice: 56.4, visitsPerYear: 6, monthly: 42.3, annual: 507.6 })) }],
         oneTimeBreakdown: { items: oneTime },
       } },
       ...estimateData,
@@ -155,6 +157,14 @@ describe('serviceMixIsRemoteMeasured: is every service on the estimate priced fr
     }
   });
 
+  test('the termite bait plan\'s own install charge is: it comes from the same measured perimeter', () => {
+    const install = { service: 'termite_bait_installation', name: 'Termite bait installation', price: 650 };
+    expect(serviceMixIsRemoteMeasured([recurringRow('termite_bait')], [install])).toBe(true);
+    // The exact stored key only: an install row with a name and no key, and other termite work, are not on the list.
+    expect(serviceMixIsRemoteMeasured([recurringRow('termite_bait')], [{ name: 'Termite bait installation', price: 650 }])).toBe(false);
+    expect(serviceMixIsRemoteMeasured([recurringRow('termite_bait')], [{ service: 'termite_install', name: 'Termite install', price: 650 }])).toBe(false);
+  });
+
   test('a recurring service off the list is not, and it takes the whole estimate with it', () => {
     const offList = [
       'rodent', 'rodent_bait', 'mosquito_misting', 'foam_recurring', 'termite_trenching', 'pre_slab_termiticide',
@@ -202,6 +212,31 @@ describe('serviceMixIsRemoteMeasured: is every service on the estimate priced fr
     }
   });
 
+  test('a row counts by its stored identity, compared whole: never by its name, never by a part of a key', () => {
+    // A saved row names its service in `service`; a row with only `key` is read by that key.
+    expect(serviceMixIsRemoteMeasured([{ key: 'pest_control', label: 'Pest Control' }], [])).toBe(true);
+    expect(serviceMixIsRemoteMeasured([{ service: ' Pest_Control ', name: 'Pest Control' }], [])).toBe(true);
+    const noIdentity = [
+      { name: 'Pest Control', visitsPerYear: 4 },
+      { label: 'Lawn Care' },
+      { serviceKey: 'pest_control', name: 'Pest Control' },
+      { service: null, name: 'Mosquito' },
+      { service: '', key: '', name: 'Pest Control' },
+      { service: 'Pest Control' },
+    ];
+    for (const row of noIdentity) {
+      const label = JSON.stringify(row);
+      expect([label, serviceMixIsRemoteMeasured([row], [])]).toEqual([label, false]);
+      expect([label, serviceMixIsRemoteMeasured([pest, row], [])]).toEqual([label, false]);
+    }
+    for (const key of ['lawn_care_plus', 'new_lawn_program', 'pest_control_commercial', 'mosquito_event', 'termite_bait_monitoring']) {
+      expect([key, serviceMixIsRemoteMeasured([recurringRow(key)], [])]).toEqual([key, false]);
+    }
+    // Each list is for its own kind of row: a plan key on a one-time row, or a one-time key on a plan row, is not on it.
+    expect(serviceMixIsRemoteMeasured([], [{ service: 'pest_control', name: 'Pest Control', amount: 120 }])).toBe(false);
+    expect(serviceMixIsRemoteMeasured([recurringRow('one_time_pest')], [])).toBe(false);
+  });
+
   test('it fails closed on an estimate with no service row', () => {
     expect(serviceMixIsRemoteMeasured([], [])).toBe(false);
     expect(serviceMixIsRemoteMeasured(null, undefined)).toBe(false);
@@ -243,6 +278,39 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured(estData, { oneTimeBreakdown: { items: [{ service: 'german_roach', name: 'German Roach Cleanout Service', amount: 450 }] } })).toBe(false);
   });
 
+  test('a recurring service that only the price the customer is served lists takes the answer away', () => {
+    const estData = { result: plan('pest_control', 'mosquito') };
+    const cadence = (...keys) => ({ key: 'quarterly', perServiceTreatments: keys.map((service) => ({ service, label: service })) });
+    const section = (key, extra = {}) => ({ key, isRecurring: true, memberKeys: [key], frequencies: [], ...extra });
+    // Cadence rows of the price, any cadence.
+    expect(estimateIsRemoteMeasured(estData, { frequencies: [cadence('pest_control', 'mosquito')] })).toBe(true);
+    expect(estimateIsRemoteMeasured(estData, { frequencies: [cadence('pest_control', 'mosquito', 'rodent_bait')] })).toBe(false);
+    expect(estimateIsRemoteMeasured(estData, { frequencies: [cadence('pest_control'), cadence('pest_control', 'rodent_bait')] })).toBe(false);
+    // Sections: one per service, or one 'bundle' section that names its services in memberKeys.
+    expect(estimateIsRemoteMeasured(estData, { services: [section('pest_control'), section('mosquito')] })).toBe(true);
+    expect(estimateIsRemoteMeasured(estData, { services: [section('pest_control'), section('rodent_bait')] })).toBe(false);
+    expect(estimateIsRemoteMeasured(estData, { services: [section('bundle', { memberKeys: ['pest_control', 'mosquito'] })] })).toBe(true);
+    expect(estimateIsRemoteMeasured(estData, { services: [section('bundle', { memberKeys: ['pest_control', 'rodent_bait'] })] })).toBe(false);
+    // A 'bundle' section that names no service, and a section with no key, fail closed.
+    expect(estimateIsRemoteMeasured(estData, { services: [section('bundle', { memberKeys: [] })] })).toBe(false);
+    expect(estimateIsRemoteMeasured(estData, { services: [{ label: 'Pest Control', isRecurring: true }] })).toBe(false);
+    // A section's own cadence rows.
+    expect(estimateIsRemoteMeasured(estData, { services: [section('pest_control', { frequencies: [cadence('pest_control', 'rodent_bait')] })] })).toBe(false);
+    // A one-time section's key is a display category. Its rows are the one-time rows, which have their own list.
+    expect(estimateIsRemoteMeasured(estData, { services: [section('pest_control'), { key: 'rodent', isRecurring: false, frequencies: [] }] })).toBe(true);
+    expect(estimateIsRemoteMeasured(estData, {
+      services: [section('pest_control'), { key: 'rodent', isRecurring: false, frequencies: [] }],
+      oneTimeBreakdown: { items: [{ service: 'rodent_trapping', name: 'Rodent Trapping', amount: 400 }] },
+    })).toBe(false);
+  });
+
+  test('the served price never grants the answer: the saved estimate decides', () => {
+    const served = { services: [{ key: 'pest_control', isRecurring: true, memberKeys: ['pest_control'] }], frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control' }] }] };
+    expect(estimateIsRemoteMeasured({}, served)).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control', 'rodent_bait') }, served)).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, served)).toBe(true);
+  });
+
   test('an authored proposal\'s rows count, and an estimate with nothing to read fails closed', () => {
     const proposal = { enabled: true, programs: [{ name: 'Quarterly pest control', service: 'pest_control' }] };
     expect(estimateIsRemoteMeasured({ result: plan('pest_control'), proposal }, {})).toBe(false);
@@ -272,7 +340,7 @@ describe('GET /:token/data: noVisitLine', () => {
     expect(mixed.body).not.toHaveProperty('noVisitLine');
   });
 
-  test('a service only the second saved shape holds, and a one-time service off the list, carry none', async () => {
+  test('a service only the second saved shape or only the served price holds, and a one-time service off the list, carry none', async () => {
     const secondShape = await pageLoad(estimateRow({
       estimateData: { engineResult: { recurring: { services: [recurringRow('pest_control'), recurringRow('rodent_bait')] } } },
     }));
@@ -284,6 +352,14 @@ describe('GET /:token/data: noVisitLine', () => {
     expect(roach.status).toBe(200);
     expect(roach.body.cta.terminalState).toBeNull();
     expect(roach.body).not.toHaveProperty('noVisitLine');
+
+    // The saved result holds pest control and mosquito; the frozen price the customer is served also lists rodent bait.
+    const servedRodent = await pageLoad(estimateRow({
+      services: ['pest_control', 'mosquito'], servedServices: ['pest_control', 'mosquito', 'rodent_bait'],
+    }));
+    expect(servedRodent.status).toBe(200);
+    expect(servedRodent.body.cta.terminalState).toBeNull();
+    expect(servedRodent.body).not.toHaveProperty('noVisitLine');
 
     // The general one-time pest service is on the list, so the same estimate with that row keeps the line.
     const oneTimePest = await pageLoad(estimateRow({ oneTime: [{ service: 'one_time_pest', name: 'One-Time Pest Control', amount: 199, price: 199 }] }));
