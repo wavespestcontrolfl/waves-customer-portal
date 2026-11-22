@@ -489,6 +489,17 @@ async function disable(technicianId, { expectedTokenVersion, code } = {}) {
   });
 }
 
+// Removes an account's authenticator and recovery codes inside the caller's
+// transaction, for a row that becomes a new account (the Team tab's Hired
+// press on a reused placeholder). The caller holds the staff table lock and
+// the account row lock, and writes mfa_enabled_at: null and the next token
+// version itself. Lock order as everywhere: factor row, then codes.
+async function forgetEnrollment(trx, technicianId) {
+  await trx('staff_mfa_totp').where({ technician_id: technicianId }).forUpdate().first();
+  await trx('staff_mfa_recovery_codes').where({ technician_id: technicianId }).del();
+  await trx('staff_mfa_totp').where({ technician_id: technicianId }).del();
+}
+
 // The `mfaRecoveryUntil` (epoch seconds) a recovery-code sign-in stamps on
 // its access token; a password change carries it over unchanged.
 function recoveryReplaceDeadline(nowMs = Date.now()) {
@@ -535,6 +546,7 @@ module.exports = {
   confirmSetup,
   disable,
   enrollmentRequired,
+  forgetEnrollment,
   generateRecoveryCodes,
   hasMfaKey,
   hotp,

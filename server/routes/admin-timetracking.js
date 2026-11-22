@@ -110,7 +110,8 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'can_create_estimates',
   // Hired button state (GATE_HIRED_PACKET); present only while the gate is on.
   // Derived flags only: the token, its hash and the password hash never ship.
-  'hire_action', 'hire_password_unset', 'hire_link_pending', 'hire_link_expires_at',
+  'hire_action', 'hire_password_unset', 'hire_link_pending', 'hire_link_expires_at', 'hire_login', 'hire_google_only',
+  'hire_clears_google',
   // Team tab "Work days" (GATE_TECH_WORK_DAYS); dropped from the response while the gate is off.
   'work_days',
   // Team tab "Shift hours" (GATE_TECH_SHIFT_HOURS); dropped from the response while the gate is off.
@@ -819,13 +820,41 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
 // TECHNICIAN MANAGEMENT — CRUD
 // ═══════════════════════════════════════════════════════════════════
 
+// The company Google address a Hired press would turn on as this row's only
+// sign-in, or null. It needs staff Google sign-in ready (gate and Google
+// client) and a linked address the Team tab's link writer takes today. With
+// one, Hired makes a Google-only account: no password, no link, no email.
+// With none, Hired emails the set-password link.
+// An office (admin) row always gets the emailed link: two-step sign-in setup
+// asks for the account password, and GATE_ADMIN_MFA_ENFORCE holds an admin
+// with no authenticator on that setup page, so a Google-only admin could
+// never get past it. The table refuses the mark on an admin row as well.
+function hireGoogleAddress(tech) {
+  if (!tech.google_email || !googleSignin.googleSigninReady()) return null;
+  if (tech.role === 'admin') return null;
+  return googleSignin.normalizeLinkedGoogleEmail(tech.google_email).value || null;
+}
+
+// Whether a Google-only account can sign in today, for the row's label: the
+// Team tab hides the linked address with the gate off, so the page cannot
+// tell these apart itself. Each state names its own way out.
+function googleOnlyState(tech) {
+  if (!googleSignin.googleSigninReady()) return 'off';
+  if (!tech.google_email) return 'unlinked';
+  return googleSignin.normalizeLinkedGoogleEmail(tech.google_email).value ? 'ready' : 'bad_address';
+}
+
 // GATE_HIRED_PACKET row state, derived from columns that never leave the
 // server. "Password unset" = an active account whose hire has not set a
 // password yet (the reset and change handlers stamp password_changed_at and
 // write password_hash); "link pending" = a set-password token is still valid.
+// A Google-only account (google_only_login_at, set by the Hired press) has no
+// password by design: it is never "password unset" and gets no resend.
 function hireLinkState(tech, now = new Date()) {
   const status = tech.employment_status || (tech.active ? 'active' : 'inactive');
-  const passwordUnset = status === 'active' && tech.active === true
+  const googleOnly = Boolean(tech.google_only_login_at);
+  const hireGoogle = status === 'prospective' ? hireGoogleAddress(tech) : null;
+  const passwordUnset = status === 'active' && tech.active === true && !googleOnly
     && !tech.password_hash && !tech.password_changed_at;
   const expires = tech.password_reset_expires_at ? new Date(tech.password_reset_expires_at) : null;
   const pending = passwordUnset && Boolean(tech.password_reset_token_hash)
@@ -834,6 +863,19 @@ function hireLinkState(tech, now = new Date()) {
     // The one action the Team tab offers on this row: hire a prospective
     // placeholder, or resend the link to a hire who has no password yet.
     hire_action: status === 'prospective' ? 'hire' : (passwordUnset ? 'resend' : null),
+    // Which sign-in the Hired press turns on for this row. For 'google' the
+    // Hired form sends back the address it showed, and the press is refused
+    // when the row no longer holds that address.
+    hire_login: status === 'prospective' ? (hireGoogle ? 'google' : 'password') : null,
+    // The emailed-link press leaves one sign-in on the row, the link. A Google
+    // address linked on the row that cannot be this hire's sign-in (staff
+    // Google sign-in off or not set up, an address outside the domains, an
+    // admin row) is removed by that press, and the form says so.
+    hire_clears_google: status === 'prospective' && Boolean(tech.google_email) && !hireGoogle,
+    // null, or how a Google-only account stands today: 'ready', 'unlinked'
+    // (no address), 'bad_address' (outside the sign-in domains) or 'off'
+    // (staff Google sign-in off or not set up).
+    hire_google_only: googleOnly && status === 'active' && tech.active === true ? googleOnlyState(tech) : null,
     hire_password_unset: passwordUnset,
     hire_link_pending: pending,
     hire_link_expires_at: pending ? expires.toISOString() : null,
@@ -1445,6 +1487,16 @@ const HIRE_OPTIONAL_FIELD_CHECKS = [
   ['employmentType', (v) => HIRE_EMPLOYMENT_TYPES.includes(v), "Employment type must be 'w2' or '1099'"],
 ];
 
+const HIRE_LOGIN_CHANGED = {
+  error: 'The sign-in for this person changed. Reload the page, then press Hired again.',
+  code: 'HIRE_LOGIN_CHANGED',
+};
+const HIRE_GOOGLE_ADDRESS_IN_USE = {
+  error: "The linked Google address is another staff member's email. Change the Google sign-in first.",
+  code: 'HIRE_GOOGLE_ADDRESS_IN_USE',
+};
+const GOOGLE_ONLY_NO_LINK = { error: 'This person signs in with Google. No password link is sent.' };
+
 function parseHireBody(body) {
   if (typeof body.name !== 'string' || !body.name.trim()) return { error: 'Name is required' };
   const normalizedEmail = normalizeTechnicianEmail(body.email);
@@ -1452,6 +1504,10 @@ function parseHireBody(body) {
   if (!normalizedEmail.value) return { error: 'Email is required' };
   if (!validDateOnly(body.hireDate)) return { error: 'First day must be a valid YYYY-MM-DD date' };
   if (body.phone != null && typeof body.phone !== 'string') return { error: 'Phone must be a string' };
+  const shownGoogle = body.googleEmail == null || body.googleEmail === '' ? null : canonicalStaffEmail(body.googleEmail);
+  if (shownGoogle === null && body.googleEmail != null && body.googleEmail !== '') {
+    return { error: 'Google address must be a valid email' };
+  }
   const invalid = HIRE_OPTIONAL_FIELD_CHECKS
     .find(([key, valid]) => body[key] != null && body[key] !== '' && !valid(body[key]));
   if (invalid) return { error: invalid[2] };
@@ -1462,7 +1518,77 @@ function parseHireBody(body) {
     jobTitle: body.jobTitle,
     employmentType: body.employmentType,
   });
-  return { name: body.name.trim(), email: normalizedEmail.value, hireDate: body.hireDate, patch };
+  return {
+    name: body.name.trim(),
+    email: normalizedEmail.value,
+    hireDate: body.hireDate,
+    // The Google address the form showed as the hire's sign-in. A form that sends none (the emailed-link form,
+    // or a tab loaded before this field) showed the emailed link.
+    googleEmail: shownGoogle,
+    patch,
+  };
+}
+
+// The sign-in a Hired press turns on, decided under the row lock: { google }
+// (the address, or null for the emailed set-password link) or { refusal }.
+// The press names the Google address its form showed (none = the emailed
+// link). A row that no longer holds exactly that (an address linked, cleared,
+// moved to another address or made unusable since the form opened) is
+// refused: no press mails a link the form did not show, and none gives a
+// staff login to a Google account the form did not show.
+async function hireLoginFor(trx, target, shownGoogle) {
+  const google = hireGoogleAddress(target);
+  if (google !== shownGoogle) return { refusal: HIRE_LOGIN_CHANGED };
+  // One mailbox, one staff row (the link writer and every email writer hold
+  // the same rule); a row linked before that rule is caught here.
+  if (google && await findTechnicianByMailbox(trx, google, target.id)) {
+    return { refusal: HIRE_GOOGLE_ADDRESS_IN_USE };
+  }
+  return { google };
+}
+
+// The credential columns of a Hired press: after it the row has the one
+// sign-in the form showed and nothing else. Any older credential on a reused
+// placeholder is dropped so it cannot sign in: the password, an earlier
+// holder's two-step enrollment (the caller removes its factor rows), and the
+// Google account id an earlier sign-in pinned (google_sub).
+// staff-google-signin.js takes a pinned id before the address, so a row hired
+// again would let the earlier Google account in even when the address now
+// belongs to another one. With no id, the next sign-in must prove the linked
+// address and pins the account that holds it today.
+function hireCredentialColumns({ google, tokenHash, now }) {
+  if (google) {
+    // Google-only: no password and no link. must_change_password stays false,
+    // because the staff middleware refuses every route while it is true and
+    // this account has no password to change.
+    return {
+      must_change_password: false,
+      password_hash: null,
+      password_changed_at: null,
+      password_reset_token_hash: null,
+      password_reset_expires_at: null,
+      password_reset_requested_at: null,
+      google_sub: null,
+      google_only_login_at: now,
+      mfa_enabled_at: null,
+    };
+  }
+  // The hire sets the first password from the emailed link. A Google address
+  // still linked on the row is one the form did not show as a sign-in (it
+  // cannot sign in today): kept, its holder could sign in to this account on
+  // the day it becomes usable. It goes; the owner links one again on purpose.
+  return {
+    must_change_password: true,
+    password_hash: null,
+    password_changed_at: null,
+    password_reset_token_hash: tokenHash,
+    password_reset_expires_at: new Date(now.getTime() + HIRE_LINK_TTL_MS),
+    password_reset_requested_at: now,
+    google_email: null,
+    google_sub: null,
+    google_only_login_at: null,
+    mfa_enabled_at: null,
+  };
 }
 
 // The updated row in the shape GET /technicians returns for an admin.
@@ -1548,6 +1674,11 @@ async function hireTechnician(req, res, next) {
       if (parsed.name !== target.name && await technicianHasHistory(trx, target.id)) {
         return { renameLocked: true };
       }
+      const login = await hireLoginFor(trx, target, parsed.googleEmail);
+      if (login.refusal) return { loginRefusal: login.refusal };
+      // An authenticator an earlier holder of a reused row set up would ask the hire for a code only that person
+      // has, and a Google-only account has no password to replace it with.
+      await require('../services/staff-mfa').forgetEnrollment(trx, target.id);
 
       await trx('technicians').where({ id: target.id }).update({
         name: parsed.name,
@@ -1558,16 +1689,9 @@ async function hireTechnician(req, res, next) {
         // Being active never makes someone dispatchable: the Team tab grants
         // field eligibility deliberately.
         field_dispatchable: false,
-        // The hire sets the first password from the emailed link. Any older
-        // credential on a reused placeholder is dropped so it cannot sign in.
-        must_change_password: true,
-        password_hash: null,
-        password_changed_at: null,
+        ...hireCredentialColumns({ google: login.google, tokenHash, now }),
         // Entering active rotates sessions, as PUT does.
         auth_token_version: Number(target.auth_token_version || 0) + 1,
-        password_reset_token_hash: tokenHash,
-        password_reset_expires_at: new Date(now.getTime() + HIRE_LINK_TTL_MS),
-        password_reset_requested_at: now,
         updated_at: now,
       });
       await PushService.deactivateStaffUser(target.id, trx);
@@ -1582,11 +1706,12 @@ async function hireTechnician(req, res, next) {
         critical: true,
         trx,
       });
-      return { tech: await trx('technicians').where({ id: target.id }).first() };
+      return { tech: await trx('technicians').where({ id: target.id }).first(), google: Boolean(login.google) };
     });
 
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
     if (outcome.notProspective) return res.status(409).json({ error: 'Only a prospective row can be hired.' });
+    if (outcome.loginRefusal) return res.status(409).json(outcome.loginRefusal);
     if (outcome.ownerRowGuard) return res.status(403).json(outcome.ownerRowGuard);
     if (outcome.fullAccessEmailGuard) return res.status(403).json(outcome.fullAccessEmailGuard);
     if (outcome.conflict) return res.status(409).json(EMAIL_IN_USE);
@@ -1594,13 +1719,17 @@ async function hireTechnician(req, res, next) {
 
     const { tech } = outcome;
     disconnectRevokedStaffSessions(tech.id, 'account_status_changed');
-    logger.info(`[team] Hired technician id=${tech.id}`);
+    logger.info(`[team] Hired technician id=${tech.id} (login: ${outcome.google ? 'google' : 'password'})`);
+    // A Google-only hire gets no link and no email: the owner hands over the Google account.
+    if (outcome.google) {
+      return res.json({ hired: true, emailed: null, login: 'google', technician: await hiredTechnicianResponse(tech) });
+    }
     // The hire is committed; an email problem never rolls it back.
     const emailed = await sendHireLink({ tech, token, tokenHash, firstDay: parsed.hireDate });
     const fresh = emailed === false
       ? await db('technicians').where({ id: tech.id }).first()
       : tech;
-    return res.json({ hired: true, emailed, technician: await hiredTechnicianResponse(fresh || tech) });
+    return res.json({ hired: true, emailed, login: 'password', technician: await hiredTechnicianResponse(fresh || tech) });
   } catch (err) {
     const dup = uniqueViolationBody(err);
     if (dup) return res.status(409).json(dup);
@@ -1624,6 +1753,7 @@ async function resendHireLink(req, res, next) {
       if (target.employment_status !== 'active' || target.active !== true || !canonicalStaffEmail(target.email)) {
         return { notEligible: true };
       }
+      if (target.google_only_login_at) return { googleOnly: true };
       if (!state.hire_password_unset) return { passwordSet: true };
       const requestedAt = target.password_reset_requested_at ? new Date(target.password_reset_requested_at) : null;
       if (requestedAt && now.getTime() - requestedAt.getTime() < HIRE_RESEND_COOLDOWN_MS) {
@@ -1642,6 +1772,7 @@ async function resendHireLink(req, res, next) {
     if (outcome.notEligible) {
       return res.status(409).json({ error: 'Only an active staff member with an email can be sent a link.' });
     }
+    if (outcome.googleOnly) return res.status(409).json(GOOGLE_ONLY_NO_LINK);
     if (outcome.passwordSet) {
       return res.status(409).json({ error: 'This person already set a password.' });
     }
@@ -2395,6 +2526,7 @@ router.post('/documents/:id/restore', requireAdmin, async (req, res, next) => {
 router._test = {
   STAFF_ENTRY_WORK_DATE_SQL,
   applyStaffEntryWorkDateRange,
+  hireLinkState,
   staffAnalyticsDateRange,
 };
 

@@ -107,6 +107,19 @@ describe('staff password reset request', () => {
     expect(sendStaffPasswordResetEmail).not.toHaveBeenCalled();
   });
 
+  test('sends nothing and stores no token for a Google-only account', async () => {
+    // The Team tab's Hired press on a row with a linked company Google address: no password by design.
+    const lookup = builder({ select: [{ id: tech.id, email: tech.email, google_only_login_at: new Date() }] });
+    db.mockReturnValueOnce(lookup);
+
+    await expect(issuePasswordReset(tech.email)).resolves.toEqual({ issued: false });
+
+    // Read with the one matched row, inside the transaction that holds the staff lock; no token write follows.
+    expect(lookup.select).toHaveBeenCalledWith('id', 'email', 'google_only_login_at');
+    expect(db).toHaveBeenCalledTimes(1);
+    expect(sendStaffPasswordResetEmail).not.toHaveBeenCalled();
+  });
+
   test('fails closed when a canonical staff email resolves to multiple rows', async () => {
     db.mockReturnValueOnce(builder({ select: [
       { id: tech.id, email: tech.email },

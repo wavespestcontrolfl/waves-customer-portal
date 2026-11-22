@@ -3587,7 +3587,11 @@ export function TeamTab({ showToast }) {
         method: "POST",
         body: JSON.stringify(fields),
       });
-      showToast(welcomeToast(res && res.emailed, fields.email.trim()));
+      showToast(
+        res && res.login === "google"
+          ? `Hired. ${fields.name} signs in with Google. No email was sent.`
+          : welcomeToast(res && res.emailed, fields.email.trim()),
+      );
       setHireTech(null);
       load();
     } catch (e) {
@@ -4605,6 +4609,11 @@ export function TeamTab({ showToast }) {
                       {t.hire_link_pending ? "Waiting for first password" : "Link expired or not sent"}
                     </div>
                   )}
+                  {t.hire_google_only && (
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                      {GOOGLE_ONLY_LABELS[t.hire_google_only] || GOOGLE_ONLY_LABELS.off}
+                    </div>
+                  )}
                   {/* Capability counts matter only for someone who takes (or will
                       take) field work — an office-only admin never reaches
                       auto-dispatch, so the line would be noise there. */}
@@ -4816,10 +4825,23 @@ export function TeamTab({ showToast }) {
   );
 }
 
+// How a Google-only account stands today (t.hire_google_only, derived on the
+// server from the stored link and the sign-in setup). Each line names its own
+// way out; an unknown state reads as no sign-in.
+const GOOGLE_ONLY_LABELS = {
+  ready: "Signs in with Google",
+  unlinked: "No sign-in. Link a Google address.",
+  bad_address: "No sign-in. Link a company Google address.",
+  off: "No sign-in. Staff Google sign-in is off or not set up.",
+};
+
 // GATE_HIRED_PACKET: one click turns a prospective placeholder into an active
-// staff account and emails the hire a set-password link. Email and first day
-// are required; the rest is prefilled from the row.
+// staff account. The server says which sign-in the press turns on
+// (tech.hire_login): "google" = the linked company Google address and nothing
+// else, no password and no email; otherwise the hire is emailed a set-password
+// link. Email and first day are required; the rest is prefilled from the row.
 function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
+  const googleLogin = tech.hire_login === "google";
   const dialogRef = useModalFocus(true, () => {
     if (!submitting) onCancel();
   });
@@ -4852,6 +4874,9 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
       payRate: form.payRate.trim(),
       jobTitle: form.jobTitle.trim(),
       employmentType: form.employmentType,
+      // The Google address this form showed as the sign-in (none = the emailed link). The server refuses the
+      // press when the row no longer holds exactly that.
+      googleEmail: googleLogin ? tech.google_email : "",
     });
   };
   const field = (id, label, input, required) => (
@@ -4905,7 +4930,12 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
           Hire {tech.name}
         </div>
         <p style={{ fontSize: 14, lineHeight: 1.55, color: D.text, margin: "12px 0 16px" }}>
-          This makes them an active staff member and emails them a link to set their password. The link works for 7 days.
+          {googleLogin
+            ? `This makes them an active staff member. They sign in with Google as ${tech.google_email}. They get no password and no email is sent.`
+            : "This makes them an active staff member and emails them a link to set their password. The link works for 7 days."}
+          {!googleLogin && tech.hire_clears_google
+            ? " The Google sign-in linked on this row cannot be used for this hire, so it is removed."
+            : ""}
         </p>
         {field("name", "Name", <input id={`${titleId}-name`} value={form.name} onChange={set("name")} style={sInput} />, true)}
         {field("email", "Email", <input id={`${titleId}-email`} type="email" value={form.email} onChange={set("email")} placeholder="name@example.com" style={sInput} />, true)}
@@ -4943,7 +4973,7 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
             aria-busy={submitting || undefined}
             style={{ ...sBtn(D.teal, D.white), cursor: submitting ? "wait" : "pointer", opacity: submitting ? 0.6 : 1 }}
           >
-            {submitting ? "Hiring…" : "Hire and send link"}
+            {submitting ? "Hiring…" : googleLogin ? "Hire with Google sign-in" : "Hire and send link"}
           </button>
         </div>
       </div>
