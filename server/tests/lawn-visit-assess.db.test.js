@@ -112,7 +112,7 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     const legacy = await request({ customerId: await customer(), photos });
     expect((await mockKnex('lawn_assessments').where({ id: legacy.body.assessment.id }).first()).score_scale).toBeNull();
     // GATE_LAWN_SCORE_SCALE_V2 needs GATE_LAWN_PROPERTY_HISTORY, which this suite keeps off: the read is forced to scale 2.
-    const spy = jest.spyOn(visitAssessment, 'analyzeVisit').mockImplementation((args) => real({ ...args, scale2: true }));
+    const spy = jest.spyOn(visitAssessment, 'analyzeVisit').mockImplementation((args) => real({ ...args, scale2: true, lighting: false }));
     dispatch.mockResolvedValue({
       ok: true, provider: 'gemini', model: 'fixture-model', usage: {}, failures: [],
       json: complete({ scores: { turf_density: rating(82), weed_control: rating(78), color_health: rating(85), condition: rating(90) } }),

@@ -319,7 +319,7 @@ const skipped = (reason, extra = {}) => ({
  * The whole gated pass over a successful Gemini answer. `payload` is the exact
  * payload Gemini was sent (so Sol sees the same prompt, images and schema);
  * `visit` = { photoCount, images, context, lighting? } (lighting = the payload's schema is
- * the GATE_LAWN_LIGHTING variant, so the second opinion is validated against it). Returns { json, referee } where
+ * the lighting variant, so the second opinion is validated against it). Returns { json, referee } where
  * `json` is Gemini's own object untouched unless a dispute settled. Never throws.
  */
 // `deadline` (optional, absolute ms): the caller's shared wall-clock deadline

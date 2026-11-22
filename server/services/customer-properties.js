@@ -68,8 +68,6 @@ function isNewAddress(existingProps, candidate = {}) {
   return !(existingProps || []).some((p) => addressKey(p) === key);
 }
 
-const RECLAIMED_COLUMNS = ['reclaimed_water', 'reclaimed_water_source', 'reclaimed_water_checked_at'];
-
 /** Active properties for a customer, primary first. */
 async function listProperties(customerId, conn = db) {
   if (!customerId) return [];
@@ -77,16 +75,11 @@ async function listProperties(customerId, conn = db) {
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
   const customer = await conn('customers').where({ id: customerId }).first('contact_role');
-  // GATE_LAWN_RECLAIMED_HALF_N off: the old payload exactly, without the three reclaimed-water columns.
-  const showReclaimed = (require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true);
-  // Gate on: each row carries the answer the plan uses, including one inherited from a merged-away copy of the address.
-  const rows = showReclaimed
-    ? await Promise.all(properties.map(property => require('./lawn-reclaimed-water').effectiveReclaimedRow(conn, property)))
-    : properties;
+  // Each row carries the answer the plan uses, including one inherited from a merged-away copy of the address.
+  const rows = await Promise.all(properties.map(property => require('./lawn-reclaimed-water').effectiveReclaimedRow(conn, property)));
   return rows.map(property => {
     const unavailable = primaryPropertyUnavailable(property, customer);
     const row = { ...property, primary_change_eligible: !unavailable, primary_change_unavailable: unavailable?.message || null };
-    if (!showReclaimed) for (const column of RECLAIMED_COLUMNS) delete row[column];
     return row;
   });
 }
@@ -240,8 +233,8 @@ const validCoordinates = (lat, lng) => Number.isFinite(coordinateNumber(lat)) &&
   && Math.abs(coordinateNumber(lat)) <= 90 && Math.abs(coordinateNumber(lng)) <= 180 && !(coordinateNumber(lat) === 0 && coordinateNumber(lng) === 0);
 const roundCoordinate = (value) => Math.round(coordinateNumber(value) * 1e7) / 1e7;
 // The address picker's coordinates as insert columns: a validated pair, rounded, or nothing. They feed only the reclaimed-water meter
-// match, so GATE_LAWN_RECLAIMED_HALF_N off stores nothing (the old insert exactly).
-const pickerCoordinateColumns = (lat, lng) => ((require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true) && validCoordinates(lat, lng)
+// match.
+const pickerCoordinateColumns = (lat, lng) => (validCoordinates(lat, lng)
   ? { latitude: roundCoordinate(lat), longitude: roundCoordinate(lng) } : {});
 
 async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, latitude = null, longitude = null, occupancyType, relationship = null, label, source = 'call_pipeline', claimFence = null, conn = null }) {
@@ -496,7 +489,7 @@ function neighborhoodResetOnMove(from, to) {
     : {};
 }
 
-// GATE_LAWN_RECLAIMED_HALF_N: whether a lawn is watered with reclaimed water belongs to the HOME, not the row. A genuine street/locality
+// Whether a lawn is watered with reclaimed water belongs to the HOME, not the row. A genuine street/locality
 // move (the same canonical test as the neighborhood reset: a unit-only or format-only edit clears nothing) drops the answer, whoever gave
 // it (county, office or customer), so the next county tick settles the new address and the office is asked again. Cleared whatever the
 // gate says, so a value saved while the gate was on cannot outlive the address it described. Only when the row has a value to clear, so a
@@ -508,18 +501,17 @@ function reclaimedResetOnMove(from, to) {
     : {};
 }
 
-// GATE_LAWN_RECLAIMED_HALF_N: a unit-only or format-only edit (addressMoved false) does not move the building, so a property whose
+// A unit-only or format-only edit (addressMoved false) does not move the building, so a property whose
 // reclaimed answer is the county's keeps its coordinates. Clearing them would fire the coordinate-reset trigger (migration
-// 20261023110000) and drop a still-valid county verdict, putting the lawn back on full nitrogen until the next county tick. Gate off, or
-// no county answer, or a real move: the coordinates clear exactly as before.
+// 20261023110000) and drop a still-valid county verdict, putting the lawn back on full nitrogen until the next county tick. With no
+// county answer, or a real move: the coordinates clear exactly as before.
 function coordsResetOnSync(from, to, preserveCoords) {
   return preserveCoords || keepsCountyReclaimedPin(from, to) ? {} : { latitude: null, longitude: null };
 }
 function keepsCountyReclaimedPin(from, to) {
   const countyAnswer = from.reclaimed_water_source === 'county_meter'
     || (from.reclaimed_water_source == null && from.reclaimed_water_checked_at != null);
-  return countyAnswer && from.latitude != null && from.longitude != null && !addressMoved(from, to)
-    && (require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true);
+  return countyAnswer && from.latitude != null && from.longitude != null && !addressMoved(from, to);
 }
 
 /**
@@ -995,7 +987,7 @@ function propertyActionError(message, statusCode = 400, code = 'invalid_property
 
 // The fields a saved property may be edited or added with beyond its address, each with its one normalization/validation rule and, where the
 // write stamps other columns with it, those columns. manualPropertyFields applies `normalize`; editManualProperty applies `columns`.
-// reclaimed_water (GATE_LAWN_RECLAIMED_HALF_N) is the office's answer for the lawn water: true, false, or null = back to the county match. It
+// reclaimed_water is the office's answer for the lawn water: true, false, or null = back to the county match. It
 // changes a nitrogen dose, so it goes through this audited writer, with its source ('office') and time written alongside.
 const EDITABLE_FIELDS = {
   label: { normalize: value => value || null },
@@ -1010,7 +1002,7 @@ const EDITABLE_FIELDS = {
   } },
   reclaimed_water: {
     normalize: (value, kind) => {
-      if (kind !== 'edit' || !(require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true)) throw propertyActionError('reclaimed_water cannot be set here');
+      if (kind !== 'edit') throw propertyActionError('reclaimed_water cannot be set here');
       if (value !== null && typeof value !== 'boolean') throw propertyActionError('reclaimed_water must be true, false or null');
       return value;
     },
