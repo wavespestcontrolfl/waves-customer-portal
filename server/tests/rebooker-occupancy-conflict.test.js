@@ -319,6 +319,29 @@ describe('reschedule — shared occupancy conflict gate', () => {
         expect(trxScheduled.where).toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
       });
 
+      // On main a same-day, same-technician move asks nothing about the technician. With the gate on it asks
+      // about the shift, and only that: the day's other rules (marked out, a day off) still do not refuse it.
+      test('gate on, a move that changes only the hours is judged on the shift alone: a technician marked out and off that weekday does not refuse it', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        try {
+          const baseDow = new Date(`${BASE}T12:00:00Z`).getUTCDay();
+          const offThatDay = { techShift: ['08:00', '16:00'], absentTechRow: { id: 'absence-1' }, techWorkDays: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== baseDow) };
+          const { trx } = wireRescheduleMocks(service(tech), offThatDay);
+          expect(await SmartRebooker.reschedule(
+            'svc-1', BASE, { start: '13:00', end: '15:00' }, 'customer_request', 'customer', {},
+          )).toMatchObject({ success: true });
+          expect(reads(trx, 'technician_absences')).toBe(false);
+          // The same technician, the same day, hours outside the shift: refused.
+          wireRescheduleMocks(service(tech), { ...offThatDay, techShift: ['08:00', '12:00'] });
+          await expect(SmartRebooker.reschedule(
+            'svc-1', BASE, { start: '13:00', end: '15:00' }, 'customer_request', 'customer', {},
+          )).rejects.toMatchObject({ status: 409, statusCode: 409, code: 'SLOT_TAKEN' });
+        } finally {
+          delete process.env.GATE_TECH_WORK_DAYS;
+        }
+      });
+
       test('gate on, a non-admin move that changes neither the day, the technician nor the hours reads nothing and pins nothing more', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
         const { trx, trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['12:00', '16:00'] });

@@ -72,6 +72,27 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     expect(await rowOf(id)).toMatchObject({ day: f.date, window_start: '11:00:00', window_end: '12:00:00' });
   });
 
+  // On main a same-day, same-technician move asks nothing about the technician. With the gate on it asks
+  // about the shift, and only that: the technician's day off (GATE_TECH_WORK_DAYS) still does not refuse it.
+  test('a move that changes only the hours is judged on the shift alone: the technician\'s day off does not refuse it', async () => {
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    const dayOfWeek = (iso) => new Date(`${iso}T12:00:00Z`).getUTCDay();
+    await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: [dayOfWeek(nextDay)] });
+    try {
+      const id = await seed();
+      expect(await move(id, f.date, { start: '10:00', end: '11:00' })).toMatchObject({ success: true });
+      await expect(move(id, f.date, { start: '11:30', end: '12:30' })).rejects.toMatchObject(refused);
+      expect(await rowOf(id)).toMatchObject({ day: f.date, window_start: '10:00:00', window_end: '11:00:00' });
+      // A move to another day still asks the day's rules: two days on is a day off.
+      const twoDaysOn = new Date(Date.parse(`${f.date}T12:00:00Z`) + 2 * 86400000).toISOString().slice(0, 10);
+      await expect(move(id, twoDaysOn, { start: '10:00', end: '11:00' })).rejects.toMatchObject(refused);
+      expect(await move(id, nextDay, { start: '10:00', end: '11:00' })).toMatchObject({ success: true });
+    } finally {
+      delete process.env.GATE_TECH_WORK_DAYS;
+      await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: null });
+    }
+  });
+
   test('the block is the later of the window end and the stored length: a long job in a short window is refused', async () => {
     const id = await seed({ estimated_duration_minutes: 150 });
     // 10:00 + 150 minutes ends at 12:30, after the 12:00 shift end, though the window ends at 11:00.

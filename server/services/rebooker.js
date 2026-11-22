@@ -21,11 +21,20 @@ const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gate
 // leave it: its window and its stored length. The caller passes it only for a
 // move that must obey the hours (reschedule: `shiftLive`). A kept technician
 // whose shift that day does not hold the block is refused the same way.
-async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null } = {}) {
+async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null, shiftOnly = false } = {}) {
   const staffMove = initiatedBy === 'admin';
   try {
-    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: !staffMove,
-      hours: block ? require('./scheduling/window-rules').rowBlockMinutes(block) : undefined });
+    const hours = block ? require('./scheduling/window-rules').rowBlockMinutes(block) : undefined;
+    // shiftOnly: a move that changes only the hours. It keeps the day and the
+    // technician dispatch gave the visit, so it is judged on the shift alone
+    // (shiftExcluding), not on the day's other rules, and refused the same way.
+    if (shiftOnly) {
+      if (await require('./technician-eligibility').shiftExcluding(trx, technicianId, date, hours)) {
+        throw Object.assign(new Error('outside the shift'), { code: NOT_ASSIGNABLE });
+      }
+      return;
+    }
+    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: !staffMove, hours });
     if (staffMove && warnings && technicianId && techWorkDaysLive()) {
       const line = await require('./technician-eligibility').offDayWarningFor(technicianId, String(date).slice(0, 10), { conn: trx });
       if (line) warnings.add(line);
@@ -2430,9 +2439,12 @@ class SmartRebooker {
       const shiftLive = initiatedBy !== 'admin' && options.skipVisitSeam !== true && techShiftHoursLive();
       const hoursMoveForShift = shiftLive
         && (hhmm(updates.window_start) !== hhmm(service.window_start) || hhmm(updates.window_end) !== hhmm(service.window_end));
-      const eligibilityChecked = techChangeForEligibility || !sameDayTarget || hoursMoveForShift;
+      const dayOrTechMove = techChangeForEligibility || !sameDayTarget;
+      const eligibilityChecked = dayOrTechMove || hoursMoveForShift;
       if (eligibilityChecked) {
-        await assertAssignableSlotTechnician(keptTechId, trx, newDateStr, { initiatedBy, warnings: offDayWarnings,
+        // An hours-only move is judged on the shift alone (shiftOnly): the day's
+        // other rules were not asked of it before, and are not asked now.
+        await assertAssignableSlotTechnician(keptTechId, trx, newDateStr, { initiatedBy, warnings: offDayWarnings, shiftOnly: !dayOrTechMove,
           block: shiftLive ? { window_start: updates.window_start, window_end: updates.window_end, estimated_duration_minutes: service.estimated_duration_minutes } : null });
       }
       // The shift check judged the technician and the length of the unlocked
