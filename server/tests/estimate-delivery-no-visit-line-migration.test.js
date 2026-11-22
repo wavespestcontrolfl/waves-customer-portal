@@ -92,12 +92,16 @@ describe('who gets the "no visit needed" line', () => {
     // The shape the booking path reads as commercial: a commercial service key on a recurring row, nothing else.
     expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: { result: { recurring: { services: [{ serviceKey: 'commercial_lawn_monthly' }] } } } })).toBe('');
     expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: JSON.stringify({ commercialEstimatedPricing: true }) })).toBe('');
+    // Estimate data that is one plain text: a bare commercial service key, as the driver returns a JSON string.
+    expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: 'commercial_pest' })).toBe('');
+    expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: JSON.stringify('commercial_pest') })).toBe('');
     // A proposal scaffold that is not enabled yet, the commercial tier, and a commercial service label.
     expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: { proposal: { scaffold: true } } })).toBe('');
     expect(noVisitLineFor({ ...HOME, waveguard_tier: 'commercial' })).toBe('');
     expect(noVisitLineFor({ ...HOME, service_interest: 'Commercial Pest Control' })).toBe('');
-    // Unreadable estimate data is not proof of a business: the row still says RESIDENTIAL.
+    // A text with no commercial mark is not proof of a business: the row still says RESIDENTIAL.
     expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: '{not json' })).toBe(LINE);
+    expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: 'pest_control' })).toBe(LINE);
   });
 
   test('a row that cannot be read gets no line and no error: the estimate email still sends', () => {

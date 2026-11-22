@@ -19,25 +19,21 @@ const logger = require('./logger');
 const NO_VISIT_QUOTE_LINE = 'We measure your home and yard from county records and satellite images, so most quotes need no visit.';
 const NO_VISIT_LINE_VARIABLE = 'estimate_no_visit_line';
 
-function parsed(value) {
-  if (!value) return null;
-  if (typeof value !== 'string') return value;
-  try { return JSON.parse(value); } catch { return null; }
-}
-
 // The sentence for a home estimate, '' for every other one. Fails closed, in three steps:
 // - a proposal gets none;
 // - a row whose category is not RESIDENTIAL (the column default) gets none;
 // - a row that says commercial anywhere gets none. isCommercialEstimateRow (plan-start-eligibility.js) is the one
 //   full reading of that: the tier, the service label, a proposal or its scaffold, and every commercial mark or
 //   commercial service key in the estimate data (the scans of the save and of the booking path are inside it).
+//   It gets the estimate data as the row holds it: the check parses a serialized payload itself, and it reads a
+//   payload that is one plain text (a bare service key such as "commercial_pest") too.
 // The line is optional and the estimate email is not: a row that cannot be read gets no line, never a failed send.
 function noVisitLineFor(estimate = {}, { proposalMode = false } = {}) {
   if (proposalMode) return '';
   if (String(estimate?.category || '').trim().toUpperCase() !== 'RESIDENTIAL') return '';
   try {
     const { isCommercialEstimateRow } = require('./plan-start-eligibility');
-    const row = { ...estimate, estimate_data: parsed(estimate.estimate_data ?? estimate.estimateData) };
+    const row = { ...estimate, estimate_data: estimate.estimate_data ?? estimate.estimateData };
     return isCommercialEstimateRow(row, false) ? '' : NO_VISIT_QUOTE_LINE;
   } catch (err) {
     logger.warn(`[estimate-no-visit-line] estimate ${estimate?.id || '(no id)'} could not be read as home or commercial; no line: ${err.message}`);
