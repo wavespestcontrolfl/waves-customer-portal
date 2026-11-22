@@ -330,6 +330,27 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01', earningsStart: '2025-12-01', estimateCents: Math.round(35000 * 0.02) });
   });
 
+  test('after the anniversary the stay bonus stays on the board until it is paid, worked out from the 12 months that ended', async () => {
+    await seed();
+    const [delta] = await db('technicians').insert({ name: 'Sample Delta', hire_date: '2025-12-01' }).returning('id');
+    const [inside, after] = await db('payroll_runs').insert([
+      { status: 'finalized', week_start: '2026-11-16', pay_date: '2026-11-27' },
+      { status: 'finalized', week_start: '2026-12-07', pay_date: '2026-12-18' },
+    ]).returning('id');
+    await insertChecks([
+      { run_id: inside.id, technician_id: delta.id, status: 'finalized', week_start: '2026-11-16', gross_cents: 70000 }, // a week of the 12 months
+      { run_id: after.id, technician_id: delta.id, status: 'finalized', week_start: '2026-12-07', gross_cents: 90000 }, // after them: never counts
+    ]);
+    const today = new Date('2026-12-20T15:00:00Z');
+    expect((await service.getScoreboard(delta.id, { now: today })).stayBonus)
+      .toMatchObject({ dueDate: '2026-12-01', years: 1, earningsStart: '2025-12-01', earningsEnd: '2026-11-30', estimateCents: Math.round(70000 * 0.02) });
+    // payroll pays it: the board shows the 3 year bonus
+    await db('payroll_pay_lines').insert({
+      technician_id: delta.id, kind: 'stay_bonus', source_type: 'tech_rewards', source_id: `stay_bonus:${delta.id}:1`, status: 'paid', earned_week_start: '2026-12-07', amount_cents: 1400,
+    });
+    expect((await service.getScoreboard(delta.id, { now: today })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+  });
+
   test('commission is recorded through the end of the pay week of the newest ledger line, never a run date', async () => {
     // pay runs exist for later weeks, but the ledger lines prove a sync only through the week of the newest one
     await db('payroll_runs').insert([

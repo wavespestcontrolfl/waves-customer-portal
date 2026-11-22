@@ -413,6 +413,24 @@ describe('composeScoreboard', () => {
     expect(composeScoreboard(inputs({ ...corrected, settledStayKeys: ['1', '3', '5'] })).stayBonus).toBeNull();
   });
 
+  test('a stay bonus stays on the board after its anniversary while a pay run dated today could still write it: 60 days, and not an anniversary from before the plan', () => {
+    const hired = { technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2025-12-01' }, priorYearGrossCents: 230000 };
+    const oneYear = { dueDate: '2026-12-01', years: 1, rateBps: 200, estimateCents: 4600, estimate: true, earningsStart: '2025-12-01', earningsEnd: '2026-11-30' };
+    // the day after the anniversary, and the last pay date that can carry it (Dec 1 + 60 days)
+    for (const today of ['2026-12-02', '2027-01-30']) expect(composeScoreboard(inputs({ ...hired, today })).stayBonus).toEqual(oneYear);
+    // the 60 days are over, or payroll has paid it: the board moves on to the 3 year bonus
+    for (const over of [{ today: '2027-01-31' }, { today: '2026-12-02', settledStayKeys: ['1'] }]) {
+      expect(composeScoreboard(inputs({ ...hired, ...over })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3, estimateCents: null });
+    }
+    // an anniversary from before the plan was approved (Nov 20, 2026) has no bonus: the board does not keep it
+    expect(composeScoreboard(inputs({ ...hired, technician: { ...hired.technician, hireDate: '2025-11-19' }, today: '2026-11-25' })).stayBonus)
+      .toMatchObject({ dueDate: '2028-11-19', years: 3 });
+    // past the last milestone's 60 days there is none left
+    expect(composeScoreboard(inputs({ ...hired, technician: { ...hired.technician, hireDate: '2021-12-01' }, today: '2027-01-31' })).stayBonus).toBeNull();
+    expect(composeScoreboard(inputs({ ...hired, technician: { ...hired.technician, hireDate: '2021-12-01' }, today: '2027-01-30' })).stayBonus)
+      .toMatchObject({ dueDate: '2026-12-01', years: 5, rateBps: 800 });
+  });
+
   test('past the 5-year bonus there is no next stay bonus', () => {
     const board = composeScoreboard(inputs({ technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2018-01-01' } }));
     expect(board.stayBonus).toBeNull();

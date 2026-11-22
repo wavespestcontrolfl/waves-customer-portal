@@ -30,7 +30,7 @@ const scores = require('./tech-rewards-scores');
 const { countDeliveredAsksForTechnician } = require('./review-ask-history');
 const { weeksOfLine, lineOvertimePremium } = require('./payroll-regular-rate');
 const { TECH_REWARD_KINDS } = require('./payroll-pay-lines');
-const { settledStayKeys } = require('./tech-rewards-pay-lines');
+const { settledStayKeys, stayDueInRun } = require('./tech-rewards-pay-lines');
 const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
 const { SOURCE_TYPE: COMMISSION_SOURCE_TYPE } = require('./payroll-commission');
 const { SOURCE_TYPE: REVIEW_BONUS_SOURCE_TYPE } = require('./payroll-review-bonuses');
@@ -122,12 +122,20 @@ function seasonBonusBlock(score, multiplier, grossCents) {
 // The board's estimate and the pay line (tech-rewards-pay-lines.js) both take the period from here.
 const stayWindow = (dueDate) => ({ earningsStart: yearBefore(dueDate), earningsEnd: addStaffWorkDays(dueDate, -1) });
 
-// settledKeys: the milestones a pay run has settled for the technician, as years of service in text
-// (tech-rewards-pay-lines.js settledStayKeys). Payroll never pays one of them again, so the board never shows one as coming:
-// after a hire date correction that moves a paid anniversary ahead of today, the next bonus is the next milestone.
+// The stay bonus the board shows: the first milestone that no pay run has settled and that payroll can still pay. Both
+// answers are payroll's own (tech-rewards-pay-lines.js):
+//   settledKeys  the milestones a pay run has settled, as years of service in text (settledStayKeys). Payroll never pays one
+//                again, so after a hire date correction that moves a paid anniversary ahead of today the board shows the
+//                next milestone, not that one.
+//   stayDueInRun the milestone a pay run dated today could still write: from its anniversary to 60 days after it. The
+//                bonus is not on a check the day after the anniversary (the run of a later week writes it), so the board
+//                keeps it, with its 12 months ended, until its line is paid or the 60 days are over. An anniversary from
+//                before the plan has no bonus, and the board does not keep one.
 function stayBonusBlock(hireDate, today, priorPayCents, settledKeys = []) {
   if (!hireDate || hireDate > today) return null;
-  const next = calc.stayBonusSchedule(hireDate).find(({ years, dueDate }) => dueDate >= today && !settledKeys.includes(String(years)));
+  const payable = stayDueInRun(today, hireDate).map((due) => due.key);
+  const next = calc.stayBonusSchedule(hireDate).find(({ years, dueDate }) => !settledKeys.includes(String(years))
+    && (dueDate >= today || payable.includes(String(years))));
   if (!next) return null;
   const { years, rateBps, dueDate } = next;
   // the 12 months of pay end the day before the anniversary: that is the day the estimate is final
@@ -569,7 +577,7 @@ async function readAll(conn, technicianId, today) {
   const season = pickSeason(today);
   // the score and its settings are cut at the board's as-of date: a running season never reads a later change
   const { seasonScore, settings } = await readScore(conn, technicianId, season);
-  // the stay bonus pays on the next anniversary that no pay run has settled, from the 12 months before IT, up to the day
+  // the stay bonus the board shows (stayBonusBlock) is worked out from the 12 months before ITS anniversary, up to the day
   // before it or today, whichever comes first: the pay recorded so far in that window
   const settled = technician.hireDate ? await settledStayKeys(conn, technicianId) : [];
   const due = stayBonusBlock(technician.hireDate, today, 0, settled);
