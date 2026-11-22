@@ -86,7 +86,8 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   // strict reads line 1 and line 2 together: a unit-first address can keep the street number in line 2.
   const digitRun = `(^|[^0-9])${leadingDigits}([^0-9]|$)`;
   const houseNumberFilter = (line1, line2) => (q) => (strict
-    ? q.whereRaw("concat_ws(' ', ??, ??) ~ ?", [line1, line2, digitRun])
+    // Also a line with no digit at all: a member's address on file without its house number (near, never exact).
+    ? q.whereRaw("(concat_ws(' ', ??, ??) ~ ? or concat_ws(' ', ??, ??) !~ '[0-9]')", [line1, line2, digitRun, line1, line2])
     : q.where(line1, 'ilike', `${houseNumber} %`));
   // A near row names the same leading house digits, or has no house number the search can read.
   const nearDigits = (row) => {
@@ -97,9 +98,9 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   // strict with a zip: only rows with that zip or no zip on file. The comparator rejects any other zip, and rows
   // from other zips would only fill the cap.
   const zipFilter = (column) => (q) => (nearZip
-    ? q.whereRaw("(btrim(coalesce(??, '')) like ? or btrim(coalesce(??, '')) = '')", [column, `${nearZip}%`, column])
+    ? q.whereRaw("coalesce(substring(?? from '[0-9]{5}'), '') in (?, '')", [column, nearZip])
     : q);
-  const zip5 = (value) => String(value || '').trim().slice(0, 5);
+  const zip5 = (value) => (String(value || '').match(/\d{5}/) || [''])[0];
   const complete = (rows, leg) => {
     if (strict && rows.length >= legLimit) throw uncheckable(`the ${leg} leg filled its ${legLimit}-row cap`);
     return rows;

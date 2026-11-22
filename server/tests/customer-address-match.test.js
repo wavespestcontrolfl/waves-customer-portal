@@ -104,10 +104,10 @@ describe('findCustomersAtAddress', () => {
   it('strict: the leading house digits are a whole digit run anywhere in the line, on both legs; default keeps the prefix', async () => {
     const strictDb = fakeDb();
     await findCustomersAtAddress(strictDb, '123-125 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
-    const raws = strictDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw' && c[2].startsWith('concat_ws'));
+    const raws = strictDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw' && c[2].includes('concat_ws'));
     expect(raws.map((c) => c[3])).toEqual([
-      ['address_line1', 'address_line2', '(^|[^0-9])123([^0-9]|$)'],
-      ['cp.address_line1', 'cp.address_line2', '(^|[^0-9])123([^0-9]|$)'],
+      ['address_line1', 'address_line2', '(^|[^0-9])123([^0-9]|$)', 'address_line1', 'address_line2'],
+      ['cp.address_line1', 'cp.address_line2', '(^|[^0-9])123([^0-9]|$)', 'cp.address_line1', 'cp.address_line2'],
     ]);
     const plainDb = fakeDb();
     await findCustomersAtAddress(plainDb, '123 Palm Ave, Venice, FL 34285');
@@ -131,6 +131,8 @@ describe('findCustomersAtAddress', () => {
         ROW('other-zip', '123 Palm Ave', null, { zip: '34292', city: 'Venice' }),
         ROW('route-number', '900 County Road 123'),
         ROW('unit-first', 'Unit 7', '123 Palm Ave'),
+        ROW('state-zip', '123/2 Palm Ave', null, { zip: 'FL 34285' }),
+        ROW('numberless', 'Palm Ave'),
       ],
     });
     const rows = await findCustomersAtAddress(db, '123-2 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
@@ -138,6 +140,9 @@ describe('findCustomersAtAddress', () => {
     expect(byId['other-zip']).toBeUndefined();
     // 123 is the route's number there, not its house number: not near.
     expect(byId['route-number']).toBeUndefined();
+    // A zip stored with its state is read; a line with no house number is near.
+    expect(byId['state-zip'] === true || byId['state-zip'] === false).toBe(true);
+    expect(byId.numberless).toBe(false);
     // The street number in line 2 of a unit-first line 1 is read.
     expect(byId['unit-first'] === true || byId['unit-first'] === false).toBe(true);
     expect(byId['no-zip']).toBe(false);
@@ -156,9 +161,9 @@ describe('findCustomersAtAddress', () => {
     // Default: a row with no line 1 is skipped, as before.
     expect(await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285')).toEqual([]);
     // Each leg's zip group (fakeDb records the inner where calls).
-    const zipSql = "(btrim(coalesce(??, '')) like ? or btrim(coalesce(??, '')) = '')";
-    expect(db.calls).toContainEqual(['whereRaw', 'customers', zipSql, ['zip', '34285%', 'zip']]);
-    expect(db.calls).toContainEqual(['whereRaw', 'customer_properties as cp', zipSql, ['cp.zip', '34285%', 'cp.zip']]);
+    const zipSql = "coalesce(substring(?? from '[0-9]{5}'), '') in (?, '')";
+    expect(db.calls).toContainEqual(['whereRaw', 'customers', zipSql, ['zip', '34285']]);
+    expect(db.calls).toContainEqual(['whereRaw', 'customer_properties as cp', zipSql, ['cp.zip', '34285']]);
   });
 
   it('a failing property leg is skipped, not fatal', async () => {
