@@ -125,8 +125,8 @@ const REPLAN_HOLD_WORDS = {
   customer_confirmed: 'customer confirmed',
   first_or_one_time: 'first or one-time visit',
   person_placed: 'staff picked the time',
-  customer_time: "the customer's own time",
-  customer_time_unread: 'a time whose origin could not be read',
+  set_time: 'a set time (asked for or picked by the customer, or a booking not shown as made by the office)',
+  set_time_unread: 'a time rule that could not be read',
   time_told: 'customer may already know the time',
   pref_unknown: "customer's wishes unreadable",
 };

@@ -4,10 +4,10 @@
  * one-time visit and a person-placed visit told only the day are movable. A customer-confirmed stop, a stop told an
  * hour (a known slot, or an unknown window) and every other existing reason stay fixed. A failed level read fails
  * CLOSED. Gate off: the known-slot told lock alone. The one change of 2026-11-22: only with the gate on does the app
- * record whether the customer asked for the time (`askRecorded`), and then customer_time (time-promise.dayOnlyEligibility,
- * mocked here; customer_time_unread when the answer cannot be read) fixes a stop FIRST, whatever it was told, so a
+ * record whether the customer asked for the time (`askRecorded`), and then set_time (time-promise.dayOnlyEligibility,
+ * mocked here; set_time_unread when the answer cannot be read) fixes a stop FIRST, whatever it was told, so a
  * day-only notice no longer frees a time the customer asked for. Gate off, or a context without `askRecorded`:
- * `customerTime` is never read or used. Same harness as night-told-lock-day-replan
+ * `setTime` is never read or used. Same harness as night-told-lock-day-replan
  * and day-replan-apply; the promise reader (told-visits) is mocked. Synthetic ids only.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -83,8 +83,8 @@ describe('fixedReason with the day-told context', () => {
     expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ dayTold: day }))).toBe('customer_confirmed');
   });
 
-  // The rule before 2026-11-22 (main), written out as the oracle. This change adds only the customer-time lock, checked
-  // first and only with askRecorded, so for a stop that is not in customerTime nothing else may change.
+  // The rule before 2026-11-22 (main), written out as the oracle. This change adds only the set-time lock, checked
+  // first and only with askRecorded, so for a stop that is not in setTime nothing else may change.
   const mainRule = (row, { told, personPlaced, dayTold }) => {
     const dayOnly = !!dayTold && dayTold.has(row.id);
     if (row.customer_confirmed === true) return 'customer_confirmed';
@@ -94,14 +94,14 @@ describe('fixedReason with the day-told context', () => {
     return null;
   };
 
-  test('table: for a stop not in customerTime, every combination of confirmed, day-only notice, first-or-one-time, person-placed (yes / no / missing) and told (yes / no / missing) gives main\'s answer, with and without askRecorded', () => {
+  test('table: for a stop not in setTime, every combination of confirmed, day-only notice, first-or-one-time, person-placed (yes / no / missing) and told (yes / no / missing) gives main\'s answer, with and without askRecorded', () => {
     let cases = 0;
     for (const confirmed of [true, false]) {
       for (const dayTold of [day, new Set(), undefined]) {
         for (const firstOrOneTime of [true, false]) {
           for (const personPlaced of [day, new Set(), undefined]) {
             for (const told of [day, new Set(), undefined]) {
-              for (const ask of [{}, { askRecorded: true, customerTime: new Map() }]) {
+              for (const ask of [{}, { askRecorded: true, setTime: new Map() }]) {
                 const ctx = base({ dayTold, personPlaced, told, ...ask });
                 const row = stop({ customer_confirmed: confirmed, ...(firstOrOneTime ? { is_recurring: false, recurring_parent_id: null } : {}) });
                 expect(_internals.fixedReason(row, ctx)).toBe(mainRule(row, ctx));
@@ -126,26 +126,26 @@ describe('fixedReason with the day-told context', () => {
     expect(_internals.fixedReason(stop({ auto_dispatch_locked: true }), base({ dayTold: day }))).toBe('staff_lock');
   });
 
-  test('the PR\'s one behavior change: with askRecorded, customer_time fixes a stop FIRST, also one told only the day, and before every other told-lock reason', () => {
-    const ask = (extra = {}) => base({ askRecorded: true, customerTime: new Map([['s1', 'customer_time']]), ...extra });
-    expect(_internals.fixedReason(stop(), ask())).toBe('customer_time');
-    expect(_internals.fixedReason(stop(), ask({ dayTold: day }))).toBe('customer_time');
-    expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false }), ask({ personPlaced: day, told: day }))).toBe('customer_time');
-    expect(_internals.fixedReason(stop(), ask({ customerTime: new Map([['other', 'customer_time']]), dayTold: day }))).toBeNull();
-    expect(_internals.fixedReason(stop(), ask({ customerTime: new Map([['s1', 'customer_time_unread']]), dayTold: day }))).toBe('customer_time_unread');
+  test('the PR\'s one behavior change: with askRecorded, set_time fixes a stop FIRST, also one told only the day, and before every other told-lock reason', () => {
+    const ask = (extra = {}) => base({ askRecorded: true, setTime: new Map([['s1', 'set_time']]), ...extra });
+    expect(_internals.fixedReason(stop(), ask())).toBe('set_time');
+    expect(_internals.fixedReason(stop(), ask({ dayTold: day }))).toBe('set_time');
+    expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false }), ask({ personPlaced: day, told: day }))).toBe('set_time');
+    expect(_internals.fixedReason(stop(), ask({ setTime: new Map([['other', 'set_time']]), dayTold: day }))).toBeNull();
+    expect(_internals.fixedReason(stop(), ask({ setTime: new Map([['s1', 'set_time_unread']]), dayTold: day }))).toBe('set_time_unread');
     // The earlier reasons still win.
     expect(_internals.fixedReason(stop({ status: 'dispatched' }), ask())).toBe('status');
     expect(_internals.fixedReason(stop(), ask({ sent24: day }))).toBe('reminder_24h_sent');
   });
 
-  test('askRecorded with no customerTime fact keeps the stop fixed as customer_time_unread (fail closed)', () => {
-    expect(_internals.fixedReason(stop(), base({ askRecorded: true, customerTime: undefined, dayTold: day }))).toBe('customer_time_unread');
+  test('askRecorded with no setTime fact keeps the stop fixed as set_time_unread (fail closed)', () => {
+    expect(_internals.fixedReason(stop(), base({ askRecorded: true, setTime: undefined, dayTold: day }))).toBe('set_time_unread');
   });
 
-  test('without askRecorded (gate off, or a hand-built context) a customerTime fact is ignored', () => {
-    const own = new Map([['s1', 'customer_time']]);
-    expect(_internals.fixedReason(stop(), base({ customerTime: own }))).toBeNull();
-    expect(_internals.fixedReason(stop({ is_recurring: false }), base({ customerTime: own }))).toBe('first_or_one_time');
+  test('without askRecorded (gate off, or a hand-built context) a setTime fact is ignored', () => {
+    const own = new Map([['s1', 'set_time']]);
+    expect(_internals.fixedReason(stop(), base({ setTime: own }))).toBeNull();
+    expect(_internals.fixedReason(stop({ is_recurring: false }), base({ setTime: own }))).toBe('first_or_one_time');
   });
 
   test('a visit with level none keeps today\'s rules', () => {
@@ -161,33 +161,24 @@ describe('fixedReason with the day-told context', () => {
   });
 });
 
-describe('loadCustomerTime', () => {
+describe('loadSetTime', () => {
   const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
 
-  test('not eligible is customer_time; eligible is absent; a missing verdict and a failed-read verdict are customer_time_unread; one bulk read, the told level ignored', async () => {
+  test('not eligible is set_time; eligible is absent; a missing verdict and a failed-read verdict are set_time_unread; one bulk read, the told level ignored', async () => {
     dayOnlyEligibility.mockResolvedValue(new Map([
       ['a', { eligible: false, level: 'none' }],
       ['b', { eligible: true, level: 'none' }],
       ['c', { eligible: false, level: 'hour', failed: true }],
     ]));
-    const fixed = await _internals.loadCustomerTime({}, rows, NOW);
+    const fixed = await _internals.loadSetTime({}, rows, NOW);
     expect(fixed).toBeInstanceOf(Map);
-    expect([...fixed].sort()).toEqual([['a', 'customer_time'], ['c', 'customer_time_unread'], ['d', 'customer_time_unread']]);
+    expect([...fixed].sort()).toEqual([['a', 'set_time'], ['c', 'set_time_unread'], ['d', 'set_time_unread']]);
     expect(fixed.has('b')).toBe(false);
     expect(dayOnlyEligibility).toHaveBeenCalledTimes(1);
     expect(dayOnlyEligibility).toHaveBeenCalledWith({}, ['a', 'b', 'c', 'd'], NOW, { ignoreLevel: true });
   });
 
-  test('a verdict marked originUnknown (a booking source that does not say who chose the hour) is customer_time_unread, never the customer\'s own time', async () => {
-    dayOnlyEligibility.mockResolvedValue(new Map([
-      ['a', { eligible: false, level: 'none', originUnknown: true }],
-      ['b', { eligible: false, level: 'none' }],
-    ]));
-    const fixed = await _internals.loadCustomerTime({}, [{ id: 'a' }, { id: 'b' }], NOW);
-    expect([...fixed].sort()).toEqual([['a', 'customer_time_unread'], ['b', 'customer_time']]);
-  });
-
-  test('over the REAL reader: a cron_selfheal booking and a visit with no reminder row are customer_time_unread; an online booking is customer_time; an office booking can move', async () => {
+  test('over the REAL reader: an online booking, a cron_selfheal booking and a visit with no reminder row are all set_time (the reason does not say who set it); an office booking can move', async () => {
     const oneTime = (id) => ({
       id, visit_id: null, status: 'pending', scheduled_date: '2026-11-15', is_recurring: false, recurring_parent_id: null,
       date_exception: null, date_exception_source: null, date_exception_at: null, customer_asked_time: null,
@@ -205,16 +196,16 @@ describe('loadCustomerTime', () => {
     };
     conn.raw = (sql) => ({ sql });
     dayOnlyEligibility.mockImplementation(jest.requireActual('../services/time-promise').dayOnlyEligibility);
-    const fixed = await _internals.loadCustomerTime(conn, tables.scheduled_services, NOW);
-    expect([...fixed].sort()).toEqual([['bare', 'customer_time_unread'], ['heal', 'customer_time_unread'], ['online', 'customer_time']]);
+    const fixed = await _internals.loadSetTime(conn, tables.scheduled_services, NOW);
+    expect([...fixed].sort()).toEqual([['bare', 'set_time'], ['heal', 'set_time'], ['online', 'set_time']]);
     expect(fixed.has('office')).toBe(false);
   });
 
-  test('a thrown read returns every id as customer_time_unread and warns (fail closed)', async () => {
+  test('a thrown read returns every id as set_time_unread and warns (fail closed)', async () => {
     dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
-    const fixed = await _internals.loadCustomerTime({}, rows, NOW);
-    expect([...fixed].sort()).toEqual([['a', 'customer_time_unread'], ['b', 'customer_time_unread'], ['c', 'customer_time_unread'], ['d', 'customer_time_unread']]);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('customer-time read failed'));
+    const fixed = await _internals.loadSetTime({}, rows, NOW);
+    expect([...fixed].sort()).toEqual([['a', 'set_time_unread'], ['b', 'set_time_unread'], ['c', 'set_time_unread'], ['d', 'set_time_unread']]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('set-time read failed'));
   });
 });
 
@@ -238,9 +229,9 @@ describe('loadDayContext', () => {
     expect(loadToldVisitIds).not.toHaveBeenCalled();
     expect([...ctx.told]).toEqual(['b']);
     expect([...ctx.dayTold]).toEqual(['a']);
-    // The ask is recorded only with the gate on: customerTime from one bulk read, and the person-placed read as before.
+    // The ask is recorded only with the gate on: setTime from one bulk read, and the person-placed read as before.
     expect(ctx.askRecorded).toBe(true);
-    expect(ctx.customerTime).toEqual(new Map());
+    expect(ctx.setTime).toEqual(new Map());
     expect(dayOnlyEligibility).toHaveBeenCalledTimes(1);
     expect(dayOnlyEligibility.mock.calls[0][3]).toEqual({ ignoreLevel: true });
     expect(ctx.personPlaced).toBeInstanceOf(Set);
@@ -268,21 +259,21 @@ describe('loadDayContext', () => {
     expect([...ctx.told]).toEqual(['b']);
     expect(ctx).not.toHaveProperty('dayTold');
     expect(ctx).not.toHaveProperty('askRecorded');
-    expect(ctx).not.toHaveProperty('customerTime');
+    expect(ctx).not.toHaveProperty('setTime');
     expect(dayOnlyEligibility).not.toHaveBeenCalled();
     expect(ctx.personPlaced).toBeInstanceOf(Set);
   });
 
-  test('this gate on: a customer-time answer fixes that stop first, also one told only the day; a failed read keeps the whole day fixed', async () => {
+  test('this gate on: a set-time answer fixes that stop first, also one told only the day; a failed read keeps the whole day fixed', async () => {
     process.env.GATE_DAY_ONLY_PROMISE = 'true';
     loadPromiseLevels.mockImplementation(levelsOf({ a: 'day', b: 'day', c: 'day' }));
     dayOnlyEligibility.mockImplementation(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: id !== 'b', level: 'none' }])));
     const ctx = await load();
-    expect([...ctx.customerTime]).toEqual([['b', 'customer_time']]);
-    expect(dayRows().map((r) => _internals.fixedReason({ ...r, customer_confirmed: false }, ctx))).toEqual([null, 'customer_time', null]);
+    expect([...ctx.setTime]).toEqual([['b', 'set_time']]);
+    expect(dayRows().map((r) => _internals.fixedReason({ ...r, customer_confirmed: false }, ctx))).toEqual([null, 'set_time', null]);
     dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
     const failed = await load();
-    expect(dayRows().map((r) => _internals.fixedReason({ ...r, customer_confirmed: false }, failed))).toEqual(['customer_time_unread', 'customer_time_unread', 'customer_time_unread']);
+    expect(dayRows().map((r) => _internals.fixedReason({ ...r, customer_confirmed: false }, failed))).toEqual(['set_time_unread', 'set_time_unread', 'set_time_unread']);
   });
 });
 
@@ -315,10 +306,10 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     const run = () => applyAcceptedDay({ conn, env, dateStr: TOMORROW, techId: TECH, plan, deps, replan: async () => fresh });
     return { db, run, rowWrites: () => db.updates.filter((u) => u.table === 'scheduled_services') };
   }
-  const deps = ({ dayOnly = true, levels = {}, placed = false, customerTime = [] } = {}) => ({
+  const deps = ({ dayOnly = true, levels = {}, placed = false, setTime = [] } = {}) => ({
     dayOnlyOn: () => dayOnly,
     isPersonPlacedVisit: jest.fn(async () => ({ placed })),
-    loadCustomerTime: jest.fn(async (_conn, rows) => new Map(rows.map((r) => r.id).filter((id) => customerTime.includes(id)).map((id) => [id, 'customer_time']))),
+    loadSetTime: jest.fn(async (_conn, rows) => new Map(rows.map((r) => r.id).filter((id) => setTime.includes(id)).map((id) => [id, 'set_time']))),
     loadToldIds: jest.fn(async () => new Set()),
     loadPromiseLevels: jest.fn(levelsOf(levels)),
   });
@@ -337,27 +328,27 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
   });
 
-  test('this gate on: a visit whose time became the customer\'s own meanwhile stops the write (visit_not_movable:customer_time), also one told only the day', async () => {
-    const over = deps({ levels: { a: 'day', b: 'day' }, customerTime: ['b'] });
+  test('this gate on: a visit whose time became a set time meanwhile stops the write (visit_not_movable:set_time), also one told only the day', async () => {
+    const over = deps({ levels: { a: 'day', b: 'day' }, setTime: ['b'] });
     const w = world({ rowExtra: recurring, over });
-    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:customer_time', moved: 0 });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:set_time', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
     // Read with the transaction handle, for the one visit.
-    expect(over.loadCustomerTime.mock.calls[0][1]).toEqual([{ id: expect.any(String) }]);
+    expect(over.loadSetTime.mock.calls[0][1]).toEqual([{ id: expect.any(String) }]);
   });
 
-  test('this gate on: the real customer-time read that fails stops the write as customer_time_unread', async () => {
+  test('this gate on: the real set-time read that fails stops the write as set_time_unread', async () => {
     dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
     const over = deps({ levels: { a: 'day', b: 'day' } });
-    over.loadCustomerTime = _internals.loadCustomerTime;
+    over.loadSetTime = _internals.loadSetTime;
     const w = world({ rowExtra: recurring, over });
-    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:customer_time_unread', moved: 0 });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:set_time_unread', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
   });
 
-  test('this gate on: a customer-time read that throws stops the write (fail closed)', async () => {
+  test('this gate on: a set-time read that throws stops the write (fail closed)', async () => {
     const over = deps({ levels: { a: 'day', b: 'day' } });
-    over.loadCustomerTime = jest.fn(async () => { throw new Error('verdict read down'); });
+    over.loadSetTime = jest.fn(async () => { throw new Error('verdict read down'); });
     const w = world({ rowExtra: recurring, over });
     expect(await w.run()).toEqual({ status: 'failed', reason: 'write_failed:error', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
@@ -396,13 +387,13 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     const w = world({ rowExtra: oneTime, over });
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:first_or_one_time', moved: 0 });
     expect(over.loadPromiseLevels).not.toHaveBeenCalled();
-    expect(over.loadCustomerTime).not.toHaveBeenCalled();
+    expect(over.loadSetTime).not.toHaveBeenCalled();
     expect(over.loadToldIds).toHaveBeenCalled();
   });
 
-  test('applyDeps carries dayOnlyOn, loadPromiseLevels and loadCustomerTime', () => {
+  test('applyDeps carries dayOnlyOn, loadPromiseLevels and loadSetTime', () => {
     const real = _internals.applyDeps();
-    expect(typeof real.loadCustomerTime).toBe('function');
+    expect(typeof real.loadSetTime).toBe('function');
     expect(typeof real.dayOnlyOn).toBe('function');
     expect(typeof real.loadPromiseLevels).toBe('function');
     expect(real.dayOnlyOn()).toBe(false);

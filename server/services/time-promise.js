@@ -215,12 +215,6 @@ const CUSTOMER_OR_UNKNOWN_SOURCES = Object.freeze([
   'recurring_auto_extend', 'recurring_cancel_reseed', 'recurring_alert_action',
 ]);
 
-// The CUSTOMER_OR_UNKNOWN_SOURCES of a first or one-time visit whose hour is known to be the customer's own: an online
-// pick, an estimate slot pick, the AI call agent's committed time. Any other source outside the office list (cron_selfheal,
-// a visit with no reminder row, a source nobody listed) says nothing about who chose the hour: the visit is not eligible
-// all the same, and its verdict carries `originUnknown` so a reader that names the reason does not call it the customer's.
-const CUSTOMER_TIME_SOURCES = Object.freeze(['booking_new', 'booking_followup', 'estimate_accept_slot', 'call_recording']);
-
 // Statuses that end a visit: a member in one of them is no longer part of the stop the customer hears about.
 const ENDED_STATUSES = ['cancelled', 'completed', 'skipped'];
 
@@ -289,8 +283,7 @@ async function memberIntentState(conn, member) {
  *  from an office source AND only while the customer has not since picked its slot (a self-service reschedule keeps the office
  *  source, but the hour is now the customer's own). Any read fails closed. Returns { eligible, degraded }: `degraded` is true
  *  when a move-history read FAILED (the intent's history read threw, or isCustomerPickedVisit swallowed the error and answered
- *  picked), so the caller can tell a failed read from a real "the customer picked it" verdict. `originUnknown` is true when a
- *  first or one-time visit is refused on a source that does not say who chose the hour (CUSTOMER_TIME_SOURCES). */
+ *  picked), so the caller can tell a failed read from a real "the customer picked it" verdict. */
 async function memberEligible(conn, member, source) {
   let state;
   try {
@@ -300,16 +293,14 @@ async function memberEligible(conn, member, source) {
   }
   if (state.intent === true) return { eligible: false, degraded: false };
   if (state.intent === false) return { eligible: true, degraded: false };
-  if (!isRecurringChild(member) && !OFFICE_BOOKING_SOURCES.includes(source)) { // no move-history read
-    return CUSTOMER_TIME_SOURCES.includes(source) ? { eligible: false, degraded: false } : { eligible: false, degraded: false, originUnknown: true };
-  }
+  if (!isRecurringChild(member) && !OFFICE_BOOKING_SOURCES.includes(source)) return { eligible: false, degraded: false }; // no move-history read
   // Lazy: auto-dispatch/eligibility pulls the route optimizer, which reads the feature gates at load time.
   const verdict = await require('./auto-dispatch/eligibility').isCustomerPickedVisit(member, conn, state.rows);
   return { eligible: !verdict.picked, degraded: verdict.degraded === true };
 }
 
 /**
- * Which visits may be promised only the DAY? Map<id, { eligible, level, failed?, originUnknown? }>, one bulk read per fact, stop-wide: every live
+ * Which visits may be promised only the DAY? Map<id, { eligible, level, failed? }>, one bulk read per fact, stop-wide: every live
  * member of a visit's stop must be eligible, else none is. `level` comes from loadPromiseLevels; a level of 'hour' is
  * never eligible (the customer already has an hour). Any read failure: not eligible, level 'hour', failed true (fail
  * closed: the customer keeps today's window copy; `failed` is the only way to tell it from a real 'hour' verdict). A swallowed
@@ -331,16 +322,14 @@ async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = f
       const level = levels.get(id) || 'hour';
       const members = facts.get(String(id)) || [];
       let eligible = level !== 'hour' && members.length > 0;
-      let refusal = null;
+      let degraded = false;
       for (const member of eligible ? members : []) {
         const verdict = await memberEligible(conn, member, sources.get(String(member.id)));
-        if (!verdict.eligible) { eligible = false; refusal = verdict; break; }
+        if (!verdict.eligible) { eligible = false; degraded = verdict.degraded; break; }
       }
       // A degraded move-history read is not eligible (senders keep today's window copy) and carries the same failed marker
-      // as a failed bulk read, so an AI context says only the day while a screen keeps the hour. `originUnknown` (the member
-      // that refused the stop has a booking source that does not say who chose the hour) changes no decision here: it only
-      // lets a reader that NAMES the reason (the day re-plan's customer-time lock) keep it apart from the customer's own time.
-      result.set(id, { eligible, level, ...(refusal && refusal.degraded ? { failed: true } : {}), ...(refusal && refusal.originUnknown ? { originUnknown: true } : {}) });
+      // as a failed bulk read, so an AI context says only the day while a screen keeps the hour.
+      result.set(id, degraded ? { eligible, level, failed: true } : { eligible, level });
     }
   } catch {
     // failed: true marks a READ FAILURE (as opposed to a real "customer was told an hour" verdict, which has the same

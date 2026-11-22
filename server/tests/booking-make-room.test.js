@@ -50,7 +50,7 @@ const ROUTE_DETOUR_MIN = 20;
 const TEXTS = { smsEnabled: true, serviceReminder72h: true, serviceReminder24h: true, reminder72hChannel: 'sms', reminder24hChannel: 'sms' };
 
 function makeDeps({
-  rows = exampleDay(), told = ['visit-e'], customerTime = null, prefs = {}, pref = {}, feasible = true, blocks = [], holdIds = [], techBlind = true,
+  rows = exampleDay(), told = ['visit-e'], setTime = null, prefs = {}, pref = {}, feasible = true, blocks = [], holdIds = [], techBlind = true,
   channel72 = {}, assignable = [TECH], absent = [], blackout = [], inactive = [], pushRoute = 'push_and_sms', device = null,
   travelGap = false, multiTech = false,
 } = {}) {
@@ -62,8 +62,8 @@ function makeDeps({
     loadDayContext: jest.fn(async (_conn, dateStr, now) => {
       const allRows = rows.filter((r) => r.scheduled_date === dateStr);
       const ctx = { dateStr, now, allRows, visitCounts: countBy(allRows, 'visit_id'), customerCounts: countBy(allRows, 'customer_id'), sent24: new Set(), toldLock: true, told: new Set(told), personPlaced: new Set() };
-      // GATE_DAY_ONLY_PROMISE on (the ask is recorded): the customer's own time is also a fact of the day.
-      return customerTime ? { ...ctx, askRecorded: true, customerTime: new Map(customerTime.map((id) => [id, 'customer_time'])) } : ctx;
+      // GATE_DAY_ONLY_PROMISE on (the ask is recorded): a set time is also a fact of the day.
+      return setTime ? { ...ctx, askRecorded: true, setTime: new Map(setTime.map((id) => [id, 'set_time'])) } : ctx;
     }),
     fixedReason,
     skipReason,
@@ -179,9 +179,9 @@ describe('the plan page example', () => {
   });
 
   test('gate on (the ask is recorded): a stop whose time is the customer\'s own never moves', async () => {
-    const { report } = await check({ deps: makeDeps({ customerTime: ['visit-c'] }) });
+    const { report } = await check({ deps: makeDeps({ setTime: ['visit-c'] }) });
     expect(starts(report)).not.toContain('09:00');
-    expect(report.byReason.fixed_customer_time).toBeGreaterThanOrEqual(1);
+    expect(report.byReason.fixed_set_time).toBeGreaterThanOrEqual(1);
   });
 
   test('a stop inside the 24-hour lock never moves', async () => {
