@@ -55,7 +55,8 @@
  *   - The Stonewall catalog row is the production row (exactly ONE row with this exact name, no
  *     alias that spells the name on another product, active, an active ingredient that BEGINS
  *     with prodiamine as the yearly cap check reads it (ILIKE 'prodiamine%', so a leading space
- *     fails here too), EPA 10404-114, rates in pounds), or the database has NO row and no alias for the name (CI, a dev copy) and the
+ *     fails here too), EPA 10404-114, rates in pounds, a fertilizer analysis that is empty or
+ *     18-0-10, a watering rule that is empty or meets the label), or the database has NO row and no alias for the name (CI, a dev copy) and the
  *     row is inserted. Two rows, a row known only through an alias, another ingredient,
  *     registration or unit: throws.
  *   - The bag has NO yearly prodiamine cap row, or exactly ONE that is a hard block in lb per
@@ -85,8 +86,9 @@
  *      (lawn-sod-sheet) and two completion checks read analysis_n from the row, so a bag
  *      without it is not treated as a fertilizer there. The bag's guaranteed analysis
  *      (18-0-10, in its name) is filled column by column, each only where it is NULL (a row
- *      that holds P but no N is still no fertilizer to those readers); a value an administrator
- *      wrote is never overwritten.
+ *      that holds P but no N is still no fertilizer to those readers). The gate has already
+ *      stopped a row that holds another figure: the recipe would plan 18-0-10 while the
+ *      nutrient ledger booked that figure.
  *   5. The standard rate. AGENTS.md, lawn protocol data fan-out: the catalog's
  *      default_rate_per_1000 matches the program rate. The yearly cap check counts an
  *      application whose ledger row holds no rate and no quantity at this figure. The production
@@ -107,7 +109,8 @@
  *
  *   7. The label water-in rule (0.5 inch within 14 days), only where post_application_watering
  *      is NULL (20261022120000 stores it on the row with this exact name; a row created after
- *      that migration ran has none).
+ *      that migration ran has none). A rule the row holds stays; the gate has already stopped
+ *      one that does not meet the label (less water, or later than 14 days).
  *
  * Chemical group: no write. The production Stonewall row holds its group in the older free-text
  * column (moa_group 'Group 3', hrac_group NULL), as the liquid pre-emergents do. The rotation
@@ -212,6 +215,7 @@ const CATALOG_ROW = {
 
 const ANALYSIS_COLUMNS = ['analysis_n', 'analysis_p', 'analysis_k'];
 const ANALYSIS = Object.fromEntries(ANALYSIS_COLUMNS.map((column) => [column, CATALOG_ROW[column]])); // 18-0-10
+const LABEL_WATERING = JSON.parse(CATALOG_ROW.post_application_watering); // water in 0.5 inch within 336 hours
 
 const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const isLb = (value) => String(value || '').trim().toLowerCase() === 'lb';
@@ -241,6 +245,9 @@ async function catalogMatches(knex, name) {
   return { rows, aliasIds };
 }
 
+const meetsLabelWatering = (rule) => rule.mode === LABEL_WATERING.mode
+  && Number(rule.water_in_inches) >= LABEL_WATERING.water_in_inches && Number(rule.water_in_by_hours) <= LABEL_WATERING.water_in_by_hours;
+
 // What the production Stonewall row must state for the swap to be safe: [is it so, what is wrong].
 const BAG_CHECKS = [
   [(bag) => bag.active !== false, () => 'is not active'],
@@ -251,6 +258,12 @@ const BAG_CHECKS = [
     (bag) => `holds EPA registration ${JSON.stringify(bag.epa_reg_number)}, not ${CATALOG_ROW.epa_reg_number}`],
   [(bag) => isLb(bag.rate_unit),
     (bag) => `states its rates in ${JSON.stringify(bag.rate_unit)}, not lb, so its standard rate cannot be set to the program rate of ${OCT_RATE} lb per 1,000 sq ft`],
+  // Empty (it is filled) or the bag's own figures: another analysis would plan 18-0-10 and book something else in the nutrient ledger.
+  [(bag) => ANALYSIS_COLUMNS.every((column) => bag[column] == null || Number(bag[column]) === ANALYSIS[column]),
+    (bag) => `holds the fertilizer analysis ${ANALYSIS_COLUMNS.map((column) => (bag[column] == null ? '?' : Number(bag[column]))).join('-')}, not 18-0-10`],
+  // Empty (it is filled) or a water-in rule that meets the label: at least 0.5 inch, within 14 days at the latest.
+  [(bag) => bag.post_application_watering == null || meetsLabelWatering(asObject(bag.post_application_watering)),
+    () => `holds a watering rule that does not meet the label (water in at least ${LABEL_WATERING.water_in_inches} inch within ${LABEL_WATERING.water_in_by_hours / 24} days)`],
 ];
 
 const stop = (what) => { throw new Error(`lawn v13 October Stonewall: ${what}. Nothing was written. Correct it, then run the migration again.`); };
@@ -263,7 +276,7 @@ async function readBag(knex) {
   if (rows.length !== 1) stop(`${rows.length} catalog rows are named ${NEW_NAME}${aliasIds.length ? ', and an alias spells that name' : ''}; the migration needs exactly one row with the name`);
   if (aliasIds.some((id) => id !== String(rows[0].id))) stop(`an alias spells ${NEW_NAME} on another product than the catalog row with that name`);
   const bag = await knex('products_catalog').where({ id: rows[0].id }).forUpdate()
-    .first('id', 'active', 'active_ingredient', 'epa_reg_number', 'default_rate_per_1000', 'rate_unit');
+    .first('id', 'active', 'active_ingredient', 'epa_reg_number', 'default_rate_per_1000', 'rate_unit', ...ANALYSIS_COLUMNS, 'post_application_watering');
   const wrong = BAG_CHECKS.filter(([holds]) => !holds(bag)).map(([, why]) => why(bag));
   if (wrong.length) stop(`the catalog row of ${NEW_NAME} ${wrong.join('; ')}`);
   return bag;

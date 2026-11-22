@@ -1484,9 +1484,9 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         });
       });
 
-      test('a watering rule the row already holds is kept', async () => {
+      test('a stricter watering rule the row already holds (more water, sooner) is kept', async () => {
         await withReset(async () => {
-          const own = { mode: 'water_in', source: 'office', water_in_inches: 0.25, water_in_by_hours: 24 };
+          const own = { mode: 'water_in', source: 'office', water_in_inches: 0.75, water_in_by_hours: 48 };
           await setWatering(JSON.stringify(own));
           try {
             await stonewallMigration.up(knex);
@@ -1496,11 +1496,24 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         });
       });
 
+      // The customer's aftercare would say less than the label needs while the recipe tells the technician 0.5 inch.
       test.each([
-        ['N only', { analysis_n: 16, analysis_p: null, analysis_k: null }, [16, 0, 10], { analysis_p: 0, analysis_k: 10 }],
+        ['less water than the label needs', { mode: 'water_in', source: 'office', water_in_inches: 0.25, water_in_by_hours: 24 }],
+        ['a later deadline than the label\'s 14 days', { mode: 'water_in', source: 'office', water_in_inches: 0.5, water_in_by_hours: 500 }],
+        ['a hold rule in place of a water-in rule', { mode: 'hold', source: 'office', hold_hours: 24 }],
+        ['no watering at all', { mode: 'none', source: 'office' }],
+      ])('a catalog row whose watering rule states %s: up throws and writes nothing', async (_label, rule) => {
+        await withReset(async () => {
+          await setWatering(JSON.stringify(rule));
+          try { await refuses('holds a watering rule that does not meet the label (water in at least 0.5 inch within 14 days)'); } finally { await setWatering(JSON.stringify(LABEL_RULE)); }
+        });
+      });
+
+      test.each([
+        ['N only', { analysis_n: 18, analysis_p: null, analysis_k: null }, [18, 0, 10], { analysis_p: 0, analysis_k: 10 }],
         // The case the new-sod sheet cares about: a row that holds P but no N is no fertilizer to it.
         ['P only', { analysis_n: null, analysis_p: 0, analysis_k: null }, [18, 0, 10], { analysis_n: 18, analysis_k: 10 }],
-      ])('an analysis an administrator wrote in part (%s) keeps what was written; only the empty columns are filled', async (_label, stored, expected, filled) => {
+      ])('an analysis the row holds in part (%s) keeps what it holds; only the empty columns are filled', async (_label, stored, expected, filled) => {
         await withReset(async () => {
           await setAnalysis(stored);
           try {
@@ -1511,14 +1524,14 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         });
       });
 
-      test('a whole analysis an administrator wrote is never overwritten', async () => {
+      // The recipe plans 18-0-10; the nutrient ledger books what the row holds. Another figure stops the swap.
+      test.each([
+        ['another whole analysis', { analysis_n: 16, analysis_p: 2, analysis_k: 8 }, 'holds the fertilizer analysis 16-2-8, not 18-0-10'],
+        ['another N beside empty P and K', { analysis_n: 16, analysis_p: null, analysis_k: null }, 'holds the fertilizer analysis 16-?-?, not 18-0-10'],
+      ])('a catalog row with %s: up throws and writes nothing', async (_label, stored, message) => {
         await withReset(async () => {
-          await setAnalysis({ analysis_n: 16, analysis_p: 2, analysis_k: 8 });
-          try {
-            await stonewallMigration.up(knex);
-            expect(await analysisOf()).toEqual([16, 2, 8]);
-            expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ analysisFilled: null });
-          } finally { await setAnalysis({ analysis_n: 18, analysis_p: 0, analysis_k: 10 }); }
+          await setAnalysis(stored);
+          try { await refuses(message); } finally { await setAnalysis({ analysis_n: 18, analysis_p: 0, analysis_k: 10 }); }
         });
       });
     });
