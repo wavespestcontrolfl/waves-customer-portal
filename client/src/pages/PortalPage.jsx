@@ -804,7 +804,7 @@ function usePlanServices(customer, enabled, reloadKey = 0) {
       .catch(() => { if (!cancelled) setRows(null); });
     return () => { cancelled = true; };
   }, [enabled, reloadKey]);
-  return rows ? resolvePlanServices(customer, rows.next, rows.upcoming).includedServices : null;
+  return rows ? resolvePlanServices(customer, rows.next, rows.upcoming).confirmedServices : null;
 }
 
 // =========================================================================
@@ -11282,7 +11282,13 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
       ...svc,
       displayName: (svc.id === 'pest_control' && pestPlanName) || detectedServiceNames[svc.id] || svc.name,
     }));
-  return { includedServices, pestPlanName };
+  // My Plan's list without the tier placeholders: only the services a plan
+  // visit on the schedule confirms. A tier gives a count, never which service
+  // is missing, so a surface that NAMES what the member pays for (Billing's
+  // Plan Charges, the Learn sentence) reads this list. A lawn-only Bronze
+  // member with no coming visit is named no service, not "Pest Control".
+  const confirmedServices = includedServices.filter(svc => detectedServiceIds.includes(svc.id));
+  return { includedServices, confirmedServices, pestPlanName };
 }
 
 const TIER_SERVICE_NAMES = {

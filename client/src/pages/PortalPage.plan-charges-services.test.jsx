@@ -5,7 +5,9 @@
 // "Pest Control". This file pins the shared derivation
 // (resolvePlanServices) and what the box does with it: the same two schedule
 // reads as My Plan, no service named while they load or after they fail,
-// and no schedule read for a cancelled account or a non-member. The Learn
+// and no schedule read for a cancelled account or a non-member. Billing and
+// Learn name only the services a plan visit on the schedule confirms
+// (confirmedServices); My Plan alone keeps its tier placeholders. The Learn
 // tab's "Your {tier} plan includes ..." sentence used the same wrong list
 // and follows the same rule.
 import React from 'react';
@@ -54,19 +56,34 @@ const LAWN = visit('Lawn Care Program');
 const PEST = visit('Quarterly Pest Control');
 const bronze = { id: 'cust-1', firstName: 'Pat', tier: 'Bronze', monthlyRate: 62, property: {} };
 const ids = (customer, next, upcoming) => resolvePlanServices(customer, next, upcoming).includedServices.map((s) => s.id);
+const confirmedIds = (customer, next, upcoming) => resolvePlanServices(customer, next, upcoming).confirmedServices.map((s) => s.id);
 
 describe('resolvePlanServices — one service list for My Plan and Billing', () => {
   it('a lawn-only Bronze member has lawn care, under the visit\'s own name, and no pest control', () => {
-    const { includedServices } = resolvePlanServices(bronze, LAWN, [LAWN]);
+    const { includedServices, confirmedServices } = resolvePlanServices(bronze, LAWN, [LAWN]);
     expect(includedServices.map((s) => s.id)).toEqual(['lawn_care']);
     expect(includedServices[0].displayName).toBe('Lawn Care Program');
+    expect(confirmedServices).toEqual(includedServices);
   });
 
-  it('a member with no plan visit on the schedule keeps the tier\'s default services', () => {
-    const { includedServices } = resolvePlanServices(bronze, null, []);
+  // A tier gives a count, never which service is missing. My Plan fills the
+  // count with catalog placeholders; the confirmed list never does.
+  it('with no plan visit on the schedule, My Plan keeps the tier placeholders and the confirmed list is empty', () => {
+    const { includedServices, confirmedServices } = resolvePlanServices(bronze, null, []);
     expect(includedServices.map((s) => s.id)).toEqual(['pest_control']);
     expect(includedServices[0].displayName).toBe('Pest Control');
-    expect(ids({ ...bronze, tier: 'Gold' }, null, [LAWN])).toEqual(['lawn_care', 'pest_control', 'mosquito']);
+    expect(confirmedServices).toEqual([]);
+  });
+
+  it('a Gold member with one service on the schedule: three for My Plan, one confirmed', () => {
+    const gold = { ...bronze, tier: 'Gold' };
+    expect(ids(gold, null, [LAWN])).toEqual(['lawn_care', 'pest_control', 'mosquito']);
+    expect(confirmedIds(gold, null, [LAWN])).toEqual(['lawn_care']);
+  });
+
+  it('the confirmed list never passes the tier\'s size (My Plan\'s own cut)', () => {
+    expect(confirmedIds(bronze, LAWN, [LAWN, PEST])).toEqual(['lawn_care']);
+    expect(confirmedIds({ ...bronze, tier: 'Silver' }, LAWN, [LAWN, PEST])).toEqual(['lawn_care', 'pest_control']);
   });
 
   it('a customer with no plan lists only what the schedule shows', () => {
@@ -81,7 +98,12 @@ describe('resolvePlanServices — one service list for My Plan and Billing', () 
     ['a rescheduled row', visit('Pest Control', { status: 'rescheduled' })],
     ['a visit the server marks as not plan coverage', visit('Pest Control', { waveguardQualifying: false })],
   ])('%s does not put pest control on a lawn member\'s list', (_label, row) => {
-    expect(ids(bronze, LAWN, [LAWN, row])).toEqual(['lawn_care']);
+    // The excluded row comes FIRST: a resolver that accepted it would detect
+    // pest control first and, on a one-service tier, drop lawn care.
+    expect(ids(bronze, row, [row, LAWN])).toEqual(['lawn_care']);
+    expect(confirmedIds(bronze, row, [row, LAWN])).toEqual(['lawn_care']);
+    // Alone, it confirms nothing.
+    expect(confirmedIds(bronze, row, [row])).toEqual([]);
   });
 
   it('pest control is named by its last upcoming visit', () => {
@@ -120,6 +142,23 @@ describe('BillingTab — Plan Charges', () => {
     expect(api.getSchedule).toHaveBeenCalledWith(365, { allProperties: true });
   });
 
+  // Pre-push audit 2026-11-22: tier padding named "Pest Control" here.
+  it('names no service for a member with no plan visit on the schedule; the plan line stays', async () => {
+    api.getNextService.mockResolvedValue({ next: null });
+    api.getSchedule.mockResolvedValue({ upcoming: [] });
+    const box = await renderPlanCharges(bronze);
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(within(box).getByText('WaveGuard Bronze')).toBeInTheDocument();
+    expect(within(box).queryByText(/Pest Control|Lawn Care/)).not.toBeInTheDocument();
+  });
+
+  it('a Gold member with only lawn care on the schedule is named lawn care alone', async () => {
+    const box = await renderPlanCharges({ ...bronze, tier: 'Gold' });
+    expect(await within(box).findByText('Lawn Care Program')).toBeInTheDocument();
+    expect(within(box).queryByText(/Pest Control|Mosquito/)).not.toBeInTheDocument();
+  });
+
   it('names no service when the schedule read fails; the plan line stays', async () => {
     api.getSchedule.mockRejectedValue(new Error('offline'));
     const box = await renderPlanCharges(bronze);
@@ -156,6 +195,16 @@ describe('LearnTab: "Your plan includes ..."', () => {
     api.getSchedule.mockResolvedValue({ upcoming: [PEST] });
     render(<LearnTab customer={bronze} />);
     expect(await screen.findByText('Your Bronze plan includes Pest Control.')).toBeInTheDocument();
+  });
+
+  it('a member with no plan visit on the schedule: no sentence, never a tier guess', async () => {
+    api.getNextService.mockResolvedValue({ next: null });
+    api.getSchedule.mockResolvedValue({ upcoming: [] });
+    render(<LearnTab customer={bronze} />);
+    expect(await screen.findByText(TIP.tip)).toBeInTheDocument();
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(screen.queryByText(/plan includes/)).not.toBeInTheDocument();
   });
 
   it('says nothing about services when the schedule read fails; the tip stays', async () => {
