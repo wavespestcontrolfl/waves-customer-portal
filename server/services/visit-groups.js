@@ -1747,14 +1747,20 @@ function planMemberTargets({ members, primary, visitWindowStart, win, newDateStr
  * leaves it: `{ id, technicianId, start, end, durationMinutes }`. Its block is
  * the commit's own (rowBlockMinutes: the start, and the later of the end and
  * the start plus the stored length). `shiftOf` is loadTechShifts' answer. A
- * member with no technician, no set hours or no start is not judged. Pure.
+ * member with no technician, no set hours or no start is not judged. A bound
+ * that is there but is no clock time (a request can carry one) refuses the
+ * member: the block cannot be read from it, and a write could still take a
+ * time from it. Pure.
  */
 function memberOutsideShift(shiftOf, date, landings) {
   const { shiftBounds } = require('./technician-eligibility');
-  const { rowBlockMinutes } = require('./scheduling/window-rules');
+  const { rowBlockMinutes, parseHHMM } = require('./scheduling/window-rules');
+  // PostgreSQL's TIME also holds 24:00:00 as an end; rowBlockMinutes reads it.
+  const unread = (v, isEnd) => v != null && v !== '' && parseHHMM(v) == null && !(isEnd && /^24:00(?::00(?:\.0+)?)?$/.test(String(v).trim()));
   for (const landing of landings) {
     const shift = landing.technicianId ? shiftOf(landing.technicianId, date) : null;
     if (!shift) continue;
+    if (unread(landing.start, false) || unread(landing.end, true)) return landing.id;
     const { startMin, endMin } = rowBlockMinutes({ window_start: landing.start, window_end: landing.end, estimated_duration_minutes: landing.durationMinutes });
     if (startMin == null) continue;
     const held = shiftBounds(shift, startMin, endMin);
@@ -2088,10 +2094,17 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           const { isPrimary, start: targetStart, end: targetEnd, shifted } = planned[index];
           // The range a member's own move takes is minute-precision (the
           // rebooker's parseWindow reads no other range, and then keeps the
-          // row's stored hours). A bound sent with seconds ("09:00:00") is
-          // written as its minutes, so the write takes the window the plan
-          // validated and the shift check judged.
-          const hm = (v) => { const minutes = String(v).match(/^\d{1,2}:\d{2}/); return minutes ? minutes[0] : v; };
+          // row's stored hours). A bound in another form the shift check
+          // reads (window-rules parseHHMM: "09:00:00") is written as its
+          // minutes, so the write takes the window the plan validated and
+          // the shift check judged. A bound already in minutes, and one
+          // that is no clock time, go as they came.
+          const hm = (v) => {
+            if (/^\d{1,2}:\d{2}$/.test(String(v))) return v;
+            const { parseHHMM, minutesToHHMM } = require('./scheduling/window-rules');
+            const minutes = parseHHMM(v);
+            return minutes == null ? v : minutesToHHMM(minutes);
+          };
           const window = shifted ? (targetEnd ? `${hm(targetStart)}-${hm(targetEnd)}` : { start: targetStart, end: null }) : null;
           const norm = (v) => (v ? String(v).slice(0, 5) : null);
           const techMatches = options.technicianId === undefined || String(m.technician_id || '') === String(options.technicianId || '');
@@ -3178,6 +3191,7 @@ module.exports = {
   visitSummariesForRows,
   visitSummaryForService,
   _test: {
+    memberOutsideShift,
     shiftClock,
     expectMatchesRow,
     siblingEligibleFor,
