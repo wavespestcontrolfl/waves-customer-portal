@@ -114,12 +114,11 @@
 //            matches /bait|monitor/. A run that includes termite (the default, owner 2026-11-21)
 //            moves these customers like any other: their bait series, their pest series, the
 //            combined pest + bait plan, and the pest series whose visits carry a bait add-on;
-//            the plan counts them as bait_customers_moving. A moving series of another line
-//            that hands over bait work (the combined plan, a bait add-on on the series'
-//            parent row, which seeds every new visit, or on a visit that moves) is termite
-//            work too: --to set to Off for termite refuses the run (plan.capability_lines).
-//            A bait add-on on a past child visit, or on a visit that stays with --from, asks
-//            for nothing. A run that
+//            the plan counts them as bait_customers_moving. A bait customer's bait work
+//            reaches --to with the series (the combined plan and a bait add-on move under the
+//            general line), so a run that moves ANY series of a bait customer needs the termite
+//            capability: --to set to Off for termite refuses it (plan.capability_lines), and
+//            leaving termite out keeps those customers whole with the owner. A run that
 //            leaves termite out (--lines without termite) skips every series of that customer
 //            (termite_bait_customer), the 2026-10-25 rule, and counts every bait customer it
 //            keeps as bait_customers_kept (a bait-only customer stays as other_line).
@@ -298,20 +297,6 @@ function baitSeriesTest(baitAddonSeriesIds) {
   return (p) => isBaitSeries(p) || addon.has(p.id);
 }
 
-/**
- * Does this moving series hand bait work to --to: a bait plan itself, a bait add-on on the series' PARENT row (the
- * template: the scheduler copies the parent's due add-ons onto each new visit, admin-schedule.js auto-extend), or
- * a bait add-on on a visit that MOVES in this run. `baitSeriesTest` marks the CUSTOMER (a bait add-on on any visit,
- * past ones too); a one-time add-on on a completed child visit, or on a visit that stays with --from, is no work
- * for the hire, so it asks for no termite capability.
- */
-function baitHandoverTest(visits, baitAddonVisitIds, movedVisitIds) {
-  const addonVisits = new Set(baitAddonVisitIds || []);
-  const moved = new Set(movedVisitIds);
-  const withMovedAddon = new Set(visits.filter((v) => addonVisits.has(v.id) && moved.has(v.id)).map((v) => v.series_id));
-  return (p) => isBaitSeries(p) || addonVisits.has(p.id) || withMovedAddon.has(p.id);
-}
-
 /** The weekdays the target works, and where that came from (no --to = the ruled Mon-Thu). */
 function targetWorkDays(to) {
   if (!to) return { workDays: ASSUMED_WORK_DAYS, workDaysSource: 'assumed_mon_thu' };
@@ -403,8 +388,6 @@ function recordWeekendDecisions(plan, weekend) {
  *   today     YYYY-MM-DD (ET)
  *   liveSeriesIds  series ids with a LIVE row (the reader's whereVisitRowLive query)
  *   baitAddonSeriesIds  series ids with a termite bait add-on on a visit (the reader's add-on query)
- *   baitAddonVisitIds   the visit ids that carry one (the same query; a parent row's id = its series id); the
- *                       capability check reads the parent rows and the visits that move
  *   lines     lines to move (subset of MOVABLE_LINES)
  *   parents   [{ id, status, customer_id, line, catalog_key, service_key_snapshot, service_type, technician_id,
  *               recurring_technician_id, recurring_technician_override, recurring_ongoing }]
@@ -424,23 +407,27 @@ const outsideZips = (zips) => (p) => Array.isArray(zips) && !zips.includes(p.zip
  *   bait_customers_kept    bait customers a run WITHOUT termite keeps, whatever rule their series met first: a customer
  *                          whose only series is the bait plan itself stays as other_line, and is kept all the same.
  *                          A --zips run counts its ZIPs only.
- *   capability_lines       the lines --to must be able to take: each line with a series to move, and termite when a
- *                          moving series of another line hands over bait work (`handsOverBait`, baitHandoverTest:
- *                          the combined pest + bait plan, and a pest series with a bait add-on on its parent
- *                          row or on a visit that moves, move as general).
+ *   capability_lines       the lines --to must be able to take: each line with a series to move, and termite when ANY
+ *                          series of a bait customer moves. A bait customer's bait work reaches --to with the series,
+ *                          now or at a later visit: the combined pest + bait plan and a pest series with a bait add-on
+ *                          move as general, and the scheduler decides visit by visit which add-ons are due
+ *                          (admin-schedule.js auto-extend copies the parent row's due add-ons). The planner does not
+ *                          re-derive that. The customer mark decides, as it does for a run that leaves termite out:
+ *                          a hire set to Off for termite takes no bait customer.
  */
-function baitFigures({ onFrom, moving, handsOverBait, baitCustomers, termiteOut, zips, movingLines }) {
+function baitFigures({ onFrom, moving, baitCustomers, termiteOut, zips, movingLines }) {
   const baitCustomerCount = (rows) => new Set(rows.filter((p) => baitCustomers.has(p.customer_id)).map((p) => p.customer_id)).size;
   const outside = outsideZips(zips);
+  const movingBaitCustomers = baitCustomerCount(moving);
   return {
-    bait_customers_moving: baitCustomerCount(moving),
+    bait_customers_moving: movingBaitCustomers,
     bait_customers_kept: termiteOut ? baitCustomerCount(onFrom.filter((p) => !outside(p))) : 0,
-    capability_lines: [...new Set([...movingLines, ...(moving.some(handsOverBait) ? ['termite'] : [])])].sort(),
+    capability_lines: [...new Set([...movingLines, ...(movingBaitCustomers ? ['termite'] : [])])].sort(),
   };
 }
 
 function buildPlan({
-  from, to = null, start, today, lines = MOVABLE_LINES, parents, visits, liveSeriesIds, baitAddonSeriesIds, baitAddonVisitIds, zips, territory,
+  from, to = null, start, today, lines = MOVABLE_LINES, parents, visits, liveSeriesIds, baitAddonSeriesIds, zips, territory,
   weekendMove, weekend,
 }) {
   const bySeries = new Map();
@@ -584,8 +571,7 @@ function buildPlan({
   }
   const retemplated = new Set(plan.ids.retemplate);
   Object.assign(plan, baitFigures({
-    onFrom, moving: onFrom.filter((p) => retemplated.has(p.id)), handsOverBait: baitHandoverTest(visits, baitAddonVisitIds, plan.ids.visits), baitCustomers, termiteOut, zips,
-    movingLines: Object.keys(plan.retemplate_by_line),
+    onFrom, moving: onFrom.filter((p) => retemplated.has(p.id)), baitCustomers, termiteOut, zips, movingLines: Object.keys(plan.retemplate_by_line),
   }));
   // One per-visit technician notice would fire for each visit whose technician changes.
   plan.notices_to_suppress = plan.would_change.visits;
@@ -659,23 +645,21 @@ async function loadLiveSeriesIds(db, parentIds, today) {
   return [...live];
 }
 
-// The series with a termite bait ADD-ON on any of their (non-cancelled) visits, and those visits.
-async function loadBaitAddons(db, parentIds) {
+// The series with a termite bait ADD-ON on any of their non-cancelled visits, or on their PARENT row in any
+// status: the scheduler copies the parent row's due add-ons onto each new visit (admin-schedule.js auto-extend),
+// and a series whose parent row was cancelled can still be live through its children.
+async function loadBaitAddonSeriesIds(db, parentIds) {
   const out = new Set();
-  const visitIds = new Set();
   for (const ids of chunks(parentIds, 1000)) {
     const rows = await db('scheduled_service_addons as a')
       .join('scheduled_services as s', 's.id', 'a.scheduled_service_id')
       .leftJoin('services as cat', 'cat.id', 'a.service_id')
       .where(function inSeries() { this.whereIn('s.recurring_parent_id', ids).orWhereIn('s.id', ids); })
-      .whereNot('s.status', 'cancelled')
+      .where(function countedRow() { this.whereNot('s.status', 'cancelled').orWhereIn('s.id', ids); })
       .select('s.id', 's.recurring_parent_id', 'a.service_key_snapshot', 'a.service_name', 'cat.service_key as catalog_key');
-    for (const r of rows.filter(isTermiteBaitAddon)) {
-      out.add(r.recurring_parent_id || r.id);
-      visitIds.add(r.id);
-    }
+    for (const r of rows) if (isTermiteBaitAddon(r)) out.add(r.recurring_parent_id || r.id);
   }
-  return { baitAddonSeriesIds: [...out], baitAddonVisitIds: [...visitIds] };
+  return [...out];
 }
 
 /** Read everything the planner needs and plan. `db` is a knex handle (or transaction). Reads only. */
@@ -709,7 +693,7 @@ async function offCapabilityLines(db, toId, lines) {
 
 /**
  * Refuse when the hire is set to Off for a line this run hands over (plan.capability_lines: a line with a series to
- * move, and termite when a moving pest series carries bait work). A line with nothing to move does not count.
+ * move, and termite when a series of a bait customer moves). A line with nothing to move does not count.
  */
 async function assertTargetTakesLines(db, toId, plan) {
   const off = await offCapabilityLines(db, toId, plan.capability_lines);
@@ -770,10 +754,10 @@ async function planHandover(db, {
   const parentIds = parents.map((p) => p.id);
   const visits = await loadVisits(db, parentIds, today);
   const liveSeriesIds = await loadLiveSeriesIds(db, parentIds, today);
-  const { baitAddonSeriesIds, baitAddonVisitIds } = await loadBaitAddons(db, parentIds);
+  const baitAddonSeriesIds = await loadBaitAddonSeriesIds(db, parentIds);
   const plan = await planWithWeekend(db, {
     from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits,
-    liveSeriesIds, baitAddonSeriesIds, baitAddonVisitIds, zips, territory,
+    liveSeriesIds, baitAddonSeriesIds, zips, territory,
   }, { weekendMove, now, lockNeighbors });
   // A line the hire is Off for cannot be handed to the hire.
   await assertTargetTakesLines(db, to, plan);
