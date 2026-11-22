@@ -33,34 +33,47 @@
  * plus this step (0.65) = 1.33 lb prodiamine per acre, under 1.5. October no longer carries
  * dithiopyr.
  *
- * What this writes. Each v13 protocol's October window is in one of three states:
- *   - SWAPPED: its one bag row is exactly the row this migration writes (Stonewall 0.37% by name
- *     and product id, in the plan by default, 4.04 lb, the N and K2O targets, the prodiamine
- *     counter) and no Dimension bag row is left: nothing to do (a second run);
- *   - TO SWAP: its one bag row is EXACTLY the row 20261007120500 wrote (the Dimension granular by
- *     name and product id, in the plan by default, 4.04 lb, its N and K2O targets, its dithiopyr
- *     counter) and no Stonewall 0.37% row is beside it: the row is swapped;
- *   - anything else (renamed, re-rated, another unit, another product id, another counter, turned
- *     off, both bags in one window, no bag row): up() THROWS before it writes anything and names
- *     the protocols. The recipe in lawn-protocol-v13.json says Stonewall for every track, so a
- *     track this could not swap would leave the recipe and the staged protocol apart (AGENTS.md,
- *     lawn protocol data fan-out); an office edit is never overwritten either. Reconcile the row,
- *     then deploy.
- * Production, read 2026-11-22: all four tracks hold the exact 10-07 row.
- * The window and its rows are read FOR UPDATE, and each write repeats the values it checked in
- * its WHERE: an edit made while the migration runs waits, or stops the migration; it is never
- * overwritten from an older read.
+ * ONE GATE, BEFORE ANY WRITE (readState). The migration acts only on a database it knows in full.
+ * Five dry runs of the pre-push audit each named another state of existing data (an edited row, a
+ * second cap row, an alias on another product, a blank ingredient), so the states are not handled
+ * one by one: every fact the swap relies on is checked in one place, and anything else THROWS
+ * and names what to correct. Nothing is written then. Known states:
+ *   - The October window of each v13 protocol is SWAPPED (its one bag row is exactly the row this
+ *     migration writes: Stonewall 0.37% by name and product id, in the plan by default, 4.04 lb,
+ *     the N and K2O targets, the prodiamine counter; no Dimension bag row beside it) or TO SWAP
+ *     (its one bag row is EXACTLY the row 20261007120500 wrote: the Dimension granular by name
+ *     and product id, in the plan by default, 4.04 lb, its N and K2O targets, its dithiopyr
+ *     counter; no Stonewall row beside it). A row renamed, re-rated, in another unit, on another
+ *     product id or counter, turned off, both bags in one window, or no bag row: throws. The
+ *     recipe in lawn-protocol-v13.json says Stonewall for every track, so a track this could
+ *     not swap would leave the recipe and the staged protocol apart (AGENTS.md, lawn protocol
+ *     data fan-out); an office edit is never overwritten either.
+ *   - The Stonewall catalog row is the production row (exactly ONE row with this exact name, no
+ *     alias that spells the name on another product, active, prodiamine first in its active
+ *     ingredient (the yearly cap check finds an application by that word), EPA 10404-114, rates
+ *     in pounds), or the database has NO row and no alias for the name (CI, a dev copy) and the
+ *     row is inserted. Two rows, a row known only through an alias, another ingredient,
+ *     registration or unit: throws.
+ *   - The bag has NO yearly prodiamine cap row, or exactly ONE that is a hard block in lb per
+ *     1,000 sq ft per year. Two rows (the check would count one application twice), another
+ *     unit or a warning-only row (it cannot be compared with the label): throws.
+ * Production, read 2026-11-22: four tracks TO SWAP, one catalog row with the production facts,
+ * one hard-block cap row. A database with no v13 October window gets no check and no write.
+ * The window, its rows, the catalog row and the cap row are read FOR UPDATE, and each write repeats
+ * the values it checked in its WHERE: an edit made while the migration runs waits, or stops the
+ * migration; it is never overwritten from an older read.
+ *
+ * What this writes:
  *   1. The row: product name, product id, the N and K2O gate text (values unchanged), the
  *      annual counter (prodiamine_lb_per_1000, the granular's own unit; the staged Stonewall
  *      4FL rows count prodiamine_oz_per_1000). report_copy holds only the row's role, never a
  *      product name, so it is not touched.
  *   2. The window goal text, only while it still reads the 10-07 text.
- *   3. The Stonewall product id is resolved ONCE (exact catalog name, else an exact alias). The
- *      row exists in production but not in a database built from migrations alone (CI, a dev
- *      copy): where neither a name nor an alias matches, the catalog row is INSERTED with the
- *      production label values (the insert style of 20261005130000), so every database ends on
- *      the same October product. Customer-copy and approval columns keep their defaults (the
- *      owner approves them).
+ *   3. The Stonewall product id is the one catalog row with the exact name. The row exists in
+ *      production but not in a database built from migrations alone (CI, a dev copy): there the
+ *      catalog row is INSERTED with the production label values (the insert style of
+ *      20261005130000), so every database ends on the same October product. Customer-copy and
+ *      approval columns keep their defaults (the owner approves them).
  * Items 4 to 7 are the bag's catalog facts. They are checked on every database where a track
  * uses the bag, swapped by this run or before it; a database with no v13 October window gets no
  * lookup and no write.
@@ -74,9 +87,8 @@
  *      default_rate_per_1000 matches the program rate. The yearly cap check counts an
  *      application whose ledger row holds no rate and no quantity at this figure. The production
  *      row holds 3.1 lb (the label's lowest listed rate), which would count the 4.04 lb October
- *      pass 0.94 lb short. On a row in pounds the standard rate becomes 4.04 lb, whatever it
- *      held (the before value is in the audit row). A row whose rates are in another unit cannot
- *      be set: up() THROWS before it writes anything. The inserted row starts at 4.04.
+ *      pass 0.94 lb short. The standard rate becomes 4.04 lb, whatever it held (the before
+ *      value is in the audit row). The inserted row starts at 4.04.
  *   6. The yearly prodiamine cap row (annual_max_rate, active_ingredient prodiamine). The label's
  *      yearly maximum is 405 lb of product per acre, printed as 9.3 lb per 1,000 sq ft. The figure
  *      20261006140000 derived from the 1.5 lb ai line (9.3068) sits a little above it, so the
@@ -84,17 +96,14 @@
  *      and the label's annual maximum). The planner divides by this row, so it may never be
  *      above the label:
  *        - no cap row: 9.3 is inserted;
- *        - a hard-block row in lb per 1,000 sq ft per year ABOVE 9.3 (production's 9.3068, or any
- *          higher figure): lowered to 9.3;
- *        - such a row at or under 9.3 is a stricter limit someone set: it stays;
- *        - a row in another unit, or one that is not a hard block, cannot be compared with the
- *          label: up() THROWS before it writes anything. Correct the row, then deploy.
+ *        - the one cap row is ABOVE 9.3 (production's 9.3068, or any higher figure): lowered to 9.3;
+ *        - the one cap row is at or under 9.3, a stricter limit someone set: it stays.
  *      405 / 43.56 = 9.2975 is not used: it would refuse the 9.3 lb rate the label itself lists.
  *      The 4FL cap and every other limit row are never changed.
  *
- *   7. The label water-in rule (0.5 inch within 14 days). 20261022120000 stored it on the row
- *      it found by exact name, so a bag known only through an alias has none. It is filled on
- *      the resolved row only where post_application_watering is NULL.
+ *   7. The label water-in rule (0.5 inch within 14 days), only where post_application_watering
+ *      is NULL (20261022120000 stores it on the row with this exact name; a row created after
+ *      that migration ran has none).
  *
  * Chemical group: no write. The production Stonewall row holds its group in the older free-text
  * column (moa_group 'Group 3', hrac_group NULL), as the liquid pre-emergents do. The rotation
@@ -110,8 +119,10 @@
  *   - a staged row goes back only while it is still EXACTLY the row this wrote (name, product
  *     id, in the plan, 4.04 lb, targets, counter). Identity, dose and counter are one decision:
  *     a row edited since (say, re-rated for Stonewall) stays whole, with its goal and its audit
- *     row, so an edited Stonewall dose never ends on the Dimension row. The window goal goes
- *     back only while it reads the new text;
+ *     row, so an edited Stonewall dose never ends on the Dimension row. Only the keys this wrote
+ *     go back (the counter key, the three gate keys): a member someone added to the row's
+ *     annual counter or gates since stays. The window goal goes back only while it reads the
+ *     new text;
  *   - a protocol that a scheduled visit or a completion references is NOT touched (the staging
  *     migration's guard): the rollback logs and leaves it and its audit row;
  *   - the catalog row, its analysis, standard rate and watering rule, and the cap row are NEVER rolled back, on purpose. They are
@@ -220,15 +231,39 @@ function same(a, b) {
   return a === b;
 }
 
-// Exact catalog name (active rows first), else an exact alias; null when neither exists.
-async function resolveProductId(knex, name) {
-  const catalog = await knex('products_catalog').select('id', 'name', 'active');
-  const hit = [...catalog].sort((a, b) => Number(b.active !== false) - Number(a.active !== false))
-    .find((row) => normalize(row.name) === normalize(name));
-  if (hit) return hit.id;
-  if (!(await knex.schema.hasTable('product_aliases'))) return null;
-  const alias = (await knex('product_aliases').select('product_id', 'alias_name')).find((row) => normalize(row.alias_name) === normalize(name));
-  return alias ? alias.product_id : null;
+// The catalog rows whose name is exactly `name`, and the product ids an alias spells that way.
+async function catalogMatches(knex, name) {
+  const rows = (await knex('products_catalog').select('id', 'name')).filter((row) => normalize(row.name) === normalize(name));
+  const aliases = (await knex.schema.hasTable('product_aliases')) ? await knex('product_aliases').select('product_id', 'alias_name') : [];
+  const aliasIds = [...new Set(aliases.filter((row) => normalize(row.alias_name) === normalize(name)).map((row) => String(row.product_id)))];
+  return { rows, aliasIds };
+}
+
+// What the production Stonewall row must state for the swap to be safe: [is it so, what is wrong].
+const BAG_CHECKS = [
+  [(bag) => bag.active !== false, () => 'is not active'],
+  [(bag) => /^prodiamine\b/i.test(String(bag.active_ingredient || '').trim()),
+    (bag) => `does not state prodiamine first as its active ingredient (${JSON.stringify(bag.active_ingredient)}); the yearly cap check finds an application by that word`],
+  [(bag) => String(bag.epa_reg_number || '').trim() === CATALOG_ROW.epa_reg_number,
+    (bag) => `holds EPA registration ${JSON.stringify(bag.epa_reg_number)}, not ${CATALOG_ROW.epa_reg_number}`],
+  [(bag) => isLb(bag.rate_unit),
+    (bag) => `states its rates in ${JSON.stringify(bag.rate_unit)}, not lb, so its standard rate cannot be set to the program rate of ${OCT_RATE} lb per 1,000 sq ft`],
+];
+
+const stop = (what) => { throw new Error(`lawn v13 October Stonewall: ${what}. Nothing was written. Correct it, then run the migration again.`); };
+
+// The Stonewall catalog row (read FOR UPDATE), or null when the database has no row and no alias for the name (it is
+// inserted then). Any state between the two stops the migration: see the header.
+async function readBag(knex) {
+  const { rows, aliasIds } = await catalogMatches(knex, NEW_NAME);
+  if (!rows.length && !aliasIds.length) return null;
+  if (rows.length !== 1) stop(`${rows.length} catalog rows are named ${NEW_NAME}${aliasIds.length ? ', and an alias spells that name' : ''}; the migration needs exactly one row with the name`);
+  if (aliasIds.some((id) => id !== String(rows[0].id))) stop(`an alias spells ${NEW_NAME} on another product than the catalog row with that name`);
+  const bag = await knex('products_catalog').where({ id: rows[0].id }).forUpdate()
+    .first('id', 'active', 'active_ingredient', 'epa_reg_number', 'default_rate_per_1000', 'rate_unit');
+  const wrong = BAG_CHECKS.filter(([holds]) => !holds(bag)).map(([, why]) => why(bag));
+  if (wrong.length) stop(`the catalog row of ${NEW_NAME} ${wrong.join('; ')}`);
+  return bag;
 }
 
 // ── Staged rows ──────────────────────────────────────────────────────────────
@@ -267,7 +302,8 @@ async function revertRow(knex, record) {
   if (!row || !isOctoberBagRow(row, name, productId, NEW_COUNTER_KEY)) return false;
   const update = { updated_at: knex.fn.now() };
   for (const [column, change] of Object.entries(record.columns || {})) {
-    update[column] = JSON_COLUMNS.has(column) ? JSON.stringify(change.before) : change.before;
+    // A JSON column: only the counter key is this migration's; a member added to the object since stays.
+    update[column] = JSON_COLUMNS.has(column) ? JSON.stringify({ ...asObject(row[column]), counter: asObject(change.before).counter }) : change.before;
   }
   const gates = asObject(row.gates);
   for (const [key, change] of Object.entries(record.gates || {})) {
@@ -290,30 +326,29 @@ function isOctoberBagRow(row, name, productId, counterKey) {
   return asObject(row.annual_counter).counter === counterKey && gates.annualCounter === counterKey;
 }
 
-// Every v13 protocol's October window: the rows to swap ({ protocolId, window, row }), how many windows already hold
-// the swapped row, and the protocol keys whose window is in neither state. Read FOR UPDATE: see the header.
-async function readOctober(knex, dimensionId, stonewallId) {
+// The October windows of the v13 protocols, read FOR UPDATE, each with its protocol key.
+async function octoberWindows(knex) {
   const protocols = await knex('lawn_protocols').where({ version: V13_VERSION }).select('id', 'protocol_key');
-  const known = new Map(protocols.map((protocol) => [String(protocol.id), protocol]));
-  const windows = (await knex('lawn_protocol_windows').where({ window_key: OCTOBER_WINDOW }).select('id', 'lawn_protocol_id', 'goal').forUpdate())
-    .filter((window) => known.has(String(window.lawn_protocol_id)));
+  const known = new Map(protocols.map((protocol) => [String(protocol.id), protocol.protocol_key]));
+  const windows = await knex('lawn_protocol_windows').where({ window_key: OCTOBER_WINDOW }).select('id', 'lawn_protocol_id', 'goal').forUpdate();
+  return windows.filter((window) => known.has(String(window.lawn_protocol_id))).map((window) => ({ ...window, protocolKey: known.get(String(window.lawn_protocol_id)) }));
+}
+
+// The rows to swap ({ protocolId, window, row }) and the protocol keys whose window is neither TO SWAP nor SWAPPED.
+async function readOctober(knex, windows, dimensionId, stonewallId) {
   const swaps = [];
   const unresolved = [];
-  let swapped = 0;
   for (const window of windows) {
     const rows = await knex('lawn_protocol_products').where({ lawn_protocol_window_id: window.id })
       .select('id', 'product_id', 'product_name', 'rate_per_1000', 'rate_unit', 'default_in_plan', 'gates', 'annual_counter').forUpdate();
     const oldRows = rows.filter((row) => row.product_name === OLD_NAME);
     const newRows = rows.filter((row) => row.product_name === NEW_NAME);
-    if (oldRows.length === 1 && !newRows.length && isOctoberBagRow(oldRows[0], OLD_NAME, dimensionId, OLD_COUNTER_KEY)) {
-      swaps.push({ protocolId: window.lawn_protocol_id, window, row: oldRows[0] });
-    } else if (!oldRows.length && newRows.length === 1 && isOctoberBagRow(newRows[0], NEW_NAME, stonewallId, NEW_COUNTER_KEY)) {
-      swapped += 1;
-    } else {
-      unresolved.push(known.get(String(window.lawn_protocol_id)).protocol_key);
-    }
+    const toSwap = oldRows.length === 1 && !newRows.length && isOctoberBagRow(oldRows[0], OLD_NAME, dimensionId, OLD_COUNTER_KEY);
+    const swapped = !oldRows.length && newRows.length === 1 && isOctoberBagRow(newRows[0], NEW_NAME, stonewallId, NEW_COUNTER_KEY);
+    if (toSwap) swaps.push({ protocolId: window.lawn_protocol_id, window, row: oldRows[0] });
+    else if (!swapped) unresolved.push(window.protocolKey);
   }
-  return { swaps, swapped, unresolved };
+  return { swaps, unresolved };
 }
 
 // The bag's yearly prodiamine cap rows, read FOR UPDATE before any write.
@@ -326,8 +361,9 @@ function readCaps(knex, productId) {
 // Can this cap row be compared with the label maximum? A hard block, in lb per 1,000 sq ft per year, above zero.
 const capComparable = (cap) => cap.limit_unit === CAP_SPEC.limit_unit && cap.severity === CAP_SPEC.severity && Number(cap.limit_value) > 0;
 
-// No cap row: the label's 9.3 is inserted. A row above 9.3 is lowered to it; a row at or under 9.3 stays (a stricter
-// limit someone set). `caps` are the comparable rows readCaps returned. Returns what it inserted and lowered.
+// No cap row: the label's 9.3 is inserted. The one cap row above 9.3 is lowered to it; at or under 9.3 it stays (a
+// stricter limit someone set). `caps` is what the gate accepted: none, or one comparable row. Returns what it
+// inserted and lowered.
 async function applyCap(knex, productId, caps) {
   if (!caps.length) {
     const row = { product_id: productId, ...CAP_SPEC };
@@ -392,35 +428,27 @@ async function hasAll(knex, tables) {
   return true;
 }
 
-// Everything that can stop the migration, read and checked BEFORE any write. Returns what up() writes from, or null
-// when no v13 October window exists (nothing names the bag here, so no lookup and no write).
+// THE GATE: everything the swap relies on, read and checked BEFORE any write (see the header). Returns what up() writes
+// from, or null when no v13 October window exists (nothing names the bag here: no check, no write).
 async function readState(knex) {
-  const dimensionId = await resolveProductId(knex, OLD_NAME);
-  const stonewallId = await resolveProductId(knex, NEW_NAME);
-  const { swaps, swapped, unresolved } = await readOctober(knex, dimensionId, stonewallId);
+  const windows = await octoberWindows(knex);
+  if (!windows.length) return null;
+  const bag = await readBag(knex);
+  const dimension = await catalogMatches(knex, OLD_NAME);
+  const dimensionId = dimension.rows.length === 1 ? dimension.rows[0].id : null;
+  const { swaps, unresolved } = await readOctober(knex, windows, dimensionId, bag ? bag.id : null);
   // A track that cannot be swapped would leave the recipe (Stonewall on every track) and its staged row apart.
   if (unresolved.length) {
-    throw new Error(`lawn v13 October Stonewall: the October step of ${unresolved.join(', ')} is not the row 20261007120500 wrote `
-      + `(${OLD_NAME} at ${OCT_RATE} lb, in the plan, with its N, K2O and dithiopyr values), and is not that row already swapped to ${NEW_NAME}. `
-      + 'Nothing was written. Reconcile that row in Protocols, then run the migration again.');
+    stop(`the October step of ${unresolved.join(', ')} is not the row 20261007120500 wrote `
+      + `(${OLD_NAME} at ${OCT_RATE} lb, in the plan, with its N, K2O and dithiopyr values), and is not that row already swapped to ${NEW_NAME}`);
   }
-  if (!swaps.length && !swapped) return null;
-  if (!stonewallId) return { swaps, stonewallId: null, caps: [], bag: null };
-  // A cap row that cannot be compared with the label maximum would become the October plan's limit.
-  const caps = await readCaps(knex, stonewallId);
-  const unreadable = caps.filter((cap) => !capComparable(cap));
-  if (unreadable.length) {
-    throw new Error(`lawn v13 October Stonewall: the yearly prodiamine cap row of ${NEW_NAME} `
-      + `(${unreadable.map((cap) => `${cap.limit_value} ${cap.limit_unit}, ${cap.severity}`).join('; ')}) is not a ${CAP_SPEC.severity} in ${CAP_SPEC.limit_unit}, `
-      + `so it cannot be checked against the label maximum of ${CAP_VALUE} lb per 1,000 sq ft. Nothing was written. Correct that limit row, then run the migration again.`);
+  // The cap row is the planner's divisor: more than one counts an application twice; one that cannot be compared could sit above the label.
+  const caps = bag ? await readCaps(knex, bag.id) : [];
+  if (caps.length > 1 || caps.some((cap) => !capComparable(cap))) {
+    stop(`${NEW_NAME} has ${caps.length} yearly prodiamine cap row(s) (${caps.map((cap) => `${cap.limit_value} ${cap.limit_unit}, ${cap.severity}`).join('; ')}); `
+      + `the migration needs none, or one ${CAP_SPEC.severity} row in ${CAP_SPEC.limit_unit}, or the cap cannot be checked against the label maximum of ${CAP_VALUE} lb per 1,000 sq ft`);
   }
-  // The catalog row states its rates in pounds: a standard rate in another unit cannot be set to the program rate.
-  const bag = await knex('products_catalog').where({ id: stonewallId }).forUpdate().first('id', 'default_rate_per_1000', 'rate_unit');
-  if (!isLb(bag.rate_unit)) {
-    throw new Error(`lawn v13 October Stonewall: the catalog row of ${NEW_NAME} states its rates in ${JSON.stringify(bag.rate_unit)}, not lb, `
-      + `so its standard rate cannot be set to the program rate of ${OCT_RATE} lb per 1,000 sq ft. Nothing was written. Correct the row's rate unit, then run the migration again.`);
-  }
-  return { swaps, stonewallId, caps, bag };
+  return { swaps, bag, caps };
 }
 
 // One track: the row, its window goal (only while it still reads the 10-07 text) and the protocol's audit row.
@@ -473,8 +501,8 @@ exports.up = async function up(knex) {
   const state = await readState(knex);
   if (!state) return;
   // The row lives in production; a database built from migrations alone has none: insert it.
-  const insertedProductId = state.stonewallId ? null : await insertCatalogRow(knex);
-  const stonewallId = state.stonewallId || insertedProductId;
+  const insertedProductId = state.bag ? null : await insertCatalogRow(knex);
+  const stonewallId = state.bag ? state.bag.id : insertedProductId;
   for (const swap of state.swaps) await swapTrack(knex, swap, stonewallId);
   await writeCatalogFacts(knex, { stonewallId, insertedProductId, caps: state.caps, bag: state.bag });
 };

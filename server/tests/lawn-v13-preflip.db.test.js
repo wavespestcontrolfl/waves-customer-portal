@@ -980,7 +980,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       const inserted = await knex('products_catalog').where({ name: STW_037 }).whereNot({ id: stonewallId() }).select('id');
       for (const { id } of inserted) await knex('product_limits').where({ product_id: id }).del();
       if (inserted.length) await knex('products_catalog').whereIn('id', inserted.map((r) => r.id)).del();
-      await knex('products_catalog').where({ id: stonewallId() }).update({ name: STW_037, hrac_group: null });
+      await knex('products_catalog').where({ id: stonewallId() }).update({ name: STW_037, hrac_group: null, active: true, active_ingredient: 'Prodiamine 0.37% + 18-0-10', epa_reg_number: '10404-114' });
       await knex('product_limits').where({ product_id: stonewallId() }).del();
       await knex('product_aliases').where({ product_id: stonewallId() }).del();
       await knex('lawn_protocol_audit_log').whereIn('action', [stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION]).del();
@@ -993,7 +993,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     beforeAll(async () => {
       const [row] = await knex('products_catalog').insert({
         name: STW_037, category: 'herbicide', label_verified_at: new Date(), inventory_on_hand: 100000, inventory_unit: 'lb', active: true,
-        active_ingredient: 'Prodiamine 0.37% + 18-0-10', formulation: 'granular', default_rate_per_1000: 4.04, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10,
+        active_ingredient: 'Prodiamine 0.37% + 18-0-10', epa_reg_number: '10404-114', formulation: 'granular', default_rate_per_1000: 4.04, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10,
         min_label_rate_per_1000: 3.1, max_label_rate_per_1000: 9.3, best_price: 33.46, best_vendor: 'Fixture vendor',
         post_application_watering: stonewallMigration.CATALOG_ROW.post_application_watering,
       }).returning('*');
@@ -1058,6 +1058,23 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(await stamped()).toBe(swapped);
       // The second up found the cap row: one catalog audit row, not two.
       expect((await ours()).map((log) => log.action).sort()).toEqual([stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION].sort());
+    });
+
+    test('down puts back only the keys this wrote: a member added to the annual counter or the gates since stays on the Dimension row', async () => {
+      const row = await octoberRow();
+      await knex('lawn_protocol_products').where({ id: row.id }).update({
+        annual_counter: JSON.stringify({ ...row.annual_counter, maxApplications: 1 }), gates: JSON.stringify({ ...row.gates, officeGate: 'kept' }),
+      });
+      try {
+        await stonewallMigration.down(knex);
+        const after = await octoberRow();
+        expect(after).toMatchObject({ product_name: DIMENSION, product_id: dimensionId() });
+        expect(after.annual_counter).toEqual({ counter: 'dithiopyr_lb_per_1000', maxApplications: 1 });
+        expect(after.gates).toEqual({ ...DIMENSION_OCTOBER.gates, officeGate: 'kept' });
+      } finally {
+        await resetToDimension();
+        await stonewallMigration.up(knex);
+      }
     });
 
     // Identity, dose and counter are one rollback decision: an edited Stonewall dose never ends on the Dimension row.
@@ -1230,11 +1247,13 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       });
 
       test.each([
-        ['in another unit', { limit_unit: 'oz/1000sf/year' }],
-        ['that only warns', { severity: 'warning' }],
-      ])('a cap row %s cannot be checked against the label maximum: up throws and writes nothing', async (_label, extra) => {
+        ['in another unit', [{ limit_unit: 'oz/1000sf/year' }]],
+        ['that only warns', [{ severity: 'warning' }]],
+        // The yearly check joins an application to every matching cap row and adds the shares: two rows count it twice.
+        ['beside a second cap row', [{}, { description: 'A second row' }]],
+      ])('a cap row %s cannot be checked against the label maximum: up throws and writes nothing', async (_label, extras) => {
         await withReset(async () => {
-          await knex('product_limits').insert(capRow(9.3068, extra));
+          for (const extra of extras) await knex('product_limits').insert(capRow(9.3068, extra));
           const stateOf = async () => JSON.stringify([await octoberRow(), await catalogJson(), await limitRows(stonewallId()), await otherRows(), await ours()]);
           const before = await stateOf();
           await expect(stonewallMigration.up(knex)).rejects.toThrow('cannot be checked against the label maximum of 9.3 lb per 1,000 sq ft. Nothing was written.');
@@ -1255,13 +1274,62 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     });
 
     describe('the Stonewall product id', () => {
-      test('a product that exists only behind an alias gets the row link and the cap', async () => {
+      // The gate: one row with the exact name and the production facts, or no row and no alias at all. Nothing between.
+      const stateOf = async () => JSON.stringify([await octoberRow(), await knex('products_catalog').where({ name: STW_037 }).orWhere({ id: stonewallId() }).orderBy('id'), await limitRows(stonewallId()), await otherRows(), await ours()]);
+      const refuses = async (message) => {
+        const before = await stateOf();
+        await expect(stonewallMigration.up(knex)).rejects.toThrow(message);
+        expect(await stateOf()).toBe(before);
+        expect(await octoberRow()).toMatchObject({ product_name: DIMENSION });
+      };
+
+      test.each([
+        ['is not active', { active: false }, 'is not active'],
+        ['states no active ingredient (the yearly cap check finds an application by that word)', { active_ingredient: null }, 'does not state prodiamine first as its active ingredient (null)'],
+        ['states another active ingredient first', { active_ingredient: 'Dithiopyr 0.21% + 18-0-10' }, 'does not state prodiamine first as its active ingredient'],
+        ['holds another EPA registration', { epa_reg_number: '10404-87' }, 'holds EPA registration "10404-87", not 10404-114'],
+        ['holds no EPA registration', { epa_reg_number: null }, 'holds EPA registration null, not 10404-114'],
+      ])('a catalog row that %s is not the bag this swap knows: up throws and writes nothing', async (_label, change, message) => {
+        await withReset(async () => {
+          await knex('products_catalog').where({ id: stonewallId() }).update(change);
+          await refuses(message);
+        });
+      });
+
+      test('a product known only through an alias: up throws and writes nothing (no second catalog row is made)', async () => {
         await withReset(async () => {
           await knex('products_catalog').where({ id: stonewallId() }).update({ name: 'Stonewall 0.37% Bag (SiteOne)' });
           await knex('product_aliases').insert({ product_id: stonewallId(), alias_name: STW_037 });
+          await refuses(`0 catalog rows are named ${STW_037}, and an alias spells that name`);
+        });
+      });
+
+      test('an alias that spells the name on another product: up throws and writes nothing', async () => {
+        await withReset(async () => {
+          const [alias] = await knex('product_aliases').insert({ product_id: dimensionId(), alias_name: STW_037 }).returning('id');
+          try {
+            await refuses(`an alias spells ${STW_037} on another product`);
+          } finally { await knex('product_aliases').where({ id: alias.id ?? alias }).del(); }
+        });
+      });
+
+      test('an alias that spells the name on the same product changes nothing: the row swaps', async () => {
+        await withReset(async () => {
+          await knex('product_aliases').insert({ product_id: stonewallId(), alias_name: STW_037.toLowerCase() });
           await stonewallMigration.up(knex);
           expect(await octoberRow()).toMatchObject({ product_name: STW_037, product_id: stonewallId() });
-          expect(shape(await limitRows(stonewallId()))).toHaveLength(1);
+        });
+      });
+
+      test('two catalog rows with the name: up throws and writes nothing', async () => {
+        await withReset(async () => {
+          const [twin] = await knex('products_catalog').insert({ name: `${STW_037} `, category: 'herbicide', active: true, active_ingredient: 'Prodiamine 0.37% + 18-0-10', epa_reg_number: '10404-114', rate_unit: 'lb' }).returning('id');
+          const id = twin.id ?? twin;
+          try {
+            const before = JSON.stringify([await octoberRow(), await catalogJson(), await limitRows(stonewallId()), await ours()]);
+            await expect(stonewallMigration.up(knex)).rejects.toThrow(`2 catalog rows are named ${STW_037}`);
+            expect(JSON.stringify([await octoberRow(), await catalogJson(), await limitRows(stonewallId()), await ours()])).toBe(before);
+          } finally { await knex('products_catalog').where({ id }).del(); }
         });
       });
 
