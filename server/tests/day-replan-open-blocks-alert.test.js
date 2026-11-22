@@ -114,7 +114,27 @@ describe('the copy', () => {
       close_gaps: rec([tail(695, 325)], { packed: driveBest, p1: { plan: 'pack', packed: packPlan, wouldAccept: true, reason: 'bigger_block', gainMin: 95, lunchLost: false, changes: [] } }),
     }], new Map());
     expect(withGain.freedMin).toBe(95);
+    expect(withGain).toMatchObject({ unmovedDays: 1, packedDays: 0 });
     expect(composeAdminAlert(_internals.alertSpec(withGain)).why).toBe('Biggest block: Sat Nov 21, 11:35 AM to 5:00 PM; re-timing booked jobs could free 1 h 35 min more.');
+    // The run did not write that day (shadow mode, or the write was skipped): the detail says what is left.
+    expect(_internals.detailText(withGain)).toContain('Not moved: re-timing booked jobs toward the morning on 1 more day would free 1 h 35 min more.');
+    expect(_internals.detailText(withGain)).not.toContain('The 4:40 AM run moved');
+  });
+
+  test('a day the 04:40 run packed and wrote is named as moved, with its blocks after the move and no gain left (owner 2026-11-22)', () => {
+    const packPlan = { ...rec([tail(600, 420)]).now };
+    const p1 = { plan: 'pack', packed: packPlan, wouldAccept: true, reason: 'bigger_block', gainMin: 95, lunchLost: false, changes: [{ id: 'v1', from: '11:00', to: '09:00' }] };
+    const row = { technician_id: TECH, day: '2026-11-21', close_gaps: rec([tail(695, 325)], { packed: packPlan, p1 }) };
+    const moved = _internals.summarize([{ ...row, apply_status: 'applied' }], new Map());
+    expect(moved).toMatchObject({ packedDays: 1, unmovedDays: 0, freedMin: 0 });
+    expect(moved.blocks.map((b) => [b.start, b.min])).toEqual([[600, 420]]);
+    const text = _internals.detailText(moved);
+    expect(text).toContain('The 4:40 AM run moved booked jobs toward the morning on 1 day. The blocks above are after that move.');
+    expect(text).not.toContain('Not moved');
+    // The same packed plan when the writer skipped the day: the day reads as booked and its gain is still open.
+    const skipped = _internals.summarize([{ ...row, apply_status: 'skipped' }], new Map());
+    expect(skipped).toMatchObject({ packedDays: 0, unmovedDays: 1, freedMin: 95 });
+    expect(skipped.blocks.map((b) => [b.start, b.min])).toEqual([[695, 325]]);
   });
 
   test('a record from before the replay test (v1) measured P1 on the drive-best plan', () => {
@@ -143,7 +163,7 @@ describe('the copy', () => {
     expect(_internals.detailText(short)).toContain('Room for 0 new jobs');
   });
 
-  test('the detail lists each block with its technician and the measuring line', () => {
+  test('the detail lists each block with its technician; with no day packed and no gain left it has no pack line', () => {
     const text = _internals.detailText(sum);
     // Job slots: 205 and 325 open minutes hold 2 and 4 new jobs of 80 minutes (a 1-hour job and its drive).
     expect(sum.slots).toBe(6);
@@ -151,7 +171,8 @@ describe('the copy', () => {
     expect(text).toContain('- Thu Nov 19, Pat: 1:35 PM to 5:00 PM (3 h 25 min, room for 2 jobs)');
     expect(text).toContain('- Sat Nov 21, Pat: 11:35 AM to 5:00 PM (5 h 25 min, room for 4 jobs)');
     expect(text).not.toContain('9:05 AM');
-    expect(text).toContain('Measuring only (no visit changes)');
+    expect(text).not.toContain('toward the morning');
+    expect(text).not.toContain('Measuring only');
   });
 });
 

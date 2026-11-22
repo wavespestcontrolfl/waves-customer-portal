@@ -5,8 +5,9 @@
  *
  * Daily 07:05 ET (scheduler.js) it reads the close-gaps records the 04:40 re-plan wrote (day_replan_plans.close_gaps,
  * ./close-gaps.js) and raises ONE admin notification: the open time in the next 7 days that a new job could fill
- * (blocks of an hour or more inside a technician's day, 8:00 AM to 5:00 PM, with no job), the biggest block, and what
- * re-timing booked jobs would free under the rules being measured. The full list is in the row's detail.
+ * (blocks of an hour or more inside a technician's day, 8:00 AM to 5:00 PM, with no job), the biggest block, the days
+ * the run moved toward the morning (the pack rule, live since 2026-11-22) and what re-timing the days it did not write
+ * would free. The full list is in the row's detail.
  * It sends nothing to a customer and changes no visit.
  *
  * Which tech-days count (the booking picker's own rules): an assignable technician who is not marked absent, on a day
@@ -70,13 +71,16 @@ const parse = (value) => (typeof value === 'string' ? JSON.parse(value) : value)
 const standing = (row, rec) => (row.apply_status === 'applied' && rec.packed ? rec.packed : rec.now);
 
 /**
- * Extra sellable minutes one tech-day would gain from the measured P1 rule, 0 when none. P1's plan is p1.packed
+ * Extra sellable minutes one tech-day would gain from the P1 (pack) rule, 0 when none. P1's plan is p1.packed
  * (record v2); a v1 record measured P1 on the drive-best plan (packed).
  */
 function freedMin(rec) {
   const fig = rec.p1 && rec.p1.wouldAccept ? (rec.p1.packed || rec.packed) : null;
   return fig && rec.now ? Math.max(0, fig.sellableMin - rec.now.sellableMin) : 0;
 }
+
+/** True for a day whose plan is the pack plan (day-replan/index.js withPackPlan: the record's p1 is that plan, accepted). */
+const packedDay = (rec) => !!(rec.p1 && rec.p1.plan === 'pack' && rec.p1.wouldAccept);
 
 /** New jobs a block has room for (close-gaps SLOT_MIN: a 1-hour job and the drive it adds). */
 const jobsIn = (b) => Math.floor(b.min / SLOT_MIN);
@@ -157,14 +161,21 @@ function summarize(rows, techNames, unplanned = []) {
   let freed = 0;
   let replayed = 0;
   let pickDiffers = 0;
+  let packedDays = 0;
+  let unmovedDays = 0;
   for (const row of rows) {
     const rec = parse(row.close_gaps);
     if (!rec || !rec.now) continue;
     for (const b of standing(row, rec).blocks || []) {
       if (b.min >= SELLABLE_MIN) blocks.push({ day: row.day, tech: techNames.get(String(row.technician_id)) || null, techId: String(row.technician_id), ...b });
     }
-    // An applied day already has the re-plan's hours; the measured rules' gains were counted from the day as booked.
-    if (row.apply_status !== 'applied') freed += freedMin(rec);
+    // An applied day already has the re-plan's hours (a packed day is counted as moved); a day the run did not write
+    // keeps its gain, counted from the day as booked.
+    const applied = row.apply_status === 'applied';
+    const gain = applied ? 0 : freedMin(rec);
+    freed += gain;
+    unmovedDays += gain > 0 ? 1 : 0;
+    packedDays += applied && packedDay(rec) ? 1 : 0;
     replayed += (rec.s1 || []).length;
     pickDiffers += (rec.s1 || []).filter((s) => s.differs).length;
   }
@@ -174,7 +185,7 @@ function summarize(rows, techNames, unplanned = []) {
   }
   blocks.sort((a, b) => a.day.localeCompare(b.day) || a.start - b.start);
   const biggest = blocks.reduce((best, b) => (!best || b.min > best.min ? b : best), null);
-  return { blocks, totalMin: blocks.reduce((n, b) => n + b.min, 0), slots: blocks.reduce((n, b) => n + jobsIn(b), 0), biggest, freedMin: freed, replayed, pickDiffers };
+  return { blocks, totalMin: blocks.reduce((n, b) => n + b.min, 0), slots: blocks.reduce((n, b) => n + jobsIn(b), 0), biggest, freedMin: freed, packedDays, unmovedDays, replayed, pickDiffers };
 }
 
 const gridNote = (b) => (b.grid ? (b.stops ? ', 1 stop that day, drive not counted' : ', no stops booked') : '');
@@ -287,6 +298,18 @@ function rainLines(rain) {
   ];
 }
 
+/**
+ * What the pack rule did and what it left (owner 2026-11-22: the 04:40 run writes the pack plan in apply mode). A day
+ * the run moved is already in the listed blocks. `freedMin` comes from the days the rule accepts that the run did not
+ * write: every such day in shadow mode; in apply mode a day that changed after the plan or that the writer refused.
+ */
+function packLines(sum) {
+  const lines = [];
+  if (sum.packedDays) lines.push(`The 4:40 AM run moved booked jobs toward the morning on ${count(sum.packedDays, 'day', 'days')}. The blocks above are after that move.`);
+  if (sum.freedMin) lines.push(`Not moved: re-timing booked jobs toward the morning on ${count(sum.unmovedDays, 'more day', 'more days')} would free ${span(sum.freedMin)} more.`);
+  return lines;
+}
+
 function detailText(sum, fill = null, rain = null) {
   const lines = [
     `Room for ${sum.slots} new job${sum.slots === 1 ? '' : 's'}: each needs ${SLOT_MIN} free minutes (a 1-hour job and its drive).`,
@@ -298,8 +321,7 @@ function detailText(sum, fill = null, rain = null) {
   if (rain) lines.push('', ...rainLines(rain));
   lines.push(
     '',
-    'Measuring only (no visit changes): re-timing booked jobs to the front of the day under the new rules would free'
-      + ` ${span(sum.freedMin)} more.`,
+    ...packLines(sum),
     `New bookings from the last 24 hours, replayed: ${sum.replayed}. A block-aware picker would pick a different hour for ${sum.pickDiffers}.`,
   );
   return lines.join('\n');

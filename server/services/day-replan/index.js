@@ -544,10 +544,16 @@ function packPlan(env, plan, { rows, techId }) {
 
 const lunchLost = (nowFig, fig) => !!(nowFig && nowFig.lunch && fig && !fig.lunch);
 
+/** Each planner stop whose hour a plan changes: the list the writer writes (apply.js movesFrom). */
+const stopChanges = (plan) => plan.stops
+  .map((s) => ({ id: s.id, fromMin: s.slotStartMin, toMin: plan.result.best.slots[s.id] }))
+  .filter((c) => c.toMin != null && c.toMin !== c.fromMin);
+
 /**
  * P1 for a plan the drive rule did not take: the pack plan and its record. It is accepted when it keeps every promise,
  * drives no more, ends no later and grows the biggest open block by P1_MIN_GAIN (packVerdict), and the app's own
- * simulation without the schedule blocks (the one apply.js finalRoute compares with) agrees: no more drive, no later end.
+ * simulation without the schedule blocks (the one apply.js finalRoute compares with) agrees: no more drive, no later end
+ * (else app_sim_rejects), and it changes at least one stop's hour (else no_hour_change).
  */
 function packProposal(env, plan, { rows, techId }) {
   const bounds = boundsOf(env, plan, techId);
@@ -560,8 +566,12 @@ function packProposal(env, plan, { rows, techId }) {
   if (verdict.wouldAccept && !(current && planned && planned.driveMin <= current.driveMin && planned.endMin <= current.endMin)) {
     verdict = { wouldAccept: false, reason: 'app_sim_rejects', gainMin: verdict.gainMin };
   }
-  const changes = verdict.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
-  return { alt, p1: { ...verdict, plan: 'pack', packed: fig, lunchLost: lunchLost(nowFig, fig), changes } };
+  // The night writes hours only. A pack plan that changes no hour (two stops of one hour, in another order) has nothing
+  // to write and the writer would skip it (no_hour_changes), so it is not the day's plan.
+  const changes = verdict.wouldAccept ? stopChanges(alt) : [];
+  if (verdict.wouldAccept && changes.length === 0) verdict = { wouldAccept: false, reason: 'no_hour_change', gainMin: verdict.gainMin };
+  const p1Changes = verdict.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
+  return { alt, changes, p1: { ...verdict, plan: 'pack', packed: fig, lunchLost: lunchLost(nowFig, fig), changes: p1Changes } };
 }
 
 /**
@@ -577,11 +587,8 @@ function withPackPlan(env, plan, { rows, techId }) {
     logger.warn(`[day-replan] ${plan.dayContext.dateStr} tech ${techId}: the pack plan failed (${err.message}); the drive plan stands`);
     return { ...plan, p1: null };
   }
-  const { alt, p1 } = proposal;
+  const { alt, p1, changes } = proposal;
   if (!p1.wouldAccept) return { ...plan, p1 };
-  const changes = alt.stops
-    .map((s) => ({ id: s.id, fromMin: s.slotStartMin, toMin: alt.result.best.slots[s.id] }))
-    .filter((c) => c.toMin != null && c.toMin !== c.fromMin);
   return {
     ...plan,
     rowGroups: alt.rowGroups,

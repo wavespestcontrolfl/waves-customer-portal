@@ -631,6 +631,15 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
       expect(result.p1.gainMin).toBe(45);
     });
 
+    test('no_hour_change: P1 would accept a plan that changes no hour; the writer has nothing to write, so it is not the plan', async () => {
+      packVerdict.mockImplementationOnce(() => ({ wouldAccept: true, reason: 'bigger_block', gainMin: 30 }));
+      // The pack plan is the booked order at the booked hours.
+      withPack(() => ({ order: ['a', 'b', 'c', 'd'], slots: { a: 480, b: 540, c: 600, d: 660 } }));
+      const result = await run();
+      refused(result, 'no_hour_change');
+      expect(result.p1.gainMin).toBe(30);
+    });
+
     test('a pack step that throws leaves the drive plan, logs a warning and the run continues', async () => {
       planDay.mockImplementationOnce((input) => actualPlanDay(input));
       planDay.mockImplementationOnce(() => { throw new Error('pack boom'); });
