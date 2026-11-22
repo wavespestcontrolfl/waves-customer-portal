@@ -766,7 +766,7 @@ async function loadGuardContext(guardMode, services, nowDate, dayOnly = false) {
   // ALL ids, not just change_count>0 — the durable move records (not the
   // best-effort stamp) decide whether a visit has spent drift budget.
   const anchorMap = await routeTiers.loadAnchorMap(db, ids);
-  const neighborMap = guardMode === 'flex' ? await flexTier.loadSeriesNeighbors(db, services) : null;
+  const neighborMap = guardMode === 'flex' ? await flexTier.loadSeriesNeighbors(db, services, { withRadius: true }) : null;
   const degraded = (reminderFreeze && reminderFreeze.failed)
     || anchorMap === null
     || (guardMode === 'flex' && neighborMap === null);
@@ -834,8 +834,8 @@ async function flexWindowFor(service, {
   const neighbors = neighborMap.get(service.id);
   if (!neighbors) return skip('SERIES_NEIGHBORS_UNKNOWN', 'Visit missing from its own series read — no move (fail closed)');
   if (!anchor) return skip('DRIFT_ANCHOR_UNKNOWN', 'Recurrence anchor could not be derived — no move (fail closed)');
-  // The band is this visit's own (±7 for a plan of 2 months or longer with no live neighbor inside 56 days, else ±5).
-  const radius = flexTier.flexBandRadius({ radiusDays: flexTier.flexRadiusDaysFor(service), origDate: service.scheduled_date, neighbors });
+  // The band is this visit's own (±7 for a plan of 2 months or longer whose nearest live sibling is 56 days away or more, else ±5).
+  const radius = flexTier.flexBandRadius({ radiusDays: flexTier.flexRadiusDaysFor(service), neighbors });
   const window = flexTier.flexTierMoveWindow({
     origDate: service.scheduled_date, anchorDate: anchor, today, neighbors, radiusDays: radius,
   });
@@ -920,7 +920,7 @@ async function recheckDayMoveWindow(guardMode, service, meta, nowDate, dayOnly =
   const todayNow = etDateString(nowDate);
   if (guardMode === 'flex') {
     return flexWindowFor(service, {
-      neighborMap: await flexTier.loadSeriesNeighbors(db, [service]), anchor: meta && meta.anchor, today: todayNow, nowDate,
+      neighborMap: await flexTier.loadSeriesNeighbors(db, [service], { withRadius: true }), anchor: meta && meta.anchor, today: todayNow, nowDate,
     });
   }
   const daysOutNow = routeTiers.daysBetween(todayNow, toDateStr(service.scheduled_date));

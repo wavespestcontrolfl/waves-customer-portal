@@ -48,7 +48,7 @@
  *                 exception) can sit well inside its cadence slot.
  */
 const { toDateStr, shiftDateStr } = require('./dates');
-const { MIN_DESTINATION_DAYS_OUT } = require('./route-tiers');
+const { MIN_DESTINATION_DAYS_OUT, daysBetween } = require('./route-tiers');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 
 // Owner-ruled constants (not env-tunable — the gate is the kill switch, the
@@ -100,20 +100,42 @@ function approvedRadius(radiusDays) {
  * The band radius a visit actually gets. The wide band needs the plan's
  * pattern (`radiusDays`, flexRadiusDaysFor) AND room in the series itself: a
  * pattern can be wrong for the visits it labels (the seeder keeps legacy
- * 9-visit mosquito rows on 'bimonthly'), so a live occurrence of the series
- * closer than FLEX_TIER_WIDE_MIN_INTERVAL_DAYS on either side (`neighbors`,
- * the bounds loadSeriesNeighbors gives) reads the narrow band. A side with no
- * live occurrence does not narrow it. Pure; the ONE place the band is decided
+ * 9-visit mosquito rows on 'bimonthly'), so the nearest other live occurrence
+ * of the series must be FLEX_TIER_WIDE_MIN_INTERVAL_DAYS away or more.
+ * `neighbors.nearestDays` is that distance by ACTUAL scheduled date
+ * (loadSeriesNeighbors with `withRadius`; nearestActualDays): null = no other
+ * live occurrence, which does not narrow the band. A number under the minimum
+ * (0 included: a sibling on the visit's own date) reads the narrow band, and so
+ * does an entry that does not carry the fact at all (fail closed). The prev /
+ * next bounds are NOT used here: they mix cadence positions with actual dates
+ * for the crossing guard, and a rescheduled sibling's old cadence date says
+ * nothing about where it is now. Pure; the ONE place the band is decided
  * (flexTierMoveWindow calls it too, so a caller cannot widen a window by
  * passing 7 on its own).
  */
-function flexBandRadius({ radiusDays, origDate, neighbors }) {
-  const orig = toDateStr(origDate);
-  if (approvedRadius(radiusDays) !== FLEX_TIER_WIDE_RADIUS_DAYS || !orig) return FLEX_TIER_RADIUS_DAYS;
-  const { prev, next } = neighbors || {};
-  const prevNear = !!prev && prev > shiftDateStr(orig, -FLEX_TIER_WIDE_MIN_INTERVAL_DAYS);
-  const nextNear = !!next && next < shiftDateStr(orig, FLEX_TIER_WIDE_MIN_INTERVAL_DAYS);
-  return prevNear || nextNear ? FLEX_TIER_RADIUS_DAYS : FLEX_TIER_WIDE_RADIUS_DAYS;
+function flexBandRadius({ radiusDays, neighbors }) {
+  if (approvedRadius(radiusDays) !== FLEX_TIER_WIDE_RADIUS_DAYS) return FLEX_TIER_RADIUS_DAYS;
+  const nearest = neighbors ? neighbors.nearestDays : undefined;
+  if (nearest === null) return FLEX_TIER_WIDE_RADIUS_DAYS;
+  return Number.isFinite(nearest) && nearest >= FLEX_TIER_WIDE_MIN_INTERVAL_DAYS ? FLEX_TIER_WIDE_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
+}
+
+/**
+ * Days from `self` to the nearest OTHER live row of its series (`family`: every
+ * live row the read saw, an unpositioned one included), by actual scheduled
+ * date on either side (0 = a sibling on the same date). null when the series
+ * has no other live row. A row whose own date, or a sibling's, cannot be read
+ * counts as 0: the band stays narrow (fail closed).
+ */
+function nearestActualDays(family, self) {
+  let nearest = null;
+  for (const o of family) {
+    if (o.id === self.id) continue;
+    const apart = daysBetween(self.actual, o.actual);
+    const days = apart === null ? 0 : Math.abs(apart);
+    if (nearest === null || days < nearest) nearest = days;
+  }
+  return nearest;
 }
 
 /** The flex tier's freeze, in hours. The night pass passes `lock24h`
@@ -169,16 +191,17 @@ function joinFamilies(familyRows, rows) {
   }
 }
 
-// One live series row as the neighbor read orders it; `radiusDays` only on the apply-time read.
+// One live series row as the neighbor read orders it; `radiusDays` only when the band facts are asked for.
 function positionedRow(r, withRadius) {
   const row = { id: String(r.id), position: seriesPosition(r), actual: toDateStr(r.scheduled_date) };
   return withRadius ? { ...row, radiusDays: flexRadiusDaysFor(r) } : row;
 }
 
-// The map entry for positioned[idx]: its bounds, plus its own radius on the apply-time read.
-function neighborEntry(positioned, idx, withRadius) {
+// The map entry for positioned[idx]: its bounds, plus the band facts (its own radius, the distance to its nearest live sibling in `family`) when asked.
+function neighborEntry(positioned, idx, withRadius, family) {
   const bounds = adjacentBounds(positioned, idx);
-  return withRadius ? { ...bounds, radiusDays: positioned[idx].radiusDays } : bounds;
+  if (!withRadius) return bounds;
+  return { ...bounds, radiusDays: positioned[idx].radiusDays, nearestDays: nearestActualDays(family, positioned[idx]) };
 }
 
 /**
@@ -194,10 +217,12 @@ function neighborEntry(positioned, idx, withRadius) {
  * route-tiers' loadAnchorMap takes). A service missing from its own
  * series' read gets NO entry, which callers treat the same way.
  *
- * `withRadius` (the apply-time read only): each entry also carries
- * `radiusDays`, flexRadiusDaysFor of the visit's OWN row as this read saw it
- * (under `lock`, so the pattern the move commits against, not a pass-1 value).
- * Off, entries are exactly {prev, next}.
+ * `withRadius` (the night run's reads: pass 1 and the apply-time read): each
+ * entry also carries the band facts flexBandRadius needs. `radiusDays` is
+ * flexRadiusDaysFor of the visit's OWN row as this read saw it (under `lock`
+ * at apply time, so the pattern the move commits against, not a pass-1 value).
+ * `nearestDays` is the distance to its nearest other live occurrence by actual
+ * date (nearestActualDays). Off, entries are exactly {prev, next}.
  *
  * `lock` (the apply-time authoritative read only): FOR SHARE NOWAIT on every
  * live row read (Codex #4995 P1). The series fence (apply.js
@@ -234,13 +259,14 @@ async function loadSeriesNeighbors(db, services, { lock = false, withRadius = fa
       joinFamilies(familyRows, rows);
     }
     for (const [parentId, members] of byParent) {
-      const positioned = familyRows.get(parentId)
-        .map((r) => positionedRow(r, withRadius))
+      // Every live row counts for the band's distance (an unpositioned one reads 0, fail closed); only positioned rows bound the crossing guard.
+      const family = familyRows.get(parentId).map((r) => positionedRow(r, withRadius));
+      const positioned = family
         .filter((r) => r.position)
         .sort((a, b) => (a.position < b.position ? -1 : (a.position > b.position ? 1 : 0)));
       for (const s of members) {
         const idx = positioned.findIndex((r) => r.id === String(s.id));
-        if (idx > -1) map.set(s.id, neighborEntry(positioned, idx, withRadius));
+        if (idx > -1) map.set(s.id, neighborEntry(positioned, idx, withRadius, family));
       }
     }
     return map;
@@ -270,8 +296,8 @@ async function loadSeriesNeighbors(db, services, { lock = false, withRadius = fa
  * cross it (Codex #4995 r7 P1). The lookahead horizon is the caller's
  * (candidate-slots.js caps any ctx.tierWindow).
  * The band is the visit's own radius (flexBandRadius: 7 for a plan of 2 months
- * or longer whose live neighbors are 56 days away or more, else 5); a missing
- * or unapproved `radiusDays` reads 5.
+ * or longer whose nearest live sibling, `neighbors.nearestDays`, is 56 days
+ * away or more, else 5); a missing or unapproved `radiusDays` reads 5.
  * Returns {dateFrom, dateTo[, dayMoveFrom][, dayMoveTo]} — the span to
  * generate candidates in — or null when nothing is legal, or the anchor is
  * unknown (fail closed — never guess a budget).
@@ -284,7 +310,7 @@ function flexTierMoveWindow({
   if (!orig || !anchor || !today) return null;
   const { prev, next } = neighbors || {};
   if ((prev && prev > orig) || (next && next < orig)) return null;
-  const radius = flexBandRadius({ radiusDays, origDate: orig, neighbors });
+  const radius = flexBandRadius({ radiusDays, neighbors });
   const prevFloor = prev ? shiftDateStr(prev, 1) : null;
   const nextCeil = next ? shiftDateStr(next, -1) : null;
   const from = latestDate(shiftDateStr(orig, -radius), shiftDateStr(anchor, -radius),

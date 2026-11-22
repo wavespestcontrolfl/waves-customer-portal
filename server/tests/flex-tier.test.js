@@ -25,6 +25,7 @@ const {
   seriesPosition,
   loadSeriesNeighbors,
   flexTierMoveWindow,
+  flexBandRadius,
   flexWindowAdmits,
   ownScheduleFrozen,
   destinationFrozen,
@@ -225,35 +226,39 @@ describe('flexRadiusDaysFor — ±7 for a plan of 2 months or longer, ±5 for ev
 });
 
 describe('flexBandRadius — the wide band needs the pattern AND room in the series', () => {
-  const { flexBandRadius } = require('../services/auto-dispatch/flex-tier');
   const origDate = '2026-09-21';
 
-  test('7 with no live neighbor, and with neighbors exactly 56 days away on both sides', () => {
-    expect(flexBandRadius({ radiusDays: 7, origDate, neighbors: {} })).toBe(7);
-    expect(flexBandRadius({ radiusDays: 7, origDate })).toBe(7);
-    expect(flexBandRadius({ radiusDays: 7, origDate, neighbors: { prev: '2026-07-27', next: '2026-11-16' } })).toBe(7);
+  test('7 with no other live occurrence (nearestDays null), and with the nearest one exactly 56 days away', () => {
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: null } })).toBe(7);
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { prev: '2026-07-27', next: '2026-11-16', nearestDays: 56 } })).toBe(7);
   });
 
-  test('a live occurrence 55 days away on either side reads 5 (a plan labeled bimonthly that runs 9 visits a year)', () => {
-    expect(flexBandRadius({ radiusDays: 7, origDate, neighbors: { next: '2026-11-15' } })).toBe(5);
-    expect(flexBandRadius({ radiusDays: 7, origDate, neighbors: { prev: '2026-07-28' } })).toBe(5);
-    expect(flexBandRadius({ radiusDays: 7, origDate, neighbors: { prev: '2026-06-01', next: '2026-10-31' } })).toBe(5);
+  test('a live occurrence closer than 56 days reads 5 (a plan labeled bimonthly that runs 9 visits a year), 0 included', () => {
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: 55 } })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: 40 } })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: 0 } })).toBe(5);
   });
 
-  test('the narrow band never widens, whatever the neighbors; a bad radius or date reads 5', () => {
-    expect(flexBandRadius({ radiusDays: 5, origDate, neighbors: {} })).toBe(5);
-    for (const bad of [undefined, null, 0, 6, 30, NaN, '7']) expect(flexBandRadius({ radiusDays: bad, origDate, neighbors: {} })).toBe(5);
-    expect(flexBandRadius({ radiusDays: 7, origDate: null, neighbors: {} })).toBe(5);
+  test('an entry without the fact reads 5 (fail closed): the prev / next bounds alone never widen the band', () => {
+    expect(flexBandRadius({ radiusDays: 7, neighbors: {} })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7 })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { prev: '2026-01-01', next: '2027-01-01' } })).toBe(5);
+    for (const bad of [undefined, NaN, '90', -1]) expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: bad } })).toBe(5);
+  });
+
+  test('the narrow band never widens; a bad radius reads 5', () => {
+    expect(flexBandRadius({ radiusDays: 5, neighbors: { nearestDays: null } })).toBe(5);
+    for (const bad of [undefined, null, 0, 6, 30, NaN, '7']) expect(flexBandRadius({ radiusDays: bad, neighbors: { nearestDays: null } })).toBe(5);
   });
 
   test('flexTierMoveWindow applies it: radius 7 with the next visit 40 days ahead is the ±5 window', () => {
     const today = '2026-09-01';
-    const near = { next: '2026-10-31' };
+    const near = { next: '2026-10-31', nearestDays: 40 };
     expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: near, radiusDays: 7 }))
       .toEqual(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: near }));
     expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: near, radiusDays: 7 }))
       .toEqual({ dateFrom: '2026-09-16', dateTo: '2026-09-26' });
-    expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: { next: '2026-12-21' }, radiusDays: 7 }))
+    expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: { next: '2026-12-21', nearestDays: 91 }, radiusDays: 7 }))
       .toEqual({ dateFrom: '2026-09-14', dateTo: '2026-09-28' });
   });
 });
@@ -264,15 +269,15 @@ describe('flexTierMoveWindow — the radius a caller passes', () => {
 
   test('radius 7 reaches 7 days each side of BOTH the current date and the anchor (the anchor still limits it)', () => {
     expect(flexTierMoveWindow({
-      origDate, anchorDate: origDate, today, neighbors: {}, radiusDays: 7,
+      origDate, anchorDate: origDate, today, neighbors: { nearestDays: null }, radiusDays: 7,
     })).toEqual({ dateFrom: '2026-09-14', dateTo: '2026-09-28' });
     // Already 6 days past its anchor: one more day out, not seven.
     expect(flexTierMoveWindow({
-      origDate: '2026-09-22', anchorDate: '2026-09-16', today, neighbors: {}, radiusDays: 7,
+      origDate: '2026-09-22', anchorDate: '2026-09-16', today, neighbors: { nearestDays: null }, radiusDays: 7,
     })).toEqual({ dateFrom: '2026-09-15', dateTo: '2026-09-23' });
     // The anchor's own lower edge binds too: anchor 09-16 reaches back to 09-09, the current date to 09-15.
     expect(flexTierMoveWindow({
-      origDate: '2026-09-22', anchorDate: '2026-09-16', today, neighbors: {}, radiusDays: 7,
+      origDate: '2026-09-22', anchorDate: '2026-09-16', today, neighbors: { nearestDays: null }, radiusDays: 7,
     }).dateFrom).toBe('2026-09-15');
   });
 
@@ -282,12 +287,12 @@ describe('flexTierMoveWindow — the radius a caller passes', () => {
     })).toEqual({ dateFrom: '2026-09-20', dateTo: '2026-09-23' });
     // 09-04 is 3 days out: the 5-day floor lifts the lower edge to 09-06; the current date stays reachable.
     expect(flexTierMoveWindow({
-      origDate: '2026-09-04', anchorDate: '2026-09-04', today, neighbors: {}, radiusDays: 7,
+      origDate: '2026-09-04', anchorDate: '2026-09-04', today, neighbors: { nearestDays: null }, radiusDays: 7,
     })).toEqual({ dateFrom: '2026-09-04', dateTo: '2026-09-11', dayMoveFrom: '2026-09-06' });
   });
 
   test('radius 7 admits a 7-day move; radius 5 refuses the same destination', () => {
-    const wide = flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: {}, radiusDays: 7 });
+    const wide = flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: { nearestDays: null }, radiusDays: 7 });
     const narrow = flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: {}, radiusDays: 5 });
     expect(flexWindowAdmits(wide, origDate, '2026-09-28')).toBe(true);
     expect(flexWindowAdmits(wide, origDate, '2026-09-29')).toBe(false);
@@ -330,8 +335,46 @@ describe('loadSeriesNeighbors — withRadius (the apply-time read)', () => {
 
   test('on: each entry carries the radius of its OWN row as the read saw it', async () => {
     const map = await loadSeriesNeighbors(seriesDbStub(rows), services, { withRadius: true });
-    expect(map.get('s1')).toEqual({ prev: '2026-09-01', next: '2027-03-01', radiusDays: 7 });
-    expect(map.get('s2')).toEqual({ prev: '2026-12-01', next: null, radiusDays: 5 });
+    expect(map.get('s1')).toEqual({ prev: '2026-09-01', next: '2027-03-01', radiusDays: 7, nearestDays: 90 });
+    expect(map.get('s2')).toEqual({ prev: '2026-12-01', next: null, radiusDays: 5, nearestDays: 90 });
+  });
+
+  test('nearestDays is by ACTUAL date: a sibling due 40 days later and rescheduled to 70 days later does not narrow the band', async () => {
+    const moved = { p1: [
+      { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'bimonthly' },
+      { id: 's2', scheduled_date: '2027-02-09', date_exception: true, date_exception_cadence_date: '2027-01-10', recurring_pattern: 'bimonthly' },
+    ] };
+    const entry = (await loadSeriesNeighbors(seriesDbStub(moved), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+    // The crossing guard still sees the old cadence date; the band reads where the sibling is now.
+    expect(entry).toMatchObject({ next: '2027-01-10', nearestDays: 70, radiusDays: 7 });
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(7);
+  });
+
+  test('a sibling rescheduled onto the visit\'s own date is 0 days away: the band is narrow', async () => {
+    const same = { p1: [
+      { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly' },
+      { id: 's2', scheduled_date: '2026-12-01', date_exception: true, date_exception_cadence_date: '2027-03-01', recurring_pattern: 'quarterly' },
+    ] };
+    const entry = (await loadSeriesNeighbors(seriesDbStub(same), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+    expect(entry.nearestDays).toBe(0);
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(5);
+  });
+
+  test('a live sibling with no readable date still counts (0 days): the band is narrow, the crossing guard ignores it', async () => {
+    const blank = { p1: [
+      { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly' },
+      { id: 's2', scheduled_date: null, recurring_pattern: 'quarterly' },
+    ] };
+    const entry = (await loadSeriesNeighbors(seriesDbStub(blank), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+    expect(entry).toEqual({ prev: null, next: null, radiusDays: 7, nearestDays: 0 });
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(5);
+  });
+
+  test('a series with no other live occurrence: nearestDays null, the pattern alone decides', async () => {
+    const alone = { p1: [{ id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly' }] };
+    const entry = (await loadSeriesNeighbors(seriesDbStub(alone), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+    expect(entry).toEqual({ prev: null, next: null, radiusDays: 7, nearestDays: null });
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(7);
   });
 });
 

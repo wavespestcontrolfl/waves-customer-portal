@@ -87,7 +87,7 @@ test('flex tier: a destination 7 days out is admitted for a +/-7 visit and dropp
   const slots = [{ date: shiftDateStr(DATE, 7), start_time: '09:00' }, { date: shiftDateStr(DATE, 5), start_time: '09:00' }];
   const admitted = (radiusDays) => {
     const tierWindow = flexTierMoveWindow({
-      origDate: DATE, anchorDate: DATE, today: '2026-08-31', neighbors: {}, radiusDays,
+      origDate: DATE, anchorDate: DATE, today: '2026-08-31', neighbors: { nearestDays: null }, radiusDays,
     });
     const drops = { flex_frozen: 0, flex_floor: 0 };
     const kept = flexCandidateRules(service, { tierMeta: { mode: 'flex' }, nightLock24h: true, nowDate, tierWindow }).admit(slots, drops);

@@ -224,8 +224,8 @@ async function assertFlexWindows(trx, rows, best, today, refuse) {
     if (!neighbors) throw refuse(r.id, 'is missing from its own series read (no move, fail closed)');
     // The band is this row's own (7 for a plan of 2 months or longer, else 5), from the
     // pattern the locked neighbor read just saw: never a pass-1 value. No radius reads 5.
-    // A live neighbor inside 56 days also reads 5 (flexBandRadius: a pattern can be wrong for the visits it labels).
-    const radius = flexTier.flexBandRadius({ radiusDays: neighbors.radiusDays, origDate: r.scheduled_date, neighbors });
+    // A live sibling inside 56 days also reads 5 (flexBandRadius: a pattern can be wrong for the visits it labels).
+    const radius = flexTier.flexBandRadius({ radiusDays: neighbors.radiusDays, neighbors });
     const window = flexTier.flexTierMoveWindow({
       origDate: r.scheduled_date, anchorDate: anchor, today, neighbors, radiusDays: radius,
     });
