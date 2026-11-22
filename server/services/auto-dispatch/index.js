@@ -834,8 +834,8 @@ async function flexWindowFor(service, {
   const neighbors = neighborMap.get(service.id);
   if (!neighbors) return skip('SERIES_NEIGHBORS_UNKNOWN', 'Visit missing from its own series read — no move (fail closed)');
   if (!anchor) return skip('DRIFT_ANCHOR_UNKNOWN', 'Recurrence anchor could not be derived — no move (fail closed)');
-  // The band is this visit's own (±7 for a plan of 2 months or longer, else ±5), read off its own row.
-  const radius = flexTier.flexRadiusDaysFor(service);
+  // The band is this visit's own (±7 for a plan of 2 months or longer with no live neighbor inside 56 days, else ±5).
+  const radius = flexTier.flexBandRadius({ radiusDays: flexTier.flexRadiusDaysFor(service), origDate: service.scheduled_date, neighbors });
   const window = flexTier.flexTierMoveWindow({
     origDate: service.scheduled_date, anchorDate: anchor, today, neighbors, radiusDays: radius,
   });

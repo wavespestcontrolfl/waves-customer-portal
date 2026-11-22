@@ -14,7 +14,8 @@
  *                 set) is always a 2nd+ occurrence.
  *   Flexible tier = everything eligibility.js lets through. May re-time SAME
  *                 DAY, or move up to ±5 days (±7 for a plan that runs every
- *                 2 months or longer, see flexRadiusDaysFor), SILENTLY —
+ *                 2 months or longer with no live occurrence of its series
+ *                 inside 56 days, see flexBandRadius), SILENTLY —
  *                 no customer comms (apply.js's rebooker call is unchanged;
  *                 it already sends none) — until FLEX_TIER_FREEZE_HOURS
  *                 before the visit (25 h for the night pass, owner 2026-11-03:
@@ -93,6 +94,26 @@ function flexRadiusDaysFor(service) {
 // bands; anything else reads the default.
 function approvedRadius(radiusDays) {
   return radiusDays === FLEX_TIER_WIDE_RADIUS_DAYS ? FLEX_TIER_WIDE_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
+}
+
+/**
+ * The band radius a visit actually gets. The wide band needs the plan's
+ * pattern (`radiusDays`, flexRadiusDaysFor) AND room in the series itself: a
+ * pattern can be wrong for the visits it labels (the seeder keeps legacy
+ * 9-visit mosquito rows on 'bimonthly'), so a live occurrence of the series
+ * closer than FLEX_TIER_WIDE_MIN_INTERVAL_DAYS on either side (`neighbors`,
+ * the bounds loadSeriesNeighbors gives) reads the narrow band. A side with no
+ * live occurrence does not narrow it. Pure; the ONE place the band is decided
+ * (flexTierMoveWindow calls it too, so a caller cannot widen a window by
+ * passing 7 on its own).
+ */
+function flexBandRadius({ radiusDays, origDate, neighbors }) {
+  const orig = toDateStr(origDate);
+  if (approvedRadius(radiusDays) !== FLEX_TIER_WIDE_RADIUS_DAYS || !orig) return FLEX_TIER_RADIUS_DAYS;
+  const { prev, next } = neighbors || {};
+  const prevNear = !!prev && prev > shiftDateStr(orig, -FLEX_TIER_WIDE_MIN_INTERVAL_DAYS);
+  const nextNear = !!next && next < shiftDateStr(orig, FLEX_TIER_WIDE_MIN_INTERVAL_DAYS);
+  return prevNear || nextNear ? FLEX_TIER_RADIUS_DAYS : FLEX_TIER_WIDE_RADIUS_DAYS;
 }
 
 /** The flex tier's freeze, in hours. The night pass passes `lock24h`
@@ -248,8 +269,9 @@ async function loadSeriesNeighbors(db, services, { lock = false, withRadius = fa
  * behind its next one — leaves no legal move at all: every day move would
  * cross it (Codex #4995 r7 P1). The lookahead horizon is the caller's
  * (candidate-slots.js caps any ctx.tierWindow).
- * The band is the visit's own radius (`radiusDays`, flexRadiusDaysFor: 5, or 7
- * for a plan of 2 months or longer); a missing or unapproved value reads 5.
+ * The band is the visit's own radius (flexBandRadius: 7 for a plan of 2 months
+ * or longer whose live neighbors are 56 days away or more, else 5); a missing
+ * or unapproved `radiusDays` reads 5.
  * Returns {dateFrom, dateTo[, dayMoveFrom][, dayMoveTo]} — the span to
  * generate candidates in — or null when nothing is legal, or the anchor is
  * unknown (fail closed — never guess a budget).
@@ -257,12 +279,12 @@ async function loadSeriesNeighbors(db, services, { lock = false, withRadius = fa
 function flexTierMoveWindow({
   origDate, anchorDate, today, neighbors, radiusDays,
 }) {
-  const radius = approvedRadius(radiusDays);
   const orig = toDateStr(origDate);
   const anchor = toDateStr(anchorDate);
   if (!orig || !anchor || !today) return null;
   const { prev, next } = neighbors || {};
   if ((prev && prev > orig) || (next && next < orig)) return null;
+  const radius = flexBandRadius({ radiusDays, origDate: orig, neighbors });
   const prevFloor = prev ? shiftDateStr(prev, 1) : null;
   const nextCeil = next ? shiftDateStr(next, -1) : null;
   const from = latestDate(shiftDateStr(orig, -radius), shiftDateStr(anchor, -radius),
@@ -427,6 +449,7 @@ module.exports = {
   FLEX_TIER_WIDE_RADIUS_DAYS,
   FLEX_TIER_WIDE_MIN_INTERVAL_DAYS,
   flexRadiusDaysFor,
+  flexBandRadius,
   FLEX_TIER_FREEZE_HOURS,
   FLEX_TIER_FREEZE_HOURS_24H,
   flexFreezeHoursFor,

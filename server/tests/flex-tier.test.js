@@ -224,6 +224,40 @@ describe('flexRadiusDaysFor — ±7 for a plan of 2 months or longer, ±5 for ev
   });
 });
 
+describe('flexBandRadius — the wide band needs the pattern AND room in the series', () => {
+  const { flexBandRadius } = require('../services/auto-dispatch/flex-tier');
+  const origDate = '2026-09-21';
+
+  test('7 with no live neighbor, and with neighbors exactly 56 days away on both sides', () => {
+    expect(flexBandRadius({ radiusDays: 7, origDate, neighbors: {} })).toBe(7);
+    expect(flexBandRadius({ radiusDays: 7, origDate })).toBe(7);
+    expect(flexBandRadius({ radiusDays: 7, origDate, neighbors: { prev: '2026-07-27', next: '2026-11-16' } })).toBe(7);
+  });
+
+  test('a live occurrence 55 days away on either side reads 5 (a plan labeled bimonthly that runs 9 visits a year)', () => {
+    expect(flexBandRadius({ radiusDays: 7, origDate, neighbors: { next: '2026-11-15' } })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7, origDate, neighbors: { prev: '2026-07-28' } })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7, origDate, neighbors: { prev: '2026-06-01', next: '2026-10-31' } })).toBe(5);
+  });
+
+  test('the narrow band never widens, whatever the neighbors; a bad radius or date reads 5', () => {
+    expect(flexBandRadius({ radiusDays: 5, origDate, neighbors: {} })).toBe(5);
+    for (const bad of [undefined, null, 0, 6, 30, NaN, '7']) expect(flexBandRadius({ radiusDays: bad, origDate, neighbors: {} })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7, origDate: null, neighbors: {} })).toBe(5);
+  });
+
+  test('flexTierMoveWindow applies it: radius 7 with the next visit 40 days ahead is the ±5 window', () => {
+    const today = '2026-09-01';
+    const near = { next: '2026-10-31' };
+    expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: near, radiusDays: 7 }))
+      .toEqual(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: near }));
+    expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: near, radiusDays: 7 }))
+      .toEqual({ dateFrom: '2026-09-16', dateTo: '2026-09-26' });
+    expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: { next: '2026-12-21' }, radiusDays: 7 }))
+      .toEqual({ dateFrom: '2026-09-14', dateTo: '2026-09-28' });
+  });
+});
+
 describe('flexTierMoveWindow — the radius a caller passes', () => {
   const today = '2026-09-01';
   const origDate = '2026-09-21';

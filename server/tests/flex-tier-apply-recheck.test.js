@@ -412,7 +412,7 @@ describe('the band is the visit\'s own radius (pass 1)', () => {
     expect(ctx.tierWindow.dateTo).toBe(shiftDateStr(VISIT_DATE, radius));
   });
 
-  test('FLEX_WINDOW_EXHAUSTED names the visit\'s own radius', async () => {
+  test('FLEX_WINDOW_EXHAUSTED names the band the visit actually has: a live neighbor inside 56 days reads ±5, also on a quarterly plan', async () => {
     // A date-exception visit sitting ahead of its previous occurrence's slot leaves no legal move at all.
     const exception = withPlan({
       recurring_pattern: 'quarterly', date_exception: true, date_exception_cadence_date: shiftDateStr(VISIT_DATE, 10),
@@ -430,7 +430,7 @@ describe('the band is the visit\'s own radius (pass 1)', () => {
     await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
     const reasons = [...decisions('skipped'), ...decisions('no_change')];
     const exhausted = reasons.find((d) => d.reason_code === 'FLEX_WINDOW_EXHAUSTED');
-    expect(exhausted.reason_description).toContain('within ±7 days');
+    expect(exhausted.reason_description).toContain('within ±5 days');
   });
 
   test('stale-anchor label: a quarterly visit is stale past 14 days from its original date, and says 14', async () => {
