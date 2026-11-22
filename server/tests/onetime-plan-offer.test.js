@@ -1244,6 +1244,10 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     test.each([
       ['sent', { ok: true, sent: true, reason: null, row: { id: 'led-1' }, duplicate: false }, { sent: 1 }, null],
       ['duplicate: an earlier attempt owns the send', { ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1' }, duplicate: true }, { done: 1 }, null],
+      ['duplicate of a sent row: the offer went out on an earlier morning', { ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'sent' }, duplicate: true }, { done: 1 }, null],
+      // The ledger never sends a skipped key again. Counting it "done" would report an offer that no one got.
+      ['duplicate of a skipped row: no offer went out, and none will', { ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'skipped' }, duplicate: true }, { held: 1 }, 'send_dropped'],
+      ['duplicate of a reserved row: a send in flight, or one a crash left', { ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'reserved' }, duplicate: true }, { held: 1 }, 'send_in_flight'],
       ['denied: the same-day cap', { ok: false, sent: false, reason: 'CAP_SAME_DAY', row: null, duplicate: false }, { held: 1 }, 'cap_same_day'],
       ['denied: the customer opted out since', { ok: false, sent: false, reason: 'EMAIL_SUPPRESSED_GROUP', row: null, duplicate: false }, { held: 1 }, 'email_suppressed_group'],
       ['denied: the address changed', { ok: false, sent: false, reason: 'RECIPIENT_CHANGED', row: null, duplicate: false }, { held: 1 }, 'recipient_changed'],

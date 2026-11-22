@@ -728,9 +728,17 @@ async function offeredBeforeGuard(trx, { customerId, jobId, now }) {
 // settled `failed` is an outage (the provider, the library, the template): the job fails, and the next morning
 // sends again under the same key. One that settled `skipped` is a refusal at the provider boundary (consent
 // changed, address changed): held.
+// A duplicate is an earlier attempt's row under this job's key, and its status is the answer. `skipped` is the
+// ledger's permanent drop: no offer went out and the key is never sent again, so the job reads held on every
+// later morning, never "offered". `reserved` is a send in flight, or one a crash left: the ledger settles it on
+// a later morning. Any other row (sent) is the offer.
+const EARLIER_ATTEMPT = Object.freeze({ skipped: 'send_dropped', reserved: 'send_in_flight' });
 async function settleOfferSend(out, { deps }) {
   if (out.sent) return { verdict: 'sent', reason: null };
-  if (out.duplicate) return { verdict: 'done', reason: null };
+  if (out.duplicate) {
+    const reason = EARLIER_ATTEMPT[out.row?.status];
+    return reason ? { verdict: 'held', reason } : { verdict: 'done', reason: null };
+  }
   if (out.row) {
     const settled = await deps.db('marketing_email_ledger').where({ id: out.row.id }).first('status');
     if (settled?.status === 'sent') return { verdict: 'done', reason: null };
