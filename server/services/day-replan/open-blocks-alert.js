@@ -161,8 +161,8 @@ function summarize(rows, techNames, unplanned = []) {
   let freed = 0;
   let replayed = 0;
   let pickDiffers = 0;
-  let packedDays = 0;
-  let unmovedDays = 0;
+  const packedDays = [];
+  const unmovedDays = [];
   for (const row of rows) {
     const rec = parse(row.close_gaps);
     if (!rec || !rec.now) continue;
@@ -174,8 +174,9 @@ function summarize(rows, techNames, unplanned = []) {
     const applied = row.apply_status === 'applied';
     const gain = applied ? 0 : freedMin(rec);
     freed += gain;
-    unmovedDays += gain > 0 ? 1 : 0;
-    packedDays += applied && packedDay(rec) ? 1 : 0;
+    const techDay = { day: row.day, tech: techNames.get(String(row.technician_id)) || null, techId: String(row.technician_id) };
+    if (gain > 0) unmovedDays.push(techDay);
+    if (applied && packedDay(rec)) packedDays.push(techDay);
     replayed += (rec.s1 || []).length;
     pickDiffers += (rec.s1 || []).filter((s) => s.differs).length;
   }
@@ -184,6 +185,7 @@ function summarize(rows, techNames, unplanned = []) {
     for (const b of u.blocks) blocks.push({ day: u.day, tech, techId: String(u.technician_id), grid: true, stops: u.stops, ...b });
   }
   blocks.sort((a, b) => a.day.localeCompare(b.day) || a.start - b.start);
+  for (const list of [packedDays, unmovedDays]) list.sort((a, b) => a.day.localeCompare(b.day));
   const biggest = blocks.reduce((best, b) => (!best || b.min > best.min ? b : best), null);
   return { blocks, totalMin: blocks.reduce((n, b) => n + b.min, 0), slots: blocks.reduce((n, b) => n + jobsIn(b), 0), biggest, freedMin: freed, packedDays, unmovedDays, replayed, pickDiffers };
 }
@@ -304,9 +306,11 @@ function rainLines(rain) {
  * write: every such day in shadow mode; in apply mode a day that changed after the plan or that the writer refused.
  */
 function packLines(sum) {
+  // Each technician's day by name: two technicians packed on one date are two schedules.
+  const names = (list) => list.map((d) => `${dayLabel(d.day)}${d.tech ? `, ${d.tech}` : ''}`).join('; ');
   const lines = [];
-  if (sum.packedDays) lines.push(`The 4:40 AM run moved booked jobs toward the morning on ${count(sum.packedDays, 'day', 'days')}. The blocks above are after that move.`);
-  if (sum.freedMin) lines.push(`Not moved: re-timing booked jobs toward the morning on ${count(sum.unmovedDays, 'more day', 'more days')} would free ${span(sum.freedMin)} more.`);
+  if (sum.packedDays.length) lines.push(`The 4:40 AM run moved booked jobs toward the morning on: ${names(sum.packedDays)}. The blocks above are after that move.`);
+  if (sum.unmovedDays.length) lines.push(`Not moved: re-timing booked jobs toward the morning would free ${span(sum.freedMin)} more on: ${names(sum.unmovedDays)}.`);
   return lines;
 }
 
